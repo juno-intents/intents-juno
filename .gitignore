@@ -1,0 +1,31 @@
+# Local-only scratch
+/tmp/
+
+# Secrets (defense-in-depth)
+.env
+.env.*
+*.pem
+*.key
+*.seed
+*.mnemonic
+*.ufvk
+
+# Go
+/bin/
+*.exe
+*.out
+*.test
+*.prof
+coverage.*
+
+# Rust
+/target/
+
+# Solidity / JS toolchains
+/node_modules/
+/out/
+/cache/
+/artifacts/
+
+# Misc
+.DS_Store
