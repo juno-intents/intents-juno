@@ -27,5 +27,11 @@ coverage.*
 /cache/
 /artifacts/
 
+# Foundry (nested project under contracts/)
+/contracts/out/
+/contracts/cache/
+/contracts/broadcast/
+/contracts/coverage/
+
 # Misc
 .DS_Store
