@@ -12,19 +12,20 @@ import {WJuno} from "../src/WJuno.sol";
 contract MockVerifierRouter is IRiscZeroVerifierRouter {
     bool public ok = true;
     bytes32 public expectedImageId;
-    bytes32 public expectedJournalHash;
+    bytes32 public expectedJournalDigest;
 
-    function setExpected(bytes32 imageId, bytes32 journalHash, bool ok_) external {
+    error VerifyFailed();
+
+    function setExpected(bytes32 imageId, bytes32 journalDigest, bool ok_) external {
         expectedImageId = imageId;
-        expectedJournalHash = journalHash;
+        expectedJournalDigest = journalDigest;
         ok = ok_;
     }
 
-    function verify(bytes calldata, bytes32 imageId, bytes calldata journal) external view returns (bool) {
-        if (!ok) return false;
-        if (expectedImageId != bytes32(0) && expectedImageId != imageId) return false;
-        if (expectedJournalHash != bytes32(0) && expectedJournalHash != keccak256(journal)) return false;
-        return true;
+    function verify(bytes calldata, bytes32 imageId, bytes32 journalDigest) external view {
+        if (!ok) revert VerifyFailed();
+        if (expectedImageId != bytes32(0) && expectedImageId != imageId) revert VerifyFailed();
+        if (expectedJournalDigest != bytes32(0) && expectedJournalDigest != journalDigest) revert VerifyFailed();
     }
 }
 
@@ -91,7 +92,7 @@ contract BridgeTest is Test {
         items[0] = Bridge.MintItem({depositId: depositId, recipient: makeAddr("alice"), amount: amount});
 
         bytes memory journal = abi.encode(items);
-        verifier.setExpected(DEPOSIT_IMAGE_ID, keccak256(journal), true);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -163,7 +164,7 @@ contract BridgeTest is Test {
         items[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
         bytes memory journal = abi.encode(items);
 
-        verifier.setExpected(WITHDRAW_IMAGE_ID, keccak256(journal), true);
+        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
 
         Bridge.Checkpoint memory cp = _checkpoint();
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
@@ -221,7 +222,7 @@ contract BridgeTest is Test {
         Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
         items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
         bytes memory journal = abi.encode(items);
-        verifier.setExpected(DEPOSIT_IMAGE_ID, keccak256(journal), true);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(2));
 
@@ -259,7 +260,7 @@ contract BridgeTest is Test {
         Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
         items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
         bytes memory journal = abi.encode(items);
-        v.setExpected(DEPOSIT_IMAGE_ID, keccak256(journal), true);
+        v.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         vm.expectRevert(Bridge.OperatorThresholdUnset.selector);
         b.mintBatch(cp, new bytes[](0), hex"01", journal);

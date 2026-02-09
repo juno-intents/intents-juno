@@ -10,9 +10,7 @@ import {IRiscZeroVerifierRouter} from "../../src/interfaces/IRiscZeroVerifierRou
 import {WJuno} from "../../src/WJuno.sol";
 
 contract AlwaysOkVerifier is IRiscZeroVerifierRouter {
-    function verify(bytes calldata, bytes32, bytes calldata) external pure returns (bool) {
-        return true;
-    }
+    function verify(bytes calldata, bytes32, bytes32) external pure {}
 }
 
 contract BridgeFlowIntegrationTest is Test {
@@ -157,4 +155,3 @@ contract BridgeFlowIntegrationTest is Test {
         }
     }
 }
-

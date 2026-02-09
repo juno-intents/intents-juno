@@ -439,8 +439,10 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     function _verifySeal(bytes calldata seal, bytes32 imageId, bytes calldata journal) internal view {
-        bool ok = verifier.verify(seal, imageId, journal);
-        if (!ok) revert InvalidProof();
+        bytes32 journalDigest = sha256(journal);
+        try verifier.verify(seal, imageId, journalDigest) {} catch {
+            revert InvalidProof();
+        }
     }
 
     function _computeFeeAndNet(uint256 amount, uint96 fbps, uint96 tipBps)
