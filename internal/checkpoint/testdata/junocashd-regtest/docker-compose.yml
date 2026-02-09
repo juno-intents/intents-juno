@@ -1,0 +1,23 @@
+services:
+  junocashd:
+    platform: linux/amd64
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "0:18232"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "junocash-cli",
+          "-regtest",
+          "-rpcuser=rpcuser",
+          "-rpcpassword=rpcpass",
+          "-rpcport=18232",
+          "-rpcconnect=127.0.0.1",
+          "getblockchaininfo",
+        ]
+      interval: 2s
+      timeout: 2s
+      retries: 60

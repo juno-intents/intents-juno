@@ -31,11 +31,11 @@ var (
 
 // Checkpoint is the off-chain mirror of Bridge.Checkpoint (contracts/src/Bridge.sol).
 type Checkpoint struct {
-	Height           uint64
-	BlockHash        common.Hash
-	FinalOrchardRoot common.Hash
-	BaseChainID      uint64
-	BridgeContract   common.Address
+	Height           uint64         `json:"height"`
+	BlockHash        common.Hash    `json:"blockHash"`
+	FinalOrchardRoot common.Hash    `json:"finalOrchardRoot"`
+	BaseChainID      uint64         `json:"baseChainId"`
+	BridgeContract   common.Address `json:"bridgeContract"`
 }
 
 // Digest computes the EIP-712 digest for checkpoint signing as implemented by Bridge.checkpointDigest.
