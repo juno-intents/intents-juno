@@ -34,6 +34,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error InsufficientSignatures();
     error SignaturesNotSortedOrUnique();
     error NotOperator();
+    error OperatorThresholdUnset();
     error InvalidExtendBatch();
     error ExpiryExtensionTooLarge();
 
@@ -408,6 +409,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     function _verifyOperatorSigs(bytes32 digest, bytes[] calldata operatorSigs) internal view {
         uint256 t = operatorRegistry.threshold();
+        if (t == 0) revert OperatorThresholdUnset();
         if (operatorSigs.length < t) revert InsufficientSignatures();
 
         address prev = address(0);
@@ -434,4 +436,3 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         net = amount - fee;
     }
 }
-

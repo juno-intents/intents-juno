@@ -229,6 +229,52 @@ contract BridgeTest is Test {
         bridge.mintBatch(cp, sigs, hex"01", journal);
     }
 
+    function test_mintBatch_revertsIfThresholdUnset() public {
+        MockVerifierRouter v = new MockVerifierRouter();
+
+        WJuno t = new WJuno(owner);
+        OperatorRegistry r = new OperatorRegistry(owner);
+        FeeDistributor d = new FeeDistributor(owner, t, address(r));
+        r.setFeeDistributor(address(d));
+
+        // Add operators but do not set threshold.
+        for (uint256 i = 0; i < opPks.length; i++) {
+            r.setOperator(vm.addr(opPks[i]), makeAddr(string.concat("fee", vm.toString(i))), 1, true);
+        }
+
+        Bridge b = new Bridge(
+            owner,
+            t,
+            d,
+            r,
+            v,
+            DEPOSIT_IMAGE_ID,
+            WITHDRAW_IMAGE_ID,
+            FEE_BPS,
+            TIP_BPS,
+            REFUND_WINDOW,
+            MAX_EXTEND
+        );
+        t.setBridge(address(b));
+        d.setBridge(address(b));
+
+        Bridge.Checkpoint memory cp = Bridge.Checkpoint({
+            height: 1,
+            blockHash: keccak256("bh"),
+            finalOrchardRoot: keccak256("root"),
+            baseChainId: block.chainid,
+            bridgeContract: address(b)
+        });
+
+        Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
+        items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
+        bytes memory journal = abi.encode(items);
+        v.setExpected(DEPOSIT_IMAGE_ID, keccak256(journal), true);
+
+        vm.expectRevert(Bridge.OperatorThresholdUnset.selector);
+        b.mintBatch(cp, new bytes[](0), hex"01", journal);
+    }
+
     function _checkpoint() private view returns (Bridge.Checkpoint memory) {
         return Bridge.Checkpoint({
             height: 123,
@@ -266,4 +312,3 @@ contract BridgeTest is Test {
         }
     }
 }
-
