@@ -216,6 +216,67 @@ contract BridgeTest is Test {
         assertEq(updatedExpiry, newExpiry);
     }
 
+    function test_extendWithdrawExpiryBatch_revertsOnEmptyIds() public {
+        bytes32[] memory ids = new bytes32[](0);
+        bytes[] memory sigs = new bytes[](0);
+
+        vm.expectRevert(Bridge.InvalidExtendBatch.selector);
+        bridge.extendWithdrawExpiryBatch(ids, uint64(block.timestamp + 1), sigs);
+    }
+
+    function test_extendWithdrawExpiryBatch_revertsOnTooManyIds() public {
+        uint256 max = bridge.MAX_EXTEND_BATCH();
+        bytes32[] memory ids = new bytes32[](max + 1);
+        for (uint256 i = 0; i < ids.length; i++) {
+            ids[i] = bytes32(i + 1);
+        }
+
+        vm.expectRevert(Bridge.InvalidExtendBatch.selector);
+        bridge.extendWithdrawExpiryBatch(ids, uint64(block.timestamp + 1 days), new bytes[](0));
+    }
+
+    function test_extendWithdrawExpiryBatch_revertsWhenNewExpiryNotInFuture() public {
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = keccak256("wid");
+
+        vm.expectRevert(Bridge.InvalidExtendBatch.selector);
+        bridge.extendWithdrawExpiryBatch(ids, uint64(block.timestamp), new bytes[](0));
+    }
+
+    function test_extendWithdrawExpiryBatch_revertsOnUnsortedIds() public {
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = bytes32(uint256(2));
+        ids[1] = bytes32(uint256(1));
+
+        vm.expectRevert(Bridge.SignaturesNotSortedOrUnique.selector);
+        bridge.extendWithdrawExpiryBatch(ids, uint64(block.timestamp + 1 days), new bytes[](0));
+    }
+
+    function test_extendWithdrawExpiryBatch_revertsOnExpiryExtensionTooLarge() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 10_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        vm.stopPrank();
+
+        (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
+        uint64 newExpiry = oldExpiry + MAX_EXTEND + uint64(1);
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = wid;
+
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory sigs = _sortedSigs(bridge.extendWithdrawDigest(idsHash, newExpiry), _firstN(3));
+
+        vm.expectRevert(Bridge.ExpiryExtensionTooLarge.selector);
+        bridge.extendWithdrawExpiryBatch(ids, newExpiry, sigs);
+    }
+
     function test_mintBatch_revertsWithInsufficientSignatures() public {
         Bridge.Checkpoint memory cp = _checkpoint();
 
