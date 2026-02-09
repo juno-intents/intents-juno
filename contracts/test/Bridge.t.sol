@@ -200,7 +200,7 @@ contract BridgeTest is Test {
         bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
         vm.stopPrank();
 
-        (, , uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
+        (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
         uint64 newExpiry = oldExpiry + 6 hours;
 
         bytes32[] memory ids = new bytes32[](1);
@@ -211,7 +211,7 @@ contract BridgeTest is Test {
 
         bridge.extendWithdrawExpiryBatch(ids, newExpiry, sigs);
 
-        (, , uint64 updatedExpiry,,,,) = bridge.getWithdrawal(wid);
+        (,, uint64 updatedExpiry,,,,) = bridge.getWithdrawal(wid);
         assertEq(updatedExpiry, newExpiry);
     }
 
@@ -243,17 +243,7 @@ contract BridgeTest is Test {
         }
 
         Bridge b = new Bridge(
-            owner,
-            t,
-            d,
-            r,
-            v,
-            DEPOSIT_IMAGE_ID,
-            WITHDRAW_IMAGE_ID,
-            FEE_BPS,
-            TIP_BPS,
-            REFUND_WINDOW,
-            MAX_EXTEND
+            owner, t, d, r, v, DEPOSIT_IMAGE_ID, WITHDRAW_IMAGE_ID, FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND
         );
         t.setBridge(address(b));
         d.setBridge(address(b));
@@ -287,7 +277,9 @@ contract BridgeTest is Test {
 
     function _firstN(uint256 n) private view returns (uint256[] memory pks) {
         pks = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) pks[i] = opPks[i];
+        for (uint256 i = 0; i < n; i++) {
+            pks[i] = opPks[i];
+        }
     }
 
     function _sortedSigs(bytes32 digest, uint256[] memory pks) private returns (bytes[] memory sigs) {

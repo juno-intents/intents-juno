@@ -131,7 +131,9 @@ contract BridgeFlowIntegrationTest is Test {
 
     function _firstN(uint256 n) private view returns (uint256[] memory pks) {
         pks = new uint256[](n);
-        for (uint256 i = 0; i < n; i++) pks[i] = opPks[i];
+        for (uint256 i = 0; i < n; i++) {
+            pks[i] = opPks[i];
+        }
     }
 
     function _sortedSigs(bytes32 digest, uint256[] memory pks) private returns (bytes[] memory sigs) {

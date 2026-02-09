@@ -100,7 +100,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     mapping(bytes32 => Withdrawal) private _withdrawals;
 
     // -------- Events --------
-    event ParamsUpdated(uint96 feeBps, uint96 relayerTipBps, uint64 refundWindowSeconds, uint64 maxExpiryExtensionSeconds);
+    event ParamsUpdated(
+        uint96 feeBps, uint96 relayerTipBps, uint64 refundWindowSeconds, uint64 maxExpiryExtensionSeconds
+    );
     event VerifierUpdated(address indexed verifier);
     event ImageIdsUpdated(bytes32 depositImageId, bytes32 withdrawImageId);
 
@@ -166,7 +168,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint64 newRefundWindowSeconds,
         uint64 newMaxExpiryExtensionSeconds
     ) external onlyOwner {
-        if (newFeeBps > BPS_DENOMINATOR || newRelayerTipBps > BPS_DENOMINATOR) revert InvalidBps();
+        if (newFeeBps > BPS_DENOMINATOR || newRelayerTipBps > BPS_DENOMINATOR) {
+            revert InvalidBps();
+        }
         if (newRefundWindowSeconds == 0 || newMaxExpiryExtensionSeconds == 0) revert InvalidExtendBatch();
 
         feeBps = newFeeBps;
@@ -199,7 +203,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     // -------- EIP-712 digests (for off-chain signing) --------
     function checkpointDigest(Checkpoint calldata checkpoint) public view returns (bytes32) {
-        if (checkpoint.baseChainId != block.chainid || checkpoint.bridgeContract != address(this)) revert BadCheckpointDomain();
+        if (checkpoint.baseChainId != block.chainid || checkpoint.bridgeContract != address(this)) {
+            revert BadCheckpointDomain();
+        }
         bytes32 structHash = keccak256(
             abi.encode(
                 CHECKPOINT_TYPEHASH,
@@ -220,11 +226,12 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     // -------- Core --------
-    function mintBatch(Checkpoint calldata checkpoint, bytes[] calldata operatorSigs, bytes calldata seal, bytes calldata journal)
-        external
-        whenNotPaused
-        nonReentrant
-    {
+    function mintBatch(
+        Checkpoint calldata checkpoint,
+        bytes[] calldata operatorSigs,
+        bytes calldata seal,
+        bytes calldata journal
+    ) external whenNotPaused nonReentrant {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
         _verifySeal(seal, depositImageId, journal);
 
@@ -279,7 +286,17 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint96 fbps = feeBps;
 
         withdrawNonce += 1;
-        withdrawalId = keccak256(abi.encode(bytes32("WJUNO_WITHDRAW_V1"), block.chainid, address(this), withdrawNonce, msg.sender, amount, keccak256(junoRecipientUA)));
+        withdrawalId = keccak256(
+            abi.encode(
+                bytes32("WJUNO_WITHDRAW_V1"),
+                block.chainid,
+                address(this),
+                withdrawNonce,
+                msg.sender,
+                amount,
+                keccak256(junoRecipientUA)
+            )
+        );
 
         Withdrawal storage w = _withdrawals[withdrawalId];
         w.requester = msg.sender;
@@ -291,11 +308,11 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit WithdrawRequested(withdrawalId, msg.sender, amount, junoRecipientUA, expiry, fbps);
     }
 
-    function extendWithdrawExpiryBatch(bytes32[] calldata withdrawalIds, uint64 newExpiry, bytes[] calldata operatorSigs)
-        external
-        whenNotPaused
-        nonReentrant
-    {
+    function extendWithdrawExpiryBatch(
+        bytes32[] calldata withdrawalIds,
+        uint64 newExpiry,
+        bytes[] calldata operatorSigs
+    ) external whenNotPaused nonReentrant {
         uint256 n = withdrawalIds.length;
         if (n == 0 || n > MAX_EXTEND_BATCH) revert InvalidExtendBatch();
         if (newExpiry <= block.timestamp) revert InvalidExtendBatch();
