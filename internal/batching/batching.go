@@ -158,4 +158,3 @@ func WithdrawalBatchIDV1(withdrawalIDs [][32]byte) [32]byte {
 	copy(out[:], outBytes)
 	return out
 }
-

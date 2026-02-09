@@ -137,4 +137,3 @@ func TestPlanExtendWithdrawExpiryBatches_ChunksToMaxBatch(t *testing.T) {
 		t.Fatalf("unexpected chunk sizes: %d, %d, %d", len(plans[0].IDs), len(plans[1].IDs), len(plans[2].IDs))
 	}
 }
-

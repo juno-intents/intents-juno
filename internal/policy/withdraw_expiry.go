@@ -21,10 +21,10 @@ const (
 )
 
 var (
-	ErrInvalidConfig          = errors.New("policy: invalid config")
-	ErrWithdrawalExpired      = errors.New("policy: withdrawal expired")
+	ErrInvalidConfig            = errors.New("policy: invalid config")
+	ErrWithdrawalExpired        = errors.New("policy: withdrawal expired")
 	ErrCannotExtendWithinBounds = errors.New("policy: cannot extend within bounds")
-	ErrDuplicateWithdrawalID  = errors.New("policy: duplicate withdrawal id")
+	ErrDuplicateWithdrawalID    = errors.New("policy: duplicate withdrawal id")
 )
 
 type WithdrawExpiryConfig struct {
@@ -44,7 +44,7 @@ type Withdrawal struct {
 }
 
 type ExtendPlan struct {
-	IDs      [][32]byte // sorted ascending, unique
+	IDs       [][32]byte // sorted ascending, unique
 	NewExpiry time.Time
 }
 
@@ -109,7 +109,7 @@ func PlanExtendWithdrawExpiryBatches(now time.Time, withdrawals []Withdrawal, cf
 			ids = append(ids, need[k].ID)
 		}
 		plans = append(plans, ExtendPlan{
-			IDs:      ids,
+			IDs:       ids,
 			NewExpiry: newExpiry,
 		})
 	}
@@ -122,4 +122,3 @@ func ceilToSecond(t time.Time) time.Time {
 	}
 	return t.Truncate(time.Second).Add(time.Second)
 }
-

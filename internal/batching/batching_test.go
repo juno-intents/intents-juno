@@ -177,4 +177,3 @@ func TestBatcher_ConcurrentAddsDoNotDoubleFlush(t *testing.T) {
 		t.Fatalf("flushed items: got %d want %d", total, n)
 	}
 }
-
