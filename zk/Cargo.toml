@@ -1,6 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-  "deposit_guest",
+  "deposit_guest/core",
+  "deposit_guest/guest",
 ]
 
+default-members = [
+  "deposit_guest/core",
+]
