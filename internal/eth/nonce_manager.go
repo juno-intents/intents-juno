@@ -67,4 +67,3 @@ func (m *NonceManager) Sync(ctx context.Context) (uint64, error) {
 	}
 	return n, nil
 }
-

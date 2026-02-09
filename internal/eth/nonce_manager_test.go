@@ -99,4 +99,3 @@ func TestNonceManager_Sync_AdoptsHigherBackendNonce(t *testing.T) {
 		t.Fatalf("nonce after Sync: got %d want %d", n, 20)
 	}
 }
-

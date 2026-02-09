@@ -81,4 +81,3 @@ func Bump1559Fees(tipCap, feeCap *big.Int, bumpPercent int, minTipBump, minFeeCa
 
 	return newTip, newFee, nil
 }
-

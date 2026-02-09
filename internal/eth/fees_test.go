@@ -46,4 +46,3 @@ func TestBump1559Fees_BumpsWithMinIncrementAndKeepsFeeAboveTip(t *testing.T) {
 		t.Fatalf("feeCap must be >= tipCap: fee=%s tip=%s", newFee, newTip)
 	}
 }
-
