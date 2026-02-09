@@ -19,7 +19,7 @@
 coverage.*
 
 # Rust
-/target/
+target/
 
 # Solidity / JS toolchains
 /node_modules/
