@@ -91,7 +91,13 @@ contract BridgeTest is Test {
         uint256 amount = 100_000;
         items[0] = Bridge.MintItem({depositId: depositId, recipient: makeAddr("alice"), amount: amount});
 
-        bytes memory journal = abi.encode(items);
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
         verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
@@ -160,13 +166,20 @@ contract BridgeTest is Test {
         uint256 feeToDist = fee - tip;
         uint256 net = amount - fee;
 
+        Bridge.Checkpoint memory cp = _checkpoint();
+
         Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
         items[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
-        bytes memory journal = abi.encode(items);
+        Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(wj);
 
         verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
 
-        Bridge.Checkpoint memory cp = _checkpoint();
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
         uint256 supplyBefore = token.totalSupply();
@@ -282,13 +295,76 @@ contract BridgeTest is Test {
 
         Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
         items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
-        bytes memory journal = abi.encode(items);
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
         verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(2));
 
         vm.expectRevert(Bridge.InsufficientSignatures.selector);
         bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
+    function test_mintBatch_revertsOnJournalCheckpointMismatch() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+
+        Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
+        items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
+
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: keccak256("wrong-root"),
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(Bridge.BadJournalDomain.selector);
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
+    function test_finalizeWithdrawBatch_revertsOnJournalCheckpointMismatch() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        vm.stopPrank();
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 net = amount - fee;
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
+        items[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
+
+        Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
+            finalOrchardRoot: keccak256("wrong-root"),
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(wj);
+        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(Bridge.BadJournalDomain.selector);
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, sigs, hex"01", journal);
     }
 
     function test_mintBatch_revertsIfThresholdUnset() public {
@@ -320,7 +396,13 @@ contract BridgeTest is Test {
 
         Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
         items[0] = Bridge.MintItem({depositId: keccak256("d"), recipient: makeAddr("alice"), amount: 1});
-        bytes memory journal = abi.encode(items);
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
         v.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
 
         vm.expectRevert(Bridge.OperatorThresholdUnset.selector);

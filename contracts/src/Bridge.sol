@@ -37,6 +37,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error OperatorThresholdUnset();
     error InvalidExtendBatch();
     error ExpiryExtensionTooLarge();
+    error BadJournalDomain();
 
     // -------- Types --------
     struct Checkpoint {
@@ -53,9 +54,27 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint256 amount;
     }
 
+    // Public journal output of the deposit zkVM. This binds the proof to a
+    // specific signed checkpoint domain/root (verified by the contract).
+    struct DepositJournal {
+        bytes32 finalOrchardRoot;
+        uint256 baseChainId;
+        address bridgeContract;
+        MintItem[] items;
+    }
+
     struct FinalizeItem {
         bytes32 withdrawalId;
         uint256 netAmount;
+    }
+
+    // Public journal output of the withdraw zkVM. This binds the proof to a
+    // specific signed checkpoint domain/root (verified by the contract).
+    struct WithdrawJournal {
+        bytes32 finalOrchardRoot;
+        uint256 baseChainId;
+        address bridgeContract;
+        FinalizeItem[] items;
     }
 
     struct Withdrawal {
@@ -235,7 +254,12 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
         _verifySeal(seal, depositImageId, journal);
 
-        MintItem[] memory items = abi.decode(journal, (MintItem[]));
+        DepositJournal memory dj = abi.decode(journal, (DepositJournal));
+        if (
+            dj.finalOrchardRoot != checkpoint.finalOrchardRoot || dj.baseChainId != checkpoint.baseChainId
+                || dj.bridgeContract != checkpoint.bridgeContract
+        ) revert BadJournalDomain();
+        MintItem[] memory items = dj.items;
 
         uint96 fbps = feeBps;
         uint96 tipBps = relayerTipBps;
@@ -348,7 +372,12 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
         _verifySeal(seal, withdrawImageId, journal);
 
-        FinalizeItem[] memory items = abi.decode(journal, (FinalizeItem[]));
+        WithdrawJournal memory wj = abi.decode(journal, (WithdrawJournal));
+        if (
+            wj.finalOrchardRoot != checkpoint.finalOrchardRoot || wj.baseChainId != checkpoint.baseChainId
+                || wj.bridgeContract != checkpoint.bridgeContract
+        ) revert BadJournalDomain();
+        FinalizeItem[] memory items = wj.items;
 
         uint96 tipBps = relayerTipBps;
 

@@ -66,16 +66,26 @@ contract BridgeFlowIntegrationTest is Test {
         address alice = makeAddr("alice");
         address relayer = makeAddr("relayer");
 
-        // 1) Mint wJUNO on deposit.
         Bridge.Checkpoint memory cp = _checkpoint();
-        Bridge.MintItem[] memory mints = new Bridge.MintItem[](1);
-        mints[0] = Bridge.MintItem({depositId: keccak256("d1"), recipient: alice, amount: 100_000});
-        bytes memory depositJournal = abi.encode(mints);
-
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
-        vm.prank(relayer);
-        bridge.mintBatch(cp, sigs, hex"01", depositJournal);
+        // 1) Mint wJUNO on deposit.
+        {
+            Bridge.MintItem[] memory mints = new Bridge.MintItem[](1);
+            mints[0] = Bridge.MintItem({depositId: keccak256("d1"), recipient: alice, amount: 100_000});
+
+            bytes memory depositJournal = abi.encode(
+                Bridge.DepositJournal({
+                    finalOrchardRoot: cp.finalOrchardRoot,
+                    baseChainId: cp.baseChainId,
+                    bridgeContract: cp.bridgeContract,
+                    items: mints
+                })
+            );
+
+            vm.prank(relayer);
+            bridge.mintBatch(cp, sigs, hex"01", depositJournal);
+        }
 
         // FeeDistributor should have accrued fees; operator 0 can claim.
         address op0 = vm.addr(opPks[0]);
@@ -97,15 +107,24 @@ contract BridgeFlowIntegrationTest is Test {
 
         // 3) Operators pay on Juno (off-chain), then finalize on Base with proof journal.
         // Journal contains net amount (net of protocol fee).
-        uint256 fee = (aliceBal * FEE_BPS) / 10_000;
-        uint256 net = aliceBal - fee;
+        uint256 net = aliceBal - ((aliceBal * FEE_BPS) / 10_000);
 
-        Bridge.FinalizeItem[] memory finals = new Bridge.FinalizeItem[](1);
-        finals[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
-        bytes memory withdrawJournal = abi.encode(finals);
+        {
+            Bridge.FinalizeItem[] memory finals = new Bridge.FinalizeItem[](1);
+            finals[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
 
-        vm.prank(relayer);
-        bridge.finalizeWithdrawBatch(cp, sigs, hex"02", withdrawJournal);
+            bytes memory withdrawJournal = abi.encode(
+                Bridge.WithdrawJournal({
+                    finalOrchardRoot: cp.finalOrchardRoot,
+                    baseChainId: cp.baseChainId,
+                    bridgeContract: cp.bridgeContract,
+                    items: finals
+                })
+            );
+
+            vm.prank(relayer);
+            bridge.finalizeWithdrawBatch(cp, sigs, hex"02", withdrawJournal);
+        }
 
         assertEq(token.balanceOf(address(bridge)), 0);
 
