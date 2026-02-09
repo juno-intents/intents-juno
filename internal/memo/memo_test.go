@@ -196,6 +196,34 @@ func TestWithdrawalMemoV1_Golden(t *testing.T) {
 	}
 }
 
+func TestWithdrawalMemoV1_RejectsInvalidLength(t *testing.T) {
+	const chainID = uint32(8453)
+	bridge := must20(t, "1234567890abcdef1234567890abcdef12345678")
+
+	_, err := ParseWithdrawalMemoV1(make([]byte, 0), chainID, bridge)
+	if !errors.Is(err, ErrInvalidLength) {
+		t.Fatalf("expected ErrInvalidLength, got %v", err)
+	}
+}
+
+func TestWithdrawalMemoV1_RejectsDomainMismatch(t *testing.T) {
+	golden := mustLoadHex(t, "withdrawal_v1_valid.hex")
+
+	bridge := must20(t, "1234567890abcdef1234567890abcdef12345678")
+	_, err := ParseWithdrawalMemoV1(golden, 1, bridge)
+	if !errors.Is(err, ErrDomainMismatch) {
+		t.Fatalf("expected ErrDomainMismatch(chainID), got %v", err)
+	}
+
+	const chainID = uint32(8453)
+	wrongBridge := must20(t, "0000000000000000000000000000000000000001")
+
+	_, err = ParseWithdrawalMemoV1(golden, chainID, wrongBridge)
+	if !errors.Is(err, ErrDomainMismatch) {
+		t.Fatalf("expected ErrDomainMismatch(bridge), got %v", err)
+	}
+}
+
 func TestWithdrawalMemoV1_RejectsInvalidMagic(t *testing.T) {
 	golden := mustLoadHex(t, "withdrawal_v1_valid.hex")
 
