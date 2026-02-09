@@ -145,11 +145,6 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 		value = big.NewInt(0)
 	}
 
-	nonce, err := nm.Next(ctx)
-	if err != nil {
-		return SendResult{}, err
-	}
-
 	gasLimit := req.GasLimit
 	if gasLimit == 0 {
 		est, err := r.backend.EstimateGas(ctx, ethereum.CallMsg{
@@ -177,6 +172,11 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 	}
 
 	tipCap, feeCap, err := Calc1559Fees(header.BaseFee, suggestedTip, r.cfg.MinTipCap)
+	if err != nil {
+		return SendResult{}, err
+	}
+
+	nonce, err := nm.Next(ctx)
 	if err != nil {
 		return SendResult{}, err
 	}

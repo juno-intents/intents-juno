@@ -2,6 +2,7 @@ package eth
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"sync"
 	"testing"
@@ -40,6 +41,7 @@ type fakeBackend struct {
 	suggestTip *big.Int
 	baseFee    *big.Int
 	gasEst     uint64
+	estErr     error
 
 	sent []*types.Transaction
 
@@ -70,6 +72,9 @@ func (b *fakeBackend) HeaderByNumber(_ context.Context, _ *big.Int) (*types.Head
 func (b *fakeBackend) EstimateGas(_ context.Context, _ ethereum.CallMsg) (uint64, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.estErr != nil {
+		return 0, b.estErr
+	}
 	return b.gasEst, nil
 }
 
@@ -181,5 +186,55 @@ func TestRelayer_ReplacesStuckTxByBumpingFees(t *testing.T) {
 
 	if res.TxHash != tx1.Hash() {
 		t.Fatalf("result hash: got %s want %s", res.TxHash, tx1.Hash())
+	}
+}
+
+func TestRelayer_DoesNotConsumeNonceWhenEstimateGasFails(t *testing.T) {
+	ctx := context.Background()
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	signer := NewLocalSigner(key)
+
+	backend := &fakeBackend{
+		pendingNonce: 5,
+		suggestTip:   big.NewInt(2),
+		baseFee:      big.NewInt(100),
+		estErr:       errors.New("estimate failed"),
+	}
+
+	r, err := NewRelayer(backend, []Signer{signer}, RelayerConfig{
+		ChainID:             big.NewInt(8453),
+		GasLimitMultiplier:  1.2,
+		MinTipCap:           big.NewInt(1),
+		ReceiptPollInterval: 1 * time.Second,
+		MaxReplacements:     0,
+		Now:                 time.Now,
+		Sleep:               nil,
+	})
+	if err != nil {
+		t.Fatalf("NewRelayer: %v", err)
+	}
+
+	to := common.HexToAddress("0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1")
+	_, err = r.SendAndWaitMined(ctx, TxRequest{
+		To:    to,
+		Data:  []byte{0x01, 0x02},
+		Value: big.NewInt(0),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+
+	if backend.nonceCalls != 0 {
+		t.Fatalf("PendingNonceAt calls: got %d want %d", backend.nonceCalls, 0)
+	}
+	if len(backend.sent) != 0 {
+		t.Fatalf("unexpected send attempts: %d", len(backend.sent))
 	}
 }
