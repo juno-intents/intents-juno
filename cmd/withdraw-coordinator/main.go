@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
@@ -111,6 +112,10 @@ func main() {
 		claimTTL     = flag.Duration("claim-ttl", 30*time.Second, "per-withdrawal claim TTL in DB")
 		tickInterval = flag.Duration("tick-interval", 1*time.Second, "coordinator tick interval")
 
+		leaderElection  = flag.Bool("leader-election", true, "enable leader election via DB lease")
+		leaderLeaseName = flag.String("leader-lease-name", "withdraw-coordinator", "lease name used for leader election")
+		leaderLeaseTTL  = flag.Duration("leader-lease-ttl", 15*time.Second, "leader lease TTL (renewed each tick)")
+
 		safetyMargin   = flag.Duration("expiry-safety-margin", policy.DefaultWithdrawExpirySafetyMargin, "minimum time-to-expiry required to broadcast (refuse if below this unless expiry extension is enabled)")
 		maxExtension   = flag.Duration("max-expiry-extension", 12*time.Hour, "max per-withdrawal expiry extension allowed by contract")
 		maxExtendBatch = flag.Int("max-extend-batch", policy.DefaultMaxExtendBatch, "max withdrawal ids per extendWithdrawExpiryBatch call")
@@ -135,6 +140,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: durations must be > 0")
 		os.Exit(2)
 	}
+	if *leaderLeaseTTL <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --leader-lease-ttl must be > 0")
+		os.Exit(2)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -154,6 +163,24 @@ func main() {
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Error("ensure schema", "err", err)
 		os.Exit(2)
+	}
+
+	var elector *withdrawcoordinator.LeaderElector
+	if *leaderElection {
+		leaseStore, err := leasespg.New(pool)
+		if err != nil {
+			log.Error("init lease store", "err", err)
+			os.Exit(2)
+		}
+		if err := leaseStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure lease schema", "err", err)
+			os.Exit(2)
+		}
+		elector, err = withdrawcoordinator.NewLeaderElector(leaseStore, *leaderLeaseName, *owner, *leaderLeaseTTL)
+		if err != nil {
+			log.Error("init leader elector", "err", err)
+			os.Exit(2)
+		}
 	}
 
 	coord, err := withdrawcoordinator.New(withdrawcoordinator.Config{
@@ -200,6 +227,17 @@ func main() {
 			}
 			return
 		case <-t.C:
+			if elector != nil {
+				leader, err := elector.Tick(ctx)
+				if err != nil {
+					log.Error("leader election tick", "err", err)
+					continue
+				}
+				if !leader {
+					continue
+				}
+			}
+
 			if err := coord.Tick(ctx); err != nil {
 				log.Error("tick", "err", err)
 			}
