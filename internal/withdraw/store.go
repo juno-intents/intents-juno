@@ -23,6 +23,7 @@ const (
 	BatchStateSigned
 	BatchStateBroadcasted
 	BatchStateConfirmed
+	BatchStateFinalized
 )
 
 func (s BatchState) String() string {
@@ -37,6 +38,8 @@ func (s BatchState) String() string {
 		return "broadcasted"
 	case BatchStateConfirmed:
 		return "confirmed"
+	case BatchStateFinalized:
+		return "finalized"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(s))
 	}
@@ -57,6 +60,9 @@ type Batch struct {
 
 	// JunoTxID is the network txid (natural idempotency key for broadcast).
 	JunoTxID string
+
+	// BaseTxHash is the Base tx hash for finalizeWithdrawBatch.
+	BaseTxHash string
 }
 
 type Store interface {
@@ -72,4 +78,5 @@ type Store interface {
 	SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error
 	SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte) error
+	SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error
 }

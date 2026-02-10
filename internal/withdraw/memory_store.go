@@ -311,6 +311,36 @@ func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) err
 	return nil
 }
 
+func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, baseTxHash string) error {
+	if baseTxHash == "" {
+		return ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.batches[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+
+	if b.State < BatchStateConfirmed {
+		return ErrInvalidTransition
+	}
+
+	if b.State >= BatchStateFinalized {
+		if b.BaseTxHash != baseTxHash {
+			return ErrBatchMismatch
+		}
+		return nil
+	}
+
+	b.State = BatchStateFinalized
+	b.BaseTxHash = baseTxHash
+	s.batches[batchID] = b
+	return nil
+}
+
 func cloneWithdrawal(w Withdrawal) Withdrawal {
 	w.RecipientUA = append([]byte(nil), w.RecipientUA...)
 	return w
@@ -343,7 +373,7 @@ func cloneBatch(b Batch) Batch {
 }
 
 func batchEqual(a, b Batch) bool {
-	if a.ID != b.ID || a.State != b.State || a.JunoTxID != b.JunoTxID {
+	if a.ID != b.ID || a.State != b.State || a.JunoTxID != b.JunoTxID || a.BaseTxHash != b.BaseTxHash {
 		return false
 	}
 	if len(a.WithdrawalIDs) != len(b.WithdrawalIDs) {

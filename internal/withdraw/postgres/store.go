@@ -239,17 +239,18 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	}
 
 	var (
-		idRaw    []byte
-		state    int16
-		txPlan   []byte
-		signedTx []byte
-		junoTxID *string
+		idRaw      []byte
+		state      int16
+		txPlan     []byte
+		signedTx   []byte
+		junoTxID   *string
+		baseTxHash *string
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT batch_id, state, tx_plan, signed_tx, juno_txid
+		SELECT batch_id, state, tx_plan, signed_tx, juno_txid, base_tx_hash
 		FROM withdrawal_batches
 		WHERE batch_id = $1
-	`, batchID[:]).Scan(&idRaw, &state, &txPlan, &signedTx, &junoTxID)
+	`, batchID[:]).Scan(&idRaw, &state, &txPlan, &signedTx, &junoTxID, &baseTxHash)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Batch{}, withdraw.ErrNotFound
@@ -298,6 +299,9 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	}
 	if junoTxID != nil {
 		out.JunoTxID = *junoTxID
+	}
+	if baseTxHash != nil {
+		out.BaseTxHash = *baseTxHash
 	}
 	return out, nil
 }
@@ -454,6 +458,47 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 	return nil
 }
 
+func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error {
+	if baseTxHash == "" {
+		return withdraw.ErrInvalidConfig
+	}
+
+	state, existingHash, err := s.getBatchFinalizationFields(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if state < withdraw.BatchStateConfirmed {
+		return withdraw.ErrInvalidTransition
+	}
+	if state >= withdraw.BatchStateFinalized {
+		if existingHash != baseTxHash {
+			return withdraw.ErrBatchMismatch
+		}
+		return nil
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = $2, base_tx_hash = $3, updated_at = now()
+		WHERE batch_id = $1 AND state = $4
+	`, batchID[:], int16(withdraw.BatchStateFinalized), baseTxHash, int16(withdraw.BatchStateConfirmed))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: set finalized: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		// Re-check state for idempotency vs races.
+		state2, existingHash2, err2 := s.getBatchFinalizationFields(ctx, batchID)
+		if err2 != nil {
+			return err2
+		}
+		if state2 >= withdraw.BatchStateFinalized && existingHash2 == baseTxHash {
+			return nil
+		}
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
 func (s *Store) updateState(ctx context.Context, batchID [32]byte, from, to withdraw.BatchState) error {
 	state, _, _, err := s.getBatchStateFields(ctx, batchID)
 	if err != nil {
@@ -505,6 +550,33 @@ func (s *Store) getBatchStateFields(ctx context.Context, batchID [32]byte) (with
 		txid = *junoTxID
 	}
 	return withdraw.BatchState(state), signedTx, txid, nil
+}
+
+func (s *Store) getBatchFinalizationFields(ctx context.Context, batchID [32]byte) (withdraw.BatchState, string, error) {
+	if s == nil || s.pool == nil {
+		return 0, "", fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	var (
+		state      int16
+		baseTxHash *string
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT state, base_tx_hash
+		FROM withdrawal_batches
+		WHERE batch_id = $1
+	`, batchID[:]).Scan(&state, &baseTxHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, "", withdraw.ErrNotFound
+		}
+		return 0, "", fmt.Errorf("withdraw/postgres: get batch finalize fields: %w", err)
+	}
+	h := ""
+	if baseTxHash != nil {
+		h = *baseTxHash
+	}
+	return withdraw.BatchState(state), h, nil
 }
 
 func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdrawal, error) {
