@@ -41,6 +41,10 @@ func (w Withdrawal) Validate() error {
 	if len(w.RecipientUA) == 0 {
 		return fmt.Errorf("%w: missing recipient UA", ErrInvalidConfig)
 	}
+	// Bridge.MAX_UA_BYTES = 256.
+	if len(w.RecipientUA) > 256 {
+		return fmt.Errorf("%w: recipient UA too long", ErrInvalidConfig)
+	}
 	if w.Expiry.IsZero() {
 		return fmt.Errorf("%w: missing expiry", ErrInvalidConfig)
 	}

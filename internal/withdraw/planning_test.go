@@ -93,3 +93,20 @@ func TestSelectForBatch_RejectsInvalidMaxItems(t *testing.T) {
 		t.Fatalf("expected ErrInvalidConfig, got %v", err)
 	}
 }
+
+func TestWithdrawal_Validate_RejectsRecipientUATooLong(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+
+	w := Withdrawal{
+		ID:          seq32(0x01),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: make([]byte, 257),
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if err := w.Validate(); err == nil {
+		t.Fatalf("expected error")
+	}
+}
