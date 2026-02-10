@@ -55,7 +55,7 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 		dec := json.NewDecoder(r.Body)
 		dec.DisallowUnknownFields()
 
-		var req sendRequest
+		var req SendRequest
 		if err := dec.Decode(&req); err != nil {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 			return
@@ -123,14 +123,14 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			return
 		}
 
-		out := sendResponse{
+		out := SendResponse{
 			From:         res.From.Hex(),
 			Nonce:        res.Nonce,
 			TxHash:       res.TxHash.Hex(),
 			Replacements: res.Replacements,
 		}
 		if res.Receipt != nil {
-			out.Receipt = &receiptResponse{
+			out.Receipt = &ReceiptResponse{
 				Status: res.Receipt.Status,
 			}
 			if res.Receipt.BlockNumber != nil {
@@ -145,28 +145,6 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	})
 
 	return mux
-}
-
-type sendRequest struct {
-	To             string `json:"to"`
-	Data           string `json:"data,omitempty"`
-	ValueWei       string `json:"value_wei,omitempty"`
-	GasLimit       uint64 `json:"gas_limit,omitempty"`
-	TimeoutSeconds int    `json:"timeout_seconds,omitempty"`
-}
-
-type sendResponse struct {
-	From         string           `json:"from"`
-	Nonce        uint64           `json:"nonce"`
-	TxHash       string           `json:"tx_hash"`
-	Replacements int              `json:"replacements"`
-	Receipt      *receiptResponse `json:"receipt,omitempty"`
-}
-
-type receiptResponse struct {
-	Status      uint64 `json:"status"`
-	BlockNumber string `json:"block_number,omitempty"`
-	GasUsed     uint64 `json:"gas_used,omitempty"`
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {
