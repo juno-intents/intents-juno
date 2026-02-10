@@ -139,6 +139,14 @@ func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) e
 	if len(pkg.OperatorSignatures) == 0 {
 		return fmt.Errorf("%w: empty operator signatures", ErrInvalidCheckpoint)
 	}
+	for i, sig := range pkg.OperatorSignatures {
+		if len(sig) != 65 {
+			return fmt.Errorf("%w: signature[%d] invalid length %d", ErrInvalidCheckpoint, i, len(sig))
+		}
+		if sig[64] != 27 && sig[64] != 28 {
+			return fmt.Errorf("%w: signature[%d] invalid v %d", ErrInvalidCheckpoint, i, sig[64])
+		}
+	}
 
 	// Only move forward in height to avoid accidental reorg/rollback usage.
 	if r.checkpoint != nil && cp.Height <= r.checkpoint.Height {
@@ -288,4 +296,3 @@ func (r *Relayer) markSeen(id common.Hash) bool {
 	}
 	return false
 }
-

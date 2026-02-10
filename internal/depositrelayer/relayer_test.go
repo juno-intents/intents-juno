@@ -43,6 +43,13 @@ func (p *stubProver) Prove(_ context.Context, imageID common.Hash, journal []byt
 	return p.seal, p.err
 }
 
+func mustOperatorSig(t *testing.T) []byte {
+	t.Helper()
+	sig := make([]byte, 65)
+	sig[64] = 27
+	return sig
+}
+
 func mustType(t *testing.T, typ string, comps []abi.ArgumentMarshaling) abi.Type {
 	t.Helper()
 
@@ -106,7 +113,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancel)
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -232,7 +239,7 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancel)
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -317,12 +324,51 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 		t.Fatalf("sender calls: got %d want %d", sender.calls, 0)
 	}
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
 	if sender.calls != 1 {
 		t.Fatalf("sender calls after checkpoint: got %d want %d", sender.calls, 1)
+	}
+}
+
+func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01"}}
+	prover := &stubProver{seal: []byte{0x99}}
+
+	r, err := New(Config{
+		BaseChainID:    baseChainID,
+		BridgeAddress:  bridge,
+		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		MaxItems:       1,
+		MaxAge:         10 * time.Minute,
+		DedupeMax:      1000,
+		Now:            time.Now,
+	}, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	// Bad length (must be 65 bytes with v in {27,28}).
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err == nil {
+		t.Fatalf("expected error")
 	}
 }
 
@@ -336,4 +382,3 @@ func mustHexToBytes(t *testing.T, s string) []byte {
 	}
 	return b
 }
-

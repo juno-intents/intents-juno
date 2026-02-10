@@ -143,7 +143,9 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err != nil {
+	opSig := make([]byte, 65)
+	opSig[64] = 27
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{opSig}}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -188,7 +190,7 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeDepositJournal: %v", err)
 	}
-	want, err := bridgeabi.PackMintBatchCalldata(cp, [][]byte{[]byte{0x01}}, []byte{0x99}, journal)
+	want, err := bridgeabi.PackMintBatchCalldata(cp, [][]byte{opSig}, []byte{0x99}, journal)
 	if err != nil {
 		t.Fatalf("PackMintBatchCalldata: %v", err)
 	}
