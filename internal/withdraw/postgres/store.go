@@ -226,6 +226,13 @@ func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw
 	return nil
 }
 
+func (s *Store) GetWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdrawal, error) {
+	if s == nil || s.pool == nil {
+		return withdraw.Withdrawal{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	return s.getWithdrawal(ctx, id)
+}
+
 func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch, error) {
 	if s == nil || s.pool == nil {
 		return withdraw.Batch{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)

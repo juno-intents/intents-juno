@@ -170,6 +170,17 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 	return nil
 }
 
+func (s *MemoryStore) GetWithdrawal(_ context.Context, id [32]byte) (Withdrawal, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.withdrawals[id]
+	if !ok {
+		return Withdrawal{}, ErrNotFound
+	}
+	return cloneWithdrawal(rec.w), nil
+}
+
 func (s *MemoryStore) GetBatch(_ context.Context, batchID [32]byte) (Batch, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

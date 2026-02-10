@@ -51,6 +51,44 @@ func TestMemoryStore_UpsertRequested_DedupesAndRejectsMismatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_GetWithdrawal_DefensiveCopy(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	s := NewMemoryStore(func() time.Time { return now })
+
+	id := seq32(0x01)
+	w := Withdrawal{
+		ID:          id,
+		Amount:      1000,
+		FeeBps:      0,
+		RecipientUA: []byte{0x01, 0x02, 0x03},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	_, _, err := s.UpsertRequested(context.Background(), w)
+	if err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+
+	got, err := s.GetWithdrawal(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWithdrawal: %v", err)
+	}
+	if !withdrawalEqual(got, w) {
+		t.Fatalf("unexpected withdrawal")
+	}
+
+	// Mutate returned slice and ensure store isn't affected.
+	got.RecipientUA[0] ^= 0xff
+	got2, err := s.GetWithdrawal(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetWithdrawal #2: %v", err)
+	}
+	if !withdrawalEqual(got2, w) {
+		t.Fatalf("expected store to be immutable to caller mutations")
+	}
+}
+
 func TestMemoryStore_ClaimAndBatch(t *testing.T) {
 	t.Parallel()
 

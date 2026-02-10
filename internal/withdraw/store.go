@@ -64,6 +64,7 @@ type Store interface {
 	ClaimUnbatched(ctx context.Context, owner string, ttl time.Duration, max int) ([]Withdrawal, error)
 	CreatePlannedBatch(ctx context.Context, owner string, b Batch) error
 
+	GetWithdrawal(ctx context.Context, id [32]byte) (Withdrawal, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
 
