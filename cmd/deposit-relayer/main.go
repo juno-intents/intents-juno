@@ -163,7 +163,8 @@ func main() {
 		select {
 		case <-ctx.Done():
 			log.Info("shutdown", "reason", ctx.Err())
-			cctx, cancel := withTimeout(ctx, *submitTimeout)
+			// Use a fresh context so we can flush a final batch even though ctx is already canceled.
+			cctx, cancel := withTimeout(context.Background(), *submitTimeout)
 			_ = relayer.Flush(cctx)
 			cancel()
 			return
