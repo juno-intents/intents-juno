@@ -218,8 +218,8 @@ func dockerRunAnvil(t *testing.T, ctx context.Context, image string, hostPort st
 		"-d",
 		"-e", "ANVIL_IP_ADDR=0.0.0.0",
 		"-p", "127.0.0.1:"+hostPort+":8545",
+		"--entrypoint", "anvil",
 		image,
-		"anvil",
 		"--port", "8545",
 		"--chain-id", "31337",
 	)
