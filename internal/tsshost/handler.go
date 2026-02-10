@@ -3,21 +3,14 @@ package tsshost
 import (
 	"context"
 	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
-)
 
-const (
-	signRequestVersion  = "tss.sign.v1"
-	signResponseVersion = "tss.sign_result.v1"
+	"github.com/juno-intents/intents-juno/internal/tss"
 )
-
-var errInvalidSessionID = errors.New("tsshost: invalid session id")
 
 type Signer interface {
 	// Sign returns a signed transaction for the provided txPlan, binding it to sessionID.
@@ -40,18 +33,6 @@ type Config struct {
 	MaxSessions int
 
 	Now func() time.Time
-}
-
-type signRequest struct {
-	Version   string `json:"version"`
-	SessionID string `json:"sessionId"`
-	TxPlan    []byte `json:"txPlan"`
-}
-
-type signResponse struct {
-	Version   string `json:"version"`
-	SessionID string `json:"sessionId"`
-	SignedTx  []byte `json:"signedTx"`
 }
 
 type handler struct {
@@ -112,7 +93,7 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
-	var req signRequest
+	var req tss.SignRequest
 	if err := dec.Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 		return
@@ -123,11 +104,11 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.Version != signRequestVersion {
+	if req.Version != tss.SignRequestVersion {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_version"})
 		return
 	}
-	sid, err := parseSessionID(req.SessionID)
+	sid, err := tss.ParseSessionID(req.SessionID)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_session_id"})
 		return
@@ -165,9 +146,9 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	resp := signResponse{
-		Version:   signResponseVersion,
-		SessionID: "0x" + hex.EncodeToString(sid[:]),
+	resp := tss.SignResponse{
+		Version:   tss.SignResponseVersion,
+		SessionID: tss.FormatSessionID(sid),
 		SignedTx:  signedTx,
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -256,23 +237,8 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 	}
 }
 
-func parseSessionID(s string) ([32]byte, error) {
-	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
-	if len(s) != 64 {
-		return [32]byte{}, errInvalidSessionID
-	}
-	b, err := hex.DecodeString(s)
-	if err != nil {
-		return [32]byte{}, errInvalidSessionID
-	}
-	var out [32]byte
-	copy(out[:], b)
-	return out, nil
-}
-
 func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
-
