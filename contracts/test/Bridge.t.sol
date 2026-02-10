@@ -204,6 +204,47 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
+    function test_finalizeWithdrawBatch_revertsOnRecipientHashMismatch() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        bytes memory ua = bytes("uaddr1...");
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
+        vm.stopPrank();
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 net = amount - fee;
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
+        items[0] = Bridge.FinalizeItem({
+            withdrawalId: wid,
+            recipientUAHash: keccak256("wrong-ua"),
+            netAmount: net
+        });
+        Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(wj);
+
+        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(Bridge.WithdrawalRecipientMismatch.selector);
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, sigs, hex"03", journal);
+    }
+
     function test_extendWithdrawExpiryBatch_requiresQuorumSig_andUpdatesExpiry() public {
         address alice = makeAddr("alice");
         uint256 amount = 10_000;
