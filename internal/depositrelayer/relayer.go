@@ -273,6 +273,12 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	if err != nil {
 		return err
 	}
+	if res.Receipt == nil {
+		return fmt.Errorf("depositrelayer: base-relayer did not return a receipt")
+	}
+	if res.Receipt.Status != 1 {
+		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
+	}
 
 	r.log.Info("submitted mintBatch",
 		"checkpointHeight", cp.Height,
