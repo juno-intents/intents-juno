@@ -20,7 +20,9 @@ type Planner interface {
 }
 
 type Signer interface {
-	Sign(ctx context.Context, txPlan []byte) ([]byte, error)
+	// Sign must be idempotent for a given batchID.
+	// Implementations MUST reject signing if the same batchID is used with different txPlan bytes.
+	Sign(ctx context.Context, batchID [32]byte, txPlan []byte) ([]byte, error)
 }
 
 type Broadcaster interface {
@@ -258,7 +260,7 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	rawTx, err := c.signer.Sign(ctx, b.TxPlan)
+	rawTx, err := c.signer.Sign(ctx, batchID, b.TxPlan)
 	if err != nil {
 		return err
 	}

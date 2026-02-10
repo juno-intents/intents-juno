@@ -87,7 +87,7 @@ func (p *mockPlanner) Plan(_ context.Context, batchID [32]byte, ws []withdraw.Wi
 
 type hashSigner struct{}
 
-func (s *hashSigner) Sign(_ context.Context, txPlan []byte) ([]byte, error) {
+func (s *hashSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
 	sum := sha256.Sum256(txPlan)
 	return sum[:], nil
 }

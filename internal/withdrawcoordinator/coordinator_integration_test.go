@@ -23,7 +23,9 @@ func (p *integPlanner) Plan(_ context.Context, _ [32]byte, _ []withdraw.Withdraw
 
 type integSigner struct{}
 
-func (s *integSigner) Sign(_ context.Context, _ []byte) ([]byte, error) { return []byte{0x01}, nil }
+func (s *integSigner) Sign(_ context.Context, _ [32]byte, _ []byte) ([]byte, error) {
+	return []byte{0x01}, nil
+}
 
 type integBroadcaster struct{}
 

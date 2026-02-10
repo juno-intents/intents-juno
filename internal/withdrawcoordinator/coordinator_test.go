@@ -23,7 +23,7 @@ type stubSigner struct {
 	calls int
 }
 
-func (s *stubSigner) Sign(_ context.Context, txPlan []byte) ([]byte, error) {
+func (s *stubSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
 	_ = txPlan
 	s.calls++
 	return []byte{0x01}, nil
