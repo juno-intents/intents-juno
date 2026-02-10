@@ -5,11 +5,14 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -19,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/policy"
+	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawcoordinator"
@@ -123,6 +127,14 @@ func main() {
 		owner = flag.String("owner", "", "unique coordinator owner id (required; used for DB claims)")
 
 		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
+
+		tssURL           = flag.String("tss-url", "", "tss-host base url (enables remote signing; must be https unless --tss-insecure-http)")
+		tssInsecureHTTP  = flag.Bool("tss-insecure-http", false, "allow tss-url over plain http (DANGEROUS; dev only)")
+		tssTimeout       = flag.Duration("tss-timeout", 10*time.Second, "tss request timeout")
+		tssMaxRespBytes  = flag.Int64("tss-max-response-bytes", 1<<20, "max tss response size (bytes)")
+		tssServerCAFile  = flag.String("tss-server-ca-file", "", "server root CA PEM file (optional; defaults to system roots)")
+		tssClientCertFile = flag.String("tss-client-cert-file", "", "client cert PEM file (optional; for mTLS)")
+		tssClientKeyFile  = flag.String("tss-client-key-file", "", "client key PEM file (optional; for mTLS)")
 	)
 	flag.Parse()
 
@@ -165,6 +177,31 @@ func main() {
 		os.Exit(2)
 	}
 
+	signer := withdrawcoordinator.Signer(&hashSigner{})
+	if *tssURL != "" {
+		hc, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile)
+		if err != nil {
+			log.Error("init tss http client", "err", err)
+			os.Exit(2)
+		}
+
+		opts := []tss.Option{
+			tss.WithHTTPClient(hc),
+			tss.WithMaxResponseBytes(*tssMaxRespBytes),
+		}
+		if *tssInsecureHTTP {
+			opts = append(opts, tss.WithInsecureHTTP())
+		}
+
+		c, err := tss.NewClient(*tssURL, opts...)
+		if err != nil {
+			log.Error("init tss client", "err", err)
+			os.Exit(2)
+		}
+		signer = c
+		log.Info("tss signer enabled", "url", *tssURL)
+	}
+
 	var elector *withdrawcoordinator.LeaderElector
 	if *leaderElection {
 		leaseStore, err := leasespg.New(pool)
@@ -194,7 +231,7 @@ func main() {
 			MaxBatch:     *maxExtendBatch,
 		},
 		Now: time.Now,
-	}, store, &mockPlanner{}, &hashSigner{}, &hashBroadcaster{}, &immediateConfirmer{}, log)
+	}, store, &mockPlanner{}, signer, &hashBroadcaster{}, &immediateConfirmer{}, log)
 	if err != nil {
 		log.Error("init coordinator", "err", err)
 		os.Exit(2)
@@ -363,4 +400,45 @@ func decodeHexBytes(s string) ([]byte, error) {
 		return nil, fmt.Errorf("decode hex: %w", err)
 	}
 	return b, nil
+}
+
+func newTSSHTTPClient(timeout time.Duration, serverCAFile string, clientCertFile string, clientKeyFile string) (*http.Client, error) {
+	if timeout <= 0 {
+		return nil, fmt.Errorf("tss timeout must be > 0")
+	}
+
+	tlsCfg := &tls.Config{
+		MinVersion: tls.VersionTLS13,
+	}
+
+	// If a CA file is provided, trust ONLY that CA (avoid mixing in system roots accidentally).
+	if serverCAFile != "" {
+		caPEM, err := os.ReadFile(serverCAFile)
+		if err != nil {
+			return nil, fmt.Errorf("read server ca file: %w", err)
+		}
+		pool := x509.NewCertPool()
+		if ok := pool.AppendCertsFromPEM(caPEM); !ok {
+			return nil, fmt.Errorf("parse server ca file")
+		}
+		tlsCfg.RootCAs = pool
+	}
+
+	if clientCertFile != "" || clientKeyFile != "" {
+		if clientCertFile == "" || clientKeyFile == "" {
+			return nil, fmt.Errorf("tss client cert requires both --tss-client-cert-file and --tss-client-key-file")
+		}
+		cert, err := tls.LoadX509KeyPair(clientCertFile, clientKeyFile)
+		if err != nil {
+			return nil, fmt.Errorf("load client cert: %w", err)
+		}
+		tlsCfg.Certificates = []tls.Certificate{cert}
+	}
+
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			TLSClientConfig: tlsCfg,
+		},
+	}, nil
 }
