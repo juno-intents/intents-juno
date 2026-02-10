@@ -99,7 +99,8 @@ contract BridgeFlowIntegrationTest is Test {
         uint256 aliceBal = token.balanceOf(alice);
         vm.startPrank(alice);
         token.approve(address(bridge), aliceBal);
-        bytes32 wid = bridge.requestWithdraw(aliceBal, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(aliceBal, ua);
         vm.stopPrank();
 
         assertEq(token.balanceOf(alice), 0);
@@ -111,7 +112,7 @@ contract BridgeFlowIntegrationTest is Test {
 
         {
             Bridge.FinalizeItem[] memory finals = new Bridge.FinalizeItem[](1);
-            finals[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
+            finals[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256(ua), netAmount: net});
 
             bytes memory withdrawJournal = abi.encode(
                 Bridge.WithdrawJournal({

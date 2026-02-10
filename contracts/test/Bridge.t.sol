@@ -133,7 +133,8 @@ contract BridgeTest is Test {
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
         assertEq(token.balanceOf(alice), 0);
@@ -158,7 +159,8 @@ contract BridgeTest is Test {
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
         uint256 fee = (amount * FEE_BPS) / 10_000;
@@ -169,7 +171,7 @@ contract BridgeTest is Test {
         Bridge.Checkpoint memory cp = _checkpoint();
 
         Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
-        items[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
+        items[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256(ua), netAmount: net});
         Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
             finalOrchardRoot: cp.finalOrchardRoot,
             baseChainId: cp.baseChainId,
@@ -211,7 +213,8 @@ contract BridgeTest is Test {
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
         (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
@@ -274,7 +277,8 @@ contract BridgeTest is Test {
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
         (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
@@ -340,7 +344,8 @@ contract BridgeTest is Test {
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        bytes memory ua = bytes("uaddr1...");
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
         uint256 fee = (amount * FEE_BPS) / 10_000;
@@ -349,7 +354,7 @@ contract BridgeTest is Test {
         Bridge.Checkpoint memory cp = _checkpoint();
 
         Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
-        items[0] = Bridge.FinalizeItem({withdrawalId: wid, netAmount: net});
+        items[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256(ua), netAmount: net});
 
         Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
             finalOrchardRoot: keccak256("wrong-root"),

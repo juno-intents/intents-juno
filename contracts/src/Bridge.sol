@@ -29,6 +29,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error WithdrawalExpired();
     error WithdrawNotExpired();
     error NetAmountMismatch();
+    error WithdrawalRecipientMismatch();
     error InvalidProof();
     error BadCheckpointDomain();
     error InsufficientSignatures();
@@ -65,6 +66,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     struct FinalizeItem {
         bytes32 withdrawalId;
+        bytes32 recipientUAHash;
         uint256 netAmount;
     }
 
@@ -392,6 +394,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             }
             if (w.refunded) revert WithdrawalRefunded();
             if (block.timestamp >= w.expiry) revert WithdrawalExpired();
+
+            if (it.recipientUAHash != keccak256(w.recipientUA)) revert WithdrawalRecipientMismatch();
 
             (uint256 fee, uint256 tip, uint256 expectedNet) = _computeFeeAndNet(w.amount, w.feeBps, tipBps);
             if (it.netAmount != expectedNet) revert NetAmountMismatch();
