@@ -147,7 +147,7 @@ func TestPackMintBatchCalldata_UnpackMatches(t *testing.T) {
 		t.Fatalf("selector mismatch: got %x", calldata[:4])
 	}
 
-	a, err := abi.JSON(strings.NewReader(mintBatchABIJSON))
+	a, err := abi.JSON(strings.NewReader(bridgeABIJSON))
 	if err != nil {
 		t.Fatalf("parse abi json: %v", err)
 	}
