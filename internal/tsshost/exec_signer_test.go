@@ -13,16 +13,26 @@ import (
 func TestExecSigner_Sign_Success(t *testing.T) {
 	t.Parallel()
 
-	s, err := NewExecSigner("fake-signer", 1<<20)
+	wantArgs := []string{"--flag-a", "value-a", "--flag-b=value-b"}
+
+	s, err := NewExecSigner("fake-signer", wantArgs, 1<<20)
 	if err != nil {
 		t.Fatalf("NewExecSigner: %v", err)
 	}
 	sessionID := [32]byte{0x01, 0x02}
 	txPlan := []byte{0xaa, 0xbb}
 
-	s.execFn = func(_ context.Context, bin string, stdin []byte) ([]byte, []byte, error) {
+	s.execFn = func(_ context.Context, bin string, args []string, stdin []byte) ([]byte, []byte, error) {
 		if bin != "fake-signer" {
 			t.Fatalf("bin: got %q want %q", bin, "fake-signer")
+		}
+		if len(args) != len(wantArgs) {
+			t.Fatalf("args length: got %d want %d", len(args), len(wantArgs))
+		}
+		for i := range args {
+			if args[i] != wantArgs[i] {
+				t.Fatalf("arg[%d]: got %q want %q", i, args[i], wantArgs[i])
+			}
 		}
 		var req tss.SignRequest
 		if err := json.Unmarshal(stdin, &req); err != nil {
@@ -57,11 +67,11 @@ func TestExecSigner_Sign_Success(t *testing.T) {
 func TestExecSigner_Sign_PropagatesCommandError(t *testing.T) {
 	t.Parallel()
 
-	s, err := NewExecSigner("fake-signer", 1<<20)
+	s, err := NewExecSigner("fake-signer", nil, 1<<20)
 	if err != nil {
 		t.Fatalf("NewExecSigner: %v", err)
 	}
-	s.execFn = func(_ context.Context, _ string, _ []byte) ([]byte, []byte, error) {
+	s.execFn = func(_ context.Context, _ string, _ []string, _ []byte) ([]byte, []byte, error) {
 		return nil, []byte("bad"), errors.New("exit 1")
 	}
 
@@ -74,8 +84,13 @@ func TestExecSigner_Sign_PropagatesCommandError(t *testing.T) {
 func TestNewExecSigner_RejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewExecSigner("", 1<<20)
+	_, err := NewExecSigner("", nil, 1<<20)
 	if !errors.Is(err, ErrInvalidExecSignerConfig) {
 		t.Fatalf("expected ErrInvalidExecSignerConfig, got %v", err)
+	}
+
+	_, err = NewExecSigner("fake-signer", []string{" ", "--ok"}, 1<<20)
+	if !errors.Is(err, ErrInvalidExecSignerConfig) {
+		t.Fatalf("expected ErrInvalidExecSignerConfig for blank arg, got %v", err)
 	}
 }

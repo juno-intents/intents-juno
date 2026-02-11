@@ -14,24 +14,31 @@ import (
 
 var ErrInvalidExecSignerConfig = errors.New("tsshost: invalid exec signer config")
 
-type execSignerFn func(ctx context.Context, bin string, stdin []byte) ([]byte, []byte, error)
+type execSignerFn func(ctx context.Context, bin string, args []string, stdin []byte) ([]byte, []byte, error)
 
 type ExecSigner struct {
-	bin string
+	bin  string
+	args []string
 
 	maxResponseBytes int
 	execFn           execSignerFn
 }
 
-func NewExecSigner(bin string, maxResponseBytes int) (*ExecSigner, error) {
+func NewExecSigner(bin string, args []string, maxResponseBytes int) (*ExecSigner, error) {
 	if strings.TrimSpace(bin) == "" {
 		return nil, fmt.Errorf("%w: missing signer binary", ErrInvalidExecSignerConfig)
+	}
+	for i, arg := range args {
+		if strings.TrimSpace(arg) == "" {
+			return nil, fmt.Errorf("%w: signer arg %d is blank", ErrInvalidExecSignerConfig, i)
+		}
 	}
 	if maxResponseBytes <= 0 {
 		return nil, fmt.Errorf("%w: max response bytes must be > 0", ErrInvalidExecSignerConfig)
 	}
 	return &ExecSigner{
 		bin:              bin,
+		args:             append([]string(nil), args...),
 		maxResponseBytes: maxResponseBytes,
 		execFn:           runExecSigner,
 	}, nil
@@ -54,7 +61,7 @@ func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte
 		return nil, fmt.Errorf("tsshost: marshal signer request: %w", err)
 	}
 
-	stdout, stderr, err := s.execFn(ctx, s.bin, req)
+	stdout, stderr, err := s.execFn(ctx, s.bin, s.args, req)
 	if err != nil {
 		msg := strings.TrimSpace(string(stderr))
 		if msg == "" {
@@ -85,8 +92,8 @@ func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte
 	return resp.SignedTx, nil
 }
 
-func runExecSigner(ctx context.Context, bin string, stdin []byte) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, bin)
+func runExecSigner(ctx context.Context, bin string, args []string, stdin []byte) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
 	cmd.Stdin = bytes.NewReader(stdin)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer

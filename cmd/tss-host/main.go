@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -18,6 +19,8 @@ import (
 )
 
 func main() {
+	var signerArgs multiValueFlag
+
 	var (
 		listenAddr = flag.String("listen-addr", "127.0.0.1:8443", "listen address")
 
@@ -38,6 +41,7 @@ func main() {
 		writeTimeout      = flag.Duration("write-timeout", 10*time.Second, "http.Server WriteTimeout")
 		idleTimeout       = flag.Duration("idle-timeout", 60*time.Second, "http.Server IdleTimeout")
 	)
+	flag.Var(&signerArgs, "signer-arg", "argument passed to signer binary (repeatable)")
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -59,7 +63,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	signer, err := tsshost.NewExecSigner(*signerBin, *signerMaxRespBytes)
+	signer, err := tsshost.NewExecSigner(*signerBin, signerArgs.Values(), *signerMaxRespBytes)
 	if err != nil {
 		log.Error("init signer", "err", err)
 		os.Exit(2)
@@ -146,4 +150,35 @@ func buildTLSConfig(certFile string, keyFile string, clientCAFile string) (*tls.
 	}
 
 	return cfg, nil
+}
+
+type multiValueFlag struct {
+	values []string
+}
+
+func (m *multiValueFlag) String() string {
+	if m == nil {
+		return ""
+	}
+	return strings.Join(m.values, ",")
+}
+
+func (m *multiValueFlag) Set(v string) error {
+	if m == nil {
+		return fmt.Errorf("invalid flag receiver")
+	}
+	if strings.TrimSpace(v) == "" {
+		return fmt.Errorf("flag value cannot be blank")
+	}
+	m.values = append(m.values, v)
+	return nil
+}
+
+func (m *multiValueFlag) Values() []string {
+	if m == nil {
+		return nil
+	}
+	out := make([]string, len(m.values))
+	copy(out, m.values)
+	return out
 }
