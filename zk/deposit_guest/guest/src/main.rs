@@ -12,28 +12,10 @@ use risc0_zkvm::guest::env;
 
 risc0_zkvm::guest::entry!(main);
 
-// Placeholder IncomingViewingKey bytes for development only.
-//
-// This MUST be replaced with the oWallet IncomingViewingKey derived from the operator
-// keyset manifest (DKG output). The deposit image ID must commit to the correct keyset.
-const OWALLET_IVK_BYTES: [u8; 64] = make_placeholder_ivk();
-
-const fn make_placeholder_ivk() -> [u8; 64] {
-    let mut out = [0u8; 64];
-    let mut i = 0usize;
-    while i < 32 {
-        out[i] = 7;
-        i += 1;
-    }
-    // ivk scalar (little-endian) = 1
-    out[32] = 1;
-    out
-}
-
 fn main() {
     let input = read_input();
 
-    let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&OWALLET_IVK_BYTES))
+    let ivk = Option::<IncomingViewingKey>::from(IncomingViewingKey::from_bytes(&input.owallet_ivk_bytes))
         .expect("invalid IncomingViewingKey bytes");
     let prepared_ivk = PreparedIncomingViewingKey::new(&ivk);
 
@@ -53,6 +35,7 @@ struct Input {
     final_orchard_root: [u8; 32],
     base_chain_id: u32,
     bridge_contract: [u8; 20],
+    owallet_ivk_bytes: [u8; 64],
     items: Vec<DepositItemWitness>,
 }
 
@@ -64,6 +47,9 @@ fn read_input() -> Input {
 
     let mut bridge_contract = [0u8; 20];
     env::read_slice(&mut bridge_contract);
+
+    let mut owallet_ivk_bytes = [0u8; 64];
+    env::read_slice(&mut owallet_ivk_bytes);
 
     let n: u32 = env::read();
     if (n as usize) > MAX_DEPOSIT_ITEMS {
@@ -79,6 +65,7 @@ fn read_input() -> Input {
         final_orchard_root,
         base_chain_id,
         bridge_contract,
+        owallet_ivk_bytes,
         items,
     }
 }
@@ -130,4 +117,3 @@ fn read_action() -> OrchardActionWitness {
         cv_net_bytes,
     }
 }
-
