@@ -8,6 +8,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 - `operator.sh`: operator-side bundle execution (`dkg-admin serve`) and process control.
 - `operator-export-kms.sh`: operator-side key package export to each operator's own AWS KMS+S3 target.
 - `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
+- `test-completiton.sh`: completion verifier that checks smoke-signature phases and outputs UFVK + Juno shielded address.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
 
 ## Primary Ceremony Flow
@@ -65,6 +66,21 @@ If interrupted:
 ```bash
 ./coordinator.sh resume --workdir ./dkg-mainnet-2026-02-11
 ```
+
+### 6) Verify completion and extract UFVK/shielded address
+
+```bash
+./test-completiton.sh run \
+  --workdir ./dkg-mainnet-2026-02-11 \
+  --output ./dkg-mainnet-2026-02-11/reports/test-completiton.json
+```
+
+This command validates online smoke-signature phases for all operators and prints JSON with:
+
+- `ufvk`
+- `juno_shielded_address` (from `owallet_ua`)
+- `public_key_package_hash`
+- `transcript_hash`
 
 ## Primary Post-DKG Export Flow (Operator-Local)
 
