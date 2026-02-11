@@ -328,11 +328,31 @@ func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) err
 		return ErrInvalidTransition
 	}
 
-	if b.State == BatchStateConfirmed {
+	if b.State >= BatchStateConfirmed {
 		return nil
 	}
 
 	b.State = BatchStateConfirmed
+	s.batches[batchID] = b
+	return nil
+}
+
+func (s *MemoryStore) MarkBatchFinalizing(_ context.Context, batchID [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.batches[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if b.State < BatchStateConfirmed {
+		return ErrInvalidTransition
+	}
+	if b.State >= BatchStateFinalizing {
+		return nil
+	}
+
+	b.State = BatchStateFinalizing
 	s.batches[batchID] = b
 	return nil
 }

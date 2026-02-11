@@ -40,7 +40,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_batches (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
 	CONSTRAINT batch_id_len CHECK (octet_length(batch_id) = 32),
-	CONSTRAINT state_range CHECK (state >= 1 AND state <= 6),
+		CONSTRAINT state_range CHECK (state >= 1 AND state <= 7),
 	CONSTRAINT juno_txid_nonempty CHECK (juno_txid IS NULL OR juno_txid <> ''),
 	CONSTRAINT rebroadcast_attempts_nonneg CHECK (rebroadcast_attempts >= 0)
 );
@@ -51,13 +51,13 @@ ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS base_tx_hash TEXT;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS rebroadcast_attempts INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS next_rebroadcast_at TIMESTAMPTZ;
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS state_range;
-ALTER TABLE withdrawal_batches ADD CONSTRAINT state_range CHECK (state >= 1 AND state <= 6);
+ALTER TABLE withdrawal_batches ADD CONSTRAINT state_range CHECK (state >= 1 AND state <= 7);
 
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS base_tx_hash_nonempty;
 ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_nonempty CHECK (base_tx_hash IS NULL OR base_tx_hash <> '');
 
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS base_tx_hash_requires_finalized;
-ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_requires_finalized CHECK (base_tx_hash IS NULL OR state = 6);
+ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_requires_finalized CHECK (base_tx_hash IS NULL OR state = 7);
 
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS rebroadcast_attempts_nonneg;
 ALTER TABLE withdrawal_batches ADD CONSTRAINT rebroadcast_attempts_nonneg CHECK (rebroadcast_attempts >= 0);

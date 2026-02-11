@@ -23,6 +23,7 @@ const (
 	BatchStateSigned
 	BatchStateBroadcasted
 	BatchStateConfirmed
+	BatchStateFinalizing
 	BatchStateFinalized
 )
 
@@ -38,6 +39,8 @@ func (s BatchState) String() string {
 		return "broadcasted"
 	case BatchStateConfirmed:
 		return "confirmed"
+	case BatchStateFinalizing:
+		return "finalizing"
 	case BatchStateFinalized:
 		return "finalized"
 	default:
@@ -85,5 +88,6 @@ type Store interface {
 	ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error
 	SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, attempts uint32, next time.Time) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte) error
+	MarkBatchFinalizing(ctx context.Context, batchID [32]byte) error
 	SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error
 }

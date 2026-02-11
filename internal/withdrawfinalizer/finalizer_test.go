@@ -74,6 +74,15 @@ func (s *recordingBlobStore) Delete(context.Context, string) error { return nil 
 
 func (s *recordingBlobStore) Exists(context.Context, string) (bool, error) { return false, nil }
 
+type failSetFinalizedStore struct {
+	withdraw.Store
+	err error
+}
+
+func (s *failSetFinalizedStore) SetBatchFinalized(context.Context, [32]byte, string) error {
+	return s.err
+}
+
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
@@ -365,6 +374,91 @@ func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
 	}
 	if sender.calls != 0 {
 		t.Fatalf("expected no submit on artifact failure, got %d calls", sender.calls)
+	}
+}
+
+func TestFinalizer_SetBatchFinalizedFailureLeavesBatchFinalizing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	baseStore := withdraw.NewMemoryStore(nowFn)
+	store := &failSetFinalizedStore{
+		Store: baseStore,
+		err:   errors.New("db unavailable"),
+	}
+	leaseStore := leases.NewMemoryStore(nowFn)
+
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = baseStore.UpsertRequested(ctx, w)
+	_, _ = baseStore.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = baseStore.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = baseStore.MarkBatchSigning(ctx, batchID)
+	_ = baseStore.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = baseStore.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = baseStore.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{
+		res: httpapi.SendResponse{
+			TxHash: "0xabc",
+			Receipt: &httpapi.ReceiptResponse{
+				Status: 1,
+			},
+		},
+	}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+	if err == nil {
+		t.Fatalf("expected IngestCheckpoint error")
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one send call, got %d", sender.calls)
+	}
+
+	b, err := baseStore.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if got, want := b.State, withdraw.BatchStateFinalizing; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
 	}
 }
 

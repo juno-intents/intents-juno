@@ -468,7 +468,7 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 	if state < withdraw.BatchStateBroadcasted {
 		return withdraw.ErrInvalidTransition
 	}
-	if state == withdraw.BatchStateConfirmed {
+	if state >= withdraw.BatchStateConfirmed {
 		return nil
 	}
 
@@ -487,6 +487,39 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 			return err2
 		}
 		if state2 == withdraw.BatchStateConfirmed {
+			return nil
+		}
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
+func (s *Store) MarkBatchFinalizing(ctx context.Context, batchID [32]byte) error {
+	state, _, _, err := s.getBatchStateFields(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if state < withdraw.BatchStateConfirmed {
+		return withdraw.ErrInvalidTransition
+	}
+	if state >= withdraw.BatchStateFinalizing {
+		return nil
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = $2, updated_at = now()
+		WHERE batch_id = $1 AND state = $3
+	`, batchID[:], int16(withdraw.BatchStateFinalizing), int16(withdraw.BatchStateConfirmed))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: mark finalizing: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		state2, _, _, err2 := s.getBatchStateFields(ctx, batchID)
+		if err2 != nil {
+			return err2
+		}
+		if state2 >= withdraw.BatchStateFinalizing {
 			return nil
 		}
 		return withdraw.ErrInvalidTransition
@@ -546,7 +579,7 @@ func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxH
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
 		SET state = $2, base_tx_hash = $3, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
+		WHERE batch_id = $1 AND state >= $4 AND state < $2
 	`, batchID[:], int16(withdraw.BatchStateFinalized), baseTxHash, int16(withdraw.BatchStateConfirmed))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: set finalized: %w", err)

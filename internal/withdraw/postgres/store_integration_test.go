@@ -116,6 +116,9 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if err := s.SetBatchConfirmed(ctx, batchID); err != nil {
 		t.Fatalf("SetBatchConfirmed: %v", err)
 	}
+	if err := s.MarkBatchFinalizing(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchFinalizing: %v", err)
+	}
 }
 
 func seq32(start byte) (out [32]byte) {

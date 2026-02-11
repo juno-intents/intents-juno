@@ -246,6 +246,12 @@ func TestMemoryStore_BatchStateMachine(t *testing.T) {
 	if err := s.SetBatchConfirmed(ctx, batchID); err != nil {
 		t.Fatalf("SetBatchConfirmed #2: %v", err)
 	}
+	if err := s.MarkBatchFinalizing(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchFinalizing: %v", err)
+	}
+	if err := s.MarkBatchFinalizing(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchFinalizing #2: %v", err)
+	}
 
 	if err := s.SetBatchFinalized(ctx, batchID, "0xabc"); err != nil {
 		t.Fatalf("SetBatchFinalized: %v", err)

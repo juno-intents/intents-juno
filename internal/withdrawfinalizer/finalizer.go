@@ -198,6 +198,9 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		// Already progressed.
 		return nil
 	}
+	if err := f.store.MarkBatchFinalizing(ctx, batchID); err != nil {
+		return err
+	}
 
 	cp := *f.checkpoint
 
