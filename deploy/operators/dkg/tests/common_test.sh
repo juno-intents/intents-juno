@@ -50,11 +50,24 @@ test_safe_slug() {
   assert_eq "$got" "0xabc_def_ghi" "safe_slug"
 }
 
+test_build_export_s3_key() {
+  local got
+
+  got="$(build_export_s3_key "dkg/keypackages" "cer-123" "0xabc" "7")"
+  assert_eq "$got" "dkg/keypackages/cer-123/operator_7_0xabc.json" "s3 key basic"
+
+  got="$(build_export_s3_key "/dkg/keypackages/" "cer-123" "0xabc" "7")"
+  assert_eq "$got" "dkg/keypackages/cer-123/operator_7_0xabc.json" "s3 key trims slashes"
+
+  got="$(build_export_s3_key "" "cer-123" "0xabc" "7")"
+  assert_eq "$got" "cer-123/operator_7_0xabc.json" "s3 key empty prefix"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
   test_safe_slug
+  test_build_export_s3_key
 }
 
 main "$@"
-

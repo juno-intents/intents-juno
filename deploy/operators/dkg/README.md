@@ -6,12 +6,13 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 
 - `tailscale.sh`: operator-side Tailscale bootstrap + registration payload output.
 - `operator.sh`: operator-side bundle execution (`dkg-admin serve`) and process control.
-- `coordinator.sh`: coordinator-side ceremony initialization, preflight, online run/resume, and export.
+- `operator-export-kms.sh`: operator-side key package export to each operator's own AWS KMS+S3 target.
+- `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
 
-## Operator Flow
+## Primary Ceremony Flow
 
-1. Generate registration payload:
+### 1) Each operator registers
 
 ```bash
 ./tailscale.sh register \
@@ -21,20 +22,9 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
   --network mainnet
 ```
 
-2. Send `operator-registration.json` to coordinator.
-3. Receive your bundle tarball from coordinator.
-4. Start `dkg-admin`:
+Each operator sends `operator-registration.json` to the coordinator.
 
-```bash
-./operator.sh run \
-  --bundle ./1_0x....tar.gz \
-  --workdir ~/.juno-dkg/operator-runtime \
-  --daemon
-```
-
-## Coordinator Flow
-
-1. Initialize ceremony workspace from operator registrations:
+### 2) Coordinator initializes workspace
 
 ```bash
 ./coordinator.sh init \
@@ -50,43 +40,82 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
   --prompt-endpoints
 ```
 
-2. Distribute bundle tarballs from `./dkg-mainnet-2026-02-11/bundles/`.
-3. Run preflight:
+### 3) Coordinator distributes bundles
+
+Send tarballs from `./dkg-mainnet-2026-02-11/bundles/` to matching operators.
+
+### 4) Each operator starts `dkg-admin`
+
+```bash
+./operator.sh run \
+  --bundle ./1_0x....tar.gz \
+  --workdir ~/.juno-dkg/operator-runtime \
+  --daemon
+```
+
+### 5) Coordinator runs preflight and ceremony
 
 ```bash
 ./coordinator.sh preflight --workdir ./dkg-mainnet-2026-02-11
-```
-
-4. Run online ceremony:
-
-```bash
 ./coordinator.sh run --workdir ./dkg-mainnet-2026-02-11
 ```
 
-5. If interrupted:
+If interrupted:
 
 ```bash
 ./coordinator.sh resume --workdir ./dkg-mainnet-2026-02-11
 ```
 
-6. Export key packages with primary KMS+S3 plus local age backup:
+## Primary Post-DKG Export Flow (Operator-Local)
+
+Each operator exports their own key package to their own AWS KMS+S3 target:
 
 ```bash
-./coordinator.sh export \
-  --workdir ./dkg-mainnet-2026-02-11 \
+./operator-export-kms.sh export \
+  --workdir ~/.juno-dkg/operator-runtime \
   --kms-key-id arn:aws:kms:... \
-  --s3-bucket my-bucket \
+  --s3-bucket my-operator-bucket \
   --s3-key-prefix dkg/keypackages \
   --s3-sse-kms-key-id arn:aws:kms:... \
-  --backup-age-recipient age1...
+  --aws-profile juno-prod \
+  --aws-region us-east-1
 ```
+
+Optional local age backup in the same run:
+
+```bash
+./operator-export-kms.sh export \
+  --workdir ~/.juno-dkg/operator-runtime \
+  --kms-key-id arn:aws:kms:... \
+  --s3-bucket my-operator-bucket \
+  --s3-key-prefix dkg/keypackages \
+  --s3-sse-kms-key-id arn:aws:kms:... \
+  --backup-age-recipient age1... \
+  --backup-out ~/.juno-dkg/exports/keypackage-backup.json
+```
+
+## Where `age-recipient` Comes From
+
+Generate or reuse an age identity key on the operator machine:
+
+```bash
+./operator-export-kms.sh age-recipient
+```
+
+This prints JSON with:
+
+- `age_recipient`: the public recipient (`age1...`) to pass in `--backup-age-recipient`.
+- `identity_file`: the local private key path to back up securely.
+
+## Optional Coordinator-Wide Export
+
+`coordinator.sh export` still exists for cases where all operators intentionally share one export target configuration.
 
 ## Notes
 
-- `preflight`, `run`, `resume`, and `export` require active Tailscale connectivity.
+- `preflight`, `run`, and `resume` require active Tailscale connectivity.
 - Endpoints are per-operator and can share hostname with different ports.
 - Bundles include `operator-metadata.json` with `fee_recipient` for later operator deployment wiring.
 - Tools default to release `v0.1.0` and auto-download by OS/arch. You can override with:
   - `JUNO_DKG_ADMIN_BIN=/path/to/dkg-admin`
   - `JUNO_DKG_CEREMONY_BIN=/path/to/dkg-ceremony`
-

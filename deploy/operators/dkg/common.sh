@@ -44,6 +44,28 @@ safe_slug() {
   printf '%s' "$out"
 }
 
+build_export_s3_key() {
+  local prefix="$1"
+  local ceremony_id="$2"
+  local operator_id="$3"
+  local identifier="$4"
+
+  prefix="$(trim "$prefix")"
+  prefix="${prefix#/}"
+  prefix="${prefix%/}"
+
+  ceremony_id="$(safe_slug "$ceremony_id")"
+  operator_id="$(safe_slug "$operator_id")"
+  identifier="$(safe_slug "$identifier")"
+
+  local leaf="operator_${identifier}_${operator_id}.json"
+  if [[ -n "$prefix" ]]; then
+    printf '%s/%s/%s' "$prefix" "$ceremony_id" "$leaf"
+    return
+  fi
+  printf '%s/%s' "$ceremony_id" "$leaf"
+}
+
 detect_os() {
   local os
   os="$(uname -s)"
@@ -213,6 +235,20 @@ ensure_command() {
         if ! apt_install tailscale; then
           curl -fsSL https://tailscale.com/install.sh | sh || die "failed to install tailscale"
         fi
+      fi
+      ;;
+    aws)
+      if [[ "$os" == "darwin" ]]; then
+        brew_install_formula awscli || die "failed to install awscli"
+      else
+        apt_install awscli || die "failed to install awscli"
+      fi
+      ;;
+    age|age-keygen)
+      if [[ "$os" == "darwin" ]]; then
+        brew_install_formula age || die "failed to install age"
+      else
+        apt_install age || die "failed to install age"
       fi
       ;;
     *)
