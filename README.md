@@ -11,3 +11,4 @@ Monorepo scaffold for the Juno <-> Base bridge implementation.
 - `deploy/`:
   - `deploy/shared/`: shared services (optional)
   - `deploy/operators/`: per-operator deployment
+  - `deploy/operators/dkg/`: online DKG ceremony automation scripts (coordinator/operator/tailscale)
