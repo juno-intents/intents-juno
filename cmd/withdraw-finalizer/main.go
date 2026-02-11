@@ -21,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/proverexec"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
 )
@@ -39,20 +40,12 @@ type checkpointPackageV1 struct {
 	CreatedAt       time.Time             `json:"createdAt"`
 }
 
-type staticProver struct {
-	seal []byte
-}
-
-func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte) ([]byte, error) {
-	return p.seal, nil
-}
-
 func main() {
 	var (
 		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
 
-		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
-		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
+		baseChainID     = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
+		bridgeAddr      = flag.String("bridge-address", "", "Bridge contract address (required)")
 		withdrawImageID = flag.String("withdraw-image-id", "", "withdraw zkVM image id (bytes32 hex, required)")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
@@ -64,8 +57,9 @@ func main() {
 		tickInterval = flag.Duration("tick-interval", 1*time.Second, "finalizer tick interval")
 		gasLimit     = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 
-		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
-		staticSealHex = flag.String("static-seal-hex", "0x01", "static seal bytes (hex) used by the built-in mock prover")
+		submitTimeout      = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
+		proverBin          = flag.String("prover-bin", "", "path to prover command binary (required)")
+		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
 
 		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
 	)
@@ -73,8 +67,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --withdraw-image-id, --base-relayer-url, and --owner are required")
+	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" || *proverBin == "" {
+		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --withdraw-image-id, --base-relayer-url, --prover-bin, and --owner are required")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -87,6 +81,10 @@ func main() {
 	}
 	if *maxLineBytes <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --max-line-bytes must be > 0")
+		os.Exit(2)
+	}
+	if *proverMaxRespBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes must be > 0")
 		os.Exit(2)
 	}
 
@@ -103,9 +101,9 @@ func main() {
 		os.Exit(2)
 	}
 
-	sealBytes, err := decodeHexBytes(*staticSealHex)
+	proverClient, err := proverexec.New(*proverBin, *proverMaxRespBytes)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: parse --static-seal-hex: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: init prover client: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -149,14 +147,14 @@ func main() {
 	}
 
 	f, err := withdrawfinalizer.New(withdrawfinalizer.Config{
-		Owner:          *owner,
-		LeaseTTL:       *leaseTTL,
-		MaxBatches:     *maxBatches,
-		BaseChainID:    *baseChainID,
-		BridgeAddress:  bridge,
+		Owner:           *owner,
+		LeaseTTL:        *leaseTTL,
+		MaxBatches:      *maxBatches,
+		BaseChainID:     *baseChainID,
+		BridgeAddress:   bridge,
 		WithdrawImageID: imageID,
-		GasLimit:       *gasLimit,
-	}, store, leaseStore, baseClient, &staticProver{seal: sealBytes}, log)
+		GasLimit:        *gasLimit,
+	}, store, leaseStore, baseClient, proverClient, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)
 		os.Exit(2)

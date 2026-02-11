@@ -20,6 +20,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/proverexec"
 )
 
 type envelope struct {
@@ -44,14 +45,6 @@ type depositEventV1 struct {
 	Memo      string `json:"memo"`
 }
 
-type staticProver struct {
-	seal []byte
-}
-
-func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte) ([]byte, error) {
-	return p.seal, nil
-}
-
 func main() {
 	var (
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required; must fit uint32 for deposit memo domain separation)")
@@ -59,17 +52,18 @@ func main() {
 
 		depositImageID = flag.String("deposit-image-id", "", "deposit zkVM image id (bytes32 hex, required)")
 
-		baseRelayerURL    = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
+		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
 
-		maxItems    = flag.Int("max-items", 25, "maximum items per mint batch")
-		maxAge      = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
-		dedupeMax   = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
-		gasLimit    = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
-		flushEvery  = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
+		maxItems      = flag.Int("max-items", 25, "maximum items per mint batch")
+		maxAge        = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
+		dedupeMax     = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
+		gasLimit      = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
+		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
 		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
 
-		staticSealHex = flag.String("static-seal-hex", "0x01", "static seal bytes (hex) used by the built-in mock prover")
+		proverBin          = flag.String("prover-bin", "", "path to prover command binary (required)")
+		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
 
 		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
 	)
@@ -77,8 +71,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *baseChainID == 0 || *bridgeAddr == "" || *depositImageID == "" || *baseRelayerURL == "" {
-		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --deposit-image-id, and --base-relayer-url are required")
+	if *baseChainID == 0 || *bridgeAddr == "" || *depositImageID == "" || *baseRelayerURL == "" || *proverBin == "" {
+		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --deposit-image-id, --base-relayer-url, and --prover-bin are required")
 		os.Exit(2)
 	}
 	if *baseChainID > uint64(^uint32(0)) {
@@ -97,6 +91,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --max-age, --flush-interval, and --submit-timeout must be > 0")
 		os.Exit(2)
 	}
+	if *proverMaxRespBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes must be > 0")
+		os.Exit(2)
+	}
 
 	bridge := common.HexToAddress(*bridgeAddr)
 	imageID, err := parseHash32Strict(*depositImageID)
@@ -111,9 +109,9 @@ func main() {
 		os.Exit(2)
 	}
 
-	sealBytes, err := decodeHexBytes(*staticSealHex)
+	proverClient, err := proverexec.New(*proverBin, *proverMaxRespBytes)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: parse --static-seal-hex: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: init prover client: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -138,7 +136,7 @@ func main() {
 		DedupeMax:      *dedupeMax,
 		GasLimit:       *gasLimit,
 		Now:            time.Now,
-	}, baseClient, &staticProver{seal: sealBytes}, log)
+	}, baseClient, proverClient, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
 		os.Exit(2)

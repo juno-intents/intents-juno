@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
@@ -18,26 +17,17 @@ import (
 	"github.com/juno-intents/intents-juno/internal/tsshost"
 )
 
-type hashSigner struct{}
-
-func (s *hashSigner) Sign(_ context.Context, sessionID [32]byte, txPlan []byte) ([]byte, error) {
-	h := sha256.New()
-	_, _ = h.Write(sessionID[:])
-	_, _ = h.Write(txPlan)
-	sum := h.Sum(nil)
-	return sum, nil
-}
-
 func main() {
 	var (
 		listenAddr = flag.String("listen-addr", "127.0.0.1:8443", "listen address")
 
-		tlsCertFile = flag.String("tls-cert-file", "", "server TLS cert PEM file (required unless --insecure-http)")
-		tlsKeyFile  = flag.String("tls-key-file", "", "server TLS key PEM file (required unless --insecure-http)")
+		tlsCertFile  = flag.String("tls-cert-file", "", "server TLS cert PEM file (required unless --insecure-http)")
+		tlsKeyFile   = flag.String("tls-key-file", "", "server TLS key PEM file (required unless --insecure-http)")
 		clientCAFile = flag.String("client-ca-file", "", "client CA PEM file (enables mTLS when set)")
 
-		insecureHTTP = flag.Bool("insecure-http", false, "serve plain HTTP (DANGEROUS; dev only)")
-		devHashSigner = flag.Bool("dev-hash-signer", false, "use a deterministic hash signer (dev only; not threshold)")
+		insecureHTTP       = flag.Bool("insecure-http", false, "serve plain HTTP (DANGEROUS; dev only)")
+		signerBin          = flag.String("signer-bin", "", "path to signer command binary (required)")
+		signerMaxRespBytes = flag.Int("signer-max-response-bytes", 1<<20, "max signer response size (bytes)")
 
 		maxBodyBytes   = flag.Int64("max-body-bytes", 1<<20, "max HTTP request body size (bytes)")
 		maxTxPlanBytes = flag.Int("max-txplan-bytes", 1<<20, "max decoded txPlan size (bytes)")
@@ -60,13 +50,20 @@ func main() {
 		log.Error("invalid size limits")
 		os.Exit(2)
 	}
-
-	if !*devHashSigner {
-		log.Error("no signer configured (set --dev-hash-signer for local dev)")
+	if *signerMaxRespBytes <= 0 {
+		log.Error("invalid signer limits")
+		os.Exit(2)
+	}
+	if *signerBin == "" {
+		log.Error("missing --signer-bin")
 		os.Exit(2)
 	}
 
-	signer := &hashSigner{}
+	signer, err := tsshost.NewExecSigner(*signerBin, *signerMaxRespBytes)
+	if err != nil {
+		log.Error("init signer", "err", err)
+		os.Exit(2)
+	}
 
 	h := tsshost.NewHandler(signer, tsshost.Config{
 		MaxBodyBytes:   *maxBodyBytes,
@@ -150,4 +147,3 @@ func buildTLSConfig(certFile string, keyFile string, clientCAFile string) (*tls.
 
 	return cfg, nil
 }
-
