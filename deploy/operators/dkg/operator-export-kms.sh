@@ -13,6 +13,7 @@ usage() {
 Usage:
   operator-export-kms.sh export [options]
   operator-export-kms.sh backup-age [options]
+  operator-export-kms.sh rewrap-age-to-kms [options]
   operator-export-kms.sh age-recipient [options]
 
 Commands:
@@ -42,8 +43,23 @@ Commands:
     --out <path>                    required output path for encrypted age backup
     --force                         allow overwriting --out when it exists
 
+  rewrap-age-to-kms:
+    --release-tag <tag>             dkg-admin release tag (default: v0.1.0)
+    --age-backup-file <path>        required age backup file created by backup-age/export
+    --age-identity-file <path>      required age private identity file used to decrypt backup
+    --admin-config <path>           required admin-config.json backup from operator bundle
+    --kms-key-id <arn>              required
+    --s3-bucket <name>              required
+    --s3-sse-kms-key-id <arn>       required
+    --s3-key-prefix <prefix>        default dkg/keypackages
+    --s3-key <key>                  optional explicit object key override
+    --aws-profile <name>            optional AWS profile used for preflight + export
+    --aws-region <name>             optional AWS region used for preflight + export
+    --skip-aws-preflight            skip aws sts/kms/s3 validation checks
+
 Notes:
   - `export` reads operator metadata from <workdir>/bundle/admin-config.json.
+  - `rewrap-age-to-kms` works from backup artifacts (age backup + age identity + admin-config backup), not runtime state.
   - Exported key package plaintext never leaves this machine.
 EOF
 }
@@ -92,6 +108,226 @@ aws_preflight() {
     || die "kms key is not accessible: $kms_key_id"
   AWS_PAGER="" aws "${aws_args[@]}" s3api head-bucket --bucket "$s3_bucket" >/dev/null \
     || die "s3 bucket is not accessible: $s3_bucket"
+}
+
+decode_base64_to_file() {
+  local input="$1"
+  local out_path="$2"
+
+  if printf '%s' "$input" | base64 --decode >"$out_path" 2>/dev/null; then
+    return
+  fi
+  if printf '%s' "$input" | base64 -D >"$out_path" 2>/dev/null; then
+    return
+  fi
+  if have_cmd openssl; then
+    if printf '%s' "$input" | openssl base64 -d -A >"$out_path" 2>/dev/null; then
+      return
+    fi
+  fi
+  die "base64 decode failed"
+}
+
+command_rewrap_age_to_kms() {
+  shift || true
+
+  local release_tag="$JUNO_DKG_VERSION_DEFAULT"
+  local age_backup_file=""
+  local age_identity_file=""
+  local admin_config_path=""
+  local kms_key_id=""
+  local s3_bucket=""
+  local s3_key_prefix="dkg/keypackages"
+  local s3_key=""
+  local s3_sse_kms_key_id=""
+  local aws_profile=""
+  local aws_region=""
+  local skip_aws_preflight="false"
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --release-tag)
+        [[ $# -ge 2 ]] || die "missing value for --release-tag"
+        release_tag="$2"
+        shift 2
+        ;;
+      --age-backup-file)
+        [[ $# -ge 2 ]] || die "missing value for --age-backup-file"
+        age_backup_file="$2"
+        shift 2
+        ;;
+      --age-identity-file)
+        [[ $# -ge 2 ]] || die "missing value for --age-identity-file"
+        age_identity_file="$2"
+        shift 2
+        ;;
+      --admin-config)
+        [[ $# -ge 2 ]] || die "missing value for --admin-config"
+        admin_config_path="$2"
+        shift 2
+        ;;
+      --kms-key-id)
+        [[ $# -ge 2 ]] || die "missing value for --kms-key-id"
+        kms_key_id="$2"
+        shift 2
+        ;;
+      --s3-bucket)
+        [[ $# -ge 2 ]] || die "missing value for --s3-bucket"
+        s3_bucket="$2"
+        shift 2
+        ;;
+      --s3-key-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --s3-key-prefix"
+        s3_key_prefix="$2"
+        shift 2
+        ;;
+      --s3-key)
+        [[ $# -ge 2 ]] || die "missing value for --s3-key"
+        s3_key="$2"
+        shift 2
+        ;;
+      --s3-sse-kms-key-id)
+        [[ $# -ge 2 ]] || die "missing value for --s3-sse-kms-key-id"
+        s3_sse_kms_key_id="$2"
+        shift 2
+        ;;
+      --aws-profile)
+        [[ $# -ge 2 ]] || die "missing value for --aws-profile"
+        aws_profile="$2"
+        shift 2
+        ;;
+      --aws-region)
+        [[ $# -ge 2 ]] || die "missing value for --aws-region"
+        aws_region="$2"
+        shift 2
+        ;;
+      --skip-aws-preflight)
+        skip_aws_preflight="true"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument for rewrap-age-to-kms: $1"
+        ;;
+    esac
+  done
+
+  [[ -f "$age_backup_file" ]] || die "--age-backup-file not found: $age_backup_file"
+  [[ -f "$age_identity_file" ]] || die "--age-identity-file not found: $age_identity_file"
+  [[ -f "$admin_config_path" ]] || die "--admin-config not found: $admin_config_path"
+  [[ -n "$kms_key_id" ]] || die "--kms-key-id is required"
+  [[ -n "$s3_bucket" ]] || die "--s3-bucket is required"
+  [[ -n "$s3_sse_kms_key_id" ]] || die "--s3-sse-kms-key-id is required"
+
+  ensure_base_dependencies
+  ensure_command age
+  ensure_dir "$JUNO_DKG_HOME_DEFAULT/bin"
+  ensure_dir "$JUNO_DKG_HOME_DEFAULT/exports"
+
+  local backend ciphertext_b64
+  backend="$(jq -r '.encryption_backend // ""' "$age_backup_file")"
+  [[ "$backend" == "age" ]] || die "age backup file is not age-encrypted"
+  ciphertext_b64="$(jq -r '.ciphertext_b64 // ""' "$age_backup_file")"
+  [[ -n "$ciphertext_b64" ]] || die "age backup missing ciphertext_b64"
+
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+  trap 'if [[ -n "${tmp_dir:-}" ]]; then rm -rf "$tmp_dir"; fi' RETURN
+
+  decode_base64_to_file "$ciphertext_b64" "$tmp_dir/ciphertext.age"
+  age --decrypt -i "$age_identity_file" "$tmp_dir/ciphertext.age" >"$tmp_dir/plaintext.json" \
+    || die "failed to decrypt age backup with provided identity"
+
+  local p_operator_id p_identifier p_threshold p_max_signers p_network p_roster_hash
+  local p_key_package_b64 p_public_key_package_b64
+  p_operator_id="$(jq -r '.operator_id // ""' "$tmp_dir/plaintext.json")"
+  p_identifier="$(jq -r '.identifier // ""' "$tmp_dir/plaintext.json")"
+  p_threshold="$(jq -r '.threshold // ""' "$tmp_dir/plaintext.json")"
+  p_max_signers="$(jq -r '.max_signers // ""' "$tmp_dir/plaintext.json")"
+  p_network="$(jq -r '.network // ""' "$tmp_dir/plaintext.json")"
+  p_roster_hash="$(jq -r '.roster_hash_hex // ""' "$tmp_dir/plaintext.json")"
+  p_key_package_b64="$(jq -r '.key_package_bytes_b64 // ""' "$tmp_dir/plaintext.json")"
+  p_public_key_package_b64="$(jq -r '.public_key_package_bytes_b64 // ""' "$tmp_dir/plaintext.json")"
+  [[ -n "$p_operator_id" ]] || die "decrypted backup missing operator_id"
+  [[ -n "$p_identifier" ]] || die "decrypted backup missing identifier"
+  [[ -n "$p_threshold" ]] || die "decrypted backup missing threshold"
+  [[ -n "$p_max_signers" ]] || die "decrypted backup missing max_signers"
+  [[ -n "$p_network" ]] || die "decrypted backup missing network"
+  [[ -n "$p_roster_hash" ]] || die "decrypted backup missing roster_hash_hex"
+  [[ -n "$p_key_package_b64" ]] || die "decrypted backup missing key_package_bytes_b64"
+  [[ -n "$p_public_key_package_b64" ]] || die "decrypted backup missing public_key_package_bytes_b64"
+
+  local c_operator_id c_identifier c_threshold c_max_signers c_network c_roster_hash c_ceremony_id
+  c_operator_id="$(jq -r '.operator_id // ""' "$admin_config_path")"
+  c_identifier="$(jq -r '.identifier // ""' "$admin_config_path")"
+  c_threshold="$(jq -r '.threshold // ""' "$admin_config_path")"
+  c_max_signers="$(jq -r '.max_signers // ""' "$admin_config_path")"
+  c_network="$(jq -r '.network // ""' "$admin_config_path")"
+  c_roster_hash="$(jq -r '.roster_hash_hex // ""' "$admin_config_path")"
+  c_ceremony_id="$(jq -r '.ceremony_id // ""' "$admin_config_path")"
+
+  [[ "$p_operator_id" == "$c_operator_id" ]] || die "operator_id mismatch between age backup and admin config"
+  [[ "$p_identifier" == "$c_identifier" ]] || die "identifier mismatch between age backup and admin config"
+  [[ "$p_threshold" == "$c_threshold" ]] || die "threshold mismatch between age backup and admin config"
+  [[ "$p_max_signers" == "$c_max_signers" ]] || die "max_signers mismatch between age backup and admin config"
+  [[ "$p_network" == "$c_network" ]] || die "network mismatch between age backup and admin config"
+  [[ "$p_roster_hash" == "$c_roster_hash" ]] || die "roster_hash mismatch between age backup and admin config"
+  [[ -n "$c_ceremony_id" ]] || die "admin config missing ceremony_id"
+
+  ensure_dir "$tmp_dir/state"
+  decode_base64_to_file "$p_key_package_b64" "$tmp_dir/state/key_package.bin"
+  decode_base64_to_file "$p_public_key_package_b64" "$tmp_dir/state/public_key_package.bin"
+
+  jq -n \
+    --slurpfile cfg "$admin_config_path" \
+    --arg state_dir "$tmp_dir/state" \
+    '{
+      config_version: ($cfg[0].config_version // 1),
+      ceremony_id: $cfg[0].ceremony_id,
+      operator_id: $cfg[0].operator_id,
+      identifier: $cfg[0].identifier,
+      threshold: $cfg[0].threshold,
+      max_signers: $cfg[0].max_signers,
+      network: $cfg[0].network,
+      roster: $cfg[0].roster,
+      roster_hash_hex: $cfg[0].roster_hash_hex,
+      state_dir: $state_dir,
+      age_identity_file: null,
+      grpc: null
+    }' >"$tmp_dir/config.json"
+
+  if [[ -z "$s3_key" ]]; then
+    s3_key="$(build_export_s3_key "$s3_key_prefix" "$c_ceremony_id" "$c_operator_id" "$c_identifier")"
+  fi
+
+  if [[ "$skip_aws_preflight" != "true" ]]; then
+    aws_preflight "$kms_key_id" "$s3_bucket" "$aws_profile" "$aws_region"
+  fi
+
+  local dkg_admin_bin
+  dkg_admin_bin="$(ensure_dkg_binary "dkg-admin" "$release_tag" "$JUNO_DKG_HOME_DEFAULT/bin")"
+
+  local stamp kms_receipt
+  stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+  kms_receipt="$JUNO_DKG_HOME_DEFAULT/exports/kms-rewrap-receipt-${stamp}.json"
+  run_dkg_admin_export \
+    "$dkg_admin_bin" \
+    "$tmp_dir/config.json" \
+    "$aws_profile" \
+    "$aws_region" \
+    --kms-key-id "$kms_key_id" \
+    --s3-bucket "$s3_bucket" \
+    --s3-key "$s3_key" \
+    --s3-sse-kms-key-id "$s3_sse_kms_key_id" | tee "$kms_receipt"
+
+  log "kms rewrap export complete"
+  log "operator_id=$c_operator_id"
+  log "ceremony_id=$c_ceremony_id"
+  log "s3://${s3_bucket}/${s3_key}"
+  log "kms_receipt=$kms_receipt"
 }
 
 command_backup_age() {
@@ -424,6 +660,7 @@ main() {
   case "$cmd" in
     export) command_export "$@" ;;
     backup-age) command_backup_age "$@" ;;
+    rewrap-age-to-kms) command_rewrap_age_to_kms "$@" ;;
     age-recipient) command_age_recipient "$@" ;;
     -h|--help)
       usage
