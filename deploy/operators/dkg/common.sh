@@ -291,9 +291,26 @@ generate_uuid() {
 ensure_operator_keygen_bin() {
   local out_dir="$1"
   local bin="$out_dir/operator-keygen"
+  local os arch bundled
+
+  os="$(detect_os)"
+  arch="$(detect_arch)"
+  bundled="$_SCRIPT_DIR/bin/operator-keygen_${os}_${arch}"
+  if [[ -f "$bundled" ]]; then
+    chmod 0755 "$bundled" || true
+    if [[ -x "$bundled" ]]; then
+      printf '%s' "$bundled"
+      return
+    fi
+  fi
+
   if [[ -x "$bin" ]]; then
     printf '%s' "$bin"
     return
+  fi
+
+  if [[ ! -f "$REPO_ROOT/go.mod" || ! -f "$REPO_ROOT/cmd/operator-keygen/main.go" ]]; then
+    die "operator-keygen not bundled and source build unavailable at $REPO_ROOT"
   fi
 
   ensure_command go

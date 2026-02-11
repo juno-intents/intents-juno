@@ -1,0 +1,90 @@
+name: release-dkg-operator-init
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create/update (example: dkg-operator-init-v0.1.0)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "dkg-operator-init-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  package-and-release:
+    runs-on: ubuntu-latest
+    env:
+      PACKAGE_NAME: dkg-operator-init
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build operator-keygen binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/build/bin
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/build/bin/operator-keygen_linux_amd64 ./cmd/operator-keygen
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o .ci/build/bin/operator-keygen_linux_arm64 ./cmd/operator-keygen
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 go build -o .ci/build/bin/operator-keygen_darwin_amd64 ./cmd/operator-keygen
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build -o .ci/build/bin/operator-keygen_darwin_arm64 ./cmd/operator-keygen
+
+      - name: Assemble package
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          RELEASE_TAG="${{ github.event.inputs.release_tag }}"
+          if [ -z "${RELEASE_TAG}" ]; then
+            RELEASE_TAG="${GITHUB_REF_NAME}"
+          fi
+          echo "RELEASE_TAG=${RELEASE_TAG}" >>"$GITHUB_ENV"
+
+          STAGE=".ci/stage/${PACKAGE_NAME}"
+          rm -rf "$STAGE" .ci/out
+          mkdir -p "$STAGE/bin" .ci/out
+
+          cp deploy/operators/dkg/common.sh "$STAGE/common.sh"
+          cp deploy/operators/dkg/tailscale.sh "$STAGE/tailscale.sh"
+          cp deploy/operators/dkg/operator.sh "$STAGE/operator.sh"
+          cp deploy/operators/dkg/coordinator.sh "$STAGE/coordinator.sh"
+          cp deploy/operators/dkg/README.md "$STAGE/README.md"
+
+          cp .ci/build/bin/operator-keygen_linux_amd64 "$STAGE/bin/"
+          cp .ci/build/bin/operator-keygen_linux_arm64 "$STAGE/bin/"
+          cp .ci/build/bin/operator-keygen_darwin_amd64 "$STAGE/bin/"
+          cp .ci/build/bin/operator-keygen_darwin_arm64 "$STAGE/bin/"
+
+          chmod 0755 "$STAGE/common.sh" "$STAGE/tailscale.sh" "$STAGE/operator.sh" "$STAGE/coordinator.sh"
+          chmod 0755 "$STAGE/bin/"operator-keygen_*
+
+          printf '%s\n' "$RELEASE_TAG" >"$STAGE/VERSION"
+
+          (
+            cd .ci/stage
+            zip -r "../out/${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
+          )
+
+          sha256sum ".ci/out/${PACKAGE_NAME}.zip" > ".ci/out/${PACKAGE_NAME}.zip.sha256"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" ".ci/out/${PACKAGE_NAME}.zip" ".ci/out/${PACKAGE_NAME}.zip.sha256" --clobber
+          else
+            gh release create "$tag" ".ci/out/${PACKAGE_NAME}.zip" ".ci/out/${PACKAGE_NAME}.zip.sha256" --title "$tag" --notes "Release ${tag}"
+          fi
