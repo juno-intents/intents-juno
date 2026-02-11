@@ -111,6 +111,7 @@ func TestCheckpointSigner_Integration_RegtestJunocashd(t *testing.T) {
 		"--confirmations", "0",
 		"--poll-interval", "200ms",
 		"--rpc-timeout", "5s",
+		"--queue-driver", "stdio",
 	)
 	cmd.Env = append(os.Environ(),
 		"JUNO_RPC_USER=rpcuser",

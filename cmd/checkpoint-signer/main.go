@@ -18,6 +18,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
 type junoChainSource struct {
@@ -72,6 +73,10 @@ func main() {
 
 		pollInterval = flag.Duration("poll-interval", 2*time.Second, "poll interval for tip height")
 		rpcTimeout   = flag.Duration("rpc-timeout", 10*time.Second, "HTTP client timeout for junocashd RPC calls")
+
+		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queueOutTopic = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
 	)
 	flag.Parse()
 
@@ -87,6 +92,10 @@ func main() {
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
 		fmt.Fprintln(os.Stderr, "error: --bridge-address must be a valid hex address")
+		os.Exit(2)
+	}
+	if *queueOutTopic == "" {
+		fmt.Fprintln(os.Stderr, "error: --queue-output-topic is required")
 		os.Exit(2)
 	}
 	bridge := common.HexToAddress(*bridgeAddr)
@@ -120,6 +129,15 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver:  *queueDriver,
+		Brokers: queue.SplitCommaList(*queueBrokers),
+	})
+	if err != nil {
+		log.Error("init queue producer", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = producer.Close() }()
 
 	rpc, err := junorpc.New(*junoRPCURL, rpcUser, rpcPass,
 		junorpc.WithTimeout(*rpcTimeout),
@@ -141,9 +159,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetEscapeHTML(false)
-
 	t := time.NewTicker(*pollInterval)
 	defer t.Stop()
 
@@ -152,6 +167,8 @@ func main() {
 		"confirmations", *confirmations,
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
+		"queueDriver", *queueDriver,
+		"queueOutTopic", *queueOutTopic,
 	)
 
 	var lastDigest common.Hash
@@ -191,8 +208,13 @@ func main() {
 			SignedAt:   msg.SignedAt.UTC(),
 		}
 
-		if err := enc.Encode(out); err != nil {
-			log.Error("write output", "err", err)
+		payload, err := json.Marshal(out)
+		if err != nil {
+			log.Error("marshal output", "err", err)
+			continue
+		}
+		if err := producer.Publish(ctx, *queueOutTopic, payload); err != nil {
+			log.Error("publish output", "err", err, "topic", *queueOutTopic)
 			continue
 		}
 	}

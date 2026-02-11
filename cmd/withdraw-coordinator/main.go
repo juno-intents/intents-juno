@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/tls"
@@ -24,6 +23,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/policy"
+	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
@@ -67,7 +67,13 @@ func main() {
 
 		owner = flag.String("owner", "", "unique coordinator owner id (required; used for DB claims)")
 
-		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
+		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queueGroup    = flag.String("queue-group", "withdraw-coordinator", "queue consumer group (required for kafka)")
+		queueTopics   = flag.String("queue-topics", "withdrawals.requested.v1", "comma-separated queue topics")
+		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
+		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
+		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
 		// Planner (juno-txbuild)
 		txbuildBin        = flag.String("juno-txbuild-bin", "juno-txbuild", "path to juno-txbuild binary")
@@ -141,8 +147,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --base-chain-id must fit uint32")
 		os.Exit(2)
 	}
-	if *maxItems <= 0 || *maxExtendBatch <= 0 || *maxLineBytes <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --max-items, --max-extend-batch, and --max-line-bytes must be > 0")
+	if *maxItems <= 0 || *maxExtendBatch <= 0 || *maxLineBytes <= 0 || *queueMaxBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --max-items, --max-extend-batch, --max-line-bytes, and --queue-max-bytes must be > 0")
 		os.Exit(2)
 	}
 	if *maxAge <= 0 || *claimTTL <= 0 || *tickInterval <= 0 || *safetyMargin <= 0 || *maxExtension <= 0 {
@@ -173,6 +179,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --extend-signer-bin is required and --extend-signer-max-response-bytes must be > 0")
 		os.Exit(2)
 	}
+	if *ackTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --queue-ack-timeout must be > 0")
+		os.Exit(2)
+	}
 
 	junoRPCUser := os.Getenv(*junoRPCUserEnv)
 	junoRPCPass := os.Getenv(*junoRPCPassEnv)
@@ -191,6 +201,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
+		Driver:        *queueDriver,
+		Brokers:       queue.SplitCommaList(*queueBrokers),
+		Group:         *queueGroup,
+		Topics:        queue.SplitCommaList(*queueTopics),
+		KafkaMaxBytes: *queueMaxBytes,
+		MaxLineBytes:  *maxLineBytes,
+	})
+	if err != nil {
+		log.Error("init queue consumer", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = consumer.Close() }()
 
 	pool, err := pgxpool.New(ctx, *postgresDSN)
 	if err != nil {
@@ -341,26 +364,27 @@ func main() {
 		"junoConfirmations", *junoConfirmations,
 		"baseChainID", *baseChainID,
 		"bridge", common.HexToAddress(*bridgeAddr),
+		"queueDriver", *queueDriver,
 	)
-
-	lineCh := make(chan []byte, 16)
-	errCh := make(chan error, 1)
-	go scanLines(os.Stdin, *maxLineBytes, lineCh, errCh)
 
 	t := time.NewTicker(*tickInterval)
 	defer t.Stop()
+	msgCh := consumer.Messages()
+	errCh := consumer.Errors()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info("shutdown", "reason", ctx.Err())
 			return
-		case err := <-errCh:
-			if err != nil {
-				log.Error("stdin read error", "err", err)
-				os.Exit(1)
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
 			}
-			return
+			if err != nil {
+				log.Error("queue consume error", "err", err)
+			}
 		case <-t.C:
 			if elector != nil {
 				leader, err := elector.Tick(ctx)
@@ -376,50 +400,61 @@ func main() {
 			if err := coord.Tick(ctx); err != nil {
 				log.Error("tick", "err", err)
 			}
-		case line := <-lineCh:
+		case qmsg, ok := <-msgCh:
+			if !ok {
+				return
+			}
+			line := qmsg.Value
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 
 			var env envelope
 			if err := json.Unmarshal(line, &env); err != nil {
 				log.Error("parse input json", "err", err)
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 
 			switch env.Version {
 			case "withdrawals.requested.v1":
-				var msg withdrawRequestedV1
-				if err := json.Unmarshal(line, &msg); err != nil {
+				var reqMsg withdrawRequestedV1
+				if err := json.Unmarshal(line, &reqMsg); err != nil {
 					log.Error("parse withdraw requested", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				if msg.Version != "withdrawals.requested.v1" {
+				if reqMsg.Version != "withdrawals.requested.v1" {
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				id, err := parseHash32(msg.WithdrawalID)
+				id, err := parseHash32(reqMsg.WithdrawalID)
 				if err != nil {
 					log.Error("parse withdrawalId", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				requester, err := parseAddr20(msg.Requester)
+				requester, err := parseAddr20(reqMsg.Requester)
 				if err != nil {
 					log.Error("parse requester", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				ua, err := decodeHexBytes(msg.RecipientUA)
+				ua, err := decodeHexBytes(reqMsg.RecipientUA)
 				if err != nil {
 					log.Error("parse recipientUA", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				expiry := time.Unix(int64(msg.Expiry), 0).UTC()
+				expiry := time.Unix(int64(reqMsg.Expiry), 0).UTC()
 
 				w := withdraw.Withdrawal{
 					ID:          id,
 					Requester:   requester,
-					Amount:      msg.Amount,
-					FeeBps:      msg.FeeBps,
+					Amount:      reqMsg.Amount,
+					FeeBps:      reqMsg.FeeBps,
 					RecipientUA: ua,
 					Expiry:      expiry,
 				}
@@ -430,8 +465,10 @@ func main() {
 				if err != nil {
 					log.Error("ingest withdrawal", "err", err)
 				}
+				ackMessage(qmsg, *ackTimeout, log)
 
 			default:
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 		}
@@ -445,19 +482,12 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 	return context.WithTimeout(ctx, d)
 }
 
-func scanLines(r *os.File, maxLineBytes int, out chan<- []byte, errCh chan<- error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 1024), maxLineBytes)
-
-	for sc.Scan() {
-		b := append([]byte(nil), sc.Bytes()...)
-		out <- b
+func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := msg.Ack(ctx); err != nil {
+		log.Error("ack queue message", "topic", msg.Topic, "err", err)
 	}
-	if err := sc.Err(); err != nil {
-		errCh <- err
-		return
-	}
-	errCh <- nil
 }
 
 func parseHash32(s string) ([32]byte, error) {

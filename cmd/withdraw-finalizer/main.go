@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/hex"
@@ -22,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/proverexec"
+	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
 )
@@ -63,7 +63,13 @@ func main() {
 		proverBin          = flag.String("prover-bin", "", "path to prover command binary (required)")
 		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
 
-		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
+		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
+		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
+		queueGroup    = flag.String("queue-group", "withdraw-finalizer", "queue consumer group (required for kafka)")
+		queueTopics   = flag.String("queue-topics", "checkpoints.packages.v1", "comma-separated queue topics")
+		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
+		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
+		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 	)
 	flag.Parse()
 
@@ -81,12 +87,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: durations and --max-batches must be > 0")
 		os.Exit(2)
 	}
-	if *maxLineBytes <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --max-line-bytes must be > 0")
+	if *maxLineBytes <= 0 || *queueMaxBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --max-line-bytes and --queue-max-bytes must be > 0")
 		os.Exit(2)
 	}
-	if *proverMaxRespBytes <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes must be > 0")
+	if *proverMaxRespBytes <= 0 || *ackTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes and --queue-ack-timeout must be > 0")
 		os.Exit(2)
 	}
 
@@ -125,6 +131,19 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
+		Driver:        *queueDriver,
+		Brokers:       queue.SplitCommaList(*queueBrokers),
+		Group:         *queueGroup,
+		Topics:        queue.SplitCommaList(*queueTopics),
+		KafkaMaxBytes: *queueMaxBytes,
+		MaxLineBytes:  *maxLineBytes,
+	})
+	if err != nil {
+		log.Error("init queue consumer", "err", err)
+		os.Exit(2)
+	}
+	defer func() { _ = consumer.Close() }()
 
 	pool, err := pgxpool.New(ctx, *postgresDSN)
 	if err != nil {
@@ -176,26 +195,27 @@ func main() {
 		"maxBatches", *maxBatches,
 		"leaseTTL", leaseTTL.String(),
 		"tickInterval", tickInterval.String(),
+		"queueDriver", *queueDriver,
 	)
-
-	lineCh := make(chan []byte, 16)
-	errCh := make(chan error, 1)
-	go scanLines(os.Stdin, *maxLineBytes, lineCh, errCh)
 
 	t := time.NewTicker(*tickInterval)
 	defer t.Stop()
+	msgCh := consumer.Messages()
+	errCh := consumer.Errors()
 
 	for {
 		select {
 		case <-ctx.Done():
 			log.Info("shutdown", "reason", ctx.Err())
 			return
-		case err := <-errCh:
-			if err != nil {
-				log.Error("stdin read error", "err", err)
-				os.Exit(1)
+		case err, ok := <-errCh:
+			if !ok {
+				errCh = nil
+				continue
 			}
-			return
+			if err != nil {
+				log.Error("queue consume error", "err", err)
+			}
 		case <-t.C:
 			cctx, cancel := context.WithTimeout(ctx, *submitTimeout)
 			err := f.Tick(cctx)
@@ -203,35 +223,44 @@ func main() {
 			if err != nil {
 				log.Error("tick", "err", err)
 			}
-		case line := <-lineCh:
+		case qmsg, ok := <-msgCh:
+			if !ok {
+				return
+			}
+			line := qmsg.Value
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 
 			var env envelope
 			if err := json.Unmarshal(line, &env); err != nil {
 				log.Error("parse input json", "err", err)
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 
 			switch env.Version {
 			case "checkpoints.package.v1":
-				var msg checkpointPackageV1
-				if err := json.Unmarshal(line, &msg); err != nil {
+				var cpMsg checkpointPackageV1
+				if err := json.Unmarshal(line, &cpMsg); err != nil {
 					log.Error("parse checkpoint package", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				if msg.Version != "checkpoints.package.v1" {
+				if cpMsg.Version != "checkpoints.package.v1" {
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				if want := checkpoint.Digest(msg.Checkpoint); msg.Digest != want {
-					log.Error("checkpoint digest mismatch", "want", want, "got", msg.Digest)
+				if want := checkpoint.Digest(cpMsg.Checkpoint); cpMsg.Digest != want {
+					log.Error("checkpoint digest mismatch", "want", want, "got", cpMsg.Digest)
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
 
-				sigs := make([][]byte, 0, len(msg.Signatures))
-				for i, s := range msg.Signatures {
+				sigs := make([][]byte, 0, len(cpMsg.Signatures))
+				for i, s := range cpMsg.Signatures {
 					b, err := decodeHexBytes(s)
 					if err != nil {
 						log.Error("decode operator signature", "err", err, "index", i)
@@ -241,38 +270,34 @@ func main() {
 					sigs = append(sigs, b)
 				}
 				if sigs == nil {
+					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
 
 				cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 				err := f.IngestCheckpoint(cctx, withdrawfinalizer.CheckpointPackage{
-					Checkpoint:         msg.Checkpoint,
+					Checkpoint:         cpMsg.Checkpoint,
 					OperatorSignatures: sigs,
 				})
 				cancel()
 				if err != nil {
 					log.Error("ingest checkpoint", "err", err)
 				}
+				ackMessage(qmsg, *ackTimeout, log)
 			default:
+				ackMessage(qmsg, *ackTimeout, log)
 				continue
 			}
 		}
 	}
 }
 
-func scanLines(r *os.File, maxLineBytes int, out chan<- []byte, errCh chan<- error) {
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 1024), maxLineBytes)
-
-	for sc.Scan() {
-		b := append([]byte(nil), sc.Bytes()...)
-		out <- b
+func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	if err := msg.Ack(ctx); err != nil {
+		log.Error("ack queue message", "topic", msg.Topic, "err", err)
 	}
-	if err := sc.Err(); err != nil {
-		errCh <- err
-		return
-	}
-	errCh <- nil
 }
 
 func decodeHexBytes(s string) ([]byte, error) {
