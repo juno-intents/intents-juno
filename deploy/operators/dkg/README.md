@@ -7,6 +7,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 - `tailscale.sh`: operator-side Tailscale bootstrap + registration payload output.
 - `operator.sh`: operator-side bundle execution (`dkg-admin serve`) and process control.
 - `operator-export-kms.sh`: operator-side key package export workflows (age backup first, KMS+S3 later).
+- `backup-package.sh`: operator-side backup zipper for external storage/escrow.
 - `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
 - `test-completiton.sh`: completion verifier that checks smoke-signature phases and outputs UFVK + Juno shielded address.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
@@ -100,6 +101,20 @@ This command validates online smoke-signature phases for all operators and print
   --out ~/.juno-dkg/exports/keypackage-backup.json
 ```
 
+### 2.5) Create external backup zip package
+
+```bash
+./backup-package.sh create \
+  --workdir ~/.juno-dkg/operator-runtime \
+  --age-identity-file ~/.juno-dkg/backup/age-identity.txt \
+  --age-backup-file ~/.juno-dkg/exports/keypackage-backup.json \
+  --admin-config ~/.juno-dkg/operator-runtime/bundle/admin-config.json \
+  --completion-report ./dkg-mainnet-2026-02-11/reports/test-completiton.json \
+  --output ~/.juno-dkg/backup-packages/dkg-backup.zip
+```
+
+Store that zip externally (cold storage / escrow / secure vault).
+
 ### 3) Later, export to each operator's own KMS+S3 target
 
 Option A (if runtime state is still present): run `export` directly from runtime:
@@ -164,6 +179,8 @@ Each operator should back up these artifacts outside the machine:
    - copy from bundle: `admin-config.json`
 5. Completion report for audit trail:
    - `<workdir>/reports/test-completiton.json`
+6. Optional packaged backup archive:
+   - `~/.juno-dkg/backup-packages/dkg-backup-*.zip`
 
 ## Optional Coordinator-Wide Export
 
