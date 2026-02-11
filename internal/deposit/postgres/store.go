@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -363,6 +364,135 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 		return fmt.Errorf("deposit/postgres: mark finalized: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	ids := uniqueDepositIDs(depositIDs)
+	if len(ids) == 0 {
+		return nil
+	}
+
+	rawIDs := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		rawIDs = append(rawIDs, rawID)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: begin finalize batch tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	rows, err := tx.Query(ctx, `
+		SELECT deposit_id, state, tx_hash
+		FROM deposit_jobs
+		WHERE deposit_id = ANY($1)
+		FOR UPDATE
+	`, rawIDs)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: lock finalize batch rows: %w", err)
+	}
+	defer rows.Close()
+
+	type rowState struct {
+		state  int16
+		txHash []byte
+	}
+	found := make(map[[32]byte]rowState, len(ids))
+	for rows.Next() {
+		var (
+			idRaw     []byte
+			state     int16
+			txHashRaw []byte
+		)
+		if err := rows.Scan(&idRaw, &state, &txHashRaw); err != nil {
+			return fmt.Errorf("deposit/postgres: scan finalize batch row: %w", err)
+		}
+		id, err := to32(idRaw)
+		if err != nil {
+			return err
+		}
+		found[id] = rowState{
+			state:  state,
+			txHash: append([]byte(nil), txHashRaw...),
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("deposit/postgres: finalize batch rows: %w", err)
+	}
+
+	updatable := make([][]byte, 0, len(ids))
+	for _, id := range ids {
+		st, ok := found[id]
+		if !ok {
+			return deposit.ErrNotFound
+		}
+		if deposit.State(st.state) == deposit.StateFinalized {
+			if len(st.txHash) != 32 || !bytes.Equal(st.txHash, txHash[:]) {
+				return deposit.ErrDepositMismatch
+			}
+			continue
+		}
+		if deposit.State(st.state) < deposit.StateConfirmed {
+			return deposit.ErrInvalidTransition
+		}
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		updatable = append(updatable, rawID)
+	}
+
+	if len(updatable) > 0 {
+		_, err := tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = $2,
+				checkpoint_height = $3,
+				checkpoint_block_hash = $4,
+				checkpoint_final_orchard_root = $5,
+				checkpoint_base_chain_id = $6,
+				checkpoint_bridge_contract = $7,
+				proof_seal = $8,
+				tx_hash = $9,
+				updated_at = now()
+			WHERE deposit_id = ANY($1)
+		`,
+			updatable,
+			int16(deposit.StateFinalized),
+			int64(cp.Height),
+			cp.BlockHash[:],
+			cp.FinalOrchardRoot[:],
+			int64(cp.BaseChainID),
+			cp.BridgeContract[:],
+			seal,
+			txHash[:],
+		)
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: update finalize batch rows: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("deposit/postgres: commit finalize batch tx: %w", err)
+	}
+	return nil
+}
+
+func uniqueDepositIDs(ids [][32]byte) [][32]byte {
+	out := make([][32]byte, 0, len(ids))
+	seen := make(map[[32]byte]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 func to32(b []byte) ([32]byte, error) {

@@ -21,4 +21,7 @@ type Store interface {
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error
 	MarkFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
+	// FinalizeBatch atomically transitions the provided deposits to finalized.
+	// Implementations must ensure all-or-nothing behavior for this batch call.
+	FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error
 }

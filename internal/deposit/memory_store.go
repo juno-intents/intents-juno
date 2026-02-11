@@ -154,3 +154,57 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 	s.jobs[depositID] = j
 	return nil
 }
+
+func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if len(depositIDs) == 0 {
+		return nil
+	}
+
+	ids := uniqueDepositIDs(depositIDs)
+
+	// Validate first so the operation is all-or-nothing.
+	for _, id := range ids {
+		j, ok := s.jobs[id]
+		if !ok {
+			return ErrNotFound
+		}
+		if j.State == StateFinalized {
+			if j.TxHash != txHash {
+				return ErrDepositMismatch
+			}
+			continue
+		}
+		if j.State < StateConfirmed {
+			return ErrInvalidTransition
+		}
+	}
+
+	for _, id := range ids {
+		j := s.jobs[id]
+		if j.State == StateFinalized {
+			continue
+		}
+		j.State = StateFinalized
+		j.Checkpoint = cp
+		j.ProofSeal = append([]byte(nil), seal...)
+		j.TxHash = txHash
+		s.jobs[id] = j
+	}
+	return nil
+}
+
+func uniqueDepositIDs(ids [][32]byte) [][32]byte {
+	out := make([][32]byte, 0, len(ids))
+	seen := make(map[[32]byte]struct{}, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
+}

@@ -206,3 +206,97 @@ func TestMemoryStore_ListByState(t *testing.T) {
 		t.Fatalf("limited len: got %d want 1", len(limited))
 	}
 }
+
+func TestMemoryStore_FinalizeBatch_Atomic(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	mkDeposit := func(tag byte) Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+
+	d1 := mkDeposit(0x01)
+	d2 := mkDeposit(0x02)
+
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed d1: %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed d2: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	seal := []byte{0x99}
+	var txHash [32]byte
+	txHash[0] = 0x77
+
+	var missing [32]byte
+	missing[0] = 0xff
+	if err := s.FinalizeBatch(ctx, [][32]byte{d1.DepositID, missing, d2.DepositID}, cp, seal, txHash); err == nil {
+		t.Fatalf("expected finalize batch error")
+	}
+
+	j1, err := s.Get(ctx, d1.DepositID)
+	if err != nil {
+		t.Fatalf("Get d1: %v", err)
+	}
+	if j1.State != StateConfirmed {
+		t.Fatalf("d1 state changed on failed batch: got %v want %v", j1.State, StateConfirmed)
+	}
+	j2, err := s.Get(ctx, d2.DepositID)
+	if err != nil {
+		t.Fatalf("Get d2: %v", err)
+	}
+	if j2.State != StateConfirmed {
+		t.Fatalf("d2 state changed on failed batch: got %v want %v", j2.State, StateConfirmed)
+	}
+
+	if err := s.FinalizeBatch(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal, txHash); err != nil {
+		t.Fatalf("FinalizeBatch: %v", err)
+	}
+	j1, err = s.Get(ctx, d1.DepositID)
+	if err != nil {
+		t.Fatalf("Get d1 after finalize: %v", err)
+	}
+	j2, err = s.Get(ctx, d2.DepositID)
+	if err != nil {
+		t.Fatalf("Get d2 after finalize: %v", err)
+	}
+	if j1.State != StateFinalized || j2.State != StateFinalized {
+		t.Fatalf("unexpected states after finalize: d1=%v d2=%v", j1.State, j2.State)
+	}
+	if j1.TxHash != txHash || j2.TxHash != txHash {
+		t.Fatalf("tx hash mismatch")
+	}
+
+	// Idempotent replay with same tx hash.
+	if err := s.FinalizeBatch(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal, txHash); err != nil {
+		t.Fatalf("FinalizeBatch replay: %v", err)
+	}
+
+	var otherTx [32]byte
+	otherTx[0] = 0x55
+	if err := s.FinalizeBatch(ctx, [][32]byte{d1.DepositID}, cp, seal, otherTx); err == nil {
+		t.Fatalf("expected tx hash mismatch on finalized deposit")
+	}
+}

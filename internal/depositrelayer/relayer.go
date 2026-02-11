@@ -361,17 +361,12 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	}
 
 	txHash := common.HexToHash(res.TxHash)
+	finalizeIDs := make([][32]byte, 0, len(batch.Items))
 	for _, it := range batch.Items {
-		depositID := it.ID
-		if err := r.store.MarkProofRequested(ctx, depositID, cp); err != nil {
-			return fmt.Errorf("depositrelayer: mark proof requested: %w", err)
-		}
-		if err := r.store.SetProofReady(ctx, depositID, seal); err != nil {
-			return fmt.Errorf("depositrelayer: set proof ready: %w", err)
-		}
-		if err := r.store.MarkFinalized(ctx, depositID, [32]byte(txHash)); err != nil {
-			return fmt.Errorf("depositrelayer: mark finalized: %w", err)
-		}
+		finalizeIDs = append(finalizeIDs, it.ID)
+	}
+	if err := r.store.FinalizeBatch(ctx, finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
+		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
 	}
 
 	r.log.Info("submitted mintBatch",
