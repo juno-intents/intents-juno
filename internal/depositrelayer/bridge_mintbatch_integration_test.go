@@ -221,7 +221,7 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 		DedupeMax:         1000,
 		GasLimit:          500_000,
 		Now:               time.Now,
-	}, sender, &staticSealProver{seal: []byte{0x99}}, nil)
+	}, sender, &staticSealProofRequester{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

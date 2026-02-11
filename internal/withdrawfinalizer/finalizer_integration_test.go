@@ -21,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 )
@@ -282,7 +283,7 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 3,
 		GasLimit:          500_000,
-	}, store, leaseStore, client, &staticProver{seal: []byte{0x99}}, nil)
+	}, store, leaseStore, client, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
 	if err != nil {
 		t.Fatalf("New finalizer: %v", err)
 	}

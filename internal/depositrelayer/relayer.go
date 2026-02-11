@@ -17,6 +17,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
 
@@ -28,10 +29,6 @@ var (
 
 type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
-}
-
-type Prover interface {
-	Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error)
 }
 
 type Config struct {
@@ -47,6 +44,9 @@ type Config struct {
 	DedupeMax int
 
 	GasLimit uint64
+
+	ProofRequestTimeout time.Duration
+	ProofPriority       int
 
 	Now func() time.Time
 }
@@ -68,7 +68,7 @@ type Relayer struct {
 
 	log    *slog.Logger
 	sender Sender
-	prover Prover
+	prover proofclient.Client
 
 	expectedBridgeMemo [20]byte
 
@@ -85,7 +85,7 @@ type Relayer struct {
 	queue []batching.Batch[bridgeabi.MintItem]
 }
 
-func New(cfg Config, sender Sender, prover Prover, log *slog.Logger) (*Relayer, error) {
+func New(cfg Config, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
 	if cfg.BaseChainID == 0 {
 		return nil, fmt.Errorf("%w: BaseChainID must be non-zero", ErrInvalidConfig)
 	}
@@ -106,6 +106,12 @@ func New(cfg Config, sender Sender, prover Prover, log *slog.Logger) (*Relayer, 
 	}
 	if cfg.DedupeMax <= 0 {
 		return nil, fmt.Errorf("%w: DedupeMax must be > 0", ErrInvalidConfig)
+	}
+	if cfg.ProofRequestTimeout <= 0 {
+		cfg.ProofRequestTimeout = 15 * time.Minute
+	}
+	if cfg.ProofPriority < 0 {
+		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -268,9 +274,31 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	seal, err := r.prover.Prove(ctx, r.cfg.DepositImageID, journal, privateInput)
+	depositIDs := make([]common.Hash, 0, len(batch.Items))
+	for _, it := range batch.Items {
+		depositIDs = append(depositIDs, common.Hash(it.ID))
+	}
+	batchID := idempotency.DepositBatchIDV1(depositIDs)
+	jobID := idempotency.ProofJobIDV1("deposit", batchID, r.cfg.DepositImageID, journal, privateInput)
+
+	pctx, cancel := context.WithTimeout(ctx, r.cfg.ProofRequestTimeout)
+	defer cancel()
+
+	proofRes, err := r.prover.RequestProof(pctx, proofclient.Request{
+		JobID:        jobID,
+		Pipeline:     "deposit",
+		ImageID:      r.cfg.DepositImageID,
+		Journal:      journal,
+		PrivateInput: privateInput,
+		Deadline:     r.cfg.Now().Add(r.cfg.ProofRequestTimeout),
+		Priority:     r.cfg.ProofPriority,
+	})
 	if err != nil {
 		return err
+	}
+	seal := proofRes.Seal
+	if len(seal) == 0 {
+		return fmt.Errorf("depositrelayer: empty proof seal from proof requester")
 	}
 
 	calldata, err := bridgeabi.PackMintBatchCalldata(cp, opSigs, seal, journal)

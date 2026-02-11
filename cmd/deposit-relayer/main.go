@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -62,11 +62,15 @@ func main() {
 		dedupeMax     = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
 		gasLimit      = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
-		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
+		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
 
-		proverBackend      = flag.String("prover-backend", boundless.BackendBoundless.String(), "prover backend: boundless|self")
-		proverBin          = flag.String("prover-bin", "", "path to prover command binary implementing prover.request.v1/prover.response.v1 (required)")
-		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
+		proofDriver        = flag.String("proof-driver", "queue", "proof client driver: queue|mock")
+		proofRequestTopic  = flag.String("proof-request-topic", "proof.requests.v1", "proof request topic")
+		proofResultTopic   = flag.String("proof-result-topic", "proof.fulfillments.v1", "proof fulfillment topic")
+		proofFailureTopic  = flag.String("proof-failure-topic", "proof.failures.v1", "proof failure topic")
+		proofResponseGroup = flag.String("proof-response-group", "", "proof response consumer group (required for kafka when proof-driver=queue)")
+		proofPriority      = flag.Int("proof-priority", 1, "proof request priority")
+		proofMockSeal      = flag.String("proof-mock-seal", "0x99", "mock proof seal hex used when --proof-driver=mock")
 
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
@@ -80,8 +84,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" || *proverBin == "" {
-		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, --base-relayer-url, and --prover-bin are required")
+	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" {
+		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, and --base-relayer-url are required")
 		os.Exit(2)
 	}
 	if *baseChainID > uint64(^uint32(0)) {
@@ -100,8 +104,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --max-age, --flush-interval, and --submit-timeout must be > 0")
 		os.Exit(2)
 	}
-	if *proverMaxRespBytes <= 0 || *ackTimeout <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes and --queue-ack-timeout must be > 0")
+	if *ackTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --queue-ack-timeout must be > 0")
+		os.Exit(2)
+	}
+	if *proofPriority < 0 {
+		fmt.Fprintln(os.Stderr, "error: --proof-priority must be >= 0")
 		os.Exit(2)
 	}
 
@@ -120,16 +128,6 @@ func main() {
 	authToken := os.Getenv(*baseRelayerAuthEnv)
 	if authToken == "" {
 		fmt.Fprintf(os.Stderr, "error: missing base-relayer auth token in env %s\n", *baseRelayerAuthEnv)
-		os.Exit(2)
-	}
-
-	proverClient, err := boundless.New(boundless.Config{
-		Backend:          *proverBackend,
-		ProverBin:        *proverBin,
-		MaxResponseBytes: *proverMaxRespBytes,
-	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: init prover backend: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -158,18 +156,40 @@ func main() {
 	}
 	defer func() { _ = consumer.Close() }()
 
+	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
+		driver:            *proofDriver,
+		queueDriver:       *queueDriver,
+		queueBrokers:      queue.SplitCommaList(*queueBrokers),
+		proofRequestTopic: *proofRequestTopic,
+		proofResultTopic:  *proofResultTopic,
+		proofFailureTopic: *proofFailureTopic,
+		proofGroup:        *proofResponseGroup,
+		maxLineBytes:      *maxLineBytes,
+		queueMaxBytes:     *queueMaxBytes,
+		ackTimeout:        *ackTimeout,
+		mockSeal:          *proofMockSeal,
+		log:               log,
+	})
+	if err != nil {
+		log.Error("init proof client", "err", err)
+		os.Exit(2)
+	}
+	defer proofCleanup()
+
 	relayer, err := depositrelayer.New(depositrelayer.Config{
-		BaseChainID:       uint32(*baseChainID),
-		BridgeAddress:     bridge,
-		DepositImageID:    imageID,
-		OperatorAddresses: operatorAddrs,
-		OperatorThreshold: *threshold,
-		MaxItems:          *maxItems,
-		MaxAge:            *maxAge,
-		DedupeMax:         *dedupeMax,
-		GasLimit:          *gasLimit,
-		Now:               time.Now,
-	}, baseClient, proverClient, log)
+		BaseChainID:         uint32(*baseChainID),
+		BridgeAddress:       bridge,
+		DepositImageID:      imageID,
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   *threshold,
+		MaxItems:            *maxItems,
+		MaxAge:              *maxAge,
+		DedupeMax:           *dedupeMax,
+		GasLimit:            *gasLimit,
+		ProofRequestTimeout: *submitTimeout,
+		ProofPriority:       *proofPriority,
+		Now:                 time.Now,
+	}, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
 		os.Exit(2)
@@ -178,7 +198,10 @@ func main() {
 	log.Info("deposit relayer started",
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
-		"proverBackend", *proverBackend,
+		"proofDriver", *proofDriver,
+		"proofRequestTopic", *proofRequestTopic,
+		"proofResultTopic", *proofResultTopic,
+		"proofFailureTopic", *proofFailureTopic,
 		"maxItems", *maxItems,
 		"maxAge", maxAge.String(),
 		"flushInterval", flushEvery.String(),
@@ -336,6 +359,86 @@ func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
 	defer cancel()
 	if err := msg.Ack(ctx); err != nil {
 		log.Error("ack queue message", "topic", msg.Topic, "err", err)
+	}
+}
+
+type initProofClientConfig struct {
+	driver            string
+	queueDriver       string
+	queueBrokers      []string
+	proofRequestTopic string
+	proofResultTopic  string
+	proofFailureTopic string
+	proofGroup        string
+	maxLineBytes      int
+	queueMaxBytes     int
+	ackTimeout        time.Duration
+	mockSeal          string
+	log               *slog.Logger
+}
+
+func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclient.Client, func(), error) {
+	switch strings.ToLower(strings.TrimSpace(cfg.driver)) {
+	case "mock":
+		seal, err := decodeHexBytes(cfg.mockSeal)
+		if err != nil {
+			return nil, func() {}, fmt.Errorf("decode --proof-mock-seal: %w", err)
+		}
+		return &proofclient.StaticClient{Result: proofclient.Result{Seal: seal}}, func() {}, nil
+	case "queue":
+		if strings.EqualFold(strings.TrimSpace(cfg.queueDriver), queue.DriverStdio) {
+			return nil, func() {}, fmt.Errorf("proof-driver=queue is incompatible with queue-driver=stdio; use --proof-driver=mock for local stdio mode")
+		}
+		group := strings.TrimSpace(cfg.proofGroup)
+		if group == "" {
+			hostname, _ := os.Hostname()
+			hostname = strings.TrimSpace(hostname)
+			if hostname == "" {
+				hostname = "local"
+			}
+			group = "deposit-relayer-proof-" + hostname
+		}
+
+		producer, err := queue.NewProducer(queue.ProducerConfig{
+			Driver:  cfg.queueDriver,
+			Brokers: cfg.queueBrokers,
+		})
+		if err != nil {
+			return nil, func() {}, err
+		}
+		consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
+			Driver:        cfg.queueDriver,
+			Brokers:       cfg.queueBrokers,
+			Group:         group,
+			Topics:        []string{cfg.proofResultTopic, cfg.proofFailureTopic},
+			KafkaMaxBytes: cfg.queueMaxBytes,
+			MaxLineBytes:  cfg.maxLineBytes,
+		})
+		if err != nil {
+			_ = producer.Close()
+			return nil, func() {}, err
+		}
+		client, err := proofclient.NewQueueClient(proofclient.QueueConfig{
+			RequestTopic: cfg.proofRequestTopic,
+			ResultTopic:  cfg.proofResultTopic,
+			FailureTopic: cfg.proofFailureTopic,
+			Producer:     producer,
+			Consumer:     consumer,
+			AckTimeout:   cfg.ackTimeout,
+			Log:          cfg.log,
+		})
+		if err != nil {
+			_ = producer.Close()
+			_ = consumer.Close()
+			return nil, func() {}, err
+		}
+		cleanup := func() {
+			_ = consumer.Close()
+			_ = producer.Close()
+		}
+		return client, cleanup, nil
+	default:
+		return nil, func() {}, fmt.Errorf("unsupported proof driver %q", cfg.driver)
 	}
 }
 

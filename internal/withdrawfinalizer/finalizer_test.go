@@ -14,6 +14,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -30,14 +31,16 @@ func (s *recordingSender) Send(_ context.Context, req httpapi.SendRequest) (http
 	return s.res, s.err
 }
 
-type staticProver struct {
-	seal     []byte
-	gotInput []byte
+type staticProofRequester struct {
+	res    proofclient.Result
+	gotReq proofclient.Request
 }
 
-func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte, privateInput []byte) ([]byte, error) {
-	p.gotInput = append([]byte(nil), privateInput...)
-	return p.seal, nil
+func (p *staticProofRequester) RequestProof(_ context.Context, req proofclient.Request) (proofclient.Result, error) {
+	p.gotReq = req
+	p.gotReq.Journal = append([]byte(nil), req.Journal...)
+	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
+	return p.res, nil
 }
 
 type recordingBlobPut struct {
@@ -129,7 +132,7 @@ func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
-	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
+	}, store, leaseStore, sender, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -195,7 +198,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 			},
 		},
 	}
-	prover := &staticProver{seal: []byte{0x99}}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 	artifacts := &recordingBlobStore{}
 
 	f, err := New(Config{
@@ -236,8 +239,14 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	if !strings.HasPrefix(sender.lastReq.Data, "0x") || len(sender.lastReq.Data) <= 2 {
 		t.Fatalf("expected calldata hex, got %q", sender.lastReq.Data)
 	}
-	if len(prover.gotInput) == 0 {
-		t.Fatalf("expected prover private input")
+	if len(prover.gotReq.PrivateInput) == 0 {
+		t.Fatalf("expected proof requester private input")
+	}
+	if got, want := prover.gotReq.Pipeline, "withdraw"; got != want {
+		t.Fatalf("proof pipeline: got %q want %q", got, want)
+	}
+	if prover.gotReq.JobID == (common.Hash{}) {
+		t.Fatalf("expected non-zero proof job id")
 	}
 	wantJournalKey := journalArtifactKey(batchID)
 	wantPrivateInputKey := privateInputArtifactKey(batchID)
@@ -325,7 +334,7 @@ func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
 			},
 		},
 	}
-	prover := &staticProver{seal: []byte{0x99}}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 	artifacts := &recordingBlobStore{putErr: errors.New("s3 unavailable")}
 
 	f, err := New(Config{
@@ -408,7 +417,7 @@ func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
-	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
+	}, store, leaseStore, sender, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

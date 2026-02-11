@@ -17,7 +17,9 @@ import (
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
@@ -29,10 +31,6 @@ var (
 
 type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
-}
-
-type Prover interface {
-	Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error)
 }
 
 type CheckpointPackage struct {
@@ -54,6 +52,9 @@ type Config struct {
 	OperatorThreshold int
 
 	GasLimit uint64
+
+	ProofRequestTimeout time.Duration
+	ProofPriority       int
 }
 
 type Finalizer struct {
@@ -62,7 +63,7 @@ type Finalizer struct {
 	store      withdraw.Store
 	leaseStore leases.Store
 	sender     Sender
-	prover     Prover
+	prover     proofclient.Client
 	blobStore  blobstore.Store
 
 	log *slog.Logger
@@ -73,7 +74,7 @@ type Finalizer struct {
 	opSigs     [][]byte
 }
 
-func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sender, prover Prover, log *slog.Logger) (*Finalizer, error) {
+func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sender, prover proofclient.Client, log *slog.Logger) (*Finalizer, error) {
 	if store == nil || leaseStore == nil || sender == nil || prover == nil {
 		return nil, fmt.Errorf("%w: nil dependency", ErrInvalidConfig)
 	}
@@ -97,6 +98,12 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 	}
 	if cfg.OperatorThreshold <= 0 {
 		return nil, fmt.Errorf("%w: OperatorThreshold must be > 0", ErrInvalidConfig)
+	}
+	if cfg.ProofRequestTimeout <= 0 {
+		cfg.ProofRequestTimeout = 15 * time.Minute
+	}
+	if cfg.ProofPriority < 0 {
+		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -234,9 +241,25 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal, privateInput)
+	jobID := idempotency.ProofJobIDV1("withdraw", common.Hash(batchID), f.cfg.WithdrawImageID, journal, privateInput)
+	pctx, cancel := context.WithTimeout(ctx, f.cfg.ProofRequestTimeout)
+	defer cancel()
+
+	proofRes, err := f.prover.RequestProof(pctx, proofclient.Request{
+		JobID:        jobID,
+		Pipeline:     "withdraw",
+		ImageID:      f.cfg.WithdrawImageID,
+		Journal:      journal,
+		PrivateInput: privateInput,
+		Deadline:     time.Now().UTC().Add(f.cfg.ProofRequestTimeout),
+		Priority:     f.cfg.ProofPriority,
+	})
 	if err != nil {
 		return err
+	}
+	seal := proofRes.Seal
+	if len(seal) == 0 {
+		return fmt.Errorf("withdrawfinalizer: empty proof seal from proof requester")
 	}
 	if err := f.persistProofSealArtifact(ctx, batchID, seal); err != nil {
 		return err

@@ -17,6 +17,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 )
 
 type stubSender struct {
@@ -32,19 +33,17 @@ func (s *stubSender) Send(_ context.Context, req httpapi.SendRequest) (httpapi.S
 	return s.res, s.err
 }
 
-type stubProver struct {
-	gotImageID common.Hash
-	gotJournal []byte
-	gotInput   []byte
-	seal       []byte
-	err        error
+type stubProofRequester struct {
+	gotReq proofclient.Request
+	res    proofclient.Result
+	err    error
 }
 
-func (p *stubProver) Prove(_ context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error) {
-	p.gotImageID = imageID
-	p.gotJournal = append([]byte(nil), journal...)
-	p.gotInput = append([]byte(nil), privateInput...)
-	return p.seal, p.err
+func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Request) (proofclient.Result, error) {
+	p.gotReq = req
+	p.gotReq.Journal = append([]byte(nil), req.Journal...)
+	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
+	return p.res, p.err
 }
 
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
@@ -112,7 +111,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
-	prover := &stubProver{seal: []byte{0x99}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 
 	r, err := New(Config{
 		BaseChainID:       baseChainID,
@@ -149,8 +148,14 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	if sender.calls != 1 {
 		t.Fatalf("sender calls: got %d want %d", sender.calls, 1)
 	}
-	if len(prover.gotInput) == 0 {
-		t.Fatalf("expected prover private input")
+	if len(prover.gotReq.PrivateInput) == 0 {
+		t.Fatalf("expected proof requester private input")
+	}
+	if got, want := prover.gotReq.Pipeline, "deposit"; got != want {
+		t.Fatalf("proof pipeline: got %q want %q", got, want)
+	}
+	if prover.gotReq.JobID == (common.Hash{}) {
+		t.Fatalf("expected non-zero proof job id")
 	}
 	if len(sender.got) != 1 {
 		t.Fatalf("sender got len: got %d", len(sender.got))
@@ -178,7 +183,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 		}},
 	})
 	args := abi.Arguments{{Name: "dj", Type: journalType}}
-	vals, err := args.Unpack(prover.gotJournal)
+	vals, err := args.Unpack(prover.gotReq.Journal)
 	if err != nil {
 		t.Fatalf("unpack journal: %v", err)
 	}
@@ -245,7 +250,7 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
-	prover := &stubProver{seal: []byte{0x99}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 
 	r, err := New(Config{
 		BaseChainID:       baseChainID,
@@ -328,7 +333,7 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 			},
 		},
 	}
-	prover := &stubProver{seal: []byte{0x99}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 
 	r, err := New(Config{
 		BaseChainID:       baseChainID,
@@ -401,7 +406,7 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
-	prover := &stubProver{seal: []byte{0x99}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 
 	r, err := New(Config{
 		BaseChainID:       baseChainID,
@@ -457,7 +462,7 @@ func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
 	}
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
-	prover := &stubProver{seal: []byte{0x99}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
 	operatorAddrs, _ := mustSignedCheckpoint(t, cp)
 
 	r, err := New(Config{

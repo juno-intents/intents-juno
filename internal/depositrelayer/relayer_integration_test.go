@@ -24,6 +24,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 )
 
 type recordingSender struct {
@@ -41,12 +42,12 @@ func (s *recordingSender) Send(ctx context.Context, req httpapi.SendRequest) (ht
 	return res, err
 }
 
-type staticSealProver struct {
+type staticSealProofRequester struct {
 	seal []byte
 }
 
-func (p *staticSealProver) Prove(_ context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
-	return p.seal, nil
+func (p *staticSealProofRequester) RequestProof(_ context.Context, _ proofclient.Request) (proofclient.Result, error) {
+	return proofclient.Result{Seal: p.seal}, nil
 }
 
 func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
@@ -149,7 +150,7 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 		DedupeMax:         1000,
 		GasLimit:          200_000, // skip estimation for deterministic tests
 		Now:               time.Now,
-	}, sender, &staticSealProver{seal: []byte{0x99}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, sender, &staticSealProofRequester{seal: []byte{0x99}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
