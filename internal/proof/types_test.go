@@ -55,4 +55,3 @@ func TestDecodeJobRequest_Invalid(t *testing.T) {
 		t.Fatalf("expected ErrInvalidJob, got %v", err)
 	}
 }
-

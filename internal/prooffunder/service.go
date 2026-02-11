@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -32,12 +33,14 @@ type Config struct {
 }
 
 type Service struct {
-	cfg      Config
-	ownerID  string
-	leases   leases.Store
-	funding  boundless.FundingClient
-	alerter  Alerter
-	log      *slog.Logger
+	cfg     Config
+	ownerID string
+	leases  leases.Store
+	funding boundless.FundingClient
+	alerter Alerter
+	log     *slog.Logger
+
+	topupCount atomic.Uint64
 }
 
 func New(cfg Config, ownerID string, leaseStore leases.Store, funding boundless.FundingClient, alerter Alerter) (*Service, error) {
@@ -71,6 +74,16 @@ func New(cfg Config, ownerID string, leaseStore leases.Store, funding boundless.
 		alerter: alerter,
 		log:     log,
 	}, nil
+}
+
+func (s *Service) WithLogger(log *slog.Logger) *Service {
+	if s == nil {
+		return s
+	}
+	if log != nil {
+		s.log = log
+	}
+	return s
 }
 
 func ComputeTopUpAmount(balanceWei, minBalanceWei, targetBalanceWei, maxTopUpPerTxWei *big.Int) (*big.Int, bool) {
@@ -109,6 +122,11 @@ func (s *Service) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.log.Info("proof-funder metrics",
+		"requestor_address", s.cfg.RequestorAddress,
+		"requestor_balance_wei", balance.String(),
+		"topup_count", s.topupCount.Load(),
+	)
 
 	if balance.Cmp(s.cfg.CriticalBalanceWei) < 0 {
 		s.log.Error("critical requestor balance", "requestor", s.cfg.RequestorAddress, "balance_wei", balance.String(), "critical_wei", s.cfg.CriticalBalanceWei.String())
@@ -130,6 +148,7 @@ func (s *Service) Tick(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.topupCount.Add(1)
 	s.log.Info("requestor topup submitted", "requestor", s.cfg.RequestorAddress, "amount_wei", topupAmount.String(), "tx_hash", txHash)
 	return nil
 }
@@ -148,4 +167,3 @@ func (s *Service) tickLeadership(ctx context.Context) (bool, error) {
 func isPositive(v *big.Int) bool {
 	return v != nil && v.Sign() > 0
 }
-

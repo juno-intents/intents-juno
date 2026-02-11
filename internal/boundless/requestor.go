@@ -17,12 +17,12 @@ const (
 )
 
 type SubmitRequest struct {
-	RequestID          uint64
-	ChainID            uint64
-	RequestorAddress   common.Address
+	RequestID           uint64
+	ChainID             uint64
+	RequestorAddress    common.Address
 	RequestorPrivateKey string
-	OrderStreamURL     string
-	MarketAddress      common.Address
+	OrderStreamURL      string
+	MarketAddress       common.Address
 
 	JobID        common.Hash
 	Pipeline     string
@@ -134,4 +134,3 @@ func ValidateFundingMode(mode string) error {
 	}
 	return nil
 }
-

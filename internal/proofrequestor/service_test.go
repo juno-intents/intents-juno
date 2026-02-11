@@ -50,12 +50,12 @@ func TestService_PrefersOffchainAndFallsBackOnFailure(t *testing.T) {
 		},
 	}
 	svc, err := New(Config{
-		Owner:                     "requestor-a",
-		ChainID:                   8453,
-		RequestTimeout:            5 * time.Second,
-		CallbackIdempotencyTTL:    72 * time.Hour,
-		SubmissionMode:            boundless.SubmissionModeOffchainPrimaryOnchainFallback,
-		OnchainFallbackEnabled:    true,
+		Owner:                      "requestor-a",
+		ChainID:                    8453,
+		RequestTimeout:             5 * time.Second,
+		CallbackIdempotencyTTL:     72 * time.Hour,
+		SubmissionMode:             boundless.SubmissionModeOffchainPrimaryOnchainFallback,
+		OnchainFallbackEnabled:     true,
 		OnchainFallbackFundingMode: boundless.FundingModeMinMaxBalance,
 	}, store, submitter, nil)
 	if err != nil {
@@ -103,12 +103,12 @@ func TestService_DoesNotFallbackWhenOffchainSucceeds(t *testing.T) {
 		},
 	}
 	svc, err := New(Config{
-		Owner:                     "requestor-a",
-		ChainID:                   8453,
-		RequestTimeout:            5 * time.Second,
-		CallbackIdempotencyTTL:    72 * time.Hour,
-		SubmissionMode:            boundless.SubmissionModeOffchainPrimaryOnchainFallback,
-		OnchainFallbackEnabled:    true,
+		Owner:                      "requestor-a",
+		ChainID:                    8453,
+		RequestTimeout:             5 * time.Second,
+		CallbackIdempotencyTTL:     72 * time.Hour,
+		SubmissionMode:             boundless.SubmissionModeOffchainPrimaryOnchainFallback,
+		OnchainFallbackEnabled:     true,
 		OnchainFallbackFundingMode: boundless.FundingModeMinMaxBalance,
 	}, store, submitter, nil)
 	if err != nil {
@@ -142,4 +142,3 @@ func TestService_DoesNotFallbackWhenOffchainSucceeds(t *testing.T) {
 		t.Fatalf("submission path: got %q want offchain", out.SubmissionPath)
 	}
 }
-

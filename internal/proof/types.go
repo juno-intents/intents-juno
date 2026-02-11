@@ -23,10 +23,10 @@ var (
 type LifecycleState string
 
 const (
-	StatePending       LifecycleState = "pending"
-	StateSubmitting    LifecycleState = "submitting"
-	StateFulfilled     LifecycleState = "fulfilled"
-	StateFailedRetry   LifecycleState = "failed_retryable"
+	StatePending        LifecycleState = "pending"
+	StateSubmitting     LifecycleState = "submitting"
+	StateFulfilled      LifecycleState = "fulfilled"
+	StateFailedRetry    LifecycleState = "failed_retryable"
 	StateFailedTerminal LifecycleState = "failed_terminal"
 )
 
@@ -157,10 +157,10 @@ type JobRecord struct {
 	RequestID uint64
 	State     LifecycleState
 
-	AttemptCount       int
-	ProcessingOwner    string
+	AttemptCount        int
+	ProcessingOwner     string
 	ProcessingExpiresAt time.Time
-	CallbackExpiresAt  time.Time
+	CallbackExpiresAt   time.Time
 
 	SubmissionPath string
 	Seal           []byte
@@ -183,3 +183,67 @@ type Store interface {
 	GetJob(ctx context.Context, jobID common.Hash) (JobRecord, error)
 }
 
+type FulfillmentMessage struct {
+	JobID          common.Hash
+	RequestID      uint64
+	Seal           []byte
+	Metadata       map[string]string
+	SubmissionPath string
+}
+
+type FailureMessage struct {
+	JobID     common.Hash
+	RequestID uint64
+	ErrorCode string
+	Retryable bool
+	Message   string
+}
+
+func EncodeFulfillmentMessage(msg FulfillmentMessage) ([]byte, error) {
+	out := struct {
+		Version        string            `json:"version"`
+		JobID          string            `json:"job_id"`
+		RequestID      uint64            `json:"request_id"`
+		Seal           string            `json:"seal"`
+		Metadata       map[string]string `json:"metadata,omitempty"`
+		SubmissionPath string            `json:"submission_path,omitempty"`
+	}{
+		Version:        "proof.fulfillment.v1",
+		JobID:          msg.JobID.Hex(),
+		RequestID:      msg.RequestID,
+		Seal:           "0x" + hex.EncodeToString(msg.Seal),
+		Metadata:       cloneMap(msg.Metadata),
+		SubmissionPath: strings.TrimSpace(msg.SubmissionPath),
+	}
+	return json.Marshal(out)
+}
+
+func EncodeFailureMessage(msg FailureMessage) ([]byte, error) {
+	out := struct {
+		Version   string `json:"version"`
+		JobID     string `json:"job_id"`
+		RequestID uint64 `json:"request_id,omitempty"`
+		ErrorCode string `json:"error_code"`
+		Retryable bool   `json:"retryable"`
+		Message   string `json:"message,omitempty"`
+	}{
+		Version:   "proof.failure.v1",
+		JobID:     msg.JobID.Hex(),
+		RequestID: msg.RequestID,
+		ErrorCode: strings.TrimSpace(msg.ErrorCode),
+		Retryable: msg.Retryable,
+		Message:   strings.TrimSpace(msg.Message),
+	}
+	return json.Marshal(out)
+}
+
+func cloneMap(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}

@@ -28,6 +28,11 @@ type Config struct {
 	RequestTimeout         time.Duration
 	CallbackIdempotencyTTL time.Duration
 
+	RequestorAddress    common.Address
+	RequestorPrivateKey string
+	OrderStreamURL      string
+	MarketAddress       common.Address
+
 	SubmissionMode string
 
 	OnchainFallbackEnabled     bool
@@ -41,10 +46,10 @@ type Config struct {
 type Outcome struct {
 	Status Status
 
-	JobID        string
-	RequestID    uint64
+	JobID          string
+	RequestID      uint64
 	SubmissionPath string
-	FallbackUsed bool
+	FallbackUsed   bool
 
 	Seal     []byte
 	Metadata map[string]string
@@ -108,7 +113,7 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 	}
 	if !claimed {
 		out := Outcome{
-			Status:        StatusSkipped,
+			Status:         StatusSkipped,
 			JobID:          job.JobID.Hex(),
 			RequestID:      rec.RequestID,
 			SubmissionPath: rec.SubmissionPath,
@@ -128,15 +133,19 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 	}
 
 	baseReq := boundless.SubmitRequest{
-		RequestID:   rec.RequestID,
-		ChainID:     s.cfg.ChainID,
-		JobID:       job.JobID,
-		Pipeline:    job.Pipeline,
-		ImageID:     job.ImageID,
-		Journal:     append([]byte(nil), job.Journal...),
-		PrivateInput: append([]byte(nil), job.PrivateInput...),
-		Deadline:    job.Deadline,
-		Priority:    job.Priority,
+		RequestID:           rec.RequestID,
+		ChainID:             s.cfg.ChainID,
+		RequestorAddress:    s.cfg.RequestorAddress,
+		RequestorPrivateKey: s.cfg.RequestorPrivateKey,
+		OrderStreamURL:      s.cfg.OrderStreamURL,
+		MarketAddress:       s.cfg.MarketAddress,
+		JobID:               job.JobID,
+		Pipeline:            job.Pipeline,
+		ImageID:             job.ImageID,
+		Journal:             append([]byte(nil), job.Journal...),
+		PrivateInput:        append([]byte(nil), job.PrivateInput...),
+		Deadline:            job.Deadline,
+		Priority:            job.Priority,
 	}
 
 	runCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
@@ -150,12 +159,12 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 
 	if s.cfg.SubmissionMode == boundless.SubmissionModeOffchainPrimaryOnchainFallback && s.cfg.OnchainFallbackEnabled {
 		onReq := boundless.OnchainSubmitRequest{
-			SubmitRequest:         baseReq,
-			FundingMode:           s.cfg.OnchainFallbackFundingMode,
-			MinBalanceWei:         cloneBigInt(s.cfg.OnchainMinBalanceWei),
-			TargetBalanceWei:      cloneBigInt(s.cfg.OnchainTargetBalanceWei),
-			MaxPricePerProofWei:   cloneBigInt(s.cfg.OnchainMaxPricePerProofWei),
-			MaxStakePerProofWei:   cloneBigInt(s.cfg.OnchainMaxStakePerProofWei),
+			SubmitRequest:       baseReq,
+			FundingMode:         s.cfg.OnchainFallbackFundingMode,
+			MinBalanceWei:       cloneBigInt(s.cfg.OnchainMinBalanceWei),
+			TargetBalanceWei:    cloneBigInt(s.cfg.OnchainTargetBalanceWei),
+			MaxPricePerProofWei: cloneBigInt(s.cfg.OnchainMaxPricePerProofWei),
+			MaxStakePerProofWei: cloneBigInt(s.cfg.OnchainMaxStakePerProofWei),
 		}
 		onResp, onErr := s.submitter.SubmitOnchain(runCtx, onReq)
 		if onErr == nil {

@@ -30,6 +30,8 @@ type Message struct {
 	Topic string
 	Key   []byte
 	Value []byte
+	// Timestamp is the producer timestamp (Kafka) or local receive time (stdio).
+	Timestamp time.Time
 
 	ackFn func(context.Context) error
 }
@@ -209,9 +211,10 @@ func (c *kafkaConsumer) run(ctx context.Context) {
 		}
 
 		msg := Message{
-			Topic: km.Topic,
-			Key:   append([]byte(nil), km.Key...),
-			Value: append([]byte(nil), km.Value...),
+			Topic:     km.Topic,
+			Key:       append([]byte(nil), km.Key...),
+			Value:     append([]byte(nil), km.Value...),
+			Timestamp: km.Time,
 			ackFn: func(ackCtx context.Context) error {
 				return c.reader.CommitMessages(ackCtx, km)
 			},
@@ -274,7 +277,10 @@ func newStdioConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 		sc.Buffer(make([]byte, 1024), maxLineBytes)
 		for sc.Scan() {
 			line := append([]byte(nil), sc.Bytes()...)
-			msg := Message{Value: line}
+			msg := Message{
+				Value:     line,
+				Timestamp: time.Now().UTC(),
+			}
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():

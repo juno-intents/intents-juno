@@ -95,4 +95,3 @@ func TestMemoryStore_RequestIDAllocatorConcurrent(t *testing.T) {
 		}
 	}
 }
-

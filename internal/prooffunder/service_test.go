@@ -93,13 +93,13 @@ func TestService_LeaseAllowsSingleActiveTopupLoop(t *testing.T) {
 	leaseStore := leases.NewMemoryStore(nowFn)
 	client := &fakeFundingClient{balance: big.NewInt(10)}
 	cfg := Config{
-		LeaseName:       "proof-funder",
-		LeaseTTL:        15 * time.Second,
-		CheckInterval:   1 * time.Second,
-		OwnerAddress:    common.HexToAddress("0x000000000000000000000000000000000000beef"),
-		RequestorAddress: common.HexToAddress("0x000000000000000000000000000000000000cafe"),
-		MinBalanceWei:   big.NewInt(50),
-		TargetBalanceWei: big.NewInt(200),
+		LeaseName:          "proof-funder",
+		LeaseTTL:           15 * time.Second,
+		CheckInterval:      1 * time.Second,
+		OwnerAddress:       common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		RequestorAddress:   common.HexToAddress("0x000000000000000000000000000000000000cafe"),
+		MinBalanceWei:      big.NewInt(50),
+		TargetBalanceWei:   big.NewInt(200),
 		CriticalBalanceWei: big.NewInt(20),
 		MaxTopUpPerTxWei:   big.NewInt(100),
 	}
@@ -127,6 +127,37 @@ func TestService_LeaseAllowsSingleActiveTopupLoop(t *testing.T) {
 	}
 }
 
+func TestService_Tick_NoTopUpWhenBalanceAboveMin(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 11, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	leaseStore := leases.NewMemoryStore(nowFn)
+	client := &fakeFundingClient{balance: big.NewInt(75)}
+	svc, err := New(Config{
+		LeaseName:          "proof-funder",
+		LeaseTTL:           15 * time.Second,
+		CheckInterval:      time.Second,
+		OwnerAddress:       common.HexToAddress("0x000000000000000000000000000000000000beef"),
+		RequestorAddress:   common.HexToAddress("0x000000000000000000000000000000000000cafe"),
+		MinBalanceWei:      big.NewInt(50),
+		TargetBalanceWei:   big.NewInt(200),
+		CriticalBalanceWei: big.NewInt(20),
+		MaxTopUpPerTxWei:   big.NewInt(100),
+	}, "funder-a", leaseStore, client, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := svc.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if client.topupCalls != 0 {
+		t.Fatalf("expected no topup, got %d calls", client.topupCalls)
+	}
+}
+
 func mustBig(v string) *big.Int {
 	out, ok := new(big.Int).SetString(v, 10)
 	if !ok {
@@ -134,4 +165,3 @@ func mustBig(v string) *big.Int {
 	}
 	return out
 }
-
