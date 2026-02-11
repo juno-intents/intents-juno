@@ -20,7 +20,22 @@ var (
 	ErrInvalidConfig    = errors.New("junorpc: invalid config")
 	ErrRPC              = errors.New("junorpc: rpc error")
 	ErrResponseTooLarge = errors.New("junorpc: response too large")
+	ErrTxNotFound       = errors.New("junorpc: transaction not found")
 )
+
+type RPCError struct {
+	Code    int
+	Message string
+}
+
+func (e *RPCError) Error() string {
+	if e == nil {
+		return "junorpc: nil rpc error"
+	}
+	return fmt.Sprintf("junorpc: rpc error code %d: %s", e.Code, e.Message)
+}
+
+func (e *RPCError) Unwrap() error { return ErrRPC }
 
 type Option func(*Client) error
 
@@ -119,6 +134,11 @@ type Block struct {
 	FinalOrchardRoot common.Hash
 }
 
+type RawTransaction struct {
+	TxID          string
+	Confirmations int64
+}
+
 func (c *Client) GetBlockChainInfo(ctx context.Context) (BlockChainInfo, error) {
 	var out BlockChainInfo
 	if err := c.call(ctx, "getblockchaininfo", nil, &out); err != nil {
@@ -161,6 +181,48 @@ func (c *Client) GetBlock(ctx context.Context, blockHash common.Hash) (Block, er
 		Hash:             h,
 		Height:           res.Height,
 		FinalOrchardRoot: root,
+	}, nil
+}
+
+func (c *Client) SendRawTransaction(ctx context.Context, rawTx []byte) (string, error) {
+	if len(rawTx) == 0 {
+		return "", fmt.Errorf("%w: empty raw tx", ErrInvalidConfig)
+	}
+	var txid string
+	if err := c.call(ctx, "sendrawtransaction", []any{hex.EncodeToString(rawTx)}, &txid); err != nil {
+		return "", err
+	}
+	h, err := parseHash32(txid)
+	if err != nil {
+		return "", fmt.Errorf("junorpc: parse sendrawtransaction result: %w", err)
+	}
+	return strings.TrimPrefix(h.Hex(), "0x"), nil
+}
+
+func (c *Client) GetRawTransaction(ctx context.Context, txid string) (RawTransaction, error) {
+	type rawTxResult struct {
+		TxID          string `json:"txid"`
+		Confirmations int64  `json:"confirmations"`
+	}
+	var res rawTxResult
+	err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(strings.TrimSpace(txid), "0x"), true}, &res)
+	if err != nil {
+		var rpcErr *RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -5 {
+			return RawTransaction{}, ErrTxNotFound
+		}
+		return RawTransaction{}, err
+	}
+	if res.TxID == "" {
+		res.TxID = txid
+	}
+	h, err := parseHash32(res.TxID)
+	if err != nil {
+		return RawTransaction{}, fmt.Errorf("junorpc: parse getrawtransaction txid: %w", err)
+	}
+	return RawTransaction{
+		TxID:          strings.TrimPrefix(h.Hex(), "0x"),
+		Confirmations: res.Confirmations,
 	}, nil
 }
 
@@ -209,8 +271,10 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 		return fmt.Errorf("junorpc: unmarshal response: %w", err)
 	}
 	if rr.Error != nil {
-		// Message comes from local node; still avoid printing params or creds.
-		return fmt.Errorf("%w: code %d: %s", ErrRPC, rr.Error.Code, rr.Error.Message)
+		return &RPCError{
+			Code:    rr.Error.Code,
+			Message: rr.Error.Message,
+		}
 	}
 	if out == nil {
 		return nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,5 +175,129 @@ func TestClient_GetBlock_ParsesFinalOrchardRoot(t *testing.T) {
 	}
 	if b.FinalOrchardRoot != finalRoot {
 		t.Fatalf("finalOrchardRoot mismatch: got %s want %s", b.FinalOrchardRoot, finalRoot)
+	}
+}
+
+func TestClient_SendRawTransaction(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	wantTxID := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "sendrawtransaction" {
+			t.Fatalf("method: got %q want %q", req.Method, "sendrawtransaction")
+		}
+		if len(req.Params) != 1 {
+			t.Fatalf("params: got %#v want 1 item", req.Params)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": wantTxID,
+			"error":  nil,
+			"id":     req.ID,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	txid, err := c.SendRawTransaction(context.Background(), []byte{0x01, 0x02, 0x03})
+	if err != nil {
+		t.Fatalf("SendRawTransaction: %v", err)
+	}
+	if txid != wantTxID {
+		t.Fatalf("txid mismatch: got %q want %q", txid, wantTxID)
+	}
+}
+
+func TestClient_GetRawTransaction_ParsesConfirmations(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	wantTxID := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		if req.Method != "getrawtransaction" {
+			t.Fatalf("method: got %q want %q", req.Method, "getrawtransaction")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{
+				"txid":          wantTxID,
+				"confirmations": 7,
+			},
+			"error": nil,
+			"id":    req.ID,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	res, err := c.GetRawTransaction(context.Background(), "0x"+wantTxID)
+	if err != nil {
+		t.Fatalf("GetRawTransaction: %v", err)
+	}
+	if res.TxID != wantTxID {
+		t.Fatalf("txid mismatch: got %q want %q", res.TxID, wantTxID)
+	}
+	if res.Confirmations != 7 {
+		t.Fatalf("confirmations mismatch: got %d want %d", res.Confirmations, 7)
+	}
+}
+
+func TestClient_GetRawTransaction_MapsNotFound(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": nil,
+			"error": map[string]any{
+				"code":    -5,
+				"message": "No such mempool or blockchain transaction",
+			},
+			"id": req.ID,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.GetRawTransaction(context.Background(), "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e")
+	if !errors.Is(err, ErrTxNotFound) {
+		t.Fatalf("expected ErrTxNotFound, got %v", err)
 	}
 }
