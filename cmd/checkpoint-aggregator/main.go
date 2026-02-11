@@ -12,8 +12,13 @@ import (
 	"strings"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -47,6 +52,16 @@ func main() {
 		maxLineBytes = flag.Int("max-line-bytes", 1<<20, "maximum input line size (bytes)")
 		maxOpen      = flag.Int("max-open", 4, "maximum distinct checkpoint digests tracked concurrently")
 		maxEmitted   = flag.Int("max-emitted", 128, "maximum emitted digests remembered for dedupe")
+
+		postgresDSN    = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		storeDriver    = flag.String("store-driver", "postgres", "checkpoint package metadata store driver: postgres|memory")
+		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "checkpoint mirror blobstore driver: s3|memory")
+		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for checkpoint package mirror (required for s3)")
+		blobPrefix     = flag.String("blob-prefix", "checkpoint-packages", "checkpoint package mirror key prefix")
+		blobMaxGet     = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
+		ipfsEnabled    = flag.Bool("ipfs-enabled", true, "enable IPFS pinning for checkpoint packages")
+		ipfsAPIURL     = flag.String("ipfs-api-url", "http://127.0.0.1:5001", "IPFS API URL used for package pinning")
+		persistTimeout = flag.Duration("persist-timeout", 30*time.Second, "timeout for package persistence (IPFS + blob + db)")
 
 		queueDriver     = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers    = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
@@ -84,10 +99,86 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --queue-ack-timeout must be > 0")
 		os.Exit(2)
 	}
+	if *persistTimeout <= 0 || *blobMaxGet <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --persist-timeout and --blob-max-get-size must be > 0")
+		os.Exit(2)
+	}
+	if normalizeBlobDriver(*blobDriver) == blobstore.DriverS3 && strings.TrimSpace(*blobBucket) == "" {
+		fmt.Fprintln(os.Stderr, "error: --blob-bucket is required when --blob-driver=s3")
+		os.Exit(2)
+	}
+	if *ipfsEnabled && strings.TrimSpace(*ipfsAPIURL) == "" {
+		fmt.Fprintln(os.Stderr, "error: --ipfs-api-url is required when --ipfs-enabled=true")
+		os.Exit(2)
+	}
 
 	bridge := common.HexToAddress(*bridgeAddr)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	var (
+		packageStore checkpoint.PackageStore
+		pool         *pgxpool.Pool
+		err          error
+	)
+	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
+	case "postgres":
+		if strings.TrimSpace(*postgresDSN) == "" {
+			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
+			os.Exit(2)
+		}
+		pool, err = pgxpool.New(ctx, *postgresDSN)
+		if err != nil {
+			log.Error("init pgx pool", "err", err)
+			os.Exit(2)
+		}
+		defer pool.Close()
+
+		pgStore, err := checkpointpg.New(pool)
+		if err != nil {
+			log.Error("init checkpoint store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure checkpoint store schema", "err", err)
+			os.Exit(2)
+		}
+		packageStore = pgStore
+	case "memory":
+		packageStore = checkpoint.NewMemoryPackageStore()
+	default:
+		fmt.Fprintf(os.Stderr, "error: unsupported --store-driver %q\n", *storeDriver)
+		os.Exit(2)
+	}
+
+	mirrorStore, err := newBlobStore(ctx, *blobDriver, *blobBucket, *blobPrefix, *blobMaxGet)
+	if err != nil {
+		log.Error("init blob store", "err", err)
+		os.Exit(2)
+	}
+
+	var pinner checkpoint.IPFSPinner
+	if *ipfsEnabled {
+		pinner, err = checkpoint.NewHTTPIPFSPinner(checkpoint.HTTPIPFSConfig{
+			APIURL: *ipfsAPIURL,
+		})
+		if err != nil {
+			log.Error("init ipfs pinner", "err", err)
+			os.Exit(2)
+		}
+	}
+
+	persist, err := checkpoint.NewPackagePersistence(checkpoint.PackagePersistenceConfig{
+		PackageStore: packageStore,
+		BlobStore:    mirrorStore,
+		BlobPrefix:   "",
+		IPFSPinner:   pinner,
+		Now:          time.Now,
+	})
+	if err != nil {
+		log.Error("init package persistence", "err", err)
+		os.Exit(2)
+	}
 
 	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
 		Driver:        *queueDriver,
@@ -140,6 +231,12 @@ func main() {
 		"operators", len(ops),
 		"queueDriver", *queueDriver,
 		"queueOutTopic", *queueOutTopic,
+		"storeDriver", strings.ToLower(strings.TrimSpace(*storeDriver)),
+		"blobDriver", normalizeBlobDriver(*blobDriver),
+		"blobBucket", strings.TrimSpace(*blobBucket),
+		"blobPrefix", strings.TrimSpace(*blobPrefix),
+		"ipfsEnabled", *ipfsEnabled,
+		"ipfsAPIURL", strings.TrimSpace(*ipfsAPIURL),
 	)
 	msgCh := consumer.Messages()
 	errCh := consumer.Errors()
@@ -218,6 +315,18 @@ func main() {
 				ackMessage(msg, *queueAckTimeout, log)
 				continue
 			}
+			pctx, pcancel := context.WithTimeout(ctx, *persistTimeout)
+			_, err = persist.Persist(pctx, checkpoint.PackageEnvelope{
+				Digest:          out.Digest,
+				Checkpoint:      out.Checkpoint,
+				OperatorSetHash: out.OperatorSetHash,
+				Payload:         payload,
+			})
+			pcancel()
+			if err != nil {
+				log.Error("persist checkpoint package", "err", err, "digest", out.Digest)
+				continue
+			}
 			if err := producer.Publish(ctx, *queueOutTopic, payload); err != nil {
 				log.Error("publish output", "err", err, "topic", *queueOutTopic)
 				continue
@@ -265,4 +374,29 @@ func decodeHexSignature(s string) ([]byte, error) {
 		return nil, fmt.Errorf("invalid hex signature")
 	}
 	return b, nil
+}
+
+func normalizeBlobDriver(driver string) string {
+	driver = strings.ToLower(strings.TrimSpace(driver))
+	if driver == "" {
+		return blobstore.DriverS3
+	}
+	return driver
+}
+
+func newBlobStore(ctx context.Context, driver string, bucket string, prefix string, maxGetSize int64) (blobstore.Store, error) {
+	cfg := blobstore.Config{
+		Driver:     normalizeBlobDriver(driver),
+		Bucket:     strings.TrimSpace(bucket),
+		Prefix:     strings.TrimSpace(prefix),
+		MaxGetSize: maxGetSize,
+	}
+	if cfg.Driver == blobstore.DriverS3 {
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load aws config: %w", err)
+		}
+		cfg.S3Client = awss3.NewFromConfig(awsCfg)
+	}
+	return blobstore.New(cfg)
 }

@@ -132,7 +132,7 @@ func TestCheckpointAggregator_Integration_RegtestJunocashd(t *testing.T) {
 	}
 
 	var lines []string
-	for _, k := range keys {
+	for i, k := range keys {
 		binCtx, binCancel := context.WithTimeout(ctx, 30*time.Second)
 
 		cmd := exec.CommandContext(binCtx, signerBin,
@@ -142,6 +142,8 @@ func TestCheckpointAggregator_Integration_RegtestJunocashd(t *testing.T) {
 			"--confirmations", "0",
 			"--poll-interval", "100ms",
 			"--rpc-timeout", "5s",
+			"--owner-id", fmt.Sprintf("it-signer-%d", i),
+			"--lease-driver", "memory",
 			"--queue-driver", "stdio",
 		)
 		cmd.Env = append(os.Environ(),
@@ -209,6 +211,9 @@ func TestCheckpointAggregator_Integration_RegtestJunocashd(t *testing.T) {
 		"--operators", opsCSV,
 		"--threshold", "3",
 		"--max-line-bytes", "1048576",
+		"--store-driver", "memory",
+		"--blob-driver", "memory",
+		"--ipfs-enabled=false",
 		"--queue-driver", "stdio",
 	)
 

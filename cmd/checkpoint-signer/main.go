@@ -10,14 +10,18 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/leases"
+	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -74,6 +78,12 @@ func main() {
 		pollInterval = flag.Duration("poll-interval", 2*time.Second, "poll interval for tip height")
 		rpcTimeout   = flag.Duration("rpc-timeout", 10*time.Second, "HTTP client timeout for junocashd RPC calls")
 
+		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required when --lease-driver=postgres)")
+		leaseDriver = flag.String("lease-driver", "postgres", "lease driver: postgres|memory")
+		ownerID     = flag.String("owner-id", "", "unique signer instance id (required)")
+		leaseName   = flag.String("lease-name", "checkpoint-signer", "lease name used for active signer selection")
+		leaseTTL    = flag.Duration("lease-ttl", 15*time.Second, "lease TTL for active signer selection")
+
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 		queueOutTopic = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
@@ -82,12 +92,12 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *junoRPCURL == "" || *baseChainID == 0 || *bridgeAddr == "" {
-		fmt.Fprintln(os.Stderr, "error: --juno-rpc-url, --base-chain-id, and --bridge-address are required")
+	if *junoRPCURL == "" || *baseChainID == 0 || *bridgeAddr == "" || strings.TrimSpace(*ownerID) == "" {
+		fmt.Fprintln(os.Stderr, "error: --juno-rpc-url, --base-chain-id, --bridge-address, and --owner-id are required")
 		os.Exit(2)
 	}
-	if *pollInterval <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --poll-interval must be > 0")
+	if *pollInterval <= 0 || *leaseTTL <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --poll-interval and --lease-ttl must be > 0")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -129,6 +139,41 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	var leaseStore leases.Store
+	switch strings.ToLower(strings.TrimSpace(*leaseDriver)) {
+	case "postgres":
+		if strings.TrimSpace(*postgresDSN) == "" {
+			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --lease-driver=postgres")
+			os.Exit(2)
+		}
+		pool, err := pgxpool.New(ctx, *postgresDSN)
+		if err != nil {
+			log.Error("init pgx pool", "err", err)
+			os.Exit(2)
+		}
+		defer pool.Close()
+
+		pgLeaseStore, err := leasespg.New(pool)
+		if err != nil {
+			log.Error("init lease store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgLeaseStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure lease schema", "err", err)
+			os.Exit(2)
+		}
+		leaseStore = pgLeaseStore
+	case "memory":
+		leaseStore = leases.NewMemoryStore(time.Now)
+	default:
+		fmt.Fprintf(os.Stderr, "error: unsupported --lease-driver %q\n", *leaseDriver)
+		os.Exit(2)
+	}
+	defer func() {
+		_ = leaseStore.Release(context.Background(), strings.TrimSpace(*leaseName), strings.TrimSpace(*ownerID))
+	}()
+
 	producer, err := queue.NewProducer(queue.ProducerConfig{
 		Driver:  *queueDriver,
 		Brokers: queue.SplitCommaList(*queueBrokers),
@@ -167,6 +212,10 @@ func main() {
 		"confirmations", *confirmations,
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
+		"ownerID", strings.TrimSpace(*ownerID),
+		"leaseName", strings.TrimSpace(*leaseName),
+		"leaseTTL", leaseTTL.String(),
+		"leaseDriver", strings.ToLower(strings.TrimSpace(*leaseDriver)),
 		"queueDriver", *queueDriver,
 		"queueOutTopic", *queueOutTopic,
 	)
@@ -178,6 +227,17 @@ func main() {
 			log.Info("shutdown", "reason", ctx.Err())
 			return
 		case <-t.C:
+		}
+
+		leaseCtx, leaseCancel := context.WithTimeout(ctx, *rpcTimeout)
+		isLeader, err := holdLease(leaseCtx, leaseStore, strings.TrimSpace(*leaseName), strings.TrimSpace(*ownerID), *leaseTTL)
+		leaseCancel()
+		if err != nil {
+			log.Error("lease tick", "err", err)
+			continue
+		}
+		if !isLeader {
+			continue
 		}
 
 		// Per-iteration timeout to avoid wedging the loop on slow RPC.
@@ -218,4 +278,17 @@ func main() {
 			continue
 		}
 	}
+}
+
+func holdLease(ctx context.Context, store leases.Store, name, owner string, ttl time.Duration) (bool, error) {
+	if _, ok, err := store.Renew(ctx, name, owner, ttl); err == nil && ok {
+		return true, nil
+	} else if err != nil && !errors.Is(err, leases.ErrNotFound) && !errors.Is(err, leases.ErrNotOwner) {
+		return false, err
+	}
+	_, ok, err := store.TryAcquire(ctx, name, owner, ttl)
+	if err != nil {
+		return false, err
+	}
+	return ok, nil
 }
