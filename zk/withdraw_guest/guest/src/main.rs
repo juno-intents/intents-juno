@@ -12,15 +12,9 @@ use withdraw_guest_core::{
 
 risc0_zkvm::guest::entry!(main);
 
-// Placeholder OutgoingViewingKey bytes for development only.
-//
-// This MUST be replaced with the oWallet OutgoingViewingKey derived from the operator
-// keyset manifest (DKG output). The withdraw image ID must commit to the correct keyset.
-const OWALLET_OVK_BYTES: [u8; 32] = [7u8; 32];
-
 fn main() {
     let input = read_input();
-    let ovk = OutgoingViewingKey::from(OWALLET_OVK_BYTES);
+    let ovk = OutgoingViewingKey::from(input.owallet_ovk_bytes);
 
     let journal = prove_withdraw_batch(
         input.final_orchard_root,
@@ -38,6 +32,7 @@ struct Input {
     final_orchard_root: [u8; 32],
     base_chain_id: u32,
     bridge_contract: [u8; 20],
+    owallet_ovk_bytes: [u8; 32],
     items: Vec<WithdrawItemWitness>,
 }
 
@@ -49,6 +44,9 @@ fn read_input() -> Input {
 
     let mut bridge_contract = [0u8; 20];
     env::read_slice(&mut bridge_contract);
+
+    let mut owallet_ovk_bytes = [0u8; 32];
+    env::read_slice(&mut owallet_ovk_bytes);
 
     let n: u32 = env::read();
     if (n as usize) > MAX_WITHDRAW_ITEMS {
@@ -64,6 +62,7 @@ fn read_input() -> Input {
         final_orchard_root,
         base_chain_id,
         bridge_contract,
+        owallet_ovk_bytes,
         items,
     }
 }

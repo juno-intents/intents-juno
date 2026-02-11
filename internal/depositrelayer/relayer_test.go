@@ -2,6 +2,7 @@ package depositrelayer
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"encoding/hex"
 	"math/big"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
@@ -33,21 +35,36 @@ func (s *stubSender) Send(_ context.Context, req httpapi.SendRequest) (httpapi.S
 type stubProver struct {
 	gotImageID common.Hash
 	gotJournal []byte
+	gotInput   []byte
 	seal       []byte
 	err        error
 }
 
-func (p *stubProver) Prove(_ context.Context, imageID common.Hash, journal []byte) ([]byte, error) {
+func (p *stubProver) Prove(_ context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error) {
 	p.gotImageID = imageID
 	p.gotJournal = append([]byte(nil), journal...)
+	p.gotInput = append([]byte(nil), privateInput...)
 	return p.seal, p.err
 }
 
-func mustOperatorSig(t *testing.T) []byte {
+func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
-	sig := make([]byte, 65)
-	sig[64] = 27
-	return sig
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	return key
+}
+
+func mustSignedCheckpoint(t *testing.T, cp checkpoint.Checkpoint) ([]common.Address, [][]byte) {
+	t.Helper()
+	key := mustOperatorKey(t)
+	sig, err := checkpoint.SignDigest(key, checkpoint.Digest(cp))
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	return []common.Address{addr}, [][]byte{sig}
 }
 
 func mustType(t *testing.T, typ string, comps []abi.ArgumentMarshaling) abi.Type {
@@ -92,19 +109,22 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
 	prover := &stubProver{seal: []byte{0x99}}
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		GasLimit:       55555,
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		GasLimit:          55555,
+		Now:               time.Now,
 	}, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -113,7 +133,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancel)
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -219,18 +239,21 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
 	prover := &stubProver{seal: []byte{0x99}}
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
 	}, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -239,7 +262,7 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancel)
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -292,6 +315,7 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{
 		res: httpapi.SendResponse{
@@ -304,13 +328,15 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 	prover := &stubProver{seal: []byte{0x99}}
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
 	}, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -319,7 +345,7 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	t.Cleanup(cancel)
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -369,18 +395,21 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
 	prover := &stubProver{seal: []byte{0x99}}
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
 	}, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -401,7 +430,7 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 		t.Fatalf("sender calls: got %d want %d", sender.calls, 0)
 	}
 
-	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{mustOperatorSig(t)}}); err != nil {
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
 
@@ -426,15 +455,18 @@ func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
 
 	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
 	prover := &stubProver{seal: []byte{0x99}}
+	operatorAddrs, _ := mustSignedCheckpoint(t, cp)
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
 	}, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)

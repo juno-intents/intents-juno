@@ -268,14 +268,20 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 	}
 
 	// Run the finalizer.
+	operatorAddrs := make([]common.Address, 0, len(opKeys))
+	for _, k := range opKeys {
+		operatorAddrs = append(operatorAddrs, crypto.PubkeyToAddress(k.PublicKey))
+	}
 	f, err := New(Config{
-		Owner:          "finalizer1",
-		LeaseTTL:       10 * time.Second,
-		MaxBatches:     10,
-		BaseChainID:    uint64(chainID.Uint64()),
-		BridgeAddress:  bridgeAddr,
-		WithdrawImageID: withdrawImageID,
-		GasLimit:       500_000,
+		Owner:             "finalizer1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       uint64(chainID.Uint64()),
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   withdrawImageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 3,
+		GasLimit:          500_000,
 	}, store, leaseStore, client, &staticProver{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New finalizer: %v", err)

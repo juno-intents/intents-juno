@@ -20,8 +20,8 @@ import (
 )
 
 var (
-	ErrInvalidConfig    = errors.New("depositrelayer: invalid config")
-	ErrInvalidEvent     = errors.New("depositrelayer: invalid event")
+	ErrInvalidConfig     = errors.New("depositrelayer: invalid config")
+	ErrInvalidEvent      = errors.New("depositrelayer: invalid event")
 	ErrInvalidCheckpoint = errors.New("depositrelayer: invalid checkpoint")
 )
 
@@ -30,13 +30,16 @@ type Sender interface {
 }
 
 type Prover interface {
-	Prove(ctx context.Context, imageID common.Hash, journal []byte) ([]byte, error)
+	Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error)
 }
 
 type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
 	DepositImageID common.Hash
+
+	OperatorAddresses []common.Address
+	OperatorThreshold int
 
 	MaxItems  int
 	MaxAge    time.Duration
@@ -73,6 +76,8 @@ type Relayer struct {
 	seen      map[common.Hash]struct{}
 	seenOrder []common.Hash
 
+	quorumVerifier *checkpoint.QuorumVerifier
+
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
 
@@ -88,6 +93,12 @@ func New(cfg Config, sender Sender, prover Prover, log *slog.Logger) (*Relayer, 
 	}
 	if cfg.MaxItems <= 0 {
 		return nil, fmt.Errorf("%w: MaxItems must be > 0", ErrInvalidConfig)
+	}
+	if len(cfg.OperatorAddresses) == 0 {
+		return nil, fmt.Errorf("%w: OperatorAddresses must be non-empty", ErrInvalidConfig)
+	}
+	if cfg.OperatorThreshold <= 0 {
+		return nil, fmt.Errorf("%w: OperatorThreshold must be > 0", ErrInvalidConfig)
 	}
 	if cfg.MaxAge <= 0 {
 		return nil, fmt.Errorf("%w: MaxAge must be > 0", ErrInvalidConfig)
@@ -114,17 +125,23 @@ func New(cfg Config, sender Sender, prover Prover, log *slog.Logger) (*Relayer, 
 		return nil, err
 	}
 
+	quorumVerifier, err := checkpoint.NewQuorumVerifier(cfg.OperatorAddresses, cfg.OperatorThreshold)
+	if err != nil {
+		return nil, err
+	}
+
 	var bridge20 [20]byte
 	copy(bridge20[:], cfg.BridgeAddress[:])
 
 	return &Relayer{
-		cfg:               cfg,
-		log:               log,
-		sender:            sender,
-		prover:            prover,
+		cfg:                cfg,
+		log:                log,
+		sender:             sender,
+		prover:             prover,
 		expectedBridgeMemo: bridge20,
-		batcher:           b,
-		seen:              make(map[common.Hash]struct{}, cfg.DedupeMax),
+		batcher:            b,
+		seen:               make(map[common.Hash]struct{}, cfg.DedupeMax),
+		quorumVerifier:     quorumVerifier,
 	}, nil
 }
 
@@ -136,16 +153,8 @@ func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) e
 	if cp.BridgeContract != r.cfg.BridgeAddress {
 		return fmt.Errorf("%w: bridge mismatch: want %s got %s", ErrInvalidCheckpoint, r.cfg.BridgeAddress, cp.BridgeContract)
 	}
-	if len(pkg.OperatorSignatures) == 0 {
-		return fmt.Errorf("%w: empty operator signatures", ErrInvalidCheckpoint)
-	}
-	for i, sig := range pkg.OperatorSignatures {
-		if len(sig) != 65 {
-			return fmt.Errorf("%w: signature[%d] invalid length %d", ErrInvalidCheckpoint, i, len(sig))
-		}
-		if sig[64] != 27 && sig[64] != 28 {
-			return fmt.Errorf("%w: signature[%d] invalid v %d", ErrInvalidCheckpoint, i, sig[64])
-		}
+	if _, err := r.quorumVerifier.VerifyCheckpointSignatures(cp, pkg.OperatorSignatures); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCheckpoint, err)
 	}
 
 	// Only move forward in height to avoid accidental reorg/rollback usage.
@@ -253,7 +262,7 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	seal, err := r.prover.Prove(ctx, r.cfg.DepositImageID, journal)
+	seal, err := r.prover.Prove(ctx, r.cfg.DepositImageID, journal, nil)
 	if err != nil {
 		return err
 	}

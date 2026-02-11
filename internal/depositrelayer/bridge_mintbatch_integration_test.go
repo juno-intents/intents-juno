@@ -205,15 +205,22 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 	}.Encode()
 
 	// Run relayer to submit mintBatch via base-relayer.
+	operatorAddrs := make([]common.Address, 0, len(opKeys))
+	for _, k := range opKeys {
+		operatorAddrs = append(operatorAddrs, crypto.PubkeyToAddress(k.PublicKey))
+	}
+
 	r, err := New(Config{
-		BaseChainID:    uint32(chainID.Uint64()),
-		BridgeAddress:  bridgeAddr,
-		DepositImageID: depositImageID,
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		GasLimit:       500_000,
-		Now:            time.Now,
+		BaseChainID:       uint32(chainID.Uint64()),
+		BridgeAddress:     bridgeAddr,
+		DepositImageID:    depositImageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 3,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		GasLimit:          500_000,
+		Now:               time.Now,
 	}, sender, &staticSealProver{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)

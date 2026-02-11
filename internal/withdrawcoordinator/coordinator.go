@@ -301,10 +301,62 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 	if b.State < withdraw.BatchStateBroadcasted {
 		return withdraw.ErrInvalidTransition
 	}
+	if err := c.ensureExpirySafety(ctx, b.WithdrawalIDs); err != nil {
+		return err
+	}
 	if err := c.confirmer.WaitConfirmed(ctx, b.JunoTxID); err != nil {
+		if errors.Is(err, ErrConfirmationPending) {
+			return nil
+		}
+		if errors.Is(err, ErrConfirmationMissing) {
+			return c.replanAndRebroadcastBatch(ctx, b.ID)
+		}
 		return err
 	}
 	return c.store.SetBatchConfirmed(ctx, batchID)
+}
+
+func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32]byte) error {
+	b, err := c.store.GetBatch(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		return nil
+	}
+
+	withdrawals := make([]withdraw.Withdrawal, 0, len(b.WithdrawalIDs))
+	for _, wid := range b.WithdrawalIDs {
+		w, err := c.store.GetWithdrawal(ctx, wid)
+		if err != nil {
+			return err
+		}
+		withdrawals = append(withdrawals, w)
+	}
+
+	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
+	if err != nil {
+		return err
+	}
+	if err := c.store.ResetBatchPlanned(ctx, b.ID, plan); err != nil {
+		if !errors.Is(err, withdraw.ErrInvalidTransition) {
+			return err
+		}
+		b2, err2 := c.store.GetBatch(ctx, b.ID)
+		if err2 != nil {
+			return err2
+		}
+		// Another worker progressed the batch.
+		if b2.State != withdraw.BatchStateBroadcasted {
+			return nil
+		}
+		return err
+	}
+
+	if err := c.signBatch(ctx, b.ID); err != nil {
+		return err
+	}
+	return c.broadcastBatch(ctx, b.ID)
 }
 
 func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][32]byte) error {

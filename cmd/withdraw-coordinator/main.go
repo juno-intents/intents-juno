@@ -20,7 +20,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
@@ -91,6 +90,7 @@ func main() {
 		junoRPCMaxResp    = flag.Int64("juno-rpc-max-response-bytes", 5<<20, "max bytes in junocashd RPC response")
 		junoConfirmations = flag.Int64("juno-confirmations", 1, "required Juno confirmations before marking batch confirmed")
 		junoConfirmPoll   = flag.Duration("juno-confirm-poll", 5*time.Second, "poll interval while waiting for Juno confirmations")
+		junoConfirmWait   = flag.Duration("juno-confirm-max-wait", 30*time.Second, "maximum wait per confirmation check before yielding pending/missing status")
 
 		// Signer (tss-host)
 		tssURL            = flag.String("tss-url", "", "tss-host base url (required; must be https unless --tss-insecure-http)")
@@ -102,13 +102,14 @@ func main() {
 		tssClientKeyFile  = flag.String("tss-client-key-file", "", "client key PEM file (optional; for mTLS)")
 
 		// Base expiry extension path
-		baseChainID        = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
-		bridgeAddr         = flag.String("bridge-address", "", "Bridge contract address (required)")
-		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
-		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token")
-		baseRelayerTimeout = flag.Duration("base-relayer-timeout", 30*time.Second, "base-relayer timeout")
-		extendGasLimit     = flag.Uint64("extend-gas-limit", 0, "optional gas limit override for extendWithdrawExpiryBatch")
-		extendKeysEnv      = flag.String("extend-signer-keys-env", "WITHDRAW_EXTEND_SIGNER_KEYS", "env var containing comma-separated secp256k1 private keys for extendWithdrawExpiry signatures")
+		baseChainID         = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
+		bridgeAddr          = flag.String("bridge-address", "", "Bridge contract address (required)")
+		baseRelayerURL      = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
+		baseRelayerAuthEnv  = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token")
+		baseRelayerTimeout  = flag.Duration("base-relayer-timeout", 30*time.Second, "base-relayer timeout")
+		extendGasLimit      = flag.Uint64("extend-gas-limit", 0, "optional gas limit override for extendWithdrawExpiryBatch")
+		extendSignerBin     = flag.String("extend-signer-bin", "", "path to external extend signer binary (required)")
+		extendSignerMaxResp = flag.Int("extend-signer-max-response-bytes", 1<<20, "max extend signer response size (bytes)")
 	)
 	flag.Parse()
 
@@ -150,7 +151,7 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --leader-lease-ttl must be > 0")
 		os.Exit(2)
 	}
-	if *junoConfirmations <= 0 || *junoConfirmPoll <= 0 || *junoRPCTimeout <= 0 || *junoRPCMaxResp <= 0 {
+	if *junoConfirmations <= 0 || *junoConfirmPoll <= 0 || *junoConfirmWait <= 0 || *junoRPCTimeout <= 0 || *junoRPCMaxResp <= 0 {
 		fmt.Fprintln(os.Stderr, "error: juno rpc and confirmation settings must be > 0")
 		os.Exit(2)
 	}
@@ -160,6 +161,10 @@ func main() {
 	}
 	if *baseRelayerTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --base-relayer-timeout must be > 0")
+		os.Exit(2)
+	}
+	if *extendSignerBin == "" || *extendSignerMaxResp <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --extend-signer-bin is required and --extend-signer-max-response-bytes must be > 0")
 		os.Exit(2)
 	}
 
@@ -173,17 +178,6 @@ func main() {
 	baseRelayerAuth := os.Getenv(*baseRelayerAuthEnv)
 	if baseRelayerAuth == "" {
 		fmt.Fprintf(os.Stderr, "error: missing base-relayer auth token in env %s\n", *baseRelayerAuthEnv)
-		os.Exit(2)
-	}
-
-	extendSignerKeysRaw := os.Getenv(*extendKeysEnv)
-	if strings.TrimSpace(extendSignerKeysRaw) == "" {
-		fmt.Fprintf(os.Stderr, "error: missing extend signer keys in env %s\n", *extendKeysEnv)
-		os.Exit(2)
-	}
-	extendSignerKeys, err := eth.ParsePrivateKeysHexList(extendSignerKeysRaw)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: parse extend signer keys: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -267,7 +261,7 @@ func main() {
 		log.Error("init juno broadcaster", "err", err)
 		os.Exit(2)
 	}
-	confirmer, err := withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll)
+	confirmer, err := withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll, *junoConfirmWait)
 	if err != nil {
 		log.Error("init juno confirmer", "err", err)
 		os.Exit(2)
@@ -278,7 +272,7 @@ func main() {
 		log.Error("init base-relayer client", "err", err)
 		os.Exit(2)
 	}
-	localExtendSigner, err := withdrawcoordinator.NewLocalExtendSigner(extendSignerKeys)
+	extendSigner, err := withdrawcoordinator.NewExecExtendSigner(*extendSignerBin, *extendSignerMaxResp)
 	if err != nil {
 		log.Error("init extend signer", "err", err)
 		os.Exit(2)
@@ -287,7 +281,7 @@ func main() {
 		BaseChainID:   *baseChainID,
 		BridgeAddress: common.HexToAddress(*bridgeAddr),
 		GasLimit:      *extendGasLimit,
-	}, baseClient, localExtendSigner)
+	}, baseClient, extendSigner)
 	if err != nil {
 		log.Error("init expiry extender", "err", err)
 		os.Exit(2)

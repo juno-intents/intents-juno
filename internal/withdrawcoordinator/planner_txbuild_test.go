@@ -39,14 +39,14 @@ func TestTxBuildPlanner_Plan_BuildsOutputsAndParsesPlan(t *testing.T) {
 		ID:          seq32ForPlanner(0x20),
 		Amount:      10_000,
 		FeeBps:      50,
-		RecipientUA: []byte("j1recipient-a"),
+		RecipientUA: []byte("j1recipienta"),
 		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
 	}
 	w1 := withdraw.Withdrawal{
 		ID:          seq32ForPlanner(0x00),
 		Amount:      5_000,
 		FeeBps:      0,
-		RecipientUA: []byte("j1recipient-b"),
+		RecipientUA: []byte("j1recipientb"),
 		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
 	}
 
@@ -88,7 +88,7 @@ func TestTxBuildPlanner_Plan_BuildsOutputsAndParsesPlan(t *testing.T) {
 		}
 
 		// Outputs are sorted by withdrawal ID ascending.
-		if outs[0].ToAddress != "j1recipient-b" || outs[1].ToAddress != "j1recipient-a" {
+		if outs[0].ToAddress != "j1recipientb" || outs[1].ToAddress != "j1recipienta" {
 			t.Fatalf("unexpected output order: %+v", outs)
 		}
 		// net(10000,50bps)=9950
@@ -156,6 +156,42 @@ func TestTxBuildPlanner_Plan_RejectsInvalidRecipientUA(t *testing.T) {
 		Amount:      1,
 		FeeBps:      0,
 		RecipientUA: []byte{0xff},
+		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
+	}
+	_, err = p.Plan(context.Background(), seq32ForPlanner(0x80), []withdraw.Withdrawal{w})
+	if err == nil || !strings.Contains(err.Error(), "invalid withdrawal recipient UA") {
+		t.Fatalf("expected invalid recipient UA error, got %v", err)
+	}
+}
+
+func TestTxBuildPlanner_Plan_RejectsRecipientUAWithWhitespace(t *testing.T) {
+	t.Parallel()
+
+	cfg := TxBuildPlannerConfig{
+		Binary:           "juno-txbuild",
+		WalletID:         "wallet-1",
+		ChangeAddress:    "j1change",
+		BaseChainID:      8453,
+		BridgeAddress:    common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		MinConfirmations: 1,
+		ExpiryOffset:     40,
+		FeeMultiplier:    1,
+	}
+	p, err := NewTxBuildPlanner(cfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner: %v", err)
+	}
+
+	p.execCommand = func(_ context.Context, _ string, _ []string, _ []string) ([]byte, error) {
+		t.Fatalf("execCommand should not be called")
+		return nil, nil
+	}
+
+	w := withdraw.Withdrawal{
+		ID:          seq32ForPlanner(0x00),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: []byte(" j1recipienta"),
 		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
 	}
 	_, err = p.Plan(context.Background(), seq32ForPlanner(0x80), []withdraw.Withdrawal{w})

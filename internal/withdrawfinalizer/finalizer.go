@@ -30,7 +30,7 @@ type Sender interface {
 }
 
 type Prover interface {
-	Prove(ctx context.Context, imageID common.Hash, journal []byte) ([]byte, error)
+	Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error)
 }
 
 type CheckpointPackage struct {
@@ -44,9 +44,12 @@ type Config struct {
 
 	MaxBatches int
 
-	BaseChainID    uint64
-	BridgeAddress  common.Address
+	BaseChainID     uint64
+	BridgeAddress   common.Address
 	WithdrawImageID common.Hash
+
+	OperatorAddresses []common.Address
+	OperatorThreshold int
 
 	GasLimit uint64
 }
@@ -60,6 +63,8 @@ type Finalizer struct {
 	prover     Prover
 
 	log *slog.Logger
+
+	quorumVerifier *checkpoint.QuorumVerifier
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
@@ -84,17 +89,29 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 	if (cfg.BridgeAddress == common.Address{}) {
 		return nil, fmt.Errorf("%w: BridgeAddress must be non-zero", ErrInvalidConfig)
 	}
+	if len(cfg.OperatorAddresses) == 0 {
+		return nil, fmt.Errorf("%w: OperatorAddresses must be non-empty", ErrInvalidConfig)
+	}
+	if cfg.OperatorThreshold <= 0 {
+		return nil, fmt.Errorf("%w: OperatorThreshold must be > 0", ErrInvalidConfig)
+	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
+	quorumVerifier, err := checkpoint.NewQuorumVerifier(cfg.OperatorAddresses, cfg.OperatorThreshold)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Finalizer{
-		cfg:        cfg,
-		store:      store,
-		leaseStore: leaseStore,
-		sender:     sender,
-		prover:     prover,
-		log:        log,
+		cfg:            cfg,
+		store:          store,
+		leaseStore:     leaseStore,
+		sender:         sender,
+		prover:         prover,
+		log:            log,
+		quorumVerifier: quorumVerifier,
 	}, nil
 }
 
@@ -106,16 +123,8 @@ func (f *Finalizer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage)
 	if cp.BridgeContract != f.cfg.BridgeAddress {
 		return fmt.Errorf("%w: bridge mismatch: want %s got %s", ErrInvalidCheckpoint, f.cfg.BridgeAddress, cp.BridgeContract)
 	}
-	if len(pkg.OperatorSignatures) == 0 {
-		return fmt.Errorf("%w: empty operator signatures", ErrInvalidCheckpoint)
-	}
-	for i, sig := range pkg.OperatorSignatures {
-		if len(sig) != 65 {
-			return fmt.Errorf("%w: signature[%d] invalid length %d", ErrInvalidCheckpoint, i, len(sig))
-		}
-		if sig[64] != 27 && sig[64] != 28 {
-			return fmt.Errorf("%w: signature[%d] invalid v %d", ErrInvalidCheckpoint, i, sig[64])
-		}
+	if _, err := f.quorumVerifier.VerifyCheckpointSignatures(cp, pkg.OperatorSignatures); err != nil {
+		return fmt.Errorf("%w: %v", ErrInvalidCheckpoint, err)
 	}
 
 	// Only move forward in height to avoid accidental reorg/rollback usage.
@@ -205,7 +214,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal)
+	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal, nil)
 	if err != nil {
 		return err
 	}
@@ -257,4 +266,3 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 func batchLeaseName(batchID [32]byte) string {
 	return "withdraw-finalizer/batch/" + hex.EncodeToString(batchID[:])
 }
-

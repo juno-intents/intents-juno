@@ -49,6 +49,8 @@ func main() {
 	var (
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required; must fit uint32 for deposit memo domain separation)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
+		operators   = flag.String("operators", "", "comma-separated operator addresses for checkpoint quorum verification (required)")
+		threshold   = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 
 		depositImageID = flag.String("deposit-image-id", "", "deposit zkVM image id (bytes32 hex, required)")
 
@@ -71,8 +73,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *baseChainID == 0 || *bridgeAddr == "" || *depositImageID == "" || *baseRelayerURL == "" || *proverBin == "" {
-		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --deposit-image-id, --base-relayer-url, and --prover-bin are required")
+	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" || *proverBin == "" {
+		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, --base-relayer-url, and --prover-bin are required")
 		os.Exit(2)
 	}
 	if *baseChainID > uint64(^uint32(0)) {
@@ -102,6 +104,11 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: parse --deposit-image-id: %v\n", err)
 		os.Exit(2)
 	}
+	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse --operators: %v\n", err)
+		os.Exit(2)
+	}
 
 	authToken := os.Getenv(*baseRelayerAuthEnv)
 	if authToken == "" {
@@ -128,14 +135,16 @@ func main() {
 	defer stop()
 
 	relayer, err := depositrelayer.New(depositrelayer.Config{
-		BaseChainID:    uint32(*baseChainID),
-		BridgeAddress:  bridge,
-		DepositImageID: imageID,
-		MaxItems:       *maxItems,
-		MaxAge:         *maxAge,
-		DedupeMax:      *dedupeMax,
-		GasLimit:       *gasLimit,
-		Now:            time.Now,
+		BaseChainID:       uint32(*baseChainID),
+		BridgeAddress:     bridge,
+		DepositImageID:    imageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: *threshold,
+		MaxItems:          *maxItems,
+		MaxAge:            *maxAge,
+		DedupeMax:         *dedupeMax,
+		GasLimit:          *gasLimit,
+		Now:               time.Now,
 	}, baseClient, proverClient, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)

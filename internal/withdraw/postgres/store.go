@@ -424,6 +424,33 @@ func (s *Store) SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid 
 	return nil
 }
 
+func (s *Store) ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error {
+	if len(txPlan) == 0 {
+		return withdraw.ErrInvalidConfig
+	}
+
+	state, _, _, err := s.getBatchStateFields(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if state != withdraw.BatchStateBroadcasted {
+		return withdraw.ErrInvalidTransition
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, updated_at = now()
+		WHERE batch_id = $1 AND state = $4
+	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateBroadcasted))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: reset planned: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
 func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 	state, _, _, err := s.getBatchStateFields(ctx, batchID)
 	if err != nil {

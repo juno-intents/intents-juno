@@ -2,11 +2,13 @@ package withdrawfinalizer
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/leases"
@@ -30,7 +32,29 @@ type staticProver struct {
 	seal []byte
 }
 
-func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte) ([]byte, error) { return p.seal, nil }
+func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
+	return p.seal, nil
+}
+
+func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
+	t.Helper()
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	return key
+}
+
+func mustSignedCheckpoint(t *testing.T, cp checkpoint.Checkpoint) ([]common.Address, [][]byte) {
+	t.Helper()
+	key := mustOperatorKey(t)
+	sig, err := checkpoint.SignDigest(key, checkpoint.Digest(cp))
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	addr := crypto.PubkeyToAddress(key.PublicKey)
+	return []common.Address{addr}, [][]byte{sig}
+}
 
 func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 	t.Parallel()
@@ -59,14 +83,17 @@ func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 	_ = store.SetBatchConfirmed(ctx, batchID)
 
 	sender := &recordingSender{}
+	operatorKey := mustOperatorKey(t)
 	f, err := New(Config{
-		Owner:         "f1",
-		LeaseTTL:      10 * time.Second,
-		MaxBatches:    10,
-		BaseChainID:   31337,
-		BridgeAddress: common.HexToAddress("0x0000000000000000000000000000000000000123"),
-		WithdrawImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
-		GasLimit:      123_000,
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		WithdrawImageID:   common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
 	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -116,6 +143,14 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	sender := &recordingSender{
 		res: httpapi.SendResponse{
@@ -127,29 +162,23 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	}
 
 	f, err := New(Config{
-		Owner:          "f1",
-		LeaseTTL:       10 * time.Second,
-		MaxBatches:     10,
-		BaseChainID:    31337,
-		BridgeAddress:  bridgeAddr,
-		WithdrawImageID: withdrawImageID,
-		GasLimit:       123_000,
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   withdrawImageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
 	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	opSig := make([]byte, 65)
-	opSig[64] = 27
 	if err := f.IngestCheckpoint(ctx, CheckpointPackage{
-		Checkpoint: checkpoint.Checkpoint{
-			Height:           1,
-			BlockHash:        common.Hash{},
-			FinalOrchardRoot: common.Hash{},
-			BaseChainID:      31337,
-			BridgeContract:   bridgeAddr,
-		},
-		OperatorSignatures: [][]byte{opSig},
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
 	}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}
@@ -220,28 +249,30 @@ func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 	}
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{BaseChainID: 31337, BridgeContract: bridgeAddr}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 	sender := &recordingSender{
 		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
 	}
 
 	f, err := New(Config{
-		Owner:          "f1",
-		LeaseTTL:       10 * time.Second,
-		MaxBatches:     10,
-		BaseChainID:    31337,
-		BridgeAddress:  bridgeAddr,
-		WithdrawImageID: common.Hash{},
-		GasLimit:       123_000,
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
 	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	opSig := make([]byte, 65)
-	opSig[64] = 27
 	_ = f.IngestCheckpoint(ctx, CheckpointPackage{
-		Checkpoint: checkpoint.Checkpoint{BaseChainID: 31337, BridgeContract: bridgeAddr},
-		OperatorSignatures: [][]byte{opSig},
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
 	})
 
 	if err := f.Tick(ctx); err != nil {
@@ -258,4 +289,3 @@ func seq32(start byte) (out [32]byte) {
 	}
 	return out
 }
-

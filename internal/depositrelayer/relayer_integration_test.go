@@ -45,7 +45,7 @@ type staticSealProver struct {
 	seal []byte
 }
 
-func (p *staticSealProver) Prove(_ context.Context, _ common.Hash, _ []byte) ([]byte, error) {
+func (p *staticSealProver) Prove(_ context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
 	return p.seal, nil
 }
 
@@ -110,6 +110,15 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 		BaseChainID:      uint64(baseChainID),
 		BridgeContract:   bridge,
 	}
+	opKey, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA operator key: %v", err)
+	}
+	opAddr := crypto.PubkeyToAddress(opKey.PublicKey)
+	opSig, err := checkpoint.SignDigest(opKey, checkpoint.Digest(cp))
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
 
 	var bridge20 [20]byte
 	copy(bridge20[:], bridge[:])
@@ -130,21 +139,21 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 	cm[0] = 0xaa
 
 	r, err := New(Config{
-		BaseChainID:    baseChainID,
-		BridgeAddress:  bridge,
-		DepositImageID: common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
-		MaxItems:       1,
-		MaxAge:         10 * time.Minute,
-		DedupeMax:      1000,
-		GasLimit:       200_000, // skip estimation for deterministic tests
-		Now:            time.Now,
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: []common.Address{opAddr},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		GasLimit:          200_000, // skip estimation for deterministic tests
+		Now:               time.Now,
 	}, sender, &staticSealProver{seal: []byte{0x99}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	opSig := make([]byte, 65)
-	opSig[64] = 27
 	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{opSig}}); err != nil {
 		t.Fatalf("IngestCheckpoint: %v", err)
 	}

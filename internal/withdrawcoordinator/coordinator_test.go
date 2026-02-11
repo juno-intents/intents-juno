@@ -41,11 +41,15 @@ func (b *stubBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, er
 
 type stubConfirmer struct {
 	calls int
+	errs  []error
 }
 
 func (c *stubConfirmer) WaitConfirmed(_ context.Context, txid string) error {
 	_ = txid
 	c.calls++
+	if c.calls <= len(c.errs) {
+		return c.errs[c.calls-1]
+	}
 	return nil
 }
 
@@ -153,5 +157,120 @@ func TestCoordinator_ResumeFromPlannedBatch(t *testing.T) {
 	}
 	if signer.calls != 1 || broadcaster.calls != 1 || confirmer.calls != 1 {
 		t.Fatalf("unexpected resume calls: signer=%d broadcaster=%d confirmer=%d", signer.calls, broadcaster.calls, confirmer.calls)
+	}
+}
+
+func TestCoordinator_BroadcastedPendingDoesNotFailTick(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x77)
+	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending, ErrConfirmationPending}}
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected batch to remain broadcasted, got %s", b.State)
+	}
+}
+
+func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x78)
+	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-old")
+
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationPending}}
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected batch to be re-broadcasted, got %s", b.State)
+	}
+	if b.JunoTxID != "tx1" {
+		t.Fatalf("expected rebroadcast txid, got %q", b.JunoTxID)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	}
+	if signer.calls != 1 {
+		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	}
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
 	}
 }

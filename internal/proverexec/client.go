@@ -38,7 +38,7 @@ func New(bin string, maxResponseBytes int) (*Client, error) {
 	}, nil
 }
 
-func (c *Client) Prove(ctx context.Context, imageID common.Hash, journal []byte) ([]byte, error) {
+func (c *Client) Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error) {
 	if c == nil || c.execCommand == nil {
 		return nil, fmt.Errorf("%w: nil client", ErrInvalidConfig)
 	}
@@ -47,9 +47,10 @@ func (c *Client) Prove(ctx context.Context, imageID common.Hash, journal []byte)
 	}
 
 	reqBody, err := json.Marshal(map[string]any{
-		"version": "prover.request.v1",
-		"imageId": imageID.Hex(),
-		"journal": "0x" + hex.EncodeToString(journal),
+		"version":      "prover.request.v1",
+		"imageId":      imageID.Hex(),
+		"journal":      "0x" + hex.EncodeToString(journal),
+		"privateInput": "0x" + hex.EncodeToString(privateInput),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("proverexec: marshal request: %w", err)

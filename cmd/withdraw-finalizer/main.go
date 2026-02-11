@@ -46,6 +46,8 @@ func main() {
 
 		baseChainID     = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr      = flag.String("bridge-address", "", "Bridge contract address (required)")
+		operators       = flag.String("operators", "", "comma-separated operator addresses for checkpoint quorum verification (required)")
+		threshold       = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 		withdrawImageID = flag.String("withdraw-image-id", "", "withdraw zkVM image id (bytes32 hex, required)")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
@@ -67,8 +69,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" || *proverBin == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --withdraw-image-id, --base-relayer-url, --prover-bin, and --owner are required")
+	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" || *proverBin == "" {
+		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --operators, --operator-threshold, --withdraw-image-id, --base-relayer-url, --prover-bin, and --owner are required")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -92,6 +94,11 @@ func main() {
 	imageID, err := parseHash32Strict(*withdrawImageID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: parse --withdraw-image-id: %v\n", err)
+		os.Exit(2)
+	}
+	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse --operators: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -147,13 +154,15 @@ func main() {
 	}
 
 	f, err := withdrawfinalizer.New(withdrawfinalizer.Config{
-		Owner:           *owner,
-		LeaseTTL:        *leaseTTL,
-		MaxBatches:      *maxBatches,
-		BaseChainID:     *baseChainID,
-		BridgeAddress:   bridge,
-		WithdrawImageID: imageID,
-		GasLimit:        *gasLimit,
+		Owner:             *owner,
+		LeaseTTL:          *leaseTTL,
+		MaxBatches:        *maxBatches,
+		BaseChainID:       *baseChainID,
+		BridgeAddress:     bridge,
+		WithdrawImageID:   imageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: *threshold,
+		GasLimit:          *gasLimit,
 	}, store, leaseStore, baseClient, proverClient, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)

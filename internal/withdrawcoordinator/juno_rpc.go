@@ -45,9 +45,16 @@ type JunoConfirmer struct {
 	rpc              JunoRPC
 	minConfirmations int64
 	pollInterval     time.Duration
+	maxWait          time.Duration
+	now              func() time.Time
 }
 
-func NewJunoConfirmer(rpc JunoRPC, minConfirmations int64, pollInterval time.Duration) (*JunoConfirmer, error) {
+var (
+	ErrConfirmationPending = errors.New("withdrawcoordinator: confirmation pending")
+	ErrConfirmationMissing = errors.New("withdrawcoordinator: transaction missing from mempool and chain")
+)
+
+func NewJunoConfirmer(rpc JunoRPC, minConfirmations int64, pollInterval time.Duration, maxWait time.Duration) (*JunoConfirmer, error) {
 	if rpc == nil {
 		return nil, fmt.Errorf("%w: nil rpc client", ErrInvalidJunoRuntimeConfig)
 	}
@@ -57,10 +64,15 @@ func NewJunoConfirmer(rpc JunoRPC, minConfirmations int64, pollInterval time.Dur
 	if pollInterval <= 0 {
 		return nil, fmt.Errorf("%w: poll interval must be > 0", ErrInvalidJunoRuntimeConfig)
 	}
+	if maxWait <= 0 {
+		return nil, fmt.Errorf("%w: max wait must be > 0", ErrInvalidJunoRuntimeConfig)
+	}
 	return &JunoConfirmer{
 		rpc:              rpc,
 		minConfirmations: minConfirmations,
 		pollInterval:     pollInterval,
+		maxWait:          maxWait,
+		now:              time.Now,
 	}, nil
 }
 
@@ -68,10 +80,24 @@ func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {
 	if c == nil || c.rpc == nil {
 		return fmt.Errorf("%w: nil confirmer", ErrInvalidJunoRuntimeConfig)
 	}
+	if c.now == nil {
+		c.now = time.Now
+	}
+
+	deadline := c.now().Add(c.maxWait)
+	seenTx := false
 
 	for {
+		if !c.now().Before(deadline) {
+			if seenTx {
+				return ErrConfirmationPending
+			}
+			return ErrConfirmationMissing
+		}
+
 		tx, err := c.rpc.GetRawTransaction(ctx, txid)
 		if err == nil {
+			seenTx = true
 			if tx.Confirmations >= c.minConfirmations {
 				return nil
 			}
@@ -79,7 +105,18 @@ func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {
 			return err
 		}
 
-		t := time.NewTimer(c.pollInterval)
+		wait := c.pollInterval
+		if remain := deadline.Sub(c.now()); remain < wait {
+			wait = remain
+		}
+		if wait <= 0 {
+			if seenTx {
+				return ErrConfirmationPending
+			}
+			return ErrConfirmationMissing
+		}
+
+		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
 			t.Stop()

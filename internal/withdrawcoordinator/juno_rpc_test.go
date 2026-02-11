@@ -61,7 +61,7 @@ func TestJunoConfirmer_WaitsForMinConfirmations(t *testing.T) {
 			{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 2}},
 		},
 	}
-	c, err := NewJunoConfirmer(rpc, 2, 1*time.Millisecond)
+	c, err := NewJunoConfirmer(rpc, 2, 1*time.Millisecond, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewJunoConfirmer: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestJunoConfirmer_ReturnsUnexpectedError(t *testing.T) {
 			{err: wantErr},
 		},
 	}
-	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond)
+	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 100*time.Millisecond)
 	if err != nil {
 		t.Fatalf("NewJunoConfirmer: %v", err)
 	}
@@ -91,10 +91,44 @@ func TestJunoConfirmer_ReturnsUnexpectedError(t *testing.T) {
 	}
 }
 
+func TestJunoConfirmer_ReturnsPendingWhenSeenButNotConfirmed(t *testing.T) {
+	t.Parallel()
+
+	rpc := &stubJunoRPC{
+		getSeq: []getResult{
+			{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 0}},
+		},
+	}
+	c, err := NewJunoConfirmer(rpc, 2, 1*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewJunoConfirmer: %v", err)
+	}
+
+	err = c.WaitConfirmed(context.Background(), "a")
+	if !errors.Is(err, ErrConfirmationPending) {
+		t.Fatalf("expected ErrConfirmationPending, got %v", err)
+	}
+}
+
+func TestJunoConfirmer_ReturnsMissingWhenNeverSeen(t *testing.T) {
+	t.Parallel()
+
+	rpc := &stubJunoRPC{}
+	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewJunoConfirmer: %v", err)
+	}
+
+	err = c.WaitConfirmed(context.Background(), "a")
+	if !errors.Is(err, ErrConfirmationMissing) {
+		t.Fatalf("expected ErrConfirmationMissing, got %v", err)
+	}
+}
+
 func TestNewJunoConfirmer_RejectsInvalidConfig(t *testing.T) {
 	t.Parallel()
 
-	_, err := NewJunoConfirmer(nil, 1, 1*time.Second)
+	_, err := NewJunoConfirmer(nil, 1, 1*time.Second, 1*time.Second)
 	if !errors.Is(err, ErrInvalidJunoRuntimeConfig) {
 		t.Fatalf("expected ErrInvalidJunoRuntimeConfig, got %v", err)
 	}

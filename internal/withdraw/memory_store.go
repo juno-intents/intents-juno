@@ -289,6 +289,30 @@ func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, t
 	return nil
 }
 
+func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, txPlan []byte) error {
+	if len(txPlan) == 0 {
+		return ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.batches[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if b.State != BatchStateBroadcasted {
+		return ErrInvalidTransition
+	}
+
+	b.State = BatchStatePlanned
+	b.TxPlan = append([]byte(nil), txPlan...)
+	b.SignedTx = nil
+	b.JunoTxID = ""
+	s.batches[batchID] = b
+	return nil
+}
+
 func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

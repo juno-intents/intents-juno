@@ -151,8 +151,8 @@ func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID
 
 	outs := make([]txbuildOutput, 0, len(ws2))
 	for _, w := range ws2 {
-		recipient := strings.TrimSpace(string(w.RecipientUA))
-		if recipient == "" || !utf8.ValidString(recipient) {
+		recipient, err := parseTxBuildRecipientAddress(w.RecipientUA)
+		if err != nil {
 			return nil, fmt.Errorf("withdrawcoordinator: invalid withdrawal recipient UA for %x", w.ID)
 		}
 
@@ -175,6 +175,29 @@ func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID
 		})
 	}
 	return outs, nil
+}
+
+func parseTxBuildRecipientAddress(recipientUA []byte) (string, error) {
+	if len(recipientUA) == 0 {
+		return "", fmt.Errorf("empty recipient ua")
+	}
+	if !utf8.Valid(recipientUA) {
+		return "", fmt.Errorf("recipient ua is not utf-8")
+	}
+
+	recipient := string(recipientUA)
+	if recipient != strings.TrimSpace(recipient) {
+		return "", fmt.Errorf("recipient ua has leading/trailing whitespace")
+	}
+	if len(recipient) < 8 {
+		return "", fmt.Errorf("recipient ua too short")
+	}
+	for _, r := range recipient {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
+			return "", fmt.Errorf("recipient ua has invalid character %q", r)
+		}
+	}
+	return recipient, nil
 }
 
 func (p *TxBuildPlanner) commandEnv() []string {

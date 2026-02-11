@@ -77,6 +77,7 @@ type Store interface {
 	MarkBatchSigning(ctx context.Context, batchID [32]byte) error
 	SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error
 	SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error
+	ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte) error
 	SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error
 }
