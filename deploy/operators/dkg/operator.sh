@@ -125,7 +125,11 @@ command_run() {
   fi
 
   if [[ "$daemon" == "true" ]]; then
-    nohup "$dkg_admin_bin" --config "$config_path" serve >>"$log_file" 2>&1 &
+    nohup bash -c '
+      set -euo pipefail
+      cd "$1"
+      exec "$2" --config "./admin-config.json" serve
+    ' _ "$runtime_bundle" "$dkg_admin_bin" >>"$log_file" 2>&1 &
     local pid=$!
     printf '%s\n' "$pid" >"$pid_file"
     log "dkg-admin started in background pid=$pid"
@@ -133,7 +137,8 @@ command_run() {
     return
   fi
 
-  exec "$dkg_admin_bin" --config "$config_path" serve
+  cd "$runtime_bundle"
+  exec "$dkg_admin_bin" --config "./admin-config.json" serve
 }
 
 command_status() {
