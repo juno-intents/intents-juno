@@ -17,10 +17,10 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
-	"github.com/juno-intents/intents-juno/internal/proverexec"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
@@ -60,7 +60,8 @@ func main() {
 		gasLimit     = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 
 		submitTimeout      = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
-		proverBin          = flag.String("prover-bin", "", "path to prover command binary (required)")
+		proverBackend      = flag.String("prover-backend", boundless.BackendBoundless.String(), "prover backend: boundless|self")
+		proverBin          = flag.String("prover-bin", "", "path to prover command binary implementing prover.request.v1/prover.response.v1 (required)")
 		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
 
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
@@ -114,9 +115,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	proverClient, err := proverexec.New(*proverBin, *proverMaxRespBytes)
+	proverClient, err := boundless.New(boundless.Config{
+		Backend:          *proverBackend,
+		ProverBin:        *proverBin,
+		MaxResponseBytes: *proverMaxRespBytes,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: init prover client: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: init prover backend: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -192,6 +197,7 @@ func main() {
 		"owner", *owner,
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
+		"proverBackend", *proverBackend,
 		"maxBatches", *maxBatches,
 		"leaseTTL", leaseTTL.String(),
 		"tickInterval", tickInterval.String(),
