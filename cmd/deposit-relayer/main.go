@@ -66,6 +66,8 @@ func main() {
 		maxItems      = flag.Int("max-items", 25, "maximum items per mint batch")
 		maxAge        = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
 		dedupeMax     = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
+		claimTTL      = flag.Duration("claim-ttl", 30*time.Second, "ttl for claimed confirmed deposits")
+		owner         = flag.String("owner", "", "unique worker identity used for deposit claim leases (default: hostname-pid)")
 		gasLimit      = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
 		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
@@ -106,8 +108,8 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --max-items, --dedupe-max, --max-line-bytes, and --queue-max-bytes must be > 0")
 		os.Exit(2)
 	}
-	if *maxAge <= 0 || *flushEvery <= 0 || *submitTimeout <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --max-age, --flush-interval, and --submit-timeout must be > 0")
+	if *maxAge <= 0 || *claimTTL <= 0 || *flushEvery <= 0 || *submitTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --max-age, --claim-ttl, --flush-interval, and --submit-timeout must be > 0")
 		os.Exit(2)
 	}
 	if *ackTimeout <= 0 {
@@ -129,6 +131,14 @@ func main() {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: parse --operators: %v\n", err)
 		os.Exit(2)
+	}
+	workerOwner := strings.TrimSpace(*owner)
+	if workerOwner == "" {
+		host, err := os.Hostname()
+		if err != nil || strings.TrimSpace(host) == "" {
+			host = "deposit-relayer"
+		}
+		workerOwner = fmt.Sprintf("%s-%d", host, os.Getpid())
 	}
 
 	authToken := os.Getenv(*baseRelayerAuthEnv)
@@ -226,6 +236,8 @@ func main() {
 		MaxItems:            *maxItems,
 		MaxAge:              *maxAge,
 		DedupeMax:           *dedupeMax,
+		Owner:               workerOwner,
+		ClaimTTL:            *claimTTL,
 		GasLimit:            *gasLimit,
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
@@ -245,6 +257,8 @@ func main() {
 		"proofFailureTopic", *proofFailureTopic,
 		"maxItems", *maxItems,
 		"maxAge", maxAge.String(),
+		"claimTTL", claimTTL.String(),
+		"owner", workerOwner,
 		"flushInterval", flushEvery.String(),
 		"queueDriver", *queueDriver,
 		"storeDriver", strings.ToLower(strings.TrimSpace(*storeDriver)),

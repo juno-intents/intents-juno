@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,6 +47,54 @@ func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Req
 	p.gotReq.Journal = append([]byte(nil), req.Journal...)
 	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
 	return p.res, p.err
+}
+
+type blockingProofRequester struct {
+	res proofclient.Result
+
+	enterOnce sync.Once
+	enterCh   chan struct{}
+	releaseCh chan struct{}
+}
+
+func newBlockingProofRequester(res proofclient.Result) *blockingProofRequester {
+	return &blockingProofRequester{
+		res:       res,
+		enterCh:   make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (p *blockingProofRequester) RequestProof(ctx context.Context, _ proofclient.Request) (proofclient.Result, error) {
+	p.enterOnce.Do(func() { close(p.enterCh) })
+	select {
+	case <-ctx.Done():
+		return proofclient.Result{}, ctx.Err()
+	case <-p.releaseCh:
+		return p.res, nil
+	}
+}
+
+func (p *blockingProofRequester) waitEntered(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-p.enterCh:
+	case <-time.After(timeout):
+		t.Fatalf("timeout waiting for proof requester entry")
+	}
+}
+
+func (p *blockingProofRequester) release() {
+	close(p.releaseCh)
+}
+
+type finalizeFailStore struct {
+	deposit.Store
+	err error
+}
+
+func (s *finalizeFailStore) FinalizeBatch(context.Context, [][32]byte, checkpoint.Checkpoint, []byte, [32]byte) error {
+	return s.err
 }
 
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
@@ -562,6 +612,188 @@ func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
 	// Bad length (must be 65 bytes with v in {27,28}).
 	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: [][]byte{[]byte{0x01}}}); err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestRelayer_FinalizeStoreFailureLeavesDepositSubmitted(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	baseStore := deposit.NewMemoryStore()
+	store := &finalizeFailStore{
+		Store: baseStore,
+		err:   errors.New("db unavailable"),
+	}
+
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	err = r.IngestDeposit(ctx, DepositEvent{
+		Commitment: cm,
+		LeafIndex:  7,
+		Amount:     1000,
+		Memo:       memoBytes[:],
+	})
+	if err == nil {
+		t.Fatalf("expected ingest error")
+	}
+
+	job, err := baseStore.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateSubmitted; got != want {
+		t.Fatalf("state: got %v want %v", got, want)
+	}
+}
+
+func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+
+	store := deposit.NewMemoryStore()
+
+	sender1 := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	sender2 := &stubSender{res: httpapi.SendResponse{TxHash: "0x02", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover1 := newBlockingProofRequester(proofclient.Result{Seal: []byte{0x99}})
+	prover2 := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r1, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, store, sender1, prover1, nil)
+	if err != nil {
+		t.Fatalf("New worker 1: %v", err)
+	}
+	r2, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, store, sender2, prover2, nil)
+	if err != nil {
+		t.Fatalf("New worker 2: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r1.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("r1 IngestCheckpoint: %v", err)
+	}
+	if err := r2.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("r2 IngestCheckpoint: %v", err)
+	}
+
+	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
+		DepositID:     depositID,
+		Commitment:    [32]byte(cm),
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: [20]byte(recipient),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- r1.Flush(ctx)
+	}()
+
+	prover1.waitEntered(t, time.Second)
+
+	if err := r2.Flush(ctx); err != nil {
+		t.Fatalf("r2 Flush: %v", err)
+	}
+	if sender2.calls != 0 {
+		t.Fatalf("worker 2 sent tx: got %d want 0", sender2.calls)
+	}
+
+	prover1.release()
+	if err := <-errCh; err != nil {
+		t.Fatalf("r1 Flush: %v", err)
+	}
+	if sender1.calls != 1 {
+		t.Fatalf("worker 1 sender calls: got %d want 1", sender1.calls)
 	}
 }
 

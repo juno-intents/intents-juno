@@ -3,6 +3,7 @@ package deposit
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
@@ -204,6 +205,122 @@ func TestMemoryStore_ListByState(t *testing.T) {
 	}
 	if len(limited) != 1 {
 		t.Fatalf("limited len: got %d want 1", len(limited))
+	}
+}
+
+func TestMemoryStore_ClaimConfirmed_LeaseBehavior(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x01
+	var cm [32]byte
+	cm[0] = 0xaa
+	var recip [20]byte
+	recip[0] = 0x11
+
+	if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	first, err := s.ClaimConfirmed(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed worker-a: %v", err)
+	}
+	if len(first) != 1 || first[0].Deposit.DepositID != id {
+		t.Fatalf("unexpected first claim result")
+	}
+
+	other, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed worker-b: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("expected worker-b to be excluded while lease active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	afterExpiry, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed worker-b after expiry: %v", err)
+	}
+	if len(afterExpiry) != 1 || afterExpiry[0].Deposit.DepositID != id {
+		t.Fatalf("expected worker-b to claim after lease expiry")
+	}
+}
+
+func TestMemoryStore_MarkBatchSubmitted(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	mkDeposit := func(tag byte) Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+
+	d1 := mkDeposit(0x01)
+	d2 := mkDeposit(0x02)
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed d1: %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed d2: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	seal := []byte{0x99}
+
+	if err := s.MarkBatchSubmitted(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	if err := s.MarkBatchSubmitted(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal); err != nil {
+		t.Fatalf("MarkBatchSubmitted replay: %v", err)
+	}
+
+	j1, err := s.Get(ctx, d1.DepositID)
+	if err != nil {
+		t.Fatalf("Get d1: %v", err)
+	}
+	j2, err := s.Get(ctx, d2.DepositID)
+	if err != nil {
+		t.Fatalf("Get d2: %v", err)
+	}
+	if j1.State != StateSubmitted || j2.State != StateSubmitted {
+		t.Fatalf("unexpected states: d1=%v d2=%v", j1.State, j2.State)
+	}
+	if j1.Checkpoint != cp || j2.Checkpoint != cp {
+		t.Fatalf("checkpoint mismatch")
+	}
+	if string(j1.ProofSeal) != string(seal) || string(j2.ProofSeal) != string(seal) {
+		t.Fatalf("proof seal mismatch")
 	}
 }
 

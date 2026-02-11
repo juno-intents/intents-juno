@@ -43,6 +43,8 @@ type Config struct {
 	MaxItems  int
 	MaxAge    time.Duration
 	DedupeMax int
+	Owner     string
+	ClaimTTL  time.Duration
 
 	GasLimit uint64
 
@@ -104,6 +106,12 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	}
 	if cfg.DedupeMax <= 0 {
 		return nil, fmt.Errorf("%w: DedupeMax must be > 0", ErrInvalidConfig)
+	}
+	if cfg.Owner == "" {
+		cfg.Owner = fmt.Sprintf("deposit-relayer-%d", time.Now().UnixNano())
+	}
+	if cfg.ClaimTTL <= 0 {
+		cfg.ClaimTTL = 30 * time.Second
 	}
 	if cfg.ProofRequestTimeout <= 0 {
 		cfg.ProofRequestTimeout = 15 * time.Minute
@@ -257,7 +265,7 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	if limit < r.cfg.MaxItems {
 		limit = r.cfg.MaxItems
 	}
-	jobs, err := r.store.ListByState(ctx, deposit.StateConfirmed, limit)
+	jobs, err := r.store.ClaimConfirmed(ctx, r.cfg.Owner, r.cfg.ClaimTTL, limit)
 	if err != nil {
 		return err
 	}
@@ -349,6 +357,14 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		GasLimit: r.cfg.GasLimit,
 	}
 
+	finalizeIDs := make([][32]byte, 0, len(batch.Items))
+	for _, it := range batch.Items {
+		finalizeIDs = append(finalizeIDs, it.ID)
+	}
+	if err := r.store.MarkBatchSubmitted(ctx, finalizeIDs, cp, seal); err != nil {
+		return fmt.Errorf("depositrelayer: mark batch submitted: %w", err)
+	}
+
 	res, err := r.sender.Send(ctx, req)
 	if err != nil {
 		return err
@@ -361,10 +377,6 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	}
 
 	txHash := common.HexToHash(res.TxHash)
-	finalizeIDs := make([][32]byte, 0, len(batch.Items))
-	for _, it := range batch.Items {
-		finalizeIDs = append(finalizeIDs, it.ID)
-	}
 	if err := r.store.FinalizeBatch(ctx, finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
 		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
 	}
