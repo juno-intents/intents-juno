@@ -63,11 +63,54 @@ test_build_export_s3_key() {
   assert_eq "$got" "cer-123/operator_7_0xabc.json" "s3 key empty prefix"
 }
 
+test_repair_executable_file() {
+  local tmp
+  tmp="$(mktemp)"
+  printf '#!/usr/bin/env bash\necho ok\n' >"$tmp"
+  chmod 0644 "$tmp"
+  repair_executable_file "$tmp"
+  if [[ ! -x "$tmp" ]]; then
+    printf 'expected repair_executable_file to set +x\n' >&2
+    exit 1
+  fi
+  rm -f "$tmp"
+}
+
+test_remove_macos_quarantine_calls_xattr() {
+  local tmp target marker
+  tmp="$(mktemp -d)"
+  target="$tmp/target"
+  marker="$tmp/xattr.args"
+  mkdir -p "$target"
+  cat >"$tmp/xattr" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$marker"
+EOF
+  chmod 0755 "$tmp/xattr"
+
+  (
+    PATH="$tmp:$PATH"
+    export JUNO_DKG_OS_OVERRIDE="darwin"
+    remove_macos_quarantine "$target"
+  )
+
+  if [[ ! -f "$marker" ]]; then
+    printf 'expected xattr to be invoked\n' >&2
+    exit 1
+  fi
+  local got
+  got="$(cat "$marker")"
+  assert_eq "$got" "-dr com.apple.quarantine $target" "xattr invocation"
+  rm -rf "$tmp"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
   test_safe_slug
   test_build_export_s3_key
+  test_repair_executable_file
+  test_remove_macos_quarantine_calls_xattr
 }
 
 main "$@"

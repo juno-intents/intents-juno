@@ -6,6 +6,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=./common.sh
 source "$SCRIPT_DIR/common.sh"
+prepare_script_runtime "$SCRIPT_DIR"
 
 usage() {
   cat <<'EOF'
@@ -139,4 +140,3 @@ fi
 
 log "operator_id=$operator_id"
 log "grpc_endpoint=$grpc_endpoint"
-

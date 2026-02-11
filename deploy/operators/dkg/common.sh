@@ -67,6 +67,19 @@ build_export_s3_key() {
 }
 
 detect_os() {
+  local os_override="${JUNO_DKG_OS_OVERRIDE:-}"
+  if [[ -n "$os_override" ]]; then
+    case "$os_override" in
+      darwin|linux)
+        printf '%s' "$os_override"
+        return
+        ;;
+      *)
+        die "invalid JUNO_DKG_OS_OVERRIDE: $os_override"
+        ;;
+    esac
+  fi
+
   local os
   os="$(uname -s)"
   case "$os" in
@@ -152,6 +165,41 @@ parse_endpoint_host_port() {
 
 ensure_dir() {
   mkdir -p "$1"
+}
+
+repair_executable_file() {
+  local path="$1"
+  [[ -f "$path" ]] || return 0
+  if [[ ! -x "$path" ]]; then
+    chmod 0755 "$path" 2>/dev/null || chmod u+x "$path" 2>/dev/null || true
+  fi
+}
+
+remove_macos_quarantine() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  if [[ "$(detect_os)" != "darwin" ]]; then
+    return 0
+  fi
+  if have_cmd xattr; then
+    xattr -dr com.apple.quarantine "$path" >/dev/null 2>&1 || true
+  fi
+}
+
+prepare_execution_path() {
+  local path="$1"
+  [[ -e "$path" ]] || return 0
+  remove_macos_quarantine "$path"
+  repair_executable_file "$path"
+}
+
+prepare_script_runtime() {
+  local script_dir="$1"
+  [[ -d "$script_dir" ]] || return 0
+  remove_macos_quarantine "$script_dir"
+  if [[ -d "$script_dir/bin" ]]; then
+    remove_macos_quarantine "$script_dir/bin"
+  fi
 }
 
 apt_install() {
@@ -333,7 +381,7 @@ ensure_operator_keygen_bin() {
   arch="$(detect_arch)"
   bundled="$_SCRIPT_DIR/bin/operator-keygen_${os}_${arch}"
   if [[ -f "$bundled" ]]; then
-    chmod 0755 "$bundled" || true
+    prepare_execution_path "$bundled"
     if [[ -x "$bundled" ]]; then
       printf '%s' "$bundled"
       return
@@ -341,6 +389,7 @@ ensure_operator_keygen_bin() {
   fi
 
   if [[ -x "$bin" ]]; then
+    prepare_execution_path "$bin"
     printf '%s' "$bin"
     return
   fi
@@ -355,7 +404,7 @@ ensure_operator_keygen_bin() {
     cd "$REPO_ROOT"
     go build -o "$bin" ./cmd/operator-keygen
   ) || die "failed to build operator-keygen"
-  chmod 0755 "$bin"
+  prepare_execution_path "$bin"
   printf '%s' "$bin"
 }
 
@@ -378,6 +427,7 @@ ensure_dkg_binary() {
   esac
 
   if [[ -n "$env_override" ]]; then
+    prepare_execution_path "$env_override"
     [[ -x "$env_override" ]] || die "$tool override is not executable: $env_override"
     printf '%s' "$env_override"
     return
@@ -386,6 +436,7 @@ ensure_dkg_binary() {
   ensure_base_dependencies
   local bin_path="$out_dir/$tool"
   if [[ -x "$bin_path" ]]; then
+    prepare_execution_path "$bin_path"
     printf '%s' "$bin_path"
     return
   fi
@@ -412,7 +463,7 @@ ensure_dkg_binary() {
     tar -xzf "$archive" -C "$tmp_dir" || die "failed to extract $asset"
     [[ -f "$tmp_dir/$tool" ]] || die "$tool not present in archive $asset"
     cp "$tmp_dir/$tool" "$bin_path"
-    chmod 0755 "$bin_path"
+    prepare_execution_path "$bin_path"
     rm -rf "$tmp_dir"
     printf '%s' "$bin_path"
     return
@@ -443,6 +494,6 @@ ensure_dkg_binary() {
   ) || die "cargo build fallback failed for $tool"
 
   cp "$src_dir/target/release/$tool" "$bin_path"
-  chmod 0755 "$bin_path"
+  prepare_execution_path "$bin_path"
   printf '%s' "$bin_path"
 }

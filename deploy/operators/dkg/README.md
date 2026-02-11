@@ -116,6 +116,9 @@ This prints JSON with:
 - `preflight`, `run`, and `resume` require active Tailscale connectivity.
 - Endpoints are per-operator and can share hostname with different ports.
 - Bundles include `operator-metadata.json` with `fee_recipient` for later operator deployment wiring.
+- Scripts auto-attempt execution remediation on startup:
+  - macOS: recursively removes `com.apple.quarantine` in the DKG script folder.
+  - Linux/macOS: repairs executable permission bits on downloaded/packaged binaries.
 - Tools default to release `v0.1.0` and auto-download by OS/arch. You can override with:
   - `JUNO_DKG_ADMIN_BIN=/path/to/dkg-admin`
   - `JUNO_DKG_CEREMONY_BIN=/path/to/dkg-ceremony`
