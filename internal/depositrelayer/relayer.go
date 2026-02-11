@@ -17,6 +17,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
 
 var (
@@ -262,7 +263,12 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	seal, err := r.prover.Prove(ctx, r.cfg.DepositImageID, journal, nil)
+	privateInput, err := proverinput.EncodeDepositPrivateInputV1(cp, opSigs, items)
+	if err != nil {
+		return err
+	}
+
+	seal, err := r.prover.Prove(ctx, r.cfg.DepositImageID, journal, privateInput)
 	if err != nil {
 		return err
 	}

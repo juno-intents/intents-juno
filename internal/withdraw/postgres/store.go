@@ -239,18 +239,20 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	}
 
 	var (
-		idRaw      []byte
-		state      int16
-		txPlan     []byte
-		signedTx   []byte
-		junoTxID   *string
-		baseTxHash *string
+		idRaw           []byte
+		state           int16
+		txPlan          []byte
+		signedTx        []byte
+		junoTxID        *string
+		baseTxHash      *string
+		rebAttempts     int32
+		nextRebroadcast *time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT batch_id, state, tx_plan, signed_tx, juno_txid, base_tx_hash
+		SELECT batch_id, state, tx_plan, signed_tx, juno_txid, base_tx_hash, rebroadcast_attempts, next_rebroadcast_at
 		FROM withdrawal_batches
 		WHERE batch_id = $1
-	`, batchID[:]).Scan(&idRaw, &state, &txPlan, &signedTx, &junoTxID, &baseTxHash)
+	`, batchID[:]).Scan(&idRaw, &state, &txPlan, &signedTx, &junoTxID, &baseTxHash, &rebAttempts, &nextRebroadcast)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Batch{}, withdraw.ErrNotFound
@@ -261,6 +263,9 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	id, err := to32(idRaw)
 	if err != nil {
 		return withdraw.Batch{}, err
+	}
+	if rebAttempts < 0 {
+		return withdraw.Batch{}, fmt.Errorf("withdraw/postgres: negative rebroadcast attempts in db")
 	}
 
 	rows, err := s.pool.Query(ctx, `
@@ -291,17 +296,21 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	}
 
 	out := withdraw.Batch{
-		ID:            id,
-		WithdrawalIDs: ids,
-		State:         withdraw.BatchState(state),
-		TxPlan:        append([]byte(nil), txPlan...),
-		SignedTx:      append([]byte(nil), signedTx...),
+		ID:                  id,
+		WithdrawalIDs:       ids,
+		State:               withdraw.BatchState(state),
+		TxPlan:              append([]byte(nil), txPlan...),
+		SignedTx:            append([]byte(nil), signedTx...),
+		RebroadcastAttempts: uint32(rebAttempts),
 	}
 	if junoTxID != nil {
 		out.JunoTxID = *junoTxID
 	}
 	if baseTxHash != nil {
 		out.BaseTxHash = *baseTxHash
+	}
+	if nextRebroadcast != nil {
+		out.NextRebroadcastAt = (*nextRebroadcast).UTC()
 	}
 	return out, nil
 }
@@ -405,7 +414,7 @@ func (s *Store) SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid 
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, juno_txid = $3, updated_at = now()
+		SET state = $2, juno_txid = $3, next_rebroadcast_at = NULL, updated_at = now()
 		WHERE batch_id = $1 AND state = $4
 	`, batchID[:], int16(withdraw.BatchStateBroadcasted), txid, int16(withdraw.BatchStateSigned))
 	if err != nil {
@@ -439,7 +448,7 @@ func (s *Store) ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan 
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, updated_at = now()
+		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, next_rebroadcast_at = NULL, updated_at = now()
 		WHERE batch_id = $1 AND state = $4
 	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
@@ -465,7 +474,7 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, updated_at = now()
+		SET state = $2, next_rebroadcast_at = NULL, updated_at = now()
 		WHERE batch_id = $1 AND state = $3
 	`, batchID[:], int16(withdraw.BatchStateConfirmed), int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
@@ -480,6 +489,36 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 		if state2 == withdraw.BatchStateConfirmed {
 			return nil
 		}
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
+func (s *Store) SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, attempts uint32, next time.Time) error {
+	if next.IsZero() {
+		return withdraw.ErrInvalidConfig
+	}
+	if attempts > math.MaxInt32 {
+		return withdraw.ErrInvalidConfig
+	}
+
+	state, _, _, err := s.getBatchStateFields(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if state != withdraw.BatchStateBroadcasted {
+		return withdraw.ErrInvalidTransition
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET rebroadcast_attempts = $2, next_rebroadcast_at = $3, updated_at = now()
+		WHERE batch_id = $1 AND state = $4
+	`, batchID[:], int32(attempts), next.UTC(), int16(withdraw.BatchStateBroadcasted))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: set rebroadcast backoff: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
 		return withdraw.ErrInvalidTransition
 	}
 	return nil

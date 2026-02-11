@@ -29,10 +29,12 @@ func (s *recordingSender) Send(_ context.Context, req httpapi.SendRequest) (http
 }
 
 type staticProver struct {
-	seal []byte
+	seal     []byte
+	gotInput []byte
 }
 
-func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
+func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte, privateInput []byte) ([]byte, error) {
+	p.gotInput = append([]byte(nil), privateInput...)
 	return p.seal, nil
 }
 
@@ -160,6 +162,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 			},
 		},
 	}
+	prover := &staticProver{seal: []byte{0x99}}
 
 	f, err := New(Config{
 		Owner:             "f1",
@@ -171,7 +174,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
-	}, store, leaseStore, sender, &staticProver{seal: []byte{0x99}}, nil)
+	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -197,6 +200,9 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	}
 	if !strings.HasPrefix(sender.lastReq.Data, "0x") || len(sender.lastReq.Data) <= 2 {
 		t.Fatalf("expected calldata hex, got %q", sender.lastReq.Data)
+	}
+	if len(prover.gotInput) == 0 {
+		t.Fatalf("expected prover private input")
 	}
 
 	b, err := store.GetBatch(ctx, batchID)

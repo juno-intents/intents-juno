@@ -17,6 +17,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -214,7 +215,12 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal, nil)
+	privateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cp, f.opSigs, items)
+	if err != nil {
+		return err
+	}
+
+	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal, privateInput)
 	if err != nil {
 		return err
 	}

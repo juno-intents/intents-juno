@@ -13,11 +13,10 @@ import (
 )
 
 const (
-	execExtendSignRequestVersion  = "withdraw.extend_sign.request.v1"
-	execExtendSignResponseVersion = "withdraw.extend_sign.response.v1"
+	execExtendSignJSONVersion = "v1"
 )
 
-type execExtendSignerCommandFn func(ctx context.Context, bin string, stdin []byte) ([]byte, []byte, error)
+type execExtendSignerCommandFn func(ctx context.Context, bin string, args []string) ([]byte, []byte, error)
 
 type ExecExtendSigner struct {
 	bin string
@@ -46,15 +45,11 @@ func (s *ExecExtendSigner) SignExtendDigest(ctx context.Context, digest common.H
 		return nil, fmt.Errorf("%w: nil extend signer", ErrInvalidExpiryExtenderConfig)
 	}
 
-	reqBody, err := json.Marshal(map[string]any{
-		"version": execExtendSignRequestVersion,
-		"digest":  digest.Hex(),
+	stdout, stderr, err := s.execCommand(ctx, s.bin, []string{
+		"sign-digest",
+		"--digest", digest.Hex(),
+		"--json",
 	})
-	if err != nil {
-		return nil, fmt.Errorf("withdrawcoordinator: marshal extend signer request: %w", err)
-	}
-
-	stdout, stderr, err := s.execCommand(ctx, s.bin, reqBody)
 	if err != nil {
 		msg := strings.TrimSpace(string(stderr))
 		if msg == "" {
@@ -69,26 +64,56 @@ func (s *ExecExtendSigner) SignExtendDigest(ctx context.Context, digest common.H
 		return nil, fmt.Errorf("withdrawcoordinator: extend signer response too large")
 	}
 
-	var resp struct {
-		Version    string   `json:"version"`
-		Signatures []string `json:"signatures"`
-		Error      string   `json:"error"`
+	var env struct {
+		Version string          `json:"version"`
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data"`
+		Error   *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
 	}
-	if err := json.Unmarshal(stdout, &resp); err != nil {
+	if err := json.Unmarshal(stdout, &env); err != nil {
 		return nil, fmt.Errorf("withdrawcoordinator: decode extend signer response: %w", err)
 	}
-	if resp.Version != execExtendSignResponseVersion {
-		return nil, fmt.Errorf("withdrawcoordinator: unexpected extend signer response version %q", resp.Version)
+	if env.Version != execExtendSignJSONVersion {
+		return nil, fmt.Errorf("withdrawcoordinator: unexpected extend signer response version %q", env.Version)
 	}
-	if strings.TrimSpace(resp.Error) != "" {
-		return nil, fmt.Errorf("withdrawcoordinator: extend signer: %s", strings.TrimSpace(resp.Error))
+	if env.Status == "err" {
+		msg := "unknown extend signer error"
+		if env.Error != nil && strings.TrimSpace(env.Error.Message) != "" {
+			msg = strings.TrimSpace(env.Error.Message)
+		}
+		if env.Error != nil && strings.TrimSpace(env.Error.Code) != "" {
+			return nil, fmt.Errorf("withdrawcoordinator: extend signer (%s): %s", strings.TrimSpace(env.Error.Code), msg)
+		}
+		return nil, fmt.Errorf("withdrawcoordinator: extend signer: %s", msg)
 	}
-	if len(resp.Signatures) == 0 {
+	if env.Status != "ok" {
+		return nil, fmt.Errorf("withdrawcoordinator: invalid extend signer status %q", env.Status)
+	}
+
+	var data struct {
+		Signatures []string `json:"signatures"`
+		Signature  string   `json:"signature"`
+	}
+	if len(env.Data) == 0 {
+		return nil, fmt.Errorf("withdrawcoordinator: extend signer returned empty data")
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, fmt.Errorf("withdrawcoordinator: decode extend signer data: %w", err)
+	}
+
+	hexSigs := data.Signatures
+	if len(hexSigs) == 0 && strings.TrimSpace(data.Signature) != "" {
+		hexSigs = []string{data.Signature}
+	}
+	if len(hexSigs) == 0 {
 		return nil, fmt.Errorf("withdrawcoordinator: extend signer returned no signatures")
 	}
 
-	sigs := make([][]byte, 0, len(resp.Signatures))
-	for i, sHex := range resp.Signatures {
+	sigs := make([][]byte, 0, len(hexSigs))
+	for i, sHex := range hexSigs {
 		sig, err := decodeHexBytesStrict(sHex)
 		if err != nil {
 			return nil, fmt.Errorf("withdrawcoordinator: decode signature[%d]: %w", i, err)
@@ -105,9 +130,8 @@ func (s *ExecExtendSigner) SignExtendDigest(ctx context.Context, digest common.H
 	return sigs, nil
 }
 
-func runExecExtendSignerCommand(ctx context.Context, bin string, stdin []byte) ([]byte, []byte, error) {
-	cmd := exec.CommandContext(ctx, bin)
-	cmd.Stdin = bytes.NewReader(stdin)
+func runExecExtendSignerCommand(ctx context.Context, bin string, args []string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
 	cmd.Stdout = &stdout

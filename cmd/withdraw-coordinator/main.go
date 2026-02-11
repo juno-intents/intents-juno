@@ -50,10 +50,12 @@ func main() {
 	var (
 		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
 
-		maxItems     = flag.Int("max-items", 50, "maximum withdrawals per Juno payout tx")
-		maxAge       = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
-		claimTTL     = flag.Duration("claim-ttl", 30*time.Second, "per-withdrawal claim TTL in DB")
-		tickInterval = flag.Duration("tick-interval", 1*time.Second, "coordinator tick interval")
+		maxItems             = flag.Int("max-items", 50, "maximum withdrawals per Juno payout tx")
+		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
+		claimTTL             = flag.Duration("claim-ttl", 30*time.Second, "per-withdrawal claim TTL in DB")
+		tickInterval         = flag.Duration("tick-interval", 1*time.Second, "coordinator tick interval")
+		rebroadcastBaseDelay = flag.Duration("rebroadcast-base-delay", 30*time.Second, "minimum delay before retrying a missing Juno tx")
+		rebroadcastMaxDelay  = flag.Duration("rebroadcast-max-delay", 10*time.Minute, "maximum delay before retrying a missing Juno tx")
 
 		leaderElection  = flag.Bool("leader-election", true, "enable leader election via DB lease")
 		leaderLeaseName = flag.String("leader-lease-name", "withdraw-coordinator", "lease name used for leader election")
@@ -108,7 +110,7 @@ func main() {
 		baseRelayerAuthEnv  = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token")
 		baseRelayerTimeout  = flag.Duration("base-relayer-timeout", 30*time.Second, "base-relayer timeout")
 		extendGasLimit      = flag.Uint64("extend-gas-limit", 0, "optional gas limit override for extendWithdrawExpiryBatch")
-		extendSignerBin     = flag.String("extend-signer-bin", "", "path to external extend signer binary (required)")
+		extendSignerBin     = flag.String("extend-signer-bin", "", "path to external extend signer binary (required; must support `sign-digest --digest <0x..> --json`)")
 		extendSignerMaxResp = flag.Int("extend-signer-max-response-bytes", 1<<20, "max extend signer response size (bytes)")
 	)
 	flag.Parse()
@@ -145,6 +147,10 @@ func main() {
 	}
 	if *maxAge <= 0 || *claimTTL <= 0 || *tickInterval <= 0 || *safetyMargin <= 0 || *maxExtension <= 0 {
 		fmt.Fprintln(os.Stderr, "error: durations must be > 0")
+		os.Exit(2)
+	}
+	if *rebroadcastBaseDelay <= 0 || *rebroadcastMaxDelay <= 0 || *rebroadcastMaxDelay < *rebroadcastBaseDelay {
+		fmt.Fprintln(os.Stderr, "error: rebroadcast delays must be > 0 and max >= base")
 		os.Exit(2)
 	}
 	if *leaderLeaseTTL <= 0 {
@@ -306,10 +312,12 @@ func main() {
 	}
 
 	coord, err := withdrawcoordinator.New(withdrawcoordinator.Config{
-		Owner:    *owner,
-		MaxItems: *maxItems,
-		MaxAge:   *maxAge,
-		ClaimTTL: *claimTTL,
+		Owner:                *owner,
+		MaxItems:             *maxItems,
+		MaxAge:               *maxAge,
+		ClaimTTL:             *claimTTL,
+		RebroadcastBaseDelay: *rebroadcastBaseDelay,
+		RebroadcastMaxDelay:  *rebroadcastMaxDelay,
 		ExpiryPolicy: policy.WithdrawExpiryConfig{
 			SafetyMargin: *safetyMargin,
 			MaxExtension: *maxExtension,

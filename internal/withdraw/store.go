@@ -63,6 +63,11 @@ type Batch struct {
 
 	// BaseTxHash is the Base tx hash for finalizeWithdrawBatch.
 	BaseTxHash string
+
+	// RebroadcastAttempts tracks how many broadcast-tx-missing recovery cycles were attempted.
+	RebroadcastAttempts uint32
+	// NextRebroadcastAt is the earliest instant the coordinator may attempt another rebroadcast cycle.
+	NextRebroadcastAt time.Time
 }
 
 type Store interface {
@@ -78,6 +83,7 @@ type Store interface {
 	SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error
 	SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error
 	ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error
+	SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, attempts uint32, next time.Time) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte) error
 	SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error
 }

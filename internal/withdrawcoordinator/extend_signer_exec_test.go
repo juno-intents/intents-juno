@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"slices"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -21,25 +22,22 @@ func TestExecExtendSigner_SignExtendDigest(t *testing.T) {
 		t.Fatalf("NewExecExtendSigner: %v", err)
 	}
 
-	s.execCommand = func(_ context.Context, bin string, stdin []byte) ([]byte, []byte, error) {
+	s.execCommand = func(_ context.Context, bin string, args []string) ([]byte, []byte, error) {
 		if bin != "juno-txsign" {
 			t.Fatalf("bin: got %q want %q", bin, "juno-txsign")
 		}
-		var req map[string]any
-		if err := json.Unmarshal(stdin, &req); err != nil {
-			t.Fatalf("decode request: %v", err)
-		}
-		if req["version"] != execExtendSignRequestVersion {
-			t.Fatalf("request version: got %v want %q", req["version"], execExtendSignRequestVersion)
-		}
-		if req["digest"] != digest.Hex() {
-			t.Fatalf("request digest: got %v want %q", req["digest"], digest.Hex())
+		wantArgs := []string{"sign-digest", "--digest", digest.Hex(), "--json"}
+		if !slices.Equal(args, wantArgs) {
+			t.Fatalf("args: got %v want %v", args, wantArgs)
 		}
 
 		sigHex := "0x" + hex.EncodeToString(wantSig)
 		resp, err := json.Marshal(map[string]any{
-			"version":    execExtendSignResponseVersion,
-			"signatures": []string{sigHex},
+			"version": execExtendSignJSONVersion,
+			"status":  "ok",
+			"data": map[string]any{
+				"signatures": []string{sigHex},
+			},
 		})
 		if err != nil {
 			t.Fatalf("marshal response: %v", err)
@@ -69,8 +67,8 @@ func TestExecExtendSigner_SignExtendDigest_RejectsBadSignature(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewExecExtendSigner: %v", err)
 	}
-	s.execCommand = func(_ context.Context, _ string, _ []byte) ([]byte, []byte, error) {
-		return []byte(`{"version":"withdraw.extend_sign.response.v1","signatures":["0x01"]}`), nil, nil
+	s.execCommand = func(_ context.Context, _ string, _ []string) ([]byte, []byte, error) {
+		return []byte(`{"version":"v1","status":"ok","data":{"signatures":["0x01"]}}`), nil, nil
 	}
 
 	_, err = s.SignExtendDigest(context.Background(), common.HexToHash("0x1"))

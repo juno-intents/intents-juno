@@ -193,6 +193,20 @@ func TestMemoryStore_BatchStateMachine(t *testing.T) {
 	if err := s.SetBatchBroadcasted(ctx, batchID, "tx1"); err != nil {
 		t.Fatalf("SetBatchBroadcasted: %v", err)
 	}
+	backoffAt := now.Add(1 * time.Minute)
+	if err := s.SetBatchRebroadcastBackoff(ctx, batchID, 1, backoffAt); err != nil {
+		t.Fatalf("SetBatchRebroadcastBackoff: %v", err)
+	}
+	b0, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch after SetBatchRebroadcastBackoff: %v", err)
+	}
+	if b0.RebroadcastAttempts != 1 {
+		t.Fatalf("rebroadcast attempts: got %d want 1", b0.RebroadcastAttempts)
+	}
+	if !b0.NextRebroadcastAt.Equal(backoffAt) {
+		t.Fatalf("next rebroadcast at mismatch")
+	}
 	if err := s.SetBatchBroadcasted(ctx, batchID, "tx1"); err != nil {
 		t.Fatalf("SetBatchBroadcasted #2: %v", err)
 	}
@@ -212,6 +226,9 @@ func TestMemoryStore_BatchStateMachine(t *testing.T) {
 	}
 	if len(b.SignedTx) != 0 || b.JunoTxID != "" {
 		t.Fatalf("expected signed tx and txid to be cleared after reset")
+	}
+	if !b.NextRebroadcastAt.IsZero() {
+		t.Fatalf("expected next rebroadcast at to clear on reset")
 	}
 	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
 		t.Fatalf("MarkBatchSigning after reset: %v", err)

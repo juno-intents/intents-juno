@@ -149,6 +149,9 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	if sender.calls != 1 {
 		t.Fatalf("sender calls: got %d want %d", sender.calls, 1)
 	}
+	if len(prover.gotInput) == 0 {
+		t.Fatalf("expected prover private input")
+	}
 	if len(sender.got) != 1 {
 		t.Fatalf("sender got len: got %d", len(sender.got))
 	}

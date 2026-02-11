@@ -21,11 +21,13 @@ func (p *stubPlanner) Plan(_ context.Context, batchID [32]byte, withdrawals []wi
 
 type stubSigner struct {
 	calls int
+	ids   [][32]byte
 }
 
-func (s *stubSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
+func (s *stubSigner) Sign(_ context.Context, signingSessionID [32]byte, txPlan []byte) ([]byte, error) {
 	_ = txPlan
 	s.calls++
+	s.ids = append(s.ids, signingSessionID)
 	return []byte{0x01}, nil
 }
 
@@ -272,5 +274,76 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	}
 	if broadcaster.calls != 1 {
 		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	}
+}
+
+func TestSigningSessionIDV1_DiffersAcrossPlans(t *testing.T) {
+	t.Parallel()
+
+	batchID := seq32(0x42)
+	id0 := signingSessionIDV1(batchID, []byte(`{"v":1}`))
+	id1 := signingSessionIDV1(batchID, []byte(`{"v":2}`))
+	if id0 == id1 {
+		t.Fatalf("expected different signing session ids for different plans")
+	}
+}
+
+func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x79)
+	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-old")
+
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{
+		errs: []error{
+			ErrConfirmationMissing, // first tick triggers rebroadcast
+			ErrConfirmationMissing, // second tick should skip due backoff
+		},
+	}
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick #1: %v", err)
+	}
+	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 {
+		t.Fatalf("expected one recovery cycle after first tick")
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick #2: %v", err)
+	}
+	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 {
+		t.Fatalf("expected no additional recovery during backoff window")
 	}
 }

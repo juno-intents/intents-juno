@@ -2,6 +2,7 @@ package withdrawcoordinator
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -20,9 +21,8 @@ type Planner interface {
 }
 
 type Signer interface {
-	// Sign must be idempotent for a given batchID.
-	// Implementations MUST reject signing if the same batchID is used with different txPlan bytes.
-	Sign(ctx context.Context, batchID [32]byte, txPlan []byte) ([]byte, error)
+	// Sign must be idempotent for a given signingSessionID.
+	Sign(ctx context.Context, signingSessionID [32]byte, txPlan []byte) ([]byte, error)
 }
 
 type Broadcaster interface {
@@ -46,6 +46,9 @@ type Config struct {
 	MaxItems int
 	MaxAge   time.Duration
 	ClaimTTL time.Duration
+
+	RebroadcastBaseDelay time.Duration
+	RebroadcastMaxDelay  time.Duration
 
 	ExpiryPolicy policy.WithdrawExpiryConfig
 
@@ -82,6 +85,18 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 	}
 	if cfg.ClaimTTL <= 0 {
 		return nil, fmt.Errorf("%w: ClaimTTL must be > 0", ErrInvalidConfig)
+	}
+	if cfg.RebroadcastBaseDelay == 0 {
+		cfg.RebroadcastBaseDelay = 30 * time.Second
+	}
+	if cfg.RebroadcastMaxDelay == 0 {
+		cfg.RebroadcastMaxDelay = 10 * time.Minute
+	}
+	if cfg.RebroadcastBaseDelay <= 0 {
+		return nil, fmt.Errorf("%w: RebroadcastBaseDelay must be > 0", ErrInvalidConfig)
+	}
+	if cfg.RebroadcastMaxDelay <= 0 || cfg.RebroadcastMaxDelay < cfg.RebroadcastBaseDelay {
+		return nil, fmt.Errorf("%w: RebroadcastMaxDelay must be >= RebroadcastBaseDelay", ErrInvalidConfig)
 	}
 	nowFn := cfg.Now
 	if nowFn == nil {
@@ -260,7 +275,7 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	rawTx, err := c.signer.Sign(ctx, batchID, b.TxPlan)
+	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
 		return err
 	}
@@ -309,6 +324,10 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			return nil
 		}
 		if errors.Is(err, ErrConfirmationMissing) {
+			now := c.cfg.Now().UTC()
+			if !b.NextRebroadcastAt.IsZero() && now.Before(b.NextRebroadcastAt) {
+				return nil
+			}
 			return c.replanAndRebroadcastBatch(ctx, b.ID)
 		}
 		return err
@@ -356,7 +375,14 @@ func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32
 	if err := c.signBatch(ctx, b.ID); err != nil {
 		return err
 	}
-	return c.broadcastBatch(ctx, b.ID)
+	if err := c.broadcastBatch(ctx, b.ID); err != nil {
+		return err
+	}
+
+	now := c.cfg.Now().UTC()
+	nextAttempts := b.RebroadcastAttempts + 1
+	nextAt := now.Add(c.rebroadcastBackoff(nextAttempts))
+	return c.store.SetBatchRebroadcastBackoff(ctx, b.ID, nextAttempts, nextAt)
 }
 
 func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][32]byte) error {
@@ -394,4 +420,37 @@ func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][3
 		}
 	}
 	return nil
+}
+
+// signingSessionIDV1 binds signing idempotency to both logical batch id and txPlan bytes.
+// This allows safe re-planning/re-signing when a broadcasted tx disappears.
+func signingSessionIDV1(batchID [32]byte, txPlan []byte) [32]byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte("withdraw-sign-session-v1"))
+	_, _ = h.Write(batchID[:])
+	_, _ = h.Write(txPlan)
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
+}
+
+func (c *Coordinator) rebroadcastBackoff(attempts uint32) time.Duration {
+	if attempts <= 1 {
+		return c.cfg.RebroadcastBaseDelay
+	}
+
+	backoff := c.cfg.RebroadcastBaseDelay
+	for i := uint32(1); i < attempts; i++ {
+		if backoff >= c.cfg.RebroadcastMaxDelay {
+			return c.cfg.RebroadcastMaxDelay
+		}
+		if backoff > c.cfg.RebroadcastMaxDelay/2 {
+			return c.cfg.RebroadcastMaxDelay
+		}
+		backoff *= 2
+	}
+	if backoff > c.cfg.RebroadcastMaxDelay {
+		return c.cfg.RebroadcastMaxDelay
+	}
+	return backoff
 }
