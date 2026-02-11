@@ -14,7 +14,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 1. Generate registration payload:
 
 ```bash
-./deploy/operators/dkg/tailscale.sh register \
+./tailscale.sh register \
   --port 8443 \
   --fee-recipient 0x... \
   --output ./operator-registration.json \
@@ -26,7 +26,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 4. Start `dkg-admin`:
 
 ```bash
-./deploy/operators/dkg/operator.sh run \
+./operator.sh run \
   --bundle ./1_0x....tar.gz \
   --workdir ~/.juno-dkg/operator-runtime \
   --daemon
@@ -37,7 +37,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 1. Initialize ceremony workspace from operator registrations:
 
 ```bash
-./deploy/operators/dkg/coordinator.sh init \
+./coordinator.sh init \
   --workdir ./dkg-mainnet-2026-02-11 \
   --network mainnet \
   --threshold 3 \
@@ -54,25 +54,25 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 3. Run preflight:
 
 ```bash
-./deploy/operators/dkg/coordinator.sh preflight --workdir ./dkg-mainnet-2026-02-11
+./coordinator.sh preflight --workdir ./dkg-mainnet-2026-02-11
 ```
 
 4. Run online ceremony:
 
 ```bash
-./deploy/operators/dkg/coordinator.sh run --workdir ./dkg-mainnet-2026-02-11
+./coordinator.sh run --workdir ./dkg-mainnet-2026-02-11
 ```
 
 5. If interrupted:
 
 ```bash
-./deploy/operators/dkg/coordinator.sh resume --workdir ./dkg-mainnet-2026-02-11
+./coordinator.sh resume --workdir ./dkg-mainnet-2026-02-11
 ```
 
 6. Export key packages with primary KMS+S3 plus local age backup:
 
 ```bash
-./deploy/operators/dkg/coordinator.sh export \
+./coordinator.sh export \
   --workdir ./dkg-mainnet-2026-02-11 \
   --kms-key-id arn:aws:kms:... \
   --s3-bucket my-bucket \
