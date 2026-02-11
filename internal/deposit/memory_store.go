@@ -109,7 +109,7 @@ func (s *MemoryStore) ClaimConfirmed(_ context.Context, owner string, ttl time.D
 	out := make([]Job, 0, limit)
 	for _, id := range s.order {
 		j := s.jobs[id]
-		if j.State != StateConfirmed {
+		if j.State != StateConfirmed && j.State != StateSubmitted {
 			continue
 		}
 		lease, claimed := s.claim[id]

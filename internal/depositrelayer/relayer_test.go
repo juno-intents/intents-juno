@@ -36,6 +36,31 @@ func (s *stubSender) Send(_ context.Context, req httpapi.SendRequest) (httpapi.S
 	return s.res, s.err
 }
 
+type scriptedSenderStep struct {
+	res httpapi.SendResponse
+	err error
+}
+
+type scriptedSender struct {
+	calls int
+	got   []httpapi.SendRequest
+	plan  []scriptedSenderStep
+}
+
+func (s *scriptedSender) Send(_ context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error) {
+	s.calls++
+	s.got = append(s.got, req)
+	idx := s.calls - 1
+	if idx < len(s.plan) {
+		return s.plan[idx].res, s.plan[idx].err
+	}
+	if len(s.plan) == 0 {
+		return httpapi.SendResponse{}, nil
+	}
+	last := s.plan[len(s.plan)-1]
+	return last.res, last.err
+}
+
 type stubProofRequester struct {
 	gotReq proofclient.Request
 	res    proofclient.Result
@@ -794,6 +819,112 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 	}
 	if sender1.calls != 1 {
 		t.Fatalf("worker 1 sender calls: got %d want 1", sender1.calls)
+	}
+}
+
+func TestRelayer_RetriesSubmittedDepositsOnLaterFlush(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	store := deposit.NewMemoryStore()
+	sender := &scriptedSender{
+		plan: []scriptedSenderStep{
+			{
+				err: errors.New("temporary send error"),
+			},
+			{
+				res: httpapi.SendResponse{
+					TxHash:  "0x01",
+					Receipt: &httpapi.ReceiptResponse{Status: 1},
+				},
+			},
+		},
+	}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	err = r.IngestDeposit(ctx, DepositEvent{
+		Commitment: cm,
+		LeafIndex:  7,
+		Amount:     1000,
+		Memo:       memoBytes[:],
+	})
+	if err == nil {
+		t.Fatalf("expected initial submit error")
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender calls after first attempt: got %d want 1", sender.calls)
+	}
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get after failed send: %v", err)
+	}
+	if got, want := job.State, deposit.StateSubmitted; got != want {
+		t.Fatalf("state after failed send: got %v want %v", got, want)
+	}
+
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush retry: %v", err)
+	}
+	if sender.calls != 2 {
+		t.Fatalf("sender calls after retry: got %d want 2", sender.calls)
+	}
+
+	job, err = store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get after retry: %v", err)
+	}
+	if got, want := job.State, deposit.StateFinalized; got != want {
+		t.Fatalf("state after retry: got %v want %v", got, want)
 	}
 }
 

@@ -288,22 +288,22 @@ func (s *Store) ClaimConfirmed(ctx context.Context, owner string, ttl time.Durat
 			SELECT deposit_id
 			FROM deposit_jobs
 			WHERE
-				state = $1
+				(state = $1 OR state = $2)
 				AND (
 					claim_expires_at IS NULL
 					OR claim_expires_at <= now()
-					OR claimed_by = $2
+					OR claimed_by = $3
 				)
-			ORDER BY created_at ASC, deposit_id ASC
+			ORDER BY state DESC, created_at ASC, deposit_id ASC
 			FOR UPDATE SKIP LOCKED
-			LIMIT $3
+			LIMIT $4
 		)
 		UPDATE deposit_jobs dj
-		SET claimed_by = $2, claim_expires_at = $4, updated_at = now()
+		SET claimed_by = $3, claim_expires_at = $5, updated_at = now()
 		FROM picked
 		WHERE dj.deposit_id = picked.deposit_id
 		RETURNING dj.deposit_id
-	`, int16(deposit.StateConfirmed), owner, limit, expiresAt)
+	`, int16(deposit.StateConfirmed), int16(deposit.StateSubmitted), owner, limit, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("deposit/postgres: claim confirmed: %w", err)
 	}
