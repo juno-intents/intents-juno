@@ -26,7 +26,7 @@ func main() {
 		clientCAFile = flag.String("client-ca-file", "", "client CA PEM file (enables mTLS when set)")
 
 		insecureHTTP       = flag.Bool("insecure-http", false, "serve plain HTTP (DANGEROUS; dev only)")
-		signerBin          = flag.String("signer-bin", "", "path to signer command binary (required)")
+		signerBin          = flag.String("signer-bin", "", "path to signer command binary (required; typically tss-signer)")
 		signerMaxRespBytes = flag.Int("signer-max-response-bytes", 1<<20, "max signer response size (bytes)")
 
 		maxBodyBytes   = flag.Int64("max-body-bytes", 1<<20, "max HTTP request body size (bytes)")
