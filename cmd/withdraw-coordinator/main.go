@@ -17,8 +17,11 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
@@ -74,6 +77,11 @@ func main() {
 		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+
+		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "blobstore driver: s3|memory")
+		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for durable withdrawal artifacts (required for s3)")
+		blobPrefix     = flag.String("blob-prefix", "withdraw-coordinator", "blob key prefix")
+		blobMaxGetSize = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
 
 		// Planner (juno-txbuild)
 		txbuildBin        = flag.String("juno-txbuild-bin", "juno-txbuild", "path to juno-txbuild binary")
@@ -183,6 +191,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --queue-ack-timeout must be > 0")
 		os.Exit(2)
 	}
+	if *blobMaxGetSize <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --blob-max-get-size must be > 0")
+		os.Exit(2)
+	}
+	if normalizeBlobDriver(*blobDriver) == blobstore.DriverS3 && strings.TrimSpace(*blobBucket) == "" {
+		fmt.Fprintln(os.Stderr, "error: --blob-bucket is required when --blob-driver=s3")
+		os.Exit(2)
+	}
 
 	junoRPCUser := os.Getenv(*junoRPCUserEnv)
 	junoRPCPass := os.Getenv(*junoRPCPassEnv)
@@ -229,6 +245,12 @@ func main() {
 	}
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Error("ensure schema", "err", err)
+		os.Exit(2)
+	}
+
+	artifactStore, err := newBlobStore(ctx, *blobDriver, *blobBucket, *blobPrefix, *blobMaxGetSize)
+	if err != nil {
+		log.Error("init blob store", "err", err)
 		os.Exit(2)
 	}
 
@@ -353,6 +375,7 @@ func main() {
 		os.Exit(2)
 	}
 	coord.WithExpiryExtender(extender)
+	coord.WithBlobStore(artifactStore)
 
 	log.Info("withdraw coordinator started",
 		"owner", *owner,
@@ -365,6 +388,9 @@ func main() {
 		"baseChainID", *baseChainID,
 		"bridge", common.HexToAddress(*bridgeAddr),
 		"queueDriver", *queueDriver,
+		"blobDriver", normalizeBlobDriver(*blobDriver),
+		"blobBucket", strings.TrimSpace(*blobBucket),
+		"blobPrefix", strings.TrimSpace(*blobPrefix),
 	)
 
 	t := time.NewTicker(*tickInterval)
@@ -528,6 +554,33 @@ func decodeHexBytes(s string) ([]byte, error) {
 		return nil, fmt.Errorf("decode hex: %w", err)
 	}
 	return b, nil
+}
+
+func normalizeBlobDriver(v string) string {
+	s := strings.TrimSpace(strings.ToLower(v))
+	if s == "" {
+		return blobstore.DriverS3
+	}
+	return s
+}
+
+func newBlobStore(ctx context.Context, driver string, bucket string, prefix string, maxGetSize int64) (blobstore.Store, error) {
+	cfg := blobstore.Config{
+		Driver:     normalizeBlobDriver(driver),
+		Bucket:     strings.TrimSpace(bucket),
+		Prefix:     strings.TrimSpace(prefix),
+		MaxGetSize: maxGetSize,
+	}
+
+	if cfg.Driver == blobstore.DriverS3 {
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load aws config: %w", err)
+		}
+		cfg.S3Client = awss3.NewFromConfig(awsCfg)
+	}
+
+	return blobstore.New(cfg)
 }
 
 func newTSSHTTPClient(timeout time.Duration, serverCAFile string, clientCertFile string, clientKeyFile string) (*http.Client, error) {

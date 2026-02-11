@@ -3,12 +3,14 @@ package withdrawfinalizer
 import (
 	"context"
 	"crypto/ecdsa"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/leases"
@@ -37,6 +39,37 @@ func (p *staticProver) Prove(_ context.Context, _ common.Hash, _ []byte, private
 	p.gotInput = append([]byte(nil), privateInput...)
 	return p.seal, nil
 }
+
+type recordingBlobPut struct {
+	key     string
+	payload []byte
+	opts    blobstore.PutOptions
+}
+
+type recordingBlobStore struct {
+	puts   []recordingBlobPut
+	putErr error
+}
+
+func (s *recordingBlobStore) Put(_ context.Context, key string, payload []byte, opts blobstore.PutOptions) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	s.puts = append(s.puts, recordingBlobPut{
+		key:     key,
+		payload: append([]byte(nil), payload...),
+		opts:    opts,
+	})
+	return nil
+}
+
+func (s *recordingBlobStore) Get(context.Context, string) (blobstore.Object, error) {
+	return blobstore.Object{}, errors.New("unexpected Get")
+}
+
+func (s *recordingBlobStore) Delete(context.Context, string) error { return nil }
+
+func (s *recordingBlobStore) Exists(context.Context, string) (bool, error) { return false, nil }
 
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
@@ -163,6 +196,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 		},
 	}
 	prover := &staticProver{seal: []byte{0x99}}
+	artifacts := &recordingBlobStore{}
 
 	f, err := New(Config{
 		Owner:             "f1",
@@ -178,6 +212,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	f.WithBlobStore(artifacts)
 
 	if err := f.IngestCheckpoint(ctx, CheckpointPackage{
 		Checkpoint:         cp,
@@ -204,6 +239,29 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	if len(prover.gotInput) == 0 {
 		t.Fatalf("expected prover private input")
 	}
+	wantJournalKey := journalArtifactKey(batchID)
+	wantPrivateInputKey := privateInputArtifactKey(batchID)
+	wantSealKey := sealArtifactKey(batchID)
+	var sawJournal, sawPrivateInput, sawSeal bool
+	for _, p := range artifacts.puts {
+		switch p.key {
+		case wantJournalKey:
+			sawJournal = true
+		case wantPrivateInputKey:
+			sawPrivateInput = true
+		case wantSealKey:
+			sawSeal = true
+		}
+	}
+	if !sawJournal {
+		t.Fatalf("expected journal artifact key %q", wantJournalKey)
+	}
+	if !sawPrivateInput {
+		t.Fatalf("expected private input artifact key %q", wantPrivateInputKey)
+	}
+	if !sawSeal {
+		t.Fatalf("expected seal artifact key %q", wantSealKey)
+	}
 
 	b, err := store.GetBatch(ctx, batchID)
 	if err != nil {
@@ -219,6 +277,85 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	// Lease should be released on success.
 	if _, err := leaseStore.Get(ctx, batchLeaseName(batchID)); err == nil {
 		t.Fatalf("expected lease to be released")
+	}
+}
+
+func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{
+		res: httpapi.SendResponse{
+			TxHash: "0xabc",
+			Receipt: &httpapi.ReceiptResponse{
+				Status: 1,
+			},
+		},
+	}
+	prover := &staticProver{seal: []byte{0x99}}
+	artifacts := &recordingBlobStore{putErr: errors.New("s3 unavailable")}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   withdrawImageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	f.WithBlobStore(artifacts)
+
+	err = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+	if err == nil {
+		t.Fatalf("expected IngestCheckpoint error")
+	}
+	if !strings.Contains(err.Error(), "persist proof journal artifact") {
+		t.Fatalf("expected artifact error, got %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected no submit on artifact failure, got %d calls", sender.calls)
 	}
 }
 

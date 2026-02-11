@@ -15,8 +15,11 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awss3 "github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
@@ -71,6 +74,11 @@ func main() {
 		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+
+		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "blobstore driver: s3|memory")
+		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for durable withdrawal proof artifacts (required for s3)")
+		blobPrefix     = flag.String("blob-prefix", "withdraw-finalizer", "blob key prefix")
+		blobMaxGetSize = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
 	)
 	flag.Parse()
 
@@ -94,6 +102,14 @@ func main() {
 	}
 	if *proverMaxRespBytes <= 0 || *ackTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --prover-max-response-bytes and --queue-ack-timeout must be > 0")
+		os.Exit(2)
+	}
+	if *blobMaxGetSize <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --blob-max-get-size must be > 0")
+		os.Exit(2)
+	}
+	if normalizeBlobDriver(*blobDriver) == blobstore.DriverS3 && strings.TrimSpace(*blobBucket) == "" {
+		fmt.Fprintln(os.Stderr, "error: --blob-bucket is required when --blob-driver=s3")
 		os.Exit(2)
 	}
 
@@ -167,6 +183,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	artifactStore, err := newBlobStore(ctx, *blobDriver, *blobBucket, *blobPrefix, *blobMaxGetSize)
+	if err != nil {
+		log.Error("init blob store", "err", err)
+		os.Exit(2)
+	}
+
 	leaseStore, err := leasespg.New(pool)
 	if err != nil {
 		log.Error("init lease store", "err", err)
@@ -192,6 +214,7 @@ func main() {
 		log.Error("init withdraw finalizer", "err", err)
 		os.Exit(2)
 	}
+	f.WithBlobStore(artifactStore)
 
 	log.Info("withdraw finalizer started",
 		"owner", *owner,
@@ -202,6 +225,9 @@ func main() {
 		"leaseTTL", leaseTTL.String(),
 		"tickInterval", tickInterval.String(),
 		"queueDriver", *queueDriver,
+		"blobDriver", normalizeBlobDriver(*blobDriver),
+		"blobBucket", strings.TrimSpace(*blobBucket),
+		"blobPrefix", strings.TrimSpace(*blobPrefix),
 	)
 
 	t := time.NewTicker(*tickInterval)
@@ -328,4 +354,31 @@ func parseHash32Strict(s string) (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("decode hex: %w", err)
 	}
 	return common.BytesToHash(b), nil
+}
+
+func normalizeBlobDriver(v string) string {
+	s := strings.TrimSpace(strings.ToLower(v))
+	if s == "" {
+		return blobstore.DriverS3
+	}
+	return s
+}
+
+func newBlobStore(ctx context.Context, driver string, bucket string, prefix string, maxGetSize int64) (blobstore.Store, error) {
+	cfg := blobstore.Config{
+		Driver:     normalizeBlobDriver(driver),
+		Bucket:     strings.TrimSpace(bucket),
+		Prefix:     strings.TrimSpace(prefix),
+		MaxGetSize: maxGetSize,
+	}
+
+	if cfg.Driver == blobstore.DriverS3 {
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("load aws config: %w", err)
+		}
+		cfg.S3Client = awss3.NewFromConfig(awsCfg)
+	}
+
+	return blobstore.New(cfg)
 }

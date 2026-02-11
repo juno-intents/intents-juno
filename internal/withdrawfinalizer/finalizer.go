@@ -13,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
@@ -62,6 +63,7 @@ type Finalizer struct {
 	leaseStore leases.Store
 	sender     Sender
 	prover     Prover
+	blobStore  blobstore.Store
 
 	log *slog.Logger
 
@@ -114,6 +116,12 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 		log:            log,
 		quorumVerifier: quorumVerifier,
 	}, nil
+}
+
+// WithBlobStore configures optional artifact persistence for proof inputs/outputs.
+func (f *Finalizer) WithBlobStore(store blobstore.Store) *Finalizer {
+	f.blobStore = store
+	return f
 }
 
 func (f *Finalizer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
@@ -214,14 +222,23 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	if err != nil {
 		return err
 	}
+	if err := f.persistProofJournalArtifact(ctx, batchID, journal); err != nil {
+		return err
+	}
 
 	privateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cp, f.opSigs, items)
 	if err != nil {
 		return err
 	}
+	if err := f.persistProofPrivateInputArtifact(ctx, batchID, privateInput); err != nil {
+		return err
+	}
 
 	seal, err := f.prover.Prove(ctx, f.cfg.WithdrawImageID, journal, privateInput)
 	if err != nil {
+		return err
+	}
+	if err := f.persistProofSealArtifact(ctx, batchID, seal); err != nil {
 		return err
 	}
 
@@ -271,4 +288,64 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 
 func batchLeaseName(batchID [32]byte) string {
 	return "withdraw-finalizer/batch/" + hex.EncodeToString(batchID[:])
+}
+
+func journalArtifactKey(batchID [32]byte) string {
+	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/proof/journal.bin"
+}
+
+func privateInputArtifactKey(batchID [32]byte) string {
+	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/proof/private_input.v1.bin"
+}
+
+func sealArtifactKey(batchID [32]byte) string {
+	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/proof/seal.bin"
+}
+
+func (f *Finalizer) persistProofJournalArtifact(ctx context.Context, batchID [32]byte, journal []byte) error {
+	if f.blobStore == nil {
+		return nil
+	}
+	if err := f.blobStore.Put(ctx, journalArtifactKey(batchID), journal, blobstore.PutOptions{
+		ContentType: "application/octet-stream",
+		Metadata: map[string]string{
+			"artifact-type": "withdraw-proof-journal",
+			"batch-id":      hex.EncodeToString(batchID[:]),
+		},
+	}); err != nil {
+		return fmt.Errorf("withdrawfinalizer: persist proof journal artifact: %w", err)
+	}
+	return nil
+}
+
+func (f *Finalizer) persistProofPrivateInputArtifact(ctx context.Context, batchID [32]byte, privateInput []byte) error {
+	if f.blobStore == nil {
+		return nil
+	}
+	if err := f.blobStore.Put(ctx, privateInputArtifactKey(batchID), privateInput, blobstore.PutOptions{
+		ContentType: "application/octet-stream",
+		Metadata: map[string]string{
+			"artifact-type": "withdraw-proof-private-input",
+			"batch-id":      hex.EncodeToString(batchID[:]),
+		},
+	}); err != nil {
+		return fmt.Errorf("withdrawfinalizer: persist proof private input artifact: %w", err)
+	}
+	return nil
+}
+
+func (f *Finalizer) persistProofSealArtifact(ctx context.Context, batchID [32]byte, seal []byte) error {
+	if f.blobStore == nil {
+		return nil
+	}
+	if err := f.blobStore.Put(ctx, sealArtifactKey(batchID), seal, blobstore.PutOptions{
+		ContentType: "application/octet-stream",
+		Metadata: map[string]string{
+			"artifact-type": "withdraw-proof-seal",
+			"batch-id":      hex.EncodeToString(batchID[:]),
+		},
+	}); err != nil {
+		return fmt.Errorf("withdrawfinalizer: persist proof seal artifact: %w", err)
+	}
+	return nil
 }

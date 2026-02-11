@@ -2,9 +2,13 @@ package withdrawcoordinator
 
 import (
 	"context"
+	"errors"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/juno-intents/intents-juno/internal/batching"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -54,6 +58,37 @@ func (c *stubConfirmer) WaitConfirmed(_ context.Context, txid string) error {
 	}
 	return nil
 }
+
+type recordingBlobPut struct {
+	key     string
+	payload []byte
+	opts    blobstore.PutOptions
+}
+
+type recordingBlobStore struct {
+	puts   []recordingBlobPut
+	putErr error
+}
+
+func (s *recordingBlobStore) Put(_ context.Context, key string, payload []byte, opts blobstore.PutOptions) error {
+	if s.putErr != nil {
+		return s.putErr
+	}
+	s.puts = append(s.puts, recordingBlobPut{
+		key:     key,
+		payload: append([]byte(nil), payload...),
+		opts:    opts,
+	})
+	return nil
+}
+
+func (s *recordingBlobStore) Get(context.Context, string) (blobstore.Object, error) {
+	return blobstore.Object{}, errors.New("unexpected Get")
+}
+
+func (s *recordingBlobStore) Delete(context.Context, string) error { return nil }
+
+func (s *recordingBlobStore) Exists(context.Context, string) (bool, error) { return false, nil }
 
 func seq32(start byte) (out [32]byte) {
 	for i := 0; i < 32; i++ {
@@ -345,5 +380,116 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 	}
 	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 {
 		t.Fatalf("expected no additional recovery during backoff window")
+	}
+}
+
+func TestCoordinator_PersistsTxPlanAndSignedTxArtifacts(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{}
+	artifacts := &recordingBlobStore{}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.WithBlobStore(artifacts)
+
+	ctx := context.Background()
+	w0 := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if err := c.IngestWithdrawRequested(ctx, w0); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	batchID := batching.WithdrawalBatchIDV1([][32]byte{w0.ID})
+	wantTxPlanKey := txPlanArtifactKey(batchID)
+	wantSignedTxKey := signedTxArtifactKey(batchID)
+
+	var sawTxPlan, sawSigned bool
+	for _, p := range artifacts.puts {
+		switch p.key {
+		case wantTxPlanKey:
+			sawTxPlan = true
+			if got, want := string(p.payload), `{"v":1}`; got != want {
+				t.Fatalf("txPlan payload mismatch: got %q want %q", got, want)
+			}
+			if got, want := p.opts.ContentType, "application/json"; got != want {
+				t.Fatalf("txPlan content type mismatch: got %q want %q", got, want)
+			}
+		case wantSignedTxKey:
+			sawSigned = true
+			if len(p.payload) != 1 || p.payload[0] != 0x01 {
+				t.Fatalf("signed tx payload mismatch: got %x", p.payload)
+			}
+			if got, want := p.opts.ContentType, "application/octet-stream"; got != want {
+				t.Fatalf("signed tx content type mismatch: got %q want %q", got, want)
+			}
+		}
+	}
+	if !sawTxPlan {
+		t.Fatalf("expected txPlan artifact key %q", wantTxPlanKey)
+	}
+	if !sawSigned {
+		t.Fatalf("expected signed tx artifact key %q", wantSignedTxKey)
+	}
+}
+
+func TestCoordinator_FailsWhenTxPlanArtifactPersistenceFails(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{}
+	artifacts := &recordingBlobStore{putErr: errors.New("s3 unavailable")}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.WithBlobStore(artifacts)
+
+	ctx := context.Background()
+	w0 := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if err := c.IngestWithdrawRequested(ctx, w0); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatalf("expected Tick error")
+	}
+	if !strings.Contains(err.Error(), "persist tx plan artifact") {
+		t.Fatalf("expected artifact error, got %v", err)
+	}
+	if signer.calls != 0 || broadcaster.calls != 0 {
+		t.Fatalf("expected no sign/broadcast on artifact failure, got signer=%d broadcaster=%d", signer.calls, broadcaster.calls)
 	}
 }

@@ -3,6 +3,7 @@ package withdrawcoordinator
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"github.com/juno-intents/intents-juno/internal/batching"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
@@ -64,6 +66,7 @@ type Coordinator struct {
 	broadcaster Broadcaster
 	confirmer   Confirmer
 	extender    ExpiryExtender
+	blobStore   blobstore.Store
 
 	log *slog.Logger
 
@@ -142,6 +145,12 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 // WithExpiryExtender configures an optional Base expiry extension hook.
 func (c *Coordinator) WithExpiryExtender(ext ExpiryExtender) *Coordinator {
 	c.extender = ext
+	return c
+}
+
+// WithBlobStore configures optional artifact persistence for tx plans and signed tx bytes.
+func (c *Coordinator) WithBlobStore(store blobstore.Store) *Coordinator {
+	c.blobStore = store
 	return c
 }
 
@@ -251,6 +260,9 @@ func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[
 	}); err != nil {
 		return err
 	}
+	if err := c.persistTxPlanArtifact(ctx, batchID, plan); err != nil {
+		return err
+	}
 
 	// Continue immediately; resume() will do the rest too, but this avoids an extra cycle.
 	if err := c.signBatch(ctx, batchID); err != nil {
@@ -277,6 +289,9 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
+		return err
+	}
+	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
 		return err
 	}
 	return c.store.SetBatchSigned(ctx, batchID, rawTx)
@@ -371,6 +386,9 @@ func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32
 		}
 		return err
 	}
+	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
+		return err
+	}
 
 	if err := c.signBatch(ctx, b.ID); err != nil {
 		return err
@@ -453,4 +471,44 @@ func (c *Coordinator) rebroadcastBackoff(attempts uint32) time.Duration {
 		return c.cfg.RebroadcastMaxDelay
 	}
 	return backoff
+}
+
+func txPlanArtifactKey(batchID [32]byte) string {
+	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/txplan.json"
+}
+
+func signedTxArtifactKey(batchID [32]byte) string {
+	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/signed.tx"
+}
+
+func (c *Coordinator) persistTxPlanArtifact(ctx context.Context, batchID [32]byte, txPlan []byte) error {
+	if c.blobStore == nil {
+		return nil
+	}
+	if err := c.blobStore.Put(ctx, txPlanArtifactKey(batchID), txPlan, blobstore.PutOptions{
+		ContentType: "application/json",
+		Metadata: map[string]string{
+			"artifact-type": "withdraw-txplan",
+			"batch-id":      hex.EncodeToString(batchID[:]),
+		},
+	}); err != nil {
+		return fmt.Errorf("withdrawcoordinator: persist tx plan artifact: %w", err)
+	}
+	return nil
+}
+
+func (c *Coordinator) persistSignedTxArtifact(ctx context.Context, batchID [32]byte, signedTx []byte) error {
+	if c.blobStore == nil {
+		return nil
+	}
+	if err := c.blobStore.Put(ctx, signedTxArtifactKey(batchID), signedTx, blobstore.PutOptions{
+		ContentType: "application/octet-stream",
+		Metadata: map[string]string{
+			"artifact-type": "withdraw-signed-tx",
+			"batch-id":      hex.EncodeToString(batchID[:]),
+		},
+	}); err != nil {
+		return fmt.Errorf("withdrawcoordinator: persist signed tx artifact: %w", err)
+	}
+	return nil
 }
