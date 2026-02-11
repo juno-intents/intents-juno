@@ -6,7 +6,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 
 - `tailscale.sh`: operator-side Tailscale bootstrap + registration payload output.
 - `operator.sh`: operator-side bundle execution (`dkg-admin serve`) and process control.
-- `operator-export-kms.sh`: operator-side key package export to each operator's own AWS KMS+S3 target.
+- `operator-export-kms.sh`: operator-side key package export workflows (age backup first, KMS+S3 later).
 - `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
 - `test-completiton.sh`: completion verifier that checks smoke-signature phases and outputs UFVK + Juno shielded address.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
@@ -82,9 +82,25 @@ This command validates online smoke-signature phases for all operators and print
 - `public_key_package_hash`
 - `transcript_hash`
 
-## Primary Post-DKG Export Flow (Operator-Local)
+## Primary Post-DKG Export Flow (Age First, KMS Later)
 
-Each operator exports their own key package to their own AWS KMS+S3 target:
+### 1) Generate age recipient on each operator
+
+```bash
+./operator-export-kms.sh age-recipient \
+  --output ~/.juno-dkg/backup/age-recipient.json
+```
+
+### 2) Export age backup only (no AWS required yet)
+
+```bash
+./operator-export-kms.sh backup-age \
+  --workdir ~/.juno-dkg/operator-runtime \
+  --age-recipient age1... \
+  --out ~/.juno-dkg/exports/keypackage-backup.json
+```
+
+### 3) Later, export to each operator's own KMS+S3 target
 
 ```bash
 ./operator-export-kms.sh export \
@@ -97,18 +113,7 @@ Each operator exports their own key package to their own AWS KMS+S3 target:
   --aws-region us-east-1
 ```
 
-Optional local age backup in the same run:
-
-```bash
-./operator-export-kms.sh export \
-  --workdir ~/.juno-dkg/operator-runtime \
-  --kms-key-id arn:aws:kms:... \
-  --s3-bucket my-operator-bucket \
-  --s3-key-prefix dkg/keypackages \
-  --s3-sse-kms-key-id arn:aws:kms:... \
-  --backup-age-recipient age1... \
-  --backup-out ~/.juno-dkg/exports/keypackage-backup.json
-```
+This "KMS later" step uses the operator runtime state to produce a new KMS-wrapped artifact. Keep `~/.juno-dkg/operator-runtime` until KMS export is complete.
 
 ## Where `age-recipient` Comes From
 
@@ -120,7 +125,7 @@ Generate or reuse an age identity key on the operator machine:
 
 This prints JSON with:
 
-- `age_recipient`: the public recipient (`age1...`) to pass in `--backup-age-recipient`.
+- `age_recipient`: the public recipient (`age1...`) to pass in `backup-age --age-recipient`.
 - `identity_file`: the local private key path to back up securely.
 
 ## Optional Coordinator-Wide Export

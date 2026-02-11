@@ -12,6 +12,7 @@ usage() {
   cat <<'EOF'
 Usage:
   operator-export-kms.sh export [options]
+  operator-export-kms.sh backup-age [options]
   operator-export-kms.sh age-recipient [options]
 
 Commands:
@@ -33,6 +34,13 @@ Commands:
   age-recipient:
     --identity-file <path>          default ~/.juno-dkg/backup/age-identity.txt
     --output <path>                 default stdout ("-")
+
+  backup-age:
+    --workdir <path>                operator runtime dir (default: ~/.juno-dkg/operator-runtime)
+    --release-tag <tag>             dkg-admin release tag (default: v0.1.0)
+    --age-recipient <age1..>        required, repeatable
+    --out <path>                    required output path for encrypted age backup
+    --force                         allow overwriting --out when it exists
 
 Notes:
   - `export` reads operator metadata from <workdir>/bundle/admin-config.json.
@@ -84,6 +92,91 @@ aws_preflight() {
     || die "kms key is not accessible: $kms_key_id"
   AWS_PAGER="" aws "${aws_args[@]}" s3api head-bucket --bucket "$s3_bucket" >/dev/null \
     || die "s3 bucket is not accessible: $s3_bucket"
+}
+
+command_backup_age() {
+  shift || true
+
+  local workdir="$JUNO_DKG_HOME_DEFAULT/operator-runtime"
+  local release_tag="$JUNO_DKG_VERSION_DEFAULT"
+  local out_path=""
+  local force="false"
+  local age_recipients=()
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --workdir)
+        [[ $# -ge 2 ]] || die "missing value for --workdir"
+        workdir="$2"
+        shift 2
+        ;;
+      --release-tag)
+        [[ $# -ge 2 ]] || die "missing value for --release-tag"
+        release_tag="$2"
+        shift 2
+        ;;
+      --age-recipient)
+        [[ $# -ge 2 ]] || die "missing value for --age-recipient"
+        age_recipients+=("$2")
+        shift 2
+        ;;
+      --out)
+        [[ $# -ge 2 ]] || die "missing value for --out"
+        out_path="$2"
+        shift 2
+        ;;
+      --force)
+        force="true"
+        shift
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument for backup-age: $1"
+        ;;
+    esac
+  done
+
+  (( ${#age_recipients[@]} > 0 )) || die "at least one --age-recipient is required"
+  [[ -n "$out_path" ]] || die "--out is required"
+
+  local config_path="$workdir/bundle/admin-config.json"
+  [[ -f "$config_path" ]] || die "missing operator config: $config_path"
+
+  ensure_base_dependencies
+  ensure_dir "$workdir/bin"
+  ensure_dir "$(dirname "$out_path")"
+  if [[ -f "$out_path" && "$force" != "true" ]]; then
+    die "output exists (use --force to overwrite): $out_path"
+  fi
+
+  local dkg_admin_bin
+  dkg_admin_bin="$(ensure_dkg_binary "dkg-admin" "$release_tag" "$workdir/bin")"
+
+  local -a age_args=()
+  local recipient
+  for recipient in "${age_recipients[@]}"; do
+    age_args+=(--age-recipient "$recipient")
+  done
+
+  local stamp age_receipt_log
+  stamp="$(date -u +'%Y%m%dT%H%M%SZ')"
+  ensure_dir "$workdir/exports"
+  age_receipt_log="$workdir/exports/age-export-receipt-${stamp}.json"
+  run_dkg_admin_export \
+    "$dkg_admin_bin" \
+    "$config_path" \
+    "" \
+    "" \
+    "${age_args[@]}" \
+    --out "$out_path" | tee "$age_receipt_log"
+
+  log "age backup export complete"
+  log "backup_out=$out_path"
+  log "age_receipt=$age_receipt_log"
+  log "backup_receipt=${out_path}.KeyImportReceipt.json"
 }
 
 command_export() {
@@ -330,6 +423,7 @@ main() {
   local cmd="${1:-export}"
   case "$cmd" in
     export) command_export "$@" ;;
+    backup-age) command_backup_age "$@" ;;
     age-recipient) command_age_recipient "$@" ;;
     -h|--help)
       usage
