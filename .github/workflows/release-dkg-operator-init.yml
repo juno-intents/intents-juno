@@ -56,6 +56,7 @@ jobs:
           cp deploy/operators/dkg/tailscale.sh "$STAGE/tailscale.sh"
           cp deploy/operators/dkg/operator.sh "$STAGE/operator.sh"
           cp deploy/operators/dkg/operator-export-kms.sh "$STAGE/operator-export-kms.sh"
+          cp deploy/operators/dkg/backup-package.sh "$STAGE/backup-package.sh"
           cp deploy/operators/dkg/coordinator.sh "$STAGE/coordinator.sh"
           cp deploy/operators/dkg/test-completiton.sh "$STAGE/test-completiton.sh"
           cp deploy/operators/dkg/README.md "$STAGE/README.md"
@@ -65,7 +66,7 @@ jobs:
           cp .ci/build/bin/operator-keygen_darwin_amd64 "$STAGE/bin/"
           cp .ci/build/bin/operator-keygen_darwin_arm64 "$STAGE/bin/"
 
-          chmod 0755 "$STAGE/common.sh" "$STAGE/tailscale.sh" "$STAGE/operator.sh" "$STAGE/operator-export-kms.sh" "$STAGE/coordinator.sh" "$STAGE/test-completiton.sh"
+          chmod 0755 "$STAGE/common.sh" "$STAGE/tailscale.sh" "$STAGE/operator.sh" "$STAGE/operator-export-kms.sh" "$STAGE/backup-package.sh" "$STAGE/coordinator.sh" "$STAGE/test-completiton.sh"
           chmod 0755 "$STAGE/bin/"operator-keygen_*
 
           printf '%s\n' "$RELEASE_TAG" >"$STAGE/VERSION"
