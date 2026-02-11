@@ -10,8 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -28,6 +30,15 @@ type Config struct {
 	OWalletUA           string
 	RefundWindowSeconds uint64
 	NonceFn             func() (uint64, error)
+
+	RateLimitPerIPPerSecond float64
+	RateLimitBurst          int
+	RateLimitMaxTrackedIPs  int
+
+	MemoCacheTTL        time.Duration
+	MemoCacheMaxEntries int
+
+	Now func() time.Time
 }
 
 type DepositReader interface {
@@ -62,11 +73,35 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	if cfg.NonceFn == nil {
 		cfg.NonceFn = randomNonce
 	}
+	if cfg.RateLimitPerIPPerSecond <= 0 {
+		cfg.RateLimitPerIPPerSecond = 20
+	}
+	if cfg.RateLimitBurst <= 0 {
+		cfg.RateLimitBurst = 40
+	}
+	if cfg.RateLimitMaxTrackedIPs <= 0 {
+		cfg.RateLimitMaxTrackedIPs = 10_000
+	}
+	if cfg.MemoCacheTTL <= 0 {
+		cfg.MemoCacheTTL = 30 * time.Second
+	}
+	if cfg.MemoCacheMaxEntries <= 0 {
+		cfg.MemoCacheMaxEntries = 10_000
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 
 	h := &handler{
 		cfg:         cfg,
 		deposits:    deposits,
 		withdrawals: withdrawals,
+		limiter: newIPRateLimiter(
+			cfg.RateLimitPerIPPerSecond,
+			float64(cfg.RateLimitBurst),
+			cfg.RateLimitMaxTrackedIPs,
+		),
+		memoCache: newMemoResponseCache(cfg.MemoCacheTTL, cfg.MemoCacheMaxEntries),
 	}
 
 	mux := http.NewServeMux()
@@ -75,7 +110,28 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /v1/deposit-memo", h.handleDepositMemo)
 	mux.HandleFunc("GET /v1/status/deposit/{depositId}", h.handleDepositStatus)
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
-	return mux, nil
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Health checks must never be throttled.
+		if r.URL.Path == "/healthz" {
+			mux.ServeHTTP(w, r)
+			return
+		}
+
+		now := h.cfg.Now().UTC()
+		ip := clientIP(r)
+		allowed := h.limiter.Allow(ip, now)
+		w.Header().Set("X-RateLimit-Limit", strconv.Itoa(h.cfg.RateLimitBurst))
+		if !allowed {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{
+				"version": "v1",
+				"error":   "rate_limited",
+			})
+			return
+		}
+
+		mux.ServeHTTP(w, r)
+	}), nil
 }
 
 type handler struct {
@@ -83,6 +139,8 @@ type handler struct {
 
 	deposits    DepositReader
 	withdrawals WithdrawalReader
+	limiter     *ipRateLimiter
+	memoCache   *memoResponseCache
 }
 
 func (h *handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
@@ -111,7 +169,15 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	nonce, err := parseNonce(r.URL.Query().Get("nonce"), h.cfg.NonceFn)
+	recipient := common.HexToAddress(baseRecipientStr)
+	nonceQuery := strings.TrimSpace(r.URL.Query().Get("nonce"))
+	cacheKey := memoCacheKey(strings.ToLower(recipient.Hex()), nonceQuery)
+	if body, ok := h.memoCache.Get(cacheKey, h.cfg.Now().UTC()); ok {
+		writeJSONBytes(w, http.StatusOK, body)
+		return
+	}
+
+	nonce, err := parseNonce(nonceQuery, h.cfg.NonceFn)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"version": "v1",
@@ -122,7 +188,6 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 
 	var bridge [20]byte
 	copy(bridge[:], h.cfg.BridgeAddress.Bytes())
-	recipient := common.HexToAddress(baseRecipientStr)
 	var recipient20 [20]byte
 	copy(recipient20[:], recipient.Bytes())
 
@@ -135,7 +200,7 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 	}
 	encoded := m.Encode()
 
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":       "v1",
 		"baseChainId":   h.cfg.BaseChainID,
 		"bridgeAddress": h.cfg.BridgeAddress.Hex(),
@@ -144,7 +209,18 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 		"nonce":         strconv.FormatUint(nonce, 10),
 		"memoHex":       hex.EncodeToString(encoded[:]),
 		"memoBase64":    base64.StdEncoding.EncodeToString(encoded[:]),
-	})
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"version": "v1",
+			"error":   "internal",
+		})
+		return
+	}
+	body = append(body, '\n')
+	h.memoCache.Set(cacheKey, body, h.cfg.Now().UTC())
+	writeJSONBytes(w, http.StatusOK, body)
 }
 
 func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
@@ -273,4 +349,214 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeJSONBytes(w http.ResponseWriter, code int, body []byte) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_, _ = w.Write(body)
+}
+
+func clientIP(r *http.Request) string {
+	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
+	if xff != "" {
+		parts := strings.Split(xff, ",")
+		ip := strings.TrimSpace(parts[0])
+		if ip != "" {
+			return ip
+		}
+	}
+	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
+		return xrip
+	}
+	remote := strings.TrimSpace(r.RemoteAddr)
+	if remote == "" {
+		return "unknown"
+	}
+	if addr, err := netip.ParseAddrPort(remote); err == nil {
+		return addr.Addr().String()
+	}
+	if addr, err := netip.ParseAddr(remote); err == nil {
+		return addr.String()
+	}
+	host := remote
+	if i := strings.LastIndex(remote, ":"); i > 0 {
+		host = remote[:i]
+	}
+	if addr, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil {
+		return addr.String()
+	}
+	return remote
+}
+
+type limiterState struct {
+	tokens   float64
+	lastAt   time.Time
+	lastSeen time.Time
+}
+
+type ipRateLimiter struct {
+	mu sync.Mutex
+
+	refillPerSecond float64
+	burst           float64
+	maxTrackedIPs   int
+	states          map[string]limiterState
+}
+
+func newIPRateLimiter(refillPerSecond float64, burst float64, maxTrackedIPs int) *ipRateLimiter {
+	return &ipRateLimiter{
+		refillPerSecond: refillPerSecond,
+		burst:           burst,
+		maxTrackedIPs:   maxTrackedIPs,
+		states:          make(map[string]limiterState),
+	}
+}
+
+func (l *ipRateLimiter) Allow(ip string, now time.Time) bool {
+	if l == nil {
+		return true
+	}
+	if ip == "" {
+		ip = "unknown"
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	st, ok := l.states[ip]
+	if !ok {
+		if len(l.states) >= l.maxTrackedIPs {
+			l.evictOne()
+		}
+		l.states[ip] = limiterState{
+			tokens:   l.burst - 1,
+			lastAt:   now,
+			lastSeen: now,
+		}
+		return true
+	}
+
+	elapsed := now.Sub(st.lastAt).Seconds()
+	if elapsed > 0 {
+		st.tokens += elapsed * l.refillPerSecond
+		if st.tokens > l.burst {
+			st.tokens = l.burst
+		}
+	}
+	st.lastAt = now
+	st.lastSeen = now
+
+	if st.tokens < 1 {
+		l.states[ip] = st
+		return false
+	}
+	st.tokens -= 1
+	l.states[ip] = st
+	return true
+}
+
+func (l *ipRateLimiter) evictOne() {
+	var oldestIP string
+	var oldestAt time.Time
+	first := true
+	for ip, st := range l.states {
+		if first || st.lastSeen.Before(oldestAt) {
+			oldestIP = ip
+			oldestAt = st.lastSeen
+			first = false
+		}
+	}
+	if oldestIP != "" {
+		delete(l.states, oldestIP)
+	}
+}
+
+type memoEntry struct {
+	body      []byte
+	expiresAt time.Time
+	lastSeen  time.Time
+}
+
+type memoResponseCache struct {
+	mu sync.Mutex
+
+	ttl        time.Duration
+	maxEntries int
+	entries    map[string]memoEntry
+}
+
+func newMemoResponseCache(ttl time.Duration, maxEntries int) *memoResponseCache {
+	return &memoResponseCache{
+		ttl:        ttl,
+		maxEntries: maxEntries,
+		entries:    make(map[string]memoEntry),
+	}
+}
+
+func (c *memoResponseCache) Get(key string, now time.Time) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	e, ok := c.entries[key]
+	if !ok {
+		return nil, false
+	}
+	if !now.Before(e.expiresAt) {
+		delete(c.entries, key)
+		return nil, false
+	}
+	e.lastSeen = now
+	c.entries[key] = e
+	return append([]byte(nil), e.body...), true
+}
+
+func (c *memoResponseCache) Set(key string, body []byte, now time.Time) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.pruneExpired(now)
+	if _, exists := c.entries[key]; !exists && len(c.entries) >= c.maxEntries {
+		c.evictOne()
+	}
+
+	c.entries[key] = memoEntry{
+		body:      append([]byte(nil), body...),
+		expiresAt: now.Add(c.ttl),
+		lastSeen:  now,
+	}
+}
+
+func (c *memoResponseCache) pruneExpired(now time.Time) {
+	for k, v := range c.entries {
+		if !now.Before(v.expiresAt) {
+			delete(c.entries, k)
+		}
+	}
+}
+
+func (c *memoResponseCache) evictOne() {
+	var evictKey string
+	var oldest time.Time
+	first := true
+	for k, v := range c.entries {
+		if first || v.lastSeen.Before(oldest) {
+			first = false
+			oldest = v.lastSeen
+			evictKey = k
+		}
+	}
+	if evictKey != "" {
+		delete(c.entries, evictKey)
+	}
+}
+
+func memoCacheKey(baseRecipient string, nonce string) string {
+	return baseRecipient + "|" + nonce
 }

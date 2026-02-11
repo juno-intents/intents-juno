@@ -30,6 +30,13 @@ func main() {
 
 		refundWindowSeconds = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
 
+		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
+		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
+		rateLimitMaxIPs    = flag.Int("rate-limit-max-tracked-ips", 10000, "maximum tracked client IP entries in rate limiter")
+
+		memoCacheTTL        = flag.Duration("memo-cache-ttl", 30*time.Second, "TTL for deposit memo response cache")
+		memoCacheMaxEntries = flag.Int("memo-cache-max-entries", 10000, "maximum cached deposit memo responses")
+
 		readHeaderTimeout = flag.Duration("read-header-timeout", 5*time.Second, "http.Server ReadHeaderTimeout")
 		readTimeout       = flag.Duration("read-timeout", 10*time.Second, "http.Server ReadTimeout")
 		writeTimeout      = flag.Duration("write-timeout", 10*time.Second, "http.Server WriteTimeout")
@@ -57,6 +64,14 @@ func main() {
 	}
 	if *readHeaderTimeout <= 0 || *readTimeout <= 0 || *writeTimeout <= 0 || *idleTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "error: timeouts must be > 0")
+		os.Exit(2)
+	}
+	if *rateLimitPerSecond <= 0 || *rateLimitBurst <= 0 || *rateLimitMaxIPs <= 0 {
+		fmt.Fprintln(os.Stderr, "error: rate limit settings must be > 0")
+		os.Exit(2)
+	}
+	if *memoCacheTTL <= 0 || *memoCacheMaxEntries <= 0 {
+		fmt.Fprintln(os.Stderr, "error: memo cache settings must be > 0")
 		os.Exit(2)
 	}
 
@@ -97,10 +112,16 @@ func main() {
 	}
 
 	handler, err := bridgeapi.NewHandler(bridgeapi.Config{
-		BaseChainID:         uint32(*baseChainID),
-		BridgeAddress:       common.HexToAddress(*bridgeAddr),
-		OWalletUA:           *oWalletUA,
-		RefundWindowSeconds: *refundWindowSeconds,
+		BaseChainID:             uint32(*baseChainID),
+		BridgeAddress:           common.HexToAddress(*bridgeAddr),
+		OWalletUA:               *oWalletUA,
+		RefundWindowSeconds:     *refundWindowSeconds,
+		RateLimitPerIPPerSecond: *rateLimitPerSecond,
+		RateLimitBurst:          *rateLimitBurst,
+		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,
+		MemoCacheTTL:            *memoCacheTTL,
+		MemoCacheMaxEntries:     *memoCacheMaxEntries,
+		Now:                     time.Now,
 	}, depositStore, withdrawReader)
 	if err != nil {
 		log.Error("init bridge api handler", "err", err)

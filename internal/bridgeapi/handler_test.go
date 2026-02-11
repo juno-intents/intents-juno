@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -203,5 +205,195 @@ func TestHandler_WithdrawalStatus(t *testing.T) {
 	}
 	if !out.Found || out.State != "broadcasted" || out.JunoTx != "abc" {
 		t.Fatalf("bad response: %+v", out)
+	}
+}
+
+func TestHandler_DepositMemo_CacheHitUsesSingleNonce(t *testing.T) {
+	t.Parallel()
+
+	var nonceCalls atomic.Uint64
+	h, err := NewHandler(Config{
+		BaseChainID:         8453,
+		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:           "u1example",
+		RefundWindowSeconds: 86400,
+		MemoCacheTTL:        30 * time.Second,
+		NonceFn: func() (uint64, error) {
+			return nonceCalls.Add(1), nil
+		},
+	}, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	path := "/v1/deposit-memo?baseRecipient=0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1"
+
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, path, nil)
+	req1.RemoteAddr = "203.0.113.10:12345"
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status: got %d want %d", rec1.Code, http.StatusOK)
+	}
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, path, nil)
+	req2.RemoteAddr = "203.0.113.10:12345"
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status: got %d want %d", rec2.Code, http.StatusOK)
+	}
+
+	var out1 struct {
+		Nonce string `json:"nonce"`
+	}
+	var out2 struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(rec1.Body.Bytes(), &out1); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out2); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+
+	if out1.Nonce != "1" || out2.Nonce != "1" {
+		t.Fatalf("expected cached nonce 1/1, got %s/%s", out1.Nonce, out2.Nonce)
+	}
+	if nonceCalls.Load() != 1 {
+		t.Fatalf("nonce calls: got %d want 1", nonceCalls.Load())
+	}
+}
+
+func TestHandler_DepositMemo_CacheExpires(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 11, 10, 0, 0, 0, time.UTC)
+	var nonceCalls atomic.Uint64
+	h, err := NewHandler(Config{
+		BaseChainID:         8453,
+		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:           "u1example",
+		RefundWindowSeconds: 86400,
+		MemoCacheTTL:        2 * time.Second,
+		Now: func() time.Time {
+			return now
+		},
+		NonceFn: func() (uint64, error) {
+			return nonceCalls.Add(1), nil
+		},
+	}, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	path := "/v1/deposit-memo?baseRecipient=0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1"
+
+	rec1 := httptest.NewRecorder()
+	req1 := httptest.NewRequest(http.MethodGet, path, nil)
+	req1.RemoteAddr = "203.0.113.11:12345"
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status: got %d want %d", rec1.Code, http.StatusOK)
+	}
+
+	now = now.Add(3 * time.Second)
+
+	rec2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, path, nil)
+	req2.RemoteAddr = "203.0.113.11:12345"
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusOK {
+		t.Fatalf("second status: got %d want %d", rec2.Code, http.StatusOK)
+	}
+
+	var out1 struct {
+		Nonce string `json:"nonce"`
+	}
+	var out2 struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(rec1.Body.Bytes(), &out1); err != nil {
+		t.Fatalf("decode first: %v", err)
+	}
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out2); err != nil {
+		t.Fatalf("decode second: %v", err)
+	}
+
+	if out1.Nonce != "1" || out2.Nonce != "2" {
+		t.Fatalf("expected nonces 1 then 2 after ttl, got %s/%s", out1.Nonce, out2.Nonce)
+	}
+	if nonceCalls.Load() != 2 {
+		t.Fatalf("nonce calls: got %d want 2", nonceCalls.Load())
+	}
+}
+
+func TestHandler_RateLimitPerIP(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 11, 10, 0, 0, 0, time.UTC)
+	h, err := NewHandler(Config{
+		BaseChainID:             8453,
+		BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:               "u1example",
+		RefundWindowSeconds:     86400,
+		RateLimitPerIPPerSecond: 1,
+		RateLimitBurst:          1,
+		Now: func() time.Time {
+			return now
+		},
+		NonceFn: func() (uint64, error) {
+			return 1, nil
+		},
+	}, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req1 := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req1.RemoteAddr = "198.51.100.7:4321"
+	rec1 := httptest.NewRecorder()
+	h.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first status: got %d want %d", rec1.Code, http.StatusOK)
+	}
+
+	req2 := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req2.RemoteAddr = "198.51.100.7:4321"
+	rec2 := httptest.NewRecorder()
+	h.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status: got %d want %d body=%s", rec2.Code, http.StatusTooManyRequests, rec2.Body.String())
+	}
+
+	var out map[string]any
+	if err := json.Unmarshal(rec2.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode rate-limit response: %v", err)
+	}
+	if out["error"] != "rate_limited" {
+		t.Fatalf("unexpected rate-limit error: %v", out)
+	}
+
+	// Different IP should still be allowed at the same instant.
+	req3 := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req3.RemoteAddr = "198.51.100.8:4321"
+	rec3 := httptest.NewRecorder()
+	h.ServeHTTP(rec3, req3)
+	if rec3.Code != http.StatusOK {
+		t.Fatalf("third status (different ip): got %d want %d", rec3.Code, http.StatusOK)
+	}
+
+	// Advance one second and the original IP should recover one token.
+	now = now.Add(1 * time.Second)
+	req4 := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+	req4.RemoteAddr = "198.51.100.7:4321"
+	rec4 := httptest.NewRecorder()
+	h.ServeHTTP(rec4, req4)
+	if rec4.Code != http.StatusOK {
+		t.Fatalf("fourth status after refill: got %d want %d", rec4.Code, http.StatusOK)
+	}
+
+	if v := rec4.Header().Get("X-RateLimit-Limit"); v != strconv.Itoa(1) {
+		t.Fatalf("unexpected X-RateLimit-Limit: %q", v)
 	}
 }
