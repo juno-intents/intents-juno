@@ -163,18 +163,37 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 		return nil
 	}
 
-	batches, err := f.store.ListBatchesByState(ctx, withdraw.BatchStateConfirmed)
-	if err != nil {
+	ids := make([][32]byte, 0, f.cfg.MaxBatches)
+	seen := make(map[[32]byte]struct{}, f.cfg.MaxBatches)
+	appendState := func(state withdraw.BatchState) error {
+		batches, err := f.store.ListBatchesByState(ctx, state)
+		if err != nil {
+			return err
+		}
+		for _, b := range batches {
+			if len(ids) >= f.cfg.MaxBatches {
+				return nil
+			}
+			if _, ok := seen[b.ID]; ok {
+				continue
+			}
+			seen[b.ID] = struct{}{}
+			ids = append(ids, b.ID)
+		}
+		return nil
+	}
+	// Prioritize finalizing batches to resume any in-flight durable work.
+	if err := appendState(withdraw.BatchStateFinalizing); err != nil {
 		return err
 	}
-
-	n := f.cfg.MaxBatches
-	if n > len(batches) {
-		n = len(batches)
+	if len(ids) < f.cfg.MaxBatches {
+		if err := appendState(withdraw.BatchStateConfirmed); err != nil {
+			return err
+		}
 	}
-	for i := 0; i < n; i++ {
-		b := batches[i]
-		if err := f.finalizeBatch(ctx, b.ID); err != nil {
+
+	for _, batchID := range ids {
+		if err := f.finalizeBatch(ctx, batchID); err != nil {
 			return err
 		}
 	}
@@ -194,12 +213,14 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	if err != nil {
 		return err
 	}
-	if b.State != withdraw.BatchStateConfirmed {
+	if b.State != withdraw.BatchStateConfirmed && b.State != withdraw.BatchStateFinalizing {
 		// Already progressed.
 		return nil
 	}
-	if err := f.store.MarkBatchFinalizing(ctx, batchID); err != nil {
-		return err
+	if b.State == withdraw.BatchStateConfirmed {
+		if err := f.store.MarkBatchFinalizing(ctx, batchID); err != nil {
+			return err
+		}
 	}
 
 	cp := *f.checkpoint

@@ -462,6 +462,90 @@ func TestFinalizer_SetBatchFinalizedFailureLeavesBatchFinalizing(t *testing.T) {
 	}
 }
 
+func TestFinalizer_TickResumesFinalizingBatch(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchFinalizing(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{
+		res: httpapi.SendResponse{
+			TxHash: "0xabc",
+			Receipt: &httpapi.ReceiptResponse{
+				Status: 1,
+			},
+		},
+	}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one send call, got %d", sender.calls)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if got, want := b.State, withdraw.BatchStateFinalized; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+}
+
 func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 	t.Parallel()
 
