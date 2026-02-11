@@ -78,6 +78,17 @@ func TestStore_StateMachine(t *testing.T) {
 		t.Fatalf("expected created=false")
 	}
 
+	confirmed, err := s.ListByState(ctx, deposit.StateConfirmed, 10)
+	if err != nil {
+		t.Fatalf("ListByState confirmed: %v", err)
+	}
+	if len(confirmed) != 1 {
+		t.Fatalf("confirmed len: got %d want 1", len(confirmed))
+	}
+	if confirmed[0].Deposit.DepositID != id {
+		t.Fatalf("confirmed deposit id mismatch")
+	}
+
 	cp := checkpoint.Checkpoint{
 		Height:           123,
 		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
@@ -110,6 +121,17 @@ func TestStore_StateMachine(t *testing.T) {
 	}
 	if got.State != deposit.StateFinalized {
 		t.Fatalf("state: got %v want %v", got.State, deposit.StateFinalized)
+	}
+
+	finalized, err := s.ListByState(ctx, deposit.StateFinalized, 10)
+	if err != nil {
+		t.Fatalf("ListByState finalized: %v", err)
+	}
+	if len(finalized) != 1 {
+		t.Fatalf("finalized len: got %d want 1", len(finalized))
+	}
+	if finalized[0].Deposit.DepositID != id {
+		t.Fatalf("finalized deposit id mismatch")
 	}
 
 	d2 := d
@@ -169,4 +191,3 @@ func dialPostgres(t *testing.T, ctx context.Context, dsn string) *pgxpool.Pool {
 	t.Fatalf("postgres not ready: %s", dsn)
 	return nil
 }
-

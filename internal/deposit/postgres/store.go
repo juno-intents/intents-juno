@@ -104,13 +104,13 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		baseRecipientRaw []byte
 		state            int16
 
-		cpHeight        *int64
-		cpBlockHashRaw  []byte
-		cpRootRaw       []byte
-		cpBaseChainID   *int64
-		cpBridgeRaw     []byte
-		proofSeal       []byte
-		txHashRaw       []byte
+		cpHeight       *int64
+		cpBlockHashRaw []byte
+		cpRootRaw      []byte
+		cpBaseChainID  *int64
+		cpBridgeRaw    []byte
+		proofSeal      []byte
+		txHashRaw      []byte
 	)
 
 	err := s.pool.QueryRow(ctx, `
@@ -230,6 +230,48 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 	return job, nil
 }
 
+func (s *Store) ListByState(ctx context.Context, state deposit.State, limit int) ([]deposit.Job, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT deposit_id
+		FROM deposit_jobs
+		WHERE state = $1
+		ORDER BY created_at ASC, deposit_id ASC
+		LIMIT $2
+	`, int16(state), limit)
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: list by state: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]deposit.Job, 0, limit)
+	for rows.Next() {
+		var idRaw []byte
+		if err := rows.Scan(&idRaw); err != nil {
+			return nil, fmt.Errorf("deposit/postgres: scan list row: %w", err)
+		}
+		id, err := to32(idRaw)
+		if err != nil {
+			return nil, err
+		}
+		job, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: list by state rows: %w", err)
+	}
+	return out, nil
+}
+
 func (s *Store) MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error {
 	job, err := s.Get(ctx, depositID)
 	if err != nil {
@@ -342,4 +384,3 @@ func to20(b []byte) ([20]byte, error) {
 }
 
 var _ deposit.Store = (*Store)(nil)
-

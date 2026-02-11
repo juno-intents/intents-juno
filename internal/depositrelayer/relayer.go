@@ -14,6 +14,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/batching"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -67,25 +68,22 @@ type Relayer struct {
 	cfg Config
 
 	log    *slog.Logger
+	store  deposit.Store
 	sender Sender
 	prover proofclient.Client
 
 	expectedBridgeMemo [20]byte
 
 	batcher *batching.Batcher[bridgeabi.MintItem]
-
-	seen      map[common.Hash]struct{}
-	seenOrder []common.Hash
+	staged  map[common.Hash]struct{}
 
 	quorumVerifier *checkpoint.QuorumVerifier
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
-
-	queue []batching.Batch[bridgeabi.MintItem]
 }
 
-func New(cfg Config, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
+func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
 	if cfg.BaseChainID == 0 {
 		return nil, fmt.Errorf("%w: BaseChainID must be non-zero", ErrInvalidConfig)
 	}
@@ -116,8 +114,8 @@ func New(cfg Config, sender Sender, prover proofclient.Client, log *slog.Logger)
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
-	if sender == nil || prover == nil {
-		return nil, fmt.Errorf("%w: nil sender/prover", ErrInvalidConfig)
+	if store == nil || sender == nil || prover == nil {
+		return nil, fmt.Errorf("%w: nil store/sender/prover", ErrInvalidConfig)
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -143,11 +141,12 @@ func New(cfg Config, sender Sender, prover proofclient.Client, log *slog.Logger)
 	return &Relayer{
 		cfg:                cfg,
 		log:                log,
+		store:              store,
 		sender:             sender,
 		prover:             prover,
 		expectedBridgeMemo: bridge20,
 		batcher:            b,
-		seen:               make(map[common.Hash]struct{}, cfg.DedupeMax),
+		staged:             make(map[common.Hash]struct{}, cfg.MaxItems*2),
 		quorumVerifier:     quorumVerifier,
 	}, nil
 }
@@ -173,7 +172,7 @@ func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) e
 	r.opSigs = pkg.OperatorSignatures
 
 	r.log.Info("updated checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
-	return r.drain(ctx)
+	return r.FlushDue(ctx)
 }
 
 func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
@@ -195,56 +194,94 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 	}
 
 	idBytes := idempotency.DepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
-	depositID := common.Hash(idBytes)
-
-	if r.markSeen(depositID) {
+	job, _, err := r.store.UpsertConfirmed(ctx, deposit.Deposit{
+		DepositID:     idBytes,
+		Commitment:    [32]byte(ev.Commitment),
+		LeafIndex:     ev.LeafIndex,
+		Amount:        ev.Amount,
+		BaseRecipient: [20]byte(recipient),
+	})
+	if err != nil {
+		return err
+	}
+	if job.State != deposit.StateConfirmed {
 		return nil
 	}
-
-	item := bridgeabi.MintItem{
-		DepositId: depositID,
-		Recipient: recipient,
-		Amount:    new(big.Int).SetUint64(ev.Amount),
-	}
-
-	batch, ok := r.batcher.Add(idBytes, item)
-	if ok {
-		r.queue = append(r.queue, batch)
-		return r.drain(ctx)
-	}
-	return nil
+	return r.refillFromStore(ctx)
 }
 
 func (r *Relayer) FlushDue(ctx context.Context) error {
-	batch, ok := r.batcher.FlushDue()
-	if ok {
-		r.queue = append(r.queue, batch)
+	if r.checkpoint == nil || len(r.opSigs) == 0 {
+		return nil
 	}
-	return r.drain(ctx)
+	if err := r.refillFromStore(ctx); err != nil {
+		return err
+	}
+	batch, ok := r.batcher.FlushDue()
+	if !ok {
+		return nil
+	}
+	if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
+		r.unstageBatch(batch)
+		return err
+	}
+	r.unstageBatch(batch)
+	return nil
 }
 
 func (r *Relayer) Flush(ctx context.Context) error {
-	batch, ok := r.batcher.Flush()
-	if ok {
-		r.queue = append(r.queue, batch)
+	if r.checkpoint == nil || len(r.opSigs) == 0 {
+		return nil
 	}
-	return r.drain(ctx)
+	if err := r.refillFromStore(ctx); err != nil {
+		return err
+	}
+	batch, ok := r.batcher.Flush()
+	if !ok {
+		return nil
+	}
+	if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
+		r.unstageBatch(batch)
+		return err
+	}
+	r.unstageBatch(batch)
+	return nil
 }
 
-func (r *Relayer) drain(ctx context.Context) error {
+func (r *Relayer) refillFromStore(ctx context.Context) error {
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
 
-	for len(r.queue) > 0 {
-		b := r.queue[0]
-		r.queue = r.queue[1:]
+	limit := r.cfg.MaxItems * 4
+	if limit < r.cfg.MaxItems {
+		limit = r.cfg.MaxItems
+	}
+	jobs, err := r.store.ListByState(ctx, deposit.StateConfirmed, limit)
+	if err != nil {
+		return err
+	}
 
-		if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, b); err != nil {
-			// Push back and stop; we require operator intervention for persistent failures.
-			r.queue = append([]batching.Batch[bridgeabi.MintItem]{b}, r.queue...)
+	for _, job := range jobs {
+		id := common.Hash(job.Deposit.DepositID)
+		if _, ok := r.staged[id]; ok {
+			continue
+		}
+		item := bridgeabi.MintItem{
+			DepositId: id,
+			Recipient: common.Address(job.Deposit.BaseRecipient),
+			Amount:    new(big.Int).SetUint64(job.Deposit.Amount),
+		}
+		r.staged[id] = struct{}{}
+		batch, ok := r.batcher.Add(job.Deposit.DepositID, item)
+		if !ok {
+			continue
+		}
+		if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
+			r.unstageBatch(batch)
 			return err
 		}
+		r.unstageBatch(batch)
 	}
 	return nil
 }
@@ -323,6 +360,20 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
 	}
 
+	txHash := common.HexToHash(res.TxHash)
+	for _, it := range batch.Items {
+		depositID := it.ID
+		if err := r.store.MarkProofRequested(ctx, depositID, cp); err != nil {
+			return fmt.Errorf("depositrelayer: mark proof requested: %w", err)
+		}
+		if err := r.store.SetProofReady(ctx, depositID, seal); err != nil {
+			return fmt.Errorf("depositrelayer: set proof ready: %w", err)
+		}
+		if err := r.store.MarkFinalized(ctx, depositID, [32]byte(txHash)); err != nil {
+			return fmt.Errorf("depositrelayer: mark finalized: %w", err)
+		}
+	}
+
 	r.log.Info("submitted mintBatch",
 		"checkpointHeight", cp.Height,
 		"items", len(items),
@@ -331,17 +382,8 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	return nil
 }
 
-// markSeen returns true if the deposit has already been observed.
-func (r *Relayer) markSeen(id common.Hash) bool {
-	if _, ok := r.seen[id]; ok {
-		return true
+func (r *Relayer) unstageBatch(batch batching.Batch[bridgeabi.MintItem]) {
+	for _, item := range batch.Items {
+		delete(r.staged, common.Hash(item.ID))
 	}
-	r.seen[id] = struct{}{}
-	r.seenOrder = append(r.seenOrder, id)
-	if len(r.seenOrder) > r.cfg.DedupeMax {
-		old := r.seenOrder[0]
-		r.seenOrder = r.seenOrder[1:]
-		delete(r.seen, old)
-	}
-	return false
 }

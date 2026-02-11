@@ -24,6 +24,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
@@ -221,7 +222,7 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 		DedupeMax:         1000,
 		GasLimit:          500_000,
 		Now:               time.Now,
-	}, sender, &staticSealProofRequester{seal: []byte{0x99}}, nil)
+	}, deposit.NewMemoryStore(), sender, &staticSealProofRequester{seal: []byte{0x99}}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -20,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
@@ -150,7 +151,7 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 		DedupeMax:         1000,
 		GasLimit:          200_000, // skip estimation for deterministic tests
 		Now:               time.Now,
-	}, sender, &staticSealProofRequester{seal: []byte{0x99}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, deposit.NewMemoryStore(), sender, &staticSealProofRequester{seal: []byte{0x99}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

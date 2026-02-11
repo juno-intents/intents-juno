@@ -14,6 +14,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -124,7 +125,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 		DedupeMax:         1000,
 		GasLimit:          55555,
 		Now:               time.Now,
-	}, sender, prover, nil)
+	}, deposit.NewMemoryStore(), sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -262,7 +263,7 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 		MaxAge:            10 * time.Minute,
 		DedupeMax:         1000,
 		Now:               time.Now,
-	}, sender, prover, nil)
+	}, deposit.NewMemoryStore(), sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -289,6 +290,81 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 
 	if sender.calls != 1 {
 		t.Fatalf("sender calls: got %d want %d", sender.calls, 1)
+	}
+}
+
+func TestRelayer_ProcessesConfirmedDepositsFromStore(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.DepositIDV1(cm, 7)
+
+	store := deposit.NewMemoryStore()
+	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
+		DepositID:     depositID,
+		Commitment:    [32]byte(cm),
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: [20]byte(recipient),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	if sender.calls != 1 {
+		t.Fatalf("sender calls: got %d want %d", sender.calls, 1)
+	}
+
+	got, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got.State != deposit.StateFinalized {
+		t.Fatalf("state: got %v want %v", got.State, deposit.StateFinalized)
 	}
 }
 
@@ -345,7 +421,7 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 		MaxAge:            10 * time.Minute,
 		DedupeMax:         1000,
 		Now:               time.Now,
-	}, sender, prover, nil)
+	}, deposit.NewMemoryStore(), sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -418,7 +494,7 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 		MaxAge:            10 * time.Minute,
 		DedupeMax:         1000,
 		Now:               time.Now,
-	}, sender, prover, nil)
+	}, deposit.NewMemoryStore(), sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -475,7 +551,7 @@ func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
 		MaxAge:            10 * time.Minute,
 		DedupeMax:         1000,
 		Now:               time.Now,
-	}, sender, prover, nil)
+	}, deposit.NewMemoryStore(), sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

@@ -16,7 +16,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/deposit"
+	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
@@ -47,6 +50,9 @@ type depositEventV1 struct {
 
 func main() {
 	var (
+		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		storeDriver = flag.String("store-driver", "postgres", "deposit store driver: postgres|memory")
+
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required; must fit uint32 for deposit memo domain separation)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
 		operators   = flag.String("operators", "", "comma-separated operator addresses for checkpoint quorum verification (required)")
@@ -142,6 +148,41 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	var (
+		pool  *pgxpool.Pool
+		store deposit.Store
+	)
+	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
+	case "postgres":
+		if strings.TrimSpace(*postgresDSN) == "" {
+			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
+			os.Exit(2)
+		}
+		pool, err = pgxpool.New(ctx, *postgresDSN)
+		if err != nil {
+			log.Error("init pgx pool", "err", err)
+			os.Exit(2)
+		}
+		defer pool.Close()
+
+		pgStore, err := depositpg.New(pool)
+		if err != nil {
+			log.Error("init deposit store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure deposit schema", "err", err)
+			os.Exit(2)
+		}
+		store = pgStore
+	case "memory":
+		store = deposit.NewMemoryStore()
+	default:
+		fmt.Fprintf(os.Stderr, "error: unsupported --store-driver %q\n", *storeDriver)
+		os.Exit(2)
+	}
+
 	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
 		Driver:        *queueDriver,
 		Brokers:       queue.SplitCommaList(*queueBrokers),
@@ -189,7 +230,7 @@ func main() {
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
 		Now:                 time.Now,
-	}, baseClient, proofRequester, log)
+	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
 		os.Exit(2)
@@ -206,6 +247,7 @@ func main() {
 		"maxAge", maxAge.String(),
 		"flushInterval", flushEvery.String(),
 		"queueDriver", *queueDriver,
+		"storeDriver", strings.ToLower(strings.TrimSpace(*storeDriver)),
 	)
 
 	t := time.NewTicker(*flushEvery)

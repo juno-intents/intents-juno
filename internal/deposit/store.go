@@ -3,7 +3,7 @@ package deposit
 import (
 	"context"
 	"errors"
- 
+
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
 
@@ -16,6 +16,7 @@ var (
 type Store interface {
 	UpsertConfirmed(ctx context.Context, d Deposit) (Job, bool, error)
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
+	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
 
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error

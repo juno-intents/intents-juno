@@ -8,8 +8,9 @@ import (
 )
 
 type MemoryStore struct {
-	mu   sync.Mutex
-	jobs map[[32]byte]Job
+	mu    sync.Mutex
+	jobs  map[[32]byte]Job
+	order [][32]byte
 }
 
 func NewMemoryStore() *MemoryStore {
@@ -29,6 +30,7 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 			State:   StateConfirmed,
 		}
 		s.jobs[d.DepositID] = j
+		s.order = append(s.order, d.DepositID)
 		return j, true, nil
 	}
 
@@ -57,6 +59,31 @@ func (s *MemoryStore) Get(_ context.Context, depositID [32]byte) (Job, error) {
 		j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 	}
 	return j, nil
+}
+
+func (s *MemoryStore) ListByState(_ context.Context, state State, limit int) ([]Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		return nil, nil
+	}
+
+	out := make([]Job, 0, limit)
+	for _, id := range s.order {
+		j := s.jobs[id]
+		if j.State != state {
+			continue
+		}
+		if j.ProofSeal != nil {
+			j.ProofSeal = append([]byte(nil), j.ProofSeal...)
+		}
+		out = append(out, j)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) MarkProofRequested(_ context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error {
@@ -127,4 +154,3 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 	s.jobs[depositID] = j
 	return nil
 }
-
