@@ -16,10 +16,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
-	"github.com/juno-intents/intents-juno/internal/proverexec"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -64,7 +64,8 @@ func main() {
 		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
 		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (prover + base-relayer)")
 
-		proverBin          = flag.String("prover-bin", "", "path to prover command binary (required)")
+		proverBackend      = flag.String("prover-backend", boundless.BackendBoundless.String(), "prover backend: boundless|self")
+		proverBin          = flag.String("prover-bin", "", "path to prover command binary implementing prover.request.v1/prover.response.v1 (required)")
 		proverMaxRespBytes = flag.Int("prover-max-response-bytes", 1<<20, "max prover response size (bytes)")
 
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
@@ -122,9 +123,13 @@ func main() {
 		os.Exit(2)
 	}
 
-	proverClient, err := proverexec.New(*proverBin, *proverMaxRespBytes)
+	proverClient, err := boundless.New(boundless.Config{
+		Backend:          *proverBackend,
+		ProverBin:        *proverBin,
+		MaxResponseBytes: *proverMaxRespBytes,
+	})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: init prover client: %v\n", err)
+		fmt.Fprintf(os.Stderr, "error: init prover backend: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -173,6 +178,7 @@ func main() {
 	log.Info("deposit relayer started",
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
+		"proverBackend", *proverBackend,
 		"maxItems", *maxItems,
 		"maxAge", maxAge.String(),
 		"flushInterval", flushEvery.String(),
