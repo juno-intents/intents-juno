@@ -71,6 +71,10 @@ run_dkg_admin_export() {
   local aws_region="$4"
   shift 4
 
+  local config_dir config_file
+  config_dir="$(cd "$(dirname "$config_path")" && pwd)"
+  config_file="$(basename "$config_path")"
+
   local -a env_args=()
   if [[ -n "$aws_profile" ]]; then
     env_args+=("AWS_PROFILE=$aws_profile")
@@ -80,10 +84,16 @@ run_dkg_admin_export() {
   fi
 
   if (( ${#env_args[@]} > 0 )); then
-    env "${env_args[@]}" "$dkg_admin_bin" --config "$config_path" export-key-package "$@"
+    (
+      cd "$config_dir"
+      env "${env_args[@]}" "$dkg_admin_bin" --config "./$config_file" export-key-package "$@"
+    )
     return
   fi
-  "$dkg_admin_bin" --config "$config_path" export-key-package "$@"
+  (
+    cd "$config_dir"
+    "$dkg_admin_bin" --config "./$config_file" export-key-package "$@"
+  )
 }
 
 aws_preflight() {

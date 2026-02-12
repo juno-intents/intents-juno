@@ -84,7 +84,7 @@ EOF
   local got
   got="$(cat "$log_file")"
   case "$got" in
-    *"--config $runtime/bundle/admin-config.json export-key-package --age-recipient age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq --out $out"*) ;;
+    *"--config ./admin-config.json export-key-package --age-recipient age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq --out $out"*) ;;
     *)
       printf 'unexpected dkg-admin args: %s\n' "$got" >&2
       exit 1
@@ -121,6 +121,40 @@ EOF
     printf 'expected backup-age to fail when output exists without --force\n' >&2
     exit 1
   fi
+
+  rm -rf "$tmp"
+}
+
+test_backup_age_uses_config_directory_cwd() {
+  local tmp runtime out fake_dkg_admin cwd_log
+  tmp="$(mktemp -d)"
+  runtime="$tmp/runtime"
+  out="$tmp/backup.json"
+  make_runtime_with_config "$runtime"
+
+  cwd_log="$tmp/pwd.log"
+  fake_dkg_admin="$tmp/fake-dkg-admin.sh"
+  cat >"$fake_dkg_admin" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+pwd >"$cwd_log"
+printf '{"ok":true}\n'
+EOF
+  chmod 0755 "$fake_dkg_admin"
+
+  (
+    cd "$REPO_ROOT"
+    JUNO_DKG_ADMIN_BIN="$fake_dkg_admin" \
+    deploy/operators/dkg/operator-export-kms.sh backup-age \
+      --workdir "$runtime" \
+      --age-recipient age1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq \
+      --out "$out"
+  )
+
+  local got want
+  got="$(cat "$cwd_log")"
+  want="$runtime/bundle"
+  assert_eq "$got" "$want" "backup-age should execute from config directory"
 
   rm -rf "$tmp"
 }
@@ -280,6 +314,7 @@ EOF
 main() {
   test_backup_age_invokes_dkg_admin_with_age_only
   test_backup_age_refuses_overwrite_without_force
+  test_backup_age_uses_config_directory_cwd
   test_rewrap_age_to_kms_uses_backup_artifacts
 }
 
