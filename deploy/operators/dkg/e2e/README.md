@@ -27,6 +27,7 @@ Current limitation:
 
 - Default mode (no verifier args): deploys a no-op verifier and runs full bridge smoke transactions for infra validation.
 - Real verifier mode: pass `--bridge-verifier-address` and both seal files (`--bridge-deposit-seal-file`, `--bridge-withdraw-seal-file`) to verify real seals against a live verifier router.
+- Auto Boundless mode: pass `--boundless-auto` plus Boundless requestor key/program URLs to submit proofs, wait for fulfillment, and execute callback transactions automatically.
 - Prepare-only mode: pass `--bridge-prepare-only` to generate proof input artifacts and skip `mintBatch/finalizeWithdrawBatch`. This supports manual callback flows when proof submission/fulfillment is handled outside the testnet stack.
 
 Pricing policy and calculator:
@@ -42,6 +43,19 @@ Pricing policy and calculator:
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
   --base-rpc-url https://base-sepolia-rpc.example \
   --base-funder-key-file ./tmp/funders/base-funder.key \
+  --force
+
+# Phase 2 automatic proof flow (Boundless submit + wait + callback).
+./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
+  --base-rpc-url https://base-sepolia-rpc.example \
+  --base-funder-key-file ./tmp/funders/base-funder.key \
+  --bridge-verifier-address 0xVerifierRouterAddress \
+  --bridge-deposit-image-id 0x... \
+  --bridge-withdraw-image-id 0x... \
+  --boundless-auto \
+  --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
+  --boundless-deposit-program-url https://.../deposit-guest.elf \
+  --boundless-withdraw-program-url https://.../withdraw-guest.elf \
   --force
 
 # Phase 2 prepare-only artifact generation for manual callback/proof submission.

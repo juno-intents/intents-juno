@@ -11,8 +11,11 @@ import (
 	"io"
 	"math/big"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -63,11 +66,42 @@ type config struct {
 	PrepareOnly      bool
 	ProofInputsOut   string
 	OutputPath       string
+	RunTimeout       time.Duration
+	Boundless        boundlessConfig
+}
+
+type boundlessConfig struct {
+	Auto bool
+
+	Bin                string
+	RPCURL             string
+	RequestorKeyHex    string
+	DepositProgramURL  string
+	WithdrawProgramURL string
+
+	MinPriceWei  *big.Int
+	MaxPriceWei  *big.Int
+	LockStakeWei *big.Int
+
+	BiddingDelaySeconds uint64
+	RampUpPeriodSeconds uint64
+	LockTimeoutSeconds  uint64
+	TimeoutSeconds      uint64
+}
+
+type boundlessWaitResult struct {
+	RequestIDHex string
+	JournalHex   string
+	SealHex      string
 }
 
 const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
+
+	defaultBoundlessMinPriceWei  = "100000000000000"
+	defaultBoundlessMaxPriceWei  = "250000000000000"
+	defaultBoundlessLockStakeWei = "20000000000000000000"
 )
 
 type report struct {
@@ -124,6 +158,20 @@ type report struct {
 		WithdrawImageID   string `json:"withdraw_image_id"`
 		DepositSealBytes  int    `json:"deposit_seal_bytes"`
 		WithdrawSealBytes int    `json:"withdraw_seal_bytes"`
+
+		Boundless struct {
+			Enabled           bool   `json:"enabled"`
+			RPCURL            string `json:"rpc_url,omitempty"`
+			DepositRequestID  string `json:"deposit_request_id,omitempty"`
+			WithdrawRequestID string `json:"withdraw_request_id,omitempty"`
+			MinPriceWei       string `json:"min_price_wei,omitempty"`
+			MaxPriceWei       string `json:"max_price_wei,omitempty"`
+			LockStakeWei      string `json:"lock_stake_wei,omitempty"`
+			BiddingDelaySec   uint64 `json:"bidding_delay_seconds,omitempty"`
+			RampUpPeriodSec   uint64 `json:"ramp_up_period_seconds,omitempty"`
+			LockTimeoutSec    uint64 `json:"lock_timeout_seconds,omitempty"`
+			TimeoutSec        uint64 `json:"timeout_seconds,omitempty"`
+		} `json:"boundless,omitempty"`
 	} `json:"proof"`
 }
 
@@ -175,7 +223,7 @@ func runMain(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), cfg.RunTimeout)
 	defer cancel()
 
 	rep, err := run(ctx, cfg)
@@ -212,6 +260,11 @@ func parseArgs(args []string) (config, error) {
 	var withdrawImageIDHex string
 	var depositSealHex string
 	var withdrawSealHex string
+	var boundlessRequestorKeyFile string
+	var boundlessRequestorKeyHex string
+	var boundlessMinPriceWei string
+	var boundlessMaxPriceWei string
+	var boundlessLockStakeWei string
 
 	fs := flag.NewFlagSet("bridge-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -234,6 +287,22 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.PrepareOnly, "prepare-only", false, "prepare proof input artifacts only; skip mint/finalize transactions")
 	fs.StringVar(&cfg.ProofInputsOut, "proof-inputs-output", "", "optional path to write proof input artifact bundle")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
+	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
+
+	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
+	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
+	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
+	fs.StringVar(&boundlessRequestorKeyFile, "boundless-requestor-key-file", "", "file containing requestor private key hex for Boundless")
+	fs.StringVar(&boundlessRequestorKeyHex, "boundless-requestor-key-hex", "", "requestor private key hex for Boundless")
+	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
+	fs.StringVar(&cfg.Boundless.WithdrawProgramURL, "boundless-withdraw-program-url", "", "withdraw guest program URL for Boundless proof requests")
+	fs.StringVar(&boundlessMinPriceWei, "boundless-min-price-wei", defaultBoundlessMinPriceWei, "Boundless min price in wei")
+	fs.StringVar(&boundlessMaxPriceWei, "boundless-max-price-wei", defaultBoundlessMaxPriceWei, "Boundless max price in wei")
+	fs.StringVar(&boundlessLockStakeWei, "boundless-lock-stake-wei", defaultBoundlessLockStakeWei, "Boundless lock stake amount in wei")
+	fs.Uint64Var(&cfg.Boundless.BiddingDelaySeconds, "boundless-bidding-delay-seconds", 85, "seconds after submission before bidding starts")
+	fs.Uint64Var(&cfg.Boundless.RampUpPeriodSeconds, "boundless-ramp-up-period-seconds", 170, "auction ramp-up period in seconds")
+	fs.Uint64Var(&cfg.Boundless.LockTimeoutSeconds, "boundless-lock-timeout-seconds", 625, "auction lock timeout in seconds")
+	fs.Uint64Var(&cfg.Boundless.TimeoutSeconds, "boundless-timeout-seconds", 1500, "auction timeout in seconds")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -256,6 +325,9 @@ func parseArgs(args []string) (config, error) {
 	}
 	if cfg.WithdrawAmount > cfg.DepositAmount {
 		return cfg, errors.New("--withdraw-amount must be <= --deposit-amount")
+	}
+	if cfg.RunTimeout <= 0 {
+		return cfg, errors.New("--run-timeout must be > 0")
 	}
 
 	if deployerKeyFile != "" && cfg.DeployerKeyHex != "" {
@@ -311,16 +383,86 @@ func parseArgs(args []string) (config, error) {
 		return cfg, err
 	}
 
+	if boundlessRequestorKeyFile != "" && boundlessRequestorKeyHex != "" {
+		return cfg, errors.New("use only one of --boundless-requestor-key-file or --boundless-requestor-key-hex")
+	}
+	if boundlessRequestorKeyFile != "" {
+		keyBytes, err := os.ReadFile(boundlessRequestorKeyFile)
+		if err != nil {
+			return cfg, fmt.Errorf("read boundless requestor key file: %w", err)
+		}
+		boundlessRequestorKeyHex = strings.TrimSpace(string(keyBytes))
+	}
+	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
+
+	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.MaxPriceWei, err = parseUint256Flag("--boundless-max-price-wei", boundlessMaxPriceWei)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.LockStakeWei, err = parseUint256Flag("--boundless-lock-stake-wei", boundlessLockStakeWei)
+	if err != nil {
+		return cfg, err
+	}
+	if cfg.Boundless.MinPriceWei.Cmp(cfg.Boundless.MaxPriceWei) > 0 {
+		return cfg, errors.New("--boundless-min-price-wei must be <= --boundless-max-price-wei")
+	}
+	if cfg.Boundless.RampUpPeriodSeconds == 0 {
+		return cfg, errors.New("--boundless-ramp-up-period-seconds must be > 0")
+	}
+	if cfg.Boundless.LockTimeoutSeconds == 0 {
+		return cfg, errors.New("--boundless-lock-timeout-seconds must be > 0")
+	}
+	if cfg.Boundless.TimeoutSeconds == 0 {
+		return cfg, errors.New("--boundless-timeout-seconds must be > 0")
+	}
+	if cfg.Boundless.LockTimeoutSeconds > cfg.Boundless.TimeoutSeconds {
+		return cfg, errors.New("--boundless-lock-timeout-seconds must be <= --boundless-timeout-seconds")
+	}
+	if cfg.Boundless.Auto {
+		if cfg.PrepareOnly {
+			return cfg, errors.New("--boundless-auto cannot be used with --prepare-only")
+		}
+		if strings.TrimSpace(cfg.Boundless.Bin) == "" {
+			return cfg, errors.New("--boundless-bin is required when --boundless-auto is set")
+		}
+		if strings.TrimSpace(cfg.Boundless.RPCURL) == "" {
+			return cfg, errors.New("--boundless-rpc-url is required when --boundless-auto is set")
+		}
+		if strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
+			return cfg, errors.New("--boundless-requestor-key-file or --boundless-requestor-key-hex is required when --boundless-auto is set")
+		}
+		if strings.TrimSpace(cfg.Boundless.DepositProgramURL) == "" {
+			return cfg, errors.New("--boundless-deposit-program-url is required when --boundless-auto is set")
+		}
+		if strings.TrimSpace(cfg.Boundless.WithdrawProgramURL) == "" {
+			return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
+		}
+		if !cfg.VerifierSet {
+			return cfg, errors.New("--boundless-auto requires --verifier-address")
+		}
+	}
+
 	if cfg.PrepareOnly && strings.TrimSpace(cfg.ProofInputsOut) == "" {
 		return cfg, errors.New("--prepare-only requires --proof-inputs-output")
 	}
 
 	if !cfg.PrepareOnly {
 		if cfg.VerifierSet {
-			if len(cfg.DepositSeal) == 0 || len(cfg.WithdrawSeal) == 0 {
+			if cfg.Boundless.Auto {
+				if len(cfg.DepositSeal) != 0 || len(cfg.WithdrawSeal) != 0 {
+					return cfg, errors.New("--boundless-auto cannot be combined with --deposit-seal-hex or --withdraw-seal-hex")
+				}
+			} else if len(cfg.DepositSeal) == 0 || len(cfg.WithdrawSeal) == 0 {
 				return cfg, errors.New("--verifier-address requires --deposit-seal-hex and --withdraw-seal-hex unless --prepare-only is set")
 			}
 		} else {
+			if cfg.Boundless.Auto {
+				return cfg, errors.New("--boundless-auto requires --verifier-address")
+			}
 			if len(cfg.DepositSeal) == 0 {
 				cfg.DepositSeal = []byte{0x99}
 			}
@@ -357,6 +499,21 @@ func parseHash32Flag(flagName, raw string) (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("%s must be 32 bytes hex", flagName)
 	}
 	return common.BytesToHash(b), nil
+}
+
+func parseUint256Flag(flagName, raw string) (*big.Int, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, fmt.Errorf("%s must be set", flagName)
+	}
+	out, ok := new(big.Int).SetString(v, 10)
+	if !ok {
+		return nil, fmt.Errorf("%s must be a base-10 integer", flagName)
+	}
+	if out.Sign() < 0 {
+		return nil, fmt.Errorf("%s must be >= 0", flagName)
+	}
+	return out, nil
 }
 
 func writeJSONArtifact(path string, value any) (string, error) {
@@ -599,6 +756,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		finalizeWithdrawTx common.Hash
 		withdrawalID       common.Hash
 		feeBpsAtReq        uint64
+		depositRequestID   string
+		withdrawRequestID  string
 	)
 
 	if cfg.PrepareOnly {
@@ -608,6 +767,20 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 		withdrawalID = predictedWithdrawalID
 	} else {
+		if cfg.Boundless.Auto {
+			cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
+				ctx,
+				cfg.Boundless,
+				"deposit",
+				cfg.Boundless.DepositProgramURL,
+				depositPrivateInput,
+				depositJournal,
+			)
+			if err != nil {
+				return nil, err
+			}
+		}
+
 		mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, cfg.DepositSeal, depositJournal)
 		if err != nil {
 			return nil, fmt.Errorf("mintBatch: %w", err)
@@ -699,6 +872,20 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
+	if !cfg.PrepareOnly && cfg.Boundless.Auto {
+		cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
+			ctx,
+			cfg.Boundless,
+			"withdraw",
+			cfg.Boundless.WithdrawProgramURL,
+			withdrawPrivateInput,
+			withdrawJournal,
+		)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	if !cfg.PrepareOnly {
 		finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, cfg.WithdrawSeal, withdrawJournal)
 		if err != nil {
@@ -767,8 +954,127 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Proof.WithdrawImageID = withdrawImageID.Hex()
 	rep.Proof.DepositSealBytes = len(cfg.DepositSeal)
 	rep.Proof.WithdrawSealBytes = len(cfg.WithdrawSeal)
+	rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
+	if cfg.Boundless.Auto {
+		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
+		rep.Proof.Boundless.DepositRequestID = depositRequestID
+		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
+		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()
+		rep.Proof.Boundless.MaxPriceWei = cfg.Boundless.MaxPriceWei.String()
+		rep.Proof.Boundless.LockStakeWei = cfg.Boundless.LockStakeWei.String()
+		rep.Proof.Boundless.BiddingDelaySec = cfg.Boundless.BiddingDelaySeconds
+		rep.Proof.Boundless.RampUpPeriodSec = cfg.Boundless.RampUpPeriodSeconds
+		rep.Proof.Boundless.LockTimeoutSec = cfg.Boundless.LockTimeoutSeconds
+		rep.Proof.Boundless.TimeoutSec = cfg.Boundless.TimeoutSeconds
+	}
 
 	return &rep, nil
+}
+
+func requestBoundlessProof(
+	ctx context.Context,
+	cfg boundlessConfig,
+	pipeline string,
+	programURL string,
+	privateInput []byte,
+	expectedJournal []byte,
+) ([]byte, string, error) {
+	tmp, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-input-*.bin")
+	if err != nil {
+		return nil, "", fmt.Errorf("create boundless input file for %s: %w", pipeline, err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if err := tmp.Close(); err != nil {
+		return nil, "", fmt.Errorf("close boundless input file for %s: %w", pipeline, err)
+	}
+	if err := os.WriteFile(tmpPath, privateInput, 0o600); err != nil {
+		return nil, "", fmt.Errorf("write boundless input file for %s: %w", pipeline, err)
+	}
+
+	privateKey := strings.TrimPrefix(strings.TrimSpace(cfg.RequestorKeyHex), "0x")
+	biddingStart := time.Now().UTC().Unix() + int64(cfg.BiddingDelaySeconds)
+
+	args := []string{
+		"--rpc-url", cfg.RPCURL,
+		"--private-key", privateKey,
+		"request", "submit-offer",
+		"--program-url", programURL,
+		"--input-file", tmpPath,
+		"--proof-type", "groth16",
+		"--wait",
+		"--min-price", cfg.MinPriceWei.String(),
+		"--max-price", cfg.MaxPriceWei.String(),
+		"--lock-stake", cfg.LockStakeWei.String(),
+		"--bidding-start", strconv.FormatInt(biddingStart, 10),
+		"--ramp-up-period", strconv.FormatUint(cfg.RampUpPeriodSeconds, 10),
+		"--lock-timeout", strconv.FormatUint(cfg.LockTimeoutSeconds, 10),
+		"--timeout", strconv.FormatUint(cfg.TimeoutSeconds, 10),
+	}
+
+	out, err := exec.CommandContext(ctx, cfg.Bin, args...).CombinedOutput()
+	if err != nil {
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, "", fmt.Errorf("boundless submit-offer failed for %s: %s", pipeline, msg)
+	}
+
+	parsed, err := parseBoundlessWaitOutput(out)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse boundless output for %s: %w", pipeline, err)
+	}
+
+	journal, err := parseHexBytesFlag("boundless journal", parsed.JournalHex)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode boundless journal for %s: %w", pipeline, err)
+	}
+	if !bytes.Equal(journal, expectedJournal) {
+		return nil, "", fmt.Errorf("boundless journal mismatch for %s", pipeline)
+	}
+
+	seal, err := parseHexBytesFlag("boundless seal", parsed.SealHex)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode boundless seal for %s: %w", pipeline, err)
+	}
+	if len(seal) == 0 {
+		return nil, "", fmt.Errorf("boundless returned empty seal for %s", pipeline)
+	}
+
+	return seal, parsed.RequestIDHex, nil
+}
+
+var (
+	boundlessRequestIDRegex = regexp.MustCompile(`Submitted request\s+(0x[0-9a-fA-F]+)`)
+	boundlessProofRegex     = regexp.MustCompile(`Journal:\s*\"(0x[0-9a-fA-F]*)\"\s*-\s*Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
+)
+
+func parseBoundlessWaitOutput(output []byte) (boundlessWaitResult, error) {
+	raw := string(output)
+
+	requestMatches := boundlessRequestIDRegex.FindAllStringSubmatch(raw, -1)
+	if len(requestMatches) == 0 || len(requestMatches[len(requestMatches)-1]) < 2 {
+		return boundlessWaitResult{}, errors.New("boundless output missing request id")
+	}
+	requestID := strings.ToLower(strings.TrimSpace(requestMatches[len(requestMatches)-1][1]))
+
+	proofMatches := boundlessProofRegex.FindAllStringSubmatch(raw, -1)
+	if len(proofMatches) == 0 || len(proofMatches[len(proofMatches)-1]) < 3 {
+		return boundlessWaitResult{}, errors.New("boundless output missing journal/seal")
+	}
+	last := proofMatches[len(proofMatches)-1]
+	journalHex := strings.ToLower(strings.TrimSpace(last[1]))
+	sealHex := strings.ToLower(strings.TrimSpace(last[2]))
+	if sealHex == "" {
+		return boundlessWaitResult{}, errors.New("boundless output missing seal")
+	}
+
+	return boundlessWaitResult{
+		RequestIDHex: requestID,
+		JournalHex:   journalHex,
+		SealHex:      sealHex,
+	}, nil
 }
 
 func parsePrivateKeyHex(raw string) (*ecdsa.PrivateKey, error) {

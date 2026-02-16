@@ -47,6 +47,66 @@ on:
         required: true
         default: false
         type: boolean
+      bridge_run_timeout:
+        description: "bridge-e2e timeout duration (e.g. 8m, 90m)"
+        required: true
+        default: "90m"
+        type: string
+      boundless_auto:
+        description: "Automatically submit/wait Boundless proofs and callback with returned seals"
+        required: true
+        default: true
+        type: boolean
+      boundless_rpc_url:
+        description: "Boundless submission RPC URL"
+        required: true
+        default: "https://mainnet.base.org"
+        type: string
+      boundless_deposit_program_url:
+        description: "Deposit guest program URL for Boundless"
+        required: false
+        default: ""
+        type: string
+      boundless_withdraw_program_url:
+        description: "Withdraw guest program URL for Boundless"
+        required: false
+        default: ""
+        type: string
+      boundless_min_price_wei:
+        description: "Boundless min price in wei"
+        required: true
+        default: "100000000000000"
+        type: string
+      boundless_max_price_wei:
+        description: "Boundless max price in wei"
+        required: true
+        default: "250000000000000"
+        type: string
+      boundless_lock_stake_wei:
+        description: "Boundless lock stake in wei"
+        required: true
+        default: "20000000000000000000"
+        type: string
+      boundless_bidding_delay_seconds:
+        description: "Boundless bidding delay in seconds"
+        required: true
+        default: "85"
+        type: string
+      boundless_ramp_up_period_seconds:
+        description: "Boundless ramp-up period in seconds"
+        required: true
+        default: "170"
+        type: string
+      boundless_lock_timeout_seconds:
+        description: "Boundless lock timeout in seconds"
+        required: true
+        default: "625"
+        type: string
+      boundless_timeout_seconds:
+        description: "Boundless timeout in seconds"
+        required: true
+        default: "1500"
+        type: string
 
 permissions:
   contents: read
@@ -66,6 +126,17 @@ jobs:
         with:
           version: stable
 
+      - name: Setup Rust toolchain
+        if: ${{ inputs.boundless_auto == true }}
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Boundless CLI
+        if: ${{ inputs.boundless_auto == true }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo install boundless-cli --version 0.14.1
+
       - name: Validate required secrets
         shell: bash
         run: |
@@ -78,6 +149,10 @@ jobs:
             echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
             exit 1
           fi
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]] && [[ -z "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX secret is required when boundless_auto=true"
+            exit 1
+          fi
 
       - name: Prepare funder key file
         shell: bash
@@ -88,6 +163,10 @@ jobs:
           chmod 0600 .ci/secrets/base-funder.key
           printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
           chmod 0600 .ci/secrets/juno-funder.key
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            printf '%s\n' "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/boundless-requestor.key
+            chmod 0600 .ci/secrets/boundless-requestor.key
+          fi
 
       - name: Prepare optional proof seal files
         shell: bash
@@ -117,6 +196,7 @@ jobs:
             --base-chain-id "${{ inputs.base_chain_id }}"
             --base-funder-key-file ".ci/secrets/base-funder.key"
             --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
+            --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
             --output "$E2E_WORKDIR/reports/testnet-e2e-summary.json"
             --force
           )
@@ -137,6 +217,30 @@ jobs:
           fi
           if [[ "${{ inputs.bridge_prepare_only }}" == "true" ]]; then
             ARGS+=(--bridge-prepare-only)
+          fi
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            if [[ -z "${{ inputs.boundless_deposit_program_url }}" ]]; then
+              echo "boundless_deposit_program_url is required when boundless_auto=true"
+              exit 1
+            fi
+            if [[ -z "${{ inputs.boundless_withdraw_program_url }}" ]]; then
+              echo "boundless_withdraw_program_url is required when boundless_auto=true"
+              exit 1
+            fi
+            ARGS+=(
+              --boundless-auto
+              --boundless-requestor-key-file ".ci/secrets/boundless-requestor.key"
+              --boundless-rpc-url "${{ inputs.boundless_rpc_url }}"
+              --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
+              --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
+              --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
+              --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
+              --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"
+              --boundless-bidding-delay-seconds "${{ inputs.boundless_bidding_delay_seconds }}"
+              --boundless-ramp-up-period-seconds "${{ inputs.boundless_ramp_up_period_seconds }}"
+              --boundless-lock-timeout-seconds "${{ inputs.boundless_lock_timeout_seconds }}"
+              --boundless-timeout-seconds "${{ inputs.boundless_timeout_seconds }}"
+            )
           fi
           ./deploy/operators/dkg/e2e/run-testnet-e2e.sh "${ARGS[@]}"
 
