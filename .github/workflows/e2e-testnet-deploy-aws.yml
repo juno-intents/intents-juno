@@ -1,0 +1,292 @@
+name: e2e-testnet-deploy-aws
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region for live e2e runner"
+        required: true
+        default: "us-east-1"
+        type: string
+      aws_instance_type:
+        description: "EC2 instance type for live e2e runner"
+        required: true
+        default: "c7i.4xlarge"
+        type: string
+      aws_root_volume_gb:
+        description: "Root EBS volume size in GiB"
+        required: true
+        default: "200"
+        type: string
+      ssh_allowed_cidr:
+        description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
+        required: false
+        default: ""
+        type: string
+      base_rpc_url:
+        description: "Base testnet RPC URL"
+        required: true
+        type: string
+      base_chain_id:
+        description: "Base testnet chain ID"
+        required: true
+        default: "84532"
+        type: string
+      base_operator_fund_wei:
+        description: "Prefund amount per operator in wei"
+        required: true
+        default: "1000000000000000"
+        type: string
+      bridge_verifier_address:
+        description: "Optional verifier router address (required with boundless_auto=true)"
+        required: false
+        default: ""
+        type: string
+      bridge_deposit_image_id:
+        description: "Optional deposit image ID (bytes32 hex)"
+        required: false
+        default: ""
+        type: string
+      bridge_withdraw_image_id:
+        description: "Optional withdraw image ID (bytes32 hex)"
+        required: false
+        default: ""
+        type: string
+      bridge_deposit_seal_hex:
+        description: "Optional deposit proof seal hex"
+        required: false
+        default: ""
+        type: string
+      bridge_withdraw_seal_hex:
+        description: "Optional withdraw proof seal hex"
+        required: false
+        default: ""
+        type: string
+      bridge_prepare_only:
+        description: "Prepare proof inputs only (skip mint/finalize bridge calls)"
+        required: true
+        default: false
+        type: boolean
+      bridge_run_timeout:
+        description: "bridge-e2e timeout duration (e.g. 8m, 90m)"
+        required: true
+        default: "90m"
+        type: string
+      boundless_auto:
+        description: "Automatically submit/wait Boundless proofs and callback with returned seals"
+        required: true
+        default: true
+        type: boolean
+      boundless_rpc_url:
+        description: "Boundless submission RPC URL"
+        required: true
+        default: "https://mainnet.base.org"
+        type: string
+      boundless_deposit_program_url:
+        description: "Deposit guest program URL for Boundless"
+        required: false
+        default: ""
+        type: string
+      boundless_withdraw_program_url:
+        description: "Withdraw guest program URL for Boundless"
+        required: false
+        default: ""
+        type: string
+      boundless_min_price_wei:
+        description: "Boundless min price in wei"
+        required: true
+        default: "100000000000000"
+        type: string
+      boundless_max_price_wei:
+        description: "Boundless max price in wei"
+        required: true
+        default: "250000000000000"
+        type: string
+      boundless_lock_stake_wei:
+        description: "Boundless lock stake in wei"
+        required: true
+        default: "5000000000000000000"
+        type: string
+      boundless_bidding_delay_seconds:
+        description: "Boundless bidding delay in seconds"
+        required: true
+        default: "85"
+        type: string
+      boundless_ramp_up_period_seconds:
+        description: "Boundless ramp-up period in seconds"
+        required: true
+        default: "170"
+        type: string
+      boundless_lock_timeout_seconds:
+        description: "Boundless lock timeout in seconds"
+        required: true
+        default: "625"
+        type: string
+      boundless_timeout_seconds:
+        description: "Boundless timeout in seconds"
+        required: true
+        default: "1500"
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  run-e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ secrets.AWS_ROLE_TO_ASSUME == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]]; then
+              echo "AWS_ACCESS_KEY_ID secret is required when AWS_ROLE_TO_ASSUME is not set"
+              exit 1
+            fi
+            if [[ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "AWS_SECRET_ACCESS_KEY secret is required when AWS_ROLE_TO_ASSUME is not set"
+              exit 1
+            fi
+          fi
+          if [[ -z "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BASE_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]] && [[ -z "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX secret is required when boundless_auto=true"
+            exit 1
+          fi
+
+      - name: Prepare Secret Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/secrets
+          printf '%s\n' "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/base-funder.key
+          printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
+          chmod 0600 .ci/secrets/base-funder.key .ci/secrets/juno-funder.key
+
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            printf '%s\n' "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/boundless-requestor.key
+            chmod 0600 .ci/secrets/boundless-requestor.key
+          fi
+
+          if [[ -n "${{ inputs.bridge_deposit_seal_hex }}" ]]; then
+            printf '%s\n' "${{ inputs.bridge_deposit_seal_hex }}" > .ci/secrets/bridge-deposit-seal.hex
+            chmod 0600 .ci/secrets/bridge-deposit-seal.hex
+          fi
+          if [[ -n "${{ inputs.bridge_withdraw_seal_hex }}" ]]; then
+            printf '%s\n' "${{ inputs.bridge_withdraw_seal_hex }}" > .ci/secrets/bridge-withdraw-seal.hex
+            chmod 0600 .ci/secrets/bridge-withdraw-seal.hex
+          fi
+
+      - name: Run AWS Live E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
+
+          ARGS=(
+            run
+            --workdir "$WORKDIR"
+            --aws-region "${{ inputs.aws_region }}"
+            --aws-instance-type "${{ inputs.aws_instance_type }}"
+            --aws-root-volume-gb "${{ inputs.aws_root_volume_gb }}"
+            --base-funder-key-file ".ci/secrets/base-funder.key"
+            --juno-funder-key-file ".ci/secrets/juno-funder.key"
+          )
+
+          if [[ -n "${{ inputs.ssh_allowed_cidr }}" ]]; then
+            ARGS+=(--ssh-allowed-cidr "${{ inputs.ssh_allowed_cidr }}")
+          fi
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
+          fi
+
+          E2E_ARGS=(
+            --base-rpc-url "${{ inputs.base_rpc_url }}"
+            --base-chain-id "${{ inputs.base_chain_id }}"
+            --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
+            --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
+          )
+          if [[ -n "${{ inputs.bridge_verifier_address }}" ]]; then
+            E2E_ARGS+=(--bridge-verifier-address "${{ inputs.bridge_verifier_address }}")
+          fi
+          if [[ -n "${{ inputs.bridge_deposit_image_id }}" ]]; then
+            E2E_ARGS+=(--bridge-deposit-image-id "${{ inputs.bridge_deposit_image_id }}")
+          fi
+          if [[ -n "${{ inputs.bridge_withdraw_image_id }}" ]]; then
+            E2E_ARGS+=(--bridge-withdraw-image-id "${{ inputs.bridge_withdraw_image_id }}")
+          fi
+          if [[ -f ".ci/secrets/bridge-deposit-seal.hex" ]]; then
+            E2E_ARGS+=(--bridge-deposit-seal-file ".ci/secrets/bridge-deposit-seal.hex")
+          fi
+          if [[ -f ".ci/secrets/bridge-withdraw-seal.hex" ]]; then
+            E2E_ARGS+=(--bridge-withdraw-seal-file ".ci/secrets/bridge-withdraw-seal.hex")
+          fi
+          if [[ "${{ inputs.bridge_prepare_only }}" == "true" ]]; then
+            E2E_ARGS+=(--bridge-prepare-only)
+          fi
+          if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            E2E_ARGS+=(
+              --boundless-auto
+              --boundless-rpc-url "${{ inputs.boundless_rpc_url }}"
+              --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
+              --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
+              --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
+              --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
+              --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"
+              --boundless-bidding-delay-seconds "${{ inputs.boundless_bidding_delay_seconds }}"
+              --boundless-ramp-up-period-seconds "${{ inputs.boundless_ramp_up_period_seconds }}"
+              --boundless-lock-timeout-seconds "${{ inputs.boundless_lock_timeout_seconds }}"
+              --boundless-timeout-seconds "${{ inputs.boundless_timeout_seconds }}"
+            )
+          fi
+
+          ARGS+=(-- "${E2E_ARGS[@]}")
+
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh "${ARGS[@]}"
+
+      - name: Fallback AWS Destroy
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh cleanup \
+            --workdir "${RUNNER_TEMP}/aws-live-e2e" \
+            --aws-region "${{ inputs.aws_region }}"
+
+      - name: Upload E2E Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-testnet-deploy-aws
+          path: |
+            ${{ runner.temp }}/aws-live-e2e/artifacts
+            ${{ runner.temp }}/aws-live-e2e/infra

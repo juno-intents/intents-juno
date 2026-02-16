@@ -22,6 +22,51 @@ Current limitation:
   - Runs DKG, exports backup packages, deletes runtime state, restores from backup zips, verifies operator boot.
 - `run-testnet-e2e.sh`:
   - Orchestrates DKG backup/restore plus Base testnet deploy and bridge smoke transactions.
+- `run-testnet-e2e-aws.sh`:
+  - Provisions a dedicated AWS EC2 runner with Terraform, executes `run-testnet-e2e.sh` on that host, collects artifacts, and destroys infra by default.
+
+## AWS Live E2E
+
+- Terraform stack:
+  - `deploy/shared/terraform/live-e2e`
+- Wrapper:
+  - `deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh`
+- GitHub workflow:
+  - `.github/workflows/e2e-testnet-deploy-aws.yml`
+
+The AWS workflow is designed for high-fidelity live runs on a powerful machine and includes teardown on both success and failure paths:
+
+1. `run-testnet-e2e-aws.sh run ...` provisions EC2 and executes e2e remotely.
+2. `run-testnet-e2e-aws.sh` trap performs destroy on exit.
+3. Workflow fallback step always invokes `run-testnet-e2e-aws.sh cleanup ...` as a second destroy guard.
+
+GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
+
+- AWS auth:
+  - Either `AWS_ROLE_TO_ASSUME` (OIDC) or static creds (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`).
+- Funding keys:
+  - `BASE_FUNDER_PRIVATE_KEY_HEX`
+  - `JUNO_FUNDER_PRIVATE_KEY_HEX`
+  - `BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX` (required when `boundless_auto=true`)
+
+Local invocation example:
+
+```bash
+./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh run \
+  --aws-region us-east-1 \
+  --base-funder-key-file ./tmp/funders/base-funder.key \
+  --juno-funder-key-file ./tmp/funders/juno-funder.key \
+  --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
+  -- \
+  --base-rpc-url https://sepolia.base.org \
+  --base-chain-id 84532 \
+  --bridge-verifier-address 0xVerifierRouterAddress \
+  --bridge-deposit-image-id 0x... \
+  --bridge-withdraw-image-id 0x... \
+  --boundless-auto \
+  --boundless-deposit-program-url https://.../deposit-guest.elf \
+  --boundless-withdraw-program-url https://.../withdraw-guest.elf
+```
 
 ## Boundless Modes
 
