@@ -104,6 +104,30 @@ EOF
   rm -rf "$tmp"
 }
 
+test_require_tailscale_active_allows_insecure_override() {
+  local tmp_bin
+  tmp_bin="$(mktemp -d)"
+
+  if ! (
+    unset JUNO_DKG_ALLOW_INSECURE_NETWORK
+    PATH="$tmp_bin:$PATH"
+    require_tailscale_active >/dev/null 2>&1
+  ); then
+    :
+  else
+    printf 'expected require_tailscale_active to fail without tailscale when override is unset\n' >&2
+    exit 1
+  fi
+
+  (
+    export JUNO_DKG_ALLOW_INSECURE_NETWORK="1"
+    PATH="$tmp_bin:$PATH"
+    require_tailscale_active >/dev/null
+  )
+
+  rm -rf "$tmp_bin"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -111,6 +135,7 @@ main() {
   test_build_export_s3_key
   test_repair_executable_file
   test_remove_macos_quarantine_calls_xattr
+  test_require_tailscale_active_allows_insecure_override
 }
 
 main "$@"

@@ -331,6 +331,10 @@ is_tailscale_active() {
 
 require_tailscale_active() {
   ensure_base_dependencies
+  if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-}" == "1" ]]; then
+    log "WARNING: JUNO_DKG_ALLOW_INSECURE_NETWORK=1; skipping tailscale activity check"
+    return 0
+  fi
   if ! is_tailscale_active; then
     die "tailscale is not active; run deploy/operators/dkg/tailscale.sh first"
   fi

@@ -8,9 +8,11 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 - `operator.sh`: operator-side bundle execution (`dkg-admin serve`) and process control.
 - `operator-export-kms.sh`: operator-side key package export workflows (age backup first, KMS+S3 later).
 - `backup-package.sh`: operator-side backup zipper for external storage/escrow.
+- `backup-package.sh restore`: restores operator runtime from `dkg-backup.zip` only.
 - `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
 - `test-completiton.sh`: completion verifier that checks smoke-signature phases and outputs UFVK + Juno shielded address.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
+- `e2e/`: live testnet orchestration scripts for DKG backup/restore and Base deploy/bridge smoke.
 
 ## Primary Ceremony Flow
 
@@ -114,6 +116,23 @@ This command validates online smoke-signature phases for all operators and print
 ```
 
 Store that zip externally (cold storage / escrow / secure vault).
+
+### 2.6) Restore runtime later from only `dkg-backup.zip`
+
+```bash
+./backup-package.sh restore \
+  --package ~/.juno-dkg/backup-packages/dkg-backup.zip \
+  --workdir ~/.juno-dkg/operator-runtime
+```
+
+Then boot operator service:
+
+```bash
+JUNO_DKG_ALLOW_INSECURE_NETWORK=1 ./operator.sh run \
+  --bundle ~/.juno-dkg/operator-runtime/bundle \
+  --workdir ~/.juno-dkg/operator-runtime \
+  --daemon
+```
 
 ### 3) Later, export to each operator's own KMS+S3 target
 
