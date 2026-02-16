@@ -74,6 +74,10 @@ jobs:
             echo "BASE_FUNDER_PRIVATE_KEY_HEX secret is required"
             exit 1
           fi
+          if [[ -z "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
 
       - name: Prepare funder key file
         shell: bash
@@ -82,6 +86,8 @@ jobs:
           mkdir -p .ci/secrets
           printf '%s\n' "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/base-funder.key
           chmod 0600 .ci/secrets/base-funder.key
+          printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
+          chmod 0600 .ci/secrets/juno-funder.key
 
       - name: Prepare optional proof seal files
         shell: bash
@@ -99,6 +105,8 @@ jobs:
 
       - name: Run Testnet E2E
         shell: bash
+        env:
+          JUNO_FUNDER_PRIVATE_KEY_HEX: ${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}
         run: |
           set -euo pipefail
           E2E_WORKDIR="${RUNNER_TEMP}/testnet-e2e"

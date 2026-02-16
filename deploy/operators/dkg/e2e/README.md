@@ -8,6 +8,11 @@ This folder provides live-network e2e automation for:
 4. operator boot verification after restore
 5. Base testnet contract deploy + bridge smoke flow (Juno->Base mint and Base->Juno finalize path)
 
+Current limitation:
+- The workflow currently executes bridge transactions on Base testnet.
+- It does not yet broadcast Juno-chain deposit/withdraw payout transactions end-to-end from this repo.
+- `JUNO_FUNDER_PRIVATE_KEY_HEX` is still required in CI and is reserved for the upcoming Juno-chain execution stage.
+
 ## Scripts
 
 - `create-funder-wallets.sh`:

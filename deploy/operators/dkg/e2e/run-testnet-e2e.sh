@@ -35,7 +35,7 @@ Options:
   --force                          remove existing workdir before starting
 
 Environment:
-  JUNO_FUNDER_PRIVATE_KEY_HEX      optional juno funder key hint included in summary metadata.
+  JUNO_FUNDER_PRIVATE_KEY_HEX      juno funder key hint included in summary metadata (required by CI workflow).
 
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
