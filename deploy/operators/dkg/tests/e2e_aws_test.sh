@@ -41,8 +41,28 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "run_with_retry cargo install --path" "boundless cli install retry"
 }
 
+test_aws_wrapper_uses_ssh_keepalive_options() {
+  local wrapper_script
+  local keepalive_count
+  wrapper_script="$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
+
+  keepalive_count="$(grep -o 'ServerAliveInterval=30' "$wrapper_script" | wc -l | tr -d ' ')"
+  if (( keepalive_count < 6 )); then
+    printf 'assert_keepalive_count failed: expected at least 6, got=%s\n' "$keepalive_count" >&2
+    exit 1
+  fi
+
+  local keepalive_max_count
+  keepalive_max_count="$(grep -o 'ServerAliveCountMax=6' "$wrapper_script" | wc -l | tr -d ' ')"
+  if (( keepalive_max_count < 6 )); then
+    printf 'assert_keepalive_max_count failed: expected at least 6, got=%s\n' "$keepalive_max_count" >&2
+    exit 1
+  fi
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
+  test_aws_wrapper_uses_ssh_keepalive_options
 }
 
 main "$@"

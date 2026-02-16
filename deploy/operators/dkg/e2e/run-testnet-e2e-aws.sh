@@ -161,6 +161,9 @@ wait_for_ssh() {
     -o UserKnownHostsFile=/dev/null
     -o ConnectTimeout=10
     -o BatchMode=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
   )
 
   local attempt
@@ -184,6 +187,9 @@ remote_prepare_runner() {
     -i "$ssh_private_key"
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
   )
 
   local remote_script
@@ -372,6 +378,9 @@ copy_remote_secret_file() {
     -i "$ssh_private_key"
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
   )
 
   scp "${ssh_opts[@]}" "$local_file" "$ssh_user@$ssh_host:$remote_file"
@@ -683,6 +692,9 @@ EOF
   ssh -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
     "$runner_ssh_user@$runner_public_ip" \
     "bash -lc $(printf '%q' "$remote_run_script")"
 
@@ -691,6 +703,9 @@ EOF
     -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
     "$runner_ssh_user@$runner_public_ip:$remote_workdir/reports" \
     "$artifacts_dir/" || true
 
@@ -698,6 +713,9 @@ EOF
     -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
     "$runner_ssh_user@$runner_public_ip:$remote_workdir/dkg" \
     "$artifacts_dir/" || true
 
