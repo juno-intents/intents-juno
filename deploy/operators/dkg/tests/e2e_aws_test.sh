@@ -27,7 +27,8 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "for attempt in \$(seq 1 30)" "apt retry loop"
   assert_contains "$script_text" "run_apt_with_retry update -y" "apt update command"
   assert_contains "$script_text" "run_apt_with_retry install -y build-essential" "apt install command"
-  assert_contains "$script_text" "cargo install --locked boundless-cli --version 0.14.1" "boundless cli install locked"
+  assert_contains "$script_text" "for attempt in \$(seq 1 3)" "generic retry loop"
+  assert_contains "$script_text" "run_with_retry cargo install --locked boundless-cli --version 0.14.1" "boundless cli install retry"
 }
 
 main() {

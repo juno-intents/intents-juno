@@ -215,6 +215,20 @@ run_apt_with_retry() {
   return 1
 }
 
+run_with_retry() {
+  local attempt
+  for attempt in \$(seq 1 3); do
+    if "\$@"; then
+      return 0
+    fi
+    if [[ \$attempt -lt 3 ]]; then
+      rm -rf /tmp/cargo-install* || true
+      sleep 5
+    fi
+  done
+  return 1
+}
+
 run_apt_with_retry update -y
 run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go
 
@@ -228,8 +242,8 @@ if ! command -v foundryup >/dev/null 2>&1; then
 fi
 foundryup
 
-cargo install --locked boundless-cli --version 0.14.1
-cargo install --locked cargo-risczero --version 3.0.5
+run_with_retry cargo install --locked boundless-cli --version 0.14.1
+run_with_retry cargo install --locked cargo-risczero --version 3.0.5
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
