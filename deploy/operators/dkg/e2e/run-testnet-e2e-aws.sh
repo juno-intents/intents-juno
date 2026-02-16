@@ -230,7 +230,7 @@ run_with_retry() {
 }
 
 run_apt_with_retry update -y
-run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go
+run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar
 
 if [[ ! -d "\$HOME/.cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -242,6 +242,39 @@ if ! command -v foundryup >/dev/null 2>&1; then
 fi
 foundryup
 
+prepare_boundless_market_patch() {
+  local cargo_registry_src
+  local cargo_index_dir
+  local crate_dir
+  local build_rs
+  local crate_url
+  local crate_archive
+
+  cargo_registry_src="\$HOME/.cargo/registry/src"
+  mkdir -p "\$cargo_registry_src"
+
+  cargo_index_dir="\$(find "\$cargo_registry_src" -maxdepth 1 -type d -name 'index.crates.io-*' | head -n1)"
+  if [[ -z "\$cargo_index_dir" ]]; then
+    cargo_index_dir="\$cargo_registry_src/index.crates.io-1949cf8c6b5b557f"
+  fi
+  mkdir -p "\$cargo_index_dir"
+
+  crate_dir="\$cargo_index_dir/boundless-market-0.14.1"
+  build_rs="\$crate_dir/build.rs"
+  if [[ ! -f "\$build_rs" ]]; then
+    crate_url="https://static.crates.io/crates/boundless-market/boundless-market-0.14.1.crate"
+    crate_archive="/tmp/boundless-market-0.14.1.crate"
+    rm -rf "\$crate_dir"
+    curl -fsSL "\$crate_url" -o "\$crate_archive"
+    tar -xzf "\$crate_archive" -C "\$cargo_index_dir"
+  fi
+
+  if [[ -f "\$build_rs" ]] && ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
+    sed -i 's/{combined_sol_contents}/{combined_sol_contents}\\\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/' "\$build_rs"
+  fi
+}
+
+prepare_boundless_market_patch
 run_with_retry cargo install --locked boundless-cli --version 0.14.1
 run_with_retry cargo install --locked cargo-risczero --version 3.0.5
 
