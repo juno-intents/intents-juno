@@ -137,12 +137,12 @@ jobs:
           set -euo pipefail
           cargo install boundless-cli --version 0.14.1
 
-      - name: Install RISC Zero VM
+      - name: Install RISC Zero Tooling
         if: ${{ inputs.boundless_auto == true }}
         shell: bash
         run: |
           set -euo pipefail
-          cargo install --locked r0vm --version 3.0.5
+          cargo install --locked cargo-risczero --version 3.0.5
 
       - name: Validate required secrets
         shell: bash
