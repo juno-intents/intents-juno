@@ -61,6 +61,14 @@ is_transient_rpc_error() {
     [[ "$lowered" == *"eof"* ]]
 }
 
+is_nonce_race_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  [[ "$lowered" == *"nonce too low"* ]] ||
+    [[ "$lowered" == *"replacement transaction underpriced"* ]]
+}
+
 run_with_rpc_retry() {
   local attempts="$1"
   local delay_seconds="$2"
@@ -78,6 +86,11 @@ run_with_rpc_retry() {
       if [[ -n "$output" ]]; then
         printf '%s\n' "$output"
       fi
+      return 0
+    fi
+
+    if [[ "$label" == "cast send" ]] && is_nonce_race_error "$output"; then
+      log "$label nonce race detected; assuming previous submission accepted"
       return 0
     fi
 
