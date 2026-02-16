@@ -42,6 +42,49 @@ trimmed_file_value() {
   tr -d '\r\n' <"$path"
 }
 
+is_transient_rpc_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  [[ "$lowered" == *"null response"* ]] ||
+    [[ "$lowered" == *"429"* ]] ||
+    [[ "$lowered" == *"timeout"* ]] ||
+    [[ "$lowered" == *"503"* ]] ||
+    [[ "$lowered" == *"connection reset"* ]] ||
+    [[ "$lowered" == *"eof"* ]]
+}
+
+run_with_rpc_retry() {
+  local attempts="$1"
+  local delay_seconds="$2"
+  local label="$3"
+  shift 3
+
+  local attempt=1 output status
+  while true; do
+    set +e
+    output="$("$@" 2>&1)"
+    status=$?
+    set -e
+
+    if (( status == 0 )); then
+      if [[ -n "$output" ]]; then
+        printf '%s\n' "$output"
+      fi
+      return 0
+    fi
+
+    if (( attempt >= attempts )) || ! is_transient_rpc_error "$output"; then
+      printf '%s\n' "$output" >&2
+      return "$status"
+    fi
+
+    log "$label transient rpc error (attempt ${attempt}/${attempts}); retrying in ${delay_seconds}s"
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 command_run() {
   shift || true
 
@@ -172,14 +215,20 @@ command_run() {
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
+    local funder_address next_nonce
+    funder_address="$(cast wallet address --private-key "$base_key")"
+    next_nonce="$(run_with_rpc_retry 5 2 "cast nonce" cast nonce "$funder_address" --rpc-url "$base_rpc_url" --block pending)"
+
     local operator
     while IFS= read -r operator; do
       [[ -n "$operator" ]] || continue
-      cast send \
+      run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
+        --nonce "$next_nonce" \
         --value "$base_operator_fund_wei" \
         "$operator" >/dev/null
+      next_nonce=$((next_nonce + 1))
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
   fi
 
@@ -201,7 +250,7 @@ command_run() {
 
   (
     cd "$REPO_ROOT"
-    go run ./cmd/bridge-e2e "${bridge_args[@]}"
+    run_with_rpc_retry 4 3 "bridge-e2e" go run ./cmd/bridge-e2e "${bridge_args[@]}"
   )
 
   jq -n \

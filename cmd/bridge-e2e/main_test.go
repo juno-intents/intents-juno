@@ -1,9 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
+	"math/big"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestParseArgs_Valid(t *testing.T) {
@@ -83,5 +90,213 @@ func TestParseArgs_RejectsWithdrawLargerThanDeposit(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+type mockCallResponse struct {
+	result any
+	err    error
+}
+
+type mockDepositUsedCaller struct {
+	expectedDepositID common.Hash
+	responses         []mockCallResponse
+	calls             int
+	blockNumbers      []*big.Int
+}
+
+func (m *mockDepositUsedCaller) Call(opts *bind.CallOpts, results *[]any, method string, params ...any) error {
+	if method != "depositUsed" {
+		return errors.New("unexpected method")
+	}
+	if len(params) != 1 {
+		return errors.New("unexpected params")
+	}
+	depositID, ok := params[0].(common.Hash)
+	if !ok {
+		return errors.New("unexpected param type")
+	}
+	if depositID != m.expectedDepositID {
+		return errors.New("unexpected deposit id")
+	}
+	if opts == nil || opts.BlockNumber == nil {
+		return errors.New("missing block number")
+	}
+	m.blockNumbers = append(m.blockNumbers, new(big.Int).Set(opts.BlockNumber))
+	m.calls++
+
+	if len(m.responses) == 0 {
+		*results = []any{false}
+		return nil
+	}
+	idx := m.calls - 1
+	if idx >= len(m.responses) {
+		idx = len(m.responses) - 1
+	}
+	resp := m.responses[idx]
+	if resp.err != nil {
+		return resp.err
+	}
+	*results = []any{resp.result}
+	return nil
+}
+
+func TestWaitDepositUsedAtBlock_RetriesUntilTrue(t *testing.T) {
+	t.Parallel()
+
+	depositID := common.HexToHash("0x1234")
+	blockNumber := big.NewInt(42)
+	bridge := &mockDepositUsedCaller{
+		expectedDepositID: depositID,
+		responses: []mockCallResponse{
+			{result: false},
+			{result: false},
+			{result: true},
+		},
+	}
+
+	used, err := waitDepositUsedAtBlock(context.Background(), bridge, depositID, blockNumber, 5, 0)
+	if err != nil {
+		t.Fatalf("waitDepositUsedAtBlock: %v", err)
+	}
+	if !used {
+		t.Fatalf("expected deposit to be used")
+	}
+	if bridge.calls != 3 {
+		t.Fatalf("expected 3 calls, got %d", bridge.calls)
+	}
+	for _, got := range bridge.blockNumbers {
+		if got.Cmp(blockNumber) != 0 {
+			t.Fatalf("expected block number %s, got %s", blockNumber, got)
+		}
+	}
+}
+
+func TestWaitDepositUsedAtBlock_ReturnsFalseAfterAttempts(t *testing.T) {
+	t.Parallel()
+
+	depositID := common.HexToHash("0xabcd")
+	bridge := &mockDepositUsedCaller{
+		expectedDepositID: depositID,
+		responses: []mockCallResponse{
+			{result: false},
+			{result: false},
+		},
+	}
+
+	used, err := waitDepositUsedAtBlock(context.Background(), bridge, depositID, big.NewInt(7), 2, 0)
+	if err != nil {
+		t.Fatalf("waitDepositUsedAtBlock: %v", err)
+	}
+	if used {
+		t.Fatalf("expected depositUsed=false")
+	}
+	if bridge.calls != 2 {
+		t.Fatalf("expected 2 calls, got %d", bridge.calls)
+	}
+}
+
+func TestWaitDepositUsedAtBlock_ReturnsLastError(t *testing.T) {
+	t.Parallel()
+
+	depositID := common.HexToHash("0xfeed")
+	bridge := &mockDepositUsedCaller{
+		expectedDepositID: depositID,
+		responses: []mockCallResponse{
+			{err: errors.New("missing trie node")},
+			{err: errors.New("header not found")},
+		},
+	}
+
+	used, err := waitDepositUsedAtBlock(context.Background(), bridge, depositID, big.NewInt(99), 2, 0)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if used {
+		t.Fatalf("expected used=false on error")
+	}
+	if !strings.Contains(err.Error(), "header not found") {
+		t.Fatalf("expected last error in message, got: %v", err)
+	}
+}
+
+func TestTransactAuthWithDefaults_UsesDefaultGasLimit(t *testing.T) {
+	t.Parallel()
+
+	base := &bind.TransactOpts{
+		GasLimit: 0,
+		Nonce:    big.NewInt(7),
+	}
+
+	got := transactAuthWithDefaults(base, 1_000_000)
+	if got == base {
+		t.Fatalf("expected a cloned transact opts")
+	}
+	if got.GasLimit != 1_000_000 {
+		t.Fatalf("expected default gas limit, got %d", got.GasLimit)
+	}
+	if base.GasLimit != 0 {
+		t.Fatalf("expected original auth gas limit unchanged, got %d", base.GasLimit)
+	}
+}
+
+func TestTransactAuthWithDefaults_RespectsExistingGasLimit(t *testing.T) {
+	t.Parallel()
+
+	base := &bind.TransactOpts{
+		GasLimit: 555_000,
+	}
+
+	got := transactAuthWithDefaults(base, 1_000_000)
+	if got == base {
+		t.Fatalf("expected a cloned transact opts")
+	}
+	if got.GasLimit != 555_000 {
+		t.Fatalf("expected existing gas limit preserved, got %d", got.GasLimit)
+	}
+	if base.GasLimit != 555_000 {
+		t.Fatalf("expected original auth gas limit unchanged, got %d", base.GasLimit)
+	}
+}
+
+func TestIsRetriableNonceError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nonce too low",
+			err:  errors.New("nonce too low: next nonce 63, tx nonce 62"),
+			want: true,
+		},
+		{
+			name: "replacement underpriced",
+			err:  errors.New("replacement transaction underpriced"),
+			want: true,
+		},
+		{
+			name: "other error",
+			err:  errors.New("execution reverted"),
+			want: false,
+		},
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRetriableNonceError(tc.err)
+			if got != tc.want {
+				t.Fatalf("isRetriableNonceError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

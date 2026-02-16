@@ -236,6 +236,11 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 	auth.Context = ctx
 	owner := auth.From
+	startNonce, err := client.PendingNonceAt(ctx, owner)
+	if err != nil {
+		return nil, fmt.Errorf("pending nonce for owner: %w", err)
+	}
+	auth.Nonce = new(big.Int).SetUint64(startNonce)
 
 	operatorKeys := make([]*ecdsa.PrivateKey, 0, len(cfg.OperatorKeyFiles))
 	for _, path := range cfg.OperatorKeyFiles {
@@ -397,12 +402,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("encode deposit journal: %w", err)
 	}
 
-	mintBatchTx, err := transactAndWait(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, []byte{0x99}, depositJournal)
+	mintBatchTx, mintBatchRcpt, err := transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, []byte{0x99}, depositJournal)
 	if err != nil {
 		return nil, fmt.Errorf("mintBatch: %w", err)
 	}
 
-	used, err := callDepositUsed(ctx, bridge, depositID)
+	used, err := waitDepositUsedAtBlock(ctx, bridge, depositID, mintBatchRcpt.BlockNumber, 20, 500*time.Millisecond)
 	if err != nil {
 		return nil, err
 	}
@@ -417,16 +422,9 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	recipientUA := []byte{0x01, 0x02, 0x03}
-	requestTx, err := bridge.Transact(auth, "requestWithdraw", withdrawAmount, recipientUA)
+	requestWithdrawTx, requestRcpt, err := transactAndWaitWithReceipt(ctx, client, auth, bridge, "requestWithdraw", withdrawAmount, recipientUA)
 	if err != nil {
-		return nil, fmt.Errorf("requestWithdraw tx: %w", err)
-	}
-	requestRcpt, err := waitMined(ctx, client, requestTx)
-	if err != nil {
-		return nil, fmt.Errorf("requestWithdraw mined: %w", err)
-	}
-	if requestRcpt.Status != 1 {
-		return nil, errors.New("requestWithdraw reverted")
+		return nil, fmt.Errorf("requestWithdraw: %w", err)
 	}
 	withdrawalID, feeBpsAtReq, err := parseWithdrawRequested(bridgeABI, requestRcpt)
 	if err != nil {
@@ -495,7 +493,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
 	rep.Transactions.MintBatch = mintBatchTx.Hex()
 	rep.Transactions.ApproveWithdraw = approveWithdrawTx.Hex()
-	rep.Transactions.RequestWithdraw = requestTx.Hash().Hex()
+	rep.Transactions.RequestWithdraw = requestWithdrawTx.Hex()
 	rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
 
 	rep.Withdraw.WithdrawalID = withdrawalID.Hex()
@@ -547,19 +545,35 @@ type evmBackend interface {
 	bind.DeployBackend
 }
 
+type txBackend interface {
+	bind.DeployBackend
+	PendingNonceAt(ctx context.Context, account common.Address) (uint64, error)
+}
+
 func deployContract(ctx context.Context, backend evmBackend, auth *bind.TransactOpts, a abi.ABI, bin []byte, args ...any) (common.Address, common.Hash, error) {
-	addr, tx, _, err := bind.DeployContract(auth, a, bin, backend, args...)
-	if err != nil {
-		return common.Address{}, common.Hash{}, err
+	for attempt := 1; attempt <= 4; attempt++ {
+		txAuth := transactAuthWithDefaults(auth, 0)
+		addr, tx, _, err := bind.DeployContract(txAuth, a, bin, backend, args...)
+		if err != nil {
+			if attempt < 4 && isRetriableNonceError(err) {
+				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
+					return common.Address{}, common.Hash{}, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
+				}
+				continue
+			}
+			return common.Address{}, common.Hash{}, err
+		}
+		incrementAuthNonce(auth)
+		rcpt, err := waitMined(ctx, backend, tx)
+		if err != nil {
+			return common.Address{}, common.Hash{}, err
+		}
+		if rcpt.Status != 1 {
+			return common.Address{}, common.Hash{}, fmt.Errorf("deployment reverted: %s", tx.Hash().Hex())
+		}
+		return addr, tx.Hash(), nil
 	}
-	rcpt, err := waitMined(ctx, backend, tx)
-	if err != nil {
-		return common.Address{}, common.Hash{}, err
-	}
-	if rcpt.Status != 1 {
-		return common.Address{}, common.Hash{}, fmt.Errorf("deployment reverted: %s", tx.Hash().Hex())
-	}
-	return addr, tx.Hash(), nil
+	return common.Address{}, common.Hash{}, errors.New("deploy contract retries exhausted")
 }
 
 func deployNoopVerifier(ctx context.Context, backend evmBackend, auth *bind.TransactOpts) (common.Address, common.Hash, error) {
@@ -574,19 +588,76 @@ func deployNoopVerifier(ctx context.Context, backend evmBackend, auth *bind.Tran
 	return deployContract(ctx, backend, auth, emptyABI, initCode)
 }
 
-func transactAndWait(ctx context.Context, backend bind.DeployBackend, auth *bind.TransactOpts, c *bind.BoundContract, method string, args ...any) (common.Hash, error) {
-	tx, err := c.Transact(auth, method, args...)
+func transactAndWait(ctx context.Context, backend txBackend, auth *bind.TransactOpts, c *bind.BoundContract, method string, args ...any) (common.Hash, error) {
+	txHash, _, err := transactAndWaitWithReceipt(ctx, backend, auth, c, method, args...)
+	return txHash, err
+}
+
+func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bind.TransactOpts, c *bind.BoundContract, method string, args ...any) (common.Hash, *types.Receipt, error) {
+	for attempt := 1; attempt <= 4; attempt++ {
+		txAuth := transactAuthWithDefaults(auth, 1_000_000)
+		tx, err := c.Transact(txAuth, method, args...)
+		if err != nil {
+			if attempt < 4 && isRetriableNonceError(err) {
+				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
+					return common.Hash{}, nil, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
+				}
+				continue
+			}
+			return common.Hash{}, nil, err
+		}
+		incrementAuthNonce(auth)
+		rcpt, err := waitMined(ctx, backend, tx)
+		if err != nil {
+			return common.Hash{}, nil, err
+		}
+		if rcpt.Status != 1 {
+			return common.Hash{}, nil, fmt.Errorf("%s reverted: %s", method, tx.Hash().Hex())
+		}
+		return tx.Hash(), rcpt, nil
+	}
+	return common.Hash{}, nil, fmt.Errorf("%s retries exhausted", method)
+}
+
+func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *bind.TransactOpts {
+	if auth == nil {
+		return nil
+	}
+	cloned := *auth
+	if cloned.GasLimit == 0 {
+		cloned.GasLimit = defaultGasLimit
+	}
+	return &cloned
+}
+
+func isRetriableNonceError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "nonce too low") || strings.Contains(msg, "replacement transaction underpriced")
+}
+
+func refreshAuthNonce(ctx context.Context, backend txBackend, auth *bind.TransactOpts) error {
+	if auth == nil {
+		return errors.New("nil auth")
+	}
+	nonce, err := backend.PendingNonceAt(ctx, auth.From)
 	if err != nil {
-		return common.Hash{}, err
+		return err
 	}
-	rcpt, err := waitMined(ctx, backend, tx)
-	if err != nil {
-		return common.Hash{}, err
+	auth.Nonce = new(big.Int).SetUint64(nonce)
+	return nil
+}
+
+func incrementAuthNonce(auth *bind.TransactOpts) {
+	if auth == nil {
+		return
 	}
-	if rcpt.Status != 1 {
-		return common.Hash{}, fmt.Errorf("%s reverted: %s", method, tx.Hash().Hex())
+	if auth.Nonce == nil {
+		return
 	}
-	return tx.Hash(), nil
+	auth.Nonce = new(big.Int).Add(auth.Nonce, big.NewInt(1))
 }
 
 func waitMined(ctx context.Context, backend bind.DeployBackend, tx *types.Transaction) (*types.Receipt, error) {
@@ -616,9 +687,53 @@ func signDigestSorted(digest common.Hash, keys []*ecdsa.PrivateKey) ([][]byte, e
 	return out, nil
 }
 
-func callDepositUsed(ctx context.Context, bridge *bind.BoundContract, depositID common.Hash) (bool, error) {
+type depositUsedCaller interface {
+	Call(opts *bind.CallOpts, results *[]any, method string, params ...any) error
+}
+
+func waitDepositUsedAtBlock(ctx context.Context, bridge depositUsedCaller, depositID common.Hash, blockNumber *big.Int, attempts int, interval time.Duration) (bool, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		used, err := callDepositUsed(ctx, bridge, depositID, blockNumber)
+		if err == nil {
+			if used {
+				return true, nil
+			}
+			lastErr = nil
+		} else {
+			lastErr = err
+		}
+
+		if i == attempts-1 || interval <= 0 {
+			continue
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return false, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	if lastErr != nil {
+		return false, fmt.Errorf("depositUsed check failed after %d attempts: %w", attempts, lastErr)
+	}
+	return false, nil
+}
+
+func callDepositUsed(ctx context.Context, bridge depositUsedCaller, depositID common.Hash, blockNumber *big.Int) (bool, error) {
 	var res []any
-	if err := bridge.Call(&bind.CallOpts{Context: ctx}, &res, "depositUsed", depositID); err != nil {
+	opts := &bind.CallOpts{Context: ctx}
+	if blockNumber != nil {
+		opts.BlockNumber = new(big.Int).Set(blockNumber)
+	}
+	if err := bridge.Call(opts, &res, "depositUsed", depositID); err != nil {
 		return false, err
 	}
 	if len(res) != 1 {
