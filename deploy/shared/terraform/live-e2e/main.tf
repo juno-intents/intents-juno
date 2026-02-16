@@ -13,15 +13,31 @@ locals {
   }
 }
 
-data "aws_vpc" "default" {
-  default = true
+data "aws_subnets" "public" {
+  filter {
+    name   = "map-public-ip-on-launch"
+    values = ["true"]
+  }
+
+  dynamic "filter" {
+    for_each = var.vpc_id == "" ? [] : [var.vpc_id]
+    content {
+      name   = "vpc-id"
+      values = [filter.value]
+    }
+  }
 }
 
-data "aws_subnets" "default" {
-  filter {
-    name   = "vpc-id"
-    values = [data.aws_vpc.default.id]
-  }
+locals {
+  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.public.ids[0]
+}
+
+data "aws_subnet" "selected" {
+  id = local.selected_subnet_id
+}
+
+locals {
+  selected_vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_subnet.selected.vpc_id
 }
 
 data "aws_ami" "ubuntu" {
@@ -49,7 +65,7 @@ resource "aws_key_pair" "runner" {
 resource "aws_security_group" "runner" {
   name        = "${local.resource_name}-sg"
   description = "Security group for intents-juno live e2e runner"
-  vpc_id      = data.aws_vpc.default.id
+  vpc_id      = local.selected_vpc_id
 
   ingress {
     description = "SSH"
@@ -74,7 +90,7 @@ resource "aws_instance" "runner" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.runner.key_name
-  subnet_id              = data.aws_subnets.default.ids[0]
+  subnet_id              = local.selected_subnet_id
   vpc_security_group_ids = [aws_security_group.runner.id]
   iam_instance_profile   = var.iam_instance_profile == "" ? null : var.iam_instance_profile
 
@@ -97,4 +113,3 @@ resource "aws_instance" "runner" {
     Name = "${local.resource_name}-runner"
   })
 }
-

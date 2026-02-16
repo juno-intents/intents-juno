@@ -36,9 +36,20 @@ variable "ssh_public_key" {
   type        = string
 }
 
+variable "vpc_id" {
+  description = "Optional VPC ID for the runner. If empty, a VPC is inferred from the selected subnet."
+  type        = string
+  default     = ""
+}
+
+variable "subnet_id" {
+  description = "Optional subnet ID for the runner. If empty, the first public subnet is selected."
+  type        = string
+  default     = ""
+}
+
 variable "iam_instance_profile" {
   description = "Optional IAM instance profile name attached to the runner."
   type        = string
   default     = ""
 }
-
