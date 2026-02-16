@@ -979,6 +979,10 @@ func requestBoundlessProof(
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
+	if err := validateBoundlessPrivateInputCompatibility(pipeline, programURL, privateInput); err != nil {
+		return nil, "", err
+	}
+
 	tmp, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-input-*.bin")
 	if err != nil {
 		return nil, "", fmt.Errorf("create boundless input file for %s: %w", pipeline, err)
@@ -1043,6 +1047,33 @@ func requestBoundlessProof(
 	}
 
 	return seal, parsed.RequestIDHex, nil
+}
+
+func validateBoundlessPrivateInputCompatibility(pipeline, programURL string, privateInput []byte) error {
+	trimmed := bytes.TrimSpace(privateInput)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return nil
+	}
+
+	var envelope struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(trimmed, &envelope); err != nil {
+		return nil
+	}
+
+	version := strings.TrimSpace(envelope.Version)
+	switch version {
+	case "deposit.private_input.v1", "withdraw.private_input.v1":
+		return fmt.Errorf(
+			"boundless %s input is incompatible with guest %q: got %s json envelope; use prepare-only/manual callback mode or a guest that accepts this input format",
+			pipeline,
+			programURL,
+			version,
+		)
+	default:
+		return nil
+	}
 }
 
 var (

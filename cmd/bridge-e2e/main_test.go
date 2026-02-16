@@ -348,6 +348,45 @@ func TestParseBoundlessWaitOutput_MissingSeal(t *testing.T) {
 	}
 }
 
+func TestValidateBoundlessPrivateInputCompatibility_RejectsKnownJSONEnvelope(t *testing.T) {
+	t.Parallel()
+
+	err := validateBoundlessPrivateInputCompatibility(
+		"deposit",
+		"https://example.invalid/deposit-guest.elf",
+		[]byte(`{"version":"deposit.private_input.v1","items":[]}`),
+	)
+	if err == nil {
+		t.Fatalf("expected compatibility error")
+	}
+	if !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("expected incompatibility error, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "deposit.private_input.v1") {
+		t.Fatalf("expected version hint in error, got: %v", err)
+	}
+}
+
+func TestValidateBoundlessPrivateInputCompatibility_AllowsUnknownOrBinaryInput(t *testing.T) {
+	t.Parallel()
+
+	if err := validateBoundlessPrivateInputCompatibility(
+		"deposit",
+		"https://example.invalid/deposit-guest.elf",
+		[]byte{0x01, 0x02, 0x03},
+	); err != nil {
+		t.Fatalf("unexpected binary compatibility error: %v", err)
+	}
+
+	if err := validateBoundlessPrivateInputCompatibility(
+		"deposit",
+		"https://example.invalid/deposit-guest.elf",
+		[]byte(`{"version":"custom.private_input.v9"}`),
+	); err != nil {
+		t.Fatalf("unexpected custom version compatibility error: %v", err)
+	}
+}
+
 func TestComputePredictedWithdrawalID_Deterministic(t *testing.T) {
 	t.Parallel()
 
