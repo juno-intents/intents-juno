@@ -249,14 +249,33 @@ prepare_boundless_market_patch() {
   local build_rs
   local crate_url
   local crate_archive
+  local candidate_dir
+  local candidate_build_rs
+
+  patch_build_rs() {
+    local target_build_rs="\$1"
+
+    if [[ ! -f "\$target_build_rs" ]]; then
+      echo "boundless-market source missing: \$target_build_rs" >&2
+      return 1
+    fi
+
+    if ! grep -q "__BOUNDLESS_DUMMY__" "\$target_build_rs"; then
+      perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$target_build_rs"
+    fi
+
+    if ! grep -q "__BOUNDLESS_DUMMY__" "\$target_build_rs"; then
+      echo "boundless-market patch marker missing after patch attempt: \$target_build_rs" >&2
+      return 1
+    fi
+
+    echo "boundless-market build.rs patched: \$target_build_rs"
+  }
 
   cargo_registry_src="\$HOME/.cargo/registry/src"
   mkdir -p "\$cargo_registry_src"
 
-  cargo_index_dir="\$(find "\$cargo_registry_src" -maxdepth 1 -type d -name 'index.crates.io-*' | head -n1)"
-  if [[ -z "\$cargo_index_dir" ]]; then
-    cargo_index_dir="\$cargo_registry_src/index.crates.io-1949cf8c6b5b557f"
-  fi
+  cargo_index_dir="\$cargo_registry_src/index.crates.io-1949cf8c6b5b557f"
   mkdir -p "\$cargo_index_dir"
 
   crate_dir="\$cargo_index_dir/boundless-market-0.14.1"
@@ -269,21 +288,15 @@ prepare_boundless_market_patch() {
     tar -xzf "\$crate_archive" -C "\$cargo_index_dir"
   fi
 
-  if [[ ! -f "\$build_rs" ]]; then
-    echo "boundless-market source missing: \$build_rs" >&2
-    return 1
-  fi
+  patch_build_rs "\$build_rs"
 
-  if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
-    perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$build_rs"
-  fi
-
-  if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
-    echo "boundless-market patch marker missing after patch attempt" >&2
-    return 1
-  fi
-
-  echo "boundless-market build.rs patched"
+  for candidate_dir in "\$cargo_registry_src"/index.crates.io-*; do
+    [[ -d "\$candidate_dir" ]] || continue
+    candidate_build_rs="\$candidate_dir/boundless-market-0.14.1/build.rs"
+    if [[ "\$candidate_build_rs" != "\$build_rs" && -f "\$candidate_build_rs" ]]; then
+      patch_build_rs "\$candidate_build_rs"
+    fi
+  done
 }
 
 prepare_boundless_market_patch
