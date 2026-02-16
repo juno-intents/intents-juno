@@ -6,7 +6,7 @@ This folder provides live-network e2e automation for:
 2. per-operator `dkg-backup.zip` creation
 3. restore with only `dkg-backup.zip`
 4. operator boot verification after restore
-5. Base testnet contract deploy + bridge smoke flow
+5. Base testnet contract deploy + bridge smoke flow (Juno->Base mint and Base->Juno finalize path)
 
 ## Scripts
 
@@ -17,9 +17,11 @@ This folder provides live-network e2e automation for:
 - `run-testnet-e2e.sh`:
   - Orchestrates DKG backup/restore plus Base testnet deploy and bridge smoke transactions.
 
-## Boundless Note
+## Boundless Modes
 
-For this testnet e2e, the bridge deploy path uses a no-op verifier contract so we can validate operator quorum signatures and bridge transaction flow without depending on Boundless testnet availability.
+- Default mode (no verifier args): deploys a no-op verifier and runs full bridge smoke transactions for infra validation.
+- Real verifier mode: pass `--bridge-verifier-address` and both seal files (`--bridge-deposit-seal-file`, `--bridge-withdraw-seal-file`) to verify real seals against a live verifier router.
+- Prepare-only mode: pass `--bridge-prepare-only` to generate proof input artifacts and skip `mintBatch/finalizeWithdrawBatch`. This supports manual callback flows when proof submission/fulfillment is handled outside the testnet stack.
 
 ## Quick Start
 
@@ -29,5 +31,26 @@ For this testnet e2e, the bridge deploy path uses a no-op verifier contract so w
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
   --base-rpc-url https://base-sepolia-rpc.example \
   --base-funder-key-file ./tmp/funders/base-funder.key \
+  --force
+
+# Phase 2 prepare-only artifact generation for manual callback/proof submission.
+./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
+  --base-rpc-url https://base-sepolia-rpc.example \
+  --base-funder-key-file ./tmp/funders/base-funder.key \
+  --bridge-verifier-address 0xVerifierRouterAddress \
+  --bridge-deposit-image-id 0x... \
+  --bridge-withdraw-image-id 0x... \
+  --bridge-prepare-only \
+  --force
+
+# Phase 2 execution with real seals.
+./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
+  --base-rpc-url https://base-sepolia-rpc.example \
+  --base-funder-key-file ./tmp/funders/base-funder.key \
+  --bridge-verifier-address 0xVerifierRouterAddress \
+  --bridge-deposit-image-id 0x... \
+  --bridge-withdraw-image-id 0x... \
+  --bridge-deposit-seal-file ./tmp/seals/deposit.seal.hex \
+  --bridge-withdraw-seal-file ./tmp/seals/withdraw.seal.hex \
   --force
 ```

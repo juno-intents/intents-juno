@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
 
 type stringListFlag []string
@@ -53,8 +54,21 @@ type config struct {
 	WithdrawAmount   uint64
 	Recipient        common.Address
 	RecipientSet     bool
+	VerifierAddress  common.Address
+	VerifierSet      bool
+	DepositImageID   common.Hash
+	WithdrawImageID  common.Hash
+	DepositSeal      []byte
+	WithdrawSeal     []byte
+	PrepareOnly      bool
+	ProofInputsOut   string
 	OutputPath       string
 }
+
+const (
+	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
+	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
+)
 
 type report struct {
 	GeneratedAtUTC string `json:"generated_at_utc"`
@@ -94,6 +108,7 @@ type report struct {
 
 	Withdraw struct {
 		WithdrawalID string `json:"withdrawal_id"`
+		PredictedID  string `json:"predicted_withdrawal_id"`
 		FeeBps       uint64 `json:"fee_bps"`
 	} `json:"withdraw"`
 
@@ -101,6 +116,50 @@ type report struct {
 		RecipientWJuno string `json:"recipient_wjuno"`
 		FeeDistributor string `json:"fee_distributor"`
 	} `json:"balances"`
+
+	Proof struct {
+		PrepareOnly       bool   `json:"prepare_only"`
+		ProofInputsPath   string `json:"proof_inputs_path,omitempty"`
+		DepositImageID    string `json:"deposit_image_id"`
+		WithdrawImageID   string `json:"withdraw_image_id"`
+		DepositSealBytes  int    `json:"deposit_seal_bytes"`
+		WithdrawSealBytes int    `json:"withdraw_seal_bytes"`
+	} `json:"proof"`
+}
+
+type proofInputsFile struct {
+	Version        string `json:"version"`
+	GeneratedAtUTC string `json:"generated_at_utc"`
+	ChainID        uint64 `json:"chain_id"`
+	BridgeContract string `json:"bridge_contract"`
+
+	Checkpoint checkpoint.Checkpoint `json:"checkpoint"`
+
+	OperatorSignatures []string `json:"operator_signatures"`
+
+	Deposit struct {
+		ProofInput struct {
+			Pipeline     string `json:"pipeline"`
+			ImageID      string `json:"image_id"`
+			Journal      string `json:"journal"`
+			PrivateInput string `json:"private_input"`
+		} `json:"proof_input"`
+		DepositID string `json:"deposit_id"`
+		Recipient string `json:"recipient"`
+		Amount    string `json:"amount"`
+	} `json:"deposit"`
+
+	Withdraw struct {
+		ProofInput struct {
+			Pipeline     string `json:"pipeline"`
+			ImageID      string `json:"image_id"`
+			Journal      string `json:"journal"`
+			PrivateInput string `json:"private_input"`
+		} `json:"proof_input"`
+		RecipientUAHex string `json:"recipient_ua_hex"`
+		WithdrawalID   string `json:"withdrawal_id"`
+		NetAmount      string `json:"net_amount"`
+	} `json:"withdraw"`
 }
 
 func main() {
@@ -148,6 +207,11 @@ func parseArgs(args []string) (config, error) {
 	var deployerKeyFile string
 	var operatorKeyFiles stringListFlag
 	var recipientHex string
+	var verifierAddressHex string
+	var depositImageIDHex string
+	var withdrawImageIDHex string
+	var depositSealHex string
+	var withdrawSealHex string
 
 	fs := flag.NewFlagSet("bridge-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -162,6 +226,13 @@ func parseArgs(args []string) (config, error) {
 	fs.Uint64Var(&cfg.DepositAmount, "deposit-amount", 100_000, "mintBatch item amount (wJUNO base units)")
 	fs.Uint64Var(&cfg.WithdrawAmount, "withdraw-amount", 10_000, "request/finalize amount (wJUNO base units)")
 	fs.StringVar(&recipientHex, "recipient", "", "optional recipient address for mint (defaults to deployer)")
+	fs.StringVar(&verifierAddressHex, "verifier-address", "", "optional verifier router address (uses no-op verifier when unset)")
+	fs.StringVar(&depositImageIDHex, "deposit-image-id", defaultDepositImageIDHex, "deposit image ID (bytes32)")
+	fs.StringVar(&withdrawImageIDHex, "withdraw-image-id", defaultWithdrawImageIDHex, "withdraw image ID (bytes32)")
+	fs.StringVar(&depositSealHex, "deposit-seal-hex", "", "optional mintBatch proof seal hex")
+	fs.StringVar(&withdrawSealHex, "withdraw-seal-hex", "", "optional finalizeWithdrawBatch proof seal hex")
+	fs.BoolVar(&cfg.PrepareOnly, "prepare-only", false, "prepare proof input artifacts only; skip mint/finalize transactions")
+	fs.StringVar(&cfg.ProofInputsOut, "proof-inputs-output", "", "optional path to write proof input artifact bundle")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 
 	if err := fs.Parse(args); err != nil {
@@ -213,8 +284,105 @@ func parseArgs(args []string) (config, error) {
 		cfg.Recipient = common.HexToAddress(recipientHex)
 		cfg.RecipientSet = true
 	}
+	if verifierAddressHex != "" {
+		if !common.IsHexAddress(verifierAddressHex) {
+			return cfg, errors.New("--verifier-address must be a valid hex address")
+		}
+		cfg.VerifierAddress = common.HexToAddress(verifierAddressHex)
+		cfg.VerifierSet = true
+	}
+
+	var err error
+	cfg.DepositImageID, err = parseHash32Flag("--deposit-image-id", depositImageIDHex)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.WithdrawImageID, err = parseHash32Flag("--withdraw-image-id", withdrawImageIDHex)
+	if err != nil {
+		return cfg, err
+	}
+
+	cfg.DepositSeal, err = parseHexBytesFlag("--deposit-seal-hex", depositSealHex)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.WithdrawSeal, err = parseHexBytesFlag("--withdraw-seal-hex", withdrawSealHex)
+	if err != nil {
+		return cfg, err
+	}
+
+	if cfg.PrepareOnly && strings.TrimSpace(cfg.ProofInputsOut) == "" {
+		return cfg, errors.New("--prepare-only requires --proof-inputs-output")
+	}
+
+	if !cfg.PrepareOnly {
+		if cfg.VerifierSet {
+			if len(cfg.DepositSeal) == 0 || len(cfg.WithdrawSeal) == 0 {
+				return cfg, errors.New("--verifier-address requires --deposit-seal-hex and --withdraw-seal-hex unless --prepare-only is set")
+			}
+		} else {
+			if len(cfg.DepositSeal) == 0 {
+				cfg.DepositSeal = []byte{0x99}
+			}
+			if len(cfg.WithdrawSeal) == 0 {
+				cfg.WithdrawSeal = []byte{0x99}
+			}
+		}
+	}
 
 	return cfg, nil
+}
+
+func parseHexBytesFlag(flagName, raw string) ([]byte, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, nil
+	}
+	if !strings.HasPrefix(v, "0x") && !strings.HasPrefix(v, "0X") {
+		v = "0x" + v
+	}
+	out, err := hexutil.Decode(v)
+	if err != nil {
+		return nil, fmt.Errorf("%s must be valid hex bytes: %w", flagName, err)
+	}
+	return out, nil
+}
+
+func parseHash32Flag(flagName, raw string) (common.Hash, error) {
+	b, err := parseHexBytesFlag(flagName, raw)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	if len(b) != 32 {
+		return common.Hash{}, fmt.Errorf("%s must be 32 bytes hex", flagName)
+	}
+	return common.BytesToHash(b), nil
+}
+
+func writeJSONArtifact(path string, value any) (string, error) {
+	out, err := json.MarshalIndent(value, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return "", err
+	}
+	if err := os.WriteFile(path, append(out, '\n'), 0o644); err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path, nil
+	}
+	return abs, nil
+}
+
+func encodeSignaturesHex(sigs [][]byte) []string {
+	out := make([]string, 0, len(sigs))
+	for _, sig := range sigs {
+		out = append(out, hexutil.Encode(sig))
+	}
+	return out
 }
 
 func run(ctx context.Context, cfg config) (*report, error) {
@@ -277,9 +445,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, err
 	}
 
-	verifierAddr, _, err := deployNoopVerifier(ctx, client, auth)
-	if err != nil {
-		return nil, fmt.Errorf("deploy verifier: %w", err)
+	verifierAddr := cfg.VerifierAddress
+	if !cfg.VerifierSet {
+		verifierAddr, _, err = deployNoopVerifier(ctx, client, auth)
+		if err != nil {
+			return nil, fmt.Errorf("deploy verifier: %w", err)
+		}
 	}
 
 	wjunoAddr, _, err := deployContract(ctx, client, auth, wjunoABI, wjunoBin, owner)
@@ -295,8 +466,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("deploy fee distributor: %w", err)
 	}
 
-	depositImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01")
-	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
+	depositImageID := cfg.DepositImageID
+	withdrawImageID := cfg.WithdrawImageID
 	const feeBps uint64 = 50
 	const tipBps uint64 = 1000
 	const refundWindowSeconds uint64 = 24 * 60 * 60
@@ -385,75 +556,154 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		BridgeContract:   cp.BridgeContract,
 	}
 
+	depositAmount := new(big.Int).SetUint64(cfg.DepositAmount)
 	depositID := crypto.Keccak256Hash([]byte("bridge-e2e-deposit-1"))
+	mintItems := []bridgeabi.MintItem{
+		{
+			DepositId: depositID,
+			Recipient: recipient,
+			Amount:    depositAmount,
+		},
+	}
 	depositJournal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
 		FinalOrchardRoot: cp.FinalOrchardRoot,
 		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
 		BridgeContract:   cp.BridgeContract,
-		Items: []bridgeabi.MintItem{
-			{
-				DepositId: depositID,
-				Recipient: recipient,
-				Amount:    new(big.Int).SetUint64(cfg.DepositAmount),
-			},
-		},
+		Items:            mintItems,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit journal: %w", err)
 	}
-
-	mintBatchTx, mintBatchRcpt, err := transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, []byte{0x99}, depositJournal)
+	depositPrivateInput, err := proverinput.EncodeDepositPrivateInputV1(cp, cpSigs, mintItems)
 	if err != nil {
-		return nil, fmt.Errorf("mintBatch: %w", err)
-	}
-
-	used, err := waitDepositUsedAtBlock(ctx, bridge, depositID, mintBatchRcpt.BlockNumber, 20, 500*time.Millisecond)
-	if err != nil {
-		return nil, err
-	}
-	if !used {
-		return nil, errors.New("depositUsed=false after mintBatch")
+		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
 
 	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
-	approveWithdrawTx, err := transactAndWait(ctx, client, auth, wjuno, "approve", bridgeAddr, withdrawAmount)
+	recipientUA := []byte{0x01, 0x02, 0x03}
+
+	nonceBefore, err := callUint64(ctx, bridge, "withdrawNonce")
 	if err != nil {
-		return nil, fmt.Errorf("approve withdraw: %w", err)
+		return nil, fmt.Errorf("withdrawNonce: %w", err)
+	}
+	predictedWithdrawalID, err := computePredictedWithdrawalID(cfg.ChainID, bridgeAddr, nonceBefore+1, owner, withdrawAmount, recipientUA)
+	if err != nil {
+		return nil, fmt.Errorf("compute predicted withdrawal id: %w", err)
 	}
 
-	recipientUA := []byte{0x01, 0x02, 0x03}
-	requestWithdrawTx, requestRcpt, err := transactAndWaitWithReceipt(ctx, client, auth, bridge, "requestWithdraw", withdrawAmount, recipientUA)
-	if err != nil {
-		return nil, fmt.Errorf("requestWithdraw: %w", err)
-	}
-	withdrawalID, feeBpsAtReq, err := parseWithdrawRequested(bridgeABI, requestRcpt)
-	if err != nil {
-		return nil, fmt.Errorf("parse WithdrawRequested: %w", err)
+	var (
+		mintBatchTx        common.Hash
+		mintBatchRcpt      *types.Receipt
+		approveWithdrawTx  common.Hash
+		requestWithdrawTx  common.Hash
+		finalizeWithdrawTx common.Hash
+		withdrawalID       common.Hash
+		feeBpsAtReq        uint64
+	)
+
+	if cfg.PrepareOnly {
+		feeBpsAtReq, err = callUint64(ctx, bridge, "feeBps")
+		if err != nil {
+			return nil, fmt.Errorf("feeBps: %w", err)
+		}
+		withdrawalID = predictedWithdrawalID
+	} else {
+		mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, cfg.DepositSeal, depositJournal)
+		if err != nil {
+			return nil, fmt.Errorf("mintBatch: %w", err)
+		}
+
+		used, err := waitDepositUsedAtBlock(ctx, bridge, depositID, mintBatchRcpt.BlockNumber, 20, 500*time.Millisecond)
+		if err != nil {
+			return nil, err
+		}
+		if !used {
+			return nil, errors.New("depositUsed=false after mintBatch")
+		}
+
+		approveWithdrawTx, err = transactAndWait(ctx, client, auth, wjuno, "approve", bridgeAddr, withdrawAmount)
+		if err != nil {
+			return nil, fmt.Errorf("approve withdraw: %w", err)
+		}
+
+		var requestRcpt *types.Receipt
+		requestWithdrawTx, requestRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "requestWithdraw", withdrawAmount, recipientUA)
+		if err != nil {
+			return nil, fmt.Errorf("requestWithdraw: %w", err)
+		}
+		withdrawalID, feeBpsAtReq, err = parseWithdrawRequested(bridgeABI, requestRcpt)
+		if err != nil {
+			return nil, fmt.Errorf("parse WithdrawRequested: %w", err)
+		}
+		if withdrawalID != predictedWithdrawalID {
+			return nil, fmt.Errorf("predicted withdrawal id mismatch: predicted=%s actual=%s", predictedWithdrawalID.Hex(), withdrawalID.Hex())
+		}
 	}
 
 	fee := new(big.Int).Mul(withdrawAmount, new(big.Int).SetUint64(feeBpsAtReq))
 	fee.Div(fee, big.NewInt(10_000))
 	net := new(big.Int).Sub(withdrawAmount, fee)
 
+	finalizeItems := []bridgeabi.FinalizeItem{
+		{
+			WithdrawalId:    withdrawalID,
+			RecipientUAHash: crypto.Keccak256Hash(recipientUA),
+			NetAmount:       net,
+		},
+	}
+
 	withdrawJournal, err := bridgeabi.EncodeWithdrawJournal(bridgeabi.WithdrawJournal{
 		FinalOrchardRoot: cp.FinalOrchardRoot,
 		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
 		BridgeContract:   cp.BridgeContract,
-		Items: []bridgeabi.FinalizeItem{
-			{
-				WithdrawalId:    withdrawalID,
-				RecipientUAHash: crypto.Keccak256Hash(recipientUA),
-				NetAmount:       net,
-			},
-		},
+		Items:            finalizeItems,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw journal: %w", err)
 	}
-
-	finalizeWithdrawTx, err := transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, []byte{0x99}, withdrawJournal)
+	withdrawPrivateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cp, cpSigs, finalizeItems)
 	if err != nil {
-		return nil, fmt.Errorf("finalizeWithdrawBatch: %w", err)
+		return nil, fmt.Errorf("encode withdraw private input: %w", err)
+	}
+
+	var proofInputsPath string
+	if strings.TrimSpace(cfg.ProofInputsOut) != "" {
+		proofBundle := proofInputsFile{
+			Version:            "bridge-e2e.proof_inputs.v1",
+			GeneratedAtUTC:     time.Now().UTC().Format(time.RFC3339),
+			ChainID:            cfg.ChainID,
+			BridgeContract:     bridgeAddr.Hex(),
+			Checkpoint:         cp,
+			OperatorSignatures: encodeSignaturesHex(cpSigs),
+		}
+
+		proofBundle.Deposit.ProofInput.Pipeline = "deposit"
+		proofBundle.Deposit.ProofInput.ImageID = depositImageID.Hex()
+		proofBundle.Deposit.ProofInput.Journal = hexutil.Encode(depositJournal)
+		proofBundle.Deposit.ProofInput.PrivateInput = hexutil.Encode(depositPrivateInput)
+		proofBundle.Deposit.DepositID = depositID.Hex()
+		proofBundle.Deposit.Recipient = recipient.Hex()
+		proofBundle.Deposit.Amount = depositAmount.String()
+
+		proofBundle.Withdraw.ProofInput.Pipeline = "withdraw"
+		proofBundle.Withdraw.ProofInput.ImageID = withdrawImageID.Hex()
+		proofBundle.Withdraw.ProofInput.Journal = hexutil.Encode(withdrawJournal)
+		proofBundle.Withdraw.ProofInput.PrivateInput = hexutil.Encode(withdrawPrivateInput)
+		proofBundle.Withdraw.RecipientUAHex = hexutil.Encode(recipientUA)
+		proofBundle.Withdraw.WithdrawalID = withdrawalID.Hex()
+		proofBundle.Withdraw.NetAmount = net.String()
+
+		proofInputsPath, err = writeJSONArtifact(cfg.ProofInputsOut, proofBundle)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	if !cfg.PrepareOnly {
+		finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, cfg.WithdrawSeal, withdrawJournal)
+		if err != nil {
+			return nil, fmt.Errorf("finalizeWithdrawBatch: %w", err)
+		}
 	}
 
 	recipientBal, err := callBalanceOf(ctx, wjuno, recipient)
@@ -491,16 +741,32 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Transactions.SetThreshold = setThresholdTx.Hex()
 	rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
 	rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
-	rep.Transactions.MintBatch = mintBatchTx.Hex()
-	rep.Transactions.ApproveWithdraw = approveWithdrawTx.Hex()
-	rep.Transactions.RequestWithdraw = requestWithdrawTx.Hex()
-	rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
+	if mintBatchTx != (common.Hash{}) {
+		rep.Transactions.MintBatch = mintBatchTx.Hex()
+	}
+	if approveWithdrawTx != (common.Hash{}) {
+		rep.Transactions.ApproveWithdraw = approveWithdrawTx.Hex()
+	}
+	if requestWithdrawTx != (common.Hash{}) {
+		rep.Transactions.RequestWithdraw = requestWithdrawTx.Hex()
+		rep.Withdraw.WithdrawalID = withdrawalID.Hex()
+	}
+	if finalizeWithdrawTx != (common.Hash{}) {
+		rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
+	}
 
-	rep.Withdraw.WithdrawalID = withdrawalID.Hex()
+	rep.Withdraw.PredictedID = predictedWithdrawalID.Hex()
 	rep.Withdraw.FeeBps = feeBpsAtReq
 
 	rep.Balances.RecipientWJuno = recipientBal.String()
 	rep.Balances.FeeDistributor = fdBal.String()
+
+	rep.Proof.PrepareOnly = cfg.PrepareOnly
+	rep.Proof.ProofInputsPath = proofInputsPath
+	rep.Proof.DepositImageID = depositImageID.Hex()
+	rep.Proof.WithdrawImageID = withdrawImageID.Hex()
+	rep.Proof.DepositSealBytes = len(cfg.DepositSeal)
+	rep.Proof.WithdrawSealBytes = len(cfg.WithdrawSeal)
 
 	return &rep, nil
 }
@@ -746,6 +1012,29 @@ func callDepositUsed(ctx context.Context, bridge depositUsedCaller, depositID co
 	return used, nil
 }
 
+func callUint64(ctx context.Context, c *bind.BoundContract, method string, args ...any) (uint64, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return 0, err
+	}
+	if len(res) != 1 {
+		return 0, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	switch v := res[0].(type) {
+	case *big.Int:
+		if v == nil {
+			return 0, nil
+		}
+		return v.Uint64(), nil
+	case uint64:
+		return v, nil
+	case uint32:
+		return uint64(v), nil
+	default:
+		return 0, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+}
+
 func callBalanceOf(ctx context.Context, token *bind.BoundContract, who common.Address) (*big.Int, error) {
 	var res []any
 	if err := token.Call(&bind.CallOpts{Context: ctx}, &res, "balanceOf", who); err != nil {
@@ -762,6 +1051,58 @@ func callBalanceOf(ctx context.Context, token *bind.BoundContract, who common.Ad
 		return big.NewInt(0), nil
 	}
 	return out, nil
+}
+
+func computePredictedWithdrawalID(chainID uint64, bridge common.Address, nonce uint64, requester common.Address, amount *big.Int, recipientUA []byte) (common.Hash, error) {
+	if amount == nil {
+		return common.Hash{}, errors.New("nil amount")
+	}
+	if nonce == 0 {
+		return common.Hash{}, errors.New("nonce must be > 0")
+	}
+	if len(recipientUA) == 0 {
+		return common.Hash{}, errors.New("recipient UA must not be empty")
+	}
+
+	bytes32Type, err := abi.NewType("bytes32", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	uintType, err := abi.NewType("uint256", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	addressType, err := abi.NewType("address", "", nil)
+	if err != nil {
+		return common.Hash{}, err
+	}
+
+	args := abi.Arguments{
+		{Type: bytes32Type},
+		{Type: uintType},
+		{Type: addressType},
+		{Type: uintType},
+		{Type: addressType},
+		{Type: uintType},
+		{Type: bytes32Type},
+	}
+
+	var versionTag [32]byte
+	copy(versionTag[:], []byte("WJUNO_WITHDRAW_V1"))
+
+	payload, err := args.Pack(
+		versionTag,
+		new(big.Int).SetUint64(chainID),
+		bridge,
+		new(big.Int).SetUint64(nonce),
+		requester,
+		new(big.Int).Set(amount),
+		crypto.Keccak256Hash(recipientUA),
+	)
+	if err != nil {
+		return common.Hash{}, err
+	}
+	return crypto.Keccak256Hash(payload), nil
 }
 
 func parseWithdrawRequested(bridgeABI abi.ABI, rcpt *types.Receipt) (common.Hash, uint64, error) {

@@ -93,6 +93,143 @@ func TestParseArgs_RejectsWithdrawLargerThanDeposit(t *testing.T) {
 	}
 }
 
+func TestParseArgs_PrepareOnlyRequiresProofInputsOutput(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--prepare-only",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseArgs_RejectsInvalidVerifierAddress(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--verifier-address", "0x1234",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseArgs_RejectsInvalidSealHex(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--deposit-seal-hex", "xyz",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseArgs_RejectsInvalidImageID(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--deposit-image-id", "0x1234",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseArgs_VerifierRequiresSealsWithoutPrepareOnly(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}
+
+func TestParseArgs_PrepareOnlyAllowsVerifierWithoutSeals(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--prepare-only",
+		"--proof-inputs-output", "/tmp/proof-inputs.json",
+	})
+	if err != nil {
+		t.Fatalf("expected parse success, got: %v", err)
+	}
+	if !cfg.PrepareOnly {
+		t.Fatalf("expected prepare-only true")
+	}
+	if len(cfg.DepositSeal) != 0 || len(cfg.WithdrawSeal) != 0 {
+		t.Fatalf("expected empty seals in prepare-only mode")
+	}
+}
+
+func TestComputePredictedWithdrawalID_Deterministic(t *testing.T) {
+	t.Parallel()
+
+	chainID := uint64(84532)
+	bridge := common.HexToAddress("0x475576d5685465D5bd65E91Cf10053f9d0EFd685")
+	requester := common.HexToAddress("0x1eeCC6a02Cb4A990197dC5C18FC481c7841D021B")
+	amount := new(big.Int).SetUint64(10_000)
+	recipientUA := []byte{0x01, 0x02, 0x03}
+
+	got1, err := computePredictedWithdrawalID(chainID, bridge, 1, requester, amount, recipientUA)
+	if err != nil {
+		t.Fatalf("computePredictedWithdrawalID: %v", err)
+	}
+	got2, err := computePredictedWithdrawalID(chainID, bridge, 1, requester, amount, recipientUA)
+	if err != nil {
+		t.Fatalf("computePredictedWithdrawalID: %v", err)
+	}
+	if got1 != got2 {
+		t.Fatalf("expected deterministic withdrawal id, got %s != %s", got1.Hex(), got2.Hex())
+	}
+
+	got3, err := computePredictedWithdrawalID(chainID, bridge, 2, requester, amount, recipientUA)
+	if err != nil {
+		t.Fatalf("computePredictedWithdrawalID: %v", err)
+	}
+	if got1 == got3 {
+		t.Fatalf("expected nonce to affect withdrawal id")
+	}
+}
+
 type mockCallResponse struct {
 	result any
 	err    error

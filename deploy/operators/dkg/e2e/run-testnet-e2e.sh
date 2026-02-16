@@ -24,6 +24,13 @@ Options:
   --threshold <n>                  DKG threshold (default: 3)
   --base-port <port>               first operator grpc port (default: 18443)
   --base-operator-fund-wei <wei>   optional pre-fund per operator (default: 1000000000000000)
+  --bridge-verifier-address <addr> optional verifier router address for real proof verification
+  --bridge-deposit-image-id <hex>  optional deposit image ID (bytes32 hex)
+  --bridge-withdraw-image-id <hex> optional withdraw image ID (bytes32 hex)
+  --bridge-deposit-seal-file <path> optional file with deposit proof seal hex
+  --bridge-withdraw-seal-file <path> optional file with withdraw proof seal hex
+  --bridge-prepare-only            prepare proof inputs only (skip mint/finalize)
+  --bridge-proof-inputs-output <path> optional proof inputs bundle output path
   --output <path>                  summary json output (default: <workdir>/reports/testnet-e2e-summary.json)
   --force                          remove existing workdir before starting
 
@@ -97,6 +104,13 @@ command_run() {
   local threshold=3
   local base_port=18443
   local base_operator_fund_wei="1000000000000000"
+  local bridge_verifier_address=""
+  local bridge_deposit_image_id=""
+  local bridge_withdraw_image_id=""
+  local bridge_deposit_seal_file=""
+  local bridge_withdraw_seal_file=""
+  local bridge_prepare_only="false"
+  local bridge_proof_inputs_output=""
   local output_path=""
   local force="false"
 
@@ -147,6 +161,40 @@ command_run() {
         base_operator_fund_wei="$2"
         shift 2
         ;;
+      --bridge-verifier-address)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-verifier-address"
+        bridge_verifier_address="$2"
+        shift 2
+        ;;
+      --bridge-deposit-image-id)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-image-id"
+        bridge_deposit_image_id="$2"
+        shift 2
+        ;;
+      --bridge-withdraw-image-id)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-image-id"
+        bridge_withdraw_image_id="$2"
+        shift 2
+        ;;
+      --bridge-deposit-seal-file)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-seal-file"
+        bridge_deposit_seal_file="$2"
+        shift 2
+        ;;
+      --bridge-withdraw-seal-file)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-seal-file"
+        bridge_withdraw_seal_file="$2"
+        shift 2
+        ;;
+      --bridge-prepare-only)
+        bridge_prepare_only="true"
+        shift
+        ;;
+      --bridge-proof-inputs-output)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-proof-inputs-output"
+        bridge_proof_inputs_output="$2"
+        shift 2
+        ;;
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output_path="$2"
@@ -174,9 +222,18 @@ command_run() {
   [[ "$threshold" =~ ^[0-9]+$ ]] || die "--threshold must be numeric"
   [[ "$base_port" =~ ^[0-9]+$ ]] || die "--base-port must be numeric"
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
+  if [[ -n "$bridge_deposit_seal_file" ]]; then
+    [[ -f "$bridge_deposit_seal_file" ]] || die "bridge deposit seal file not found: $bridge_deposit_seal_file"
+  fi
+  if [[ -n "$bridge_withdraw_seal_file" ]]; then
+    [[ -f "$bridge_withdraw_seal_file" ]] || die "bridge withdraw seal file not found: $bridge_withdraw_seal_file"
+  fi
 
   if [[ -z "$output_path" ]]; then
     output_path="$workdir/reports/testnet-e2e-summary.json"
+  fi
+  if [[ -z "$bridge_proof_inputs_output" ]]; then
+    bridge_proof_inputs_output="$workdir/reports/bridge-proof-inputs.json"
   fi
 
   ensure_base_dependencies
@@ -241,6 +298,27 @@ command_run() {
     "--contracts-out" "$contracts_out"
     "--output" "$bridge_summary"
   )
+  if [[ -n "$bridge_verifier_address" ]]; then
+    bridge_args+=("--verifier-address" "$bridge_verifier_address")
+  fi
+  if [[ -n "$bridge_deposit_image_id" ]]; then
+    bridge_args+=("--deposit-image-id" "$bridge_deposit_image_id")
+  fi
+  if [[ -n "$bridge_withdraw_image_id" ]]; then
+    bridge_args+=("--withdraw-image-id" "$bridge_withdraw_image_id")
+  fi
+  if [[ -n "$bridge_deposit_seal_file" ]]; then
+    bridge_args+=("--deposit-seal-hex" "$(trimmed_file_value "$bridge_deposit_seal_file")")
+  fi
+  if [[ -n "$bridge_withdraw_seal_file" ]]; then
+    bridge_args+=("--withdraw-seal-hex" "$(trimmed_file_value "$bridge_withdraw_seal_file")")
+  fi
+  if [[ "$bridge_prepare_only" == "true" ]]; then
+    bridge_args+=("--prepare-only")
+  fi
+  if [[ -n "$bridge_proof_inputs_output" ]]; then
+    bridge_args+=("--proof-inputs-output" "$bridge_proof_inputs_output")
+  fi
 
   local key_path
   while IFS= read -r key_path; do
@@ -263,6 +341,11 @@ command_run() {
     --argjson operator_count "$operator_count" \
     --argjson threshold "$threshold" \
     --arg base_operator_fund_wei "$base_operator_fund_wei" \
+    --arg bridge_verifier_address "$bridge_verifier_address" \
+    --arg bridge_deposit_image_id "$bridge_deposit_image_id" \
+    --arg bridge_withdraw_image_id "$bridge_withdraw_image_id" \
+    --arg bridge_prepare_only "$bridge_prepare_only" \
+    --arg bridge_proof_inputs_output "$bridge_proof_inputs_output" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
     --argjson dkg "$(cat "$dkg_summary")" \
     --argjson bridge "$(cat "$bridge_summary")" \
@@ -283,6 +366,11 @@ command_run() {
       },
       bridge: {
         summary_path: $bridge_summary,
+        verifier_address: (if $bridge_verifier_address == "" then null else $bridge_verifier_address end),
+        deposit_image_id: (if $bridge_deposit_image_id == "" then null else $bridge_deposit_image_id end),
+        withdraw_image_id: (if $bridge_withdraw_image_id == "" then null else $bridge_withdraw_image_id end),
+        prepare_only: ($bridge_prepare_only == "true"),
+        proof_inputs_output: $bridge_proof_inputs_output,
         report: $bridge
       },
       juno: {
