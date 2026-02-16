@@ -31,6 +31,7 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "prepare_boundless_market_patch()" "boundless market patch helper"
   assert_contains "$script_text" "https://static.crates.io/crates/boundless-market/boundless-market-0.14.1.crate" "boundless market crate url"
   assert_contains "$script_text" "__BOUNDLESS_DUMMY__" "boundless parser workaround marker"
+  assert_contains "$script_text" "boundless-market build.rs patched" "boundless parser workaround log"
   assert_contains "$script_text" "prepare_boundless_market_patch" "boundless market patch invocation"
   assert_contains "$script_text" "run_with_retry cargo install --locked boundless-cli --version 0.14.1" "boundless cli install retry"
 }

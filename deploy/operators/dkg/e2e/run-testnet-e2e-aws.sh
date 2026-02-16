@@ -247,6 +247,7 @@ prepare_boundless_market_patch() {
   local cargo_index_dir
   local crate_dir
   local build_rs
+  local build_rs_tmp
   local crate_url
   local crate_archive
 
@@ -269,9 +270,39 @@ prepare_boundless_market_patch() {
     tar -xzf "\$crate_archive" -C "\$cargo_index_dir"
   fi
 
-  if [[ -f "\$build_rs" ]] && ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
-    sed -i 's/{combined_sol_contents}/{combined_sol_contents}\\\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/' "\$build_rs"
+  if [[ ! -f "\$build_rs" ]]; then
+    echo "boundless-market source missing: \$build_rs" >&2
+    return 1
   fi
+
+  if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
+    build_rs_tmp="\$build_rs.tmp"
+    awk '
+      BEGIN {
+        inserted = 0
+      }
+      /let mut alloy_import = "alloy_sol_types";/ && inserted == 0 {
+        print "    combined_sol_contents.push_str(\"\\\\n            enum __BOUNDLESS_DUMMY__ { __BOUNDLESS_DUMMY_VALUE__ }\\\\n\");"
+        inserted = 1
+      }
+      {
+        print
+      }
+      END {
+        if (inserted == 0) {
+          exit 1
+        }
+      }
+    ' "\$build_rs" >"\$build_rs_tmp"
+    mv "\$build_rs_tmp" "\$build_rs"
+  fi
+
+  if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
+    echo "boundless-market patch marker missing after patch attempt" >&2
+    return 1
+  fi
+
+  echo "boundless-market build.rs patched"
 }
 
 prepare_boundless_market_patch
