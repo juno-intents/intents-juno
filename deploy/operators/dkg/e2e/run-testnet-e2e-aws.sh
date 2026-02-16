@@ -187,11 +187,36 @@ remote_prepare_runner() {
   )
 
   local remote_script
-  remote_script=$(cat <<EOF
+  remote_script="$(build_remote_prepare_script "$repo_commit")"
+
+  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+}
+
+build_remote_prepare_script() {
+  local repo_commit="$1"
+  cat <<EOF
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
-sudo apt-get update -y
-sudo apt-get install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go
+
+if command -v cloud-init >/dev/null 2>&1; then
+  sudo cloud-init status --wait || true
+fi
+
+run_apt_with_retry() {
+  local attempt
+  for attempt in \$(seq 1 30); do
+    if sudo apt-get "\$@"; then
+      return 0
+    fi
+    if [[ \$attempt -lt 30 ]]; then
+      sleep 5
+    fi
+  done
+  return 1
+}
+
+run_apt_with_retry update -y
+run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go
 
 if [[ ! -d "\$HOME/.cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -216,9 +241,6 @@ git submodule update --init --recursive
 mkdir -p .ci/secrets
 chmod 700 .ci/secrets
 EOF
-)
-
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
 
 copy_remote_secret_file() {
@@ -591,4 +613,6 @@ main() {
   esac
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
