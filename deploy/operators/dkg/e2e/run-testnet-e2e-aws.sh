@@ -219,6 +219,7 @@ dump_boundless_failure_context() {
   local install_dir
   local generated_file
   local patched_build_rs
+  local patched_cli_manifest
 
   install_dir="\$(ls -dt /tmp/cargo-install* 2>/dev/null | head -n1 || true)"
   if [[ -z "\$install_dir" ]]; then
@@ -238,10 +239,21 @@ dump_boundless_failure_context() {
     echo "boundless diagnostics: generated file not found under \$install_dir"
   fi
 
-  patched_build_rs="\$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/boundless-market-0.14.1/build.rs"
+  if [[ -n "\${BOUNDLESS_CLI_SOURCE_DIR:-}" ]]; then
+    patched_build_rs="\$(cd "\$BOUNDLESS_CLI_SOURCE_DIR/.." && pwd)/boundless-market-0.14.1/build.rs"
+    patched_cli_manifest="\$BOUNDLESS_CLI_SOURCE_DIR/Cargo.toml"
+  else
+    patched_build_rs="\$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/boundless-market-0.14.1/build.rs"
+    patched_cli_manifest=""
+  fi
+
   if [[ -f "\$patched_build_rs" ]]; then
     echo "boundless diagnostics: patched build.rs snippet (\$patched_build_rs)"
     sed -n '116,130p' "\$patched_build_rs" || true
+  fi
+  if [[ -n "\$patched_cli_manifest" && -f "\$patched_cli_manifest" ]]; then
+    echo "boundless diagnostics: patched cli manifest tail (\$patched_cli_manifest)"
+    tail -n 30 "\$patched_cli_manifest" || true
   fi
 }
 
@@ -251,7 +263,7 @@ run_with_retry() {
     if "\$@"; then
       return 0
     fi
-    if [[ "\$*" == "cargo install --locked boundless-cli --version 0.14.1" ]]; then
+    if [[ "\$*" == cargo\ install\ --path* ]]; then
       dump_boundless_failure_context || true
     fi
     if [[ \$attempt -lt 3 ]]; then
@@ -276,64 +288,65 @@ fi
 foundryup
 
 prepare_boundless_market_patch() {
-  local cargo_registry_src
-  local cargo_index_dir
-  local crate_dir
-  local build_rs
-  local crate_url
-  local crate_archive
-  local candidate_dir
-  local candidate_build_rs
+  local staging_root
+  local boundless_cli_archive
+  local boundless_market_archive
+  local boundless_cli_dir
+  local boundless_market_dir
+  local boundless_market_build_rs
+  local boundless_cli_manifest
 
-  patch_build_rs() {
-    local target_build_rs="\$1"
+  staging_root="/tmp/boundless-cli-patched"
+  boundless_cli_archive="\$staging_root/boundless-cli-0.14.1.crate"
+  boundless_market_archive="\$staging_root/boundless-market-0.14.1.crate"
+  boundless_cli_dir="\$staging_root/boundless-cli-0.14.1"
+  boundless_market_dir="\$staging_root/boundless-market-0.14.1"
+  boundless_market_build_rs="\$boundless_market_dir/build.rs"
+  boundless_cli_manifest="\$boundless_cli_dir/Cargo.toml"
 
-    if [[ ! -f "\$target_build_rs" ]]; then
-      echo "boundless-market source missing: \$target_build_rs" >&2
-      return 1
-    fi
+  mkdir -p "\$staging_root"
+  rm -rf "\$boundless_cli_dir" "\$boundless_market_dir"
 
-    if ! grep -q "__BOUNDLESS_DUMMY__" "\$target_build_rs"; then
-      perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$target_build_rs"
-    fi
+  curl -fsSL "https://static.crates.io/crates/boundless-cli/boundless-cli-0.14.1.crate" -o "\$boundless_cli_archive"
+  curl -fsSL "https://static.crates.io/crates/boundless-market/boundless-market-0.14.1.crate" -o "\$boundless_market_archive"
 
-    if ! grep -q "__BOUNDLESS_DUMMY__" "\$target_build_rs"; then
-      echo "boundless-market patch marker missing after patch attempt: \$target_build_rs" >&2
-      return 1
-    fi
+  tar -xzf "\$boundless_cli_archive" -C "\$staging_root"
+  tar -xzf "\$boundless_market_archive" -C "\$staging_root"
 
-    echo "boundless-market build.rs patched: \$target_build_rs"
-  }
-
-  cargo_registry_src="\$HOME/.cargo/registry/src"
-  mkdir -p "\$cargo_registry_src"
-
-  cargo_index_dir="\$cargo_registry_src/index.crates.io-1949cf8c6b5b557f"
-  mkdir -p "\$cargo_index_dir"
-
-  crate_dir="\$cargo_index_dir/boundless-market-0.14.1"
-  build_rs="\$crate_dir/build.rs"
-  if [[ ! -f "\$build_rs" ]]; then
-    crate_url="https://static.crates.io/crates/boundless-market/boundless-market-0.14.1.crate"
-    crate_archive="/tmp/boundless-market-0.14.1.crate"
-    rm -rf "\$crate_dir"
-    curl -fsSL "\$crate_url" -o "\$crate_archive"
-    tar -xzf "\$crate_archive" -C "\$cargo_index_dir"
+  if [[ ! -f "\$boundless_market_build_rs" ]]; then
+    echo "boundless-market source missing: \$boundless_market_build_rs" >&2
+    return 1
   fi
 
-  patch_build_rs "\$build_rs"
+  if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
+    perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$boundless_market_build_rs"
+  fi
 
-  for candidate_dir in "\$cargo_registry_src"/index.crates.io-*; do
-    [[ -d "\$candidate_dir" ]] || continue
-    candidate_build_rs="\$candidate_dir/boundless-market-0.14.1/build.rs"
-    if [[ "\$candidate_build_rs" != "\$build_rs" && -f "\$candidate_build_rs" ]]; then
-      patch_build_rs "\$candidate_build_rs"
-    fi
-  done
+  if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
+    echo "boundless-market patch marker missing after patch attempt: \$boundless_market_build_rs" >&2
+    return 1
+  fi
+
+  if [[ ! -f "\$boundless_cli_manifest" ]]; then
+    echo "boundless-cli source missing: \$boundless_cli_manifest" >&2
+    return 1
+  fi
+
+  if ! grep -q "^\\[patch\\.crates-io\\]" "\$boundless_cli_manifest"; then
+    cat >>"\$boundless_cli_manifest" <<'PATCH'
+
+[patch.crates-io]
+boundless-market = { path = "../boundless-market-0.14.1" }
+PATCH
+  fi
+
+  BOUNDLESS_CLI_SOURCE_DIR="\$boundless_cli_dir"
+  export BOUNDLESS_CLI_SOURCE_DIR
+  echo "boundless-market build.rs patched: \$boundless_market_build_rs"
 }
 
 prepare_boundless_market_patch
-run_with_retry cargo install --locked boundless-cli --version 0.14.1
+run_with_retry cargo install --path "\$BOUNDLESS_CLI_SOURCE_DIR" --locked --force
 run_with_retry cargo install --locked cargo-risczero --version 3.0.5
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
