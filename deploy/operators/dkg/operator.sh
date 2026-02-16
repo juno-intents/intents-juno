@@ -37,6 +37,15 @@ extract_bundle() {
   local bundle="$1"
   local dst="$2"
 
+  if [[ -d "$bundle" ]]; then
+    local bundle_abs dst_abs
+    bundle_abs="$(cd "$bundle" && pwd -P)"
+    dst_abs="$(mkdir -p "$dst" && cd "$dst" && pwd -P)"
+    if [[ "$bundle_abs" == "$dst_abs" ]]; then
+      return
+    fi
+  fi
+
   rm -rf "$dst"
   ensure_dir "$dst"
 

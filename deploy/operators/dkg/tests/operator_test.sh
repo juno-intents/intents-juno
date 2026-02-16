@@ -110,8 +110,80 @@ EOF
   rm -rf "$tmp"
 }
 
+test_operator_run_accepts_bundle_equal_to_runtime_bundle() {
+  local tmp fake_bin_dir fake_dkg_admin runtime bundle
+  tmp="$(mktemp -d)"
+  fake_bin_dir="$tmp/fake-bin"
+  fake_dkg_admin="$tmp/fake-dkg-admin.sh"
+  runtime="$tmp/runtime"
+  bundle="$runtime/bundle"
+
+  mkdir -p "$fake_bin_dir" "$bundle/tls" "$bundle/state"
+  printf '{}' >"$bundle/tls/ca.pem"
+  printf '{}' >"$bundle/tls/server.pem"
+  printf '{}' >"$bundle/tls/server.key"
+  chmod 0600 "$bundle/tls/server.key"
+  cat >"$bundle/admin-config.json" <<'JSON'
+{
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "identifier": 1,
+  "threshold": 2,
+  "max_signers": 3,
+  "network": "mainnet",
+  "ceremony_id": "11111111-1111-1111-1111-111111111111",
+  "roster_hash_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "roster": {
+    "roster_version": 1,
+    "operators": [
+      {
+        "operator_id": "0x1111111111111111111111111111111111111111",
+        "grpc_endpoint": "https://node.ts.net:8443"
+      }
+    ]
+  },
+  "grpc": {
+    "listen_addr": "0.0.0.0:8443",
+    "tls_ca_cert_pem_path": "./tls/ca.pem",
+    "tls_server_cert_pem_path": "./tls/server.pem",
+    "tls_server_key_pem_path": "./tls/server.key"
+  }
+}
+JSON
+
+  cat >"$fake_bin_dir/tailscale" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "status" && "${2:-}" == "--json" ]]; then
+  printf '{"BackendState":"Running","Self":{"Online":true}}\n'
+  exit 0
+fi
+exit 0
+EOF
+  chmod 0755 "$fake_bin_dir/tailscale"
+
+  cat >"$fake_dkg_admin" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'ok\n'
+EOF
+  chmod 0755 "$fake_dkg_admin"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin_dir:$PATH" \
+    JUNO_DKG_ADMIN_BIN="$fake_dkg_admin" \
+    deploy/operators/dkg/operator.sh run \
+      --bundle "$bundle" \
+      --workdir "$runtime" \
+      --daemon
+  )
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_operator_run_uses_bundle_cwd
+  test_operator_run_accepts_bundle_equal_to_runtime_bundle
 }
 
 main "$@"

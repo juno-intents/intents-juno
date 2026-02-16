@@ -152,7 +152,7 @@ command_run() {
   local cleanup_enabled="true"
 
   trap '
-    if [[ "$cleanup_enabled" == "true" ]]; then
+    if [[ "${cleanup_enabled:-true}" == "true" ]]; then
       cleanup_started_runtimes started_runtimes
     fi
   ' RETURN
