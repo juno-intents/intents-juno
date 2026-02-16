@@ -101,9 +101,9 @@ terraform_apply_live_e2e() {
   local aws_region="$5"
 
   terraform_env_args "$aws_profile" "$aws_region"
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir "$terraform_dir" init -input=false >/dev/null
+  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
   env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-    -chdir "$terraform_dir" \
+    -chdir="$terraform_dir" \
     apply \
     -input=false \
     -auto-approve \
@@ -124,9 +124,9 @@ terraform_destroy_live_e2e() {
   fi
 
   terraform_env_args "$aws_profile" "$aws_region"
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir "$terraform_dir" init -input=false >/dev/null
+  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
   env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-    -chdir "$terraform_dir" \
+    -chdir="$terraform_dir" \
     destroy \
     -input=false \
     -auto-approve \
@@ -466,14 +466,14 @@ command_run() {
   terraform_env_args "$aws_profile" "$aws_region"
   runner_public_ip="$(
     env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-      -chdir "$terraform_dir" \
+      -chdir="$terraform_dir" \
       output \
       -state="$state_file" \
       -raw runner_public_ip
   )"
   runner_ssh_user="$(
     env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-      -chdir "$terraform_dir" \
+      -chdir="$terraform_dir" \
       output \
       -state="$state_file" \
       -raw runner_ssh_user
@@ -592,4 +592,3 @@ main() {
 }
 
 main "$@"
-
