@@ -228,7 +228,7 @@ if ! command -v foundryup >/dev/null 2>&1; then
 fi
 foundryup
 
-cargo install boundless-cli --version 0.14.1
+cargo install --locked boundless-cli --version 0.14.1
 cargo install --locked cargo-risczero --version 3.0.5
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
