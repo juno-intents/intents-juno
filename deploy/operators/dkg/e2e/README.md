@@ -17,7 +17,7 @@ Current limitation:
 
 - `create-funder-wallets.sh`:
   - Creates and saves local Base/Juno funder key files under `tmp/`.
-  - Derives a Juno testnet transparent address (`tm...`) and local WIF file for funding.
+  - Creates a Juno testnet Orchard wallet/account/address and seed phrase file for funding.
 - `run-dkg-backup-restore.sh`:
   - Runs DKG, exports backup packages, deletes runtime state, restores from backup zips, verifies operator boot.
 - `run-testnet-e2e.sh`:
