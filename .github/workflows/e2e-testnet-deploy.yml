@@ -1,0 +1,78 @@
+name: e2e-testnet-deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_rpc_url:
+        description: "Base testnet RPC URL"
+        required: true
+        type: string
+      base_chain_id:
+        description: "Base testnet chain ID"
+        required: true
+        default: "84532"
+        type: string
+      base_operator_fund_wei:
+        description: "Prefund amount per operator in wei"
+        required: true
+        default: "1000000000000000"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  run-e2e:
+    runs-on: ubuntu-latest
+    env:
+      E2E_WORKDIR: ${{ runner.temp }}/testnet-e2e
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Validate required secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BASE_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+
+      - name: Prepare funder key file
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/secrets
+          printf '%s\n' "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/base-funder.key
+          chmod 0600 .ci/secrets/base-funder.key
+
+      - name: Run Testnet E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
+            --workdir "$E2E_WORKDIR" \
+            --base-rpc-url "${{ inputs.base_rpc_url }}" \
+            --base-chain-id "${{ inputs.base_chain_id }}" \
+            --base-funder-key-file ".ci/secrets/base-funder.key" \
+            --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}" \
+            --output "$E2E_WORKDIR/reports/testnet-e2e-summary.json" \
+            --force
+
+      - name: Upload E2E Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-testnet-deploy
+          path: |
+            ${{ runner.temp }}/testnet-e2e/reports
+            ${{ runner.temp }}/testnet-e2e/dkg
