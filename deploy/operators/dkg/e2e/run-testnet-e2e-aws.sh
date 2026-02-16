@@ -247,7 +247,6 @@ prepare_boundless_market_patch() {
   local cargo_index_dir
   local crate_dir
   local build_rs
-  local build_rs_tmp
   local crate_url
   local crate_archive
 
@@ -276,25 +275,7 @@ prepare_boundless_market_patch() {
   fi
 
   if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
-    build_rs_tmp="\$build_rs.tmp"
-    awk '
-      BEGIN {
-        inserted = 0
-      }
-      /let mut alloy_import = "alloy_sol_types";/ && inserted == 0 {
-        print "    combined_sol_contents.push_str(\"\\\\n            enum __BOUNDLESS_DUMMY__ { __BOUNDLESS_DUMMY_VALUE__ }\\\\n\");"
-        inserted = 1
-      }
-      {
-        print
-      }
-      END {
-        if (inserted == 0) {
-          exit 1
-        }
-      }
-    ' "\$build_rs" >"\$build_rs_tmp"
-    mv "\$build_rs_tmp" "\$build_rs"
+    perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$build_rs"
   fi
 
   if ! grep -q "__BOUNDLESS_DUMMY__" "\$build_rs"; then
