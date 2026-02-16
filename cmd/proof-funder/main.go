@@ -40,9 +40,9 @@ func main() {
 		checkInterval    = flag.Duration("check-interval", 30*time.Second, "requestor balance check interval")
 
 		minBalanceWei      = flag.String("min-balance-wei", "50000000000000000", "minimum requestor balance before topup")
-		targetBalanceWei   = flag.String("target-balance-wei", "500000000000000000", "target requestor balance after topup")
+		targetBalanceWei   = flag.String("target-balance-wei", "200000000000000000", "target requestor balance after topup")
 		criticalBalanceWei = flag.String("critical-balance-wei", "10000000000000000", "critical low-balance alert threshold")
-		maxTopUpPerTxWei   = flag.String("max-topup-per-tx-wei", "1000000000000000000", "maximum topup per transaction")
+		maxTopUpPerTxWei   = flag.String("max-topup-per-tx-wei", "200000000000000000", "maximum topup per transaction")
 
 		alertTopic = flag.String("alert-topic", "ops.alerts.v1", "critical alert topic")
 

@@ -29,6 +29,11 @@ Current limitation:
 - Real verifier mode: pass `--bridge-verifier-address` and both seal files (`--bridge-deposit-seal-file`, `--bridge-withdraw-seal-file`) to verify real seals against a live verifier router.
 - Prepare-only mode: pass `--bridge-prepare-only` to generate proof input artifacts and skip `mintBatch/finalizeWithdrawBatch`. This supports manual callback flows when proof submission/fulfillment is handled outside the testnet stack.
 
+Pricing policy and calculator:
+
+- See `deploy/shared/runbooks/boundless-auction-pricing.md`.
+- Run `deploy/shared/runbooks/calc-boundless-auction.sh --cycle-count <cycles>` to compute a baseline profile.
+
 ## Quick Start
 
 ```bash

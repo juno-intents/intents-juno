@@ -50,9 +50,9 @@ func main() {
 		onchainFallbackEnabled  = flag.Bool("onchain-fallback-enabled", true, "enable onchain fallback submission")
 		onchainFundingMode      = flag.String("onchain-funding-mode", boundless.FundingModeMinMaxBalance, "onchain fallback funding mode")
 		onchainMinBalanceWei    = flag.String("onchain-min-balance-wei", "50000000000000000", "onchain fallback min balance (wei)")
-		onchainTargetBalanceWei = flag.String("onchain-target-balance-wei", "500000000000000000", "onchain fallback target balance (wei)")
-		onchainMaxPriceWei      = flag.String("onchain-max-price-per-proof-wei", "2000000000000000", "onchain fallback max price per proof (wei)")
-		onchainMaxStakeWei      = flag.String("onchain-max-stake-per-proof-wei", "1000000000000000", "onchain fallback max stake per proof (wei)")
+		onchainTargetBalanceWei = flag.String("onchain-target-balance-wei", "200000000000000000", "onchain fallback target balance (wei)")
+		onchainMaxPriceWei      = flag.String("onchain-max-price-per-proof-wei", "250000000000000", "onchain fallback max price per proof (wei)")
+		onchainMaxStakeWei      = flag.String("onchain-max-stake-per-proof-wei", "20000000000000000000", "onchain fallback max stake per proof (wei)")
 
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
