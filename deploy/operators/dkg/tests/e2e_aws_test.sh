@@ -60,9 +60,21 @@ test_aws_wrapper_uses_ssh_keepalive_options() {
   fi
 }
 
+test_aws_wrapper_collects_artifacts_after_remote_failures() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "local remote_run_status=0" "remote run status capture"
+  assert_contains "$wrapper_script_text" "set +e" "remote run temporary errexit disable"
+  assert_contains "$wrapper_script_text" "remote_run_status=$?" "remote run exit capture"
+  assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
+  assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_aws_wrapper_uses_ssh_keepalive_options
+  test_aws_wrapper_collects_artifacts_after_remote_failures
 }
 
 main "$@"

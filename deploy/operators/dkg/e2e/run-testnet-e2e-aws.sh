@@ -689,6 +689,8 @@ EOF
 )
 
   log "running live e2e on remote host $runner_public_ip"
+  local remote_run_status=0
+  set +e
   ssh -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
@@ -697,6 +699,8 @@ EOF
     -o TCPKeepAlive=yes \
     "$runner_ssh_user@$runner_public_ip" \
     "bash -lc $(printf '%q' "$remote_run_script")"
+  remote_run_status=$?
+  set -e
 
   log "collecting artifacts"
   scp -r \
@@ -726,6 +730,10 @@ EOF
     printf '%s\n' "$summary_path"
   else
     log "summary file not found locally after artifact collection"
+  fi
+
+  if (( remote_run_status != 0 )); then
+    die "remote live e2e run failed (status=$remote_run_status)"
   fi
 
   if [[ "$keep_infra" == "true" ]]; then
