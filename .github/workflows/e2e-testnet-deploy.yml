@@ -219,6 +219,18 @@ jobs:
             ARGS+=(--bridge-prepare-only)
           fi
           if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
+            if [[ -z "${{ inputs.bridge_verifier_address }}" ]]; then
+              echo "bridge_verifier_address is required when boundless_auto=true"
+              exit 1
+            fi
+            if [[ -z "${{ inputs.bridge_deposit_image_id }}" ]]; then
+              echo "bridge_deposit_image_id is required when boundless_auto=true"
+              exit 1
+            fi
+            if [[ -z "${{ inputs.bridge_withdraw_image_id }}" ]]; then
+              echo "bridge_withdraw_image_id is required when boundless_auto=true"
+              exit 1
+            fi
             if [[ -z "${{ inputs.boundless_deposit_program_url }}" ]]; then
               echo "boundless_deposit_program_url is required when boundless_auto=true"
               exit 1
