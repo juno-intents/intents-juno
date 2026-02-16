@@ -215,11 +215,44 @@ run_apt_with_retry() {
   return 1
 }
 
+dump_boundless_failure_context() {
+  local install_dir
+  local generated_file
+  local patched_build_rs
+
+  install_dir="\$(ls -dt /tmp/cargo-install* 2>/dev/null | head -n1 || true)"
+  if [[ -z "\$install_dir" ]]; then
+    echo "boundless diagnostics: no /tmp/cargo-install* directory found"
+    return 0
+  fi
+
+  generated_file="\$(find "\$install_dir" -type f -name 'boundless_market_generated.rs' | head -n1 || true)"
+  if [[ -n "\$generated_file" && -f "\$generated_file" ]]; then
+    echo "boundless diagnostics: generated file: \$generated_file"
+    if command -v rg >/dev/null 2>&1; then
+      rg -n "__BOUNDLESS_DUMMY__|alloy::sol!|enum|library|interface" "\$generated_file" | tail -n 40 || true
+    fi
+    echo "boundless diagnostics: generated file tail"
+    tail -n 80 "\$generated_file" || true
+  else
+    echo "boundless diagnostics: generated file not found under \$install_dir"
+  fi
+
+  patched_build_rs="\$HOME/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/boundless-market-0.14.1/build.rs"
+  if [[ -f "\$patched_build_rs" ]]; then
+    echo "boundless diagnostics: patched build.rs snippet (\$patched_build_rs)"
+    sed -n '116,130p' "\$patched_build_rs" || true
+  fi
+}
+
 run_with_retry() {
   local attempt
   for attempt in \$(seq 1 3); do
     if "\$@"; then
       return 0
+    fi
+    if [[ "\$*" == "cargo install --locked boundless-cli --version 0.14.1" ]]; then
+      dump_boundless_failure_context || true
     fi
     if [[ \$attempt -lt 3 ]]; then
       rm -rf /tmp/cargo-install* || true
