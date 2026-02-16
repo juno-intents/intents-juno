@@ -272,20 +272,14 @@ command_run() {
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
-    local funder_address next_nonce
-    funder_address="$(cast wallet address --private-key "$base_key")"
-    next_nonce="$(run_with_rpc_retry 5 2 "cast nonce" cast nonce "$funder_address" --rpc-url "$base_rpc_url" --block pending)"
-
     local operator
     while IFS= read -r operator; do
       [[ -n "$operator" ]] || continue
       run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
-        --nonce "$next_nonce" \
         --value "$base_operator_fund_wei" \
         "$operator" >/dev/null
-      next_nonce=$((next_nonce + 1))
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
   fi
 
