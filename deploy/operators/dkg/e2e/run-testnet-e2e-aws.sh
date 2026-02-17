@@ -288,7 +288,33 @@ wait_for_shared_connectivity_from_runner() {
       "$shared_kafka_port"
   )"
 
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+  local attempt
+  local probe_log
+  local ssh_status
+  for attempt in $(seq 1 3); do
+    log "checking shared services connectivity from runner (attempt $attempt/3)"
+    probe_log="$(mktemp)"
+    set +e
+    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")" 2>&1 | tee "$probe_log"
+    ssh_status="${PIPESTATUS[0]}"
+    set -e
+
+    if (( ssh_status == 0 )); then
+      rm -f "$probe_log"
+      return 0
+    fi
+    if grep -q "shared services reachable from runner" "$probe_log"; then
+      log "shared connectivity reported ready despite ssh exit status=$ssh_status; continuing"
+      rm -f "$probe_log"
+      return 0
+    fi
+    rm -f "$probe_log"
+    if [[ $attempt -lt 3 ]]; then
+      sleep 5
+    fi
+  done
+
+  return 1
 }
 
 build_remote_prepare_script() {

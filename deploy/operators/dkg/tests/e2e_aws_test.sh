@@ -108,6 +108,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "remote_prepare_shared_host" "shared host preparation hook"
   assert_contains "$wrapper_script_text" "preparing shared services host (attempt " "shared host preparation retry logs"
   assert_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "shared host fallback on nonzero ssh exit"
+  assert_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "runner connectivity fallback on nonzero ssh exit"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
   assert_contains "$wrapper_script_text" "assembling remote e2e arguments" "remote args assembly logging"
   assert_contains "$wrapper_script_text" "failed to build remote command line" "remote args assembly error message"
