@@ -42,12 +42,14 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "rustup default 1.91.1" "rust toolchain pin default"
   assert_contains "$script_text" "BOUNDLESS_CLI_SOURCE_DIR=\"/tmp/boundless-cli-release-1.2\"" "boundless source dir"
   assert_contains "$script_text" "git clone --depth 1 --branch release-1.2 https://github.com/boundless-xyz/boundless" "boundless source clone command"
+  assert_contains "$script_text" "boundless_market_build_rs=\"\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-market/build.rs\"" "boundless market build path"
+  assert_contains "$script_text" "__BOUNDLESS_DUMMY__" "boundless parser workaround marker"
+  assert_contains "$script_text" "perl -0pi -e" "boundless parser workaround patch command"
   assert_contains "$script_text" "run_with_retry cargo +1.91.1 install --path \"\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli\" --locked --force" "boundless cli install command"
   assert_contains "$script_text" "run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5" "cargo-risczero toolchain pin"
   assert_contains "$script_text" "boundless --version" "boundless version check"
   assert_not_contains "$script_text" "cargo +1.91.1 install --locked --git https://github.com/boundless-xyz/boundless" "boundless git install path removed"
   assert_not_contains "$script_text" "boundless-market-0.14.1" "legacy boundless crate pin removed"
-  assert_not_contains "$script_text" "__BOUNDLESS_DUMMY__" "legacy parser workaround removed"
 }
 
 test_remote_shared_prepare_script_waits_for_services() {

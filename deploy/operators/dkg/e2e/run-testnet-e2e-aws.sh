@@ -404,6 +404,22 @@ if [[ -d "\$BOUNDLESS_CLI_SOURCE_DIR/.git" ]]; then
 else
   git clone --depth 1 --branch release-1.2 https://github.com/boundless-xyz/boundless "\$BOUNDLESS_CLI_SOURCE_DIR"
 fi
+
+boundless_market_build_rs="\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-market/build.rs"
+if [[ ! -f "\$boundless_market_build_rs" ]]; then
+  echo "boundless-market build script missing: \$boundless_market_build_rs" >&2
+  exit 1
+fi
+
+# Work around alloy::sol parser edge case during cargo-install codegen on Linux.
+if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
+  perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$boundless_market_build_rs"
+fi
+if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
+  echo "failed to patch boundless market build script: \$boundless_market_build_rs" >&2
+  exit 1
+fi
+
 run_with_retry cargo +1.91.1 install --path "\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli" --locked --force
 boundless --version
 run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
