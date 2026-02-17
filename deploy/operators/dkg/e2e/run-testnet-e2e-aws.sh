@@ -995,18 +995,26 @@ command_run() {
   fi
   remote_args+=("${e2e_args[@]}")
 
+  log "assembling remote e2e arguments"
   local remote_joined_args
-  remote_joined_args="$(shell_join "${remote_args[@]}")"
+  if ! remote_joined_args="$(shell_join "${remote_args[@]}")"; then
+    die "failed to build remote command line"
+  fi
+  [[ -n "$remote_joined_args" ]] || die "remote command line is empty"
+  log "remote e2e arguments assembled"
 
   local remote_run_script
-  remote_run_script=$(cat <<EOF
+  if ! remote_run_script=$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
 export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh $remote_joined_args
 EOF
-)
+); then
+    die "failed to render remote run script"
+  fi
+  log "remote run script ready"
 
   log "running live e2e on remote host $runner_public_ip"
   local remote_run_status=0
