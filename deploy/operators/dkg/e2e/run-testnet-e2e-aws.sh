@@ -1089,6 +1089,10 @@ EOF
   fi
 
   if (( remote_run_status != 0 )); then
+    if [[ "$keep_infra" == "true" ]]; then
+      cleanup_enabled="false"
+      log "keep-infra enabled after failure; leaving resources up"
+    fi
     die "remote live e2e run failed (status=$remote_run_status)"
   fi
 

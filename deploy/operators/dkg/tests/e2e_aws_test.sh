@@ -92,6 +92,8 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" "set +e" "remote run temporary errexit disable"
   assert_contains "$wrapper_script_text" "remote_run_status=$?" "remote run exit capture"
   assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
+  assert_contains "$wrapper_script_text" "keep-infra enabled after failure; leaving resources up" "keep-infra failure retention log"
+  assert_contains "$wrapper_script_text" "cleanup_enabled=\"false\"" "keep-infra disables cleanup on failure"
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
 }
 
