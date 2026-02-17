@@ -1,9 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/segmentio/kafka-go"
 )
 
 func TestParseArgs_Valid(t *testing.T) {
@@ -93,5 +96,47 @@ func TestParseBrokers_DedupAndTrim(t *testing.T) {
 	}
 	if got[0] != "127.0.0.1:9092" || got[1] != "127.0.0.1:9093" {
 		t.Fatalf("unexpected brokers: %#v", got)
+	}
+}
+
+func TestIsTopicAlreadyExistsError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "exact",
+			err:  kafka.TopicAlreadyExists,
+			want: true,
+		},
+		{
+			name: "wrapped",
+			err:  fmt.Errorf("wrapped: %w", kafka.TopicAlreadyExists),
+			want: true,
+		},
+		{
+			name: "different kafka error",
+			err:  kafka.UnknownTopicOrPartition,
+			want: false,
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isTopicAlreadyExistsError(tc.err)
+			if got != tc.want {
+				t.Fatalf("isTopicAlreadyExistsError() = %v, want %v", got, tc.want)
+			}
+		})
 	}
 }

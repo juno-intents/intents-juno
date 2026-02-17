@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/segmentio/kafka-go"
 )
 
 type config struct {
@@ -263,6 +264,9 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.kafka.v1","time":"%s"}`,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	))
+	if err := ensureKafkaTopic(ctx, cfg.KafkaBrokers, topic); err != nil {
+		return kafkaReport{}, fmt.Errorf("ensure topic: %w", err)
+	}
 
 	producer, err := queue.NewProducer(queue.ProducerConfig{
 		Driver:  queue.DriverKafka,
@@ -333,4 +337,69 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 			}, nil
 		}
 	}
+}
+
+func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error {
+	brokers = parseBrokers(strings.Join(brokers, ","))
+	if len(brokers) == 0 {
+		return errors.New("kafka topic creation requires at least one broker")
+	}
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("kafka topic is required")
+	}
+
+	dialer := &kafka.Dialer{Timeout: 10 * time.Second}
+	var lastErr error
+
+	for _, broker := range brokers {
+		conn, err := dialer.DialContext(ctx, "tcp", broker)
+		if err != nil {
+			lastErr = fmt.Errorf("dial broker %s: %w", broker, err)
+			continue
+		}
+
+		controller, err := conn.Controller()
+		_ = conn.Close()
+		if err != nil {
+			lastErr = fmt.Errorf("lookup controller via %s: %w", broker, err)
+			continue
+		}
+
+		controllerAddr := fmt.Sprintf("%s:%d", controller.Host, controller.Port)
+		controllerConn, err := dialer.DialContext(ctx, "tcp", controllerAddr)
+		if err != nil {
+			lastErr = fmt.Errorf("dial controller %s: %w", controllerAddr, err)
+			continue
+		}
+
+		err = controllerConn.CreateTopics(kafka.TopicConfig{
+			Topic:             topic,
+			NumPartitions:     1,
+			ReplicationFactor: 1,
+		})
+		closeErr := controllerConn.Close()
+
+		if err == nil || isTopicAlreadyExistsError(err) {
+			return nil
+		}
+		if closeErr != nil {
+			lastErr = fmt.Errorf("create topic %s via %s: %w (close: %v)", topic, controllerAddr, err, closeErr)
+			continue
+		}
+		lastErr = fmt.Errorf("create topic %s via %s: %w", topic, controllerAddr, err)
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("unable to create kafka topic")
+	}
+	return lastErr
+}
+
+func isTopicAlreadyExistsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	var kafkaErr kafka.Error
+	return errors.As(err, &kafkaErr) && kafkaErr == kafka.TopicAlreadyExists
 }
