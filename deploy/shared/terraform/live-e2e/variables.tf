@@ -53,3 +53,52 @@ variable "iam_instance_profile" {
   type        = string
   default     = ""
 }
+
+variable "provision_shared_services" {
+  description = "Whether to provision a shared services EC2 host for Postgres+Kafka."
+  type        = bool
+  default     = true
+}
+
+variable "shared_instance_type" {
+  description = "EC2 instance type for the shared services host."
+  type        = string
+  default     = "c7i.large"
+}
+
+variable "shared_root_volume_size_gb" {
+  description = "Root EBS size in GiB for the shared services host."
+  type        = number
+  default     = 100
+}
+
+variable "shared_postgres_user" {
+  description = "Postgres username on shared services host."
+  type        = string
+  default     = "postgres"
+}
+
+variable "shared_postgres_password" {
+  description = "Postgres password on shared services host."
+  type        = string
+  default     = "postgres"
+  sensitive   = true
+}
+
+variable "shared_postgres_db" {
+  description = "Postgres database name on shared services host."
+  type        = string
+  default     = "intents_e2e"
+}
+
+variable "shared_postgres_port" {
+  description = "Postgres TCP port exposed by the shared services host."
+  type        = number
+  default     = 5432
+}
+
+variable "shared_kafka_port" {
+  description = "Kafka TCP port exposed by the shared services host."
+  type        = number
+  default     = 9092
+}

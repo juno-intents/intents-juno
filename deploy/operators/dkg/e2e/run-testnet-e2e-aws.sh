@@ -41,6 +41,11 @@ run options:
   --base-funder-key-file <path>        file with Base funder private key hex (required)
   --juno-funder-key-file <path>        file with Juno funder private key hex (required)
   --boundless-requestor-key-file <p>   optional file with Boundless requestor private key hex
+  --without-shared-services            skip provisioning shared Postgres/Kafka host
+  --shared-postgres-user <user>        shared Postgres username (default: postgres)
+  --shared-postgres-db <name>          shared Postgres DB name (default: intents_e2e)
+  --shared-postgres-port <port>        shared Postgres TCP port (default: 5432)
+  --shared-kafka-port <port>           shared Kafka TCP port (default: 9092)
   --keep-infra                         do not destroy infra at the end
 
 cleanup options:
@@ -458,6 +463,11 @@ command_run() {
   local base_funder_key_file=""
   local juno_funder_key_file=""
   local boundless_requestor_key_file=""
+  local with_shared_services="true"
+  local shared_postgres_user="postgres"
+  local shared_postgres_db="intents_e2e"
+  local shared_postgres_port="5432"
+  local shared_kafka_port="9092"
   local keep_infra="false"
   local -a e2e_args=()
 
@@ -518,6 +528,30 @@ command_run() {
         boundless_requestor_key_file="$2"
         shift 2
         ;;
+      --without-shared-services)
+        with_shared_services="false"
+        shift
+        ;;
+      --shared-postgres-user)
+        [[ $# -ge 2 ]] || die "missing value for --shared-postgres-user"
+        shared_postgres_user="$2"
+        shift 2
+        ;;
+      --shared-postgres-db)
+        [[ $# -ge 2 ]] || die "missing value for --shared-postgres-db"
+        shared_postgres_db="$2"
+        shift 2
+        ;;
+      --shared-postgres-port)
+        [[ $# -ge 2 ]] || die "missing value for --shared-postgres-port"
+        shared_postgres_port="$2"
+        shift 2
+        ;;
+      --shared-kafka-port)
+        [[ $# -ge 2 ]] || die "missing value for --shared-kafka-port"
+        shared_kafka_port="$2"
+        shift 2
+        ;;
       --keep-infra)
         keep_infra="true"
         shift
@@ -542,6 +576,10 @@ command_run() {
   [[ -n "$juno_funder_key_file" ]] || die "--juno-funder-key-file is required"
   [[ -f "$base_funder_key_file" ]] || die "base funder key file not found: $base_funder_key_file"
   [[ -f "$juno_funder_key_file" ]] || die "juno funder key file not found: $juno_funder_key_file"
+  [[ "$shared_postgres_port" =~ ^[0-9]+$ ]] || die "--shared-postgres-port must be numeric"
+  [[ "$shared_kafka_port" =~ ^[0-9]+$ ]] || die "--shared-kafka-port must be numeric"
+  [[ -n "$shared_postgres_user" ]] || die "--shared-postgres-user must not be empty"
+  [[ -n "$shared_postgres_db" ]] || die "--shared-postgres-db must not be empty"
   if [[ -n "$boundless_requestor_key_file" && ! -f "$boundless_requestor_key_file" ]]; then
     die "boundless requestor key file not found: $boundless_requestor_key_file"
   fi
@@ -578,10 +616,19 @@ command_run() {
 
   local deployment_id
   deployment_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+  local shared_postgres_password
+  shared_postgres_password="$(openssl rand -hex 16)"
 
   local tfvars_file state_file
   tfvars_file="$infra_dir/terraform.tfvars.json"
   state_file="$infra_dir/terraform.tfstate"
+
+  local provision_shared_services_json
+  if [[ "$with_shared_services" == "true" ]]; then
+    provision_shared_services_json="true"
+  else
+    provision_shared_services_json="false"
+  fi
 
   jq -n \
     --arg aws_region "$aws_region" \
@@ -591,6 +638,12 @@ command_run() {
     --argjson root_volume_size_gb "$aws_root_volume_gb" \
     --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
     --arg ssh_public_key "$(cat "$ssh_key_public")" \
+    --argjson provision_shared_services "$provision_shared_services_json" \
+    --arg shared_postgres_user "$shared_postgres_user" \
+    --arg shared_postgres_password "$shared_postgres_password" \
+    --arg shared_postgres_db "$shared_postgres_db" \
+    --argjson shared_postgres_port "$shared_postgres_port" \
+    --argjson shared_kafka_port "$shared_kafka_port" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -598,7 +651,13 @@ command_run() {
       instance_type: $instance_type,
       root_volume_size_gb: $root_volume_size_gb,
       allowed_ssh_cidr: $allowed_ssh_cidr,
-      ssh_public_key: $ssh_public_key
+      ssh_public_key: $ssh_public_key,
+      provision_shared_services: $provision_shared_services,
+      shared_postgres_user: $shared_postgres_user,
+      shared_postgres_password: $shared_postgres_password,
+      shared_postgres_db: $shared_postgres_db,
+      shared_postgres_port: $shared_postgres_port,
+      shared_kafka_port: $shared_kafka_port
     }' >"$tfvars_file"
 
   cleanup_enabled="true"
@@ -627,6 +686,18 @@ command_run() {
       -state="$state_file" \
       -raw runner_ssh_user
   )"
+
+  local shared_private_ip=""
+  if [[ "$with_shared_services" == "true" ]]; then
+    shared_private_ip="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_private_ip
+    )"
+    [[ -n "$shared_private_ip" && "$shared_private_ip" != "null" ]] || die "shared services were requested but terraform output shared_private_ip is empty"
+  fi
 
   wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$runner_public_ip"
 
@@ -672,6 +743,15 @@ command_run() {
   )
   if [[ -n "$boundless_requestor_key_file" ]]; then
     remote_args+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
+  fi
+  if [[ "$with_shared_services" == "true" ]]; then
+    local shared_postgres_dsn shared_kafka_brokers
+    shared_postgres_dsn="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_private_ip}:${shared_postgres_port}/${shared_postgres_db}?sslmode=disable"
+    shared_kafka_brokers="${shared_private_ip}:${shared_kafka_port}"
+    remote_args+=(
+      "--shared-postgres-dsn" "$shared_postgres_dsn"
+      "--shared-kafka-brokers" "$shared_kafka_brokers"
+    )
   fi
   remote_args+=("${e2e_args[@]}")
 

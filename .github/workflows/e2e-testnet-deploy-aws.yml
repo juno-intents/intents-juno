@@ -18,6 +18,11 @@ on:
         required: true
         default: "200"
         type: string
+      with_shared_services:
+        description: "Provision shared Postgres/Kafka services host and validate it before bridge flow"
+        required: true
+        default: true
+        type: boolean
       ssh_allowed_cidr:
         description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
         required: false
@@ -226,6 +231,9 @@ jobs:
 
           if [[ -n "${{ inputs.ssh_allowed_cidr }}" ]]; then
             ARGS+=(--ssh-allowed-cidr "${{ inputs.ssh_allowed_cidr }}")
+          fi
+          if [[ "${{ inputs.with_shared_services }}" != "true" ]]; then
+            ARGS+=(--without-shared-services)
           fi
           if [[ "${{ inputs.boundless_auto }}" == "true" ]]; then
             ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")

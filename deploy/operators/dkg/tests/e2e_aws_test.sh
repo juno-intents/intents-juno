@@ -71,10 +71,35 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
 }
 
+test_aws_wrapper_wires_shared_services_into_remote_e2e() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "--without-shared-services" "shared services toggle option"
+  assert_contains "$wrapper_script_text" "shared_postgres_password=\"\$(openssl rand -hex 16)\"" "shared postgres password generation"
+  assert_contains "$wrapper_script_text" "provision_shared_services" "terraform shared services flag"
+  assert_contains "$wrapper_script_text" "shared_postgres_dsn=\"postgres://" "shared postgres dsn assembly"
+  assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\${shared_private_ip}:\${shared_kafka_port}\"" "shared kafka brokers assembly"
+  assert_contains "$wrapper_script_text" "\"--shared-postgres-dsn\" \"\$shared_postgres_dsn\"" "remote shared postgres arg"
+  assert_contains "$wrapper_script_text" "\"--shared-kafka-brokers\" \"\$shared_kafka_brokers\"" "remote shared kafka arg"
+}
+
+test_local_e2e_supports_shared_infra_validation() {
+  local e2e_script_text
+  e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
+
+  assert_contains "$e2e_script_text" "--shared-postgres-dsn" "shared postgres option"
+  assert_contains "$e2e_script_text" "--shared-kafka-brokers" "shared kafka option"
+  assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
+  assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_aws_wrapper_uses_ssh_keepalive_options
   test_aws_wrapper_collects_artifacts_after_remote_failures
+  test_aws_wrapper_wires_shared_services_into_remote_e2e
+  test_local_e2e_supports_shared_infra_validation
 }
 
 main "$@"

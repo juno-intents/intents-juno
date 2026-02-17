@@ -45,6 +45,11 @@ Options:
   --boundless-ramp-up-period-seconds <s> auction ramp period (default: 170)
   --boundless-lock-timeout-seconds <s> auction lock timeout (default: 625)
   --boundless-timeout-seconds <s> auction timeout (default: 1500)
+  --shared-postgres-dsn <dsn>       optional shared Postgres DSN for infra validation
+  --shared-kafka-brokers <list>     optional shared Kafka brokers CSV for infra validation
+  --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
+  --shared-timeout <duration>       shared infra validation timeout (default: 90s)
+  --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
   --output <path>                  summary json output (default: <workdir>/reports/testnet-e2e-summary.json)
   --force                          remove existing workdir before starting
 
@@ -152,6 +157,11 @@ command_run() {
   local boundless_ramp_up_period_seconds="170"
   local boundless_lock_timeout_seconds="625"
   local boundless_timeout_seconds="1500"
+  local shared_postgres_dsn=""
+  local shared_kafka_brokers=""
+  local shared_topic_prefix="shared.infra.e2e"
+  local shared_timeout="90s"
+  local shared_output=""
   local output_path=""
   local force="false"
 
@@ -305,6 +315,31 @@ command_run() {
         boundless_timeout_seconds="$2"
         shift 2
         ;;
+      --shared-postgres-dsn)
+        [[ $# -ge 2 ]] || die "missing value for --shared-postgres-dsn"
+        shared_postgres_dsn="$2"
+        shift 2
+        ;;
+      --shared-kafka-brokers)
+        [[ $# -ge 2 ]] || die "missing value for --shared-kafka-brokers"
+        shared_kafka_brokers="$2"
+        shift 2
+        ;;
+      --shared-topic-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --shared-topic-prefix"
+        shared_topic_prefix="$2"
+        shift 2
+        ;;
+      --shared-timeout)
+        [[ $# -ge 2 ]] || die "missing value for --shared-timeout"
+        shared_timeout="$2"
+        shift 2
+        ;;
+      --shared-output)
+        [[ $# -ge 2 ]] || die "missing value for --shared-output"
+        shared_output="$2"
+        shift 2
+        ;;
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output_path="$2"
@@ -373,6 +408,16 @@ command_run() {
   if [[ -z "$bridge_proof_inputs_output" ]]; then
     bridge_proof_inputs_output="$workdir/reports/bridge-proof-inputs.json"
   fi
+  if [[ -z "$shared_output" ]]; then
+    shared_output="$workdir/reports/shared-infra-summary.json"
+  fi
+
+  local shared_enabled="false"
+  if [[ -n "$shared_postgres_dsn" || -n "$shared_kafka_brokers" ]]; then
+    [[ -n "$shared_postgres_dsn" ]] || die "--shared-kafka-brokers requires --shared-postgres-dsn"
+    [[ -n "$shared_kafka_brokers" ]] || die "--shared-postgres-dsn requires --shared-kafka-brokers"
+    shared_enabled="true"
+  fi
 
   ensure_base_dependencies
   ensure_command go
@@ -391,6 +436,19 @@ command_run() {
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
+  local shared_summary="$shared_output"
+
+  if [[ "$shared_enabled" == "true" ]]; then
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/shared-infra-e2e \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --kafka-brokers "$shared_kafka_brokers" \
+        --topic-prefix "$shared_topic_prefix" \
+        --timeout "$shared_timeout" \
+        --output "$shared_summary"
+    )
+  fi
 
   (
     cd "$REPO_ROOT/contracts"
@@ -512,7 +570,13 @@ command_run() {
     --arg boundless_ramp_up_period_seconds "$boundless_ramp_up_period_seconds" \
     --arg boundless_lock_timeout_seconds "$boundless_lock_timeout_seconds" \
     --arg boundless_timeout_seconds "$boundless_timeout_seconds" \
+    --arg shared_enabled "$shared_enabled" \
+    --arg shared_kafka_brokers "$shared_kafka_brokers" \
+    --arg shared_topic_prefix "$shared_topic_prefix" \
+    --arg shared_timeout "$shared_timeout" \
+    --arg shared_summary "$shared_summary" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
+    --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
     --argjson dkg "$(cat "$dkg_summary")" \
     --argjson bridge "$(cat "$bridge_summary")" \
     '{
@@ -553,6 +617,15 @@ command_run() {
           timeout_seconds: $boundless_timeout_seconds
         },
         report: $bridge
+      },
+      shared_infra: {
+        enabled: ($shared_enabled == "true"),
+        postgres_configured: ($shared_enabled == "true"),
+        kafka_brokers: (if $shared_kafka_brokers == "" then null else $shared_kafka_brokers end),
+        topic_prefix: (if $shared_topic_prefix == "" then null else $shared_topic_prefix end),
+        timeout: (if $shared_timeout == "" then null else $shared_timeout end),
+        summary_path: (if $shared_summary == "" then null else $shared_summary end),
+        report: $shared
       },
       juno: {
         funder_env_present: ($juno_funder_present == "true")

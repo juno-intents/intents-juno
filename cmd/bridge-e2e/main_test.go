@@ -640,3 +640,67 @@ func TestIsRetriableNonceError(t *testing.T) {
 		})
 	}
 }
+
+func TestComputeFeeBreakdown(t *testing.T) {
+	t.Parallel()
+
+	out := computeFeeBreakdown(new(big.Int).SetUint64(100_000), 50, 1000)
+	if out.Fee.Cmp(big.NewInt(500)) != 0 {
+		t.Fatalf("fee: got %s want 500", out.Fee.String())
+	}
+	if out.Tip.Cmp(big.NewInt(50)) != 0 {
+		t.Fatalf("tip: got %s want 50", out.Tip.String())
+	}
+	if out.FeeToDistributor.Cmp(big.NewInt(450)) != 0 {
+		t.Fatalf("feeToDistributor: got %s want 450", out.FeeToDistributor.String())
+	}
+	if out.Net.Cmp(big.NewInt(99_500)) != 0 {
+		t.Fatalf("net: got %s want 99500", out.Net.String())
+	}
+}
+
+func TestExpectedBalanceDeltas_RecipientEqualsOwner(t *testing.T) {
+	t.Parallel()
+
+	deltas := expectedBalanceDeltas(expectedBalanceDeltaInput{
+		DepositAmount:        big.NewInt(100_000),
+		WithdrawAmount:       big.NewInt(10_000),
+		DepositFeeBps:        50,
+		WithdrawFeeBps:       50,
+		RelayerTipBps:        1000,
+		RecipientEqualsOwner: true,
+	})
+
+	if deltas.Owner.Cmp(big.NewInt(89_555)) != 0 {
+		t.Fatalf("owner delta: got %s want 89555", deltas.Owner.String())
+	}
+	if deltas.Recipient.Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("recipient delta: got %s want 0", deltas.Recipient.String())
+	}
+	if deltas.FeeDistributor.Cmp(big.NewInt(495)) != 0 {
+		t.Fatalf("fee distributor delta: got %s want 495", deltas.FeeDistributor.String())
+	}
+}
+
+func TestExpectedBalanceDeltas_RecipientDiffersFromOwner(t *testing.T) {
+	t.Parallel()
+
+	deltas := expectedBalanceDeltas(expectedBalanceDeltaInput{
+		DepositAmount:        big.NewInt(100_000),
+		WithdrawAmount:       big.NewInt(10_000),
+		DepositFeeBps:        50,
+		WithdrawFeeBps:       50,
+		RelayerTipBps:        1000,
+		RecipientEqualsOwner: false,
+	})
+
+	if deltas.Owner.Cmp(big.NewInt(-9_945)) != 0 {
+		t.Fatalf("owner delta: got %s want -9945", deltas.Owner.String())
+	}
+	if deltas.Recipient.Cmp(big.NewInt(99_500)) != 0 {
+		t.Fatalf("recipient delta: got %s want 99500", deltas.Recipient.String())
+	}
+	if deltas.FeeDistributor.Cmp(big.NewInt(495)) != 0 {
+		t.Fatalf("fee distributor delta: got %s want 495", deltas.FeeDistributor.String())
+	}
+}

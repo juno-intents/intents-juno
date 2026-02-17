@@ -173,6 +173,48 @@ type report struct {
 			TimeoutSec        uint64 `json:"timeout_seconds,omitempty"`
 		} `json:"boundless,omitempty"`
 	} `json:"proof"`
+
+	Invariants struct {
+		Registry struct {
+			OperatorCount uint64 `json:"operator_count"`
+			Threshold     uint64 `json:"threshold"`
+			AllActive     bool   `json:"all_active"`
+		} `json:"registry"`
+		DepositUsed bool `json:"deposit_used"`
+		Withdrawal  struct {
+			Exists    bool   `json:"exists"`
+			Finalized bool   `json:"finalized"`
+			Refunded  bool   `json:"refunded"`
+			FeeBps    uint64 `json:"fee_bps"`
+			Amount    string `json:"amount"`
+			Expiry    uint64 `json:"expiry"`
+		} `json:"withdrawal"`
+		Fees struct {
+			Deposit struct {
+				Fee              string `json:"fee"`
+				Tip              string `json:"tip"`
+				FeeToDistributor string `json:"fee_to_distributor"`
+				Net              string `json:"net"`
+			} `json:"deposit"`
+			Withdraw struct {
+				Fee              string `json:"fee"`
+				Tip              string `json:"tip"`
+				FeeToDistributor string `json:"fee_to_distributor"`
+				Net              string `json:"net"`
+			} `json:"withdraw"`
+		} `json:"fees"`
+		BalanceDeltas struct {
+			OwnerExpected          string `json:"owner_expected"`
+			OwnerActual            string `json:"owner_actual"`
+			RecipientExpected      string `json:"recipient_expected"`
+			RecipientActual        string `json:"recipient_actual"`
+			FeeDistributorExpected string `json:"fee_distributor_expected"`
+			FeeDistributorActual   string `json:"fee_distributor_actual"`
+			BridgeExpected         string `json:"bridge_expected"`
+			BridgeActual           string `json:"bridge_actual"`
+			Matches                bool   `json:"matches"`
+		} `json:"balance_deltas"`
+	} `json:"invariants"`
 }
 
 type proofInputsFile struct {
@@ -209,6 +251,39 @@ type proofInputsFile struct {
 		Amount         string `json:"amount,omitempty"`
 		NetAmount      string `json:"net_amount"`
 	} `json:"withdraw"`
+}
+
+type feeBreakdown struct {
+	Fee              *big.Int
+	Tip              *big.Int
+	FeeToDistributor *big.Int
+	Net              *big.Int
+}
+
+type expectedBalanceDeltaInput struct {
+	DepositAmount        *big.Int
+	WithdrawAmount       *big.Int
+	DepositFeeBps        uint64
+	WithdrawFeeBps       uint64
+	RelayerTipBps        uint64
+	RecipientEqualsOwner bool
+}
+
+type expectedBalanceDelta struct {
+	Owner          *big.Int
+	Recipient      *big.Int
+	FeeDistributor *big.Int
+	Bridge         *big.Int
+}
+
+type withdrawalView struct {
+	Requester common.Address
+	Amount    *big.Int
+	Expiry    uint64
+	FeeBps    uint64
+	Finalized bool
+	Refunded  bool
+	Recipient []byte
 }
 
 func main() {
@@ -682,6 +757,67 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
 	}
 
+	registryOperatorCount, err := callUint64(ctx, reg, "operatorCount")
+	if err != nil {
+		return nil, fmt.Errorf("operatorCount: %w", err)
+	}
+	if registryOperatorCount != uint64(len(operatorAddrs)) {
+		return nil, fmt.Errorf("operatorCount mismatch: got=%d want=%d", registryOperatorCount, len(operatorAddrs))
+	}
+	registryThreshold, err := callUint64(ctx, reg, "threshold")
+	if err != nil {
+		return nil, fmt.Errorf("threshold: %w", err)
+	}
+	if registryThreshold != uint64(cfg.Threshold) {
+		return nil, fmt.Errorf("registry threshold mismatch: got=%d want=%d", registryThreshold, cfg.Threshold)
+	}
+	allOperatorsActive := true
+	for _, op := range operatorAddrs {
+		isActive, err := callBool(ctx, reg, "isOperator", op)
+		if err != nil {
+			return nil, fmt.Errorf("isOperator(%s): %w", op.Hex(), err)
+		}
+		if !isActive {
+			allOperatorsActive = false
+			break
+		}
+	}
+	if !allOperatorsActive {
+		return nil, errors.New("operator registry invariant failed: not all operators are active")
+	}
+
+	feeBpsOnChain, err := callUint64(ctx, bridge, "feeBps")
+	if err != nil {
+		return nil, fmt.Errorf("bridge feeBps: %w", err)
+	}
+	relayerTipBpsOnChain, err := callUint64(ctx, bridge, "relayerTipBps")
+	if err != nil {
+		return nil, fmt.Errorf("bridge relayerTipBps: %w", err)
+	}
+	if feeBpsOnChain != feeBps {
+		return nil, fmt.Errorf("bridge feeBps mismatch: got=%d want=%d", feeBpsOnChain, feeBps)
+	}
+	if relayerTipBpsOnChain != tipBps {
+		return nil, fmt.Errorf("bridge relayerTipBps mismatch: got=%d want=%d", relayerTipBpsOnChain, tipBps)
+	}
+
+	ownerBalBefore, err := callBalanceOf(ctx, wjuno, owner)
+	if err != nil {
+		return nil, fmt.Errorf("owner balance before: %w", err)
+	}
+	recipientBalBefore, err := callBalanceOf(ctx, wjuno, recipient)
+	if err != nil {
+		return nil, fmt.Errorf("recipient balance before: %w", err)
+	}
+	fdBalBefore, err := callBalanceOf(ctx, wjuno, fdAddr)
+	if err != nil {
+		return nil, fmt.Errorf("fee distributor balance before: %w", err)
+	}
+	bridgeBalBefore, err := callBalanceOf(ctx, wjuno, bridgeAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bridge balance before: %w", err)
+	}
+
 	header, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("latest header: %w", err)
@@ -715,6 +851,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	depositAmount := new(big.Int).SetUint64(cfg.DepositAmount)
+	depositFees := computeFeeBreakdown(depositAmount, feeBpsOnChain, relayerTipBpsOnChain)
 	depositID := crypto.Keccak256Hash([]byte("bridge-e2e-deposit-1"))
 	mintItems := []bridgeabi.MintItem{
 		{
@@ -762,10 +899,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	)
 
 	if cfg.PrepareOnly {
-		feeBpsAtReq, err = callUint64(ctx, bridge, "feeBps")
-		if err != nil {
-			return nil, fmt.Errorf("feeBps: %w", err)
-		}
+		feeBpsAtReq = feeBpsOnChain
 		withdrawalID = predictedWithdrawalID
 	} else {
 		if cfg.Boundless.Auto {
@@ -814,9 +948,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	fee := new(big.Int).Mul(withdrawAmount, new(big.Int).SetUint64(feeBpsAtReq))
-	fee.Div(fee, big.NewInt(10_000))
-	net := new(big.Int).Sub(withdrawAmount, fee)
+	withdrawFees := computeFeeBreakdown(withdrawAmount, feeBpsAtReq, relayerTipBpsOnChain)
+	net := new(big.Int).Set(withdrawFees.Net)
 
 	finalizeItems := []bridgeabi.FinalizeItem{
 		{
@@ -895,13 +1028,96 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	recipientBal, err := callBalanceOf(ctx, wjuno, recipient)
+	ownerBalAfter, err := callBalanceOf(ctx, wjuno, owner)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("owner balance after: %w", err)
 	}
-	fdBal, err := callBalanceOf(ctx, wjuno, fdAddr)
+	recipientBalAfter, err := callBalanceOf(ctx, wjuno, recipient)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("recipient balance after: %w", err)
+	}
+	fdBalAfter, err := callBalanceOf(ctx, wjuno, fdAddr)
+	if err != nil {
+		return nil, fmt.Errorf("fee distributor balance after: %w", err)
+	}
+	bridgeBalAfter, err := callBalanceOf(ctx, wjuno, bridgeAddr)
+	if err != nil {
+		return nil, fmt.Errorf("bridge balance after: %w", err)
+	}
+
+	depositUsedInvariant := false
+	withdrawInvariant := withdrawalView{Amount: big.NewInt(0)}
+	if !cfg.PrepareOnly {
+		depositUsedInvariant, err = callDepositUsed(ctx, bridge, depositID, nil)
+		if err != nil {
+			return nil, fmt.Errorf("depositUsed invariant call: %w", err)
+		}
+		if !depositUsedInvariant {
+			return nil, errors.New("depositUsed invariant failed: expected true after mintBatch")
+		}
+
+		withdrawInvariant, err = callWithdrawal(ctx, bridge, withdrawalID)
+		if err != nil {
+			return nil, fmt.Errorf("getWithdrawal invariant call: %w", err)
+		}
+		if withdrawInvariant.Requester != owner {
+			return nil, fmt.Errorf("withdraw requester mismatch: got=%s want=%s", withdrawInvariant.Requester.Hex(), owner.Hex())
+		}
+		if withdrawInvariant.Amount.Cmp(withdrawAmount) != 0 {
+			return nil, fmt.Errorf("withdraw amount mismatch: got=%s want=%s", withdrawInvariant.Amount.String(), withdrawAmount.String())
+		}
+		if withdrawInvariant.FeeBps != feeBpsAtReq {
+			return nil, fmt.Errorf("withdraw fee bps mismatch: got=%d want=%d", withdrawInvariant.FeeBps, feeBpsAtReq)
+		}
+		if !withdrawInvariant.Finalized {
+			return nil, errors.New("withdraw invariant failed: expected finalized=true")
+		}
+		if withdrawInvariant.Refunded {
+			return nil, errors.New("withdraw invariant failed: expected refunded=false")
+		}
+		if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
+			return nil, errors.New("withdraw invariant failed: recipient UA mismatch")
+		}
+	}
+
+	expectedDeltas := expectedBalanceDeltas(expectedBalanceDeltaInput{
+		DepositAmount:        depositAmount,
+		WithdrawAmount:       withdrawAmount,
+		DepositFeeBps:        feeBpsOnChain,
+		WithdrawFeeBps:       feeBpsAtReq,
+		RelayerTipBps:        relayerTipBpsOnChain,
+		RecipientEqualsOwner: recipient == owner,
+	})
+	if cfg.PrepareOnly {
+		expectedDeltas = expectedBalanceDelta{
+			Owner:          big.NewInt(0),
+			Recipient:      big.NewInt(0),
+			FeeDistributor: big.NewInt(0),
+			Bridge:         big.NewInt(0),
+		}
+	}
+
+	ownerDeltaActual := new(big.Int).Sub(ownerBalAfter, ownerBalBefore)
+	recipientDeltaActual := new(big.Int).Sub(recipientBalAfter, recipientBalBefore)
+	fdDeltaActual := new(big.Int).Sub(fdBalAfter, fdBalBefore)
+	bridgeDeltaActual := new(big.Int).Sub(bridgeBalAfter, bridgeBalBefore)
+
+	balanceDeltaMatches := ownerDeltaActual.Cmp(expectedDeltas.Owner) == 0 &&
+		recipientDeltaActual.Cmp(expectedDeltas.Recipient) == 0 &&
+		fdDeltaActual.Cmp(expectedDeltas.FeeDistributor) == 0 &&
+		bridgeDeltaActual.Cmp(expectedDeltas.Bridge) == 0
+	if !balanceDeltaMatches {
+		return nil, fmt.Errorf(
+			"balance delta invariant failed: owner got=%s want=%s recipient got=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s",
+			ownerDeltaActual.String(),
+			expectedDeltas.Owner.String(),
+			recipientDeltaActual.String(),
+			expectedDeltas.Recipient.String(),
+			fdDeltaActual.String(),
+			expectedDeltas.FeeDistributor.String(),
+			bridgeDeltaActual.String(),
+			expectedDeltas.Bridge.String(),
+		)
 	}
 
 	var rep report
@@ -947,8 +1163,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Withdraw.PredictedID = predictedWithdrawalID.Hex()
 	rep.Withdraw.FeeBps = feeBpsAtReq
 
-	rep.Balances.RecipientWJuno = recipientBal.String()
-	rep.Balances.FeeDistributor = fdBal.String()
+	rep.Balances.RecipientWJuno = recipientBalAfter.String()
+	rep.Balances.FeeDistributor = fdBalAfter.String()
 
 	rep.Proof.PrepareOnly = cfg.PrepareOnly
 	rep.Proof.ProofInputsPath = proofInputsPath
@@ -969,6 +1185,36 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Proof.Boundless.LockTimeoutSec = cfg.Boundless.LockTimeoutSeconds
 		rep.Proof.Boundless.TimeoutSec = cfg.Boundless.TimeoutSeconds
 	}
+
+	rep.Invariants.Registry.OperatorCount = registryOperatorCount
+	rep.Invariants.Registry.Threshold = registryThreshold
+	rep.Invariants.Registry.AllActive = allOperatorsActive
+	rep.Invariants.DepositUsed = depositUsedInvariant
+	rep.Invariants.Withdrawal.Exists = !cfg.PrepareOnly
+	rep.Invariants.Withdrawal.Finalized = withdrawInvariant.Finalized
+	rep.Invariants.Withdrawal.Refunded = withdrawInvariant.Refunded
+	rep.Invariants.Withdrawal.FeeBps = withdrawInvariant.FeeBps
+	rep.Invariants.Withdrawal.Amount = withdrawInvariant.Amount.String()
+	rep.Invariants.Withdrawal.Expiry = withdrawInvariant.Expiry
+
+	rep.Invariants.Fees.Deposit.Fee = depositFees.Fee.String()
+	rep.Invariants.Fees.Deposit.Tip = depositFees.Tip.String()
+	rep.Invariants.Fees.Deposit.FeeToDistributor = depositFees.FeeToDistributor.String()
+	rep.Invariants.Fees.Deposit.Net = depositFees.Net.String()
+	rep.Invariants.Fees.Withdraw.Fee = withdrawFees.Fee.String()
+	rep.Invariants.Fees.Withdraw.Tip = withdrawFees.Tip.String()
+	rep.Invariants.Fees.Withdraw.FeeToDistributor = withdrawFees.FeeToDistributor.String()
+	rep.Invariants.Fees.Withdraw.Net = withdrawFees.Net.String()
+
+	rep.Invariants.BalanceDeltas.OwnerExpected = expectedDeltas.Owner.String()
+	rep.Invariants.BalanceDeltas.OwnerActual = ownerDeltaActual.String()
+	rep.Invariants.BalanceDeltas.RecipientExpected = expectedDeltas.Recipient.String()
+	rep.Invariants.BalanceDeltas.RecipientActual = recipientDeltaActual.String()
+	rep.Invariants.BalanceDeltas.FeeDistributorExpected = expectedDeltas.FeeDistributor.String()
+	rep.Invariants.BalanceDeltas.FeeDistributorActual = fdDeltaActual.String()
+	rep.Invariants.BalanceDeltas.BridgeExpected = expectedDeltas.Bridge.String()
+	rep.Invariants.BalanceDeltas.BridgeActual = bridgeDeltaActual.String()
+	rep.Invariants.BalanceDeltas.Matches = balanceDeltaMatches
 
 	return &rep, nil
 }
@@ -1390,6 +1636,157 @@ func callBalanceOf(ctx context.Context, token *bind.BoundContract, who common.Ad
 		return big.NewInt(0), nil
 	}
 	return out, nil
+}
+
+func callBool(ctx context.Context, c *bind.BoundContract, method string, args ...any) (bool, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return false, err
+	}
+	if len(res) != 1 {
+		return false, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	v, ok := res[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+	return v, nil
+}
+
+func callWithdrawal(ctx context.Context, bridge *bind.BoundContract, withdrawalID common.Hash) (withdrawalView, error) {
+	var res []any
+	if err := bridge.Call(&bind.CallOpts{Context: ctx}, &res, "getWithdrawal", withdrawalID); err != nil {
+		return withdrawalView{}, err
+	}
+	if len(res) != 7 {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal result count: %d", len(res))
+	}
+
+	requester, ok := res[0].(common.Address)
+	if !ok {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal requester type: %T", res[0])
+	}
+
+	amount, ok := res[1].(*big.Int)
+	if !ok || amount == nil {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal amount type: %T", res[1])
+	}
+
+	expiry, err := anyToUint64(res[2])
+	if err != nil {
+		return withdrawalView{}, fmt.Errorf("decode getWithdrawal expiry: %w", err)
+	}
+	feeBps, err := anyToUint64(res[3])
+	if err != nil {
+		return withdrawalView{}, fmt.Errorf("decode getWithdrawal feeBps: %w", err)
+	}
+
+	finalized, ok := res[4].(bool)
+	if !ok {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal finalized type: %T", res[4])
+	}
+	refunded, ok := res[5].(bool)
+	if !ok {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal refunded type: %T", res[5])
+	}
+	recipient, ok := res[6].([]byte)
+	if !ok {
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal recipient type: %T", res[6])
+	}
+
+	return withdrawalView{
+		Requester: requester,
+		Amount:    new(big.Int).Set(amount),
+		Expiry:    expiry,
+		FeeBps:    feeBps,
+		Finalized: finalized,
+		Refunded:  refunded,
+		Recipient: append([]byte(nil), recipient...),
+	}, nil
+}
+
+func anyToUint64(v any) (uint64, error) {
+	switch x := v.(type) {
+	case uint64:
+		return x, nil
+	case uint32:
+		return uint64(x), nil
+	case uint16:
+		return uint64(x), nil
+	case uint8:
+		return uint64(x), nil
+	case int64:
+		if x < 0 {
+			return 0, fmt.Errorf("negative int64: %d", x)
+		}
+		return uint64(x), nil
+	case *big.Int:
+		if x == nil {
+			return 0, nil
+		}
+		if x.Sign() < 0 {
+			return 0, fmt.Errorf("negative big.Int: %s", x.String())
+		}
+		return x.Uint64(), nil
+	default:
+		return 0, fmt.Errorf("unsupported type %T", v)
+	}
+}
+
+func computeFeeBreakdown(amount *big.Int, feeBps uint64, tipBps uint64) feeBreakdown {
+	safeAmount := big.NewInt(0)
+	if amount != nil {
+		safeAmount = new(big.Int).Set(amount)
+	}
+
+	fee := new(big.Int).Mul(safeAmount, new(big.Int).SetUint64(feeBps))
+	fee.Div(fee, big.NewInt(10_000))
+
+	tip := new(big.Int).Mul(fee, new(big.Int).SetUint64(tipBps))
+	tip.Div(tip, big.NewInt(10_000))
+
+	feeToDistributor := new(big.Int).Sub(fee, tip)
+	net := new(big.Int).Sub(safeAmount, fee)
+
+	return feeBreakdown{
+		Fee:              fee,
+		Tip:              tip,
+		FeeToDistributor: feeToDistributor,
+		Net:              net,
+	}
+}
+
+func expectedBalanceDeltas(in expectedBalanceDeltaInput) expectedBalanceDelta {
+	withdrawAmount := big.NewInt(0)
+	if in.WithdrawAmount != nil {
+		withdrawAmount = new(big.Int).Set(in.WithdrawAmount)
+	}
+
+	deposit := computeFeeBreakdown(in.DepositAmount, in.DepositFeeBps, in.RelayerTipBps)
+	withdraw := computeFeeBreakdown(in.WithdrawAmount, in.WithdrawFeeBps, in.RelayerTipBps)
+
+	owner := big.NewInt(0)
+	if in.RecipientEqualsOwner {
+		owner.Add(owner, deposit.Net)
+	}
+	owner.Add(owner, deposit.Tip)
+	owner.Sub(owner, withdrawAmount)
+	owner.Add(owner, withdraw.Tip)
+
+	recipient := big.NewInt(0)
+	if !in.RecipientEqualsOwner {
+		recipient = new(big.Int).Set(deposit.Net)
+	}
+
+	feeDistributor := new(big.Int).Add(deposit.FeeToDistributor, withdraw.FeeToDistributor)
+	bridge := big.NewInt(0)
+
+	return expectedBalanceDelta{
+		Owner:          owner,
+		Recipient:      recipient,
+		FeeDistributor: feeDistributor,
+		Bridge:         bridge,
+	}
 }
 
 func computePredictedWithdrawalID(chainID uint64, bridge common.Address, nonce uint64, requester common.Address, amount *big.Int, recipientUA []byte) (common.Hash, error) {
