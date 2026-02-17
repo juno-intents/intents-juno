@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+  "journal_guest/guest",
   "deposit_guest/core",
   "deposit_guest/guest",
   "withdraw_guest/core",

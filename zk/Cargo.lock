@@ -873,6 +873,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "journal-guest"
+version = "0.1.0"
+dependencies = [
+ "risc0-zkvm",
+]
+
+[[package]]
 name = "jubjub"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
