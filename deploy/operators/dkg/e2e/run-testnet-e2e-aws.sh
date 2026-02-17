@@ -234,7 +234,18 @@ remote_prepare_shared_host() {
       "$shared_kafka_port"
   )"
 
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+  local attempt
+  for attempt in $(seq 1 3); do
+    log "preparing shared services host (attempt $attempt/3)"
+    if ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"; then
+      return 0
+    fi
+    if [[ $attempt -lt 3 ]]; then
+      sleep 5
+    fi
+  done
+
+  return 1
 }
 
 wait_for_shared_connectivity_from_runner() {
@@ -890,8 +901,7 @@ command_run() {
 
   if [[ "$with_shared_services" == "true" ]]; then
     wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$shared_public_ip"
-    log "preparing shared services host"
-    remote_prepare_shared_host \
+    if ! remote_prepare_shared_host \
       "$ssh_key_private" \
       "$runner_ssh_user" \
       "$shared_public_ip" \
@@ -900,7 +910,9 @@ command_run() {
       "$shared_postgres_password" \
       "$shared_postgres_db" \
       "$shared_postgres_port" \
-      "$shared_kafka_port"
+      "$shared_kafka_port"; then
+      die "failed to prepare shared services host"
+    fi
   fi
 
   wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$runner_public_ip"

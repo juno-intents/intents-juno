@@ -106,6 +106,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\${shared_private_ip}:\${shared_kafka_port}\"" "shared kafka brokers assembly"
   assert_contains "$wrapper_script_text" "-raw shared_public_ip" "shared public ip output retrieval"
   assert_contains "$wrapper_script_text" "remote_prepare_shared_host" "shared host preparation hook"
+  assert_contains "$wrapper_script_text" "preparing shared services host (attempt " "shared host preparation retry logs"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
   assert_contains "$wrapper_script_text" "\"--shared-postgres-dsn\" \"\$shared_postgres_dsn\"" "remote shared postgres arg"
   assert_contains "$wrapper_script_text" "\"--shared-kafka-brokers\" \"\$shared_kafka_brokers\"" "remote shared kafka arg"
