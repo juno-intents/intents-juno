@@ -1012,12 +1012,14 @@ command_run() {
       "$shared_kafka_port"
 
     local shared_postgres_dsn shared_kafka_brokers
+    log "assembling shared service remote args"
     shared_postgres_dsn="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_private_ip}:${shared_postgres_port}/${shared_postgres_db}?sslmode=disable"
     shared_kafka_brokers="${shared_private_ip}:${shared_kafka_port}"
     remote_args+=(
       "--shared-postgres-dsn" "$shared_postgres_dsn"
       "--shared-kafka-brokers" "$shared_kafka_brokers"
     )
+    log "shared service remote args assembled"
   fi
   remote_args+=("${e2e_args[@]}")
 
