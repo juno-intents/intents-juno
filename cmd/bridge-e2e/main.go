@@ -108,7 +108,7 @@ const (
 	defaultBoundlessMinPriceWei  = "100000000000000"
 	defaultBoundlessMaxPriceWei  = "250000000000000"
 	defaultBoundlessLockStakeWei = "20000000000000000000"
-	defaultBoundlessMarketAddr   = "0x26759dbB201aFbA361Bec78E097Aa3942B0b4AB8"
+	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 	defaultBoundlessRouterAddr   = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
 	defaultBoundlessSetVerAddr   = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
 
@@ -1323,19 +1323,19 @@ func requestBoundlessProof(
 	biddingStart := time.Now().UTC().Unix() + int64(cfg.BiddingDelaySeconds)
 
 	args := []string{
-		"--rpc-url", cfg.RPCURL,
-		"--boundless-market-address", cfg.MarketAddress.Hex(),
-		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-		"--private-key", privateKey,
-		"request", "submit-offer",
+		"requestor", "submit",
 		"--program-url", programURL,
 		"--input-file", tmpPath,
 		"--proof-type", "groth16",
 		"--wait",
+		"--requestor-rpc-url", cfg.RPCURL,
+		"--requestor-private-key", privateKey,
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
 		"--min-price", cfg.MinPriceWei.String(),
 		"--max-price", cfg.MaxPriceWei.String(),
-		"--lock-stake", cfg.LockStakeWei.String(),
+		"--lock-collateral", cfg.LockStakeWei.String(),
 		"--bidding-start", strconv.FormatInt(biddingStart, 10),
 		"--ramp-up-period", strconv.FormatUint(cfg.RampUpPeriodSeconds, 10),
 		"--lock-timeout", strconv.FormatUint(cfg.LockTimeoutSeconds, 10),
@@ -1343,12 +1343,7 @@ func requestBoundlessProof(
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	cmd.Env = append(
-		os.Environ(),
-		"BOUNDLESS_MARKET_ADDRESS="+cfg.MarketAddress.Hex(),
-		"VERIFIER_ADDRESS="+cfg.VerifierRouterAddr.Hex(),
-		"SET_VERIFIER_ADDRESS="+cfg.SetVerifierAddr.Hex(),
-	)
+	cmd.Env = os.Environ()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -1401,8 +1396,10 @@ func boundlessPrivateInputVersion(privateInput []byte) string {
 }
 
 var (
-	boundlessRequestIDRegex = regexp.MustCompile(`Submitted request\s+(0x[0-9a-fA-F]+)`)
-	boundlessProofRegex     = regexp.MustCompile(`Journal:\s*\"(0x[0-9a-fA-F]*)\"\s*-\s*Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
+	boundlessRequestIDRegex   = regexp.MustCompile(`(?:Assigned Request ID:|Request ID:|Submitted request)\s*(0x[0-9a-fA-F]+)`)
+	boundlessLegacyProofRegex = regexp.MustCompile(`Journal:\s*\"(0x[0-9a-fA-F]*)\"\s*-\s*Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
+	boundlessFulfillmentRegex = regexp.MustCompile(`(?s)Fulfillment Data:\s*(\{.*?\})\s*Seal:`)
+	boundlessSealOnlyRegex    = regexp.MustCompile(`Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
 )
 
 func parseBoundlessWaitOutput(output []byte) (boundlessWaitResult, error) {
@@ -1414,13 +1411,49 @@ func parseBoundlessWaitOutput(output []byte) (boundlessWaitResult, error) {
 	}
 	requestID := strings.ToLower(strings.TrimSpace(requestMatches[len(requestMatches)-1][1]))
 
-	proofMatches := boundlessProofRegex.FindAllStringSubmatch(raw, -1)
-	if len(proofMatches) == 0 || len(proofMatches[len(proofMatches)-1]) < 3 {
+	if legacyMatches := boundlessLegacyProofRegex.FindAllStringSubmatch(raw, -1); len(legacyMatches) > 0 {
+		last := legacyMatches[len(legacyMatches)-1]
+		journalHex := strings.ToLower(strings.TrimSpace(last[1]))
+		sealHex := strings.ToLower(strings.TrimSpace(last[2]))
+		if sealHex == "" {
+			return boundlessWaitResult{}, errors.New("boundless output missing seal")
+		}
+		return boundlessWaitResult{
+			RequestIDHex: requestID,
+			JournalHex:   journalHex,
+			SealHex:      sealHex,
+		}, nil
+	}
+
+	fulfillmentMatch := boundlessFulfillmentRegex.FindStringSubmatch(raw)
+	if len(fulfillmentMatch) < 2 {
 		return boundlessWaitResult{}, errors.New("boundless output missing journal/seal")
 	}
-	last := proofMatches[len(proofMatches)-1]
-	journalHex := strings.ToLower(strings.TrimSpace(last[1]))
-	sealHex := strings.ToLower(strings.TrimSpace(last[2]))
+
+	var fulfillment struct {
+		ImageIDAndJournal []json.RawMessage `json:"ImageIdAndJournal"`
+	}
+	if err := json.Unmarshal([]byte(fulfillmentMatch[1]), &fulfillment); err != nil {
+		return boundlessWaitResult{}, fmt.Errorf("decode fulfillment data: %w", err)
+	}
+	if len(fulfillment.ImageIDAndJournal) < 2 {
+		return boundlessWaitResult{}, errors.New("boundless output missing journal/seal")
+	}
+
+	var journalHex string
+	if err := json.Unmarshal(fulfillment.ImageIDAndJournal[1], &journalHex); err != nil {
+		return boundlessWaitResult{}, fmt.Errorf("decode fulfillment journal: %w", err)
+	}
+	journalHex = strings.ToLower(strings.TrimSpace(journalHex))
+	if journalHex == "" {
+		return boundlessWaitResult{}, errors.New("boundless output missing journal")
+	}
+
+	sealMatch := boundlessSealOnlyRegex.FindStringSubmatch(raw)
+	if len(sealMatch) < 2 {
+		return boundlessWaitResult{}, errors.New("boundless output missing seal")
+	}
+	sealHex := strings.ToLower(strings.TrimSpace(sealMatch[1]))
 	if sealHex == "" {
 		return boundlessWaitResult{}, errors.New("boundless output missing seal")
 	}

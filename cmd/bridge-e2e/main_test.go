@@ -484,6 +484,46 @@ func TestParseBoundlessWaitOutput(t *testing.T) {
 	}
 }
 
+func TestParseBoundlessWaitOutput_RequestorSubmitFormat(t *testing.T) {
+	t.Parallel()
+
+	out := strings.Join([]string{
+		"Submitting Proof Request from YAML [Unknown Network]",
+		"  Assigned Request ID: 0x28ae6a6bc48ac3e425df6e5cbce845eb0001ceae5952e986",
+		"",
+		"✓ Request submitted successfully",
+		"",
+		"ℹ Waiting for request fulfillment...",
+		"",
+		"✓ Request fulfilled!",
+		"",
+		"Fulfillment Data:",
+		"{",
+		`  "ImageIdAndJournal": [`,
+		"    [1,2,3,4,5,6,7,8],",
+		`    "0x01020304"`,
+		"  ]",
+		"}",
+		"",
+		"Seal:",
+		`"0x99aa55"`,
+	}, "\n")
+
+	got, err := parseBoundlessWaitOutput([]byte(out))
+	if err != nil {
+		t.Fatalf("parseBoundlessWaitOutput: %v", err)
+	}
+	if got.RequestIDHex != "0x28ae6a6bc48ac3e425df6e5cbce845eb0001ceae5952e986" {
+		t.Fatalf("request id: got %q", got.RequestIDHex)
+	}
+	if got.JournalHex != "0x01020304" {
+		t.Fatalf("journal: got %q", got.JournalHex)
+	}
+	if got.SealHex != "0x99aa55" {
+		t.Fatalf("seal: got %q", got.SealHex)
+	}
+}
+
 func TestParseBoundlessWaitOutput_MissingSeal(t *testing.T) {
 	t.Parallel()
 

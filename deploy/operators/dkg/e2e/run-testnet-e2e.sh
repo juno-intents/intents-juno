@@ -35,6 +35,12 @@ Options:
   --boundless-auto                 auto-submit/wait Boundless proofs and callback with returned seals
   --boundless-bin <path>           boundless binary (default: boundless)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
+  --boundless-market-address <addr> boundless market contract address
+                                   (default: 0xFd152dADc5183870710FE54f939Eae3aB9F0fE82)
+  --boundless-verifier-router-address <addr> boundless verifier router address
+                                   (default: 0x0b144e07a0826182b6b59788c34b32bfa86fb711)
+  --boundless-set-verifier-address <addr> boundless set verifier address
+                                   (default: 0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104)
   --boundless-input-mode <mode>    boundless private input mode: private-input | journal-bytes-v1 (default: private-input)
   --boundless-requestor-key-file <path> requestor key file for boundless (required with --boundless-auto)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required with --boundless-auto)
@@ -148,6 +154,9 @@ command_run() {
   local boundless_auto="false"
   local boundless_bin="boundless"
   local boundless_rpc_url="https://mainnet.base.org"
+  local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+  local boundless_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
+  local boundless_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
   local boundless_input_mode="private-input"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
@@ -265,6 +274,21 @@ command_run() {
       --boundless-rpc-url)
         [[ $# -ge 2 ]] || die "missing value for --boundless-rpc-url"
         boundless_rpc_url="$2"
+        shift 2
+        ;;
+      --boundless-market-address)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-market-address"
+        boundless_market_address="$2"
+        shift 2
+        ;;
+      --boundless-verifier-router-address)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-verifier-router-address"
+        boundless_verifier_router_address="$2"
+        shift 2
+        ;;
+      --boundless-set-verifier-address)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-set-verifier-address"
+        boundless_set_verifier_address="$2"
         shift 2
         ;;
       --boundless-input-mode)
@@ -437,6 +461,11 @@ command_run() {
   ensure_command go
   if [[ "$boundless_auto" == "true" ]]; then
     ensure_command "$boundless_bin"
+    local boundless_version
+    boundless_version="$("$boundless_bin" --version 2>/dev/null || true)"
+    if [[ "$boundless_version" == boundless-cli\ 0.* ]]; then
+      die "boundless-auto requires boundless-cli v1.x+; installed version is '$boundless_version'"
+    fi
   fi
   ensure_dir "$(dirname "$output_path")"
 
@@ -532,6 +561,9 @@ command_run() {
       "--boundless-auto"
       "--boundless-bin" "$boundless_bin"
       "--boundless-rpc-url" "$boundless_rpc_url"
+      "--boundless-market-address" "$boundless_market_address"
+      "--boundless-verifier-router-address" "$boundless_verifier_router_address"
+      "--boundless-set-verifier-address" "$boundless_set_verifier_address"
       "--boundless-input-mode" "$boundless_input_mode"
       "--boundless-requestor-key-file" "$boundless_requestor_key_file"
       "--boundless-deposit-program-url" "$boundless_deposit_program_url"

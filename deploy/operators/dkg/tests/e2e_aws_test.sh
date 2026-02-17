@@ -16,6 +16,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: unexpected=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   # shellcheck source=../e2e/run-testnet-e2e-aws.sh
   source "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
@@ -28,17 +38,10 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "run_apt_with_retry update -y" "apt update command"
   assert_contains "$script_text" "run_apt_with_retry install -y build-essential" "apt install command"
   assert_contains "$script_text" "for attempt in \$(seq 1 3)" "generic retry loop"
-  assert_contains "$script_text" "dump_boundless_failure_context()" "boundless install failure diagnostics helper"
-  assert_contains "$script_text" "prepare_boundless_market_patch()" "boundless market patch helper"
-  assert_contains "$script_text" "https://static.crates.io/crates/boundless-market/boundless-market-0.14.1.crate" "boundless market crate url"
-  assert_contains "$script_text" "https://static.crates.io/crates/boundless-cli/boundless-cli-0.14.1.crate" "boundless cli crate url"
-  assert_contains "$script_text" "__BOUNDLESS_DUMMY__" "boundless parser workaround marker"
-  assert_contains "$script_text" "perl -0pi -e" "boundless parser workaround patch command"
-  assert_contains "$script_text" "[patch.crates-io]" "boundless local patch section"
-  assert_contains "$script_text" "boundless-market build.rs patched:" "boundless parser workaround patched path log"
-  assert_contains "$script_text" "boundless-market build.rs patched" "boundless parser workaround log"
-  assert_contains "$script_text" "prepare_boundless_market_patch" "boundless market patch invocation"
-  assert_contains "$script_text" "run_with_retry cargo install --path" "boundless cli install retry"
+  assert_contains "$script_text" "run_with_retry cargo install --locked --git https://github.com/boundless-xyz/boundless --branch release-1.2 --bin boundless --force" "boundless cli install command"
+  assert_contains "$script_text" "boundless --version" "boundless version check"
+  assert_not_contains "$script_text" "boundless-market-0.14.1" "legacy boundless crate pin removed"
+  assert_not_contains "$script_text" "__BOUNDLESS_DUMMY__" "legacy parser workaround removed"
 }
 
 test_remote_shared_prepare_script_waits_for_services() {
@@ -128,6 +131,12 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
   assert_contains "$e2e_script_text" "--boundless-input-mode" "boundless input mode option"
   assert_contains "$e2e_script_text" "\"--boundless-input-mode\" \"\$boundless_input_mode\"" "boundless input mode bridge forwarding"
+  assert_contains "$e2e_script_text" "--boundless-market-address" "boundless market option"
+  assert_contains "$e2e_script_text" "--boundless-verifier-router-address" "boundless verifier router option"
+  assert_contains "$e2e_script_text" "--boundless-set-verifier-address" "boundless set verifier option"
+  assert_contains "$e2e_script_text" "\"--boundless-market-address\" \"\$boundless_market_address\"" "boundless market bridge forwarding"
+  assert_contains "$e2e_script_text" "\"--boundless-verifier-router-address\" \"\$boundless_verifier_router_address\"" "boundless verifier router bridge forwarding"
+  assert_contains "$e2e_script_text" "\"--boundless-set-verifier-address\" \"\$boundless_set_verifier_address\"" "boundless set verifier bridge forwarding"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
 }
 
