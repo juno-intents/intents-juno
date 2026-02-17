@@ -397,7 +397,14 @@ foundryup
 run_with_retry rustup toolchain install 1.91.1 --profile minimal
 run_with_retry rustup default 1.91.1
 rustc --version
-run_with_retry cargo +1.91.1 install --locked --git https://github.com/boundless-xyz/boundless --branch release-1.2 --bin boundless --force boundless-cli
+BOUNDLESS_CLI_SOURCE_DIR="/tmp/boundless-cli-release-1.2"
+if [[ -d "\$BOUNDLESS_CLI_SOURCE_DIR/.git" ]]; then
+  git -C "\$BOUNDLESS_CLI_SOURCE_DIR" fetch --depth 1 origin release-1.2
+  git -C "\$BOUNDLESS_CLI_SOURCE_DIR" checkout --force FETCH_HEAD
+else
+  git clone --depth 1 --branch release-1.2 https://github.com/boundless-xyz/boundless "\$BOUNDLESS_CLI_SOURCE_DIR"
+fi
+run_with_retry cargo +1.91.1 install --path "\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli" --locked --force
 boundless --version
 run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
 
