@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"math/big"
 	"os"
@@ -384,6 +385,21 @@ func TestValidateBoundlessPrivateInputCompatibility_AllowsUnknownOrBinaryInput(t
 		[]byte(`{"version":"custom.private_input.v9"}`),
 	); err != nil {
 		t.Fatalf("unexpected custom version compatibility error: %v", err)
+	}
+}
+
+func TestProofInputsFile_WithdrawAmountMarshals(t *testing.T) {
+	t.Parallel()
+
+	var f proofInputsFile
+	f.Withdraw.Amount = "10000"
+
+	b, err := json.Marshal(f)
+	if err != nil {
+		t.Fatalf("marshal proof inputs: %v", err)
+	}
+	if !strings.Contains(string(b), `"amount":"10000"`) {
+		t.Fatalf("expected withdraw amount in json, got: %s", string(b))
 	}
 }
 

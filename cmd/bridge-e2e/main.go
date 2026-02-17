@@ -206,6 +206,7 @@ type proofInputsFile struct {
 		} `json:"proof_input"`
 		RecipientUAHex string `json:"recipient_ua_hex"`
 		WithdrawalID   string `json:"withdrawal_id"`
+		Amount         string `json:"amount,omitempty"`
 		NetAmount      string `json:"net_amount"`
 	} `json:"withdraw"`
 }
@@ -864,6 +865,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		proofBundle.Withdraw.ProofInput.PrivateInput = hexutil.Encode(withdrawPrivateInput)
 		proofBundle.Withdraw.RecipientUAHex = hexutil.Encode(recipientUA)
 		proofBundle.Withdraw.WithdrawalID = withdrawalID.Hex()
+		proofBundle.Withdraw.Amount = withdrawAmount.String()
 		proofBundle.Withdraw.NetAmount = net.String()
 
 		proofInputsPath, err = writeJSONArtifact(cfg.ProofInputsOut, proofBundle)
