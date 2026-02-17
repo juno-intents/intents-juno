@@ -13,11 +13,6 @@ on:
         required: true
         default: "c7i.4xlarge"
         type: string
-      aws_root_volume_gb:
-        description: "Root EBS volume size in GiB"
-        required: true
-        default: "200"
-        type: string
       ssh_allowed_cidr:
         description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
         required: false
@@ -224,7 +219,7 @@ jobs:
             --workdir "$WORKDIR"
             --aws-region "${{ inputs.aws_region }}"
             --aws-instance-type "${{ inputs.aws_instance_type }}"
-            --aws-root-volume-gb "${{ inputs.aws_root_volume_gb }}"
+            --aws-root-volume-gb "200"
             --base-funder-key-file ".ci/secrets/base-funder.key"
             --juno-funder-key-file ".ci/secrets/juno-funder.key"
           )

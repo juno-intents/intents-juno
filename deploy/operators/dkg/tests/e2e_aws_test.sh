@@ -131,6 +131,25 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
 }
 
+test_aws_workflow_dispatch_input_count_within_limit() {
+  local workflow
+  workflow="$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml"
+
+  local count
+  count="$(awk '
+    /workflow_dispatch:/ { in_dispatch=1; next }
+    in_dispatch && /inputs:/ { in_inputs=1; next }
+    in_dispatch && in_inputs && /^[^[:space:]]/ { in_inputs=0; in_dispatch=0 }
+    in_inputs && /^      [a-zA-Z0-9_]+:$/ { count++ }
+    END { print count+0 }
+  ' "$workflow")"
+
+  if (( count > 25 )); then
+    printf 'workflow_dispatch input count exceeds github limit: got=%s max=25\n' "$count" >&2
+    exit 1
+  fi
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_remote_shared_prepare_script_waits_for_services
@@ -138,6 +157,7 @@ main() {
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e
   test_local_e2e_supports_shared_infra_validation
+  test_aws_workflow_dispatch_input_count_within_limit
 }
 
 main "$@"
