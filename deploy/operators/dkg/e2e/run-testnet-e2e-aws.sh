@@ -235,11 +235,26 @@ remote_prepare_shared_host() {
   )"
 
   local attempt
+  local prep_log
+  local ssh_status
   for attempt in $(seq 1 3); do
     log "preparing shared services host (attempt $attempt/3)"
-    if ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"; then
+    prep_log="$(mktemp)"
+    set +e
+    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")" 2>&1 | tee "$prep_log"
+    ssh_status="${PIPESTATUS[0]}"
+    set -e
+
+    if (( ssh_status == 0 )); then
+      rm -f "$prep_log"
       return 0
     fi
+    if grep -q "shared services ready on host" "$prep_log"; then
+      log "shared services reported ready despite ssh exit status=$ssh_status; continuing"
+      rm -f "$prep_log"
+      return 0
+    fi
+    rm -f "$prep_log"
     if [[ $attempt -lt 3 ]]; then
       sleep 5
     fi
