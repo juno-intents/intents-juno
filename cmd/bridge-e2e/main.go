@@ -79,6 +79,8 @@ type boundlessConfig struct {
 	RPCURL             string
 	InputMode          string
 	MarketAddress      common.Address
+	VerifierRouterAddr common.Address
+	SetVerifierAddr    common.Address
 	RequestorKeyHex    string
 	DepositProgramURL  string
 	WithdrawProgramURL string
@@ -106,7 +108,9 @@ const (
 	defaultBoundlessMinPriceWei  = "100000000000000"
 	defaultBoundlessMaxPriceWei  = "250000000000000"
 	defaultBoundlessLockStakeWei = "20000000000000000000"
-	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+	defaultBoundlessMarketAddr   = "0x26759dbB201aFbA361Bec78E097Aa3942B0b4AB8"
+	defaultBoundlessRouterAddr   = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
+	defaultBoundlessSetVerAddr   = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
@@ -172,6 +176,8 @@ type report struct {
 			RPCURL            string `json:"rpc_url,omitempty"`
 			InputMode         string `json:"input_mode,omitempty"`
 			MarketAddress     string `json:"market_address,omitempty"`
+			VerifierRouter    string `json:"verifier_router_address,omitempty"`
+			SetVerifier       string `json:"set_verifier_address,omitempty"`
 			DepositRequestID  string `json:"deposit_request_id,omitempty"`
 			WithdrawRequestID string `json:"withdraw_request_id,omitempty"`
 			MinPriceWei       string `json:"min_price_wei,omitempty"`
@@ -380,7 +386,11 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
 	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input or journal-bytes-v1")
 	var boundlessMarketAddressHex string
+	var boundlessVerifierRouterHex string
+	var boundlessSetVerifierHex string
 	fs.StringVar(&boundlessMarketAddressHex, "boundless-market-address", defaultBoundlessMarketAddr, "Boundless market contract address")
+	fs.StringVar(&boundlessVerifierRouterHex, "boundless-verifier-router-address", defaultBoundlessRouterAddr, "Boundless verifier router contract address")
+	fs.StringVar(&boundlessSetVerifierHex, "boundless-set-verifier-address", defaultBoundlessSetVerAddr, "Boundless set verifier contract address")
 	fs.StringVar(&boundlessRequestorKeyFile, "boundless-requestor-key-file", "", "file containing requestor private key hex for Boundless")
 	fs.StringVar(&boundlessRequestorKeyHex, "boundless-requestor-key-hex", "", "requestor private key hex for Boundless")
 	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
@@ -490,6 +500,14 @@ func parseArgs(args []string) (config, error) {
 		return cfg, errors.New("--boundless-market-address must be a valid hex address")
 	}
 	cfg.Boundless.MarketAddress = common.HexToAddress(boundlessMarketAddressHex)
+	if !common.IsHexAddress(boundlessVerifierRouterHex) {
+		return cfg, errors.New("--boundless-verifier-router-address must be a valid hex address")
+	}
+	cfg.Boundless.VerifierRouterAddr = common.HexToAddress(boundlessVerifierRouterHex)
+	if !common.IsHexAddress(boundlessSetVerifierHex) {
+		return cfg, errors.New("--boundless-set-verifier-address must be a valid hex address")
+	}
+	cfg.Boundless.SetVerifierAddr = common.HexToAddress(boundlessSetVerifierHex)
 	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
 
 	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
@@ -956,7 +974,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
 				ctx,
 				cfg.Boundless,
-				cfg.VerifierAddress,
 				"deposit",
 				cfg.Boundless.DepositProgramURL,
 				depositBoundlessInput,
@@ -1069,7 +1086,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
 			ctx,
 			cfg.Boundless,
-			cfg.VerifierAddress,
 			"withdraw",
 			cfg.Boundless.WithdrawProgramURL,
 			withdrawBoundlessInput,
@@ -1236,6 +1252,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
 		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
 		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
+		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
+		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
 		rep.Proof.Boundless.DepositRequestID = depositRequestID
 		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
 		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()
@@ -1283,7 +1301,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 func requestBoundlessProof(
 	ctx context.Context,
 	cfg boundlessConfig,
-	setVerifierAddress common.Address,
 	pipeline string,
 	programURL string,
 	privateInput []byte,
@@ -1308,7 +1325,8 @@ func requestBoundlessProof(
 	args := []string{
 		"--rpc-url", cfg.RPCURL,
 		"--boundless-market-address", cfg.MarketAddress.Hex(),
-		"--set-verifier-address", setVerifierAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
 		"--private-key", privateKey,
 		"request", "submit-offer",
 		"--program-url", programURL,
@@ -1325,7 +1343,12 @@ func requestBoundlessProof(
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	cmd.Env = append(os.Environ(), "BOUNDLESS_MARKET_ADDRESS="+cfg.MarketAddress.Hex())
+	cmd.Env = append(
+		os.Environ(),
+		"BOUNDLESS_MARKET_ADDRESS="+cfg.MarketAddress.Hex(),
+		"VERIFIER_ADDRESS="+cfg.VerifierRouterAddr.Hex(),
+		"SET_VERIFIER_ADDRESS="+cfg.SetVerifierAddr.Hex(),
+	)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
