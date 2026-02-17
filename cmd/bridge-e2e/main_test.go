@@ -282,6 +282,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-bin", "boundless",
 		"--boundless-rpc-url", "https://mainnet.base.org",
 		"--boundless-input-mode", "journal-bytes-v1",
+		"--boundless-market-address", "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82",
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
@@ -304,6 +305,9 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	}
 	if cfg.Boundless.InputMode != "journal-bytes-v1" {
 		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
+	}
+	if cfg.Boundless.MarketAddress != common.HexToAddress("0xFd152dADc5183870710FE54f939Eae3aB9F0fE82") {
+		t.Fatalf("unexpected boundless market address: %s", cfg.Boundless.MarketAddress.Hex())
 	}
 	if cfg.Boundless.RequestorKeyHex == "" {
 		t.Fatalf("expected requestor key loaded from file")
@@ -346,6 +350,39 @@ func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--boundless-input-mode") {
 		t.Fatalf("expected boundless input mode error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoRejectsInvalidMarketAddress(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-market-address", "not-an-address",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-market-address") {
+		t.Fatalf("expected boundless market address error, got: %v", err)
 	}
 }
 

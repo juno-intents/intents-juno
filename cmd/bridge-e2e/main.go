@@ -78,6 +78,7 @@ type boundlessConfig struct {
 	Bin                string
 	RPCURL             string
 	InputMode          string
+	MarketAddress      common.Address
 	RequestorKeyHex    string
 	DepositProgramURL  string
 	WithdrawProgramURL string
@@ -105,6 +106,7 @@ const (
 	defaultBoundlessMinPriceWei  = "100000000000000"
 	defaultBoundlessMaxPriceWei  = "250000000000000"
 	defaultBoundlessLockStakeWei = "20000000000000000000"
+	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
@@ -169,6 +171,7 @@ type report struct {
 			Enabled           bool   `json:"enabled"`
 			RPCURL            string `json:"rpc_url,omitempty"`
 			InputMode         string `json:"input_mode,omitempty"`
+			MarketAddress     string `json:"market_address,omitempty"`
 			DepositRequestID  string `json:"deposit_request_id,omitempty"`
 			WithdrawRequestID string `json:"withdraw_request_id,omitempty"`
 			MinPriceWei       string `json:"min_price_wei,omitempty"`
@@ -376,6 +379,8 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
 	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
 	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input or journal-bytes-v1")
+	var boundlessMarketAddressHex string
+	fs.StringVar(&boundlessMarketAddressHex, "boundless-market-address", defaultBoundlessMarketAddr, "Boundless market contract address")
 	fs.StringVar(&boundlessRequestorKeyFile, "boundless-requestor-key-file", "", "file containing requestor private key hex for Boundless")
 	fs.StringVar(&boundlessRequestorKeyHex, "boundless-requestor-key-hex", "", "requestor private key hex for Boundless")
 	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
@@ -481,6 +486,10 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	if !common.IsHexAddress(boundlessMarketAddressHex) {
+		return cfg, errors.New("--boundless-market-address must be a valid hex address")
+	}
+	cfg.Boundless.MarketAddress = common.HexToAddress(boundlessMarketAddressHex)
 	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
 
 	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
@@ -1224,6 +1233,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if cfg.Boundless.Auto {
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
 		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
+		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
 		rep.Proof.Boundless.DepositRequestID = depositRequestID
 		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
 		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()
@@ -1309,7 +1319,9 @@ func requestBoundlessProof(
 		"--timeout", strconv.FormatUint(cfg.TimeoutSeconds, 10),
 	}
 
-	out, err := exec.CommandContext(ctx, cfg.Bin, args...).CombinedOutput()
+	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
+	cmd.Env = append(os.Environ(), "BOUNDLESS_MARKET_ADDRESS="+cfg.MarketAddress.Hex())
+	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
 		if msg == "" {
