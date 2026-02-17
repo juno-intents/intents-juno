@@ -41,6 +41,30 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "run_with_retry cargo install --path" "boundless cli install retry"
 }
 
+test_remote_shared_prepare_script_waits_for_services() {
+  # shellcheck source=../e2e/run-testnet-e2e-aws.sh
+  source "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
+
+  local script_text
+  script_text="$(
+    build_remote_shared_prepare_script \
+      "10.0.0.10" \
+      "postgres" \
+      "pw" \
+      "intents_e2e" \
+      "5432" \
+      "9092"
+  )"
+
+  assert_contains "$script_text" "cloud-init status --wait" "cloud-init wait"
+  assert_contains "$script_text" "run_apt_with_retry install -y ca-certificates curl docker.io netcat-openbsd postgresql-client" "shared host dependencies"
+  assert_contains "$script_text" "docker pull \"\$image\"" "docker pull retry"
+  assert_contains "$script_text" "intents-shared-postgres" "postgres container configured"
+  assert_contains "$script_text" "intents-shared-kafka" "kafka container configured"
+  assert_contains "$script_text" "pg_isready -h 127.0.0.1 -p 5432 -U 'postgres' -d 'intents_e2e'" "postgres readiness check"
+  assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/127.0.0.1/9092'" "kafka readiness check"
+}
+
 test_aws_wrapper_uses_ssh_keepalive_options() {
   local wrapper_script
   local keepalive_count
@@ -80,6 +104,9 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "provision_shared_services" "terraform shared services flag"
   assert_contains "$wrapper_script_text" "shared_postgres_dsn=\"postgres://" "shared postgres dsn assembly"
   assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\${shared_private_ip}:\${shared_kafka_port}\"" "shared kafka brokers assembly"
+  assert_contains "$wrapper_script_text" "-raw shared_public_ip" "shared public ip output retrieval"
+  assert_contains "$wrapper_script_text" "remote_prepare_shared_host" "shared host preparation hook"
+  assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
   assert_contains "$wrapper_script_text" "\"--shared-postgres-dsn\" \"\$shared_postgres_dsn\"" "remote shared postgres arg"
   assert_contains "$wrapper_script_text" "\"--shared-kafka-brokers\" \"\$shared_kafka_brokers\"" "remote shared kafka arg"
 }
@@ -96,6 +123,7 @@ test_local_e2e_supports_shared_infra_validation() {
 
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
+  test_remote_shared_prepare_script_waits_for_services
   test_aws_wrapper_uses_ssh_keepalive_options
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e

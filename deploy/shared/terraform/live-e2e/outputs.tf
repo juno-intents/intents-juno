@@ -28,6 +28,11 @@ output "shared_instance_id" {
   value       = try(aws_instance.shared[0].id, null)
 }
 
+output "shared_public_ip" {
+  description = "Shared services public IPv4 address."
+  value       = try(aws_instance.shared[0].public_ip, null)
+}
+
 output "shared_private_ip" {
   description = "Shared services private IPv4 address."
   value       = try(aws_instance.shared[0].private_ip, null)

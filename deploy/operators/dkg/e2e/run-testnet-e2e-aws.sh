@@ -203,6 +203,68 @@ remote_prepare_runner() {
   ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
 
+remote_prepare_shared_host() {
+  local ssh_private_key="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local shared_private_ip="$4"
+  local shared_postgres_user="$5"
+  local shared_postgres_password="$6"
+  local shared_postgres_db="$7"
+  local shared_postgres_port="$8"
+  local shared_kafka_port="$9"
+
+  local -a ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+  )
+
+  local remote_script
+  remote_script="$(
+    build_remote_shared_prepare_script \
+      "$shared_private_ip" \
+      "$shared_postgres_user" \
+      "$shared_postgres_password" \
+      "$shared_postgres_db" \
+      "$shared_postgres_port" \
+      "$shared_kafka_port"
+  )"
+
+  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+}
+
+wait_for_shared_connectivity_from_runner() {
+  local ssh_private_key="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local shared_private_ip="$4"
+  local shared_postgres_port="$5"
+  local shared_kafka_port="$6"
+
+  local -a ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+  )
+
+  local remote_script
+  remote_script="$(
+    build_runner_shared_probe_script \
+      "$shared_private_ip" \
+      "$shared_postgres_port" \
+      "$shared_kafka_port"
+  )"
+
+  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+}
+
 build_remote_prepare_script() {
   local repo_commit="$1"
   cat <<EOF
@@ -369,6 +431,124 @@ git checkout ${repo_commit}
 git submodule update --init --recursive
 mkdir -p .ci/secrets
 chmod 700 .ci/secrets
+EOF
+}
+
+build_remote_shared_prepare_script() {
+  local shared_private_ip="$1"
+  local shared_postgres_user="$2"
+  local shared_postgres_password="$3"
+  local shared_postgres_db="$4"
+  local shared_postgres_port="$5"
+  local shared_kafka_port="$6"
+
+  cat <<EOF
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+if command -v cloud-init >/dev/null 2>&1; then
+  sudo cloud-init status --wait || true
+fi
+
+run_apt_with_retry() {
+  local attempt
+  for attempt in \$(seq 1 30); do
+    if sudo apt-get "\$@"; then
+      return 0
+    fi
+    if [[ \$attempt -lt 30 ]]; then
+      sleep 5
+    fi
+  done
+  return 1
+}
+
+docker_pull_with_retry() {
+  local image="\$1"
+  local attempt
+  for attempt in \$(seq 1 12); do
+    if sudo docker pull "\$image"; then
+      return 0
+    fi
+    if [[ \$attempt -lt 12 ]]; then
+      sleep 5
+    fi
+  done
+  return 1
+}
+
+run_apt_with_retry update -y
+run_apt_with_retry install -y ca-certificates curl docker.io netcat-openbsd postgresql-client
+sudo systemctl enable --now docker
+
+docker_pull_with_retry postgres:16-alpine
+docker_pull_with_retry docker.redpanda.com/redpandadata/redpanda:v24.3.7
+
+sudo docker rm -f intents-shared-postgres intents-shared-kafka >/dev/null 2>&1 || true
+
+sudo docker run -d \
+  --name intents-shared-postgres \
+  --restart unless-stopped \
+  -e POSTGRES_USER='${shared_postgres_user}' \
+  -e POSTGRES_PASSWORD='${shared_postgres_password}' \
+  -e POSTGRES_DB='${shared_postgres_db}' \
+  -p ${shared_postgres_port}:5432 \
+  postgres:16-alpine
+
+sudo docker run -d \
+  --name intents-shared-kafka \
+  --restart unless-stopped \
+  -p ${shared_kafka_port}:9092 \
+  docker.redpanda.com/redpandadata/redpanda:v24.3.7 \
+  redpanda start \
+    --overprovisioned \
+    --smp 1 \
+    --memory 1G \
+    --reserve-memory 0M \
+    --node-id 0 \
+    --check=false \
+    --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+    --advertise-kafka-addr PLAINTEXT://${shared_private_ip}:${shared_kafka_port}
+
+for attempt in \$(seq 1 90); do
+  if sudo docker exec intents-shared-postgres pg_isready -h 127.0.0.1 -p 5432 -U '${shared_postgres_user}' -d '${shared_postgres_db}' >/dev/null 2>&1 \
+    && timeout 2 bash -lc '</dev/tcp/127.0.0.1/${shared_kafka_port}' >/dev/null 2>&1; then
+    echo "shared services ready on host"
+    exit 0
+  fi
+  if [[ \$attempt -lt 90 ]]; then
+    sleep 2
+  fi
+done
+
+echo "shared service readiness failed; docker status follows:" >&2
+sudo docker ps -a >&2 || true
+sudo docker logs --tail 80 intents-shared-postgres >&2 || true
+sudo docker logs --tail 80 intents-shared-kafka >&2 || true
+exit 1
+EOF
+}
+
+build_runner_shared_probe_script() {
+  local shared_private_ip="$1"
+  local shared_postgres_port="$2"
+  local shared_kafka_port="$3"
+
+  cat <<EOF
+set -euo pipefail
+for attempt in \$(seq 1 90); do
+  if timeout 2 bash -lc '</dev/tcp/${shared_private_ip}/${shared_postgres_port}' >/dev/null 2>&1 \
+    && timeout 2 bash -lc '</dev/tcp/${shared_private_ip}/${shared_kafka_port}' >/dev/null 2>&1; then
+    echo "shared services reachable from runner"
+    exit 0
+  fi
+  if [[ \$attempt -lt 90 ]]; then
+    sleep 2
+  fi
+done
+
+echo "timed out waiting for shared services connectivity from runner to ${shared_private_ip}" >&2
+exit 1
 EOF
 }
 
@@ -688,6 +868,7 @@ command_run() {
   )"
 
   local shared_private_ip=""
+  local shared_public_ip=""
   if [[ "$with_shared_services" == "true" ]]; then
     shared_private_ip="$(
       env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
@@ -697,6 +878,29 @@ command_run() {
         -raw shared_private_ip
     )"
     [[ -n "$shared_private_ip" && "$shared_private_ip" != "null" ]] || die "shared services were requested but terraform output shared_private_ip is empty"
+    shared_public_ip="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_public_ip
+    )"
+    [[ -n "$shared_public_ip" && "$shared_public_ip" != "null" ]] || die "shared services were requested but terraform output shared_public_ip is empty"
+  fi
+
+  if [[ "$with_shared_services" == "true" ]]; then
+    wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$shared_public_ip"
+    log "preparing shared services host"
+    remote_prepare_shared_host \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$shared_public_ip" \
+      "$shared_private_ip" \
+      "$shared_postgres_user" \
+      "$shared_postgres_password" \
+      "$shared_postgres_db" \
+      "$shared_postgres_port" \
+      "$shared_kafka_port"
   fi
 
   wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$runner_public_ip"
@@ -745,6 +949,15 @@ command_run() {
     remote_args+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
   fi
   if [[ "$with_shared_services" == "true" ]]; then
+    log "waiting for shared services connectivity from runner"
+    wait_for_shared_connectivity_from_runner \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$shared_private_ip" \
+      "$shared_postgres_port" \
+      "$shared_kafka_port"
+
     local shared_postgres_dsn shared_kafka_brokers
     shared_postgres_dsn="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_private_ip}:${shared_postgres_port}/${shared_postgres_db}?sslmode=disable"
     shared_kafka_brokers="${shared_private_ip}:${shared_kafka_port}"
