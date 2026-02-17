@@ -349,42 +349,24 @@ func TestParseBoundlessWaitOutput_MissingSeal(t *testing.T) {
 	}
 }
 
-func TestValidateBoundlessPrivateInputCompatibility_RejectsKnownJSONEnvelope(t *testing.T) {
+func TestBoundlessPrivateInputVersion_DetectsKnownJSONEnvelope(t *testing.T) {
 	t.Parallel()
 
-	err := validateBoundlessPrivateInputCompatibility(
-		"deposit",
-		"https://example.invalid/deposit-guest.elf",
-		[]byte(`{"version":"deposit.private_input.v1","items":[]}`),
-	)
-	if err == nil {
-		t.Fatalf("expected compatibility error")
-	}
-	if !strings.Contains(err.Error(), "incompatible") {
-		t.Fatalf("expected incompatibility error, got: %v", err)
-	}
-	if !strings.Contains(err.Error(), "deposit.private_input.v1") {
-		t.Fatalf("expected version hint in error, got: %v", err)
+	got := boundlessPrivateInputVersion([]byte(`{"version":"deposit.private_input.v1","items":[]}`))
+	if got != "deposit.private_input.v1" {
+		t.Fatalf("input version: got %q", got)
 	}
 }
 
-func TestValidateBoundlessPrivateInputCompatibility_AllowsUnknownOrBinaryInput(t *testing.T) {
+func TestBoundlessPrivateInputVersion_IgnoresBinaryOrMissingVersion(t *testing.T) {
 	t.Parallel()
 
-	if err := validateBoundlessPrivateInputCompatibility(
-		"deposit",
-		"https://example.invalid/deposit-guest.elf",
-		[]byte{0x01, 0x02, 0x03},
-	); err != nil {
-		t.Fatalf("unexpected binary compatibility error: %v", err)
+	if got := boundlessPrivateInputVersion([]byte{0x01, 0x02, 0x03}); got != "" {
+		t.Fatalf("expected empty version for binary input, got %q", got)
 	}
 
-	if err := validateBoundlessPrivateInputCompatibility(
-		"deposit",
-		"https://example.invalid/deposit-guest.elf",
-		[]byte(`{"version":"custom.private_input.v9"}`),
-	); err != nil {
-		t.Fatalf("unexpected custom version compatibility error: %v", err)
+	if got := boundlessPrivateInputVersion([]byte(`{"items":[]}`)); got != "" {
+		t.Fatalf("expected empty version for json without version, got %q", got)
 	}
 }
 
