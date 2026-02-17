@@ -956,6 +956,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
 				ctx,
 				cfg.Boundless,
+				cfg.VerifierAddress,
 				"deposit",
 				cfg.Boundless.DepositProgramURL,
 				depositBoundlessInput,
@@ -1068,6 +1069,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
 			ctx,
 			cfg.Boundless,
+			cfg.VerifierAddress,
 			"withdraw",
 			cfg.Boundless.WithdrawProgramURL,
 			withdrawBoundlessInput,
@@ -1281,6 +1283,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 func requestBoundlessProof(
 	ctx context.Context,
 	cfg boundlessConfig,
+	setVerifierAddress common.Address,
 	pipeline string,
 	programURL string,
 	privateInput []byte,
@@ -1304,6 +1307,8 @@ func requestBoundlessProof(
 
 	args := []string{
 		"--rpc-url", cfg.RPCURL,
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--set-verifier-address", setVerifierAddress.Hex(),
 		"--private-key", privateKey,
 		"request", "submit-offer",
 		"--program-url", programURL,
