@@ -24,11 +24,12 @@ func TestMemoryStore_UpsertConfirmed_DedupesAndRejectsMismatch(t *testing.T) {
 	recip[19] = 0x01
 
 	d := Deposit{
-		DepositID:     id,
-		Commitment:    cm,
-		LeafIndex:     7,
-		Amount:        1000,
-		BaseRecipient: recip,
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: []byte{0x01, 0x02, 0x03},
 	}
 
 	job, created, err := s.UpsertConfirmed(context.Background(), d)
@@ -55,6 +56,49 @@ func TestMemoryStore_UpsertConfirmed_DedupesAndRejectsMismatch(t *testing.T) {
 	_, _, err = s.UpsertConfirmed(context.Background(), d2)
 	if err == nil {
 		t.Fatalf("expected mismatch error")
+	}
+}
+
+func TestMemoryStore_Get_DefensiveCopyWitness(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x01
+	var cm [32]byte
+	cm[0] = 0xaa
+	var recip [20]byte
+	recip[19] = 0x01
+
+	origWitness := []byte{0x10, 0x20, 0x30}
+	if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: origWitness,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get #1: %v", err)
+	}
+	if len(job.Deposit.ProofWitnessItem) != len(origWitness) {
+		t.Fatalf("witness len mismatch")
+	}
+	job.Deposit.ProofWitnessItem[0] ^= 0xff
+
+	job2, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get #2: %v", err)
+	}
+	if job2.Deposit.ProofWitnessItem[0] != origWitness[0] {
+		t.Fatalf("store witness mutated by caller")
 	}
 }
 

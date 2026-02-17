@@ -45,8 +45,10 @@ type withdrawRequestedV1 struct {
 	Amount       uint64 `json:"amount"`
 
 	RecipientUA string `json:"recipientUA"` // hex bytes (no 0x required)
-	Expiry      uint64 `json:"expiry"`      // unix seconds
-	FeeBps      uint32 `json:"feeBps"`
+	// Optional per-withdrawal witness payload for binary withdraw guest input.
+	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
+	Expiry           uint64 `json:"expiry"` // unix seconds
+	FeeBps           uint32 `json:"feeBps"`
 }
 
 func main() {
@@ -474,15 +476,22 @@ func main() {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
+				proofWitnessItem, err := decodeHexBytesOptional(reqMsg.ProofWitnessItem)
+				if err != nil {
+					log.Error("parse proofWitnessItem", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
+					continue
+				}
 				expiry := time.Unix(int64(reqMsg.Expiry), 0).UTC()
 
 				w := withdraw.Withdrawal{
-					ID:          id,
-					Requester:   requester,
-					Amount:      reqMsg.Amount,
-					FeeBps:      reqMsg.FeeBps,
-					RecipientUA: ua,
-					Expiry:      expiry,
+					ID:               id,
+					Requester:        requester,
+					Amount:           reqMsg.Amount,
+					FeeBps:           reqMsg.FeeBps,
+					RecipientUA:      ua,
+					ProofWitnessItem: proofWitnessItem,
+					Expiry:           expiry,
 				}
 
 				cctx, cancel := withTimeout(ctx, 5*time.Second)
@@ -548,6 +557,18 @@ func decodeHexBytes(s string) ([]byte, error) {
 	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
 	if s == "" {
 		return nil, fmt.Errorf("empty hex")
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decode hex: %w", err)
+	}
+	return b, nil
+}
+
+func decodeHexBytesOptional(s string) ([]byte, error) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
+	if s == "" {
+		return nil, nil
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil {

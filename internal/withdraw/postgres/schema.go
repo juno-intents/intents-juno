@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	amount BIGINT NOT NULL,
 	fee_bps INTEGER NOT NULL,
 	recipient_ua BYTEA NOT NULL,
+	proof_witness_item BYTEA,
 	expiry TIMESTAMPTZ NOT NULL,
 
 	claimed_by TEXT,
@@ -20,11 +21,15 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	CONSTRAINT amount_positive CHECK (amount > 0),
 	CONSTRAINT fee_bps_range CHECK (fee_bps >= 0 AND fee_bps <= 10000),
 	CONSTRAINT recipient_ua_nonempty CHECK (octet_length(recipient_ua) > 0),
+	CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923),
 	CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
 );
 
 CREATE INDEX IF NOT EXISTS withdrawal_requests_claim_idx ON withdrawal_requests (claim_expires_at);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_expiry_idx ON withdrawal_requests (expiry);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS proof_witness_item_len;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923);
 
 CREATE TABLE IF NOT EXISTS withdrawal_batches (
 	batch_id BYTEA PRIMARY KEY,

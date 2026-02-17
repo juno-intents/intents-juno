@@ -36,6 +36,9 @@ type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
 	DepositImageID common.Hash
+	// Optional 64-byte OWallet IVK. When set, relayer requires per-deposit
+	// witness items and builds binary guest input for real deposit proofs.
+	OWalletIVKBytes []byte
 
 	OperatorAddresses []common.Address
 	OperatorThreshold int
@@ -59,6 +62,9 @@ type DepositEvent struct {
 	LeafIndex  uint64
 	Amount     uint64
 	Memo       []byte
+	// Optional per-deposit witness payload. Layout must match
+	// proverinput.DepositWitnessItemLen.
+	ProofWitnessItem []byte
 }
 
 type CheckpointPackage struct {
@@ -76,13 +82,18 @@ type Relayer struct {
 
 	expectedBridgeMemo [20]byte
 
-	batcher *batching.Batcher[bridgeabi.MintItem]
+	batcher *batching.Batcher[mintBatchItem]
 	staged  map[common.Hash]struct{}
 
 	quorumVerifier *checkpoint.QuorumVerifier
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
+}
+
+type mintBatchItem struct {
+	Mint             bridgeabi.MintItem
+	ProofWitnessItem []byte
 }
 
 func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
@@ -119,6 +130,9 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	if cfg.ProofPriority < 0 {
 		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
 	}
+	if n := len(cfg.OWalletIVKBytes); n != 0 && n != 64 {
+		return nil, fmt.Errorf("%w: OWalletIVKBytes must be 64 bytes when set", ErrInvalidConfig)
+	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
 	}
@@ -129,7 +143,7 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
-	b, err := batching.New[bridgeabi.MintItem](batching.Config{
+	b, err := batching.New[mintBatchItem](batching.Config{
 		MaxItems: cfg.MaxItems,
 		MaxAge:   cfg.MaxAge,
 		Now:      cfg.Now,
@@ -203,11 +217,12 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 
 	idBytes := idempotency.DepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
 	job, _, err := r.store.UpsertConfirmed(ctx, deposit.Deposit{
-		DepositID:     idBytes,
-		Commitment:    [32]byte(ev.Commitment),
-		LeafIndex:     ev.LeafIndex,
-		Amount:        ev.Amount,
-		BaseRecipient: [20]byte(recipient),
+		DepositID:        idBytes,
+		Commitment:       [32]byte(ev.Commitment),
+		LeafIndex:        ev.LeafIndex,
+		Amount:           ev.Amount,
+		BaseRecipient:    [20]byte(recipient),
+		ProofWitnessItem: append([]byte(nil), ev.ProofWitnessItem...),
 	})
 	if err != nil {
 		return err
@@ -281,7 +296,10 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 			Amount:    new(big.Int).SetUint64(job.Deposit.Amount),
 		}
 		r.staged[id] = struct{}{}
-		batch, ok := r.batcher.Add(job.Deposit.DepositID, item)
+		batch, ok := r.batcher.Add(job.Deposit.DepositID, mintBatchItem{
+			Mint:             item,
+			ProofWitnessItem: append([]byte(nil), job.Deposit.ProofWitnessItem...),
+		})
 		if !ok {
 			continue
 		}
@@ -294,14 +312,16 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	return nil
 }
 
-func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opSigs [][]byte, batch batching.Batch[bridgeabi.MintItem]) error {
+func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opSigs [][]byte, batch batching.Batch[mintBatchItem]) error {
 	if len(batch.Items) == 0 {
 		return nil
 	}
 
 	items := make([]bridgeabi.MintItem, 0, len(batch.Items))
+	witnessItems := make([][]byte, 0, len(batch.Items))
 	for _, it := range batch.Items {
-		items = append(items, it.Val)
+		items = append(items, it.Val.Mint)
+		witnessItems = append(witnessItems, it.Val.ProofWitnessItem)
 	}
 
 	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
@@ -314,7 +334,7 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	privateInput, err := proverinput.EncodeDepositPrivateInputV1(cp, opSigs, items)
+	privateInput, err := r.encodePrivateInput(cp, opSigs, items, witnessItems)
 	if err != nil {
 		return err
 	}
@@ -389,8 +409,22 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	return nil
 }
 
-func (r *Relayer) unstageBatch(batch batching.Batch[bridgeabi.MintItem]) {
+func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {
 	for _, item := range batch.Items {
 		delete(r.staged, common.Hash(item.ID))
 	}
+}
+
+func (r *Relayer) encodePrivateInput(cp checkpoint.Checkpoint, opSigs [][]byte, items []bridgeabi.MintItem, witnessItems [][]byte) ([]byte, error) {
+	if len(r.cfg.OWalletIVKBytes) == 64 {
+		var ivk [64]byte
+		copy(ivk[:], r.cfg.OWalletIVKBytes)
+		for i, w := range witnessItems {
+			if len(w) == 0 {
+				return nil, fmt.Errorf("depositrelayer: missing proof witness item for batch index %d", i)
+			}
+		}
+		return proverinput.EncodeDepositGuestPrivateInput(cp, ivk, witnessItems)
+	}
+	return proverinput.EncodeDepositPrivateInputV1(cp, opSigs, items)
 }

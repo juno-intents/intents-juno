@@ -1,6 +1,7 @@
 package withdrawfinalizer
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"errors"
@@ -15,6 +16,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -610,6 +612,165 @@ func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 	}
 	if sender.calls != 0 {
 		t.Fatalf("expected no send calls, got %d", sender.calls)
+	}
+}
+
+func TestFinalizer_UsesBinaryGuestInputWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	witness := bytes.Repeat([]byte{0x66}, proverinput.WithdrawWitnessItemLen)
+	w := withdraw.Withdrawal{
+		ID:               seq32(0x00),
+		Amount:           1000,
+		FeeBps:           50,
+		RecipientUA:      []byte{0x01},
+		Expiry:           now.Add(24 * time.Hour),
+		ProofWitnessItem: witness,
+	}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	var ovk [32]byte
+	for i := range ovk {
+		ovk[i] = byte(0x80 + i)
+	}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		OWalletOVKBytes:   ovk[:],
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := f.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	wantInput, err := proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, [][]byte{witness})
+	if err != nil {
+		t.Fatalf("EncodeWithdrawGuestPrivateInput: %v", err)
+	}
+	if !bytes.Equal(prover.gotReq.PrivateInput, wantInput) {
+		t.Fatalf("proof requester private input mismatch")
+	}
+}
+
+func TestFinalizer_ErrorsWhenGuestInputConfiguredButWitnessMissing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{
+		ID:          seq32(0x00),
+		Amount:      1000,
+		FeeBps:      50,
+		RecipientUA: []byte{0x01},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var ovk [32]byte
+	ovk[0] = 0x01
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		OWalletOVKBytes:   ovk[:],
+	}, store, leaseStore, &recordingSender{}, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+	if err == nil {
+		t.Fatalf("expected missing witness error")
+	}
+	if !strings.Contains(err.Error(), "proof witness item") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

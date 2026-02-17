@@ -411,6 +411,7 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, bas
 
 func cloneWithdrawal(w Withdrawal) Withdrawal {
 	w.RecipientUA = append([]byte(nil), w.RecipientUA...)
+	w.ProofWitnessItem = append([]byte(nil), w.ProofWitnessItem...)
 	return w
 }
 
@@ -418,7 +419,8 @@ func withdrawalEqual(a, b Withdrawal) bool {
 	if a.ID != b.ID || a.Requester != b.Requester || a.Amount != b.Amount || a.FeeBps != b.FeeBps || !a.Expiry.Equal(b.Expiry) {
 		return false
 	}
-	return bytes.Equal(a.RecipientUA, b.RecipientUA)
+	return bytes.Equal(a.RecipientUA, b.RecipientUA) &&
+		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
 }
 
 func sortedUnique32(in [][32]byte) ([][32]byte, error) {

@@ -47,6 +47,9 @@ type Config struct {
 	BaseChainID     uint64
 	BridgeAddress   common.Address
 	WithdrawImageID common.Hash
+	// Optional 32-byte OWallet OVK. When set, finalizer requires per-withdrawal
+	// witness items and builds binary guest input for real withdraw proofs.
+	OWalletOVKBytes []byte
 
 	OperatorAddresses []common.Address
 	OperatorThreshold int
@@ -104,6 +107,9 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 	}
 	if cfg.ProofPriority < 0 {
 		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
+	}
+	if n := len(cfg.OWalletOVKBytes); n != 0 && n != 32 {
+		return nil, fmt.Errorf("%w: OWalletOVKBytes must be 32 bytes when set", ErrInvalidConfig)
 	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
@@ -226,6 +232,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	cp := *f.checkpoint
 
 	items := make([]bridgeabi.FinalizeItem, 0, len(b.WithdrawalIDs))
+	witnessItems := make([][]byte, 0, len(b.WithdrawalIDs))
 	for _, wid := range b.WithdrawalIDs {
 		w, err := f.store.GetWithdrawal(ctx, wid)
 		if err != nil {
@@ -242,6 +249,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 			RecipientUAHash: crypto.Keccak256Hash(w.RecipientUA),
 			NetAmount:       new(big.Int).SetUint64(net),
 		})
+		witnessItems = append(witnessItems, append([]byte(nil), w.ProofWitnessItem...))
 	}
 
 	journal, err := bridgeabi.EncodeWithdrawJournal(bridgeabi.WithdrawJournal{
@@ -257,7 +265,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
-	privateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cp, f.opSigs, items)
+	privateInput, err := f.encodePrivateInput(cp, items, witnessItems)
 	if err != nil {
 		return err
 	}
@@ -395,4 +403,18 @@ func (f *Finalizer) persistProofSealArtifact(ctx context.Context, batchID [32]by
 		return fmt.Errorf("withdrawfinalizer: persist proof seal artifact: %w", err)
 	}
 	return nil
+}
+
+func (f *Finalizer) encodePrivateInput(cp checkpoint.Checkpoint, items []bridgeabi.FinalizeItem, witnessItems [][]byte) ([]byte, error) {
+	if len(f.cfg.OWalletOVKBytes) == 32 {
+		var ovk [32]byte
+		copy(ovk[:], f.cfg.OWalletOVKBytes)
+		for i, w := range witnessItems {
+			if len(w) == 0 {
+				return nil, fmt.Errorf("withdrawfinalizer: missing proof witness item for batch index %d", i)
+			}
+		}
+		return proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, witnessItems)
+	}
+	return proverinput.EncodeWithdrawPrivateInputV1(cp, f.opSigs, items)
 }

@@ -1,6 +1,7 @@
 package deposit
 
 import (
+	"bytes"
 	"context"
 	"sync"
 	"time"
@@ -42,7 +43,7 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 		return j, true, nil
 	}
 
-	if j.Deposit != d {
+	if !depositEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
 	}
 
@@ -64,6 +65,7 @@ func (s *MemoryStore) Get(_ context.Context, depositID [32]byte) (Job, error) {
 	}
 
 	// Defensive copy of slices.
+	j.Deposit = cloneDeposit(j.Deposit)
 	if j.ProofSeal != nil {
 		j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 	}
@@ -84,6 +86,7 @@ func (s *MemoryStore) ListByState(_ context.Context, state State, limit int) ([]
 		if j.State != state {
 			continue
 		}
+		j.Deposit = cloneDeposit(j.Deposit)
 		if j.ProofSeal != nil {
 			j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 		}
@@ -120,6 +123,7 @@ func (s *MemoryStore) ClaimConfirmed(_ context.Context, owner string, ttl time.D
 			owner:     owner,
 			expiresAt: expiresAt,
 		}
+		j.Deposit = cloneDeposit(j.Deposit)
 		if j.ProofSeal != nil {
 			j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 		}
@@ -293,4 +297,18 @@ func uniqueDepositIDs(ids [][32]byte) [][32]byte {
 		out = append(out, id)
 	}
 	return out
+}
+
+func cloneDeposit(d Deposit) Deposit {
+	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	return d
+}
+
+func depositEqual(a, b Deposit) bool {
+	return a.DepositID == b.DepositID &&
+		a.Commitment == b.Commitment &&
+		a.LeafIndex == b.LeafIndex &&
+		a.Amount == b.Amount &&
+		a.BaseRecipient == b.BaseRecipient &&
+		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
 }

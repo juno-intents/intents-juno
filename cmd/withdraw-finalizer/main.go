@@ -52,6 +52,7 @@ func main() {
 		operators       = flag.String("operators", "", "comma-separated operator addresses for checkpoint quorum verification (required)")
 		threshold       = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 		withdrawImageID = flag.String("withdraw-image-id", "", "withdraw zkVM image id (bytes32 hex, required)")
+		owalletOVK      = flag.String("owallet-ovk", "", "optional 32-byte OWallet OVK hex for binary guest private input mode")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
@@ -126,6 +127,15 @@ func main() {
 	imageID, err := parseHash32Strict(*withdrawImageID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: parse --withdraw-image-id: %v\n", err)
+		os.Exit(2)
+	}
+	owalletOVKBytes, err := decodeHexBytesOptional(*owalletOVK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse --owallet-ovk: %v\n", err)
+		os.Exit(2)
+	}
+	if n := len(owalletOVKBytes); n != 0 && n != 32 {
+		fmt.Fprintf(os.Stderr, "error: --owallet-ovk must be 32 bytes when set, got %d\n", n)
 		os.Exit(2)
 	}
 	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
@@ -231,6 +241,7 @@ func main() {
 		GasLimit:            *gasLimit,
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
+		OWalletOVKBytes:     owalletOVKBytes,
 	}, store, leaseStore, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)
@@ -442,6 +453,18 @@ func decodeHexBytes(s string) ([]byte, error) {
 	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
 	if s == "" {
 		return nil, fmt.Errorf("empty hex")
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decode hex: %w", err)
+	}
+	return b, nil
+}
+
+func decodeHexBytesOptional(s string) ([]byte, error) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
+	if s == "" {
+		return nil, nil
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil {

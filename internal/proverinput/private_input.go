@@ -1,13 +1,30 @@
 package proverinput
 
 import (
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"math"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+)
+
+const (
+	// Matches MAX_DEPOSIT_ITEMS in zk/deposit_guest/core/src/lib.rs.
+	MaxDepositWitnessItems = 100
+	// Matches MAX_WITHDRAW_ITEMS in zk/withdraw_guest/core/src/lib.rs.
+	MaxWithdrawWitnessItems = 100
+
+	// Byte length of one deposit witness item in the exact guest read order:
+	// leaf_index(4) + auth_path(32*32) + orchard_action(32*5 + 580 + 80).
+	DepositWitnessItemLen = 4 + (32 * 32) + (32*5 + 580 + 80)
+	// Byte length of one withdraw witness item in the exact guest read order:
+	// withdrawal_id(32) + recipient_raw_address(43) + leaf_index(4)
+	// + auth_path(32*32) + orchard_action(32*5 + 580 + 80).
+	WithdrawWitnessItemLen = 32 + 43 + 4 + (32 * 32) + (32*5 + 580 + 80)
 )
 
 type depositPrivateInputV1 struct {
@@ -82,4 +99,56 @@ func encodeSignaturesHex(sigs [][]byte) []string {
 		out = append(out, "0x"+hex.EncodeToString(sig))
 	}
 	return out
+}
+
+// EncodeDepositGuestPrivateInput builds the raw binary stdin payload expected by
+// zk/deposit_guest/guest/src/main.rs.
+func EncodeDepositGuestPrivateInput(cp checkpoint.Checkpoint, owalletIVK [64]byte, witnessItems [][]byte) ([]byte, error) {
+	if cp.BaseChainID > math.MaxUint32 {
+		return nil, fmt.Errorf("proverinput: base chain id %d exceeds uint32", cp.BaseChainID)
+	}
+	if len(witnessItems) > MaxDepositWitnessItems {
+		return nil, fmt.Errorf("proverinput: too many deposit witness items: got %d max %d", len(witnessItems), MaxDepositWitnessItems)
+	}
+
+	buf := make([]byte, 0, 32+4+20+64+4+len(witnessItems)*DepositWitnessItemLen)
+	buf = append(buf, cp.FinalOrchardRoot[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(cp.BaseChainID))
+	buf = append(buf, cp.BridgeContract[:]...)
+	buf = append(buf, owalletIVK[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(witnessItems)))
+
+	for i, item := range witnessItems {
+		if len(item) != DepositWitnessItemLen {
+			return nil, fmt.Errorf("proverinput: deposit witness item %d has len %d, want %d", i, len(item), DepositWitnessItemLen)
+		}
+		buf = append(buf, item...)
+	}
+	return buf, nil
+}
+
+// EncodeWithdrawGuestPrivateInput builds the raw binary stdin payload expected by
+// zk/withdraw_guest/guest/src/main.rs.
+func EncodeWithdrawGuestPrivateInput(cp checkpoint.Checkpoint, owalletOVK [32]byte, witnessItems [][]byte) ([]byte, error) {
+	if cp.BaseChainID > math.MaxUint32 {
+		return nil, fmt.Errorf("proverinput: base chain id %d exceeds uint32", cp.BaseChainID)
+	}
+	if len(witnessItems) > MaxWithdrawWitnessItems {
+		return nil, fmt.Errorf("proverinput: too many withdraw witness items: got %d max %d", len(witnessItems), MaxWithdrawWitnessItems)
+	}
+
+	buf := make([]byte, 0, 32+4+20+32+4+len(witnessItems)*WithdrawWitnessItemLen)
+	buf = append(buf, cp.FinalOrchardRoot[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(cp.BaseChainID))
+	buf = append(buf, cp.BridgeContract[:]...)
+	buf = append(buf, owalletOVK[:]...)
+	buf = binary.LittleEndian.AppendUint32(buf, uint32(len(witnessItems)))
+
+	for i, item := range witnessItems {
+		if len(item) != WithdrawWitnessItemLen {
+			return nil, fmt.Errorf("proverinput: withdraw witness item %d has len %d, want %d", i, len(item), WithdrawWitnessItemLen)
+		}
+		buf = append(buf, item...)
+	}
+	return buf, nil
 }

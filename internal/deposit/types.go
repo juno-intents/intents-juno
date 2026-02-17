@@ -43,6 +43,11 @@ type Deposit struct {
 	LeafIndex     uint64
 	Amount        uint64
 	BaseRecipient [20]byte
+
+	// ProofWitnessItem is the optional per-deposit witness payload expected by
+	// the deposit guest, excluding checkpoint fields, IVK, and item count.
+	// Layout must match proverinput.DepositWitnessItemLen.
+	ProofWitnessItem []byte
 }
 
 type Job struct {
@@ -54,4 +59,3 @@ type Job struct {
 	ProofSeal []byte
 	TxHash    [32]byte
 }
-

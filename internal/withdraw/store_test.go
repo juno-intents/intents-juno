@@ -17,11 +17,12 @@ func TestMemoryStore_UpsertRequested_DedupesAndRejectsMismatch(t *testing.T) {
 	id[0] = 0x01
 
 	w := Withdrawal{
-		ID:          id,
-		Amount:      1000,
-		FeeBps:      50,
-		RecipientUA: []byte{0x01},
-		Expiry:      now.Add(24 * time.Hour),
+		ID:               id,
+		Amount:           1000,
+		FeeBps:           50,
+		RecipientUA:      []byte{0x01},
+		ProofWitnessItem: []byte{0x09, 0x08},
+		Expiry:           now.Add(24 * time.Hour),
 	}
 
 	got, created, err := s.UpsertRequested(context.Background(), w)
@@ -59,11 +60,12 @@ func TestMemoryStore_GetWithdrawal_DefensiveCopy(t *testing.T) {
 
 	id := seq32(0x01)
 	w := Withdrawal{
-		ID:          id,
-		Amount:      1000,
-		FeeBps:      0,
-		RecipientUA: []byte{0x01, 0x02, 0x03},
-		Expiry:      now.Add(24 * time.Hour),
+		ID:               id,
+		Amount:           1000,
+		FeeBps:           0,
+		RecipientUA:      []byte{0x01, 0x02, 0x03},
+		ProofWitnessItem: []byte{0xaa, 0xbb, 0xcc},
+		Expiry:           now.Add(24 * time.Hour),
 	}
 	_, _, err := s.UpsertRequested(context.Background(), w)
 	if err != nil {
@@ -80,6 +82,7 @@ func TestMemoryStore_GetWithdrawal_DefensiveCopy(t *testing.T) {
 
 	// Mutate returned slice and ensure store isn't affected.
 	got.RecipientUA[0] ^= 0xff
+	got.ProofWitnessItem[0] ^= 0xff
 	got2, err := s.GetWithdrawal(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetWithdrawal #2: %v", err)

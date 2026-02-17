@@ -52,11 +52,12 @@ func TestStore_StateMachine(t *testing.T) {
 	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000456").Bytes())
 
 	d := deposit.Deposit{
-		DepositID:     id,
-		Commitment:    cm,
-		LeafIndex:     7,
-		Amount:        1000,
-		BaseRecipient: recip,
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: []byte{0x01, 0x02, 0x03},
 	}
 
 	job, created, err := s.UpsertConfirmed(ctx, d)

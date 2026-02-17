@@ -41,11 +41,12 @@ type checkpointPackageV1 struct {
 }
 
 type depositEventV1 struct {
-	Version   string `json:"version"`
-	CM        string `json:"cm"`
-	LeafIndex uint64 `json:"leafIndex"`
-	Amount    uint64 `json:"amount"`
-	Memo      string `json:"memo"`
+	Version          string `json:"version"`
+	CM               string `json:"cm"`
+	LeafIndex        uint64 `json:"leafIndex"`
+	Amount           uint64 `json:"amount"`
+	Memo             string `json:"memo"`
+	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
 }
 
 func main() {
@@ -59,6 +60,7 @@ func main() {
 		threshold   = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 
 		depositImageID = flag.String("deposit-image-id", "", "deposit zkVM image id (bytes32 hex, required)")
+		owalletIVK     = flag.String("owallet-ivk", "", "optional 64-byte OWallet IVK hex for binary guest private input mode")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
@@ -125,6 +127,15 @@ func main() {
 	imageID, err := parseHash32Strict(*depositImageID)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: parse --deposit-image-id: %v\n", err)
+		os.Exit(2)
+	}
+	owalletIVKBytes, err := decodeHexBytesOptional(*owalletIVK)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: parse --owallet-ivk: %v\n", err)
+		os.Exit(2)
+	}
+	if n := len(owalletIVKBytes); n != 0 && n != 64 {
+		fmt.Fprintf(os.Stderr, "error: --owallet-ivk must be 64 bytes when set, got %d\n", n)
 		os.Exit(2)
 	}
 	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
@@ -242,6 +253,7 @@ func main() {
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
 		Now:                 time.Now,
+		OWalletIVKBytes:     owalletIVKBytes,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
@@ -382,13 +394,20 @@ func main() {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
+				proofWitnessItem, err := decodeHexBytesOptional(depMsg.ProofWitnessItem)
+				if err != nil {
+					log.Error("parse proofWitnessItem", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
+					continue
+				}
 
 				cctx, cancel := withTimeout(ctx, *submitTimeout)
 				err = relayer.IngestDeposit(cctx, depositrelayer.DepositEvent{
-					Commitment: cm,
-					LeafIndex:  depMsg.LeafIndex,
-					Amount:     depMsg.Amount,
-					Memo:       memoBytes,
+					Commitment:       cm,
+					LeafIndex:        depMsg.LeafIndex,
+					Amount:           depMsg.Amount,
+					Memo:             memoBytes,
+					ProofWitnessItem: proofWitnessItem,
 				})
 				cancel()
 				if err != nil {
@@ -516,6 +535,18 @@ func decodeHexBytes(s string) ([]byte, error) {
 	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
 	if s == "" {
 		return nil, fmt.Errorf("empty hex")
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("decode hex: %w", err)
+	}
+	return b, nil
+}
+
+func decodeHexBytesOptional(s string) ([]byte, error) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
+	if s == "" {
+		return nil, nil
 	}
 	b, err := hex.DecodeString(s)
 	if err != nil {

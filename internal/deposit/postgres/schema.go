@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 	leaf_index BIGINT NOT NULL,
 	amount BIGINT NOT NULL,
 	base_recipient BYTEA NOT NULL,
+	proof_witness_item BYTEA,
 
 	state SMALLINT NOT NULL,
 
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 	CONSTRAINT deposit_id_len CHECK (octet_length(deposit_id) = 32),
 	CONSTRAINT commitment_len CHECK (octet_length(commitment) = 32),
 	CONSTRAINT base_recipient_len CHECK (octet_length(base_recipient) = 20),
+	CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848),
 	CONSTRAINT leaf_index_nonneg CHECK (leaf_index >= 0),
 	CONSTRAINT amount_nonneg CHECK (amount >= 0),
 	CONSTRAINT state_range CHECK (state >= 1 AND state <= 6),
@@ -41,6 +43,9 @@ CREATE INDEX IF NOT EXISTS deposit_jobs_state_idx ON deposit_jobs (state);
 CREATE INDEX IF NOT EXISTS deposit_jobs_claim_idx ON deposit_jobs (claim_expires_at);
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS claim_owner_nonempty;
 ALTER TABLE deposit_jobs ADD CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
+ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS proof_witness_item_len;
+ALTER TABLE deposit_jobs ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848);
 `

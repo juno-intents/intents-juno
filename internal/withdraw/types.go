@@ -22,6 +22,10 @@ type Withdrawal struct {
 	Amount      uint64
 	FeeBps      uint32
 	RecipientUA []byte
+	// ProofWitnessItem is the optional per-withdrawal witness payload expected
+	// by the withdraw guest, excluding checkpoint fields, OVK, and item count.
+	// Layout must match proverinput.WithdrawWitnessItemLen.
+	ProofWitnessItem []byte
 
 	// Expiry is the on-chain expiry time (block.timestamp seconds) as a UTC time.
 	Expiry time.Time

@@ -45,9 +45,9 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 
 	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
 
-	w0 := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
-	w1 := withdraw.Withdrawal{ID: seq32(0x20), Amount: 2, FeeBps: 0, RecipientUA: []byte{0x02}, Expiry: now.Add(24 * time.Hour)}
-	w2 := withdraw.Withdrawal{ID: seq32(0x40), Amount: 3, FeeBps: 0, RecipientUA: []byte{0x03}, Expiry: now.Add(24 * time.Hour)}
+	w0 := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, ProofWitnessItem: []byte{0x10}, Expiry: now.Add(24 * time.Hour)}
+	w1 := withdraw.Withdrawal{ID: seq32(0x20), Amount: 2, FeeBps: 0, RecipientUA: []byte{0x02}, ProofWitnessItem: []byte{0x20}, Expiry: now.Add(24 * time.Hour)}
+	w2 := withdraw.Withdrawal{ID: seq32(0x40), Amount: 3, FeeBps: 0, RecipientUA: []byte{0x03}, ProofWitnessItem: []byte{0x30}, Expiry: now.Add(24 * time.Hour)}
 
 	if _, created, err := s.UpsertRequested(ctx, w0); err != nil || !created {
 		t.Fatalf("UpsertRequested w0: created=%v err=%v", created, err)

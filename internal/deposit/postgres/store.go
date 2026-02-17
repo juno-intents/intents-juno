@@ -56,24 +56,25 @@ func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit
 			leaf_index,
 			amount,
 			base_recipient,
+			proof_witness_item,
 			state,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
 		ON CONFLICT (deposit_id) DO NOTHING
-	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], int16(deposit.StateConfirmed))
+	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], d.ProofWitnessItem, int16(deposit.StateConfirmed))
 	if err != nil {
 		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: insert: %w", err)
 	}
 	if tag.RowsAffected() == 1 {
-		return deposit.Job{Deposit: d, State: deposit.StateConfirmed}, true, nil
+		return deposit.Job{Deposit: cloneDeposit(d), State: deposit.StateConfirmed}, true, nil
 	}
 
 	job, err := s.Get(ctx, d.DepositID)
 	if err != nil {
 		return deposit.Job{}, false, err
 	}
-	if job.Deposit != d {
+	if !depositEqual(job.Deposit, d) {
 		return deposit.Job{}, false, deposit.ErrDepositMismatch
 	}
 
@@ -104,6 +105,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		leafIndex        int64
 		amount           int64
 		baseRecipientRaw []byte
+		proofWitnessRaw  []byte
 		state            int16
 
 		cpHeight       *int64
@@ -122,6 +124,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 			leaf_index,
 			amount,
 			base_recipient,
+			proof_witness_item,
 			state,
 			checkpoint_height,
 			checkpoint_block_hash,
@@ -138,6 +141,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		&leafIndex,
 		&amount,
 		&baseRecipientRaw,
+		&proofWitnessRaw,
 		&state,
 		&cpHeight,
 		&cpBlockHashRaw,
@@ -172,11 +176,12 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 
 	job := deposit.Job{
 		Deposit: deposit.Deposit{
-			DepositID:     id,
-			Commitment:    cm,
-			LeafIndex:     uint64(leafIndex),
-			Amount:        uint64(amount),
-			BaseRecipient: recip,
+			DepositID:        id,
+			Commitment:       cm,
+			LeafIndex:        uint64(leafIndex),
+			Amount:           uint64(amount),
+			BaseRecipient:    recip,
+			ProofWitnessItem: append([]byte(nil), proofWitnessRaw...),
 		},
 		State: deposit.State(state),
 	}
@@ -687,6 +692,20 @@ func to20(b []byte) ([20]byte, error) {
 	var out [20]byte
 	copy(out[:], b)
 	return out, nil
+}
+
+func cloneDeposit(d deposit.Deposit) deposit.Deposit {
+	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	return d
+}
+
+func depositEqual(a, b deposit.Deposit) bool {
+	return a.DepositID == b.DepositID &&
+		a.Commitment == b.Commitment &&
+		a.LeafIndex == b.LeafIndex &&
+		a.Amount == b.Amount &&
+		a.BaseRecipient == b.BaseRecipient &&
+		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
 }
 
 var _ deposit.Store = (*Store)(nil)
