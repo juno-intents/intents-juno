@@ -1155,13 +1155,14 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
+	recipientEqualsOwner := recipient == owner
 	expectedDeltas := expectedBalanceDeltas(expectedBalanceDeltaInput{
 		DepositAmount:        depositAmount,
 		WithdrawAmount:       withdrawAmount,
 		DepositFeeBps:        feeBpsOnChain,
 		WithdrawFeeBps:       feeBpsAtReq,
 		RelayerTipBps:        relayerTipBpsOnChain,
-		RecipientEqualsOwner: recipient == owner,
+		RecipientEqualsOwner: recipientEqualsOwner,
 	})
 	if cfg.PrepareOnly {
 		expectedDeltas = expectedBalanceDelta{
@@ -1173,7 +1174,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	ownerDeltaActual := new(big.Int).Sub(ownerBalAfter, ownerBalBefore)
-	recipientDeltaActual := new(big.Int).Sub(recipientBalAfter, recipientBalBefore)
+	recipientDeltaRaw := new(big.Int).Sub(recipientBalAfter, recipientBalBefore)
+	recipientDeltaActual := normalizeRecipientDeltaActual(recipientDeltaRaw, recipientEqualsOwner)
 	fdDeltaActual := new(big.Int).Sub(fdBalAfter, fdBalBefore)
 	bridgeDeltaActual := new(big.Int).Sub(bridgeBalAfter, bridgeBalBefore)
 
@@ -1183,10 +1185,11 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		bridgeDeltaActual.Cmp(expectedDeltas.Bridge) == 0
 	if !balanceDeltaMatches {
 		return nil, fmt.Errorf(
-			"balance delta invariant failed: owner got=%s want=%s recipient got=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s",
+			"balance delta invariant failed: owner got=%s want=%s recipient got=%s raw=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s",
 			ownerDeltaActual.String(),
 			expectedDeltas.Owner.String(),
 			recipientDeltaActual.String(),
+			recipientDeltaRaw.String(),
 			expectedDeltas.Recipient.String(),
 			fdDeltaActual.String(),
 			expectedDeltas.FeeDistributor.String(),
@@ -1896,6 +1899,16 @@ func expectedBalanceDeltas(in expectedBalanceDeltaInput) expectedBalanceDelta {
 		FeeDistributor: feeDistributor,
 		Bridge:         bridge,
 	}
+}
+
+func normalizeRecipientDeltaActual(raw *big.Int, recipientEqualsOwner bool) *big.Int {
+	if recipientEqualsOwner {
+		return big.NewInt(0)
+	}
+	if raw == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Set(raw)
 }
 
 func computePredictedWithdrawalID(chainID uint64, bridge common.Address, nonce uint64, requester common.Address, amount *big.Int, recipientUA []byte) (common.Hash, error) {

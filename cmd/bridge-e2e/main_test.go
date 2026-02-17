@@ -893,3 +893,31 @@ func TestExpectedBalanceDeltas_RecipientDiffersFromOwner(t *testing.T) {
 		t.Fatalf("fee distributor delta: got %s want 495", deltas.FeeDistributor.String())
 	}
 }
+
+func TestNormalizeRecipientDeltaActual_RecipientEqualsOwner(t *testing.T) {
+	t.Parallel()
+
+	raw := big.NewInt(89_555)
+	got := normalizeRecipientDeltaActual(raw, true)
+	if got.Cmp(big.NewInt(0)) != 0 {
+		t.Fatalf("normalized recipient delta: got %s want 0", got.String())
+	}
+	if raw.Cmp(big.NewInt(89_555)) != 0 {
+		t.Fatalf("raw recipient delta mutated: got %s want 89555", raw.String())
+	}
+}
+
+func TestNormalizeRecipientDeltaActual_RecipientDiffersFromOwner(t *testing.T) {
+	t.Parallel()
+
+	raw := big.NewInt(99_500)
+	got := normalizeRecipientDeltaActual(raw, false)
+	if got.Cmp(big.NewInt(99_500)) != 0 {
+		t.Fatalf("normalized recipient delta: got %s want 99500", got.String())
+	}
+
+	got.Add(got, big.NewInt(1))
+	if raw.Cmp(big.NewInt(99_500)) != 0 {
+		t.Fatalf("normalized recipient delta aliases input: got raw %s want 99500", raw.String())
+	}
+}
