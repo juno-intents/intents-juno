@@ -35,6 +35,7 @@ Options:
   --boundless-auto                 auto-submit/wait Boundless proofs and callback with returned seals
   --boundless-bin <path>           boundless binary (default: boundless)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
+  --boundless-input-mode <mode>    boundless private input mode: private-input | journal-bytes-v1 (default: private-input)
   --boundless-requestor-key-file <path> requestor key file for boundless (required with --boundless-auto)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required with --boundless-auto)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required with --boundless-auto)
@@ -147,6 +148,7 @@ command_run() {
   local boundless_auto="false"
   local boundless_bin="boundless"
   local boundless_rpc_url="https://mainnet.base.org"
+  local boundless_input_mode="private-input"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -265,6 +267,11 @@ command_run() {
         boundless_rpc_url="$2"
         shift 2
         ;;
+      --boundless-input-mode)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-mode"
+        boundless_input_mode="$(lower "$2")"
+        shift 2
+        ;;
       --boundless-requestor-key-file)
         [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
         boundless_requestor_key_file="$2"
@@ -374,6 +381,13 @@ command_run() {
   [[ "$boundless_ramp_up_period_seconds" =~ ^[0-9]+$ ]] || die "--boundless-ramp-up-period-seconds must be numeric"
   [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
   [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
+  case "$boundless_input_mode" in
+    private-input|journal-bytes-v1)
+      ;;
+    *)
+      die "--boundless-input-mode must be one of: private-input, journal-bytes-v1"
+      ;;
+  esac
 
   if [[ -z "$bridge_run_timeout" ]]; then
     if [[ "$boundless_auto" == "true" ]]; then
@@ -518,6 +532,7 @@ command_run() {
       "--boundless-auto"
       "--boundless-bin" "$boundless_bin"
       "--boundless-rpc-url" "$boundless_rpc_url"
+      "--boundless-input-mode" "$boundless_input_mode"
       "--boundless-requestor-key-file" "$boundless_requestor_key_file"
       "--boundless-deposit-program-url" "$boundless_deposit_program_url"
       "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
@@ -561,6 +576,7 @@ command_run() {
     --arg boundless_auto "$boundless_auto" \
     --arg boundless_bin "$boundless_bin" \
     --arg boundless_rpc_url "$boundless_rpc_url" \
+    --arg boundless_input_mode "$boundless_input_mode" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
     --arg boundless_min_price_wei "$boundless_min_price_wei" \
@@ -606,6 +622,7 @@ command_run() {
           auto: ($boundless_auto == "true"),
           bin: $boundless_bin,
           rpc_url: $boundless_rpc_url,
+          input_mode: $boundless_input_mode,
           deposit_program_url: (if $boundless_deposit_program_url == "" then null else $boundless_deposit_program_url end),
           withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),
           min_price_wei: $boundless_min_price_wei,

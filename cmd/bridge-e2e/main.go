@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"math/big"
 	"os"
 	"os/exec"
@@ -75,6 +77,7 @@ type boundlessConfig struct {
 
 	Bin                string
 	RPCURL             string
+	InputMode          string
 	RequestorKeyHex    string
 	DepositProgramURL  string
 	WithdrawProgramURL string
@@ -102,6 +105,9 @@ const (
 	defaultBoundlessMinPriceWei  = "100000000000000"
 	defaultBoundlessMaxPriceWei  = "250000000000000"
 	defaultBoundlessLockStakeWei = "20000000000000000000"
+
+	boundlessInputModePrivate        = "private-input"
+	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
 )
 
 type report struct {
@@ -162,6 +168,7 @@ type report struct {
 		Boundless struct {
 			Enabled           bool   `json:"enabled"`
 			RPCURL            string `json:"rpc_url,omitempty"`
+			InputMode         string `json:"input_mode,omitempty"`
 			DepositRequestID  string `json:"deposit_request_id,omitempty"`
 			WithdrawRequestID string `json:"withdraw_request_id,omitempty"`
 			MinPriceWei       string `json:"min_price_wei,omitempty"`
@@ -368,6 +375,7 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
 	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
+	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input or journal-bytes-v1")
 	fs.StringVar(&boundlessRequestorKeyFile, "boundless-requestor-key-file", "", "file containing requestor private key hex for Boundless")
 	fs.StringVar(&boundlessRequestorKeyHex, "boundless-requestor-key-hex", "", "requestor private key hex for Boundless")
 	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
@@ -469,6 +477,10 @@ func parseArgs(args []string) (config, error) {
 		}
 		boundlessRequestorKeyHex = strings.TrimSpace(string(keyBytes))
 	}
+	cfg.Boundless.InputMode, err = parseBoundlessInputMode(cfg.Boundless.InputMode)
+	if err != nil {
+		return cfg, err
+	}
 	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
 
 	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
@@ -549,6 +561,28 @@ func parseArgs(args []string) (config, error) {
 	}
 
 	return cfg, nil
+}
+
+func parseBoundlessInputMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case "", boundlessInputModePrivate:
+		return boundlessInputModePrivate, nil
+	case boundlessInputModeJournalBytesV1:
+		return boundlessInputModeJournalBytesV1, nil
+	default:
+		return "", errors.New("--boundless-input-mode must be one of: private-input, journal-bytes-v1")
+	}
+}
+
+func encodeBoundlessJournalInput(journal []byte) ([]byte, error) {
+	if len(journal) > math.MaxUint32 {
+		return nil, fmt.Errorf("journal too large for boundless input: %d bytes", len(journal))
+	}
+	out := make([]byte, 4+len(journal))
+	binary.LittleEndian.PutUint32(out[:4], uint32(len(journal)))
+	copy(out[4:], journal)
+	return out, nil
 }
 
 func parseHexBytesFlag(flagName, raw string) ([]byte, error) {
@@ -873,6 +907,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
+	depositBoundlessInput := depositPrivateInput
+	if cfg.Boundless.InputMode == boundlessInputModeJournalBytesV1 {
+		depositBoundlessInput, err = encodeBoundlessJournalInput(depositJournal)
+		if err != nil {
+			return nil, fmt.Errorf("encode deposit boundless input: %w", err)
+		}
+	}
 
 	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
 	recipientUA := []byte{0x01, 0x02, 0x03}
@@ -908,7 +949,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 				cfg.Boundless,
 				"deposit",
 				cfg.Boundless.DepositProgramURL,
-				depositPrivateInput,
+				depositBoundlessInput,
 				depositJournal,
 			)
 			if err != nil {
@@ -972,6 +1013,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw private input: %w", err)
 	}
+	withdrawBoundlessInput := withdrawPrivateInput
+	if cfg.Boundless.InputMode == boundlessInputModeJournalBytesV1 {
+		withdrawBoundlessInput, err = encodeBoundlessJournalInput(withdrawJournal)
+		if err != nil {
+			return nil, fmt.Errorf("encode withdraw boundless input: %w", err)
+		}
+	}
 
 	var proofInputsPath string
 	if strings.TrimSpace(cfg.ProofInputsOut) != "" {
@@ -1013,7 +1061,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			cfg.Boundless,
 			"withdraw",
 			cfg.Boundless.WithdrawProgramURL,
-			withdrawPrivateInput,
+			withdrawBoundlessInput,
 			withdrawJournal,
 		)
 		if err != nil {
@@ -1175,6 +1223,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
 	if cfg.Boundless.Auto {
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
+		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
 		rep.Proof.Boundless.DepositRequestID = depositRequestID
 		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
 		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()

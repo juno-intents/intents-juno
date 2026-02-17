@@ -67,6 +67,7 @@ Local invocation example:
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
   --boundless-auto \
+  --boundless-input-mode private-input \
   --boundless-deposit-program-url https://.../deposit-guest.elf \
   --boundless-withdraw-program-url https://.../withdraw-guest.elf
 ```
@@ -103,6 +104,7 @@ Pricing policy and calculator:
   --bridge-withdraw-image-id 0x... \
   --boundless-auto \
   --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
+  --boundless-input-mode private-input \
   --boundless-deposit-program-url https://.../deposit-guest.elf \
   --boundless-withdraw-program-url https://.../withdraw-guest.elf \
   --force

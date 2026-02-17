@@ -62,6 +62,11 @@ on:
         required: true
         default: "https://mainnet.base.org"
         type: string
+      boundless_input_mode:
+        description: "Boundless private input mode (private-input or journal-bytes-v1)"
+        required: true
+        default: "private-input"
+        type: string
       boundless_deposit_program_url:
         description: "Deposit guest program URL for Boundless"
         required: false
@@ -250,6 +255,7 @@ jobs:
               --boundless-auto
               --boundless-requestor-key-file ".ci/secrets/boundless-requestor.key"
               --boundless-rpc-url "${{ inputs.boundless_rpc_url }}"
+              --boundless-input-mode "${{ inputs.boundless_input_mode }}"
               --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
               --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
               --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"

@@ -281,6 +281,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-auto",
 		"--boundless-bin", "boundless",
 		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "journal-bytes-v1",
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
@@ -301,6 +302,9 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	if cfg.Boundless.Bin != "boundless" {
 		t.Fatalf("unexpected boundless bin: %q", cfg.Boundless.Bin)
 	}
+	if cfg.Boundless.InputMode != "journal-bytes-v1" {
+		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
+	}
 	if cfg.Boundless.RequestorKeyHex == "" {
 		t.Fatalf("expected requestor key loaded from file")
 	}
@@ -309,6 +313,39 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	}
 	if cfg.Boundless.WithdrawProgramURL != "https://example.invalid/withdraw.elf" {
 		t.Fatalf("unexpected withdraw program url: %q", cfg.Boundless.WithdrawProgramURL)
+	}
+}
+
+func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "invalid-mode",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-input-mode") {
+		t.Fatalf("expected boundless input mode error, got: %v", err)
 	}
 }
 
@@ -367,6 +404,25 @@ func TestBoundlessPrivateInputVersion_IgnoresBinaryOrMissingVersion(t *testing.T
 
 	if got := boundlessPrivateInputVersion([]byte(`{"items":[]}`)); got != "" {
 		t.Fatalf("expected empty version for json without version, got %q", got)
+	}
+}
+
+func TestEncodeBoundlessJournalInput(t *testing.T) {
+	t.Parallel()
+
+	in := []byte{0xaa, 0xbb, 0xcc, 0xdd}
+	got, err := encodeBoundlessJournalInput(in)
+	if err != nil {
+		t.Fatalf("encodeBoundlessJournalInput: %v", err)
+	}
+	if len(got) != 8 {
+		t.Fatalf("encoded len: got %d want 8", len(got))
+	}
+	if got[0] != 0x04 || got[1] != 0x00 || got[2] != 0x00 || got[3] != 0x00 {
+		t.Fatalf("unexpected length prefix: %x", got[:4])
+	}
+	if string(got[4:]) != string(in) {
+		t.Fatalf("unexpected payload: %x", got[4:])
 	}
 }
 
