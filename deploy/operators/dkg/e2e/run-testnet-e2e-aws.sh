@@ -394,9 +394,12 @@ fi
 foundryup
 
 # Keep this pinned to the release branch documented for mainnet requestors.
-run_with_retry cargo install --locked --git https://github.com/boundless-xyz/boundless --branch release-1.2 --bin boundless --force boundless-cli
+run_with_retry rustup toolchain install 1.91.1 --profile minimal
+run_with_retry rustup default 1.91.1
+rustc --version
+run_with_retry cargo +1.91.1 install --locked --git https://github.com/boundless-xyz/boundless --branch release-1.2 --bin boundless --force boundless-cli
 boundless --version
-run_with_retry cargo install --locked cargo-risczero --version 3.0.5
+run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
