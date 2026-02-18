@@ -42,7 +42,9 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "rustup default 1.91.1" "rust toolchain pin default"
   assert_contains "$script_text" "boundless_cli_target_version=\"1.2.0\"" "boundless target version pin"
   assert_contains "$script_text" "boundless-cli already installed at target version; skipping reinstall" "boundless install skip log"
-  assert_contains "$script_text" "run_with_retry cargo +1.91.1 install boundless-cli --version \"\$boundless_cli_target_version\" --locked --force" "boundless cli install command"
+  assert_contains "$script_text" "if run_with_retry cargo +1.91.1 install boundless-cli --version \"\$boundless_cli_target_version\" --locked --force; then" "boundless crates install attempt"
+  assert_contains "$script_text" "boundless-cli \$boundless_cli_target_version is unavailable on crates.io; falling back to git tag \$boundless_ref_tag" "boundless crates fallback log"
+  assert_contains "$script_text" "run_with_retry cargo +1.91.1 install boundless-cli --git https://github.com/boundless-xyz/boundless --tag \"\$boundless_ref_tag\" --locked --force" "boundless git fallback install command"
   assert_contains "$script_text" "installing rzup for risc0 toolchain" "rzup install log"
   assert_contains "$script_text" "run_with_retry rzup install" "rzup install command"
   assert_contains "$script_text" "command -v r0vm" "r0vm presence check"
@@ -51,7 +53,6 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_not_contains "$script_text" "__BOUNDLESS_DUMMY__" "boundless parser workaround removed"
   assert_not_contains "$script_text" "perl -0pi -e" "boundless source patch command removed"
   assert_not_contains "$script_text" "git clone --depth 1 --branch release-1.2 https://github.com/boundless-xyz/boundless" "boundless source clone removed"
-  assert_not_contains "$script_text" "cargo +1.91.1 install --locked --git https://github.com/boundless-xyz/boundless" "boundless git install path removed"
   assert_not_contains "$script_text" "boundless-market-0.14.1" "legacy boundless crate pin removed"
 }
 

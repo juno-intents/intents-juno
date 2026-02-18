@@ -448,10 +448,19 @@ boundless_version_output=""
 if command -v boundless >/dev/null 2>&1; then
   boundless_version_output="\$(boundless --version 2>/dev/null || true)"
 fi
+install_boundless_cli() {
+  local boundless_ref_tag
+  boundless_ref_tag="v\${boundless_cli_target_version}"
+  if run_with_retry cargo +1.91.1 install boundless-cli --version "\$boundless_cli_target_version" --locked --force; then
+    return 0
+  fi
+  echo "boundless-cli \$boundless_cli_target_version is unavailable on crates.io; falling back to git tag \$boundless_ref_tag"
+  run_with_retry cargo +1.91.1 install boundless-cli --git https://github.com/boundless-xyz/boundless --tag "\$boundless_ref_tag" --locked --force
+}
 if [[ "\$boundless_version_output" == *"boundless-cli \$boundless_cli_target_version"* ]]; then
   echo "boundless-cli already installed at target version; skipping reinstall"
 else
-  run_with_retry cargo +1.91.1 install boundless-cli --version "\$boundless_cli_target_version" --locked --force
+  install_boundless_cli
 fi
 boundless --version
 
