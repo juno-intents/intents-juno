@@ -161,7 +161,7 @@ cast_send_with_nonce_retry() {
     nonce="$(cast nonce --rpc-url "$rpc_url" --block pending "$sender" 2>/dev/null || true)"
     [[ "$nonce" =~ ^[0-9]+$ ]] || nonce="$(cast nonce --rpc-url "$rpc_url" --block latest "$sender" 2>/dev/null || true)"
     [[ "$nonce" =~ ^[0-9]+$ ]] || nonce="0"
-    gas_price_wei=$((1000000000 * attempt))
+    gas_price_wei=$((5000000000 * attempt))
 
     set +e
     output="$(cast send \
@@ -187,6 +187,12 @@ cast_send_with_nonce_retry() {
         log "cast send nonce race detected and sender nonce advanced; assuming previous submission accepted"
         return 0
       fi
+      if (( attempt >= attempts )); then
+        if force_replace_stuck_nonce "$rpc_url" "$private_key" "$sender" "$nonce"; then
+          log "stuck nonce replacement succeeded; original transfer will retry on next balance probe"
+          return 0
+        fi
+      fi
       log "cast send nonce race detected but sender nonce not advanced; nonce=$nonce gas_price_wei=$gas_price_wei attempt=${attempt}/${attempts}"
     elif (( attempt >= attempts )) || ! is_transient_rpc_error "$output"; then
       printf '%s\n' "$output" >&2
@@ -203,6 +209,51 @@ cast_send_with_nonce_retry() {
     sleep "$delay_seconds"
     attempt=$((attempt + 1))
   done
+}
+
+force_replace_stuck_nonce() {
+  local rpc_url="$1"
+  local private_key="$2"
+  local sender="$3"
+  local nonce="$4"
+
+  local -a replacement_prices_wei=(
+    50000000000
+    100000000000
+    200000000000
+    400000000000
+  )
+
+  local gas_price_wei output status
+  for gas_price_wei in "${replacement_prices_wei[@]}"; do
+    set +e
+    output="$(cast send \
+      --rpc-url "$rpc_url" \
+      --private-key "$private_key" \
+      --async \
+      --gas-price "$gas_price_wei" \
+      --nonce "$nonce" \
+      --value 0 \
+      "$sender" 2>&1)"
+    status=$?
+    set -e
+
+    if (( status == 0 )); then
+      log "submitted stuck nonce replacement tx nonce=$nonce gas_price_wei=$gas_price_wei"
+    elif is_nonce_race_error "$output"; then
+      log "stuck nonce replacement race nonce=$nonce gas_price_wei=$gas_price_wei"
+    else
+      log "stuck nonce replacement failed nonce=$nonce gas_price_wei=$gas_price_wei"
+      continue
+    fi
+
+    sleep 2
+    if nonce_has_advanced "$rpc_url" "$sender" "$nonce"; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 ensure_recipient_min_balance() {
