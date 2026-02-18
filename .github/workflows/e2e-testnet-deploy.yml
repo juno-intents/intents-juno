@@ -6,6 +6,7 @@ on:
       base_rpc_url:
         description: "Base testnet RPC URL"
         required: true
+        default: "https://base-sepolia.drpc.org"
         type: string
       base_chain_id:
         description: "Base testnet chain ID"

@@ -61,7 +61,7 @@ Local invocation example:
   --juno-funder-key-file ./tmp/funders/juno-funder.key \
   --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
   -- \
-  --base-rpc-url https://sepolia.base.org \
+  --base-rpc-url https://base-sepolia.drpc.org \
   --base-chain-id 84532 \
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
