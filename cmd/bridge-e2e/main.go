@@ -682,6 +682,7 @@ func encodeSignaturesHex(sigs [][]byte) []string {
 }
 
 func run(ctx context.Context, cfg config) (*report, error) {
+	logProgress("start chain_id=%d rpc=%s", cfg.ChainID, cfg.RPCURL)
 	client, err := ethclient.DialContext(ctx, cfg.RPCURL)
 	if err != nil {
 		return nil, fmt.Errorf("dial rpc: %w", err)
@@ -705,6 +706,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("pending nonce for owner: %w", err)
 	}
 	auth.Nonce = new(big.Int).SetUint64(startNonce)
+	logProgress("deployer=%s start_nonce=%d", owner.Hex(), startNonce)
 
 	operatorKeys := make([]*ecdsa.PrivateKey, 0, len(cfg.OperatorKeyFiles))
 	for _, path := range cfg.OperatorKeyFiles {
@@ -753,14 +755,17 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("deploy wjuno: %w", err)
 	}
+	logProgress("deployed wjuno=%s", wjunoAddr.Hex())
 	regAddr, _, err := deployContract(ctx, client, auth, regABI, regBin, owner)
 	if err != nil {
 		return nil, fmt.Errorf("deploy operator registry: %w", err)
 	}
+	logProgress("deployed operator_registry=%s", regAddr.Hex())
 	fdAddr, _, err := deployContract(ctx, client, auth, fdABI, fdBin, owner, wjunoAddr, regAddr)
 	if err != nil {
 		return nil, fmt.Errorf("deploy fee distributor: %w", err)
 	}
+	logProgress("deployed fee_distributor=%s", fdAddr.Hex())
 
 	depositImageID := cfg.DepositImageID
 	withdrawImageID := cfg.WithdrawImageID
@@ -786,6 +791,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("deploy bridge: %w", err)
 	}
+	logProgress("deployed bridge=%s", bridgeAddr.Hex())
 
 	reg := bind.NewBoundContract(regAddr, regABI, client, client, client)
 	fd := bind.NewBoundContract(fdAddr, fdABI, client, client, client)
@@ -819,6 +825,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
 	}
+	logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
 
 	registryOperatorCount, err := callUint64(ctx, reg, "operatorCount")
 	if err != nil {
@@ -973,6 +980,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		withdrawalID = predictedWithdrawalID
 	} else {
 		if cfg.Boundless.Auto {
+			logProgress("requesting boundless deposit proof")
 			cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
 				ctx,
 				cfg.Boundless,
@@ -1085,6 +1093,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	if !cfg.PrepareOnly && cfg.Boundless.Auto {
+		logProgress("requesting boundless withdraw proof")
 		cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
 			ctx,
 			cfg.Boundless,
@@ -1519,8 +1528,14 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 	for attempt := 1; attempt <= 4; attempt++ {
 		txAuth := transactAuthWithDefaults(auth, 0)
 		applyRetryGasBump(ctx, backend, txAuth, attempt)
+		nonce := "<nil>"
+		if txAuth.Nonce != nil {
+			nonce = txAuth.Nonce.String()
+		}
+		logProgress("deploy attempt=%d nonce=%s", attempt, nonce)
 		addr, tx, _, err := bind.DeployContract(txAuth, a, bin, backend, args...)
 		if err != nil {
+			logProgress("deploy attempt=%d failed: %v", attempt, err)
 			if attempt < 4 && isRetriableNonceError(err) {
 				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
 					return common.Address{}, common.Hash{}, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
@@ -1530,13 +1545,16 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 			return common.Address{}, common.Hash{}, err
 		}
 		incrementAuthNonce(auth)
+		logProgress("deploy submitted tx=%s", tx.Hash().Hex())
 		rcpt, err := waitMined(ctx, backend, tx)
 		if err != nil {
+			logProgress("deploy wait mined failed tx=%s: %v", tx.Hash().Hex(), err)
 			return common.Address{}, common.Hash{}, err
 		}
 		if rcpt.Status != 1 {
 			return common.Address{}, common.Hash{}, fmt.Errorf("deployment reverted: %s", tx.Hash().Hex())
 		}
+		logProgress("deploy mined tx=%s", tx.Hash().Hex())
 		return addr, tx.Hash(), nil
 	}
 	return common.Address{}, common.Hash{}, errors.New("deploy contract retries exhausted")
@@ -1563,8 +1581,14 @@ func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bi
 	for attempt := 1; attempt <= 4; attempt++ {
 		txAuth := transactAuthWithDefaults(auth, 1_000_000)
 		applyRetryGasBump(ctx, backend, txAuth, attempt)
+		nonce := "<nil>"
+		if txAuth.Nonce != nil {
+			nonce = txAuth.Nonce.String()
+		}
+		logProgress("%s attempt=%d nonce=%s", method, attempt, nonce)
 		tx, err := c.Transact(txAuth, method, args...)
 		if err != nil {
+			logProgress("%s attempt=%d failed: %v", method, attempt, err)
 			if attempt < 4 && isRetriableNonceError(err) {
 				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
 					return common.Hash{}, nil, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
@@ -1574,13 +1598,16 @@ func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bi
 			return common.Hash{}, nil, err
 		}
 		incrementAuthNonce(auth)
+		logProgress("%s submitted tx=%s", method, tx.Hash().Hex())
 		rcpt, err := waitMined(ctx, backend, tx)
 		if err != nil {
+			logProgress("%s wait mined failed tx=%s: %v", method, tx.Hash().Hex(), err)
 			return common.Hash{}, nil, err
 		}
 		if rcpt.Status != 1 {
 			return common.Hash{}, nil, fmt.Errorf("%s reverted: %s", method, tx.Hash().Hex())
 		}
+		logProgress("%s mined tx=%s", method, tx.Hash().Hex())
 		return tx.Hash(), rcpt, nil
 	}
 	return common.Hash{}, nil, fmt.Errorf("%s retries exhausted", method)
@@ -1595,6 +1622,10 @@ func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *
 		cloned.GasLimit = defaultGasLimit
 	}
 	return &cloned
+}
+
+func logProgress(format string, args ...any) {
+	_, _ = fmt.Fprintf(os.Stderr, "bridge-e2e: "+format+"\n", args...)
 }
 
 type gasPriceSuggester interface {
