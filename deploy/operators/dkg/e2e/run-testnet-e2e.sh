@@ -38,6 +38,11 @@ Options:
                                    (default: 0x0b144e07a0826182b6b59788c34b32bfa86fb711)
   --boundless-set-verifier-address <addr> boundless set verifier address
                                    (default: 0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104)
+  --boundless-input-mode <mode>     boundless input mode (private-input|guest-witness-v1, default: private-input)
+  --boundless-deposit-owallet-ivk-hex <hex>  64-byte oWallet IVK hex (required for guest-witness-v1)
+  --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
+  --boundless-deposit-witness-item-file <path> deposit witness item file (repeat for guest-witness-v1)
+  --boundless-withdraw-witness-item-file <path> withdraw witness item file (repeat for guest-witness-v1)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
@@ -306,6 +311,11 @@ command_run() {
   local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
   local boundless_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
   local boundless_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+  local boundless_input_mode="private-input"
+  local boundless_deposit_owallet_ivk_hex=""
+  local boundless_withdraw_owallet_ovk_hex=""
+  local -a boundless_deposit_witness_item_files=()
+  local -a boundless_withdraw_witness_item_files=()
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -427,6 +437,31 @@ command_run() {
       --boundless-set-verifier-address)
         [[ $# -ge 2 ]] || die "missing value for --boundless-set-verifier-address"
         boundless_set_verifier_address="$2"
+        shift 2
+        ;;
+      --boundless-input-mode)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-mode"
+        boundless_input_mode="$2"
+        shift 2
+        ;;
+      --boundless-deposit-owallet-ivk-hex)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-owallet-ivk-hex"
+        boundless_deposit_owallet_ivk_hex="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-owallet-ovk-hex)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-owallet-ovk-hex"
+        boundless_withdraw_owallet_ovk_hex="$2"
+        shift 2
+        ;;
+      --boundless-deposit-witness-item-file)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-item-file"
+        boundless_deposit_witness_item_files+=("$2")
+        shift 2
+        ;;
+      --boundless-withdraw-witness-item-file)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-item-file"
+        boundless_withdraw_witness_item_files+=("$2")
         shift 2
         ;;
       --boundless-requestor-key-file)
@@ -557,6 +592,9 @@ command_run() {
   [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
   [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
   (( boundless_max_price_cap_wei >= boundless_max_price_wei )) || die "--boundless-max-price-cap-wei must be >= --boundless-max-price-wei"
+  if [[ "$boundless_input_mode" != "private-input" && "$boundless_input_mode" != "guest-witness-v1" ]]; then
+    die "--boundless-input-mode must be private-input or guest-witness-v1"
+  fi
   if (( boundless_max_price_bump_retries > 0 && boundless_max_price_bump_multiplier < 2 )); then
     die "--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0"
   fi
@@ -571,6 +609,24 @@ command_run() {
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
+  if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
+    [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required for --boundless-input-mode guest-witness-v1"
+    [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required for --boundless-input-mode guest-witness-v1"
+    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required for --boundless-input-mode guest-witness-v1"
+    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required for --boundless-input-mode guest-witness-v1"
+  else
+    if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
+      (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
+      die "--boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file require --boundless-input-mode guest-witness-v1"
+    fi
+  fi
+  local witness_file
+  for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+    [[ -f "$witness_file" ]] || die "boundless deposit witness item file not found: $witness_file"
+  done
+  for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
+    [[ -f "$witness_file" ]] || die "boundless withdraw witness item file not found: $witness_file"
+  done
 
   if [[ -z "$output_path" ]]; then
     output_path="$workdir/reports/testnet-e2e-summary.json"
@@ -727,7 +783,7 @@ command_run() {
     "--boundless-market-address" "$boundless_market_address"
     "--boundless-verifier-router-address" "$boundless_verifier_router_address"
     "--boundless-set-verifier-address" "$boundless_set_verifier_address"
-    "--boundless-input-mode" "private-input"
+    "--boundless-input-mode" "$boundless_input_mode"
     "--boundless-requestor-key-file" "$boundless_requestor_key_file"
     "--boundless-deposit-program-url" "$boundless_deposit_program_url"
     "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
@@ -742,6 +798,18 @@ command_run() {
     "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
     "--boundless-timeout-seconds" "$boundless_timeout_seconds"
   )
+  if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
+    bridge_args+=(
+      "--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex"
+      "--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex"
+    )
+    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+      bridge_args+=("--boundless-deposit-witness-item-file" "$witness_file")
+    done
+    for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
+      bridge_args+=("--boundless-withdraw-witness-item-file" "$witness_file")
+    done
+  fi
 
   local key_path
   while IFS= read -r key_path; do
@@ -771,6 +839,18 @@ command_run() {
     log "juno_tx_hash=unavailable"
   fi
 
+  local boundless_deposit_ivk_configured="false"
+  local boundless_withdraw_ovk_configured="false"
+  local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
+  if [[ -n "$boundless_deposit_owallet_ivk_hex" ]]; then
+    boundless_deposit_ivk_configured="true"
+  fi
+  if [[ -n "$boundless_withdraw_owallet_ovk_hex" ]]; then
+    boundless_withdraw_ovk_configured="true"
+  fi
+  boundless_deposit_witness_item_count="${#boundless_deposit_witness_item_files[@]}"
+  boundless_withdraw_witness_item_count="${#boundless_withdraw_witness_item_files[@]}"
+
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
     --arg workdir "$workdir" \
@@ -789,7 +869,11 @@ command_run() {
     --arg boundless_auto "$boundless_auto" \
     --arg boundless_bin "$boundless_bin" \
     --arg boundless_rpc_url "$boundless_rpc_url" \
-    --arg boundless_input_mode "private-input" \
+    --arg boundless_input_mode "$boundless_input_mode" \
+    --arg boundless_deposit_ivk_configured "$boundless_deposit_ivk_configured" \
+    --arg boundless_withdraw_ovk_configured "$boundless_withdraw_ovk_configured" \
+    --argjson boundless_deposit_witness_item_count "$boundless_deposit_witness_item_count" \
+    --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
     --arg boundless_min_price_wei "$boundless_min_price_wei" \
@@ -841,6 +925,13 @@ command_run() {
           bin: $boundless_bin,
           rpc_url: $boundless_rpc_url,
           input_mode: $boundless_input_mode,
+          guest_witness: {
+            enabled: ($boundless_input_mode == "guest-witness-v1"),
+            deposit_owallet_ivk_configured: ($boundless_deposit_ivk_configured == "true"),
+            withdraw_owallet_ovk_configured: ($boundless_withdraw_ovk_configured == "true"),
+            deposit_witness_item_count: $boundless_deposit_witness_item_count,
+            withdraw_witness_item_count: $boundless_withdraw_witness_item_count
+          },
           deposit_program_url: (if $boundless_deposit_program_url == "" then null else $boundless_deposit_program_url end),
           withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),
           min_price_wei: $boundless_min_price_wei,

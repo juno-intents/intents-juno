@@ -73,7 +73,12 @@ Local invocation example:
 ## Boundless Mode
 
 - The e2e runs in strict proof mode only.
-- `run-testnet-e2e.sh` always uses `--boundless-auto` and `--boundless-input-mode private-input`.
+- `run-testnet-e2e.sh` always uses `--boundless-auto`.
+- `--boundless-input-mode` defaults to `private-input` and also supports `guest-witness-v1` with:
+  - `--boundless-deposit-owallet-ivk-hex`
+  - `--boundless-withdraw-owallet-ovk-hex`
+  - `--boundless-deposit-witness-item-file` (repeatable)
+  - `--boundless-withdraw-witness-item-file` (repeatable)
 - No manual seal injection, no prepare-only path, and no no-op verifier path are supported in this flow.
 
 Pricing policy and calculator:
