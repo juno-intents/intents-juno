@@ -387,7 +387,7 @@ if [[ ! -d "\$HOME/.cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 
-export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
+export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$HOME/.risc0/bin:\$PATH"
 if ! command -v foundryup >/dev/null 2>&1; then
   curl -L https://foundry.paradigm.xyz | bash
 fi
@@ -433,7 +433,20 @@ else
 fi
 boundless --version
 
-echo "skipping cargo-risczero install; not required for live e2e"
+if ! command -v rzup >/dev/null 2>&1; then
+  echo "installing rzup for risc0 toolchain"
+  run_with_retry bash -lc "curl -sSfL https://risczero.com/install | bash"
+fi
+if ! command -v rzup >/dev/null 2>&1; then
+  echo "rzup not found after install attempt" >&2
+  exit 1
+fi
+run_with_retry rzup install
+if ! command -v r0vm >/dev/null 2>&1; then
+  echo "r0vm not found after rzup install" >&2
+  exit 1
+fi
+r0vm --version
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
