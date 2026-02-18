@@ -45,8 +45,11 @@ Options:
   --boundless-requestor-key-file <path> requestor key file for boundless (required with --boundless-auto)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required with --boundless-auto)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required with --boundless-auto)
-  --boundless-min-price-wei <wei>  auction min price (default: 100000000000000)
-  --boundless-max-price-wei <wei>  auction max price (default: 250000000000000)
+  --boundless-min-price-wei <wei>  auction min price (default: 0)
+  --boundless-max-price-wei <wei>  auction max price (default: 50000000000000)
+  --boundless-max-price-cap-wei <wei> max auction price cap used by retry bumps (default: 250000000000000)
+  --boundless-max-price-bump-multiplier <n> max price bump multiplier on lock failures (default: 2)
+  --boundless-max-price-bump-retries <n> max price bump retries on lock failures (default: 3)
   --boundless-lock-stake-wei <wei> auction lock stake (default: 20000000000000000000)
   --boundless-bidding-delay-seconds <s> auction bidding delay (default: 85)
   --boundless-ramp-up-period-seconds <s> auction ramp period (default: 170)
@@ -313,8 +316,11 @@ command_run() {
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
-  local boundless_min_price_wei="100000000000000"
-  local boundless_max_price_wei="250000000000000"
+  local boundless_min_price_wei="0"
+  local boundless_max_price_wei="50000000000000"
+  local boundless_max_price_cap_wei="250000000000000"
+  local boundless_max_price_bump_multiplier="2"
+  local boundless_max_price_bump_retries="3"
   local boundless_lock_stake_wei="20000000000000000000"
   local boundless_bidding_delay_seconds="85"
   local boundless_ramp_up_period_seconds="170"
@@ -473,6 +479,21 @@ command_run() {
         boundless_max_price_wei="$2"
         shift 2
         ;;
+      --boundless-max-price-cap-wei)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-cap-wei"
+        boundless_max_price_cap_wei="$2"
+        shift 2
+        ;;
+      --boundless-max-price-bump-multiplier)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-bump-multiplier"
+        boundless_max_price_bump_multiplier="$2"
+        shift 2
+        ;;
+      --boundless-max-price-bump-retries)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-bump-retries"
+        boundless_max_price_bump_retries="$2"
+        shift 2
+        ;;
       --boundless-lock-stake-wei)
         [[ $# -ge 2 ]] || die "missing value for --boundless-lock-stake-wei"
         boundless_lock_stake_wei="$2"
@@ -552,11 +573,18 @@ command_run() {
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
   [[ "$boundless_min_price_wei" =~ ^[0-9]+$ ]] || die "--boundless-min-price-wei must be numeric"
   [[ "$boundless_max_price_wei" =~ ^[0-9]+$ ]] || die "--boundless-max-price-wei must be numeric"
+  [[ "$boundless_max_price_cap_wei" =~ ^[0-9]+$ ]] || die "--boundless-max-price-cap-wei must be numeric"
+  [[ "$boundless_max_price_bump_multiplier" =~ ^[0-9]+$ ]] || die "--boundless-max-price-bump-multiplier must be numeric"
+  [[ "$boundless_max_price_bump_retries" =~ ^[0-9]+$ ]] || die "--boundless-max-price-bump-retries must be numeric"
   [[ "$boundless_lock_stake_wei" =~ ^[0-9]+$ ]] || die "--boundless-lock-stake-wei must be numeric"
   [[ "$boundless_bidding_delay_seconds" =~ ^[0-9]+$ ]] || die "--boundless-bidding-delay-seconds must be numeric"
   [[ "$boundless_ramp_up_period_seconds" =~ ^[0-9]+$ ]] || die "--boundless-ramp-up-period-seconds must be numeric"
   [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
   [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
+  (( boundless_max_price_cap_wei >= boundless_max_price_wei )) || die "--boundless-max-price-cap-wei must be >= --boundless-max-price-wei"
+  if (( boundless_max_price_bump_retries > 0 && boundless_max_price_bump_multiplier < 2 )); then
+    die "--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0"
+  fi
   case "$boundless_input_mode" in
     private-input|journal-bytes-v1)
       ;;
@@ -737,6 +765,9 @@ command_run() {
       "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
       "--boundless-min-price-wei" "$boundless_min_price_wei"
       "--boundless-max-price-wei" "$boundless_max_price_wei"
+      "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
+      "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
+      "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
       "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
       "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
       "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
@@ -780,6 +811,9 @@ command_run() {
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
     --arg boundless_min_price_wei "$boundless_min_price_wei" \
     --arg boundless_max_price_wei "$boundless_max_price_wei" \
+    --arg boundless_max_price_cap_wei "$boundless_max_price_cap_wei" \
+    --arg boundless_max_price_bump_multiplier "$boundless_max_price_bump_multiplier" \
+    --arg boundless_max_price_bump_retries "$boundless_max_price_bump_retries" \
     --arg boundless_lock_stake_wei "$boundless_lock_stake_wei" \
     --arg boundless_bidding_delay_seconds "$boundless_bidding_delay_seconds" \
     --arg boundless_ramp_up_period_seconds "$boundless_ramp_up_period_seconds" \
@@ -826,6 +860,9 @@ command_run() {
           withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),
           min_price_wei: $boundless_min_price_wei,
           max_price_wei: $boundless_max_price_wei,
+          max_price_cap_wei: $boundless_max_price_cap_wei,
+          max_price_bump_multiplier: $boundless_max_price_bump_multiplier,
+          max_price_bump_retries: $boundless_max_price_bump_retries,
           lock_stake_wei: $boundless_lock_stake_wei,
           bidding_delay_seconds: $boundless_bidding_delay_seconds,
           ramp_up_period_seconds: $boundless_ramp_up_period_seconds,

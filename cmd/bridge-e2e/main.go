@@ -85,14 +85,20 @@ type boundlessConfig struct {
 	DepositProgramURL  string
 	WithdrawProgramURL string
 
-	MinPriceWei  *big.Int
-	MaxPriceWei  *big.Int
-	LockStakeWei *big.Int
+	MinPriceWei    *big.Int
+	MaxPriceWei    *big.Int
+	MaxPriceCapWei *big.Int
+	LockStakeWei   *big.Int
+
+	MaxPriceBumpMultiplier uint64
+	MaxPriceBumpRetries    uint64
 
 	BiddingDelaySeconds uint64
 	RampUpPeriodSeconds uint64
 	LockTimeoutSeconds  uint64
 	TimeoutSeconds      uint64
+
+	RequestorAddress common.Address
 }
 
 type boundlessWaitResult struct {
@@ -105,18 +111,22 @@ const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
 
-	defaultBoundlessMinPriceWei  = "100000000000000"
-	defaultBoundlessMaxPriceWei  = "250000000000000"
-	defaultBoundlessLockStakeWei = "20000000000000000000"
-	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-	defaultBoundlessRouterAddr   = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
-	defaultBoundlessSetVerAddr   = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-	defaultRetryGasPriceWei      = int64(500_000_000)
-	defaultRetryGasTipCapWei     = int64(100_000_000)
+	defaultBoundlessMinPriceWei            = "0"
+	defaultBoundlessMaxPriceWei            = "50000000000000"
+	defaultBoundlessMaxPriceCapWei         = "250000000000000"
+	defaultBoundlessMaxPriceBumpMultiplier = 2
+	defaultBoundlessMaxPriceBumpRetries    = 3
+	defaultBoundlessLockStakeWei           = "20000000000000000000"
+	defaultBoundlessMarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+	defaultBoundlessRouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
+	defaultBoundlessSetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+	defaultRetryGasPriceWei                = int64(500_000_000)
+	defaultRetryGasTipCapWei               = int64(100_000_000)
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
 	txMinedWaitTimeout               = 75 * time.Second
+	boundlessMarketBalanceOfABIJSON  = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 )
 
 type report struct {
@@ -175,21 +185,24 @@ type report struct {
 		WithdrawSealBytes int    `json:"withdraw_seal_bytes"`
 
 		Boundless struct {
-			Enabled           bool   `json:"enabled"`
-			RPCURL            string `json:"rpc_url,omitempty"`
-			InputMode         string `json:"input_mode,omitempty"`
-			MarketAddress     string `json:"market_address,omitempty"`
-			VerifierRouter    string `json:"verifier_router_address,omitempty"`
-			SetVerifier       string `json:"set_verifier_address,omitempty"`
-			DepositRequestID  string `json:"deposit_request_id,omitempty"`
-			WithdrawRequestID string `json:"withdraw_request_id,omitempty"`
-			MinPriceWei       string `json:"min_price_wei,omitempty"`
-			MaxPriceWei       string `json:"max_price_wei,omitempty"`
-			LockStakeWei      string `json:"lock_stake_wei,omitempty"`
-			BiddingDelaySec   uint64 `json:"bidding_delay_seconds,omitempty"`
-			RampUpPeriodSec   uint64 `json:"ramp_up_period_seconds,omitempty"`
-			LockTimeoutSec    uint64 `json:"lock_timeout_seconds,omitempty"`
-			TimeoutSec        uint64 `json:"timeout_seconds,omitempty"`
+			Enabled                bool   `json:"enabled"`
+			RPCURL                 string `json:"rpc_url,omitempty"`
+			InputMode              string `json:"input_mode,omitempty"`
+			MarketAddress          string `json:"market_address,omitempty"`
+			VerifierRouter         string `json:"verifier_router_address,omitempty"`
+			SetVerifier            string `json:"set_verifier_address,omitempty"`
+			DepositRequestID       string `json:"deposit_request_id,omitempty"`
+			WithdrawRequestID      string `json:"withdraw_request_id,omitempty"`
+			MinPriceWei            string `json:"min_price_wei,omitempty"`
+			MaxPriceWei            string `json:"max_price_wei,omitempty"`
+			MaxPriceCapWei         string `json:"max_price_cap_wei,omitempty"`
+			LockStakeWei           string `json:"lock_stake_wei,omitempty"`
+			MaxPriceBumpMultiplier uint64 `json:"max_price_bump_multiplier,omitempty"`
+			MaxPriceBumpRetries    uint64 `json:"max_price_bump_retries,omitempty"`
+			BiddingDelaySec        uint64 `json:"bidding_delay_seconds,omitempty"`
+			RampUpPeriodSec        uint64 `json:"ramp_up_period_seconds,omitempty"`
+			LockTimeoutSec         uint64 `json:"lock_timeout_seconds,omitempty"`
+			TimeoutSec             uint64 `json:"timeout_seconds,omitempty"`
 		} `json:"boundless,omitempty"`
 	} `json:"proof"`
 
@@ -359,6 +372,7 @@ func parseArgs(args []string) (config, error) {
 	var boundlessRequestorKeyHex string
 	var boundlessMinPriceWei string
 	var boundlessMaxPriceWei string
+	var boundlessMaxPriceCapWei string
 	var boundlessLockStakeWei string
 
 	fs := flag.NewFlagSet("bridge-e2e", flag.ContinueOnError)
@@ -400,7 +414,10 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.Boundless.WithdrawProgramURL, "boundless-withdraw-program-url", "", "withdraw guest program URL for Boundless proof requests")
 	fs.StringVar(&boundlessMinPriceWei, "boundless-min-price-wei", defaultBoundlessMinPriceWei, "Boundless min price in wei")
 	fs.StringVar(&boundlessMaxPriceWei, "boundless-max-price-wei", defaultBoundlessMaxPriceWei, "Boundless max price in wei")
+	fs.StringVar(&boundlessMaxPriceCapWei, "boundless-max-price-cap-wei", defaultBoundlessMaxPriceCapWei, "Boundless max price cap in wei for retry bumps")
 	fs.StringVar(&boundlessLockStakeWei, "boundless-lock-stake-wei", defaultBoundlessLockStakeWei, "Boundless lock stake amount in wei")
+	fs.Uint64Var(&cfg.Boundless.MaxPriceBumpMultiplier, "boundless-max-price-bump-multiplier", defaultBoundlessMaxPriceBumpMultiplier, "multiplier applied to max price after lock failures")
+	fs.Uint64Var(&cfg.Boundless.MaxPriceBumpRetries, "boundless-max-price-bump-retries", defaultBoundlessMaxPriceBumpRetries, "number of lock-failure retries with max price bumps")
 	fs.Uint64Var(&cfg.Boundless.BiddingDelaySeconds, "boundless-bidding-delay-seconds", 85, "seconds after submission before bidding starts")
 	fs.Uint64Var(&cfg.Boundless.RampUpPeriodSeconds, "boundless-ramp-up-period-seconds", 170, "auction ramp-up period in seconds")
 	fs.Uint64Var(&cfg.Boundless.LockTimeoutSeconds, "boundless-lock-timeout-seconds", 625, "auction lock timeout in seconds")
@@ -512,6 +529,13 @@ func parseArgs(args []string) (config, error) {
 	}
 	cfg.Boundless.SetVerifierAddr = common.HexToAddress(boundlessSetVerifierHex)
 	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
+	if cfg.Boundless.RequestorKeyHex != "" {
+		boundlessKey, err := parsePrivateKeyHex(cfg.Boundless.RequestorKeyHex)
+		if err != nil {
+			return cfg, fmt.Errorf("parse --boundless-requestor-key-*: %w", err)
+		}
+		cfg.Boundless.RequestorAddress = crypto.PubkeyToAddress(boundlessKey.PublicKey)
+	}
 
 	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
 	if err != nil {
@@ -521,12 +545,22 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.Boundless.MaxPriceCapWei, err = parseUint256Flag("--boundless-max-price-cap-wei", boundlessMaxPriceCapWei)
+	if err != nil {
+		return cfg, err
+	}
 	cfg.Boundless.LockStakeWei, err = parseUint256Flag("--boundless-lock-stake-wei", boundlessLockStakeWei)
 	if err != nil {
 		return cfg, err
 	}
 	if cfg.Boundless.MinPriceWei.Cmp(cfg.Boundless.MaxPriceWei) > 0 {
 		return cfg, errors.New("--boundless-min-price-wei must be <= --boundless-max-price-wei")
+	}
+	if cfg.Boundless.MaxPriceWei.Cmp(cfg.Boundless.MaxPriceCapWei) > 0 {
+		return cfg, errors.New("--boundless-max-price-cap-wei must be >= --boundless-max-price-wei")
+	}
+	if cfg.Boundless.MaxPriceBumpRetries > 0 && cfg.Boundless.MaxPriceBumpMultiplier < 2 {
+		return cfg, errors.New("--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0")
 	}
 	if cfg.Boundless.RampUpPeriodSeconds == 0 {
 		return cfg, errors.New("--boundless-ramp-up-period-seconds must be > 0")
@@ -1273,7 +1307,10 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
 		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()
 		rep.Proof.Boundless.MaxPriceWei = cfg.Boundless.MaxPriceWei.String()
+		rep.Proof.Boundless.MaxPriceCapWei = cfg.Boundless.MaxPriceCapWei.String()
 		rep.Proof.Boundless.LockStakeWei = cfg.Boundless.LockStakeWei.String()
+		rep.Proof.Boundless.MaxPriceBumpMultiplier = cfg.Boundless.MaxPriceBumpMultiplier
+		rep.Proof.Boundless.MaxPriceBumpRetries = cfg.Boundless.MaxPriceBumpRetries
 		rep.Proof.Boundless.BiddingDelaySec = cfg.Boundless.BiddingDelaySeconds
 		rep.Proof.Boundless.RampUpPeriodSec = cfg.Boundless.RampUpPeriodSeconds
 		rep.Proof.Boundless.LockTimeoutSec = cfg.Boundless.LockTimeoutSeconds
@@ -1314,6 +1351,74 @@ func run(ctx context.Context, cfg config) (*report, error) {
 }
 
 func requestBoundlessProof(
+	ctx context.Context,
+	cfg boundlessConfig,
+	pipeline string,
+	programURL string,
+	privateInput []byte,
+	expectedJournal []byte,
+) ([]byte, string, error) {
+	maxPriceWei := new(big.Int).Set(cfg.MaxPriceWei)
+	totalAttempts := cfg.MaxPriceBumpRetries + 1
+
+	for attempt := uint64(1); ; attempt++ {
+		attemptCfg := cfg
+		attemptCfg.MaxPriceWei = new(big.Int).Set(maxPriceWei)
+
+		if bal, err := readBoundlessMarketBalance(ctx, attemptCfg); err != nil {
+			logProgress("boundless %s attempt=%d/%d market balance probe failed: %v", pipeline, attempt, totalAttempts, err)
+		} else {
+			shortfall := boundlessFundingShortfallWei(attemptCfg.MaxPriceWei, bal)
+			if shortfall.Sign() == 0 {
+				logProgress(
+					"boundless %s attempt=%d/%d market_balance_wei=%s max_price_wei=%s shortfall_wei=0 (cli funding mode may still send value=max_price)",
+					pipeline,
+					attempt,
+					totalAttempts,
+					bal.String(),
+					attemptCfg.MaxPriceWei.String(),
+				)
+			} else {
+				logProgress(
+					"boundless %s attempt=%d/%d market_balance_wei=%s max_price_wei=%s shortfall_wei=%s",
+					pipeline,
+					attempt,
+					totalAttempts,
+					bal.String(),
+					attemptCfg.MaxPriceWei.String(),
+					shortfall.String(),
+				)
+			}
+		}
+
+		seal, requestID, err := requestBoundlessProofOnce(ctx, attemptCfg, pipeline, programURL, privateInput, expectedJournal)
+		if err == nil {
+			return seal, requestID, nil
+		}
+		if !isRetriableBoundlessLockFailure(err.Error()) {
+			return nil, "", err
+		}
+		if attempt >= totalAttempts {
+			return nil, "", err
+		}
+
+		nextMaxPriceWei, ok := nextBoundlessMaxPriceWei(maxPriceWei, cfg.MaxPriceBumpMultiplier, cfg.MaxPriceCapWei)
+		if !ok {
+			return nil, "", fmt.Errorf("%w (max price bump exhausted at %s wei)", err, maxPriceWei.String())
+		}
+		logProgress(
+			"boundless %s lock failure attempt=%d/%d bumping max_price_wei=%s -> %s",
+			pipeline,
+			attempt,
+			totalAttempts,
+			maxPriceWei.String(),
+			nextMaxPriceWei.String(),
+		)
+		maxPriceWei = nextMaxPriceWei
+	}
+}
+
+func requestBoundlessProofOnce(
 	ctx context.Context,
 	cfg boundlessConfig,
 	pipeline string,
@@ -1466,6 +1571,64 @@ func parseBoundlessProofOutput(output []byte, pipeline string, expectedJournal [
 	return seal, parsed.RequestIDHex, nil
 }
 
+func readBoundlessMarketBalance(ctx context.Context, cfg boundlessConfig) (*big.Int, error) {
+	if cfg.RequestorAddress == (common.Address{}) {
+		return nil, errors.New("boundless requestor address is required for market balance checks")
+	}
+	client, err := ethclient.DialContext(ctx, cfg.RPCURL)
+	if err != nil {
+		return nil, fmt.Errorf("dial boundless rpc: %w", err)
+	}
+	defer client.Close()
+
+	boundlessMarketABI, err := abi.JSON(strings.NewReader(boundlessMarketBalanceOfABIJSON))
+	if err != nil {
+		return nil, fmt.Errorf("parse boundless market abi: %w", err)
+	}
+	market := bind.NewBoundContract(cfg.MarketAddress, boundlessMarketABI, client, client, client)
+	balance, err := callBalanceOf(ctx, market, cfg.RequestorAddress)
+	if err != nil {
+		return nil, fmt.Errorf("boundless market balanceOf: %w", err)
+	}
+	return balance, nil
+}
+
+func boundlessFundingShortfallWei(maxPriceWei, marketBalanceWei *big.Int) *big.Int {
+	maxPrice := big.NewInt(0)
+	if maxPriceWei != nil {
+		maxPrice = new(big.Int).Set(maxPriceWei)
+	}
+	if maxPrice.Sign() <= 0 {
+		return big.NewInt(0)
+	}
+	balance := big.NewInt(0)
+	if marketBalanceWei != nil {
+		balance = new(big.Int).Set(marketBalanceWei)
+	}
+	if balance.Cmp(maxPrice) >= 0 {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Sub(maxPrice, balance)
+}
+
+func nextBoundlessMaxPriceWei(current *big.Int, multiplier uint64, cap *big.Int) (*big.Int, bool) {
+	currentPrice := big.NewInt(0)
+	if current != nil {
+		currentPrice = new(big.Int).Set(current)
+	}
+	if multiplier < 2 || currentPrice.Sign() <= 0 {
+		return currentPrice, false
+	}
+	nextPrice := new(big.Int).Mul(currentPrice, new(big.Int).SetUint64(multiplier))
+	if cap != nil && cap.Sign() > 0 && nextPrice.Cmp(cap) > 0 {
+		nextPrice = new(big.Int).Set(cap)
+	}
+	if nextPrice.Cmp(currentPrice) <= 0 {
+		return nextPrice, false
+	}
+	return nextPrice, true
+}
+
 func buildBoundlessCommandEnv() []string {
 	env := os.Environ()
 	pathValue := os.Getenv("PATH")
@@ -1520,6 +1683,16 @@ func isRetriableBoundlessGetProofError(msg string) bool {
 		strings.Contains(lowered, "not fulfilled") ||
 		strings.Contains(lowered, "not found") ||
 		strings.Contains(lowered, "missing data")
+}
+
+func isRetriableBoundlessLockFailure(msg string) bool {
+	lowered := strings.ToLower(msg)
+	return strings.Contains(lowered, "request timed out") ||
+		strings.Contains(lowered, "not fulfilled") ||
+		strings.Contains(lowered, "lock timeout") ||
+		strings.Contains(lowered, "request expired") ||
+		strings.Contains(lowered, "expired without fulfillment") ||
+		strings.Contains(lowered, "unable to lock")
 }
 
 func boundlessPrivateInputVersion(privateInput []byte) string {

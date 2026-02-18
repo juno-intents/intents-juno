@@ -95,12 +95,27 @@ on:
       boundless_min_price_wei:
         description: "Boundless min price in wei"
         required: true
-        default: "100000000000000"
+        default: "0"
         type: string
       boundless_max_price_wei:
         description: "Boundless max price in wei"
         required: true
+        default: "50000000000000"
+        type: string
+      boundless_max_price_cap_wei:
+        description: "Boundless max price cap in wei used by retry bumps"
+        required: true
         default: "250000000000000"
+        type: string
+      boundless_max_price_bump_multiplier:
+        description: "Boundless max price bump multiplier for lock-failure retries"
+        required: true
+        default: "2"
+        type: string
+      boundless_max_price_bump_retries:
+        description: "Boundless max price bump retries for lock-failure retries"
+        required: true
+        default: "3"
         type: string
       boundless_lock_stake_wei:
         description: "Boundless lock stake in wei"
@@ -264,6 +279,9 @@ jobs:
               --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
               --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
               --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
+              --boundless-max-price-cap-wei "${{ inputs.boundless_max_price_cap_wei }}"
+              --boundless-max-price-bump-multiplier "${{ inputs.boundless_max_price_bump_multiplier }}"
+              --boundless-max-price-bump-retries "${{ inputs.boundless_max_price_bump_retries }}"
               --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"
               --boundless-bidding-delay-seconds "${{ inputs.boundless_bidding_delay_seconds }}"
               --boundless-ramp-up-period-seconds "${{ inputs.boundless_ramp_up_period_seconds }}"

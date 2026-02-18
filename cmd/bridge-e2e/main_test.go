@@ -233,7 +233,7 @@ func TestParseArgs_BoundlessAutoRejectsPrepareOnly(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x11\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -266,7 +266,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -333,7 +333,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -366,7 +366,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidMarketAddress(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -399,7 +399,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidVerifierRouterAddress(t *testing.T
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -432,7 +432,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidSetVerifierAddress(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0x0123456789abcdef\n"), 0o600); err != nil {
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
 
@@ -457,6 +457,74 @@ func TestParseArgs_BoundlessAutoRejectsInvalidSetVerifierAddress(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--boundless-set-verifier-address") {
 		t.Fatalf("expected boundless set verifier address error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoRejectsMaxPriceCapBelowMax(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-max-price-wei", "100",
+		"--boundless-max-price-cap-wei", "99",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-max-price-cap-wei") {
+		t.Fatalf("expected boundless max price cap error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoRejectsInvalidMaxPriceBumpMultiplier(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-max-price-bump-retries", "2",
+		"--boundless-max-price-bump-multiplier", "1",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-max-price-bump-multiplier") {
+		t.Fatalf("expected boundless max price bump multiplier error, got: %v", err)
 	}
 }
 
@@ -625,6 +693,138 @@ func TestIsRetriableBoundlessGetProofError(t *testing.T) {
 			got := isRetriableBoundlessGetProofError(tc.msg)
 			if got != tc.want {
 				t.Fatalf("isRetriableBoundlessGetProofError(%q) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestIsRetriableBoundlessLockFailure(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "request timed out", msg: "boundless submit-offer failed for deposit: request timed out", want: true},
+		{name: "not fulfilled", msg: "boundless get-proof failed for withdraw request_id=0xabc: request not fulfilled", want: true},
+		{name: "lock timeout", msg: "primary prover lock timeout reached", want: true},
+		{name: "request expired", msg: "request expired before lock", want: true},
+		{name: "non lock failure", msg: "boundless journal mismatch for deposit", want: false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRetriableBoundlessLockFailure(tc.msg)
+			if got != tc.want {
+				t.Fatalf("isRetriableBoundlessLockFailure(%q) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNextBoundlessMaxPriceWei(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		current    string
+		multiplier uint64
+		cap        string
+		want       string
+		wantOK     bool
+	}{
+		{
+			name:       "bumps within cap",
+			current:    "50000000000000",
+			multiplier: 2,
+			cap:        "250000000000000",
+			want:       "100000000000000",
+			wantOK:     true,
+		},
+		{
+			name:       "clamps to cap",
+			current:    "200000000000000",
+			multiplier: 2,
+			cap:        "250000000000000",
+			want:       "250000000000000",
+			wantOK:     true,
+		},
+		{
+			name:       "cannot bump at cap",
+			current:    "250000000000000",
+			multiplier: 2,
+			cap:        "250000000000000",
+			want:       "250000000000000",
+			wantOK:     false,
+		},
+		{
+			name:       "invalid multiplier",
+			current:    "50000000000000",
+			multiplier: 1,
+			cap:        "250000000000000",
+			want:       "50000000000000",
+			wantOK:     false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			current, _ := new(big.Int).SetString(tc.current, 10)
+			cap, _ := new(big.Int).SetString(tc.cap, 10)
+			got, ok := nextBoundlessMaxPriceWei(current, tc.multiplier, cap)
+			if ok != tc.wantOK {
+				t.Fatalf("nextBoundlessMaxPriceWei ok=%v, want %v", ok, tc.wantOK)
+			}
+			if got.String() != tc.want {
+				t.Fatalf("nextBoundlessMaxPriceWei got=%s, want %s", got.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestBoundlessFundingShortfallWei(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		maxPrice string
+		balance  string
+		want     string
+	}{
+		{
+			name:     "insufficient balance",
+			maxPrice: "100",
+			balance:  "40",
+			want:     "60",
+		},
+		{
+			name:     "exact balance",
+			maxPrice: "100",
+			balance:  "100",
+			want:     "0",
+		},
+		{
+			name:     "surplus balance",
+			maxPrice: "100",
+			balance:  "500",
+			want:     "0",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			maxPrice, _ := new(big.Int).SetString(tc.maxPrice, 10)
+			balance, _ := new(big.Int).SetString(tc.balance, 10)
+			got := boundlessFundingShortfallWei(maxPrice, balance)
+			if got.String() != tc.want {
+				t.Fatalf("boundlessFundingShortfallWei got=%s, want=%s", got.String(), tc.want)
 			}
 		})
 	}
