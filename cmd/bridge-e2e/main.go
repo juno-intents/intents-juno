@@ -1526,7 +1526,7 @@ type txBackend interface {
 
 func deployContract(ctx context.Context, backend evmBackend, auth *bind.TransactOpts, a abi.ABI, bin []byte, args ...any) (common.Address, common.Hash, error) {
 	for attempt := 1; attempt <= 4; attempt++ {
-		txAuth := transactAuthWithDefaults(auth, 0)
+		txAuth := transactAuthWithDefaults(auth, 10_000_000)
 		applyRetryGasBump(ctx, backend, txAuth, attempt)
 		nonce := "<nil>"
 		if txAuth.Nonce != nil {
