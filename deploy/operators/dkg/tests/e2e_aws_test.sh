@@ -143,6 +143,8 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--shared-postgres-dsn" "shared postgres option"
   assert_contains "$e2e_script_text" "--shared-kafka-brokers" "shared kafka option"
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
+  assert_not_contains "$e2e_script_text" "run_with_rpc_retry 4 3 \"bridge-e2e\"" "bridge e2e should not be re-invoked on transient rpc wrapper retries"
+  assert_contains "$e2e_script_text" "go run ./cmd/bridge-e2e \"\${bridge_args[@]}\"" "bridge e2e direct invocation"
   assert_contains "$e2e_script_text" "--boundless-input-mode" "boundless input mode option"
   assert_contains "$e2e_script_text" "\"--boundless-input-mode\" \"\$boundless_input_mode\"" "boundless input mode bridge forwarding"
   assert_contains "$e2e_script_text" "--boundless-market-address" "boundless market option"

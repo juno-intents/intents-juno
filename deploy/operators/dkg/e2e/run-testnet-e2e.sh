@@ -784,7 +784,7 @@ command_run() {
 
   (
     cd "$REPO_ROOT"
-    run_with_rpc_retry 4 3 "bridge-e2e" go run ./cmd/bridge-e2e "${bridge_args[@]}"
+    go run ./cmd/bridge-e2e "${bridge_args[@]}"
   )
 
   jq -n \
