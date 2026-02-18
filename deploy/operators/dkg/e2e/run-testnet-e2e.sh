@@ -24,15 +24,11 @@ Options:
   --threshold <n>                  DKG threshold (default: 3)
   --base-port <port>               first operator grpc port (default: 18443)
   --base-operator-fund-wei <wei>   optional pre-fund per operator (default: 1000000000000000)
-  --bridge-verifier-address <addr> optional verifier router address for real proof verification
-  --bridge-deposit-image-id <hex>  optional deposit image ID (bytes32 hex)
-  --bridge-withdraw-image-id <hex> optional withdraw image ID (bytes32 hex)
-  --bridge-deposit-seal-file <path> optional file with deposit proof seal hex
-  --bridge-withdraw-seal-file <path> optional file with withdraw proof seal hex
-  --bridge-prepare-only            prepare proof inputs only (skip mint/finalize)
+  --bridge-verifier-address <addr> required verifier router address for proof verification
+  --bridge-deposit-image-id <hex>  required deposit image ID (bytes32 hex)
+  --bridge-withdraw-image-id <hex> required withdraw image ID (bytes32 hex)
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
-  --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 8m; 90m with --boundless-auto)
-  --boundless-auto                 auto-submit/wait Boundless proofs and callback with returned seals
+  --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --boundless-bin <path>           boundless binary (default: boundless)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
   --boundless-market-address <addr> boundless market contract address
@@ -41,10 +37,9 @@ Options:
                                    (default: 0x0b144e07a0826182b6b59788c34b32bfa86fb711)
   --boundless-set-verifier-address <addr> boundless set verifier address
                                    (default: 0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104)
-  --boundless-input-mode <mode>    boundless private input mode: private-input | journal-bytes-v1 (default: private-input)
-  --boundless-requestor-key-file <path> requestor key file for boundless (required with --boundless-auto)
-  --boundless-deposit-program-url <url> deposit guest program URL for boundless (required with --boundless-auto)
-  --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required with --boundless-auto)
+  --boundless-requestor-key-file <path> requestor key file for boundless (required)
+  --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
+  --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
   --boundless-min-price-wei <wei>  auction min price (default: 0)
   --boundless-max-price-wei <wei>  auction max price (default: 50000000000000)
   --boundless-max-price-cap-wei <wei> max auction price cap used by retry bumps (default: 250000000000000)
@@ -69,7 +64,7 @@ Environment:
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
   2) Base operator pre-funding (optional)
-  3) Base testnet deploy + bridge smoke transactions via cmd/bridge-e2e
+  3) Base testnet deploy + bridge flow via cmd/bridge-e2e with real Boundless proofs
 EOF
 }
 
@@ -301,18 +296,14 @@ command_run() {
   local bridge_verifier_address=""
   local bridge_deposit_image_id=""
   local bridge_withdraw_image_id=""
-  local bridge_deposit_seal_file=""
-  local bridge_withdraw_seal_file=""
-  local bridge_prepare_only="false"
   local bridge_proof_inputs_output=""
   local bridge_run_timeout=""
-  local boundless_auto="false"
+  local boundless_auto="true"
   local boundless_bin="boundless"
   local boundless_rpc_url="https://mainnet.base.org"
   local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
   local boundless_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
   local boundless_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-  local boundless_input_mode="private-input"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -396,20 +387,6 @@ command_run() {
         bridge_withdraw_image_id="$2"
         shift 2
         ;;
-      --bridge-deposit-seal-file)
-        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-seal-file"
-        bridge_deposit_seal_file="$2"
-        shift 2
-        ;;
-      --bridge-withdraw-seal-file)
-        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-seal-file"
-        bridge_withdraw_seal_file="$2"
-        shift 2
-        ;;
-      --bridge-prepare-only)
-        bridge_prepare_only="true"
-        shift
-        ;;
       --bridge-proof-inputs-output)
         [[ $# -ge 2 ]] || die "missing value for --bridge-proof-inputs-output"
         bridge_proof_inputs_output="$2"
@@ -419,10 +396,6 @@ command_run() {
         [[ $# -ge 2 ]] || die "missing value for --bridge-run-timeout"
         bridge_run_timeout="$2"
         shift 2
-        ;;
-      --boundless-auto)
-        boundless_auto="true"
-        shift
         ;;
       --boundless-bin)
         [[ $# -ge 2 ]] || die "missing value for --boundless-bin"
@@ -447,11 +420,6 @@ command_run() {
       --boundless-set-verifier-address)
         [[ $# -ge 2 ]] || die "missing value for --boundless-set-verifier-address"
         boundless_set_verifier_address="$2"
-        shift 2
-        ;;
-      --boundless-input-mode)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-mode"
-        boundless_input_mode="$(lower "$2")"
         shift 2
         ;;
       --boundless-requestor-key-file)
@@ -585,40 +553,17 @@ command_run() {
   if (( boundless_max_price_bump_retries > 0 && boundless_max_price_bump_multiplier < 2 )); then
     die "--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0"
   fi
-  case "$boundless_input_mode" in
-    private-input|journal-bytes-v1)
-      ;;
-    *)
-      die "--boundless-input-mode must be one of: private-input, journal-bytes-v1"
-      ;;
-  esac
-
   if [[ -z "$bridge_run_timeout" ]]; then
-    if [[ "$boundless_auto" == "true" ]]; then
-      bridge_run_timeout="90m"
-    else
-      bridge_run_timeout="8m"
-    fi
+    bridge_run_timeout="90m"
   fi
 
-  if [[ "$boundless_auto" == "true" ]]; then
-    [[ -n "$boundless_requestor_key_file" ]] || die "--boundless-requestor-key-file is required with --boundless-auto"
-    [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
-    [[ -n "$boundless_deposit_program_url" ]] || die "--boundless-deposit-program-url is required with --boundless-auto"
-    [[ -n "$boundless_withdraw_program_url" ]] || die "--boundless-withdraw-program-url is required with --boundless-auto"
-    [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required with --boundless-auto"
-    [[ "$bridge_prepare_only" != "true" ]] || die "--boundless-auto cannot be used with --bridge-prepare-only"
-  fi
-
-  if [[ -n "$bridge_deposit_seal_file" ]]; then
-    [[ -f "$bridge_deposit_seal_file" ]] || die "bridge deposit seal file not found: $bridge_deposit_seal_file"
-  fi
-  if [[ -n "$bridge_withdraw_seal_file" ]]; then
-    [[ -f "$bridge_withdraw_seal_file" ]] || die "bridge withdraw seal file not found: $bridge_withdraw_seal_file"
-  fi
-  if [[ "$boundless_auto" == "true" && ( -n "$bridge_deposit_seal_file" || -n "$bridge_withdraw_seal_file" ) ]]; then
-    die "--boundless-auto cannot be combined with --bridge-deposit-seal-file/--bridge-withdraw-seal-file"
-  fi
+  [[ -n "$boundless_requestor_key_file" ]] || die "--boundless-requestor-key-file is required"
+  [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
+  [[ -n "$boundless_deposit_program_url" ]] || die "--boundless-deposit-program-url is required"
+  [[ -n "$boundless_withdraw_program_url" ]] || die "--boundless-withdraw-program-url is required"
+  [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
+  [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
+  [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
 
   if [[ -z "$output_path" ]]; then
     output_path="$workdir/reports/testnet-e2e-summary.json"
@@ -639,13 +584,22 @@ command_run() {
 
   ensure_base_dependencies
   ensure_command go
-  if [[ "$boundless_auto" == "true" ]]; then
-    ensure_command "$boundless_bin"
-    local boundless_version
-    boundless_version="$("$boundless_bin" --version 2>/dev/null || true)"
-    if [[ "$boundless_version" == boundless-cli\ 0.* ]]; then
-      die "boundless-auto requires boundless-cli v1.x+; installed version is '$boundless_version'"
-    fi
+  ensure_command "$boundless_bin"
+  local boundless_version
+  boundless_version="$("$boundless_bin" --version 2>/dev/null || true)"
+  if [[ "$boundless_version" == boundless-cli\ 0.* ]]; then
+    die "boundless-auto requires boundless-cli v1.x+; installed version is '$boundless_version'"
+  fi
+  ensure_command openssl
+
+  local bridge_recipient_key_file="$workdir/reports/bridge-recipient.key"
+  local bridge_recipient_key_hex="0x$(openssl rand -hex 32)"
+  printf '%s\n' "$bridge_recipient_key_hex" >"$bridge_recipient_key_file"
+  chmod 0600 "$bridge_recipient_key_file"
+  local bridge_recipient_address
+  bridge_recipient_address="$(cast wallet address --private-key "$bridge_recipient_key_hex")"
+  if [[ -z "$bridge_recipient_address" ]]; then
+    die "failed to derive bridge recipient address"
   fi
   ensure_dir "$(dirname "$output_path")"
 
@@ -733,54 +687,38 @@ command_run() {
     "--deployer-key-file" "$bridge_deployer_key_file"
     "--threshold" "$threshold"
     "--contracts-out" "$contracts_out"
+    "--recipient" "$bridge_recipient_address"
+    "--boundless-auto"
     "--run-timeout" "$bridge_run_timeout"
     "--output" "$bridge_summary"
   )
-  if [[ -n "$bridge_verifier_address" ]]; then
-    bridge_args+=("--verifier-address" "$bridge_verifier_address")
-  fi
-  if [[ -n "$bridge_deposit_image_id" ]]; then
-    bridge_args+=("--deposit-image-id" "$bridge_deposit_image_id")
-  fi
-  if [[ -n "$bridge_withdraw_image_id" ]]; then
-    bridge_args+=("--withdraw-image-id" "$bridge_withdraw_image_id")
-  fi
-  if [[ -n "$bridge_deposit_seal_file" ]]; then
-    bridge_args+=("--deposit-seal-hex" "$(trimmed_file_value "$bridge_deposit_seal_file")")
-  fi
-  if [[ -n "$bridge_withdraw_seal_file" ]]; then
-    bridge_args+=("--withdraw-seal-hex" "$(trimmed_file_value "$bridge_withdraw_seal_file")")
-  fi
-  if [[ "$bridge_prepare_only" == "true" ]]; then
-    bridge_args+=("--prepare-only")
-  fi
+  bridge_args+=("--verifier-address" "$bridge_verifier_address")
+  bridge_args+=("--deposit-image-id" "$bridge_deposit_image_id")
+  bridge_args+=("--withdraw-image-id" "$bridge_withdraw_image_id")
   if [[ -n "$bridge_proof_inputs_output" ]]; then
     bridge_args+=("--proof-inputs-output" "$bridge_proof_inputs_output")
   fi
-  if [[ "$boundless_auto" == "true" ]]; then
-    bridge_args+=(
-      "--boundless-auto"
-      "--boundless-bin" "$boundless_bin"
-      "--boundless-rpc-url" "$boundless_rpc_url"
-      "--boundless-market-address" "$boundless_market_address"
-      "--boundless-verifier-router-address" "$boundless_verifier_router_address"
-      "--boundless-set-verifier-address" "$boundless_set_verifier_address"
-      "--boundless-input-mode" "$boundless_input_mode"
-      "--boundless-requestor-key-file" "$boundless_requestor_key_file"
-      "--boundless-deposit-program-url" "$boundless_deposit_program_url"
-      "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
-      "--boundless-min-price-wei" "$boundless_min_price_wei"
-      "--boundless-max-price-wei" "$boundless_max_price_wei"
-      "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
-      "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
-      "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
-      "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
-      "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
-      "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
-      "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
-      "--boundless-timeout-seconds" "$boundless_timeout_seconds"
-    )
-  fi
+  bridge_args+=(
+    "--boundless-bin" "$boundless_bin"
+    "--boundless-rpc-url" "$boundless_rpc_url"
+    "--boundless-market-address" "$boundless_market_address"
+    "--boundless-verifier-router-address" "$boundless_verifier_router_address"
+    "--boundless-set-verifier-address" "$boundless_set_verifier_address"
+    "--boundless-input-mode" "private-input"
+    "--boundless-requestor-key-file" "$boundless_requestor_key_file"
+    "--boundless-deposit-program-url" "$boundless_deposit_program_url"
+    "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
+    "--boundless-min-price-wei" "$boundless_min_price_wei"
+    "--boundless-max-price-wei" "$boundless_max_price_wei"
+    "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
+    "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
+    "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
+    "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
+    "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
+    "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
+    "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
+    "--boundless-timeout-seconds" "$boundless_timeout_seconds"
+  )
 
   local key_path
   while IFS= read -r key_path; do
@@ -806,13 +744,12 @@ command_run() {
     --arg bridge_verifier_address "$bridge_verifier_address" \
     --arg bridge_deposit_image_id "$bridge_deposit_image_id" \
     --arg bridge_withdraw_image_id "$bridge_withdraw_image_id" \
-    --arg bridge_prepare_only "$bridge_prepare_only" \
     --arg bridge_proof_inputs_output "$bridge_proof_inputs_output" \
     --arg bridge_run_timeout "$bridge_run_timeout" \
     --arg boundless_auto "$boundless_auto" \
     --arg boundless_bin "$boundless_bin" \
     --arg boundless_rpc_url "$boundless_rpc_url" \
-    --arg boundless_input_mode "$boundless_input_mode" \
+    --arg boundless_input_mode "private-input" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
     --arg boundless_min_price_wei "$boundless_min_price_wei" \
@@ -825,6 +762,7 @@ command_run() {
     --arg boundless_ramp_up_period_seconds "$boundless_ramp_up_period_seconds" \
     --arg boundless_lock_timeout_seconds "$boundless_lock_timeout_seconds" \
     --arg boundless_timeout_seconds "$boundless_timeout_seconds" \
+    --arg bridge_recipient_address "$bridge_recipient_address" \
     --arg shared_enabled "$shared_enabled" \
     --arg shared_kafka_brokers "$shared_kafka_brokers" \
     --arg shared_topic_prefix "$shared_topic_prefix" \
@@ -854,7 +792,7 @@ command_run() {
         verifier_address: (if $bridge_verifier_address == "" then null else $bridge_verifier_address end),
         deposit_image_id: (if $bridge_deposit_image_id == "" then null else $bridge_deposit_image_id end),
         withdraw_image_id: (if $bridge_withdraw_image_id == "" then null else $bridge_withdraw_image_id end),
-        prepare_only: ($bridge_prepare_only == "true"),
+        recipient_address: $bridge_recipient_address,
         run_timeout: $bridge_run_timeout,
         proof_inputs_output: $bridge_proof_inputs_output,
         boundless: {

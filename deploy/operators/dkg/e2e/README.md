@@ -25,9 +25,6 @@ Current limitation:
   - Optionally validates shared Postgres/Kafka infra first via `cmd/shared-infra-e2e` when `--shared-postgres-dsn` and `--shared-kafka-brokers` are provided.
 - `run-testnet-e2e-aws.sh`:
   - Provisions a dedicated AWS EC2 runner with Terraform, plus a shared-services EC2 host (Postgres+Kafka by default), executes `run-testnet-e2e.sh` on that host, collects artifacts, and destroys infra by default.
-- `run-bridge-phase2-callback.sh`:
-  - Executes phase-2 callback transactions from `bridge-proof-inputs.json` plus provided deposit/withdraw seals.
-
 ## AWS Live E2E
 
 - Terraform stack:
@@ -50,7 +47,7 @@ GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
 - Funding keys:
   - `BASE_FUNDER_PRIVATE_KEY_HEX`
   - `JUNO_FUNDER_PRIVATE_KEY_HEX`
-  - `BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX` (required when `boundless_auto=true`)
+  - `BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX`
 
 Local invocation example:
 
@@ -66,19 +63,15 @@ Local invocation example:
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
-  --boundless-auto \
-  --boundless-input-mode private-input \
   --boundless-deposit-program-url https://.../deposit-guest.elf \
   --boundless-withdraw-program-url https://.../withdraw-guest.elf
 ```
 
-## Boundless Modes
+## Boundless Mode
 
-- Default mode (no verifier args): deploys a no-op verifier and runs full bridge smoke transactions for infra validation.
-- Real verifier mode: pass `--bridge-verifier-address` and both seal files (`--bridge-deposit-seal-file`, `--bridge-withdraw-seal-file`) to verify real seals against a live verifier router.
-- Auto Boundless mode: pass `--boundless-auto` plus Boundless requestor key/program URLs to submit proofs, wait for fulfillment, and execute callback transactions automatically.
-- Prepare-only mode: pass `--bridge-prepare-only` to generate proof input artifacts and skip `mintBatch/finalizeWithdrawBatch`. This supports manual callback flows when proof submission/fulfillment is handled outside the testnet stack.
-- Manual callback runner: use `run-bridge-phase2-callback.sh` with the prepare-only proof bundle and seal files to execute `mintBatch`, `approve`, `requestWithdraw`, and `finalizeWithdrawBatch` on the already deployed bridge contracts.
+- The e2e runs in strict proof mode only.
+- `run-testnet-e2e.sh` always uses `--boundless-auto` and `--boundless-input-mode private-input`.
+- No manual seal injection, no prepare-only path, and no no-op verifier path are supported in this flow.
 
 Pricing policy and calculator:
 
@@ -93,50 +86,11 @@ Pricing policy and calculator:
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
   --base-rpc-url https://base-sepolia-rpc.example \
   --base-funder-key-file ./tmp/funders/base-funder.key \
-  --force
-
-# Phase 2 automatic proof flow (Boundless submit + wait + callback).
-./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
-  --base-rpc-url https://base-sepolia-rpc.example \
-  --base-funder-key-file ./tmp/funders/base-funder.key \
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
-  --boundless-auto \
   --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
-  --boundless-input-mode private-input \
   --boundless-deposit-program-url https://.../deposit-guest.elf \
   --boundless-withdraw-program-url https://.../withdraw-guest.elf \
   --force
-
-# Phase 2 prepare-only artifact generation for manual callback/proof submission.
-./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
-  --base-rpc-url https://base-sepolia-rpc.example \
-  --base-funder-key-file ./tmp/funders/base-funder.key \
-  --bridge-verifier-address 0xVerifierRouterAddress \
-  --bridge-deposit-image-id 0x... \
-  --bridge-withdraw-image-id 0x... \
-  --bridge-prepare-only \
-  --force
-
-# Phase 2 execution with real seals.
-./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
-  --base-rpc-url https://base-sepolia-rpc.example \
-  --base-funder-key-file ./tmp/funders/base-funder.key \
-  --bridge-verifier-address 0xVerifierRouterAddress \
-  --bridge-deposit-image-id 0x... \
-  --bridge-withdraw-image-id 0x... \
-  --bridge-deposit-seal-file ./tmp/seals/deposit.seal.hex \
-  --bridge-withdraw-seal-file ./tmp/seals/withdraw.seal.hex \
-  --force
-
-# Phase 2 callback execution from prepare-only artifacts.
-# NOTE: pass --withdraw-amount for older proof bundles that do not include withdraw.amount.
-./deploy/operators/dkg/e2e/run-bridge-phase2-callback.sh run \
-  --base-rpc-url https://base-sepolia-rpc.example \
-  --base-funder-key-file ./tmp/funders/base-funder.key \
-  --proof-inputs-file ./tmp/testnet-e2e/reports/bridge-proof-inputs.json \
-  --deposit-seal-file ./tmp/seals/deposit.seal.hex \
-  --withdraw-seal-file ./tmp/seals/withdraw.seal.hex \
-  --withdraw-amount 10000
 ```

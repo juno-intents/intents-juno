@@ -397,39 +397,15 @@ foundryup
 run_with_retry rustup toolchain install 1.91.1 --profile minimal
 run_with_retry rustup default 1.91.1
 rustc --version
-BOUNDLESS_CLI_SOURCE_DIR="/tmp/boundless-cli-release-1.2"
-if [[ -d "\$BOUNDLESS_CLI_SOURCE_DIR/.git" ]]; then
-  git -C "\$BOUNDLESS_CLI_SOURCE_DIR" fetch --depth 1 origin release-1.2
-  git -C "\$BOUNDLESS_CLI_SOURCE_DIR" checkout --force FETCH_HEAD
-else
-  git clone --depth 1 --branch release-1.2 https://github.com/boundless-xyz/boundless "\$BOUNDLESS_CLI_SOURCE_DIR"
-fi
-
-boundless_market_build_rs="\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-market/build.rs"
-if [[ ! -f "\$boundless_market_build_rs" ]]; then
-  echo "boundless-market build script missing: \$boundless_market_build_rs" >&2
-  exit 1
-fi
-
-# Work around alloy::sol parser edge case during cargo-install codegen on Linux.
-if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
-  perl -0pi -e 's/\\{combined_sol_contents\\}/\\{combined_sol_contents\\}\\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$boundless_market_build_rs"
-fi
-if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
-  echo "failed to patch boundless market build script: \$boundless_market_build_rs" >&2
-  exit 1
-fi
-
 boundless_cli_target_version="1.2.0"
-boundless_cli_target_branch="release-1.2"
 boundless_version_output=""
 if command -v boundless >/dev/null 2>&1; then
   boundless_version_output="\$(boundless --version 2>/dev/null || true)"
 fi
-if [[ "\$boundless_version_output" == *"boundless-cli \$boundless_cli_target_version"* && "\$boundless_version_output" == *"branch:\$boundless_cli_target_branch"* ]]; then
+if [[ "\$boundless_version_output" == *"boundless-cli \$boundless_cli_target_version"* ]]; then
   echo "boundless-cli already installed at target version; skipping reinstall"
 else
-  run_with_retry cargo +1.91.1 install --path "\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli" --locked --force
+  run_with_retry cargo +1.91.1 install boundless-cli --version "\$boundless_cli_target_version" --locked --force
 fi
 boundless --version
 

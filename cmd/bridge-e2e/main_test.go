@@ -23,6 +23,7 @@ func TestParseArgs_Valid(t *testing.T) {
 	op1 := filepath.Join(tmp, "op1.key")
 	op2 := filepath.Join(tmp, "op2.key")
 	op3 := filepath.Join(tmp, "op3.key")
+	requestor := filepath.Join(tmp, "requestor.key")
 
 	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write deployer key: %v", err)
@@ -36,6 +37,9 @@ func TestParseArgs_Valid(t *testing.T) {
 	if err := os.WriteFile(op3, []byte("0x0f4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0\n"), 0o600); err != nil {
 		t.Fatalf("write op3 key: %v", err)
 	}
+	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
 
 	cfg, err := parseArgs([]string{
 		"--rpc-url", "https://example-rpc.invalid",
@@ -45,6 +49,11 @@ func TestParseArgs_Valid(t *testing.T) {
 		"--operator-key-file", op2,
 		"--operator-key-file", op3,
 		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-requestor-key-file", requestor,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -95,22 +104,6 @@ func TestParseArgs_RejectsWithdrawLargerThanDeposit(t *testing.T) {
 	}
 }
 
-func TestParseArgs_PrepareOnlyRequiresProofInputsOutput(t *testing.T) {
-	t.Parallel()
-
-	_, err := parseArgs([]string{
-		"--rpc-url", "https://example-rpc.invalid",
-		"--chain-id", "84532",
-		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-		"--operator-key-file", "/tmp/op1",
-		"--operator-key-file", "/tmp/op2",
-		"--prepare-only",
-	})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
 func TestParseArgs_RejectsInvalidVerifierAddress(t *testing.T) {
 	t.Parallel()
 
@@ -121,22 +114,6 @@ func TestParseArgs_RejectsInvalidVerifierAddress(t *testing.T) {
 		"--operator-key-file", "/tmp/op1",
 		"--operator-key-file", "/tmp/op2",
 		"--verifier-address", "0x1234",
-	})
-	if err == nil {
-		t.Fatalf("expected error")
-	}
-}
-
-func TestParseArgs_RejectsInvalidSealHex(t *testing.T) {
-	t.Parallel()
-
-	_, err := parseArgs([]string{
-		"--rpc-url", "https://example-rpc.invalid",
-		"--chain-id", "84532",
-		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-		"--operator-key-file", "/tmp/op1",
-		"--operator-key-file", "/tmp/op2",
-		"--deposit-seal-hex", "xyz",
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -160,7 +137,7 @@ func TestParseArgs_RejectsInvalidImageID(t *testing.T) {
 	}
 }
 
-func TestParseArgs_VerifierRequiresSealsWithoutPrepareOnly(t *testing.T) {
+func TestParseArgs_RequiresVerifierAddress(t *testing.T) {
 	t.Parallel()
 
 	_, err := parseArgs([]string{
@@ -170,35 +147,16 @@ func TestParseArgs_VerifierRequiresSealsWithoutPrepareOnly(t *testing.T) {
 		"--operator-key-file", "/tmp/op1",
 		"--operator-key-file", "/tmp/op2",
 		"--operator-key-file", "/tmp/op3",
-		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-requestor-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-}
-
-func TestParseArgs_PrepareOnlyAllowsVerifierWithoutSeals(t *testing.T) {
-	t.Parallel()
-
-	cfg, err := parseArgs([]string{
-		"--rpc-url", "https://example-rpc.invalid",
-		"--chain-id", "84532",
-		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
-		"--operator-key-file", "/tmp/op1",
-		"--operator-key-file", "/tmp/op2",
-		"--operator-key-file", "/tmp/op3",
-		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
-		"--prepare-only",
-		"--proof-inputs-output", "/tmp/proof-inputs.json",
-	})
-	if err != nil {
-		t.Fatalf("expected parse success, got: %v", err)
-	}
-	if !cfg.PrepareOnly {
-		t.Fatalf("expected prepare-only true")
-	}
-	if len(cfg.DepositSeal) != 0 || len(cfg.WithdrawSeal) != 0 {
-		t.Fatalf("expected empty seals in prepare-only mode")
+	if !strings.Contains(err.Error(), "--verifier-address") {
+		t.Fatalf("expected verifier required error, got: %v", err)
 	}
 }
 
@@ -218,8 +176,6 @@ func TestParseArgs_BoundlessAutoRequiresRequestorKeyFile(t *testing.T) {
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
-		"--deposit-seal-hex", "0x99",
-		"--withdraw-seal-hex", "0x99",
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -229,14 +185,8 @@ func TestParseArgs_BoundlessAutoRequiresRequestorKeyFile(t *testing.T) {
 	}
 }
 
-func TestParseArgs_BoundlessAutoRejectsPrepareOnly(t *testing.T) {
+func TestParseArgs_RequiresBoundlessAuto(t *testing.T) {
 	t.Parallel()
-
-	tmp := t.TempDir()
-	requestorKey := filepath.Join(tmp, "requestor.key")
-	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
-		t.Fatalf("write requestor key: %v", err)
-	}
 
 	_, err := parseArgs([]string{
 		"--rpc-url", "https://example-rpc.invalid",
@@ -245,20 +195,13 @@ func TestParseArgs_BoundlessAutoRejectsPrepareOnly(t *testing.T) {
 		"--operator-key-file", "/tmp/op1",
 		"--operator-key-file", "/tmp/op2",
 		"--operator-key-file", "/tmp/op3",
-		"--prepare-only",
-		"--proof-inputs-output", "/tmp/proof-inputs.json",
-		"--boundless-auto",
-		"--boundless-bin", "boundless",
-		"--boundless-rpc-url", "https://mainnet.base.org",
-		"--boundless-requestor-key-file", requestorKey,
-		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
-		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "cannot be used with --prepare-only") {
-		t.Fatalf("expected prepare-only incompatibility error, got: %v", err)
+	if !strings.Contains(err.Error(), "--boundless-auto") {
+		t.Fatalf("expected boundless-auto required error, got: %v", err)
 	}
 }
 
@@ -282,7 +225,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-auto",
 		"--boundless-bin", "boundless",
 		"--boundless-rpc-url", "https://mainnet.base.org",
-		"--boundless-input-mode", "journal-bytes-v1",
+		"--boundless-input-mode", "private-input",
 		"--boundless-market-address", "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82",
 		"--boundless-verifier-router-address", "0x0b144e07a0826182b6b59788c34b32bfa86fb711",
 		"--boundless-set-verifier-address", "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104",
@@ -306,7 +249,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	if cfg.Boundless.Bin != "boundless" {
 		t.Fatalf("unexpected boundless bin: %q", cfg.Boundless.Bin)
 	}
-	if cfg.Boundless.InputMode != "journal-bytes-v1" {
+	if cfg.Boundless.InputMode != "private-input" {
 		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
 	}
 	if cfg.Boundless.MarketAddress != common.HexToAddress("0xFd152dADc5183870710FE54f939Eae3aB9F0fE82") {
@@ -329,7 +272,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	}
 }
 
-func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
+func TestParseArgs_BoundlessAutoRejectsJournalInputMode(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -349,7 +292,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
 		"--boundless-auto",
 		"--boundless-bin", "boundless",
 		"--boundless-rpc-url", "https://mainnet.base.org",
-		"--boundless-input-mode", "invalid-mode",
+		"--boundless-input-mode", "journal-bytes-v1",
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
@@ -357,7 +300,7 @@ func TestParseArgs_BoundlessAutoRejectsInvalidInputMode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "--boundless-input-mode") {
+	if !strings.Contains(err.Error(), "private-input") {
 		t.Fatalf("expected boundless input mode error, got: %v", err)
 	}
 }
@@ -851,25 +794,6 @@ func TestBoundlessPrivateInputVersion_IgnoresBinaryOrMissingVersion(t *testing.T
 
 	if got := boundlessPrivateInputVersion([]byte(`{"items":[]}`)); got != "" {
 		t.Fatalf("expected empty version for json without version, got %q", got)
-	}
-}
-
-func TestEncodeBoundlessJournalInput(t *testing.T) {
-	t.Parallel()
-
-	in := []byte{0xaa, 0xbb, 0xcc, 0xdd}
-	got, err := encodeBoundlessJournalInput(in)
-	if err != nil {
-		t.Fatalf("encodeBoundlessJournalInput: %v", err)
-	}
-	if len(got) != 8 {
-		t.Fatalf("encoded len: got %d want 8", len(got))
-	}
-	if got[0] != 0x04 || got[1] != 0x00 || got[2] != 0x00 || got[3] != 0x00 {
-		t.Fatalf("unexpected length prefix: %x", got[:4])
-	}
-	if string(got[4:]) != string(in) {
-		t.Fatalf("unexpected payload: %x", got[4:])
 	}
 }
 

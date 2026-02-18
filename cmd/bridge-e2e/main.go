@@ -4,13 +4,11 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"math"
 	"math/big"
 	"os"
 	"os/exec"
@@ -65,7 +63,6 @@ type config struct {
 	WithdrawImageID  common.Hash
 	DepositSeal      []byte
 	WithdrawSeal     []byte
-	PrepareOnly      bool
 	ProofInputsOut   string
 	OutputPath       string
 	RunTimeout       time.Duration
@@ -124,7 +121,6 @@ const (
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
 	boundlessInputModePrivate         = "private-input"
-	boundlessInputModeJournalBytesV1  = "journal-bytes-v1"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
 	withdrawalFinalizedWaitTimeout    = 60 * time.Second
@@ -167,6 +163,7 @@ type report struct {
 		MintBatch         string `json:"mint_batch"`
 		ApproveWithdraw   string `json:"approve_withdraw"`
 		RequestWithdraw   string `json:"request_withdraw"`
+		ExtendWithdraw    string `json:"extend_withdraw"`
 		FinalizeWithdraw  string `json:"finalize_withdraw"`
 	} `json:"transactions"`
 
@@ -182,7 +179,6 @@ type report struct {
 	} `json:"balances"`
 
 	Proof struct {
-		PrepareOnly       bool   `json:"prepare_only"`
 		ProofInputsPath   string `json:"proof_inputs_path,omitempty"`
 		DepositImageID    string `json:"deposit_image_id"`
 		WithdrawImageID   string `json:"withdraw_image_id"`
@@ -219,12 +215,14 @@ type report struct {
 		} `json:"registry"`
 		DepositUsed bool `json:"deposit_used"`
 		Withdrawal  struct {
-			Exists    bool   `json:"exists"`
-			Finalized bool   `json:"finalized"`
-			Refunded  bool   `json:"refunded"`
-			FeeBps    uint64 `json:"fee_bps"`
-			Amount    string `json:"amount"`
-			Expiry    uint64 `json:"expiry"`
+			Exists         bool   `json:"exists"`
+			Finalized      bool   `json:"finalized"`
+			Refunded       bool   `json:"refunded"`
+			Extended       bool   `json:"extended"`
+			FeeBps         uint64 `json:"fee_bps"`
+			Amount         string `json:"amount"`
+			Expiry         uint64 `json:"expiry"`
+			ExpectedExpiry uint64 `json:"expected_expiry"`
 		} `json:"withdrawal"`
 		Fees struct {
 			Deposit struct {
@@ -371,8 +369,6 @@ func parseArgs(args []string) (config, error) {
 	var verifierAddressHex string
 	var depositImageIDHex string
 	var withdrawImageIDHex string
-	var depositSealHex string
-	var withdrawSealHex string
 	var boundlessRequestorKeyFile string
 	var boundlessRequestorKeyHex string
 	var boundlessMinPriceWei string
@@ -393,12 +389,9 @@ func parseArgs(args []string) (config, error) {
 	fs.Uint64Var(&cfg.DepositAmount, "deposit-amount", 100_000, "mintBatch item amount (wJUNO base units)")
 	fs.Uint64Var(&cfg.WithdrawAmount, "withdraw-amount", 10_000, "request/finalize amount (wJUNO base units)")
 	fs.StringVar(&recipientHex, "recipient", "", "optional recipient address for mint (defaults to deployer)")
-	fs.StringVar(&verifierAddressHex, "verifier-address", "", "optional verifier router address (uses no-op verifier when unset)")
+	fs.StringVar(&verifierAddressHex, "verifier-address", "", "verifier router address (required)")
 	fs.StringVar(&depositImageIDHex, "deposit-image-id", defaultDepositImageIDHex, "deposit image ID (bytes32)")
 	fs.StringVar(&withdrawImageIDHex, "withdraw-image-id", defaultWithdrawImageIDHex, "withdraw image ID (bytes32)")
-	fs.StringVar(&depositSealHex, "deposit-seal-hex", "", "optional mintBatch proof seal hex")
-	fs.StringVar(&withdrawSealHex, "withdraw-seal-hex", "", "optional finalizeWithdrawBatch proof seal hex")
-	fs.BoolVar(&cfg.PrepareOnly, "prepare-only", false, "prepare proof input artifacts only; skip mint/finalize transactions")
 	fs.StringVar(&cfg.ProofInputsOut, "proof-inputs-output", "", "optional path to write proof input artifact bundle")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
@@ -406,7 +399,7 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
 	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
-	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input or journal-bytes-v1")
+	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input")
 	var boundlessMarketAddressHex string
 	var boundlessVerifierRouterHex string
 	var boundlessSetVerifierHex string
@@ -498,15 +491,6 @@ func parseArgs(args []string) (config, error) {
 		return cfg, err
 	}
 
-	cfg.DepositSeal, err = parseHexBytesFlag("--deposit-seal-hex", depositSealHex)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.WithdrawSeal, err = parseHexBytesFlag("--withdraw-seal-hex", withdrawSealHex)
-	if err != nil {
-		return cfg, err
-	}
-
 	if boundlessRequestorKeyFile != "" && boundlessRequestorKeyHex != "" {
 		return cfg, errors.New("use only one of --boundless-requestor-key-file or --boundless-requestor-key-hex")
 	}
@@ -579,54 +563,26 @@ func parseArgs(args []string) (config, error) {
 	if cfg.Boundless.LockTimeoutSeconds > cfg.Boundless.TimeoutSeconds {
 		return cfg, errors.New("--boundless-lock-timeout-seconds must be <= --boundless-timeout-seconds")
 	}
-	if cfg.Boundless.Auto {
-		if cfg.PrepareOnly {
-			return cfg, errors.New("--boundless-auto cannot be used with --prepare-only")
-		}
-		if strings.TrimSpace(cfg.Boundless.Bin) == "" {
-			return cfg, errors.New("--boundless-bin is required when --boundless-auto is set")
-		}
-		if strings.TrimSpace(cfg.Boundless.RPCURL) == "" {
-			return cfg, errors.New("--boundless-rpc-url is required when --boundless-auto is set")
-		}
-		if strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
-			return cfg, errors.New("--boundless-requestor-key-file or --boundless-requestor-key-hex is required when --boundless-auto is set")
-		}
-		if strings.TrimSpace(cfg.Boundless.DepositProgramURL) == "" {
-			return cfg, errors.New("--boundless-deposit-program-url is required when --boundless-auto is set")
-		}
-		if strings.TrimSpace(cfg.Boundless.WithdrawProgramURL) == "" {
-			return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
-		}
-		if !cfg.VerifierSet {
-			return cfg, errors.New("--boundless-auto requires --verifier-address")
-		}
+	if !cfg.VerifierSet {
+		return cfg, errors.New("--verifier-address is required")
 	}
-
-	if cfg.PrepareOnly && strings.TrimSpace(cfg.ProofInputsOut) == "" {
-		return cfg, errors.New("--prepare-only requires --proof-inputs-output")
+	if !cfg.Boundless.Auto {
+		return cfg, errors.New("--boundless-auto is required")
 	}
-
-	if !cfg.PrepareOnly {
-		if cfg.VerifierSet {
-			if cfg.Boundless.Auto {
-				if len(cfg.DepositSeal) != 0 || len(cfg.WithdrawSeal) != 0 {
-					return cfg, errors.New("--boundless-auto cannot be combined with --deposit-seal-hex or --withdraw-seal-hex")
-				}
-			} else if len(cfg.DepositSeal) == 0 || len(cfg.WithdrawSeal) == 0 {
-				return cfg, errors.New("--verifier-address requires --deposit-seal-hex and --withdraw-seal-hex unless --prepare-only is set")
-			}
-		} else {
-			if cfg.Boundless.Auto {
-				return cfg, errors.New("--boundless-auto requires --verifier-address")
-			}
-			if len(cfg.DepositSeal) == 0 {
-				cfg.DepositSeal = []byte{0x99}
-			}
-			if len(cfg.WithdrawSeal) == 0 {
-				cfg.WithdrawSeal = []byte{0x99}
-			}
-		}
+	if strings.TrimSpace(cfg.Boundless.Bin) == "" {
+		return cfg, errors.New("--boundless-bin is required when --boundless-auto is set")
+	}
+	if strings.TrimSpace(cfg.Boundless.RPCURL) == "" {
+		return cfg, errors.New("--boundless-rpc-url is required when --boundless-auto is set")
+	}
+	if strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
+		return cfg, errors.New("--boundless-requestor-key-file or --boundless-requestor-key-hex is required when --boundless-auto is set")
+	}
+	if strings.TrimSpace(cfg.Boundless.DepositProgramURL) == "" {
+		return cfg, errors.New("--boundless-deposit-program-url is required when --boundless-auto is set")
+	}
+	if strings.TrimSpace(cfg.Boundless.WithdrawProgramURL) == "" {
+		return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
 	}
 
 	return cfg, nil
@@ -637,21 +593,9 @@ func parseBoundlessInputMode(raw string) (string, error) {
 	switch mode {
 	case "", boundlessInputModePrivate:
 		return boundlessInputModePrivate, nil
-	case boundlessInputModeJournalBytesV1:
-		return boundlessInputModeJournalBytesV1, nil
 	default:
-		return "", errors.New("--boundless-input-mode must be one of: private-input, journal-bytes-v1")
+		return "", errors.New("--boundless-input-mode must be private-input")
 	}
-}
-
-func encodeBoundlessJournalInput(journal []byte) ([]byte, error) {
-	if len(journal) > math.MaxUint32 {
-		return nil, fmt.Errorf("journal too large for boundless input: %d bytes", len(journal))
-	}
-	out := make([]byte, 4+len(journal))
-	binary.LittleEndian.PutUint32(out[:4], uint32(len(journal)))
-	copy(out[4:], journal)
-	return out, nil
 }
 
 func parseHexBytesFlag(flagName, raw string) ([]byte, error) {
@@ -784,12 +728,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	verifierAddr := cfg.VerifierAddress
-	if !cfg.VerifierSet {
-		verifierAddr, _, err = deployNoopVerifier(ctx, client, auth)
-		if err != nil {
-			return nil, fmt.Errorf("deploy verifier: %w", err)
-		}
-	}
 
 	wjunoAddr, _, err := deployContract(ctx, client, auth, wjunoABI, wjunoBin, owner)
 	if err != nil {
@@ -984,12 +922,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
 	depositBoundlessInput := depositPrivateInput
-	if cfg.Boundless.InputMode == boundlessInputModeJournalBytesV1 {
-		depositBoundlessInput, err = encodeBoundlessJournalInput(depositJournal)
-		if err != nil {
-			return nil, fmt.Errorf("encode deposit boundless input: %w", err)
-		}
-	}
 
 	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
 	recipientUA := []byte{0x01, 0x02, 0x03}
@@ -1004,66 +936,92 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	var (
-		mintBatchTx        common.Hash
-		mintBatchRcpt      *types.Receipt
-		approveWithdrawTx  common.Hash
-		requestWithdrawTx  common.Hash
-		finalizeWithdrawTx common.Hash
-		withdrawalID       common.Hash
-		feeBpsAtReq        uint64
-		depositRequestID   string
-		withdrawRequestID  string
+		mintBatchTx          common.Hash
+		mintBatchRcpt        *types.Receipt
+		approveWithdrawTx    common.Hash
+		requestWithdrawTx    common.Hash
+		extendWithdrawTx     common.Hash
+		finalizeWithdrawTx   common.Hash
+		withdrawalID         common.Hash
+		feeBpsAtReq          uint64
+		withdrawalExpiryWant uint64
+		depositRequestID     string
+		withdrawRequestID    string
 	)
 
-	if cfg.PrepareOnly {
-		feeBpsAtReq = feeBpsOnChain
-		withdrawalID = predictedWithdrawalID
-	} else {
-		if cfg.Boundless.Auto {
-			logProgress("requesting boundless deposit proof")
-			cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
-				ctx,
-				cfg.Boundless,
-				"deposit",
-				cfg.Boundless.DepositProgramURL,
-				depositBoundlessInput,
-				depositJournal,
-			)
-			if err != nil {
-				return nil, err
-			}
-		}
+	logProgress("requesting boundless deposit proof")
+	cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
+		ctx,
+		cfg.Boundless,
+		"deposit",
+		cfg.Boundless.DepositProgramURL,
+		depositBoundlessInput,
+		depositJournal,
+	)
+	if err != nil {
+		return nil, err
+	}
 
-		mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, cfg.DepositSeal, depositJournal)
-		if err != nil {
-			return nil, fmt.Errorf("mintBatch: %w", err)
-		}
+	mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, cfg.DepositSeal, depositJournal)
+	if err != nil {
+		return nil, fmt.Errorf("mintBatch: %w", err)
+	}
 
-		used, err := waitDepositUsedAtBlock(ctx, bridge, depositID, mintBatchRcpt.BlockNumber, 20, 500*time.Millisecond)
-		if err != nil {
-			return nil, err
-		}
-		if !used {
-			return nil, errors.New("depositUsed=false after mintBatch")
-		}
+	used, err := waitDepositUsedAtBlock(ctx, bridge, depositID, mintBatchRcpt.BlockNumber, 20, 500*time.Millisecond)
+	if err != nil {
+		return nil, err
+	}
+	if !used {
+		return nil, errors.New("depositUsed=false after mintBatch")
+	}
 
-		approveWithdrawTx, err = transactAndWait(ctx, client, auth, wjuno, "approve", bridgeAddr, withdrawAmount)
-		if err != nil {
-			return nil, fmt.Errorf("approve withdraw: %w", err)
-		}
+	approveWithdrawTx, err = transactAndWait(ctx, client, auth, wjuno, "approve", bridgeAddr, withdrawAmount)
+	if err != nil {
+		return nil, fmt.Errorf("approve withdraw: %w", err)
+	}
 
-		var requestRcpt *types.Receipt
-		requestWithdrawTx, requestRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "requestWithdraw", withdrawAmount, recipientUA)
-		if err != nil {
-			return nil, fmt.Errorf("requestWithdraw: %w", err)
-		}
-		withdrawalID, feeBpsAtReq, err = parseWithdrawRequested(bridgeABI, requestRcpt)
-		if err != nil {
-			return nil, fmt.Errorf("parse WithdrawRequested: %w", err)
-		}
-		if withdrawalID != predictedWithdrawalID {
-			return nil, fmt.Errorf("predicted withdrawal id mismatch: predicted=%s actual=%s", predictedWithdrawalID.Hex(), withdrawalID.Hex())
-		}
+	var requestRcpt *types.Receipt
+	requestWithdrawTx, requestRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "requestWithdraw", withdrawAmount, recipientUA)
+	if err != nil {
+		return nil, fmt.Errorf("requestWithdraw: %w", err)
+	}
+	withdrawalID, feeBpsAtReq, err = parseWithdrawRequested(bridgeABI, requestRcpt)
+	if err != nil {
+		return nil, fmt.Errorf("parse WithdrawRequested: %w", err)
+	}
+	if withdrawalID != predictedWithdrawalID {
+		return nil, fmt.Errorf("predicted withdrawal id mismatch: predicted=%s actual=%s", predictedWithdrawalID.Hex(), withdrawalID.Hex())
+	}
+
+	withdrawView, err := callWithdrawal(ctx, bridge, withdrawalID)
+	if err != nil {
+		return nil, fmt.Errorf("getWithdrawal before extend: %w", err)
+	}
+	if withdrawView.Expiry == 0 {
+		return nil, errors.New("withdraw expiry is zero before extend")
+	}
+	withdrawalExpiryWant = withdrawView.Expiry + 60
+	idsHash := crypto.Keccak256Hash(withdrawalID[:])
+	extendDigest, err := callHash(ctx, bridge, "extendWithdrawDigest", idsHash, withdrawalExpiryWant)
+	if err != nil {
+		return nil, fmt.Errorf("extendWithdrawDigest: %w", err)
+	}
+	extendSigs, err := signDigestSorted(extendDigest, operatorKeys[:cfg.Threshold])
+	if err != nil {
+		return nil, fmt.Errorf("sign extend digest: %w", err)
+	}
+	extendWithdrawTx, err = transactAndWait(
+		ctx,
+		client,
+		auth,
+		bridge,
+		"extendWithdrawExpiryBatch",
+		[]common.Hash{withdrawalID},
+		withdrawalExpiryWant,
+		extendSigs,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("extendWithdrawExpiryBatch: %w", err)
 	}
 
 	withdrawFees := computeFeeBreakdown(withdrawAmount, feeBpsAtReq, relayerTipBpsOnChain)
@@ -1091,12 +1049,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("encode withdraw private input: %w", err)
 	}
 	withdrawBoundlessInput := withdrawPrivateInput
-	if cfg.Boundless.InputMode == boundlessInputModeJournalBytesV1 {
-		withdrawBoundlessInput, err = encodeBoundlessJournalInput(withdrawJournal)
-		if err != nil {
-			return nil, fmt.Errorf("encode withdraw boundless input: %w", err)
-		}
-	}
 
 	var proofInputsPath string
 	if strings.TrimSpace(cfg.ProofInputsOut) != "" {
@@ -1132,26 +1084,22 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	if !cfg.PrepareOnly && cfg.Boundless.Auto {
-		logProgress("requesting boundless withdraw proof")
-		cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
-			ctx,
-			cfg.Boundless,
-			"withdraw",
-			cfg.Boundless.WithdrawProgramURL,
-			withdrawBoundlessInput,
-			withdrawJournal,
-		)
-		if err != nil {
-			return nil, err
-		}
+	logProgress("requesting boundless withdraw proof")
+	cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
+		ctx,
+		cfg.Boundless,
+		"withdraw",
+		cfg.Boundless.WithdrawProgramURL,
+		withdrawBoundlessInput,
+		withdrawJournal,
+	)
+	if err != nil {
+		return nil, err
 	}
 
-	if !cfg.PrepareOnly {
-		finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, cfg.WithdrawSeal, withdrawJournal)
-		if err != nil {
-			return nil, fmt.Errorf("finalizeWithdrawBatch: %w", err)
-		}
+	finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, cfg.WithdrawSeal, withdrawJournal)
+	if err != nil {
+		return nil, fmt.Errorf("finalizeWithdrawBatch: %w", err)
 	}
 
 	recipientEqualsOwner := recipient == owner
@@ -1163,15 +1111,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		RelayerTipBps:        relayerTipBpsOnChain,
 		RecipientEqualsOwner: recipientEqualsOwner,
 	})
-	if cfg.PrepareOnly {
-		expectedDeltas = expectedBalanceDelta{
-			Owner:          big.NewInt(0),
-			Recipient:      big.NewInt(0),
-			FeeDistributor: big.NewInt(0),
-			Bridge:         big.NewInt(0),
-		}
-	}
-
 	var (
 		ownerBalAfter        *big.Int
 		recipientBalAfter    *big.Int
@@ -1207,37 +1146,38 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			return fmt.Errorf("bridge balance after: %w", checkErr)
 		}
 
-		if !cfg.PrepareOnly {
-			depositUsedInvariant, checkErr = callDepositUsed(ctx, bridge, depositID, nil)
-			if checkErr != nil {
-				return fmt.Errorf("depositUsed invariant call: %w", checkErr)
-			}
-			if !depositUsedInvariant {
-				return errors.New("depositUsed invariant failed: expected true after mintBatch")
-			}
+		depositUsedInvariant, checkErr = callDepositUsed(ctx, bridge, depositID, nil)
+		if checkErr != nil {
+			return fmt.Errorf("depositUsed invariant call: %w", checkErr)
+		}
+		if !depositUsedInvariant {
+			return errors.New("depositUsed invariant failed: expected true after mintBatch")
+		}
 
-			withdrawInvariant, checkErr = callWithdrawal(ctx, bridge, withdrawalID)
-			if checkErr != nil {
-				return fmt.Errorf("getWithdrawal invariant call: %w", checkErr)
-			}
-			if withdrawInvariant.Requester != owner {
-				return fmt.Errorf("withdraw requester mismatch: got=%s want=%s", withdrawInvariant.Requester.Hex(), owner.Hex())
-			}
-			if withdrawInvariant.Amount.Cmp(withdrawAmount) != 0 {
-				return fmt.Errorf("withdraw amount mismatch: got=%s want=%s", withdrawInvariant.Amount.String(), withdrawAmount.String())
-			}
-			if withdrawInvariant.FeeBps != feeBpsAtReq {
-				return fmt.Errorf("withdraw fee bps mismatch: got=%d want=%d", withdrawInvariant.FeeBps, feeBpsAtReq)
-			}
-			if !withdrawInvariant.Finalized {
-				return errors.New("withdraw invariant failed: expected finalized=true")
-			}
-			if withdrawInvariant.Refunded {
-				return errors.New("withdraw invariant failed: expected refunded=false")
-			}
-			if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
-				return errors.New("withdraw invariant failed: recipient UA mismatch")
-			}
+		withdrawInvariant, checkErr = callWithdrawal(ctx, bridge, withdrawalID)
+		if checkErr != nil {
+			return fmt.Errorf("getWithdrawal invariant call: %w", checkErr)
+		}
+		if withdrawInvariant.Requester != owner {
+			return fmt.Errorf("withdraw requester mismatch: got=%s want=%s", withdrawInvariant.Requester.Hex(), owner.Hex())
+		}
+		if withdrawInvariant.Amount.Cmp(withdrawAmount) != 0 {
+			return fmt.Errorf("withdraw amount mismatch: got=%s want=%s", withdrawInvariant.Amount.String(), withdrawAmount.String())
+		}
+		if withdrawInvariant.FeeBps != feeBpsAtReq {
+			return fmt.Errorf("withdraw fee bps mismatch: got=%d want=%d", withdrawInvariant.FeeBps, feeBpsAtReq)
+		}
+		if !withdrawInvariant.Finalized {
+			return errors.New("withdraw invariant failed: expected finalized=true")
+		}
+		if withdrawInvariant.Refunded {
+			return errors.New("withdraw invariant failed: expected refunded=false")
+		}
+		if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
+			return errors.New("withdraw invariant failed: recipient UA mismatch")
+		}
+		if withdrawInvariant.Expiry != withdrawalExpiryWant {
+			return fmt.Errorf("withdraw expiry mismatch: got=%d want=%d", withdrawInvariant.Expiry, withdrawalExpiryWant)
 		}
 
 		ownerDeltaActual = new(big.Int).Sub(ownerBalAfter, ownerBalBefore)
@@ -1267,15 +1207,9 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil
 	}
 
-	if cfg.PrepareOnly {
-		if err := checkInvariants(); err != nil {
-			return nil, err
-		}
-	} else {
-		err = waitForInvariantConvergence(ctx, postFinalizeInvariantWaitTimeout, postFinalizeInvariantPollInterval, checkInvariants)
-		if err != nil {
-			return nil, err
-		}
+	err = waitForInvariantConvergence(ctx, postFinalizeInvariantWaitTimeout, postFinalizeInvariantPollInterval, checkInvariants)
+	if err != nil {
+		return nil, err
 	}
 
 	var rep report
@@ -1314,6 +1248,9 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Transactions.RequestWithdraw = requestWithdrawTx.Hex()
 		rep.Withdraw.WithdrawalID = withdrawalID.Hex()
 	}
+	if extendWithdrawTx != (common.Hash{}) {
+		rep.Transactions.ExtendWithdraw = extendWithdrawTx.Hex()
+	}
 	if finalizeWithdrawTx != (common.Hash{}) {
 		rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
 	}
@@ -1324,7 +1261,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Balances.RecipientWJuno = recipientBalAfter.String()
 	rep.Balances.FeeDistributor = fdBalAfter.String()
 
-	rep.Proof.PrepareOnly = cfg.PrepareOnly
 	rep.Proof.ProofInputsPath = proofInputsPath
 	rep.Proof.DepositImageID = depositImageID.Hex()
 	rep.Proof.WithdrawImageID = withdrawImageID.Hex()
@@ -1355,12 +1291,14 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Invariants.Registry.Threshold = registryThreshold
 	rep.Invariants.Registry.AllActive = allOperatorsActive
 	rep.Invariants.DepositUsed = depositUsedInvariant
-	rep.Invariants.Withdrawal.Exists = !cfg.PrepareOnly
+	rep.Invariants.Withdrawal.Exists = true
 	rep.Invariants.Withdrawal.Finalized = withdrawInvariant.Finalized
 	rep.Invariants.Withdrawal.Refunded = withdrawInvariant.Refunded
+	rep.Invariants.Withdrawal.Extended = withdrawalExpiryWant > 0
 	rep.Invariants.Withdrawal.FeeBps = withdrawInvariant.FeeBps
 	rep.Invariants.Withdrawal.Amount = withdrawInvariant.Amount.String()
 	rep.Invariants.Withdrawal.Expiry = withdrawInvariant.Expiry
+	rep.Invariants.Withdrawal.ExpectedExpiry = withdrawalExpiryWant
 
 	rep.Invariants.Fees.Deposit.Fee = depositFees.Fee.String()
 	rep.Invariants.Fees.Deposit.Tip = depositFees.Tip.String()
@@ -1915,18 +1853,6 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 	return common.Address{}, common.Hash{}, errors.New("deploy contract retries exhausted")
 }
 
-func deployNoopVerifier(ctx context.Context, backend evmBackend, auth *bind.TransactOpts) (common.Address, common.Hash, error) {
-	emptyABI, err := abi.JSON(strings.NewReader("[]"))
-	if err != nil {
-		return common.Address{}, common.Hash{}, err
-	}
-	initCode, err := hexutil.Decode("0x6001600c60003960016000f300")
-	if err != nil {
-		return common.Address{}, common.Hash{}, err
-	}
-	return deployContract(ctx, backend, auth, emptyABI, initCode)
-}
-
 func transactAndWait(ctx context.Context, backend txBackend, auth *bind.TransactOpts, c *bind.BoundContract, method string, args ...any) (common.Hash, error) {
 	txHash, _, err := transactAndWaitWithReceipt(ctx, backend, auth, c, method, args...)
 	return txHash, err
@@ -2223,6 +2149,24 @@ func callUint64(ctx context.Context, c *bind.BoundContract, method string, args 
 		return uint64(v), nil
 	default:
 		return 0, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+}
+
+func callHash(ctx context.Context, c *bind.BoundContract, method string, args ...any) (common.Hash, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return common.Hash{}, err
+	}
+	if len(res) != 1 {
+		return common.Hash{}, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	switch v := res[0].(type) {
+	case common.Hash:
+		return v, nil
+	case [32]byte:
+		return common.BytesToHash(v[:]), nil
+	default:
+		return common.Hash{}, fmt.Errorf("unexpected %s type: %T", method, res[0])
 	}
 }
 
