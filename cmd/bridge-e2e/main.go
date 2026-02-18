@@ -111,6 +111,8 @@ const (
 	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 	defaultBoundlessRouterAddr   = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
 	defaultBoundlessSetVerAddr   = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+	defaultRetryGasPriceWei      = int64(5_000_000_000)
+	defaultRetryGasTipCapWei     = int64(2_000_000_000)
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
@@ -1516,6 +1518,7 @@ type txBackend interface {
 func deployContract(ctx context.Context, backend evmBackend, auth *bind.TransactOpts, a abi.ABI, bin []byte, args ...any) (common.Address, common.Hash, error) {
 	for attempt := 1; attempt <= 4; attempt++ {
 		txAuth := transactAuthWithDefaults(auth, 0)
+		applyRetryGasBump(ctx, backend, txAuth, attempt)
 		addr, tx, _, err := bind.DeployContract(txAuth, a, bin, backend, args...)
 		if err != nil {
 			if attempt < 4 && isRetriableNonceError(err) {
@@ -1559,6 +1562,7 @@ func transactAndWait(ctx context.Context, backend txBackend, auth *bind.Transact
 func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bind.TransactOpts, c *bind.BoundContract, method string, args ...any) (common.Hash, *types.Receipt, error) {
 	for attempt := 1; attempt <= 4; attempt++ {
 		txAuth := transactAuthWithDefaults(auth, 1_000_000)
+		applyRetryGasBump(ctx, backend, txAuth, attempt)
 		tx, err := c.Transact(txAuth, method, args...)
 		if err != nil {
 			if attempt < 4 && isRetriableNonceError(err) {
@@ -1591,6 +1595,75 @@ func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *
 		cloned.GasLimit = defaultGasLimit
 	}
 	return &cloned
+}
+
+type gasPriceSuggester interface {
+	SuggestGasPrice(ctx context.Context) (*big.Int, error)
+}
+
+type gasTipCapSuggester interface {
+	SuggestGasTipCap(ctx context.Context) (*big.Int, error)
+}
+
+func applyRetryGasBump(ctx context.Context, backend any, txAuth *bind.TransactOpts, attempt int) {
+	if txAuth == nil || attempt <= 1 {
+		return
+	}
+
+	multiplier := retryGasMultiplier(attempt)
+
+	gasPriceBase := big.NewInt(defaultRetryGasPriceWei)
+	if suggester, ok := backend.(gasPriceSuggester); ok {
+		if suggested, err := suggester.SuggestGasPrice(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+			gasPriceBase = new(big.Int).Set(suggested)
+		}
+	}
+	if txAuth.GasPrice != nil && txAuth.GasPrice.Sign() > 0 && txAuth.GasPrice.Cmp(gasPriceBase) > 0 {
+		gasPriceBase = new(big.Int).Set(txAuth.GasPrice)
+	}
+
+	if suggester, ok := backend.(gasTipCapSuggester); ok {
+		tipBase := big.NewInt(defaultRetryGasTipCapWei)
+		if suggested, err := suggester.SuggestGasTipCap(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+			tipBase = new(big.Int).Set(suggested)
+		}
+		if txAuth.GasTipCap != nil && txAuth.GasTipCap.Sign() > 0 && txAuth.GasTipCap.Cmp(tipBase) > 0 {
+			tipBase = new(big.Int).Set(txAuth.GasTipCap)
+		}
+
+		feeCapBase := new(big.Int).Set(gasPriceBase)
+		if txAuth.GasFeeCap != nil && txAuth.GasFeeCap.Sign() > 0 && txAuth.GasFeeCap.Cmp(feeCapBase) > 0 {
+			feeCapBase = new(big.Int).Set(txAuth.GasFeeCap)
+		}
+		tipFloor := new(big.Int).Mul(tipBase, big.NewInt(2))
+		if feeCapBase.Cmp(tipFloor) < 0 {
+			feeCapBase = tipFloor
+		}
+
+		txAuth.GasTipCap = new(big.Int).Mul(tipBase, multiplier)
+		txAuth.GasFeeCap = new(big.Int).Mul(feeCapBase, multiplier)
+		tipMinFee := new(big.Int).Mul(txAuth.GasTipCap, big.NewInt(2))
+		if txAuth.GasFeeCap.Cmp(tipMinFee) < 0 {
+			txAuth.GasFeeCap = tipMinFee
+		}
+		txAuth.GasPrice = nil
+		return
+	}
+
+	txAuth.GasPrice = new(big.Int).Mul(gasPriceBase, multiplier)
+	txAuth.GasTipCap = nil
+	txAuth.GasFeeCap = nil
+}
+
+func retryGasMultiplier(attempt int) *big.Int {
+	if attempt <= 1 {
+		return big.NewInt(1)
+	}
+	shift := attempt - 1
+	if shift > 6 {
+		shift = 6
+	}
+	return new(big.Int).Lsh(big.NewInt(1), uint(shift))
 }
 
 func isRetriableNonceError(err error) bool {

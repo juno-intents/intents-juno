@@ -701,6 +701,33 @@ func TestWaitDepositUsedAtBlock_RetriesUntilTrue(t *testing.T) {
 	}
 }
 
+type mockGasEstimator struct {
+	price    *big.Int
+	tip      *big.Int
+	priceErr error
+	tipErr   error
+}
+
+func (m mockGasEstimator) SuggestGasPrice(context.Context) (*big.Int, error) {
+	if m.priceErr != nil {
+		return nil, m.priceErr
+	}
+	if m.price == nil {
+		return nil, nil
+	}
+	return new(big.Int).Set(m.price), nil
+}
+
+func (m mockGasEstimator) SuggestGasTipCap(context.Context) (*big.Int, error) {
+	if m.tipErr != nil {
+		return nil, m.tipErr
+	}
+	if m.tip == nil {
+		return nil, nil
+	}
+	return new(big.Int).Set(m.tip), nil
+}
+
 func TestWaitDepositUsedAtBlock_ReturnsFalseAfterAttempts(t *testing.T) {
 	t.Parallel()
 
@@ -785,6 +812,74 @@ func TestTransactAuthWithDefaults_RespectsExistingGasLimit(t *testing.T) {
 	}
 	if base.GasLimit != 555_000 {
 		t.Fatalf("expected original auth gas limit unchanged, got %d", base.GasLimit)
+	}
+}
+
+func TestApplyRetryGasBump_NoopForFirstAttempt(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{
+		GasPrice:  big.NewInt(7),
+		GasTipCap: big.NewInt(3),
+		GasFeeCap: big.NewInt(9),
+	}
+
+	applyRetryGasBump(context.Background(), mockGasEstimator{price: big.NewInt(100), tip: big.NewInt(10)}, auth, 1)
+	if auth.GasPrice.Cmp(big.NewInt(7)) != 0 {
+		t.Fatalf("gas price changed unexpectedly: got=%s want=7", auth.GasPrice.String())
+	}
+	if auth.GasTipCap.Cmp(big.NewInt(3)) != 0 {
+		t.Fatalf("gas tip cap changed unexpectedly: got=%s want=3", auth.GasTipCap.String())
+	}
+	if auth.GasFeeCap.Cmp(big.NewInt(9)) != 0 {
+		t.Fatalf("gas fee cap changed unexpectedly: got=%s want=9", auth.GasFeeCap.String())
+	}
+}
+
+func TestApplyRetryGasBump_BumpsEIP1559Fields(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{}
+	applyRetryGasBump(context.Background(), mockGasEstimator{
+		price: big.NewInt(10),
+		tip:   big.NewInt(2),
+	}, auth, 3)
+
+	if auth.GasPrice != nil {
+		t.Fatalf("expected legacy gas price to be cleared for EIP-1559")
+	}
+	if auth.GasTipCap == nil || auth.GasTipCap.Cmp(big.NewInt(8)) != 0 {
+		got := "<nil>"
+		if auth.GasTipCap != nil {
+			got = auth.GasTipCap.String()
+		}
+		t.Fatalf("unexpected gas tip cap: got=%s want=8", got)
+	}
+	if auth.GasFeeCap == nil || auth.GasFeeCap.Cmp(big.NewInt(40)) != 0 {
+		got := "<nil>"
+		if auth.GasFeeCap != nil {
+			got = auth.GasFeeCap.String()
+		}
+		t.Fatalf("unexpected gas fee cap: got=%s want=40", got)
+	}
+}
+
+func TestApplyRetryGasBump_FallsBackToLegacyGasPrice(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{}
+	applyRetryGasBump(context.Background(), struct{}{}, auth, 2)
+
+	want := big.NewInt(defaultRetryGasPriceWei * 2)
+	if auth.GasPrice == nil || auth.GasPrice.Cmp(want) != 0 {
+		got := "<nil>"
+		if auth.GasPrice != nil {
+			got = auth.GasPrice.String()
+		}
+		t.Fatalf("unexpected gas price: got=%s want=%s", got, want.String())
+	}
+	if auth.GasTipCap != nil || auth.GasFeeCap != nil {
+		t.Fatalf("unexpected EIP-1559 fields in legacy fallback: tip=%v fee=%v", auth.GasTipCap, auth.GasFeeCap)
 	}
 }
 
