@@ -79,6 +79,28 @@ test_remote_shared_prepare_script_waits_for_services() {
   assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/127.0.0.1/9092'" "kafka readiness check"
 }
 
+test_live_e2e_terraform_supports_operator_instances() {
+  local main_tf variables_tf outputs_tf
+  main_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/main.tf")"
+  variables_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/variables.tf")"
+  outputs_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/outputs.tf")"
+
+  assert_contains "$variables_tf" "variable \"operator_instance_count\"" "operator instance count variable"
+  assert_contains "$variables_tf" "variable \"operator_instance_type\"" "operator instance type variable"
+  assert_contains "$variables_tf" "variable \"operator_root_volume_size_gb\"" "operator root volume variable"
+  assert_contains "$variables_tf" "variable \"operator_base_port\"" "operator base port variable"
+
+  assert_contains "$main_tf" "resource \"aws_security_group\" \"operator\"" "operator security group resource"
+  assert_contains "$main_tf" "resource \"aws_instance\" \"operator\"" "operator instance resource"
+  assert_contains "$main_tf" "count = var.operator_instance_count" "operator instance count wiring"
+  assert_contains "$main_tf" "from_port       = var.operator_base_port" "operator grpc ingress start"
+  assert_contains "$main_tf" "to_port         = var.operator_base_port + var.operator_instance_count - 1" "operator grpc ingress range"
+
+  assert_contains "$outputs_tf" "output \"operator_instance_ids\"" "operator ids output"
+  assert_contains "$outputs_tf" "output \"operator_public_ips\"" "operator public ip output"
+  assert_contains "$outputs_tf" "output \"operator_private_ips\"" "operator private ip output"
+}
+
 test_aws_wrapper_uses_ssh_keepalive_options() {
   local wrapper_script
   local keepalive_count
@@ -96,6 +118,23 @@ test_aws_wrapper_uses_ssh_keepalive_options() {
     printf 'assert_keepalive_max_count failed: expected at least 6, got=%s\n' "$keepalive_max_count" >&2
     exit 1
   fi
+}
+
+test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "--operator-instance-count" "operator instance count option"
+  assert_contains "$wrapper_script_text" "--operator-instance-type" "operator instance type option"
+  assert_contains "$wrapper_script_text" "--operator-root-volume-gb" "operator root volume option"
+  assert_contains "$wrapper_script_text" "operator_instance_count" "terraform operator count wiring"
+  assert_contains "$wrapper_script_text" "operator_instance_type" "terraform operator type wiring"
+  assert_contains "$wrapper_script_text" "operator_root_volume_size_gb" "terraform operator root volume wiring"
+  assert_contains "$wrapper_script_text" "remote_prepare_operator_host" "remote operator host preparation hook"
+  assert_contains "$wrapper_script_text" "run_distributed_dkg_backup_restore" "distributed dkg orchestration hook"
+  assert_contains "$wrapper_script_text" "--dkg-summary-path" "external dkg summary forwarding"
+  assert_contains "$wrapper_script_text" "-json operator_public_ips" "terraform operator public ips output retrieval"
+  assert_contains "$wrapper_script_text" "-json operator_private_ips" "terraform operator private ips output retrieval"
 }
 
 test_aws_wrapper_collects_artifacts_after_remote_failures() {
@@ -151,6 +190,16 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "\"--boundless-verifier-router-address\" \"\$boundless_verifier_router_address\"" "boundless verifier router bridge forwarding"
   assert_contains "$e2e_script_text" "\"--boundless-set-verifier-address\" \"\$boundless_set_verifier_address\"" "boundless set verifier bridge forwarding"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
+}
+
+test_local_e2e_supports_external_dkg_summary_path() {
+  local e2e_script_text
+  e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
+
+  assert_contains "$e2e_script_text" "--dkg-summary-path" "external dkg summary option"
+  assert_contains "$e2e_script_text" "dkg_summary_path" "external dkg summary variable"
+  assert_contains "$e2e_script_text" "if [[ -n \"\$dkg_summary_path\" ]]; then" "external dkg summary conditional"
+  assert_contains "$e2e_script_text" "deploy/operators/dkg/e2e/run-dkg-backup-restore.sh run" "local dkg fallback path retained"
 }
 
 test_local_e2e_uses_operator_deployer_key() {
@@ -223,10 +272,13 @@ test_aws_workflow_dispatch_input_count_within_limit() {
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_remote_shared_prepare_script_waits_for_services
+  test_live_e2e_terraform_supports_operator_instances
   test_aws_wrapper_uses_ssh_keepalive_options
+  test_aws_wrapper_supports_operator_fleet_and_distributed_dkg
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e
   test_local_e2e_supports_shared_infra_validation
+  test_local_e2e_supports_external_dkg_summary_path
   test_local_e2e_uses_operator_deployer_key
   test_local_e2e_cast_send_handles_already_known_nonce_race
   test_local_e2e_tops_up_bridge_deployer_balance

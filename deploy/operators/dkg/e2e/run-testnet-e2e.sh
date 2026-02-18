@@ -23,6 +23,7 @@ Options:
   --operator-count <n>             DKG operator count (default: 5)
   --threshold <n>                  DKG threshold (default: 3)
   --base-port <port>               first operator grpc port (default: 18443)
+  --dkg-summary-path <path>        optional precomputed DKG summary (skip local DKG flow)
   --base-operator-fund-wei <wei>   optional pre-fund per operator (default: 1000000000000000)
   --bridge-verifier-address <addr> required verifier router address for proof verification
   --bridge-deposit-image-id <hex>  required deposit image ID (bytes32 hex)
@@ -292,6 +293,7 @@ command_run() {
   local operator_count=5
   local threshold=3
   local base_port=18443
+  local dkg_summary_path=""
   local base_operator_fund_wei="1000000000000000"
   local bridge_verifier_address=""
   local bridge_deposit_image_id=""
@@ -365,6 +367,11 @@ command_run() {
       --base-port)
         [[ $# -ge 2 ]] || die "missing value for --base-port"
         base_port="$2"
+        shift 2
+        ;;
+      --dkg-summary-path)
+        [[ $# -ge 2 ]] || die "missing value for --dkg-summary-path"
+        dkg_summary_path="$2"
         shift 2
         ;;
       --base-operator-fund-wei)
@@ -604,10 +611,12 @@ command_run() {
   ensure_dir "$(dirname "$output_path")"
 
   if [[ -d "$workdir" ]]; then
-    if [[ "$force" != "true" ]]; then
+    if [[ "$force" != "true" && -z "$dkg_summary_path" ]]; then
       die "workdir already exists (use --force to overwrite): $workdir"
     fi
-    rm -rf "$workdir"
+    if [[ "$force" == "true" && -z "$dkg_summary_path" ]]; then
+      rm -rf "$workdir"
+    fi
   fi
   ensure_dir "$workdir/reports"
 
@@ -632,16 +641,30 @@ command_run() {
     forge build
   )
 
-  (
-    cd "$REPO_ROOT"
-    deploy/operators/dkg/e2e/run-dkg-backup-restore.sh run \
-      --workdir "$workdir/dkg" \
-      --operator-count "$operator_count" \
-      --threshold "$threshold" \
-      --base-port "$base_port" \
-      --output "$dkg_summary" \
-      --force
-  )
+  if [[ -n "$dkg_summary_path" ]]; then
+    dkg_summary="$dkg_summary_path"
+    [[ -f "$dkg_summary" ]] || die "dkg summary file not found: $dkg_summary"
+    local summary_operator_count summary_threshold
+    summary_operator_count="$(jq -r '.operator_count // (.operators | length) // 0' "$dkg_summary")"
+    summary_threshold="$(jq -r '.threshold // 0' "$dkg_summary")"
+    [[ "$summary_operator_count" =~ ^[0-9]+$ ]] || die "dkg summary operator_count is invalid: $summary_operator_count"
+    (( summary_operator_count >= 1 )) || die "dkg summary operator_count must be >= 1"
+    operator_count="$summary_operator_count"
+    if [[ "$summary_threshold" =~ ^[0-9]+$ ]] && (( summary_threshold >= 1 )); then
+      threshold="$summary_threshold"
+    fi
+  else
+    (
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/e2e/run-dkg-backup-restore.sh run \
+        --workdir "$workdir/dkg" \
+        --operator-count "$operator_count" \
+        --threshold "$threshold" \
+        --base-port "$base_port" \
+        --output "$dkg_summary" \
+        --force
+    )
+  fi
 
   local base_key
   base_key="$(trimmed_file_value "$base_funder_key_file")"

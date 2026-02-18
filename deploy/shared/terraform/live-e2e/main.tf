@@ -128,6 +128,38 @@ resource "aws_security_group" "shared" {
   tags = local.common_tags
 }
 
+resource "aws_security_group" "operator" {
+  name        = "${local.resource_name}-operator-sg"
+  description = "Security group for intents-juno live e2e operator hosts"
+  vpc_id      = local.selected_vpc_id
+
+  ingress {
+    description = "SSH"
+    from_port   = 22
+    to_port     = 22
+    protocol    = "tcp"
+    cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
+  ingress {
+    description     = "Operator gRPC from runner"
+    from_port       = var.operator_base_port
+    to_port         = var.operator_base_port + var.operator_instance_count - 1
+    protocol        = "tcp"
+    security_groups = [aws_security_group.runner.id]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
 resource "aws_instance" "runner" {
   ami                    = data.aws_ami.ubuntu.id
   instance_type          = var.instance_type
@@ -212,5 +244,35 @@ resource "aws_instance" "shared" {
 
   tags = merge(local.common_tags, {
     Name = "${local.resource_name}-shared"
+  })
+}
+
+resource "aws_instance" "operator" {
+  count = var.operator_instance_count
+
+  ami                    = data.aws_ami.ubuntu.id
+  instance_type          = var.operator_instance_type
+  key_name               = aws_key_pair.runner.key_name
+  subnet_id              = local.selected_subnet_id
+  vpc_security_group_ids = [aws_security_group.operator.id]
+  iam_instance_profile   = var.iam_instance_profile == "" ? null : var.iam_instance_profile
+
+  associate_public_ip_address = true
+
+  root_block_device {
+    volume_type = "gp3"
+    volume_size = var.operator_root_volume_size_gb
+  }
+
+  user_data = <<-EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl git jq unzip rsync age
+  EOF
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-operator-${count.index + 1}"
   })
 }

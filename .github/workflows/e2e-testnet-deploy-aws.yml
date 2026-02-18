@@ -13,6 +13,16 @@ on:
         required: true
         default: "c7i.4xlarge"
         type: string
+      operator_instance_count:
+        description: "Number of dedicated operator hosts"
+        required: true
+        default: "5"
+        type: string
+      operator_instance_type:
+        description: "EC2 instance type for each operator host"
+        required: true
+        default: "c7i.large"
+        type: string
       ssh_allowed_cidr:
         description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
         required: false
@@ -178,6 +188,8 @@ jobs:
             --workdir "$WORKDIR"
             --aws-region "${{ inputs.aws_region }}"
             --aws-instance-type "${{ inputs.aws_instance_type }}"
+            --operator-instance-count "${{ inputs.operator_instance_count }}"
+            --operator-instance-type "${{ inputs.operator_instance_type }}"
             --aws-root-volume-gb "200"
             --base-funder-key-file ".ci/secrets/base-funder.key"
             --juno-funder-key-file ".ci/secrets/juno-funder.key"

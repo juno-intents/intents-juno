@@ -22,9 +22,12 @@ Current limitation:
   - Runs DKG, exports backup packages, deletes runtime state, restores from backup zips, verifies operator boot.
 - `run-testnet-e2e.sh`:
   - Orchestrates DKG backup/restore plus Base testnet deploy and bridge smoke transactions.
+  - Supports `--dkg-summary-path` to reuse a precomputed distributed DKG result.
   - Optionally validates shared Postgres/Kafka infra first via `cmd/shared-infra-e2e` when `--shared-postgres-dsn` and `--shared-kafka-brokers` are provided.
 - `run-testnet-e2e-aws.sh`:
-  - Provisions a dedicated AWS EC2 runner with Terraform, plus a shared-services EC2 host (Postgres+Kafka by default), executes `run-testnet-e2e.sh` on that host, collects artifacts, and destroys infra by default.
+  - Provisions a dedicated AWS EC2 runner with Terraform, plus shared-services EC2 (Postgres+Kafka by default) and one dedicated EC2 per operator.
+  - Executes distributed DKG + backup/restore across those operator hosts, then runs `run-testnet-e2e.sh` against the generated `dkg-summary.json`.
+  - Collects artifacts and destroys infra by default.
 ## AWS Live E2E
 
 - Terraform stack:

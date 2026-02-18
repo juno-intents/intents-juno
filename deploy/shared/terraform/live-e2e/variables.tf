@@ -26,6 +26,45 @@ variable "root_volume_size_gb" {
   default     = 200
 }
 
+variable "operator_instance_count" {
+  description = "Number of dedicated operator EC2 instances."
+  type        = number
+  default     = 5
+
+  validation {
+    condition     = var.operator_instance_count >= 1
+    error_message = "operator_instance_count must be >= 1."
+  }
+}
+
+variable "operator_instance_type" {
+  description = "EC2 instance type for each dedicated operator host."
+  type        = string
+  default     = "c7i.large"
+}
+
+variable "operator_root_volume_size_gb" {
+  description = "Root EBS size in GiB for each dedicated operator host."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.operator_root_volume_size_gb >= 20
+    error_message = "operator_root_volume_size_gb must be >= 20."
+  }
+}
+
+variable "operator_base_port" {
+  description = "First operator gRPC TCP port used for distributed DKG."
+  type        = number
+  default     = 18443
+
+  validation {
+    condition     = var.operator_base_port >= 1 && var.operator_base_port <= 65535
+    error_message = "operator_base_port must be in the range [1, 65535]."
+  }
+}
+
 variable "allowed_ssh_cidr" {
   description = "CIDR allowed to SSH to the runner instance."
   type        = string

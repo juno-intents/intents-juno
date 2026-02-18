@@ -47,3 +47,18 @@ output "shared_kafka_port" {
   description = "Shared Kafka TCP port."
   value       = var.shared_kafka_port
 }
+
+output "operator_instance_ids" {
+  description = "Operator EC2 instance IDs."
+  value       = aws_instance.operator[*].id
+}
+
+output "operator_public_ips" {
+  description = "Operator public IPv4 addresses."
+  value       = aws_instance.operator[*].public_ip
+}
+
+output "operator_private_ips" {
+  description = "Operator private IPv4 addresses."
+  value       = aws_instance.operator[*].private_ip
+}
