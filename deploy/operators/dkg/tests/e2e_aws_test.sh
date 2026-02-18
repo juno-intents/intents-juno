@@ -164,6 +164,16 @@ test_local_e2e_cast_send_handles_already_known_nonce_race() {
   assert_contains "$e2e_script_text" "[[ \"\$lowered\" == *\"already known\"* ]]" "cast send already-known nonce race handling"
 }
 
+test_local_e2e_tops_up_bridge_deployer_balance() {
+  local e2e_script_text
+  e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
+
+  assert_contains "$e2e_script_text" "bridge_deployer_required_wei=\$((base_operator_fund_wei * 10))" "bridge deployer required balance multiplier"
+  assert_contains "$e2e_script_text" "bridge_deployer_balance=\"\$(cast balance --rpc-url \"\$base_rpc_url\" \"\$bridge_deployer_address\")\"" "bridge deployer balance probe"
+  assert_contains "$e2e_script_text" "bridge deployer balance below required target" "bridge deployer top-up log"
+  assert_contains "$e2e_script_text" "failed to fund bridge deployer" "bridge deployer top-up hard failure"
+}
+
 test_aws_workflow_dispatch_input_count_within_limit() {
   local workflow
   workflow="$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml"
@@ -192,6 +202,7 @@ main() {
   test_local_e2e_supports_shared_infra_validation
   test_local_e2e_uses_operator_deployer_key
   test_local_e2e_cast_send_handles_already_known_nonce_race
+  test_local_e2e_tops_up_bridge_deployer_balance
   test_aws_workflow_dispatch_input_count_within_limit
 }
 

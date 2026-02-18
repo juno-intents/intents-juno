@@ -513,6 +513,10 @@ command_run() {
   local base_key
   base_key="$(trimmed_file_value "$base_funder_key_file")"
 
+  local bridge_deployer_address
+  bridge_deployer_address="$(jq -r '.operators[0].operator_id // empty' "$dkg_summary")"
+  [[ -n "$bridge_deployer_address" ]] || die "dkg summary missing operators[0].operator_id"
+
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
     local operator
@@ -524,6 +528,29 @@ command_run() {
         --value "$base_operator_fund_wei" \
         "$operator" >/dev/null
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
+
+    local bridge_deployer_required_wei
+    bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
+    local funded_bridge_deployer="false"
+    local attempt bridge_deployer_balance bridge_deployer_topup_wei
+    for attempt in $(seq 1 12); do
+      bridge_deployer_balance="$(cast balance --rpc-url "$base_rpc_url" "$bridge_deployer_address")"
+      [[ "$bridge_deployer_balance" =~ ^[0-9]+$ ]] || die "unexpected bridge deployer balance from cast: $bridge_deployer_balance"
+      if (( bridge_deployer_balance >= bridge_deployer_required_wei )); then
+        funded_bridge_deployer="true"
+        break
+      fi
+
+      bridge_deployer_topup_wei=$((bridge_deployer_required_wei - bridge_deployer_balance))
+      log "bridge deployer balance below required target; topping up address=$bridge_deployer_address balance=$bridge_deployer_balance required=$bridge_deployer_required_wei topup=$bridge_deployer_topup_wei attempt=$attempt/12"
+      run_with_rpc_retry 5 2 "cast send" cast send \
+        --rpc-url "$base_rpc_url" \
+        --private-key "$base_key" \
+        --value "$bridge_deployer_topup_wei" \
+        "$bridge_deployer_address" >/dev/null
+      sleep 2
+    done
+    [[ "$funded_bridge_deployer" == "true" ]] || die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
   fi
 
   local bridge_deployer_key_file
