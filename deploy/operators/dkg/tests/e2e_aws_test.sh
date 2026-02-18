@@ -184,8 +184,11 @@ test_local_e2e_uses_managed_nonce_for_funding() {
 
   assert_contains "$e2e_script_text" "funding_sender_address=\"\$(cast wallet address --private-key \"\$base_key\")\"" "funding sender address derivation"
   assert_contains "$e2e_script_text" "funding_nonce=\"\$(cast nonce --rpc-url \"\$base_rpc_url\" --block pending \"\$funding_sender_address\")\"" "funding starting nonce derivation"
+  assert_contains "$e2e_script_text" "nonce_has_advanced()" "nonce advancement helper"
+  assert_contains "$e2e_script_text" "cast_send_with_nonce_retry()" "nonce-aware cast send helper"
+  assert_contains "$e2e_script_text" "cast send nonce race detected but sender nonce not advanced" "nonce race guarded by sender nonce advancement"
   assert_contains "$e2e_script_text" "--async \\" "async cast send to avoid receipt wait stalls"
-  assert_contains "$e2e_script_text" "--nonce \"\$funding_nonce\"" "explicit funding nonce usage"
+  assert_contains "$e2e_script_text" "cast_send_with_nonce_retry 5 2 \"\$base_rpc_url\" \"\$base_key\" \"\$funding_sender_address\" \"\$funding_nonce\"" "explicit nonce-aware funding send usage"
   assert_contains "$e2e_script_text" "funding_nonce=\$((funding_nonce + 1))" "funding nonce increment"
 }
 

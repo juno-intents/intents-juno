@@ -132,6 +132,74 @@ run_with_rpc_retry() {
   done
 }
 
+nonce_has_advanced() {
+  local rpc_url="$1"
+  local sender="$2"
+  local nonce="$3"
+
+  local latest_nonce pending_nonce
+  latest_nonce="$(cast nonce --rpc-url "$rpc_url" --block latest "$sender" 2>/dev/null || true)"
+  pending_nonce="$(cast nonce --rpc-url "$rpc_url" --block pending "$sender" 2>/dev/null || true)"
+
+  [[ "$latest_nonce" =~ ^[0-9]+$ ]] || latest_nonce="$nonce"
+  [[ "$pending_nonce" =~ ^[0-9]+$ ]] || pending_nonce="$latest_nonce"
+
+  (( latest_nonce > nonce || pending_nonce > nonce ))
+}
+
+cast_send_with_nonce_retry() {
+  local attempts="$1"
+  local delay_seconds="$2"
+  local rpc_url="$3"
+  local private_key="$4"
+  local sender="$5"
+  local nonce="$6"
+  local value_wei="$7"
+  local recipient="$8"
+
+  local attempt=1 output status
+  while true; do
+    set +e
+    output="$(cast send \
+      --rpc-url "$rpc_url" \
+      --private-key "$private_key" \
+      --async \
+      --nonce "$nonce" \
+      --value "$value_wei" \
+      "$recipient" 2>&1)"
+    status=$?
+    set -e
+
+    if (( status == 0 )); then
+      if [[ -n "$output" ]]; then
+        printf '%s\n' "$output"
+      fi
+      return 0
+    fi
+
+    if is_nonce_race_error "$output"; then
+      if nonce_has_advanced "$rpc_url" "$sender" "$nonce"; then
+        log "cast send nonce race detected and sender nonce advanced; assuming previous submission accepted"
+        return 0
+      fi
+      log "cast send nonce race detected but sender nonce not advanced; nonce=$nonce attempt=${attempt}/${attempts}"
+    elif (( attempt >= attempts )) || ! is_transient_rpc_error "$output"; then
+      printf '%s\n' "$output" >&2
+      return "$status"
+    else
+      log "cast send transient rpc error (attempt ${attempt}/${attempts}); retrying in ${delay_seconds}s"
+    fi
+
+    if (( attempt >= attempts )); then
+      printf '%s\n' "$output" >&2
+      return "$status"
+    fi
+
+    sleep "$delay_seconds"
+    attempt=$((attempt + 1))
+  done
+}
+
 command_run() {
   shift || true
 
@@ -530,13 +598,7 @@ command_run() {
     local operator
     while IFS= read -r operator; do
       [[ -n "$operator" ]] || continue
-      run_with_rpc_retry 5 2 "cast send" cast send \
-        --rpc-url "$base_rpc_url" \
-        --private-key "$base_key" \
-        --async \
-        --nonce "$funding_nonce" \
-        --value "$base_operator_fund_wei" \
-        "$operator" >/dev/null
+      cast_send_with_nonce_retry 5 2 "$base_rpc_url" "$base_key" "$funding_sender_address" "$funding_nonce" "$base_operator_fund_wei" "$operator" >/dev/null
       funding_nonce=$((funding_nonce + 1))
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
 
@@ -554,13 +616,7 @@ command_run() {
 
       bridge_deployer_topup_wei=$((bridge_deployer_required_wei - bridge_deployer_balance))
       log "bridge deployer balance below required target; topping up address=$bridge_deployer_address balance=$bridge_deployer_balance required=$bridge_deployer_required_wei topup=$bridge_deployer_topup_wei attempt=$attempt/12"
-      run_with_rpc_retry 5 2 "cast send" cast send \
-        --rpc-url "$base_rpc_url" \
-        --private-key "$base_key" \
-        --async \
-        --nonce "$funding_nonce" \
-        --value "$bridge_deployer_topup_wei" \
-        "$bridge_deployer_address" >/dev/null
+      cast_send_with_nonce_retry 5 2 "$base_rpc_url" "$base_key" "$funding_sender_address" "$funding_nonce" "$bridge_deployer_topup_wei" "$bridge_deployer_address" >/dev/null
       funding_nonce=$((funding_nonce + 1))
       sleep 2
     done
