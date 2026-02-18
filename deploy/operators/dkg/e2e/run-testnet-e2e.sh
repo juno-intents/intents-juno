@@ -519,14 +519,24 @@ command_run() {
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
+    local funding_sender_address
+    funding_sender_address="$(cast wallet address --private-key "$base_key")"
+    [[ -n "$funding_sender_address" ]] || die "failed to derive funding sender address"
+
+    local funding_nonce
+    funding_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$funding_sender_address")"
+    [[ "$funding_nonce" =~ ^[0-9]+$ ]] || die "unexpected funding nonce from cast: $funding_nonce"
+
     local operator
     while IFS= read -r operator; do
       [[ -n "$operator" ]] || continue
       run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
+        --nonce "$funding_nonce" \
         --value "$base_operator_fund_wei" \
         "$operator" >/dev/null
+      funding_nonce=$((funding_nonce + 1))
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
 
     local bridge_deployer_required_wei
@@ -546,8 +556,10 @@ command_run() {
       run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
+        --nonce "$funding_nonce" \
         --value "$bridge_deployer_topup_wei" \
         "$bridge_deployer_address" >/dev/null
+      funding_nonce=$((funding_nonce + 1))
       sleep 2
     done
     [[ "$funded_bridge_deployer" == "true" ]] || die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"

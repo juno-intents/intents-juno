@@ -174,6 +174,16 @@ test_local_e2e_tops_up_bridge_deployer_balance() {
   assert_contains "$e2e_script_text" "failed to fund bridge deployer" "bridge deployer top-up hard failure"
 }
 
+test_local_e2e_uses_managed_nonce_for_funding() {
+  local e2e_script_text
+  e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
+
+  assert_contains "$e2e_script_text" "funding_sender_address=\"\$(cast wallet address --private-key \"\$base_key\")\"" "funding sender address derivation"
+  assert_contains "$e2e_script_text" "funding_nonce=\"\$(cast nonce --rpc-url \"\$base_rpc_url\" --block pending \"\$funding_sender_address\")\"" "funding starting nonce derivation"
+  assert_contains "$e2e_script_text" "--nonce \"\$funding_nonce\"" "explicit funding nonce usage"
+  assert_contains "$e2e_script_text" "funding_nonce=\$((funding_nonce + 1))" "funding nonce increment"
+}
+
 test_aws_workflow_dispatch_input_count_within_limit() {
   local workflow
   workflow="$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml"
@@ -203,6 +213,7 @@ main() {
   test_local_e2e_uses_operator_deployer_key
   test_local_e2e_cast_send_handles_already_known_nonce_race
   test_local_e2e_tops_up_bridge_deployer_balance
+  test_local_e2e_uses_managed_nonce_for_funding
   test_aws_workflow_dispatch_input_count_within_limit
 }
 
