@@ -528,7 +528,7 @@ command_run() {
   local bridge_deployer_key_file
   bridge_deployer_key_file="$(jq -r '.operators[0].operator_key_file // empty' "$dkg_summary")"
   [[ -n "$bridge_deployer_key_file" ]] || die "dkg summary missing operators[0].operator_key_file"
-  ensure_file "$bridge_deployer_key_file"
+  [[ -f "$bridge_deployer_key_file" ]] || die "bridge deployer key file not found: $bridge_deployer_key_file"
 
   local -a bridge_args=()
   bridge_args+=(
