@@ -111,8 +111,8 @@ const (
 	defaultBoundlessMarketAddr   = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 	defaultBoundlessRouterAddr   = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
 	defaultBoundlessSetVerAddr   = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-	defaultRetryGasPriceWei      = int64(5_000_000_000)
-	defaultRetryGasTipCapWei     = int64(2_000_000_000)
+	defaultRetryGasPriceWei      = int64(500_000_000)
+	defaultRetryGasTipCapWei     = int64(100_000_000)
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
@@ -1526,7 +1526,7 @@ type txBackend interface {
 
 func deployContract(ctx context.Context, backend evmBackend, auth *bind.TransactOpts, a abi.ABI, bin []byte, args ...any) (common.Address, common.Hash, error) {
 	for attempt := 1; attempt <= 4; attempt++ {
-		txAuth := transactAuthWithDefaults(auth, 10_000_000)
+		txAuth := transactAuthWithDefaults(auth, 4_000_000)
 		applyRetryGasBump(ctx, backend, txAuth, attempt)
 		nonce := "<nil>"
 		if txAuth.Nonce != nil {
