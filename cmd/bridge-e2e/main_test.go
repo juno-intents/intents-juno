@@ -1454,3 +1454,70 @@ func TestWaitForWithdrawalFinalized_TimesOut(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestWaitForInvariantConvergence_Immediate(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	err := waitForInvariantConvergence(
+		context.Background(),
+		25*time.Millisecond,
+		time.Millisecond,
+		func() error {
+			calls++
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForInvariantConvergence: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected one call, got %d", calls)
+	}
+}
+
+func TestWaitForInvariantConvergence_RetryThenSuccess(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	err := waitForInvariantConvergence(
+		context.Background(),
+		50*time.Millisecond,
+		time.Millisecond,
+		func() error {
+			calls++
+			if calls < 3 {
+				return errors.New("not yet")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForInvariantConvergence: %v", err)
+	}
+	if calls != 3 {
+		t.Fatalf("expected three calls, got %d", calls)
+	}
+}
+
+func TestWaitForInvariantConvergence_TimesOut(t *testing.T) {
+	t.Parallel()
+
+	err := waitForInvariantConvergence(
+		context.Background(),
+		15*time.Millisecond,
+		5*time.Millisecond,
+		func() error {
+			return errors.New("still stale")
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for invariant convergence") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(err.Error(), "still stale") {
+		t.Fatalf("expected wrapped last error, got: %v", err)
+	}
+}

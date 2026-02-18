@@ -123,13 +123,15 @@ const (
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
-	boundlessInputModePrivate        = "private-input"
-	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
-	txMinedWaitTimeout               = 180 * time.Second
-	txMinedGraceTimeout              = 240 * time.Second
-	withdrawalFinalizedWaitTimeout   = 60 * time.Second
-	withdrawalFinalizedPollInterval  = 2 * time.Second
-	boundlessMarketBalanceOfABIJSON  = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
+	boundlessInputModePrivate         = "private-input"
+	boundlessInputModeJournalBytesV1  = "journal-bytes-v1"
+	txMinedWaitTimeout                = 180 * time.Second
+	txMinedGraceTimeout               = 240 * time.Second
+	withdrawalFinalizedWaitTimeout    = 60 * time.Second
+	withdrawalFinalizedPollInterval   = 2 * time.Second
+	postFinalizeInvariantWaitTimeout  = 60 * time.Second
+	postFinalizeInvariantPollInterval = 2 * time.Second
+	boundlessMarketBalanceOfABIJSON   = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 )
 
 type report struct {
@@ -1152,64 +1154,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	ownerBalAfter, err := callBalanceOf(ctx, wjuno, owner)
-	if err != nil {
-		return nil, fmt.Errorf("owner balance after: %w", err)
-	}
-	recipientBalAfter, err := callBalanceOf(ctx, wjuno, recipient)
-	if err != nil {
-		return nil, fmt.Errorf("recipient balance after: %w", err)
-	}
-	fdBalAfter, err := callBalanceOf(ctx, wjuno, fdAddr)
-	if err != nil {
-		return nil, fmt.Errorf("fee distributor balance after: %w", err)
-	}
-	bridgeBalAfter, err := callBalanceOf(ctx, wjuno, bridgeAddr)
-	if err != nil {
-		return nil, fmt.Errorf("bridge balance after: %w", err)
-	}
-
-	depositUsedInvariant := false
-	withdrawInvariant := withdrawalView{Amount: big.NewInt(0)}
-	if !cfg.PrepareOnly {
-		depositUsedInvariant, err = callDepositUsed(ctx, bridge, depositID, nil)
-		if err != nil {
-			return nil, fmt.Errorf("depositUsed invariant call: %w", err)
-		}
-		if !depositUsedInvariant {
-			return nil, errors.New("depositUsed invariant failed: expected true after mintBatch")
-		}
-
-		withdrawInvariant, err = waitForWithdrawalFinalized(
-			ctx,
-			withdrawalFinalizedPollInterval,
-			func() (withdrawalView, error) {
-				return callWithdrawal(ctx, bridge, withdrawalID)
-			},
-		)
-		if err != nil {
-			return nil, fmt.Errorf("getWithdrawal invariant call: %w", err)
-		}
-		if withdrawInvariant.Requester != owner {
-			return nil, fmt.Errorf("withdraw requester mismatch: got=%s want=%s", withdrawInvariant.Requester.Hex(), owner.Hex())
-		}
-		if withdrawInvariant.Amount.Cmp(withdrawAmount) != 0 {
-			return nil, fmt.Errorf("withdraw amount mismatch: got=%s want=%s", withdrawInvariant.Amount.String(), withdrawAmount.String())
-		}
-		if withdrawInvariant.FeeBps != feeBpsAtReq {
-			return nil, fmt.Errorf("withdraw fee bps mismatch: got=%d want=%d", withdrawInvariant.FeeBps, feeBpsAtReq)
-		}
-		if !withdrawInvariant.Finalized {
-			return nil, errors.New("withdraw invariant failed: expected finalized=true")
-		}
-		if withdrawInvariant.Refunded {
-			return nil, errors.New("withdraw invariant failed: expected refunded=false")
-		}
-		if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
-			return nil, errors.New("withdraw invariant failed: recipient UA mismatch")
-		}
-	}
-
 	recipientEqualsOwner := recipient == owner
 	expectedDeltas := expectedBalanceDeltas(expectedBalanceDeltaInput{
 		DepositAmount:        depositAmount,
@@ -1228,29 +1172,110 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	ownerDeltaActual := new(big.Int).Sub(ownerBalAfter, ownerBalBefore)
-	recipientDeltaRaw := new(big.Int).Sub(recipientBalAfter, recipientBalBefore)
-	recipientDeltaActual := normalizeRecipientDeltaActual(recipientDeltaRaw, recipientEqualsOwner)
-	fdDeltaActual := new(big.Int).Sub(fdBalAfter, fdBalBefore)
-	bridgeDeltaActual := new(big.Int).Sub(bridgeBalAfter, bridgeBalBefore)
+	var (
+		ownerBalAfter        *big.Int
+		recipientBalAfter    *big.Int
+		fdBalAfter           *big.Int
+		bridgeBalAfter       *big.Int
+		depositUsedInvariant bool
+		withdrawInvariant    = withdrawalView{Amount: big.NewInt(0)}
+		ownerDeltaActual     *big.Int
+		recipientDeltaRaw    *big.Int
+		recipientDeltaActual *big.Int
+		fdDeltaActual        *big.Int
+		bridgeDeltaActual    *big.Int
+		balanceDeltaMatches  bool
+	)
 
-	balanceDeltaMatches := ownerDeltaActual.Cmp(expectedDeltas.Owner) == 0 &&
-		recipientDeltaActual.Cmp(expectedDeltas.Recipient) == 0 &&
-		fdDeltaActual.Cmp(expectedDeltas.FeeDistributor) == 0 &&
-		bridgeDeltaActual.Cmp(expectedDeltas.Bridge) == 0
-	if !balanceDeltaMatches {
-		return nil, fmt.Errorf(
-			"balance delta invariant failed: owner got=%s want=%s recipient got=%s raw=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s",
-			ownerDeltaActual.String(),
-			expectedDeltas.Owner.String(),
-			recipientDeltaActual.String(),
-			recipientDeltaRaw.String(),
-			expectedDeltas.Recipient.String(),
-			fdDeltaActual.String(),
-			expectedDeltas.FeeDistributor.String(),
-			bridgeDeltaActual.String(),
-			expectedDeltas.Bridge.String(),
-		)
+	checkInvariants := func() error {
+		var checkErr error
+
+		ownerBalAfter, checkErr = callBalanceOf(ctx, wjuno, owner)
+		if checkErr != nil {
+			return fmt.Errorf("owner balance after: %w", checkErr)
+		}
+		recipientBalAfter, checkErr = callBalanceOf(ctx, wjuno, recipient)
+		if checkErr != nil {
+			return fmt.Errorf("recipient balance after: %w", checkErr)
+		}
+		fdBalAfter, checkErr = callBalanceOf(ctx, wjuno, fdAddr)
+		if checkErr != nil {
+			return fmt.Errorf("fee distributor balance after: %w", checkErr)
+		}
+		bridgeBalAfter, checkErr = callBalanceOf(ctx, wjuno, bridgeAddr)
+		if checkErr != nil {
+			return fmt.Errorf("bridge balance after: %w", checkErr)
+		}
+
+		if !cfg.PrepareOnly {
+			depositUsedInvariant, checkErr = callDepositUsed(ctx, bridge, depositID, nil)
+			if checkErr != nil {
+				return fmt.Errorf("depositUsed invariant call: %w", checkErr)
+			}
+			if !depositUsedInvariant {
+				return errors.New("depositUsed invariant failed: expected true after mintBatch")
+			}
+
+			withdrawInvariant, checkErr = callWithdrawal(ctx, bridge, withdrawalID)
+			if checkErr != nil {
+				return fmt.Errorf("getWithdrawal invariant call: %w", checkErr)
+			}
+			if withdrawInvariant.Requester != owner {
+				return fmt.Errorf("withdraw requester mismatch: got=%s want=%s", withdrawInvariant.Requester.Hex(), owner.Hex())
+			}
+			if withdrawInvariant.Amount.Cmp(withdrawAmount) != 0 {
+				return fmt.Errorf("withdraw amount mismatch: got=%s want=%s", withdrawInvariant.Amount.String(), withdrawAmount.String())
+			}
+			if withdrawInvariant.FeeBps != feeBpsAtReq {
+				return fmt.Errorf("withdraw fee bps mismatch: got=%d want=%d", withdrawInvariant.FeeBps, feeBpsAtReq)
+			}
+			if !withdrawInvariant.Finalized {
+				return errors.New("withdraw invariant failed: expected finalized=true")
+			}
+			if withdrawInvariant.Refunded {
+				return errors.New("withdraw invariant failed: expected refunded=false")
+			}
+			if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
+				return errors.New("withdraw invariant failed: recipient UA mismatch")
+			}
+		}
+
+		ownerDeltaActual = new(big.Int).Sub(ownerBalAfter, ownerBalBefore)
+		recipientDeltaRaw = new(big.Int).Sub(recipientBalAfter, recipientBalBefore)
+		recipientDeltaActual = normalizeRecipientDeltaActual(recipientDeltaRaw, recipientEqualsOwner)
+		fdDeltaActual = new(big.Int).Sub(fdBalAfter, fdBalBefore)
+		bridgeDeltaActual = new(big.Int).Sub(bridgeBalAfter, bridgeBalBefore)
+
+		balanceDeltaMatches = ownerDeltaActual.Cmp(expectedDeltas.Owner) == 0 &&
+			recipientDeltaActual.Cmp(expectedDeltas.Recipient) == 0 &&
+			fdDeltaActual.Cmp(expectedDeltas.FeeDistributor) == 0 &&
+			bridgeDeltaActual.Cmp(expectedDeltas.Bridge) == 0
+		if !balanceDeltaMatches {
+			return fmt.Errorf(
+				"balance delta invariant failed: owner got=%s want=%s recipient got=%s raw=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s",
+				ownerDeltaActual.String(),
+				expectedDeltas.Owner.String(),
+				recipientDeltaActual.String(),
+				recipientDeltaRaw.String(),
+				expectedDeltas.Recipient.String(),
+				fdDeltaActual.String(),
+				expectedDeltas.FeeDistributor.String(),
+				bridgeDeltaActual.String(),
+				expectedDeltas.Bridge.String(),
+			)
+		}
+		return nil
+	}
+
+	if cfg.PrepareOnly {
+		if err := checkInvariants(); err != nil {
+			return nil, err
+		}
+	} else {
+		err = waitForInvariantConvergence(ctx, postFinalizeInvariantWaitTimeout, postFinalizeInvariantPollInterval, checkInvariants)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	var rep report
@@ -2328,6 +2353,50 @@ func waitForWithdrawalFinalized(ctx context.Context, pollInterval time.Duration,
 			if view.Finalized {
 				return view, nil
 			}
+		}
+
+		timer.Reset(pollInterval)
+	}
+}
+
+func waitForInvariantConvergence(
+	ctx context.Context,
+	timeout time.Duration,
+	pollInterval time.Duration,
+	check func() error,
+) error {
+	if timeout <= 0 {
+		timeout = postFinalizeInvariantWaitTimeout
+	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	var lastErr error
+	for {
+		select {
+		case <-waitCtx.Done():
+			const timeoutMsg = "timed out waiting for invariant convergence"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				if lastErr != nil {
+					return fmt.Errorf("%s: %w", timeoutMsg, lastErr)
+				}
+				return errors.New(timeoutMsg)
+			}
+			return waitCtx.Err()
+		case <-timer.C:
+		}
+
+		if err := check(); err == nil {
+			return nil
+		} else {
+			lastErr = err
 		}
 
 		timer.Reset(pollInterval)
