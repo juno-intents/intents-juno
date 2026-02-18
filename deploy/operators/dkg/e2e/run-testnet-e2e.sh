@@ -711,6 +711,12 @@ command_run() {
 
     local bridge_deployer_required_wei
     bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
+    # Bridge deployment retries can require a high fee cap on Base testnet; keep
+    # a hard floor so replacement transactions do not fail with insufficient funds.
+    local bridge_deployer_min_wei="70000000000000000"
+    if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
+      bridge_deployer_required_wei="$bridge_deployer_min_wei"
+    fi
     ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$bridge_deployer_address" "$bridge_deployer_required_wei" "bridge deployer" || \
       die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
   fi

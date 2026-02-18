@@ -176,7 +176,10 @@ test_local_e2e_tops_up_bridge_deployer_balance() {
   local e2e_script_text
   e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
 
-  assert_contains "$e2e_script_text" "bridge_deployer_required_wei=\$((base_operator_fund_wei * 10))" "bridge deployer required balance multiplier"
+  assert_contains "$e2e_script_text" "bridge_deployer_required_wei=\$((base_operator_fund_wei * 10))" "bridge deployer required balance baseline multiplier"
+  assert_contains "$e2e_script_text" "bridge_deployer_min_wei=" "bridge deployer absolute minimum floor"
+  assert_contains "$e2e_script_text" "if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then" "bridge deployer top-up floor check"
+  assert_contains "$e2e_script_text" "bridge_deployer_required_wei=\"\$bridge_deployer_min_wei\"" "bridge deployer floor assignment"
   assert_contains "$e2e_script_text" "ensure_recipient_min_balance()" "min-balance funding helper"
   assert_contains "$e2e_script_text" "\$label balance below target" "bridge deployer top-up log"
   assert_contains "$e2e_script_text" "\"bridge deployer\"" "bridge deployer label passed to helper"
