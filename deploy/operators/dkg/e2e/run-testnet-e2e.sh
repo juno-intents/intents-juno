@@ -533,6 +533,7 @@ command_run() {
       run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
+        --async \
         --nonce "$funding_nonce" \
         --value "$base_operator_fund_wei" \
         "$operator" >/dev/null
@@ -556,6 +557,7 @@ command_run() {
       run_with_rpc_retry 5 2 "cast send" cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$base_key" \
+        --async \
         --nonce "$funding_nonce" \
         --value "$bridge_deployer_topup_wei" \
         "$bridge_deployer_address" >/dev/null
