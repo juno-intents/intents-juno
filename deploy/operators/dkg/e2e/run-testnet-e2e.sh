@@ -92,7 +92,8 @@ is_nonce_race_error() {
   msg="${1:-}"
   lowered="$(lower "$msg")"
   [[ "$lowered" == *"nonce too low"* ]] ||
-    [[ "$lowered" == *"replacement transaction underpriced"* ]]
+    [[ "$lowered" == *"replacement transaction underpriced"* ]] ||
+    [[ "$lowered" == *"already known"* ]]
 }
 
 run_with_rpc_retry() {
