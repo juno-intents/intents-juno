@@ -188,6 +188,7 @@ test_local_e2e_uses_managed_nonce_for_funding() {
   assert_contains "$e2e_script_text" "cast_send_with_nonce_retry()" "nonce-aware cast send helper"
   assert_contains "$e2e_script_text" "force_replace_stuck_nonce()" "stuck nonce replacement helper"
   assert_contains "$e2e_script_text" "cast send nonce race detected but sender nonce not advanced" "nonce race guarded by sender nonce advancement"
+  assert_contains "$e2e_script_text" "--gas-limit 21000 \\" "funding sends pin transfer gas limit"
   assert_contains "$e2e_script_text" "--gas-price \"\$gas_price_wei\" \\" "nonce retries bump gas price"
   assert_contains "$e2e_script_text" "submitted stuck nonce replacement tx nonce=" "stuck nonce replacement log"
   assert_contains "$e2e_script_text" "replacement_prices_wei=(" "stuck nonce replacement gas ladder"

@@ -168,6 +168,7 @@ cast_send_with_nonce_retry() {
       --rpc-url "$rpc_url" \
       --private-key "$private_key" \
       --async \
+      --gas-limit 21000 \
       --gas-price "$gas_price_wei" \
       --nonce "$nonce" \
       --value "$value_wei" \
@@ -231,6 +232,7 @@ force_replace_stuck_nonce() {
       --rpc-url "$rpc_url" \
       --private-key "$private_key" \
       --async \
+      --gas-limit 21000 \
       --gas-price "$gas_price_wei" \
       --nonce "$nonce" \
       --value 0 \
