@@ -42,7 +42,7 @@ on:
       boundless_input_mode:
         description: "Boundless input mode (private-input|guest-witness-v1)"
         required: true
-        default: "private-input"
+        default: "guest-witness-v1"
         type: string
       boundless_deposit_program_url:
         description: "Deposit guest program URL for Boundless"

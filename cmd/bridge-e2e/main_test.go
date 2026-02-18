@@ -364,7 +364,49 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeValid(t *testing.T) {
 	}
 }
 
-func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresInputs(t *testing.T) {
+func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.Boundless.InputMode != "guest-witness-v1" {
+		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
+	}
+	if !cfg.Boundless.GuestWitnessAuto {
+		t.Fatalf("expected guest witness auto mode")
+	}
+	if len(cfg.Boundless.DepositWitnessItems) != 0 {
+		t.Fatalf("expected no preloaded deposit witness items in auto mode")
+	}
+	if len(cfg.Boundless.WithdrawWitnessItems) != 0 {
+		t.Fatalf("expected no preloaded withdraw witness items in auto mode")
+	}
+}
+
+func TestParseArgs_BoundlessAutoGuestWitnessModeRejectsPartialManualInputs(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -388,12 +430,13 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresInputs(t *testing.T) {
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "--boundless-deposit-owallet-ivk-hex") {
-		t.Fatalf("expected guest-witness-v1 requirement error, got: %v", err)
+	if !strings.Contains(err.Error(), "all guest witness manual inputs must be set together") {
+		t.Fatalf("expected partial guest-witness manual input error, got: %v", err)
 	}
 }
 

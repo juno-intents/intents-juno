@@ -75,6 +75,8 @@ type boundlessConfig struct {
 	Bin                     string
 	RPCURL                  string
 	InputMode               string
+	GuestWitnessAuto        bool
+	GuestWitnessManifest    string
 	DepositOWalletIVKBytes  []byte
 	WithdrawOWalletOVKBytes []byte
 	DepositWitnessItems     [][]byte
@@ -108,6 +110,31 @@ type boundlessWaitResult struct {
 	SealHex      string
 }
 
+type guestWitnessCommandOutput struct {
+	Pipeline         string `json:"pipeline"`
+	FinalOrchardRoot string `json:"final_orchard_root"`
+	DepositID        string `json:"deposit_id"`
+	RecipientUA      string `json:"recipient_ua"`
+	OWalletIVK       string `json:"owallet_ivk"`
+	OWalletOVK       string `json:"owallet_ovk"`
+	WitnessItem      string `json:"witness_item"`
+}
+
+type guestDepositFixture struct {
+	FinalOrchardRoot common.Hash
+	DepositID        common.Hash
+	RecipientUA      []byte
+	OWalletIVKBytes  []byte
+	WitnessItem      []byte
+}
+
+type guestWithdrawFixture struct {
+	FinalOrchardRoot common.Hash
+	RecipientUA      []byte
+	OWalletOVKBytes  []byte
+	WitnessItem      []byte
+}
+
 const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
@@ -121,6 +148,7 @@ const (
 	defaultBoundlessMarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 	defaultBoundlessRouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
 	defaultBoundlessSetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+	defaultGuestWitnessManifestPath        = "zk/witness_fixture/cli/Cargo.toml"
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
@@ -194,6 +222,7 @@ type report struct {
 			Enabled                bool   `json:"enabled"`
 			RPCURL                 string `json:"rpc_url,omitempty"`
 			InputMode              string `json:"input_mode,omitempty"`
+			GuestWitnessAuto       bool   `json:"guest_witness_auto,omitempty"`
 			MarketAddress          string `json:"market_address,omitempty"`
 			VerifierRouter         string `json:"verifier_router_address,omitempty"`
 			SetVerifier            string `json:"set_verifier_address,omitempty"`
@@ -263,9 +292,11 @@ type proofInputsFile struct {
 	ChainID        uint64 `json:"chain_id"`
 	BridgeContract string `json:"bridge_contract"`
 
-	Checkpoint checkpoint.Checkpoint `json:"checkpoint"`
+	Checkpoint         checkpoint.Checkpoint  `json:"checkpoint"`
+	WithdrawCheckpoint *checkpoint.Checkpoint `json:"withdraw_checkpoint,omitempty"`
 
-	OperatorSignatures []string `json:"operator_signatures"`
+	OperatorSignatures         []string `json:"operator_signatures"`
+	WithdrawOperatorSignatures []string `json:"withdraw_operator_signatures,omitempty"`
 
 	Deposit struct {
 		ProofInput struct {
@@ -380,6 +411,7 @@ func parseArgs(args []string) (config, error) {
 	var boundlessWithdrawOWalletOVKHex string
 	var boundlessDepositWitnessItemFiles stringListFlag
 	var boundlessWithdrawWitnessItemFiles stringListFlag
+	var boundlessGuestWitnessManifest string
 	var boundlessMinPriceWei string
 	var boundlessMaxPriceWei string
 	var boundlessMaxPriceCapWei string
@@ -421,6 +453,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&boundlessWithdrawOWalletOVKHex, "boundless-withdraw-owallet-ovk-hex", "", "32-byte oWallet OVK hex for guest-witness-v1 withdraw input mode")
 	fs.Var(&boundlessDepositWitnessItemFiles, "boundless-deposit-witness-item-file", "deposit guest witness item file path (repeat for guest-witness-v1)")
 	fs.Var(&boundlessWithdrawWitnessItemFiles, "boundless-withdraw-witness-item-file", "withdraw guest witness item file path (repeat for guest-witness-v1)")
+	fs.StringVar(&boundlessGuestWitnessManifest, "boundless-guest-witness-manifest", defaultGuestWitnessManifestPath, "Cargo manifest path for auto guest witness generation (used in guest-witness-v1 auto mode)")
 	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
 	fs.StringVar(&cfg.Boundless.WithdrawProgramURL, "boundless-withdraw-program-url", "", "withdraw guest program URL for Boundless proof requests")
 	fs.StringVar(&boundlessMinPriceWei, "boundless-min-price-wei", defaultBoundlessMinPriceWei, "Boundless min price in wei")
@@ -518,6 +551,7 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.Boundless.GuestWitnessManifest = strings.TrimSpace(boundlessGuestWitnessManifest)
 	if !common.IsHexAddress(boundlessMarketAddressHex) {
 		return cfg, errors.New("--boundless-market-address must be a valid hex address")
 	}
@@ -598,37 +632,51 @@ func parseArgs(args []string) (config, error) {
 		return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
 	}
 	if cfg.Boundless.InputMode == boundlessInputModeGuestWitnessV1 {
-		cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
-			"--boundless-deposit-owallet-ivk-hex",
-			boundlessDepositOWalletIVKHex,
-			64,
-		)
-		if err != nil {
-			return cfg, err
+		manualIVKSet := strings.TrimSpace(boundlessDepositOWalletIVKHex) != ""
+		manualOVKSet := strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != ""
+		manualDepositItemsSet := len(boundlessDepositWitnessItemFiles) > 0
+		manualWithdrawItemsSet := len(boundlessWithdrawWitnessItemFiles) > 0
+		manualAny := manualIVKSet || manualOVKSet || manualDepositItemsSet || manualWithdrawItemsSet
+		manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
+
+		if manualAny && !manualAll {
+			return cfg, errors.New("all guest witness manual inputs must be set together: --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, --boundless-withdraw-witness-item-file")
 		}
-		cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
-			"--boundless-withdraw-owallet-ovk-hex",
-			boundlessWithdrawOWalletOVKHex,
-			32,
-		)
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-deposit-witness-item-file",
-			boundlessDepositWitnessItemFiles,
-			proverinput.DepositWitnessItemLen,
-		)
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-withdraw-witness-item-file",
-			boundlessWithdrawWitnessItemFiles,
-			proverinput.WithdrawWitnessItemLen,
-		)
-		if err != nil {
-			return cfg, err
+
+		cfg.Boundless.GuestWitnessAuto = !manualAll
+		if manualAll {
+			cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
+				"--boundless-deposit-owallet-ivk-hex",
+				boundlessDepositOWalletIVKHex,
+				64,
+			)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
+				"--boundless-withdraw-owallet-ovk-hex",
+				boundlessWithdrawOWalletOVKHex,
+				32,
+			)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
+				"--boundless-deposit-witness-item-file",
+				boundlessDepositWitnessItemFiles,
+				proverinput.DepositWitnessItemLen,
+			)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
+				"--boundless-withdraw-witness-item-file",
+				boundlessWithdrawWitnessItemFiles,
+				proverinput.WithdrawWitnessItemLen,
+			)
+			if err != nil {
+				return cfg, err
+			}
 		}
 	} else {
 		if strings.TrimSpace(boundlessDepositOWalletIVKHex) != "" || strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != "" {
@@ -956,17 +1004,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("latest header: %w", err)
 	}
-	cp := checkpoint.Checkpoint{
+	cpTemplate := checkpoint.Checkpoint{
 		Height:           header.Number.Uint64(),
 		BlockHash:        header.Hash(),
 		FinalOrchardRoot: crypto.Keccak256Hash([]byte("juno-e2e"), header.Hash().Bytes()),
 		BaseChainID:      cfg.ChainID,
 		BridgeContract:   bridgeAddr,
-	}
-	digest := checkpoint.Digest(cp)
-	cpSigs, err := signDigestSorted(digest, operatorKeys[:cfg.Threshold])
-	if err != nil {
-		return nil, fmt.Errorf("sign checkpoint digest: %w", err)
 	}
 
 	type checkpointABI struct {
@@ -976,17 +1019,93 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		BaseChainId      *big.Int
 		BridgeContract   common.Address
 	}
-	cpABI := checkpointABI{
-		Height:           cp.Height,
-		BlockHash:        cp.BlockHash,
-		FinalOrchardRoot: cp.FinalOrchardRoot,
-		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
-		BridgeContract:   cp.BridgeContract,
+	toCheckpointABI := func(cp checkpoint.Checkpoint) checkpointABI {
+		return checkpointABI{
+			Height:           cp.Height,
+			BlockHash:        cp.BlockHash,
+			FinalOrchardRoot: cp.FinalOrchardRoot,
+			BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
+			BridgeContract:   cp.BridgeContract,
+		}
 	}
 
 	depositAmount := new(big.Int).SetUint64(cfg.DepositAmount)
 	depositFees := computeFeeBreakdown(depositAmount, feeBpsOnChain, relayerTipBpsOnChain)
+	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
+
+	cpDeposit := cpTemplate
+	cpWithdraw := cpTemplate
 	depositID := crypto.Keccak256Hash([]byte("bridge-e2e-deposit-1"))
+	recipientUA := []byte{0x01, 0x02, 0x03}
+	var withdrawNetForFixture *big.Int
+
+	nonceBefore, err := callUint64(ctx, bridge, "withdrawNonce")
+	if err != nil {
+		return nil, fmt.Errorf("withdrawNonce: %w", err)
+	}
+
+	if cfg.Boundless.InputMode == boundlessInputModeGuestWitnessV1 && cfg.Boundless.GuestWitnessAuto {
+		logProgress("generating guest witness fixtures (auto mode)")
+		depositFixture, err := generateGuestWitnessDepositFixture(
+			ctx,
+			cfg.Boundless,
+			cfg.ChainID,
+			bridgeAddr,
+			recipient,
+			cfg.DepositAmount,
+		)
+		if err != nil {
+			return nil, err
+		}
+		cpDeposit.FinalOrchardRoot = depositFixture.FinalOrchardRoot
+		depositID = depositFixture.DepositID
+		recipientUA = append([]byte(nil), depositFixture.RecipientUA...)
+		cfg.Boundless.DepositOWalletIVKBytes = append([]byte(nil), depositFixture.OWalletIVKBytes...)
+		cfg.Boundless.DepositWitnessItems = [][]byte{append([]byte(nil), depositFixture.WitnessItem...)}
+
+		predictedID, predErr := computePredictedWithdrawalID(
+			cfg.ChainID,
+			bridgeAddr,
+			nonceBefore+1,
+			owner,
+			withdrawAmount,
+			recipientUA,
+		)
+		if predErr != nil {
+			return nil, fmt.Errorf("compute predicted withdrawal id for guest fixture: %w", predErr)
+		}
+
+		withdrawFeesExpected := computeFeeBreakdown(withdrawAmount, feeBpsOnChain, relayerTipBpsOnChain)
+		if !withdrawFeesExpected.Net.IsUint64() {
+			return nil, fmt.Errorf("withdraw net amount exceeds uint64: %s", withdrawFeesExpected.Net.String())
+		}
+		withdrawFixture, err := generateGuestWitnessWithdrawFixture(
+			ctx,
+			cfg.Boundless,
+			cfg.ChainID,
+			bridgeAddr,
+			predictedID,
+			withdrawFeesExpected.Net.Uint64(),
+		)
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(recipientUA, withdrawFixture.RecipientUA) {
+			return nil, errors.New("guest witness recipient UA mismatch between deposit and withdraw fixtures")
+		}
+		cpWithdraw.FinalOrchardRoot = withdrawFixture.FinalOrchardRoot
+		cfg.Boundless.WithdrawOWalletOVKBytes = append([]byte(nil), withdrawFixture.OWalletOVKBytes...)
+		cfg.Boundless.WithdrawWitnessItems = [][]byte{append([]byte(nil), withdrawFixture.WitnessItem...)}
+		withdrawNetForFixture = new(big.Int).Set(withdrawFeesExpected.Net)
+	}
+
+	depositDigest := checkpoint.Digest(cpDeposit)
+	cpDepositSigs, err := signDigestSorted(depositDigest, operatorKeys[:cfg.Threshold])
+	if err != nil {
+		return nil, fmt.Errorf("sign deposit checkpoint digest: %w", err)
+	}
+	cpDepositABI := toCheckpointABI(cpDeposit)
+
 	mintItems := []bridgeabi.MintItem{
 		{
 			DepositId: depositID,
@@ -995,15 +1114,15 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		},
 	}
 	depositJournal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
-		FinalOrchardRoot: cp.FinalOrchardRoot,
-		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
-		BridgeContract:   cp.BridgeContract,
+		FinalOrchardRoot: cpDeposit.FinalOrchardRoot,
+		BaseChainId:      new(big.Int).SetUint64(cpDeposit.BaseChainID),
+		BridgeContract:   cpDeposit.BridgeContract,
 		Items:            mintItems,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit journal: %w", err)
 	}
-	depositPrivateInput, err := proverinput.EncodeDepositPrivateInputV1(cp, cpSigs, mintItems)
+	depositPrivateInput, err := proverinput.EncodeDepositPrivateInputV1(cpDeposit, cpDepositSigs, mintItems)
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
@@ -1021,7 +1140,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 		var ivk [64]byte
 		copy(ivk[:], cfg.Boundless.DepositOWalletIVKBytes)
-		depositBoundlessInput, err = proverinput.EncodeDepositGuestPrivateInput(cp, ivk, cfg.Boundless.DepositWitnessItems)
+		depositBoundlessInput, err = proverinput.EncodeDepositGuestPrivateInput(cpDeposit, ivk, cfg.Boundless.DepositWitnessItems)
 		if err != nil {
 			return nil, fmt.Errorf("encode deposit guest private input: %w", err)
 		}
@@ -1029,13 +1148,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("unsupported boundless input mode: %s", cfg.Boundless.InputMode)
 	}
 
-	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
-	recipientUA := []byte{0x01, 0x02, 0x03}
-
-	nonceBefore, err := callUint64(ctx, bridge, "withdrawNonce")
-	if err != nil {
-		return nil, fmt.Errorf("withdrawNonce: %w", err)
-	}
 	predictedWithdrawalID, err := computePredictedWithdrawalID(cfg.ChainID, bridgeAddr, nonceBefore+1, owner, withdrawAmount, recipientUA)
 	if err != nil {
 		return nil, fmt.Errorf("compute predicted withdrawal id: %w", err)
@@ -1068,7 +1180,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, err
 	}
 
-	mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpABI, cpSigs, cfg.DepositSeal, depositJournal)
+	mintBatchTx, mintBatchRcpt, err = transactAndWaitWithReceipt(ctx, client, auth, bridge, "mintBatch", cpDepositABI, cpDepositSigs, cfg.DepositSeal, depositJournal)
 	if err != nil {
 		return nil, fmt.Errorf("mintBatch: %w", err)
 	}
@@ -1131,7 +1243,21 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	withdrawFees := computeFeeBreakdown(withdrawAmount, feeBpsAtReq, relayerTipBpsOnChain)
+	if withdrawNetForFixture != nil && withdrawFees.Net.Cmp(withdrawNetForFixture) != 0 {
+		return nil, fmt.Errorf(
+			"guest witness net amount mismatch: generated=%s onchain=%s",
+			withdrawNetForFixture.String(),
+			withdrawFees.Net.String(),
+		)
+	}
 	net := new(big.Int).Set(withdrawFees.Net)
+
+	withdrawDigest := checkpoint.Digest(cpWithdraw)
+	cpWithdrawSigs, err := signDigestSorted(withdrawDigest, operatorKeys[:cfg.Threshold])
+	if err != nil {
+		return nil, fmt.Errorf("sign withdraw checkpoint digest: %w", err)
+	}
+	cpWithdrawABI := toCheckpointABI(cpWithdraw)
 
 	finalizeItems := []bridgeabi.FinalizeItem{
 		{
@@ -1142,15 +1268,15 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	withdrawJournal, err := bridgeabi.EncodeWithdrawJournal(bridgeabi.WithdrawJournal{
-		FinalOrchardRoot: cp.FinalOrchardRoot,
-		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
-		BridgeContract:   cp.BridgeContract,
+		FinalOrchardRoot: cpWithdraw.FinalOrchardRoot,
+		BaseChainId:      new(big.Int).SetUint64(cpWithdraw.BaseChainID),
+		BridgeContract:   cpWithdraw.BridgeContract,
 		Items:            finalizeItems,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw journal: %w", err)
 	}
-	withdrawPrivateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cp, cpSigs, finalizeItems)
+	withdrawPrivateInput, err := proverinput.EncodeWithdrawPrivateInputV1(cpWithdraw, cpWithdrawSigs, finalizeItems)
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw private input: %w", err)
 	}
@@ -1168,7 +1294,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 		var ovk [32]byte
 		copy(ovk[:], cfg.Boundless.WithdrawOWalletOVKBytes)
-		withdrawBoundlessInput, err = proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, cfg.Boundless.WithdrawWitnessItems)
+		withdrawBoundlessInput, err = proverinput.EncodeWithdrawGuestPrivateInput(cpWithdraw, ovk, cfg.Boundless.WithdrawWitnessItems)
 		if err != nil {
 			return nil, fmt.Errorf("encode withdraw guest private input: %w", err)
 		}
@@ -1183,8 +1309,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			GeneratedAtUTC:     time.Now().UTC().Format(time.RFC3339),
 			ChainID:            cfg.ChainID,
 			BridgeContract:     bridgeAddr.Hex(),
-			Checkpoint:         cp,
-			OperatorSignatures: encodeSignaturesHex(cpSigs),
+			Checkpoint:         cpDeposit,
+			OperatorSignatures: encodeSignaturesHex(cpDepositSigs),
+		}
+		if cpWithdraw != cpDeposit {
+			cp := cpWithdraw
+			proofBundle.WithdrawCheckpoint = &cp
+			proofBundle.WithdrawOperatorSignatures = encodeSignaturesHex(cpWithdrawSigs)
 		}
 
 		proofBundle.Deposit.ProofInput.Pipeline = "deposit"
@@ -1223,7 +1354,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, err
 	}
 
-	finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpABI, cpSigs, cfg.WithdrawSeal, withdrawJournal)
+	finalizeWithdrawTx, err = transactAndWait(ctx, client, auth, bridge, "finalizeWithdrawBatch", cpWithdrawABI, cpWithdrawSigs, cfg.WithdrawSeal, withdrawJournal)
 	if err != nil {
 		return nil, fmt.Errorf("finalizeWithdrawBatch: %w", err)
 	}
@@ -1356,9 +1487,9 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Operators = append(rep.Operators, op.Hex())
 	}
 	rep.Threshold = cfg.Threshold
-	rep.Checkpoint.Height = cp.Height
-	rep.Checkpoint.BlockHash = cp.BlockHash.Hex()
-	rep.Checkpoint.FinalOrchardRoot = cp.FinalOrchardRoot.Hex()
+	rep.Checkpoint.Height = cpDeposit.Height
+	rep.Checkpoint.BlockHash = cpDeposit.BlockHash.Hex()
+	rep.Checkpoint.FinalOrchardRoot = cpDeposit.FinalOrchardRoot.Hex()
 
 	rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
 	rep.Transactions.SetThreshold = setThresholdTx.Hex()
@@ -1396,6 +1527,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if cfg.Boundless.Auto {
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
 		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
+		rep.Proof.Boundless.GuestWitnessAuto = cfg.Boundless.GuestWitnessAuto
 		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
 		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
 		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
@@ -1741,6 +1873,158 @@ func buildBoundlessCommandEnv() []string {
 		)
 	}
 	return upsertEnvVar(env, "PATH", pathValue)
+}
+
+func generateGuestWitnessDepositFixture(
+	ctx context.Context,
+	cfg boundlessConfig,
+	baseChainID uint64,
+	bridgeAddr common.Address,
+	baseRecipient common.Address,
+	amount uint64,
+) (guestDepositFixture, error) {
+	if baseChainID > uint64(^uint32(0)) {
+		return guestDepositFixture{}, fmt.Errorf("guest witness: base chain id %d exceeds uint32", baseChainID)
+	}
+	out, err := runGuestWitnessFixtureCommand(ctx, cfg, []string{
+		"deposit",
+		"--base-chain-id", strconv.FormatUint(baseChainID, 10),
+		"--bridge-address", bridgeAddr.Hex(),
+		"--base-recipient", baseRecipient.Hex(),
+		"--amount", strconv.FormatUint(amount, 10),
+	})
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+
+	var parsed guestWitnessCommandOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return guestDepositFixture{}, fmt.Errorf("decode guest witness deposit fixture output: %w", err)
+	}
+
+	root, err := parseHash32Flag("guest witness final_orchard_root", parsed.FinalOrchardRoot)
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+	depositID, err := parseHash32Flag("guest witness deposit_id", parsed.DepositID)
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+	recipientUA, err := parseHexBytesFlag("guest witness recipient_ua", parsed.RecipientUA)
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+	if len(recipientUA) != 43 {
+		return guestDepositFixture{}, fmt.Errorf("guest witness recipient_ua must be 43 bytes, got %d", len(recipientUA))
+	}
+	ivk, err := parseHexFixedLength("guest witness owallet_ivk", parsed.OWalletIVK, 64)
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+	witnessItem, err := parseHexBytesFlag("guest witness witness_item", parsed.WitnessItem)
+	if err != nil {
+		return guestDepositFixture{}, err
+	}
+	if len(witnessItem) != proverinput.DepositWitnessItemLen {
+		return guestDepositFixture{}, fmt.Errorf(
+			"guest witness deposit witness item length mismatch: got=%d want=%d",
+			len(witnessItem),
+			proverinput.DepositWitnessItemLen,
+		)
+	}
+
+	return guestDepositFixture{
+		FinalOrchardRoot: root,
+		DepositID:        depositID,
+		RecipientUA:      append([]byte(nil), recipientUA...),
+		OWalletIVKBytes:  append([]byte(nil), ivk...),
+		WitnessItem:      append([]byte(nil), witnessItem...),
+	}, nil
+}
+
+func generateGuestWitnessWithdrawFixture(
+	ctx context.Context,
+	cfg boundlessConfig,
+	baseChainID uint64,
+	bridgeAddr common.Address,
+	withdrawalID common.Hash,
+	netAmount uint64,
+) (guestWithdrawFixture, error) {
+	if baseChainID > uint64(^uint32(0)) {
+		return guestWithdrawFixture{}, fmt.Errorf("guest witness: base chain id %d exceeds uint32", baseChainID)
+	}
+	out, err := runGuestWitnessFixtureCommand(ctx, cfg, []string{
+		"withdraw",
+		"--base-chain-id", strconv.FormatUint(baseChainID, 10),
+		"--bridge-address", bridgeAddr.Hex(),
+		"--withdrawal-id", withdrawalID.Hex(),
+		"--net-amount", strconv.FormatUint(netAmount, 10),
+	})
+	if err != nil {
+		return guestWithdrawFixture{}, err
+	}
+
+	var parsed guestWitnessCommandOutput
+	if err := json.Unmarshal(out, &parsed); err != nil {
+		return guestWithdrawFixture{}, fmt.Errorf("decode guest witness withdraw fixture output: %w", err)
+	}
+
+	root, err := parseHash32Flag("guest witness final_orchard_root", parsed.FinalOrchardRoot)
+	if err != nil {
+		return guestWithdrawFixture{}, err
+	}
+	recipientUA, err := parseHexBytesFlag("guest witness recipient_ua", parsed.RecipientUA)
+	if err != nil {
+		return guestWithdrawFixture{}, err
+	}
+	if len(recipientUA) != 43 {
+		return guestWithdrawFixture{}, fmt.Errorf("guest witness recipient_ua must be 43 bytes, got %d", len(recipientUA))
+	}
+	ovk, err := parseHexFixedLength("guest witness owallet_ovk", parsed.OWalletOVK, 32)
+	if err != nil {
+		return guestWithdrawFixture{}, err
+	}
+	witnessItem, err := parseHexBytesFlag("guest witness witness_item", parsed.WitnessItem)
+	if err != nil {
+		return guestWithdrawFixture{}, err
+	}
+	if len(witnessItem) != proverinput.WithdrawWitnessItemLen {
+		return guestWithdrawFixture{}, fmt.Errorf(
+			"guest witness withdraw witness item length mismatch: got=%d want=%d",
+			len(witnessItem),
+			proverinput.WithdrawWitnessItemLen,
+		)
+	}
+
+	return guestWithdrawFixture{
+		FinalOrchardRoot: root,
+		RecipientUA:      append([]byte(nil), recipientUA...),
+		OWalletOVKBytes:  append([]byte(nil), ovk...),
+		WitnessItem:      append([]byte(nil), witnessItem...),
+	}, nil
+}
+
+func runGuestWitnessFixtureCommand(ctx context.Context, cfg boundlessConfig, args []string) ([]byte, error) {
+	manifest := strings.TrimSpace(cfg.GuestWitnessManifest)
+	if manifest == "" {
+		return nil, errors.New("guest witness manifest path is required for guest-witness-v1 auto mode")
+	}
+	cmdArgs := []string{"run", "--quiet", "--manifest-path", manifest, "--"}
+	cmdArgs = append(cmdArgs, args...)
+	cmd := exec.CommandContext(ctx, "cargo", cmdArgs...)
+	cmd.Env = buildBoundlessCommandEnv()
+
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
+	if err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			msg = err.Error()
+		}
+		return nil, fmt.Errorf("guest witness command failed: %s", msg)
+	}
+	return bytes.TrimSpace(out), nil
 }
 
 func prependPathEntries(pathValue string, entries ...string) string {

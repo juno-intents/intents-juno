@@ -6,6 +6,7 @@ members = [
   "deposit_guest/guest",
   "withdraw_guest/core",
   "withdraw_guest/guest",
+  "witness_fixture/cli",
 ]
 
 default-members = [

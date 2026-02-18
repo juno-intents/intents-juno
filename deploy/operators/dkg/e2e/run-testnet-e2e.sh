@@ -43,6 +43,8 @@ Options:
   --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
   --boundless-deposit-witness-item-file <path> deposit witness item file (repeat for guest-witness-v1)
   --boundless-withdraw-witness-item-file <path> withdraw witness item file (repeat for guest-witness-v1)
+  --boundless-guest-witness-manifest <path> Cargo manifest for auto guest witness generation
+                                   (default: zk/witness_fixture/cli/Cargo.toml)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
@@ -316,6 +318,7 @@ command_run() {
   local boundless_withdraw_owallet_ovk_hex=""
   local -a boundless_deposit_witness_item_files=()
   local -a boundless_withdraw_witness_item_files=()
+  local boundless_guest_witness_manifest="zk/witness_fixture/cli/Cargo.toml"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -464,6 +467,11 @@ command_run() {
         boundless_withdraw_witness_item_files+=("$2")
         shift 2
         ;;
+      --boundless-guest-witness-manifest)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-guest-witness-manifest"
+        boundless_guest_witness_manifest="$2"
+        shift 2
+        ;;
       --boundless-requestor-key-file)
         [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
         boundless_requestor_key_file="$2"
@@ -609,11 +617,16 @@ command_run() {
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
+  local guest_witness_manual_mode="false"
   if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
-    [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required for --boundless-input-mode guest-witness-v1"
-    [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required for --boundless-input-mode guest-witness-v1"
-    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required for --boundless-input-mode guest-witness-v1"
-    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required for --boundless-input-mode guest-witness-v1"
+    if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
+      (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
+      guest_witness_manual_mode="true"
+      [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required in guest witness manual mode"
+      [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required in guest witness manual mode"
+      (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required in guest witness manual mode"
+      (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required in guest witness manual mode"
+    fi
   else
     if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
       (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
@@ -784,6 +797,7 @@ command_run() {
     "--boundless-verifier-router-address" "$boundless_verifier_router_address"
     "--boundless-set-verifier-address" "$boundless_set_verifier_address"
     "--boundless-input-mode" "$boundless_input_mode"
+    "--boundless-guest-witness-manifest" "$boundless_guest_witness_manifest"
     "--boundless-requestor-key-file" "$boundless_requestor_key_file"
     "--boundless-deposit-program-url" "$boundless_deposit_program_url"
     "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
@@ -842,6 +856,7 @@ command_run() {
   local boundless_deposit_ivk_configured="false"
   local boundless_withdraw_ovk_configured="false"
   local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
+  local guest_witness_auto_generate="false"
   if [[ -n "$boundless_deposit_owallet_ivk_hex" ]]; then
     boundless_deposit_ivk_configured="true"
   fi
@@ -850,6 +865,9 @@ command_run() {
   fi
   boundless_deposit_witness_item_count="${#boundless_deposit_witness_item_files[@]}"
   boundless_withdraw_witness_item_count="${#boundless_withdraw_witness_item_files[@]}"
+  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_manual_mode" != "true" ]]; then
+    guest_witness_auto_generate="true"
+  fi
 
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
@@ -870,8 +888,10 @@ command_run() {
     --arg boundless_bin "$boundless_bin" \
     --arg boundless_rpc_url "$boundless_rpc_url" \
     --arg boundless_input_mode "$boundless_input_mode" \
+    --arg boundless_guest_witness_manifest "$boundless_guest_witness_manifest" \
     --arg boundless_deposit_ivk_configured "$boundless_deposit_ivk_configured" \
     --arg boundless_withdraw_ovk_configured "$boundless_withdraw_ovk_configured" \
+    --arg guest_witness_auto_generate "$guest_witness_auto_generate" \
     --argjson boundless_deposit_witness_item_count "$boundless_deposit_witness_item_count" \
     --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
@@ -927,6 +947,8 @@ command_run() {
           input_mode: $boundless_input_mode,
           guest_witness: {
             enabled: ($boundless_input_mode == "guest-witness-v1"),
+            auto_generate: ($guest_witness_auto_generate == "true"),
+            manifest_path: (if $boundless_guest_witness_manifest == "" then null else $boundless_guest_witness_manifest end),
             deposit_owallet_ivk_configured: ($boundless_deposit_ivk_configured == "true"),
             withdraw_owallet_ovk_configured: ($boundless_withdraw_ovk_configured == "true"),
             deposit_witness_item_count: $boundless_deposit_witness_item_count,
