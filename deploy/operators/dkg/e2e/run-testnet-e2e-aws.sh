@@ -433,16 +433,7 @@ else
 fi
 boundless --version
 
-cargo_risczero_target_version="3.0.5"
-cargo_risczero_version_output=""
-if command -v cargo-risczero >/dev/null 2>&1; then
-  cargo_risczero_version_output="\$(cargo-risczero --version 2>/dev/null || true)"
-fi
-if [[ "\$cargo_risczero_version_output" == *"\$cargo_risczero_target_version"* ]]; then
-  echo "cargo-risczero already installed at target version; skipping reinstall"
-else
-  run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
-fi
+echo "skipping cargo-risczero install; not required for live e2e"
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
