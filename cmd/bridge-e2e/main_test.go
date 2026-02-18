@@ -925,6 +925,53 @@ func TestIsRetriableNonceError(t *testing.T) {
 	}
 }
 
+func TestIsRetriableWaitMinedError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "deadline exceeded",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "not found",
+			err:  errors.New("transaction not found"),
+			want: true,
+		},
+		{
+			name: "not indexed",
+			err:  errors.New("header not indexed yet"),
+			want: true,
+		},
+		{
+			name: "other error",
+			err:  errors.New("execution reverted"),
+			want: false,
+		},
+		{
+			name: "nil",
+			err:  nil,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRetriableWaitMinedError(tc.err)
+			if got != tc.want {
+				t.Fatalf("isRetriableWaitMinedError(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestComputeFeeBreakdown(t *testing.T) {
 	t.Parallel()
 

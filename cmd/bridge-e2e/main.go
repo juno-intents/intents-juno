@@ -116,6 +116,7 @@ const (
 
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
+	txMinedWaitTimeout               = 75 * time.Second
 )
 
 type report struct {
@@ -1546,9 +1547,17 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 		}
 		incrementAuthNonce(auth)
 		logProgress("deploy submitted tx=%s", tx.Hash().Hex())
-		rcpt, err := waitMined(ctx, backend, tx)
+		waitCtx, cancel := context.WithTimeout(ctx, txMinedWaitTimeout)
+		rcpt, err := waitMined(waitCtx, backend, tx)
+		cancel()
 		if err != nil {
 			logProgress("deploy wait mined failed tx=%s: %v", tx.Hash().Hex(), err)
+			if ctx.Err() == nil && attempt < 4 && isRetriableWaitMinedError(err) {
+				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
+					return common.Address{}, common.Hash{}, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
+				}
+				continue
+			}
 			return common.Address{}, common.Hash{}, err
 		}
 		if rcpt.Status != 1 {
@@ -1599,9 +1608,17 @@ func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bi
 		}
 		incrementAuthNonce(auth)
 		logProgress("%s submitted tx=%s", method, tx.Hash().Hex())
-		rcpt, err := waitMined(ctx, backend, tx)
+		waitCtx, cancel := context.WithTimeout(ctx, txMinedWaitTimeout)
+		rcpt, err := waitMined(waitCtx, backend, tx)
+		cancel()
 		if err != nil {
 			logProgress("%s wait mined failed tx=%s: %v", method, tx.Hash().Hex(), err)
+			if ctx.Err() == nil && attempt < 4 && isRetriableWaitMinedError(err) {
+				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
+					return common.Hash{}, nil, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
+				}
+				continue
+			}
 			return common.Hash{}, nil, err
 		}
 		if rcpt.Status != 1 {
@@ -1708,6 +1725,17 @@ func isRetriableNonceError(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "nonce too low") || strings.Contains(msg, "replacement transaction underpriced")
+}
+
+func isRetriableWaitMinedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "not found") || strings.Contains(msg, "not indexed")
 }
 
 func refreshAuthNonce(ctx context.Context, backend txBackend, auth *bind.TransactOpts) error {
