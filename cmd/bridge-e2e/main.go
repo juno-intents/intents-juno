@@ -126,6 +126,7 @@ const (
 	boundlessInputModePrivate        = "private-input"
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
 	txMinedWaitTimeout               = 180 * time.Second
+	txMinedGraceTimeout              = 240 * time.Second
 	boundlessMarketBalanceOfABIJSON  = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 )
 
@@ -1859,9 +1860,7 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 		}
 		incrementAuthNonce(auth)
 		logProgress("deploy submitted tx=%s", tx.Hash().Hex())
-		waitCtx, cancel := context.WithTimeout(ctx, txMinedWaitTimeout)
-		rcpt, err := waitMined(waitCtx, backend, tx)
-		cancel()
+		rcpt, err := waitMinedWithGrace(ctx, backend, tx)
 		if err != nil {
 			logProgress("deploy wait mined failed tx=%s: %v", tx.Hash().Hex(), err)
 			if ctx.Err() == nil && attempt < 4 && isRetriableWaitMinedError(err) {
@@ -1920,9 +1919,7 @@ func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bi
 		}
 		incrementAuthNonce(auth)
 		logProgress("%s submitted tx=%s", method, tx.Hash().Hex())
-		waitCtx, cancel := context.WithTimeout(ctx, txMinedWaitTimeout)
-		rcpt, err := waitMined(waitCtx, backend, tx)
-		cancel()
+		rcpt, err := waitMinedWithGrace(ctx, backend, tx)
 		if err != nil {
 			logProgress("%s wait mined failed tx=%s: %v", method, tx.Hash().Hex(), err)
 			if ctx.Err() == nil && attempt < 4 && isRetriableWaitMinedError(err) {
@@ -2074,6 +2071,19 @@ func incrementAuthNonce(auth *bind.TransactOpts) {
 
 func waitMined(ctx context.Context, backend bind.DeployBackend, tx *types.Transaction) (*types.Receipt, error) {
 	return bind.WaitMined(ctx, backend, tx)
+}
+
+func waitMinedWithGrace(ctx context.Context, backend bind.DeployBackend, tx *types.Transaction) (*types.Receipt, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, txMinedWaitTimeout)
+	rcpt, err := waitMined(waitCtx, backend, tx)
+	cancel()
+	if err == nil || ctx.Err() != nil || !errors.Is(err, context.DeadlineExceeded) {
+		return rcpt, err
+	}
+
+	graceCtx, graceCancel := context.WithTimeout(ctx, txMinedGraceTimeout)
+	defer graceCancel()
+	return waitMined(graceCtx, backend, tx)
 }
 
 func signDigestSorted(digest common.Hash, keys []*ecdsa.PrivateKey) ([][]byte, error) {
