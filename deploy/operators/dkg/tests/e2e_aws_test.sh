@@ -173,8 +173,9 @@ test_local_e2e_tops_up_bridge_deployer_balance() {
   e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
 
   assert_contains "$e2e_script_text" "bridge_deployer_required_wei=\$((base_operator_fund_wei * 10))" "bridge deployer required balance multiplier"
-  assert_contains "$e2e_script_text" "bridge_deployer_balance=\"\$(cast balance --rpc-url \"\$base_rpc_url\" \"\$bridge_deployer_address\")\"" "bridge deployer balance probe"
-  assert_contains "$e2e_script_text" "bridge deployer balance below required target" "bridge deployer top-up log"
+  assert_contains "$e2e_script_text" "ensure_recipient_min_balance()" "min-balance funding helper"
+  assert_contains "$e2e_script_text" "\$label balance below target" "bridge deployer top-up log"
+  assert_contains "$e2e_script_text" "\"bridge deployer\"" "bridge deployer label passed to helper"
   assert_contains "$e2e_script_text" "failed to fund bridge deployer" "bridge deployer top-up hard failure"
 }
 
@@ -183,13 +184,13 @@ test_local_e2e_uses_managed_nonce_for_funding() {
   e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
 
   assert_contains "$e2e_script_text" "funding_sender_address=\"\$(cast wallet address --private-key \"\$base_key\")\"" "funding sender address derivation"
-  assert_contains "$e2e_script_text" "funding_nonce=\"\$(cast nonce --rpc-url \"\$base_rpc_url\" --block pending \"\$funding_sender_address\")\"" "funding starting nonce derivation"
   assert_contains "$e2e_script_text" "nonce_has_advanced()" "nonce advancement helper"
   assert_contains "$e2e_script_text" "cast_send_with_nonce_retry()" "nonce-aware cast send helper"
   assert_contains "$e2e_script_text" "cast send nonce race detected but sender nonce not advanced" "nonce race guarded by sender nonce advancement"
+  assert_contains "$e2e_script_text" "--gas-price \"\$gas_price_wei\" \\" "nonce retries bump gas price"
+  assert_contains "$e2e_script_text" "nonce=\"\$(cast nonce --rpc-url \"\$rpc_url\" --block pending \"\$sender\" 2>/dev/null || true)\"" "nonce resolved per-send from pending state"
   assert_contains "$e2e_script_text" "--async \\" "async cast send to avoid receipt wait stalls"
-  assert_contains "$e2e_script_text" "cast_send_with_nonce_retry 5 2 \"\$base_rpc_url\" \"\$base_key\" \"\$funding_sender_address\" \"\$funding_nonce\"" "explicit nonce-aware funding send usage"
-  assert_contains "$e2e_script_text" "funding_nonce=\$((funding_nonce + 1))" "funding nonce increment"
+  assert_contains "$e2e_script_text" "ensure_recipient_min_balance \"\$base_rpc_url\" \"\$base_key\" \"\$funding_sender_address\" \"\$operator\" \"\$base_operator_fund_wei\" \"operator pre-fund\"" "operator prefund uses min-balance helper"
 }
 
 test_aws_workflow_dispatch_input_count_within_limit() {

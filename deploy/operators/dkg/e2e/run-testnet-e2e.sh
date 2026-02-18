@@ -153,17 +153,22 @@ cast_send_with_nonce_retry() {
   local rpc_url="$3"
   local private_key="$4"
   local sender="$5"
-  local nonce="$6"
-  local value_wei="$7"
-  local recipient="$8"
+  local value_wei="$6"
+  local recipient="$7"
 
-  local attempt=1 output status
+  local attempt=1 output status nonce gas_price_wei
   while true; do
+    nonce="$(cast nonce --rpc-url "$rpc_url" --block pending "$sender" 2>/dev/null || true)"
+    [[ "$nonce" =~ ^[0-9]+$ ]] || nonce="$(cast nonce --rpc-url "$rpc_url" --block latest "$sender" 2>/dev/null || true)"
+    [[ "$nonce" =~ ^[0-9]+$ ]] || nonce="0"
+    gas_price_wei=$((1000000000 * attempt))
+
     set +e
     output="$(cast send \
       --rpc-url "$rpc_url" \
       --private-key "$private_key" \
       --async \
+      --gas-price "$gas_price_wei" \
       --nonce "$nonce" \
       --value "$value_wei" \
       "$recipient" 2>&1)"
@@ -182,7 +187,7 @@ cast_send_with_nonce_retry() {
         log "cast send nonce race detected and sender nonce advanced; assuming previous submission accepted"
         return 0
       fi
-      log "cast send nonce race detected but sender nonce not advanced; nonce=$nonce attempt=${attempt}/${attempts}"
+      log "cast send nonce race detected but sender nonce not advanced; nonce=$nonce gas_price_wei=$gas_price_wei attempt=${attempt}/${attempts}"
     elif (( attempt >= attempts )) || ! is_transient_rpc_error "$output"; then
       printf '%s\n' "$output" >&2
       return "$status"
@@ -198,6 +203,31 @@ cast_send_with_nonce_retry() {
     sleep "$delay_seconds"
     attempt=$((attempt + 1))
   done
+}
+
+ensure_recipient_min_balance() {
+  local rpc_url="$1"
+  local private_key="$2"
+  local sender="$3"
+  local recipient="$4"
+  local min_balance_wei="$5"
+  local label="$6"
+
+  local attempt balance topup_wei
+  for attempt in $(seq 1 12); do
+    balance="$(cast balance --rpc-url "$rpc_url" "$recipient")"
+    [[ "$balance" =~ ^[0-9]+$ ]] || die "unexpected $label balance from cast: $balance"
+    if (( balance >= min_balance_wei )); then
+      return 0
+    fi
+
+    topup_wei=$((min_balance_wei - balance))
+    log "$label balance below target; topping up address=$recipient balance=$balance required=$min_balance_wei topup=$topup_wei attempt=$attempt/12"
+    cast_send_with_nonce_retry 5 2 "$rpc_url" "$private_key" "$sender" "$topup_wei" "$recipient" >/dev/null
+    sleep 2
+  done
+
+  return 1
 }
 
 command_run() {
@@ -591,36 +621,17 @@ command_run() {
     funding_sender_address="$(cast wallet address --private-key "$base_key")"
     [[ -n "$funding_sender_address" ]] || die "failed to derive funding sender address"
 
-    local funding_nonce
-    funding_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$funding_sender_address")"
-    [[ "$funding_nonce" =~ ^[0-9]+$ ]] || die "unexpected funding nonce from cast: $funding_nonce"
-
     local operator
     while IFS= read -r operator; do
       [[ -n "$operator" ]] || continue
-      cast_send_with_nonce_retry 5 2 "$base_rpc_url" "$base_key" "$funding_sender_address" "$funding_nonce" "$base_operator_fund_wei" "$operator" >/dev/null
-      funding_nonce=$((funding_nonce + 1))
+      ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$operator" "$base_operator_fund_wei" "operator pre-fund" || \
+        die "failed to pre-fund operator: address=$operator required_wei=$base_operator_fund_wei"
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
 
     local bridge_deployer_required_wei
     bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
-    local funded_bridge_deployer="false"
-    local attempt bridge_deployer_balance bridge_deployer_topup_wei
-    for attempt in $(seq 1 12); do
-      bridge_deployer_balance="$(cast balance --rpc-url "$base_rpc_url" "$bridge_deployer_address")"
-      [[ "$bridge_deployer_balance" =~ ^[0-9]+$ ]] || die "unexpected bridge deployer balance from cast: $bridge_deployer_balance"
-      if (( bridge_deployer_balance >= bridge_deployer_required_wei )); then
-        funded_bridge_deployer="true"
-        break
-      fi
-
-      bridge_deployer_topup_wei=$((bridge_deployer_required_wei - bridge_deployer_balance))
-      log "bridge deployer balance below required target; topping up address=$bridge_deployer_address balance=$bridge_deployer_balance required=$bridge_deployer_required_wei topup=$bridge_deployer_topup_wei attempt=$attempt/12"
-      cast_send_with_nonce_retry 5 2 "$base_rpc_url" "$base_key" "$funding_sender_address" "$funding_nonce" "$bridge_deployer_topup_wei" "$bridge_deployer_address" >/dev/null
-      funding_nonce=$((funding_nonce + 1))
-      sleep 2
-    done
-    [[ "$funded_bridge_deployer" == "true" ]] || die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
+    ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$bridge_deployer_address" "$bridge_deployer_required_wei" "bridge deployer" || \
+      die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
   fi
 
   local bridge_deployer_key_file
