@@ -1637,29 +1637,34 @@ type gasTipCapSuggester interface {
 }
 
 func applyRetryGasBump(ctx context.Context, backend any, txAuth *bind.TransactOpts, attempt int) {
-	if txAuth == nil || attempt <= 1 {
+	if txAuth == nil {
 		return
+	}
+	if attempt < 1 {
+		attempt = 1
 	}
 
 	multiplier := retryGasMultiplier(attempt)
 
 	gasPriceBase := big.NewInt(defaultRetryGasPriceWei)
+	if txAuth.GasPrice != nil && txAuth.GasPrice.Sign() > 0 {
+		gasPriceBase = new(big.Int).Set(txAuth.GasPrice)
+	}
 	if suggester, ok := backend.(gasPriceSuggester); ok {
-		if suggested, err := suggester.SuggestGasPrice(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+		if suggested, err := suggester.SuggestGasPrice(ctx); err == nil && suggested != nil && suggested.Cmp(gasPriceBase) > 0 {
 			gasPriceBase = new(big.Int).Set(suggested)
 		}
-	}
-	if txAuth.GasPrice != nil && txAuth.GasPrice.Sign() > 0 && txAuth.GasPrice.Cmp(gasPriceBase) > 0 {
-		gasPriceBase = new(big.Int).Set(txAuth.GasPrice)
 	}
 
 	if suggester, ok := backend.(gasTipCapSuggester); ok {
 		tipBase := big.NewInt(defaultRetryGasTipCapWei)
-		if suggested, err := suggester.SuggestGasTipCap(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
-			tipBase = new(big.Int).Set(suggested)
-		}
-		if txAuth.GasTipCap != nil && txAuth.GasTipCap.Sign() > 0 && txAuth.GasTipCap.Cmp(tipBase) > 0 {
+		if txAuth.GasTipCap != nil && txAuth.GasTipCap.Sign() > 0 {
 			tipBase = new(big.Int).Set(txAuth.GasTipCap)
+		}
+		if suggested, err := suggester.SuggestGasTipCap(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+			if suggested.Cmp(tipBase) > 0 {
+				tipBase = new(big.Int).Set(suggested)
+			}
 		}
 
 		feeCapBase := new(big.Int).Set(gasPriceBase)

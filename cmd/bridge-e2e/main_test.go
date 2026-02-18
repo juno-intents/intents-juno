@@ -815,24 +815,22 @@ func TestTransactAuthWithDefaults_RespectsExistingGasLimit(t *testing.T) {
 	}
 }
 
-func TestApplyRetryGasBump_NoopForFirstAttempt(t *testing.T) {
+func TestApplyRetryGasBump_AttemptOneUsesLegacyFloor(t *testing.T) {
 	t.Parallel()
 
-	auth := &bind.TransactOpts{
-		GasPrice:  big.NewInt(7),
-		GasTipCap: big.NewInt(3),
-		GasFeeCap: big.NewInt(9),
-	}
+	auth := &bind.TransactOpts{}
+	applyRetryGasBump(context.Background(), struct{}{}, auth, 1)
 
-	applyRetryGasBump(context.Background(), mockGasEstimator{price: big.NewInt(100), tip: big.NewInt(10)}, auth, 1)
-	if auth.GasPrice.Cmp(big.NewInt(7)) != 0 {
-		t.Fatalf("gas price changed unexpectedly: got=%s want=7", auth.GasPrice.String())
+	want := big.NewInt(defaultRetryGasPriceWei)
+	if auth.GasPrice == nil || auth.GasPrice.Cmp(want) != 0 {
+		got := "<nil>"
+		if auth.GasPrice != nil {
+			got = auth.GasPrice.String()
+		}
+		t.Fatalf("unexpected gas price: got=%s want=%s", got, want.String())
 	}
-	if auth.GasTipCap.Cmp(big.NewInt(3)) != 0 {
-		t.Fatalf("gas tip cap changed unexpectedly: got=%s want=3", auth.GasTipCap.String())
-	}
-	if auth.GasFeeCap.Cmp(big.NewInt(9)) != 0 {
-		t.Fatalf("gas fee cap changed unexpectedly: got=%s want=9", auth.GasFeeCap.String())
+	if auth.GasTipCap != nil || auth.GasFeeCap != nil {
+		t.Fatalf("unexpected EIP-1559 fields in legacy attempt one: tip=%v fee=%v", auth.GasTipCap, auth.GasFeeCap)
 	}
 }
 
@@ -848,19 +846,21 @@ func TestApplyRetryGasBump_BumpsEIP1559Fields(t *testing.T) {
 	if auth.GasPrice != nil {
 		t.Fatalf("expected legacy gas price to be cleared for EIP-1559")
 	}
-	if auth.GasTipCap == nil || auth.GasTipCap.Cmp(big.NewInt(8)) != 0 {
+	wantTip := big.NewInt(defaultRetryGasTipCapWei * 4)
+	if auth.GasTipCap == nil || auth.GasTipCap.Cmp(wantTip) != 0 {
 		got := "<nil>"
 		if auth.GasTipCap != nil {
 			got = auth.GasTipCap.String()
 		}
-		t.Fatalf("unexpected gas tip cap: got=%s want=8", got)
+		t.Fatalf("unexpected gas tip cap: got=%s want=%s", got, wantTip.String())
 	}
-	if auth.GasFeeCap == nil || auth.GasFeeCap.Cmp(big.NewInt(40)) != 0 {
+	wantFee := big.NewInt(defaultRetryGasPriceWei * 4)
+	if auth.GasFeeCap == nil || auth.GasFeeCap.Cmp(wantFee) != 0 {
 		got := "<nil>"
 		if auth.GasFeeCap != nil {
 			got = auth.GasFeeCap.String()
 		}
-		t.Fatalf("unexpected gas fee cap: got=%s want=40", got)
+		t.Fatalf("unexpected gas fee cap: got=%s want=%s", got, wantFee.String())
 	}
 }
 
