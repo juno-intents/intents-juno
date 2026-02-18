@@ -148,6 +148,15 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
 }
 
+test_local_e2e_uses_operator_deployer_key() {
+  local e2e_script_text
+  e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
+
+  assert_contains "$e2e_script_text" "bridge_deployer_key_file=\"\$(jq -r '.operators[0].operator_key_file // empty' \"\$dkg_summary\")\"" "bridge deployer key derived from first operator"
+  assert_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$bridge_deployer_key_file\"" "bridge deployer key forwarded"
+  assert_not_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$base_funder_key_file\"" "bridge deployer no longer reuses funder key"
+}
+
 test_aws_workflow_dispatch_input_count_within_limit() {
   local workflow
   workflow="$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml"
@@ -174,6 +183,7 @@ main() {
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e
   test_local_e2e_supports_shared_infra_validation
+  test_local_e2e_uses_operator_deployer_key
   test_aws_workflow_dispatch_input_count_within_limit
 }
 

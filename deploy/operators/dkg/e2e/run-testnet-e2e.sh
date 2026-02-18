@@ -525,11 +525,16 @@ command_run() {
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
   fi
 
+  local bridge_deployer_key_file
+  bridge_deployer_key_file="$(jq -r '.operators[0].operator_key_file // empty' "$dkg_summary")"
+  [[ -n "$bridge_deployer_key_file" ]] || die "dkg summary missing operators[0].operator_key_file"
+  ensure_file "$bridge_deployer_key_file"
+
   local -a bridge_args=()
   bridge_args+=(
     "--rpc-url" "$base_rpc_url"
     "--chain-id" "$base_chain_id"
-    "--deployer-key-file" "$base_funder_key_file"
+    "--deployer-key-file" "$bridge_deployer_key_file"
     "--threshold" "$threshold"
     "--contracts-out" "$contracts_out"
     "--run-timeout" "$bridge_run_timeout"
