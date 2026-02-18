@@ -150,6 +150,8 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" "set +e" "remote run temporary errexit disable"
   assert_contains "$wrapper_script_text" "remote_run_status=$?" "remote run exit capture"
   assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
+  assert_contains "$wrapper_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when available"
+  assert_contains "$wrapper_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
   assert_contains "$wrapper_script_text" "keep-infra enabled after failure; leaving resources up" "keep-infra failure retention log"
   assert_contains "$wrapper_script_text" "cleanup_enabled=\"false\"" "keep-infra disables cleanup on failure"
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
@@ -194,6 +196,10 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "\"--boundless-market-address\" \"\$boundless_market_address\"" "boundless market bridge forwarding"
   assert_contains "$e2e_script_text" "\"--boundless-verifier-router-address\" \"\$boundless_verifier_router_address\"" "boundless verifier router bridge forwarding"
   assert_contains "$e2e_script_text" "\"--boundless-set-verifier-address\" \"\$boundless_set_verifier_address\"" "boundless set verifier bridge forwarding"
+  assert_contains "$e2e_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when present"
+  assert_contains "$e2e_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
+  assert_contains "$e2e_script_text" "--arg juno_tx_hash \"\$juno_tx_hash\"" "summary receives juno tx hash"
+  assert_contains "$e2e_script_text" "tx_hash: (if \$juno_tx_hash == \"\" then null else \$juno_tx_hash end)" "summary stores juno tx hash"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
 }
 

@@ -1589,6 +1589,23 @@ EOF
   local summary_path
   summary_path="$artifacts_dir/reports/testnet-e2e-summary.json"
   if [[ -f "$summary_path" ]]; then
+    local juno_tx_hash
+    juno_tx_hash="$(
+      jq -r '[
+        .juno.tx_hash?,
+        .bridge.report.juno.tx_hash?,
+        .bridge.report.juno.txid?,
+        .bridge.report.withdraw.juno_tx_hash?,
+        .bridge.report.withdraw.juno_txid?,
+        .bridge.report.transactions.juno_withdraw?,
+        .bridge.report.transactions.juno_broadcast?
+      ] | map(select(type == "string" and length > 0)) | .[0] // ""' "$summary_path" 2>/dev/null || true
+    )"
+    if [[ -n "$juno_tx_hash" ]]; then
+      log "juno_tx_hash=$juno_tx_hash"
+    else
+      log "juno_tx_hash=unavailable"
+    fi
     log "summary=$summary_path"
     printf '%s\n' "$summary_path"
   else

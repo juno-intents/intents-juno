@@ -754,6 +754,23 @@ command_run() {
     go run ./cmd/bridge-e2e "${bridge_args[@]}"
   )
 
+  local juno_tx_hash=""
+  juno_tx_hash="$(
+    jq -r '[
+      .juno.tx_hash?,
+      .juno.txid?,
+      .withdraw.juno_tx_hash?,
+      .withdraw.juno_txid?,
+      .transactions.juno_withdraw?,
+      .transactions.juno_broadcast?
+    ] | map(select(type == "string" and length > 0)) | .[0] // ""' "$bridge_summary" 2>/dev/null || true
+  )"
+  if [[ -n "$juno_tx_hash" ]]; then
+    log "juno_tx_hash=$juno_tx_hash"
+  else
+    log "juno_tx_hash=unavailable"
+  fi
+
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
     --arg workdir "$workdir" \
@@ -791,6 +808,7 @@ command_run() {
     --arg shared_topic_prefix "$shared_topic_prefix" \
     --arg shared_timeout "$shared_timeout" \
     --arg shared_summary "$shared_summary" \
+    --arg juno_tx_hash "$juno_tx_hash" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
     --argjson dkg "$(cat "$dkg_summary")" \
@@ -848,7 +866,8 @@ command_run() {
         report: $shared
       },
       juno: {
-        funder_env_present: ($juno_funder_present == "true")
+        funder_env_present: ($juno_funder_present == "true"),
+        tx_hash: (if $juno_tx_hash == "" then null else $juno_tx_hash end)
       }
     }' >"$output_path"
 
