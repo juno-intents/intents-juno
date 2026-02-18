@@ -127,6 +127,8 @@ const (
 	boundlessInputModeJournalBytesV1 = "journal-bytes-v1"
 	txMinedWaitTimeout               = 180 * time.Second
 	txMinedGraceTimeout              = 240 * time.Second
+	withdrawalFinalizedWaitTimeout   = 60 * time.Second
+	withdrawalFinalizedPollInterval  = 2 * time.Second
 	boundlessMarketBalanceOfABIJSON  = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 )
 
@@ -1178,7 +1180,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			return nil, errors.New("depositUsed invariant failed: expected true after mintBatch")
 		}
 
-		withdrawInvariant, err = callWithdrawal(ctx, bridge, withdrawalID)
+		withdrawInvariant, err = waitForWithdrawalFinalized(
+			ctx,
+			withdrawalFinalizedPollInterval,
+			func() (withdrawalView, error) {
+				return callWithdrawal(ctx, bridge, withdrawalID)
+			},
+		)
 		if err != nil {
 			return nil, fmt.Errorf("getWithdrawal invariant call: %w", err)
 		}
@@ -2276,6 +2284,54 @@ func callWithdrawal(ctx context.Context, bridge *bind.BoundContract, withdrawalI
 		Refunded:  refunded,
 		Recipient: append([]byte(nil), recipient...),
 	}, nil
+}
+
+func waitForWithdrawalFinalized(ctx context.Context, pollInterval time.Duration, fetch func() (withdrawalView, error)) (withdrawalView, error) {
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, withdrawalFinalizedWaitTimeout)
+	defer cancel()
+
+	timer := time.NewTimer(0)
+	defer timer.Stop()
+
+	var last withdrawalView
+	var haveLast bool
+	var lastErr error
+
+	for {
+		select {
+		case <-waitCtx.Done():
+			const timeoutMsg = "timed out waiting for finalized withdrawal"
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				if lastErr != nil {
+					return withdrawalView{}, fmt.Errorf("%s: %w", timeoutMsg, lastErr)
+				}
+				if haveLast {
+					return last, fmt.Errorf("%s: finalized=%t refunded=%t", timeoutMsg, last.Finalized, last.Refunded)
+				}
+				return withdrawalView{}, errors.New(timeoutMsg)
+			}
+			return withdrawalView{}, waitCtx.Err()
+		case <-timer.C:
+		}
+
+		view, err := fetch()
+		if err != nil {
+			lastErr = err
+		} else {
+			last = view
+			haveLast = true
+			lastErr = nil
+			if view.Finalized {
+				return view, nil
+			}
+		}
+
+		timer.Reset(pollInterval)
+	}
 }
 
 func anyToUint64(v any) (uint64, error) {

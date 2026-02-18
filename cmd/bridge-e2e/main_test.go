@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -1384,5 +1385,72 @@ func TestNormalizeRecipientDeltaActual_RecipientDiffersFromOwner(t *testing.T) {
 	got.Add(got, big.NewInt(1))
 	if raw.Cmp(big.NewInt(99_500)) != 0 {
 		t.Fatalf("normalized recipient delta aliases input: got raw %s want 99500", raw.String())
+	}
+}
+
+func TestWaitForWithdrawalFinalized_Immediate(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	got, err := waitForWithdrawalFinalized(
+		context.Background(),
+		time.Millisecond,
+		func() (withdrawalView, error) {
+			calls++
+			return withdrawalView{Finalized: true}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForWithdrawalFinalized: %v", err)
+	}
+	if !got.Finalized {
+		t.Fatalf("expected finalized withdrawal")
+	}
+	if calls != 1 {
+		t.Fatalf("expected one call, got %d", calls)
+	}
+}
+
+func TestWaitForWithdrawalFinalized_RetryThenSuccess(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	got, err := waitForWithdrawalFinalized(
+		context.Background(),
+		time.Millisecond,
+		func() (withdrawalView, error) {
+			calls++
+			return withdrawalView{Finalized: calls >= 3}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitForWithdrawalFinalized: %v", err)
+	}
+	if !got.Finalized {
+		t.Fatalf("expected finalized withdrawal")
+	}
+	if calls != 3 {
+		t.Fatalf("expected three calls, got %d", calls)
+	}
+}
+
+func TestWaitForWithdrawalFinalized_TimesOut(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Millisecond)
+	defer cancel()
+
+	_, err := waitForWithdrawalFinalized(
+		ctx,
+		5*time.Millisecond,
+		func() (withdrawalView, error) {
+			return withdrawalView{Finalized: false}, nil
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected timeout error")
+	}
+	if !strings.Contains(err.Error(), "timed out waiting for finalized withdrawal") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
