@@ -683,6 +683,8 @@ func TestIsRetriableBoundlessGetProofError(t *testing.T) {
 		{name: "decoding", msg: "decoding err: missing field", want: true},
 		{name: "not found", msg: "proof not found yet", want: true},
 		{name: "missing data", msg: "missing data", want: true},
+		{name: "http 429", msg: "HTTP 429 Too Many Requests", want: true},
+		{name: "over rate limit", msg: "over rate limit", want: true},
 		{name: "non retriable", msg: "unauthorized", want: false},
 	}
 

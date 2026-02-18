@@ -1683,7 +1683,9 @@ func isRetriableBoundlessGetProofError(msg string) bool {
 		strings.Contains(lowered, "decoding err") ||
 		strings.Contains(lowered, "not fulfilled") ||
 		strings.Contains(lowered, "not found") ||
-		strings.Contains(lowered, "missing data")
+		strings.Contains(lowered, "missing data") ||
+		strings.Contains(lowered, "429") ||
+		strings.Contains(lowered, "rate limit")
 }
 
 func isRetriableBoundlessLockFailure(msg string) bool {
