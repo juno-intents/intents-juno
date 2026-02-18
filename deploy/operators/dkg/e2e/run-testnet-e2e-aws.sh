@@ -468,7 +468,7 @@ prepare_boundless_release_source() {
   fi
 
   if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
-    perl -0pi -e 's/\{combined_sol_contents\}/\{combined_sol_contents\}\n            enum __BOUNDLESS_DUMMY__ { __BOUNDLESS_DUMMY_VALUE__ }/s' "\$boundless_market_build_rs"
+    perl -0pi -e 's/\{combined_sol_contents\}/\{combined_sol_contents\}\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$boundless_market_build_rs"
   fi
   if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
     echo "failed to patch boundless market build script: \$boundless_market_build_rs" >&2

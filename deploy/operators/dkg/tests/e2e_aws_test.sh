@@ -50,6 +50,7 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "boundless-cli \$boundless_cli_target_version install from git tag failed; falling back to branch \$boundless_release_branch with parser workaround" "boundless release branch fallback log"
   assert_contains "$script_text" "git clone --depth 1 --branch \"\$boundless_release_branch\" https://github.com/boundless-xyz/boundless \"\$boundless_source_dir\"" "boundless release branch clone"
   assert_contains "$script_text" "perl -0pi -e" "boundless parser workaround patch command"
+  assert_contains "$script_text" "__BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}" "boundless parser workaround uses escaped format braces"
   assert_contains "$script_text" "run_with_retry cargo +1.91.1 install --path \"\$boundless_source_dir/crates/boundless-cli\" --locked --force" "boundless branch path install command"
   assert_contains "$script_text" "installing rzup for risc0 toolchain" "rzup install log"
   assert_contains "$script_text" "run_with_retry rzup install" "rzup install command"
