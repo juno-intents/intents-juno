@@ -420,9 +420,29 @@ if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
   exit 1
 fi
 
-run_with_retry cargo +1.91.1 install --path "\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli" --locked --force
+boundless_cli_target_version="1.2.0"
+boundless_cli_target_branch="release-1.2"
+boundless_version_output=""
+if command -v boundless >/dev/null 2>&1; then
+  boundless_version_output="\$(boundless --version 2>/dev/null || true)"
+fi
+if [[ "\$boundless_version_output" == *"boundless-cli \$boundless_cli_target_version"* && "\$boundless_version_output" == *"branch:\$boundless_cli_target_branch"* ]]; then
+  echo "boundless-cli already installed at target version; skipping reinstall"
+else
+  run_with_retry cargo +1.91.1 install --path "\$BOUNDLESS_CLI_SOURCE_DIR/crates/boundless-cli" --locked --force
+fi
 boundless --version
-run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
+
+cargo_risczero_target_version="3.0.5"
+cargo_risczero_version_output=""
+if command -v cargo-risczero >/dev/null 2>&1; then
+  cargo_risczero_version_output="\$(cargo-risczero --version 2>/dev/null || true)"
+fi
+if [[ "\$cargo_risczero_version_output" == *"\$cargo_risczero_target_version"* ]]; then
+  echo "cargo-risczero already installed at target version; skipping reinstall"
+else
+  run_with_retry cargo +1.91.1 install --locked cargo-risczero --version 3.0.5
+fi
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
