@@ -1358,16 +1358,7 @@ func requestBoundlessProof(
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	env := os.Environ()
-	pathValue := os.Getenv("PATH")
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
-		pathValue = prependPathEntries(pathValue,
-			filepath.Join(home, ".cargo", "bin"),
-			filepath.Join(home, ".risc0", "bin"),
-		)
-	}
-	env = upsertEnvVar(env, "PATH", pathValue)
-	cmd.Env = env
+	cmd.Env = buildBoundlessCommandEnv()
 	logProgress("boundless %s cmd=%s", pipeline, cfg.Bin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1375,13 +1366,83 @@ func requestBoundlessProof(
 		if msg == "" {
 			msg = err.Error()
 		}
+		requestID := extractBoundlessRequestID(out)
+		if requestID != "" {
+			logProgress("boundless %s submit returned error after request_id=%s; attempting get-proof fallback", pipeline, requestID)
+			seal, fallbackErr := waitForBoundlessProof(ctx, cfg, privateKey, pipeline, requestID, expectedJournal)
+			if fallbackErr == nil {
+				return seal, requestID, nil
+			}
+			msg += " (fallback get-proof failed: " + fallbackErr.Error() + ")"
+		}
 		if version := boundlessPrivateInputVersion(privateInput); version != "" {
 			msg += " (input_version=" + version + ")"
 		}
 		return nil, "", fmt.Errorf("boundless submit-offer failed for %s: %s", pipeline, msg)
 	}
 
-	parsed, err := parseBoundlessWaitOutput(out)
+	seal, requestID, err := parseBoundlessProofOutput(out, pipeline, expectedJournal)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return seal, requestID, nil
+}
+
+func waitForBoundlessProof(
+	ctx context.Context,
+	cfg boundlessConfig,
+	privateKey string,
+	pipeline string,
+	requestID string,
+	expectedJournal []byte,
+) ([]byte, error) {
+	args := []string{
+		"requestor", "get-proof",
+		"--requestor-rpc-url", cfg.RPCURL,
+		"--requestor-private-key", privateKey,
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
+		requestID,
+	}
+
+	for attempt := 1; ; attempt++ {
+		cmd := exec.CommandContext(ctx, cfg.Bin, args...)
+		cmd.Env = buildBoundlessCommandEnv()
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			seal, _, parseErr := parseBoundlessProofOutput(out, pipeline, expectedJournal)
+			if parseErr != nil {
+				return nil, fmt.Errorf("parse boundless get-proof output for %s: %w", pipeline, parseErr)
+			}
+			return seal, nil
+		}
+
+		msg := strings.TrimSpace(string(out))
+		if msg == "" {
+			msg = err.Error()
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("boundless get-proof timeout for %s request_id=%s: %s", pipeline, requestID, msg)
+		}
+		if !isRetriableBoundlessGetProofError(msg) {
+			return nil, fmt.Errorf("boundless get-proof failed for %s request_id=%s: %s", pipeline, requestID, msg)
+		}
+
+		logProgress("boundless get-proof retry pipeline=%s request_id=%s attempt=%d", pipeline, requestID, attempt)
+		timer := time.NewTimer(10 * time.Second)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("boundless get-proof timeout for %s request_id=%s: %w", pipeline, requestID, ctx.Err())
+		case <-timer.C:
+		}
+	}
+}
+
+func parseBoundlessProofOutput(output []byte, pipeline string, expectedJournal []byte) ([]byte, string, error) {
+	parsed, err := parseBoundlessWaitOutput(output)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse boundless output for %s: %w", pipeline, err)
 	}
@@ -1403,6 +1464,18 @@ func requestBoundlessProof(
 	}
 
 	return seal, parsed.RequestIDHex, nil
+}
+
+func buildBoundlessCommandEnv() []string {
+	env := os.Environ()
+	pathValue := os.Getenv("PATH")
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		pathValue = prependPathEntries(pathValue,
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, ".risc0", "bin"),
+		)
+	}
+	return upsertEnvVar(env, "PATH", pathValue)
 }
 
 func prependPathEntries(pathValue string, entries ...string) string {
@@ -1439,6 +1512,16 @@ func upsertEnvVar(env []string, key, value string) []string {
 	return append(env, prefix+value)
 }
 
+func isRetriableBoundlessGetProofError(msg string) bool {
+	lowered := strings.ToLower(msg)
+	return strings.Contains(lowered, "request timed out") ||
+		strings.Contains(lowered, "query_fulfilled_event") ||
+		strings.Contains(lowered, "decoding err") ||
+		strings.Contains(lowered, "not fulfilled") ||
+		strings.Contains(lowered, "not found") ||
+		strings.Contains(lowered, "missing data")
+}
+
 func boundlessPrivateInputVersion(privateInput []byte) string {
 	trimmed := bytes.TrimSpace(privateInput)
 	if len(trimmed) == 0 || trimmed[0] != '{' {
@@ -1460,6 +1543,18 @@ var (
 	boundlessFulfillmentRegex = regexp.MustCompile(`(?s)Fulfillment Data:\s*(\{.*?\})\s*Seal:`)
 	boundlessSealOnlyRegex    = regexp.MustCompile(`Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
 )
+
+func extractBoundlessRequestID(output []byte) string {
+	matches := boundlessRequestIDRegex.FindAllStringSubmatch(string(output), -1)
+	if len(matches) == 0 {
+		return ""
+	}
+	last := matches[len(matches)-1]
+	if len(last) < 2 {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(last[1]))
+}
 
 func parseBoundlessWaitOutput(output []byte) (boundlessWaitResult, error) {
 	raw := string(output)

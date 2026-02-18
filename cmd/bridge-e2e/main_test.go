@@ -537,6 +537,99 @@ func TestParseBoundlessWaitOutput_MissingSeal(t *testing.T) {
 	}
 }
 
+func TestParseBoundlessProofOutput(t *testing.T) {
+	t.Parallel()
+
+	out := strings.Join([]string{
+		"Submitting Proof Request from YAML [Unknown Network]",
+		"  Assigned Request ID: 0x28ae6a6bc48ac3e425df6e5cbce845eb0001ceae5952e986",
+		"✓ Request fulfilled!",
+		"Fulfillment Data:",
+		"{",
+		`  "ImageIdAndJournal": [`,
+		"    [1,2,3,4,5,6,7,8],",
+		`    "0x01020304"`,
+		"  ]",
+		"}",
+		"Seal:",
+		`"0x99aa55"`,
+	}, "\n")
+
+	seal, requestID, err := parseBoundlessProofOutput([]byte(out), "withdraw", []byte{0x01, 0x02, 0x03, 0x04})
+	if err != nil {
+		t.Fatalf("parseBoundlessProofOutput: %v", err)
+	}
+	if requestID != "0x28ae6a6bc48ac3e425df6e5cbce845eb0001ceae5952e986" {
+		t.Fatalf("request id: got %q", requestID)
+	}
+	if len(seal) == 0 || seal[0] != 0x99 {
+		t.Fatalf("unexpected seal bytes: %x", seal)
+	}
+}
+
+func TestParseBoundlessProofOutput_JournalMismatch(t *testing.T) {
+	t.Parallel()
+
+	out := strings.Join([]string{
+		"2026-02-16T00:00:00Z  INFO Submitted request 0x8fd, bidding starts at 2026-02-16 00:01:25 UTC",
+		"2026-02-16T00:10:00Z  INFO Request fulfilled!",
+		"2026-02-16T00:10:00Z  INFO Journal: \"0x010203\" - Seal: \"0x99aa\"",
+	}, "\n")
+
+	_, _, err := parseBoundlessProofOutput([]byte(out), "deposit", []byte{0x09, 0x09, 0x09})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "journal mismatch") {
+		t.Fatalf("expected journal mismatch error, got: %v", err)
+	}
+}
+
+func TestExtractBoundlessRequestID(t *testing.T) {
+	t.Parallel()
+
+	out := strings.Join([]string{
+		"Submitted request 0xabc",
+		"Assigned Request ID: 0xDEF123",
+	}, "\n")
+	got := extractBoundlessRequestID([]byte(out))
+	if got != "0xdef123" {
+		t.Fatalf("extractBoundlessRequestID() = %q, want %q", got, "0xdef123")
+	}
+
+	if empty := extractBoundlessRequestID([]byte("no request id here")); empty != "" {
+		t.Fatalf("expected empty request id, got %q", empty)
+	}
+}
+
+func TestIsRetriableBoundlessGetProofError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		msg  string
+		want bool
+	}{
+		{name: "timeout", msg: "request timed out", want: true},
+		{name: "query event", msg: "query_fulfilled_event failed", want: true},
+		{name: "decoding", msg: "decoding err: missing field", want: true},
+		{name: "not found", msg: "proof not found yet", want: true},
+		{name: "missing data", msg: "missing data", want: true},
+		{name: "non retriable", msg: "unauthorized", want: false},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := isRetriableBoundlessGetProofError(tc.msg)
+			if got != tc.want {
+				t.Fatalf("isRetriableBoundlessGetProofError(%q) = %v, want %v", tc.msg, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestBoundlessPrivateInputVersion_DetectsKnownJSONEnvelope(t *testing.T) {
 	t.Parallel()
 
