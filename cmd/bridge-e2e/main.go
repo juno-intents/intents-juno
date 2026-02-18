@@ -1358,7 +1358,17 @@ func requestBoundlessProof(
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	cmd.Env = os.Environ()
+	env := os.Environ()
+	pathValue := os.Getenv("PATH")
+	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
+		pathValue = prependPathEntries(pathValue,
+			filepath.Join(home, ".cargo", "bin"),
+			filepath.Join(home, ".risc0", "bin"),
+		)
+	}
+	env = upsertEnvVar(env, "PATH", pathValue)
+	cmd.Env = env
+	logProgress("boundless %s cmd=%s", pipeline, cfg.Bin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -1393,6 +1403,40 @@ func requestBoundlessProof(
 	}
 
 	return seal, parsed.RequestIDHex, nil
+}
+
+func prependPathEntries(pathValue string, entries ...string) string {
+	parts := strings.Split(pathValue, ":")
+	existing := make(map[string]struct{}, len(parts))
+	for _, part := range parts {
+		if part == "" {
+			continue
+		}
+		existing[part] = struct{}{}
+	}
+	for i := len(entries) - 1; i >= 0; i-- {
+		entry := strings.TrimSpace(entries[i])
+		if entry == "" {
+			continue
+		}
+		if _, ok := existing[entry]; ok {
+			continue
+		}
+		parts = append([]string{entry}, parts...)
+		existing[entry] = struct{}{}
+	}
+	return strings.Join(parts, ":")
+}
+
+func upsertEnvVar(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, item := range env {
+		if strings.HasPrefix(item, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 func boundlessPrivateInputVersion(privateInput []byte) string {

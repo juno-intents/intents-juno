@@ -972,6 +972,34 @@ func TestIsRetriableWaitMinedError(t *testing.T) {
 	}
 }
 
+func TestPrependPathEntries(t *testing.T) {
+	t.Parallel()
+
+	got := prependPathEntries("/usr/bin:/bin", "/home/ubuntu/.cargo/bin", "/usr/bin")
+	want := "/home/ubuntu/.cargo/bin:/usr/bin:/bin"
+	if got != want {
+		t.Fatalf("prependPathEntries() = %q, want %q", got, want)
+	}
+}
+
+func TestUpsertEnvVar(t *testing.T) {
+	t.Parallel()
+
+	env := []string{"PATH=/usr/bin", "HOME=/tmp/home"}
+	got := upsertEnvVar(env, "PATH", "/custom/bin")
+	if got[0] != "PATH=/custom/bin" {
+		t.Fatalf("expected PATH to be replaced, got %q", got[0])
+	}
+
+	got2 := upsertEnvVar([]string{"HOME=/tmp/home"}, "PATH", "/custom/bin")
+	if len(got2) != 2 {
+		t.Fatalf("expected appended env var, got len=%d", len(got2))
+	}
+	if got2[1] != "PATH=/custom/bin" {
+		t.Fatalf("expected PATH append at end, got %q", got2[1])
+	}
+}
+
 func TestComputeFeeBreakdown(t *testing.T) {
 	t.Parallel()
 
