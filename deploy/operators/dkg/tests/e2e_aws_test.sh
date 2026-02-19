@@ -26,6 +26,29 @@ assert_not_contains() {
   fi
 }
 
+assert_order() {
+  local haystack="$1"
+  local first="$2"
+  local second="$3"
+  local msg="$4"
+
+  if [[ "$haystack" != *"$first"* ]]; then
+    printf 'assert_order failed: %s: first missing=%q\n' "$msg" "$first" >&2
+    exit 1
+  fi
+  if [[ "$haystack" != *"$second"* ]]; then
+    printf 'assert_order failed: %s: second missing=%q\n' "$msg" "$second" >&2
+    exit 1
+  fi
+
+  local after_first
+  after_first="${haystack#*"$first"}"
+  if [[ "$after_first" != *"$second"* ]]; then
+    printf 'assert_order failed: %s: expected %q before %q\n' "$msg" "$first" "$second" >&2
+    exit 1
+  fi
+}
+
 test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   # shellcheck source=../e2e/run-testnet-e2e-aws.sh
   source "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
@@ -256,6 +279,8 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
 
   assert_contains "$wrapper_script_text" "--without-shared-services" "shared services toggle option"
+  assert_contains "$wrapper_script_text" "requires forwarded shared args after '--':" "without-shared-services usage documents required forwarded shared args"
+  assert_contains "$wrapper_script_text" "--without-shared-services requires forwarded --shared-postgres-dsn, --shared-kafka-brokers, and --shared-ipfs-api-url after '--'" "without-shared-services mode validates required forwarded shared args up front"
   assert_contains "$wrapper_script_text" "shared_postgres_password=\"\$(openssl rand -hex 16)\"" "shared postgres password generation"
   assert_contains "$wrapper_script_text" "provision_shared_services" "terraform shared services flag"
   assert_contains "$wrapper_script_text" "shared_postgres_dsn=\"postgres://" "shared postgres dsn assembly"
@@ -276,13 +301,23 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_not_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "no shared host bootstrap fallback"
   assert_not_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "no ssh fallback for managed shared stack"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
-  assert_contains "$wrapper_script_text" "configuring checkpoint services on operator host op" "aws wrapper configures checkpoint services per operator for shared infra"
-  assert_contains "$wrapper_script_text" "set_env CHECKPOINT_POSTGRES_DSN" "aws wrapper writes shared postgres dsn into operator stack env"
-  assert_contains "$wrapper_script_text" "set_env CHECKPOINT_KAFKA_BROKERS" "aws wrapper writes shared kafka brokers into operator stack env"
-  assert_contains "$wrapper_script_text" "set_env CHECKPOINT_BLOB_BUCKET" "aws wrapper writes checkpoint blob bucket into operator stack env"
-  assert_contains "$wrapper_script_text" "set_env CHECKPOINT_OPERATORS" "aws wrapper writes checkpoint operator set into operator stack env"
-  assert_contains "$wrapper_script_text" "set_env CHECKPOINT_THRESHOLD" "aws wrapper writes checkpoint threshold into operator stack env"
+  assert_contains "$wrapper_script_text" "tss-host restart deferred until hydrator config has been staged" "aws wrapper defers tss-host restart until hydrator input staging"
+  assert_contains "$wrapper_script_text" "staging hydrator config and restarting operator stack services on op" "aws wrapper stages hydrator config per operator"
+  assert_contains "$wrapper_script_text" "default_config_json_path=\"/etc/intents-juno/operator-stack-config.json\"" "aws wrapper stages hydrator json to operator stack config path"
+  assert_contains "$wrapper_script_text" 'staged hydrator config at \$config_json_path with TSS_SIGNER_RUNTIME_MODE=\$tss_signer_runtime_mode' "aws wrapper logs staged hydrator config and runtime mode"
+  assert_contains "$wrapper_script_text" 'set_env "\$tmp_env" TSS_SIGNER_RUNTIME_MODE "\$tss_signer_runtime_mode"' "aws wrapper sets explicit tss signer runtime mode in operator stack env"
+  assert_contains "$wrapper_script_text" "nitro signer artifacts or PCR expectations unavailable; forcing TSS_SIGNER_RUNTIME_MODE=host-process for e2e orchestration" "aws wrapper explicitly selects host-process mode when nitro prerequisites are unavailable"
+  assert_contains "$wrapper_script_text" "operator stack hydration requires shared postgres dsn" "aws wrapper requires shared postgres config for hydrator flow"
+  assert_contains "$wrapper_script_text" "operator stack hydration requires shared kafka brokers" "aws wrapper requires shared kafka config for hydrator flow"
+  assert_contains "$wrapper_script_text" "operator stack hydration requires shared ipfs api url" "aws wrapper requires shared ipfs config for hydrator flow"
+  assert_contains "$wrapper_script_text" "forwarded --shared-postgres-dsn must not be empty" "aws wrapper validates forwarded shared postgres dsn"
+  assert_contains "$wrapper_script_text" "forwarded --shared-kafka-brokers must not be empty" "aws wrapper validates forwarded shared kafka brokers"
+  assert_contains "$wrapper_script_text" "forwarded --shared-ipfs-api-url must not be empty" "aws wrapper validates forwarded shared ipfs api url"
+  assert_contains "$wrapper_script_text" "sudo systemctl restart intents-juno-config-hydrator.service" "aws wrapper restarts config hydrator after staging input"
+  assert_contains "$wrapper_script_text" "sudo systemctl restart tss-host.service" "aws wrapper restarts tss-host after hydrator run"
   assert_contains "$wrapper_script_text" "systemctl restart checkpoint-signer.service checkpoint-aggregator.service" "aws wrapper restarts checkpoint services after shared config update"
+  assert_order "$wrapper_script_text" "sudo systemctl restart intents-juno-config-hydrator.service" "sudo systemctl restart tss-host.service" "hydrator restart should precede tss-host restart"
+  assert_order "$wrapper_script_text" "sudo systemctl restart intents-juno-config-hydrator.service" "sudo systemctl restart checkpoint-signer.service checkpoint-aggregator.service" "hydrator restart should precede checkpoint service restart"
   assert_contains "$wrapper_script_text" "shared service remote args assembled" "shared args assembly logging"
   assert_contains "$wrapper_script_text" "assembling remote e2e arguments" "remote args assembly logging"
   assert_contains "$wrapper_script_text" "failed to build remote command line" "remote args assembly error message"
@@ -318,6 +353,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "-L \"127.0.0.1:\${witness_tunnel_tss_port}:127.0.0.1:9443\"" "aws wrapper opens runner-local tss-host tunnels per operator"
   assert_contains "$wrapper_script_text" "JUNO_RPC_USER is required for withdraw coordinator full mode" "aws wrapper remote run hard-fails when coordinator rpc auth is missing"
   assert_contains "$wrapper_script_text" "JUNO_RPC_PASS is required for withdraw coordinator full mode" "aws wrapper remote run hard-fails when coordinator rpc auth is missing"
+  assert_contains "$wrapper_script_text" 'export JUNO_QUEUE_KAFKA_TLS="true"' "aws wrapper enforces kafka tls for live queue clients in remote run"
   assert_contains "$wrapper_script_text" "command -v psql" "aws wrapper ensures psql is available on remote runner"
   assert_contains "$wrapper_script_text" "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --runtime-mode)" "aws wrapper rejects forwarded runtime-mode flag"
   assert_contains "$wrapper_script_text" "if [[ \"\${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}\" == \"1\" ]]; then" "aws wrapper allows explicit insecure dkg opt-in only"

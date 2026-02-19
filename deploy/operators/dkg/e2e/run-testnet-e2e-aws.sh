@@ -70,6 +70,10 @@ run options:
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
   --boundless-requestor-key-file <p>   required file with Boundless requestor private key hex
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
+                                       requires forwarded shared args after '--':
+                                         --shared-postgres-dsn
+                                         --shared-kafka-brokers
+                                         --shared-ipfs-api-url
   --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
   --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
@@ -1113,12 +1117,7 @@ chmod 0600 "\$runtime_dir/ufvk.txt"
 sudo mkdir -p /var/lib/intents-juno
 sudo ln -sfn "\$runtime_dir" /var/lib/intents-juno/operator-runtime
 sudo chown -h ubuntu:ubuntu /var/lib/intents-juno/operator-runtime
-sudo systemctl restart tss-host.service
-if ! sudo systemctl is-active --quiet tss-host.service; then
-  echo "tss-host failed to start with runtime signer artifacts" >&2
-  sudo systemctl status tss-host.service --no-pager || true
-  exit 1
-fi
+echo "tss-host restart deferred until hydrator config has been staged"
 
 deploy/operators/dkg/operator.sh status --workdir "\$runtime_dir" >"\$op_root/status.json"
 EOF
@@ -1176,50 +1175,192 @@ EOF
     operators_json="$(jq --argjson op "$op_json" '. + [$op]' <<<"$operators_json")"
   done
 
-  if [[ -n "$shared_postgres_dsn" || -n "$shared_kafka_brokers" || -n "$shared_ipfs_api_url" ]]; then
-    [[ -n "$shared_postgres_dsn" ]] || die "shared checkpoint service config missing postgres dsn"
-    [[ -n "$shared_kafka_brokers" ]] || die "shared checkpoint service config missing kafka brokers"
-    [[ -n "$shared_ipfs_api_url" ]] || die "shared checkpoint service config missing ipfs api url"
-    [[ -n "$checkpoint_blob_bucket" ]] || die "shared checkpoint service config missing blob bucket"
-    [[ -n "$checkpoint_blob_prefix" ]] || die "shared checkpoint service config missing blob prefix"
+  [[ -n "$shared_postgres_dsn" ]] || die "shared checkpoint service config missing postgres dsn"
+  [[ -n "$shared_kafka_brokers" ]] || die "shared checkpoint service config missing kafka brokers"
+  [[ -n "$shared_ipfs_api_url" ]] || die "shared checkpoint service config missing ipfs api url"
+  [[ -n "$checkpoint_blob_bucket" ]] || die "shared checkpoint service config missing blob bucket"
+  [[ -n "$checkpoint_blob_prefix" ]] || die "shared checkpoint service config missing blob prefix"
 
-    local checkpoint_operators_csv
-    checkpoint_operators_csv="$(jq -r 'map(.operator_id) | join(",")' <<<"$operators_json")"
-    [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operator set for operator stack config"
+  local checkpoint_operators_csv
+  checkpoint_operators_csv="$(jq -r 'map(.operator_id) | join(",")' <<<"$operators_json")"
+  [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operator set for operator stack config"
 
-    local configure_checkpoint_services_script
-    configure_checkpoint_services_script="$(cat <<EOF
+  local configure_operator_stack_services_script
+  configure_operator_stack_services_script="$(cat <<EOF
 set -euo pipefail
-env_file="/etc/intents-juno/operator-stack.env"
-tmp_env="\$(mktemp)"
-sudo cp "\$env_file" "\$tmp_env"
-sudo chown "\$(id -u):\$(id -g)" "\$tmp_env"
-chmod 600 "\$tmp_env"
-set_env() {
+stack_env_file="/etc/intents-juno/operator-stack.env"
+hydrator_env_file="/etc/intents-juno/operator-stack-hydrator.env"
+default_config_json_path="/etc/intents-juno/operator-stack-config.json"
+config_json_path="\$default_config_json_path"
+
+[[ -s "\$stack_env_file" ]] || {
+  echo "operator stack env is missing: \$stack_env_file" >&2
+  exit 1
+}
+
+read_env_value() {
   local key="\$1"
-  local value="\$2"
+  awk -v key="\$key" -F= '
+    \$1 == key {
+      print substr(\$0, index(\$0, "=") + 1)
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "\$stack_env_file"
+}
+
+normalize_pcr() {
+  local value="\${1:-}"
+  value="\${value#0x}"
+  printf '%s' "\${value,,}"
+}
+
+set_env() {
+  local tmp_file="\$1"
+  local key="\$2"
+  local value="\$3"
   local tmp_next
   tmp_next="\$(mktemp)"
-  grep -v "^\${key}=" "\$tmp_env" >"\$tmp_next" || true
+  grep -v "^\${key}=" "\$tmp_file" >"\$tmp_next" || true
   printf '%s=%s\n' "\$key" "\$value" >>"\$tmp_next"
-  mv "\$tmp_next" "\$tmp_env"
+  mv "\$tmp_next" "\$tmp_file"
 }
-set_env CHECKPOINT_POSTGRES_DSN "$shared_postgres_dsn"
-set_env CHECKPOINT_KAFKA_BROKERS "$shared_kafka_brokers"
-set_env CHECKPOINT_IPFS_API_URL "$shared_ipfs_api_url"
-set_env CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
-set_env CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
-set_env CHECKPOINT_OPERATORS "$checkpoint_operators_csv"
-set_env CHECKPOINT_THRESHOLD "$threshold"
-set_env CHECKPOINT_SIGNATURE_TOPIC "checkpoints.signatures.v1"
-set_env CHECKPOINT_PACKAGE_TOPIC "checkpoints.packages.v1"
-sudo install -m 0600 "\$tmp_env" "\$env_file"
+
+if [[ -f "\$hydrator_env_file" ]]; then
+  configured_json_path="\$(awk -F= '/^OPERATOR_STACK_CONFIG_JSON_PATH=/{print substr(\$0, index(\$0, "=")+1); exit}' "\$hydrator_env_file")"
+  if [[ -n "\$configured_json_path" ]]; then
+    config_json_path="\$configured_json_path"
+  fi
+fi
+
+stack_runtime_mode="\$(read_env_value TSS_SIGNER_RUNTIME_MODE 2>/dev/null || printf 'nitro-enclave')"
+stack_runtime_mode="\${stack_runtime_mode,,}"
+[[ -n "\$stack_runtime_mode" ]] || stack_runtime_mode="nitro-enclave"
+
+tss_nitro_expected_pcr0="\$(normalize_pcr "\$(read_env_value TSS_NITRO_EXPECTED_PCR0 2>/dev/null || true)")"
+tss_nitro_expected_pcr1="\$(normalize_pcr "\$(read_env_value TSS_NITRO_EXPECTED_PCR1 2>/dev/null || true)")"
+tss_nitro_expected_pcr2="\$(normalize_pcr "\$(read_env_value TSS_NITRO_EXPECTED_PCR2 2>/dev/null || true)")"
+tss_signer_runtime_mode="\$stack_runtime_mode"
+
+nitro_runtime_ready="true"
+[[ -x "/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer" ]] || nitro_runtime_ready="false"
+[[ -s "/var/lib/intents-juno/operator-runtime/enclave/spendauth-signer.eif" ]] || nitro_runtime_ready="false"
+[[ -s "/var/lib/intents-juno/operator-runtime/attestation/spendauth-attestation.json" ]] || nitro_runtime_ready="false"
+[[ "\$tss_nitro_expected_pcr0" =~ ^[0-9a-f]{96}$ ]] || nitro_runtime_ready="false"
+[[ "\$tss_nitro_expected_pcr1" =~ ^[0-9a-f]{96}$ ]] || nitro_runtime_ready="false"
+[[ "\$tss_nitro_expected_pcr2" =~ ^[0-9a-f]{96}$ ]] || nitro_runtime_ready="false"
+
+case "\$stack_runtime_mode" in
+  nitro-enclave)
+    if [[ "\$nitro_runtime_ready" != "true" ]]; then
+      tss_signer_runtime_mode="host-process"
+      echo "nitro signer artifacts or PCR expectations unavailable; forcing TSS_SIGNER_RUNTIME_MODE=host-process for e2e orchestration"
+    fi
+    ;;
+  host-process)
+    tss_signer_runtime_mode="host-process"
+    ;;
+  *)
+    echo "unsupported TSS_SIGNER_RUNTIME_MODE in operator stack env: \$stack_runtime_mode" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "\$tss_signer_runtime_mode" == "host-process" ]]; then
+  [[ -x "/var/lib/intents-juno/operator-runtime/bin/dkg-admin" ]] || {
+    echo "host-process tss signer requires /var/lib/intents-juno/operator-runtime/bin/dkg-admin executable" >&2
+    exit 1
+  }
+fi
+
+tmp_env="\$(mktemp)"
+sudo cp "\$stack_env_file" "\$tmp_env"
+sudo chown "\$(id -u):\$(id -g)" "\$tmp_env"
+chmod 600 "\$tmp_env"
+set_env "\$tmp_env" TSS_SIGNER_RUNTIME_MODE "\$tss_signer_runtime_mode"
+sudo install -m 0600 "\$tmp_env" "\$stack_env_file"
 rm -f "\$tmp_env"
+
+tmp_json="\$(mktemp)"
+if [[ "\$tss_signer_runtime_mode" == "nitro-enclave" ]]; then
+  jq -n \
+    --arg checkpoint_postgres_dsn "$shared_postgres_dsn" \
+    --arg checkpoint_kafka_brokers "$shared_kafka_brokers" \
+    --arg checkpoint_ipfs_api_url "$shared_ipfs_api_url" \
+    --arg checkpoint_blob_bucket "$checkpoint_blob_bucket" \
+    --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
+    --arg checkpoint_operators "$checkpoint_operators_csv" \
+    --arg checkpoint_threshold "$threshold" \
+    --arg tss_nitro_expected_pcr0 "\$tss_nitro_expected_pcr0" \
+    --arg tss_nitro_expected_pcr1 "\$tss_nitro_expected_pcr1" \
+    --arg tss_nitro_expected_pcr2 "\$tss_nitro_expected_pcr2" \
+    '{
+      CHECKPOINT_POSTGRES_DSN: \$checkpoint_postgres_dsn,
+      CHECKPOINT_KAFKA_BROKERS: \$checkpoint_kafka_brokers,
+      CHECKPOINT_IPFS_API_URL: \$checkpoint_ipfs_api_url,
+      CHECKPOINT_BLOB_BUCKET: \$checkpoint_blob_bucket,
+      CHECKPOINT_BLOB_PREFIX: \$checkpoint_blob_prefix,
+      CHECKPOINT_OPERATORS: \$checkpoint_operators,
+      CHECKPOINT_THRESHOLD: \$checkpoint_threshold,
+      CHECKPOINT_SIGNATURE_TOPIC: "checkpoints.signatures.v1",
+      CHECKPOINT_PACKAGE_TOPIC: "checkpoints.packages.v1",
+      JUNO_QUEUE_KAFKA_TLS: "true",
+      TSS_NITRO_EXPECTED_PCR0: \$tss_nitro_expected_pcr0,
+      TSS_NITRO_EXPECTED_PCR1: \$tss_nitro_expected_pcr1,
+      TSS_NITRO_EXPECTED_PCR2: \$tss_nitro_expected_pcr2
+    }' >"\$tmp_json"
+else
+  jq -n \
+    --arg checkpoint_postgres_dsn "$shared_postgres_dsn" \
+    --arg checkpoint_kafka_brokers "$shared_kafka_brokers" \
+    --arg checkpoint_ipfs_api_url "$shared_ipfs_api_url" \
+    --arg checkpoint_blob_bucket "$checkpoint_blob_bucket" \
+    --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
+    --arg checkpoint_operators "$checkpoint_operators_csv" \
+    --arg checkpoint_threshold "$threshold" \
+    '{
+      CHECKPOINT_POSTGRES_DSN: \$checkpoint_postgres_dsn,
+      CHECKPOINT_KAFKA_BROKERS: \$checkpoint_kafka_brokers,
+      CHECKPOINT_IPFS_API_URL: \$checkpoint_ipfs_api_url,
+      CHECKPOINT_BLOB_BUCKET: \$checkpoint_blob_bucket,
+      CHECKPOINT_BLOB_PREFIX: \$checkpoint_blob_prefix,
+      CHECKPOINT_OPERATORS: \$checkpoint_operators,
+      CHECKPOINT_THRESHOLD: \$checkpoint_threshold,
+      CHECKPOINT_SIGNATURE_TOPIC: "checkpoints.signatures.v1",
+      CHECKPOINT_PACKAGE_TOPIC: "checkpoints.packages.v1",
+      JUNO_QUEUE_KAFKA_TLS: "true"
+    }' >"\$tmp_json"
+fi
+sudo install -d -m 0700 "\$(dirname "\$config_json_path")"
+sudo install -m 0600 "\$tmp_json" "\$config_json_path"
+rm -f "\$tmp_json"
+
+echo "staged hydrator config at \$config_json_path with TSS_SIGNER_RUNTIME_MODE=\$tss_signer_runtime_mode"
+
 sudo systemctl daemon-reload
+sudo systemctl restart intents-juno-config-hydrator.service
+if ! sudo systemctl is-active --quiet intents-juno-config-hydrator.service; then
+  echo "operator stack config hydrator failed after staged config update" >&2
+  sudo systemctl status intents-juno-config-hydrator.service --no-pager || true
+  exit 1
+fi
+
+sudo systemctl restart tss-host.service
+if ! sudo systemctl is-active --quiet tss-host.service; then
+  echo "tss-host failed to start with hydrated runtime config" >&2
+  sudo systemctl status tss-host.service --no-pager || true
+  exit 1
+fi
+
 sudo systemctl restart checkpoint-signer.service checkpoint-aggregator.service
 for svc in checkpoint-signer.service checkpoint-aggregator.service; do
   if ! sudo systemctl is-active --quiet "\$svc"; then
-    echo "operator checkpoint service failed after shared config: \$svc" >&2
+    echo "operator checkpoint service failed after hydrated config: \$svc" >&2
     sudo systemctl status "\$svc" --no-pager || true
     exit 1
   fi
@@ -1227,13 +1368,12 @@ done
 EOF
 )"
 
-    for ((idx = 0; idx < operator_count; idx++)); do
-      op_index=$((idx + 1))
-      op_public_ip="${operator_public_ips[$idx]}"
-      log "configuring checkpoint services on operator host op${op_index} for shared infra"
-      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$configure_checkpoint_services_script")"
-    done
-  fi
+  for ((idx = 0; idx < operator_count; idx++)); do
+    op_index=$((idx + 1))
+    op_public_ip="${operator_public_ips[$idx]}"
+    log "staging hydrator config and restarting operator stack services on op${op_index}"
+    ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$configure_operator_stack_services_script")"
+  done
 
   ensure_dir "$(dirname "$dkg_summary_local_path")"
   jq -n \
@@ -1686,6 +1826,9 @@ command_run() {
   local forwarded_threshold=""
   local forwarded_relayer_runtime_mode=""
   local relayer_runtime_mode_forwarded="false"
+  local forwarded_shared_postgres_dsn=""
+  local forwarded_shared_kafka_brokers=""
+  local forwarded_shared_ipfs_api_url=""
   if forwarded_operator_count="$(forwarded_arg_value "--operator-count" "${e2e_args[@]}" 2>/dev/null)"; then
     [[ "$forwarded_operator_count" =~ ^[0-9]+$ ]] || die "forwarded --operator-count must be numeric"
     if [[ "$operator_count_explicit" == "true" && "$forwarded_operator_count" != "$operator_instance_count" ]]; then
@@ -1715,6 +1858,20 @@ command_run() {
     fi
     relayer_runtime_mode="$forwarded_relayer_runtime_mode"
     relayer_runtime_mode_forwarded="true"
+  fi
+  if forwarded_shared_postgres_dsn="$(forwarded_arg_value "--shared-postgres-dsn" "${e2e_args[@]}" 2>/dev/null)"; then
+    [[ -n "$forwarded_shared_postgres_dsn" ]] || die "forwarded --shared-postgres-dsn must not be empty"
+  fi
+  if forwarded_shared_kafka_brokers="$(forwarded_arg_value "--shared-kafka-brokers" "${e2e_args[@]}" 2>/dev/null)"; then
+    [[ -n "$forwarded_shared_kafka_brokers" ]] || die "forwarded --shared-kafka-brokers must not be empty"
+  fi
+  if forwarded_shared_ipfs_api_url="$(forwarded_arg_value "--shared-ipfs-api-url" "${e2e_args[@]}" 2>/dev/null)"; then
+    [[ -n "$forwarded_shared_ipfs_api_url" ]] || die "forwarded --shared-ipfs-api-url must not be empty"
+  fi
+  if [[ "$with_shared_services" != "true" ]]; then
+    if [[ -z "$forwarded_shared_postgres_dsn" || -z "$forwarded_shared_kafka_brokers" || -z "$forwarded_shared_ipfs_api_url" ]]; then
+      die "--without-shared-services requires forwarded --shared-postgres-dsn, --shared-kafka-brokers, and --shared-ipfs-api-url after '--'"
+    fi
   fi
   if [[ "$distributed_relayer_runtime_explicit" == "true" && "$relayer_runtime_mode" != "distributed" ]]; then
     die "--distributed-relayer-runtime requires relayer runtime mode distributed"
@@ -2099,13 +2256,37 @@ command_run() {
   dkg_summary_remote_path="$remote_workdir/reports/dkg-summary.json"
   dkg_summary_local_path="$artifacts_dir/dkg-summary-distributed.json"
   local shared_postgres_dsn_for_operator=""
+  local shared_kafka_brokers_for_operator=""
+  local shared_ipfs_api_url_for_operator=""
   local checkpoint_blob_bucket_for_operator=""
   local checkpoint_blob_prefix_for_operator=""
-  if [[ "$with_shared_services" == "true" ]]; then
+  if [[ -n "$forwarded_shared_postgres_dsn" ]]; then
+    shared_postgres_dsn_for_operator="$forwarded_shared_postgres_dsn"
+  elif [[ "$with_shared_services" == "true" ]]; then
     shared_postgres_dsn_for_operator="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_postgres_endpoint}:${shared_postgres_port}/${shared_postgres_db}?sslmode=require"
+  fi
+  if [[ -n "$forwarded_shared_kafka_brokers" ]]; then
+    shared_kafka_brokers_for_operator="$forwarded_shared_kafka_brokers"
+  elif [[ "$with_shared_services" == "true" ]]; then
+    shared_kafka_brokers_for_operator="$shared_kafka_bootstrap_brokers"
+  fi
+  if [[ -n "$forwarded_shared_ipfs_api_url" ]]; then
+    shared_ipfs_api_url_for_operator="$forwarded_shared_ipfs_api_url"
+  elif [[ "$with_shared_services" == "true" ]]; then
+    shared_ipfs_api_url_for_operator="$shared_ipfs_api_url"
+  fi
+  if [[ -n "$shared_postgres_dsn_for_operator" || -n "$shared_kafka_brokers_for_operator" || -n "$shared_ipfs_api_url_for_operator" ]]; then
+    [[ -n "$shared_postgres_dsn_for_operator" ]] || die "operator stack hydration requires shared postgres dsn (set --shared-postgres-dsn)"
+    [[ -n "$shared_kafka_brokers_for_operator" ]] || die "operator stack hydration requires shared kafka brokers (set --shared-kafka-brokers)"
+    [[ -n "$shared_ipfs_api_url_for_operator" ]] || die "operator stack hydration requires shared ipfs api url (set --shared-ipfs-api-url)"
     checkpoint_blob_bucket_for_operator="$dkg_s3_bucket"
     checkpoint_blob_prefix_for_operator="${dkg_s3_key_prefix_out%/}/checkpoint-packages"
   fi
+  [[ -n "$shared_postgres_dsn_for_operator" ]] || die "operator stack hydration requires shared postgres dsn"
+  [[ -n "$shared_kafka_brokers_for_operator" ]] || die "operator stack hydration requires shared kafka brokers"
+  [[ -n "$shared_ipfs_api_url_for_operator" ]] || die "operator stack hydration requires shared ipfs api url"
+  [[ -n "$checkpoint_blob_bucket_for_operator" ]] || die "operator stack hydration requires checkpoint blob bucket"
+  [[ -n "$checkpoint_blob_prefix_for_operator" ]] || die "operator stack hydration requires checkpoint blob prefix"
 
   run_distributed_dkg_backup_restore \
     "$ssh_key_private" \
@@ -2127,8 +2308,8 @@ command_run() {
     "$dkg_s3_key_prefix_out" \
     "$aws_region" \
     "$shared_postgres_dsn_for_operator" \
-    "$shared_kafka_bootstrap_brokers" \
-    "$shared_ipfs_api_url" \
+    "$shared_kafka_brokers_for_operator" \
+    "$shared_ipfs_api_url_for_operator" \
     "$checkpoint_blob_bucket_for_operator" \
     "$checkpoint_blob_prefix_for_operator"
 
@@ -2339,7 +2520,8 @@ export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
-export JUNO_QUEUE_KAFKA_TLS="${with_shared_services}"
+# Live e2e queues target TLS-enabled Kafka brokers in both managed and forwarded shared modes.
+export JUNO_QUEUE_KAFKA_TLS="true"
 if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
   export JUNO_SCAN_BEARER_TOKEN="\$(tr -d '\r\n' < .ci/secrets/juno-scan-bearer.txt)"
 fi
