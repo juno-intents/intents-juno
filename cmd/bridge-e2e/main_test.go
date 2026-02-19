@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"math/big"
@@ -339,6 +340,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeValid(t *testing.T) {
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
 		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
 		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
 		"--boundless-deposit-witness-item-file", depositWitness,
@@ -388,6 +390,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -403,6 +406,39 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t
 	}
 	if len(cfg.Boundless.WithdrawWitnessItems) != 0 {
 		t.Fatalf("expected no preloaded withdraw witness items in auto mode")
+	}
+}
+
+func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresInputS3Bucket(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-input-s3-bucket") {
+		t.Fatalf("expected missing s3 bucket error, got: %v", err)
 	}
 }
 
@@ -430,6 +466,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeRejectsPartialManualInputs(t *te
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
 		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
 	})
 	if err == nil {
@@ -959,6 +996,54 @@ func TestValidateBoundlessInputPreflight_GuestWitnessModeAllowsGuestProgramURL(t
 		[]byte{0x01, 0x02},
 	); err != nil {
 		t.Fatalf("unexpected preflight error: %v", err)
+	}
+}
+
+func TestBuildBoundlessSubmitFileRequestYAML_UsesURLInputAndGroth16Selector(t *testing.T) {
+	t.Parallel()
+
+	cfg := boundlessConfig{
+		MinPriceWei:            big.NewInt(0),
+		MaxPriceWei:            big.NewInt(50000000000000),
+		LockStakeWei:           big.NewInt(5000000000000000000),
+		RampUpPeriodSeconds:    170,
+		LockTimeoutSeconds:     625,
+		TimeoutSeconds:         1500,
+		BiddingDelaySeconds:    85,
+		MaxPriceBumpRetries:    3,
+		MaxPriceBumpMultiplier: 2,
+	}
+	imageID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	journal := []byte{0x01, 0x02, 0x03, 0x04}
+	inputURL := "https://example.invalid/input.bin?sig=abc123"
+	programURL := "https://example.invalid/deposit-guest.elf"
+	biddingStart := int64(1_700_000_085)
+
+	got, err := buildBoundlessSubmitFileRequestYAML(cfg, programURL, inputURL, imageID, journal, biddingStart)
+	if err != nil {
+		t.Fatalf("buildBoundlessSubmitFileRequestYAML: %v", err)
+	}
+
+	raw := string(got)
+	if !strings.Contains(raw, "inputType: Url") {
+		t.Fatalf("expected URL input type in yaml: %s", raw)
+	}
+	if !strings.Contains(raw, `selector: "73c457ba"`) {
+		t.Fatalf("expected groth16 selector in yaml: %s", raw)
+	}
+	wantInputHex := hex.EncodeToString([]byte(inputURL))
+	if !strings.Contains(raw, `data: "`+wantInputHex+`"`) {
+		t.Fatalf("expected input url hex %q in yaml: %s", wantInputHex, raw)
+	}
+	wantPredicateHex := strings.TrimPrefix(imageID.Hex(), "0x") + hex.EncodeToString(journal)
+	if !strings.Contains(raw, `predicateType: PrefixMatch`) || !strings.Contains(raw, `data: "`+wantPredicateHex+`"`) {
+		t.Fatalf("expected strict predicate data %q in yaml: %s", wantPredicateHex, raw)
+	}
+	if !strings.Contains(raw, "rampUpStart: 1700000085") {
+		t.Fatalf("expected bidding start in yaml: %s", raw)
+	}
+	if !strings.Contains(raw, "maxPrice: 50000000000000") {
+		t.Fatalf("expected maxPrice in yaml: %s", raw)
 	}
 }
 

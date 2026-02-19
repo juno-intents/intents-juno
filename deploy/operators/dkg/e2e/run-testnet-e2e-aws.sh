@@ -1534,6 +1534,17 @@ set -euo pipefail
 cd "$remote_repo"
 export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
+export AWS_REGION="${aws_region}"
+export AWS_DEFAULT_REGION="${aws_region}"
+if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
+  export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
+fi
+if [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+  export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-}"
+fi
+if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
+  export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+fi
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh $remote_joined_args
 EOF
 ); then

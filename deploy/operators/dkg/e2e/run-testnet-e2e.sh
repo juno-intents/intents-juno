@@ -48,6 +48,13 @@ Options:
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
+  --boundless-input-s3-bucket <name> S3 bucket used for oversized boundless inputs
+                                   (required for guest-witness-v1 / >2048-byte inputs)
+  --boundless-input-s3-prefix <prefix> S3 key prefix for oversized boundless inputs
+                                   (default: bridge-e2e/boundless-input)
+  --boundless-input-s3-region <region> optional AWS region override for oversized input uploads
+  --boundless-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
+                                   (default: 2h)
   --boundless-min-price-wei <wei>  auction min price (default: 0)
   --boundless-max-price-wei <wei>  auction max price (default: 50000000000000)
   --boundless-max-price-cap-wei <wei> max auction price cap used by retry bumps (default: 250000000000000)
@@ -322,6 +329,10 @@ command_run() {
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
+  local boundless_input_s3_bucket=""
+  local boundless_input_s3_prefix="bridge-e2e/boundless-input"
+  local boundless_input_s3_region=""
+  local boundless_input_s3_presign_ttl="2h"
   local boundless_min_price_wei="0"
   local boundless_max_price_wei="50000000000000"
   local boundless_max_price_cap_wei="250000000000000"
@@ -487,6 +498,26 @@ command_run() {
         boundless_withdraw_program_url="$2"
         shift 2
         ;;
+      --boundless-input-s3-bucket)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-bucket"
+        boundless_input_s3_bucket="$2"
+        shift 2
+        ;;
+      --boundless-input-s3-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-prefix"
+        boundless_input_s3_prefix="$2"
+        shift 2
+        ;;
+      --boundless-input-s3-region)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-region"
+        boundless_input_s3_region="$2"
+        shift 2
+        ;;
+      --boundless-input-s3-presign-ttl)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-presign-ttl"
+        boundless_input_s3_presign_ttl="$2"
+        shift 2
+        ;;
       --boundless-min-price-wei)
         [[ $# -ge 2 ]] || die "missing value for --boundless-min-price-wei"
         boundless_min_price_wei="$2"
@@ -614,11 +645,14 @@ command_run() {
   [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
   [[ -n "$boundless_deposit_program_url" ]] || die "--boundless-deposit-program-url is required"
   [[ -n "$boundless_withdraw_program_url" ]] || die "--boundless-withdraw-program-url is required"
+  [[ -n "$boundless_input_s3_prefix" ]] || die "--boundless-input-s3-prefix must not be empty"
+  [[ -n "$boundless_input_s3_presign_ttl" ]] || die "--boundless-input-s3-presign-ttl must not be empty"
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
   local guest_witness_manual_mode="false"
   if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
+    [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
     if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
       (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
       guest_witness_manual_mode="true"
@@ -801,6 +835,10 @@ command_run() {
     "--boundless-requestor-key-file" "$boundless_requestor_key_file"
     "--boundless-deposit-program-url" "$boundless_deposit_program_url"
     "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
+    "--boundless-input-s3-bucket" "$boundless_input_s3_bucket"
+    "--boundless-input-s3-prefix" "$boundless_input_s3_prefix"
+    "--boundless-input-s3-region" "$boundless_input_s3_region"
+    "--boundless-input-s3-presign-ttl" "$boundless_input_s3_presign_ttl"
     "--boundless-min-price-wei" "$boundless_min_price_wei"
     "--boundless-max-price-wei" "$boundless_max_price_wei"
     "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
@@ -896,6 +934,10 @@ command_run() {
     --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
+    --arg boundless_input_s3_bucket "$boundless_input_s3_bucket" \
+    --arg boundless_input_s3_prefix "$boundless_input_s3_prefix" \
+    --arg boundless_input_s3_region "$boundless_input_s3_region" \
+    --arg boundless_input_s3_presign_ttl "$boundless_input_s3_presign_ttl" \
     --arg boundless_min_price_wei "$boundless_min_price_wei" \
     --arg boundless_max_price_wei "$boundless_max_price_wei" \
     --arg boundless_max_price_cap_wei "$boundless_max_price_cap_wei" \
@@ -956,6 +998,10 @@ command_run() {
           },
           deposit_program_url: (if $boundless_deposit_program_url == "" then null else $boundless_deposit_program_url end),
           withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),
+          input_s3_bucket: (if $boundless_input_s3_bucket == "" then null else $boundless_input_s3_bucket end),
+          input_s3_prefix: (if $boundless_input_s3_prefix == "" then null else $boundless_input_s3_prefix end),
+          input_s3_region: (if $boundless_input_s3_region == "" then null else $boundless_input_s3_region end),
+          input_s3_presign_ttl: (if $boundless_input_s3_presign_ttl == "" then null else $boundless_input_s3_presign_ttl end),
           min_price_wei: $boundless_min_price_wei,
           max_price_wei: $boundless_max_price_wei,
           max_price_cap_wei: $boundless_max_price_cap_wei,
