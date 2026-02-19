@@ -504,7 +504,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&junoExecutionTxHash, "juno-execution-tx-hash", "", "canonical Juno execution tx hash to report under juno.proof_of_execution")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
-	fs.BoolVar(&cfg.DeployOnly, "deploy-only", false, "deprecated and disabled; full deposit/withdraw/finalize flow is always required")
+	fs.BoolVar(&cfg.DeployOnly, "deploy-only", false, "deploy/configure contracts only; skip deposit/withdraw/finalize flow")
 
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
@@ -1043,10 +1043,6 @@ func encodeSignaturesHex(sigs [][]byte) []string {
 }
 
 func run(ctx context.Context, cfg config) (*report, error) {
-	if cfg.DeployOnly {
-		return nil, errors.New("--deploy-only is disabled; full bridge invariant checks are mandatory")
-	}
-
 	cfg.OperatorSignerBin = strings.TrimSpace(cfg.OperatorSignerBin)
 	if cfg.OperatorSignerBin == "" {
 		return nil, errors.New("--operator-signer-bin is required")
