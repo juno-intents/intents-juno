@@ -86,6 +86,20 @@ Local invocation example:
     - `--boundless-withdraw-owallet-ovk-hex`
     - `--boundless-deposit-witness-item-file` (repeatable)
     - `--boundless-withdraw-witness-item-file` (repeatable)
+  - optional witness extraction from live `juno-scan` + `junocashd` when witness item files are omitted:
+    - `--boundless-witness-juno-scan-url`
+    - `--boundless-witness-juno-rpc-url`
+    - `--boundless-deposit-witness-wallet-id`
+    - `--boundless-deposit-witness-txid`
+    - `--boundless-deposit-witness-action-index`
+    - `--boundless-withdraw-witness-wallet-id`
+    - `--boundless-withdraw-witness-txid`
+    - `--boundless-withdraw-witness-action-index`
+    - `--boundless-withdraw-witness-withdrawal-id-hex`
+    - `--boundless-withdraw-witness-recipient-raw-address-hex`
+  - extraction command is also available directly:
+    - `go run ./cmd/juno-witness-extract deposit ...`
+    - `go run ./cmd/juno-witness-extract withdraw ...`
 - No manual seal injection, no prepare-only path, and no no-op verifier path are supported in this flow.
 
 Pricing policy and calculator:

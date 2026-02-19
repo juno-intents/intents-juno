@@ -43,6 +43,21 @@ Options:
   --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
   --boundless-deposit-witness-item-file <path> deposit witness item file (repeat for guest-witness-v1)
   --boundless-withdraw-witness-item-file <path> withdraw witness item file (repeat for guest-witness-v1)
+  --boundless-witness-juno-scan-url <url> juno-scan URL for witness extraction (optional, guest-witness-v1)
+  --boundless-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (optional, guest-witness-v1)
+  --boundless-witness-juno-scan-bearer-token-env <name> env var for optional juno-scan bearer token
+                                   (default: JUNO_SCAN_BEARER_TOKEN)
+  --boundless-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
+  --boundless-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
+  --boundless-deposit-witness-wallet-id <id> juno-scan wallet id for deposit witness extraction
+  --boundless-deposit-witness-txid <txid> txid for deposit witness extraction
+  --boundless-deposit-witness-action-index <n> orchard action index for deposit witness extraction
+  --boundless-withdraw-witness-wallet-id <id> juno-scan wallet id for withdraw witness extraction
+  --boundless-withdraw-witness-txid <txid> txid for withdraw witness extraction
+  --boundless-withdraw-witness-action-index <n> orchard action index for withdraw witness extraction
+  --boundless-withdraw-witness-withdrawal-id-hex <hex> withdrawal id (32-byte hex) for withdraw witness extraction
+  --boundless-withdraw-witness-recipient-raw-address-hex <hex> recipient raw Orchard address (43-byte hex)
+                                   for withdraw witness extraction
   --boundless-guest-witness-manifest <path> Cargo manifest for auto guest witness generation
                                    (default: zk/witness_fixture/cli/Cargo.toml)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
@@ -325,6 +340,19 @@ command_run() {
   local boundless_withdraw_owallet_ovk_hex=""
   local -a boundless_deposit_witness_item_files=()
   local -a boundless_withdraw_witness_item_files=()
+  local boundless_witness_juno_scan_url=""
+  local boundless_witness_juno_rpc_url=""
+  local boundless_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
+  local boundless_witness_juno_rpc_user_env="JUNO_RPC_USER"
+  local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
+  local boundless_deposit_witness_wallet_id=""
+  local boundless_deposit_witness_txid=""
+  local boundless_deposit_witness_action_index=""
+  local boundless_withdraw_witness_wallet_id=""
+  local boundless_withdraw_witness_txid=""
+  local boundless_withdraw_witness_action_index=""
+  local boundless_withdraw_witness_withdrawal_id_hex=""
+  local boundless_withdraw_witness_recipient_raw_address_hex=""
   local boundless_guest_witness_manifest="zk/witness_fixture/cli/Cargo.toml"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
@@ -476,6 +504,71 @@ command_run() {
       --boundless-withdraw-witness-item-file)
         [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-item-file"
         boundless_withdraw_witness_item_files+=("$2")
+        shift 2
+        ;;
+      --boundless-witness-juno-scan-url)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-url"
+        boundless_witness_juno_scan_url="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-rpc-url)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-url"
+        boundless_witness_juno_rpc_url="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-scan-bearer-token-env)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-bearer-token-env"
+        boundless_witness_juno_scan_bearer_token_env="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-rpc-user-env)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-user-env"
+        boundless_witness_juno_rpc_user_env="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-rpc-pass-env)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-pass-env"
+        boundless_witness_juno_rpc_pass_env="$2"
+        shift 2
+        ;;
+      --boundless-deposit-witness-wallet-id)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-wallet-id"
+        boundless_deposit_witness_wallet_id="$2"
+        shift 2
+        ;;
+      --boundless-deposit-witness-txid)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-txid"
+        boundless_deposit_witness_txid="$2"
+        shift 2
+        ;;
+      --boundless-deposit-witness-action-index)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-action-index"
+        boundless_deposit_witness_action_index="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-witness-wallet-id)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-wallet-id"
+        boundless_withdraw_witness_wallet_id="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-witness-txid)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-txid"
+        boundless_withdraw_witness_txid="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-witness-action-index)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-action-index"
+        boundless_withdraw_witness_action_index="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-witness-withdrawal-id-hex)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-withdrawal-id-hex"
+        boundless_withdraw_witness_withdrawal_id_hex="$2"
+        shift 2
+        ;;
+      --boundless-withdraw-witness-recipient-raw-address-hex)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-recipient-raw-address-hex"
+        boundless_withdraw_witness_recipient_raw_address_hex="$2"
         shift 2
         ;;
       --boundless-guest-witness-manifest)
@@ -651,26 +744,62 @@ command_run() {
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
   local guest_witness_manual_mode="true"
+  local guest_witness_extract_mode="false"
   if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
     [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
     [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required when --boundless-input-mode guest-witness-v1"
     [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
-    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required when --boundless-input-mode guest-witness-v1"
-    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required when --boundless-input-mode guest-witness-v1"
+
+    local guest_witness_extract_any="false"
+    if [[ -n "$boundless_witness_juno_scan_url" || -n "$boundless_witness_juno_rpc_url" || \
+      -n "$boundless_deposit_witness_wallet_id" || -n "$boundless_deposit_witness_txid" || -n "$boundless_deposit_witness_action_index" || \
+      -n "$boundless_withdraw_witness_wallet_id" || -n "$boundless_withdraw_witness_txid" || -n "$boundless_withdraw_witness_action_index" || \
+      -n "$boundless_withdraw_witness_withdrawal_id_hex" || -n "$boundless_withdraw_witness_recipient_raw_address_hex" ]]; then
+      guest_witness_extract_any="true"
+    fi
+
+    if (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
+      (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required when --boundless-withdraw-witness-item-file is set"
+      (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required when --boundless-deposit-witness-item-file is set"
+      if [[ "$guest_witness_extract_any" == "true" ]]; then
+        die "guest witness extraction flags cannot be combined with explicit --boundless-*-witness-item-file inputs"
+      fi
+    else
+      guest_witness_manual_mode="false"
+      guest_witness_extract_mode="true"
+      [[ "$boundless_deposit_witness_action_index" =~ ^[0-9]+$ ]] || die "--boundless-deposit-witness-action-index must be numeric when guest witness extraction is enabled"
+      [[ "$boundless_withdraw_witness_action_index" =~ ^[0-9]+$ ]] || die "--boundless-withdraw-witness-action-index must be numeric when guest witness extraction is enabled"
+      [[ -n "$boundless_witness_juno_scan_url" ]] || die "--boundless-witness-juno-scan-url is required when witness files are not provided"
+      [[ -n "$boundless_witness_juno_rpc_url" ]] || die "--boundless-witness-juno-rpc-url is required when witness files are not provided"
+      [[ -n "$boundless_deposit_witness_wallet_id" ]] || die "--boundless-deposit-witness-wallet-id is required when witness files are not provided"
+      [[ -n "$boundless_deposit_witness_txid" ]] || die "--boundless-deposit-witness-txid is required when witness files are not provided"
+      [[ -n "$boundless_deposit_witness_action_index" ]] || die "--boundless-deposit-witness-action-index is required when witness files are not provided"
+      [[ -n "$boundless_withdraw_witness_wallet_id" ]] || die "--boundless-withdraw-witness-wallet-id is required when witness files are not provided"
+      [[ -n "$boundless_withdraw_witness_txid" ]] || die "--boundless-withdraw-witness-txid is required when witness files are not provided"
+      [[ -n "$boundless_withdraw_witness_action_index" ]] || die "--boundless-withdraw-witness-action-index is required when witness files are not provided"
+      [[ -n "$boundless_withdraw_witness_withdrawal_id_hex" ]] || die "--boundless-withdraw-witness-withdrawal-id-hex is required when witness files are not provided"
+      [[ -n "$boundless_withdraw_witness_recipient_raw_address_hex" ]] || die "--boundless-withdraw-witness-recipient-raw-address-hex is required when witness files are not provided"
+    fi
   else
     guest_witness_manual_mode="false"
-    if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
+    if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" || \
+      -n "$boundless_witness_juno_scan_url" || -n "$boundless_witness_juno_rpc_url" || \
+      -n "$boundless_deposit_witness_wallet_id" || -n "$boundless_deposit_witness_txid" || -n "$boundless_deposit_witness_action_index" || \
+      -n "$boundless_withdraw_witness_wallet_id" || -n "$boundless_withdraw_witness_txid" || -n "$boundless_withdraw_witness_action_index" || \
+      -n "$boundless_withdraw_witness_withdrawal_id_hex" || -n "$boundless_withdraw_witness_recipient_raw_address_hex" ]] || \
       (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
       die "--boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file require --boundless-input-mode guest-witness-v1"
     fi
   fi
   local witness_file
-  for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-    [[ -f "$witness_file" ]] || die "boundless deposit witness item file not found: $witness_file"
-  done
-  for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
-    [[ -f "$witness_file" ]] || die "boundless withdraw witness item file not found: $witness_file"
-  done
+  if [[ "$guest_witness_extract_mode" != "true" ]]; then
+    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+      [[ -f "$witness_file" ]] || die "boundless deposit witness item file not found: $witness_file"
+    done
+    for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
+      [[ -f "$witness_file" ]] || die "boundless withdraw witness item file not found: $witness_file"
+    done
+  fi
 
   if [[ -z "$output_path" ]]; then
     output_path="$workdir/reports/testnet-e2e-summary.json"
@@ -723,6 +852,44 @@ command_run() {
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
   local shared_summary="$shared_output"
+
+  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
+    ensure_dir "$workdir/reports/witness"
+    local deposit_witness_auto_file="$workdir/reports/witness/deposit.witness.bin"
+    local withdraw_witness_auto_file="$workdir/reports/witness/withdraw.witness.bin"
+    local deposit_witness_auto_json="$workdir/reports/witness/deposit-witness.json"
+    local withdraw_witness_auto_json="$workdir/reports/witness/withdraw-witness.json"
+
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/juno-witness-extract deposit \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$boundless_deposit_witness_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$boundless_deposit_witness_txid" \
+        --action-index "$boundless_deposit_witness_action_index" \
+        --output-witness-item-file "$deposit_witness_auto_file" >"$deposit_witness_auto_json"
+
+      go run ./cmd/juno-witness-extract withdraw \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$boundless_withdraw_witness_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$boundless_withdraw_witness_txid" \
+        --action-index "$boundless_withdraw_witness_action_index" \
+        --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
+        --recipient-raw-address-hex "$boundless_withdraw_witness_recipient_raw_address_hex" \
+        --output-witness-item-file "$withdraw_witness_auto_file" >"$withdraw_witness_auto_json"
+    )
+
+    boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
+    boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
+  fi
 
   if [[ "$shared_enabled" == "true" ]]; then
     (
@@ -892,6 +1059,7 @@ command_run() {
   local boundless_withdraw_ovk_configured="false"
   local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
   local guest_witness_auto_generate="false"
+  local guest_witness_extract_from_chain="false"
   if [[ -n "$boundless_deposit_owallet_ivk_hex" ]]; then
     boundless_deposit_ivk_configured="true"
   fi
@@ -902,6 +1070,9 @@ command_run() {
   boundless_withdraw_witness_item_count="${#boundless_withdraw_witness_item_files[@]}"
   if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_manual_mode" != "true" ]]; then
     guest_witness_auto_generate="true"
+  fi
+  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
+    guest_witness_extract_from_chain="true"
   fi
 
   jq -n \
@@ -927,6 +1098,7 @@ command_run() {
     --arg boundless_deposit_ivk_configured "$boundless_deposit_ivk_configured" \
     --arg boundless_withdraw_ovk_configured "$boundless_withdraw_ovk_configured" \
     --arg guest_witness_auto_generate "$guest_witness_auto_generate" \
+    --arg guest_witness_extract_from_chain "$guest_witness_extract_from_chain" \
     --argjson boundless_deposit_witness_item_count "$boundless_deposit_witness_item_count" \
     --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
@@ -987,6 +1159,7 @@ command_run() {
           guest_witness: {
             enabled: ($boundless_input_mode == "guest-witness-v1"),
             auto_generate: ($guest_witness_auto_generate == "true"),
+            extract_from_chain: ($guest_witness_extract_from_chain == "true"),
             manifest_path: (if $boundless_guest_witness_manifest == "" then null else $boundless_guest_witness_manifest end),
             deposit_owallet_ivk_configured: ($boundless_deposit_ivk_configured == "true"),
             withdraw_owallet_ovk_configured: ($boundless_withdraw_ovk_configured == "true"),

@@ -139,6 +139,16 @@ type RawTransaction struct {
 	Confirmations int64
 }
 
+type OrchardAction struct {
+	Nullifier     [32]byte
+	RK            [32]byte
+	CMX           [32]byte
+	EphemeralKey  [32]byte
+	EncCiphertext [580]byte
+	OutCiphertext [80]byte
+	CV            [32]byte
+}
+
 func (c *Client) GetBlockChainInfo(ctx context.Context) (BlockChainInfo, error) {
 	var out BlockChainInfo
 	if err := c.call(ctx, "getblockchaininfo", nil, &out); err != nil {
@@ -226,6 +236,69 @@ func (c *Client) GetRawTransaction(ctx context.Context, txid string) (RawTransac
 	}, nil
 }
 
+func (c *Client) GetOrchardAction(ctx context.Context, txid string, actionIndex uint32) (OrchardAction, error) {
+	var out OrchardAction
+	txHash, err := parseHash32(strings.TrimPrefix(strings.TrimSpace(txid), "0x"))
+	if err != nil {
+		return out, fmt.Errorf("junorpc: parse txid: %w", err)
+	}
+
+	var rawHex string
+	if err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(txHash.Hex(), "0x"), false}, &rawHex); err != nil {
+		return out, err
+	}
+	rawHex = strings.TrimSpace(rawHex)
+	if rawHex == "" {
+		return out, errors.New("junorpc: empty raw transaction hex")
+	}
+
+	type decodedRawTx struct {
+		Orchard struct {
+			Actions []struct {
+				Nullifier     string `json:"nullifier"`
+				RK            string `json:"rk"`
+				CMX           string `json:"cmx"`
+				EphemeralKey  string `json:"ephemeralKey"`
+				EncCiphertext string `json:"encCiphertext"`
+				OutCiphertext string `json:"outCiphertext"`
+				CV            string `json:"cv"`
+			} `json:"actions"`
+		} `json:"orchard"`
+	}
+	var decoded decodedRawTx
+	if err := c.call(ctx, "decoderawtransaction", []any{rawHex}, &decoded); err != nil {
+		return out, err
+	}
+	if int(actionIndex) >= len(decoded.Orchard.Actions) {
+		return out, fmt.Errorf("junorpc: orchard action index out of range: index=%d count=%d", actionIndex, len(decoded.Orchard.Actions))
+	}
+	action := decoded.Orchard.Actions[actionIndex]
+
+	if err := decodeFixedHexInto("nullifier", action.Nullifier, out.Nullifier[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("rk", action.RK, out.RK[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("cmx", action.CMX, out.CMX[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("ephemeralKey", action.EphemeralKey, out.EphemeralKey[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("encCiphertext", action.EncCiphertext, out.EncCiphertext[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("outCiphertext", action.OutCiphertext, out.OutCiphertext[:]); err != nil {
+		return out, err
+	}
+	if err := decodeFixedHexInto("cv", action.CV, out.CV[:]); err != nil {
+		return out, err
+	}
+
+	return out, nil
+}
+
 func (c *Client) call(ctx context.Context, method string, params []any, out any) error {
 	id := c.nextID.Add(1)
 	reqBody, err := json.Marshal(rpcRequest{
@@ -308,4 +381,19 @@ func parseHash32(s string) (common.Hash, error) {
 	var out common.Hash
 	copy(out[:], b)
 	return out, nil
+}
+
+func decodeFixedHexInto(field, raw string, out []byte) error {
+	normalized := strings.TrimSpace(raw)
+	normalized = strings.TrimPrefix(normalized, "0x")
+	normalized = strings.TrimPrefix(normalized, "0X")
+	if len(normalized) != len(out)*2 {
+		return fmt.Errorf("junorpc: invalid %s length: got=%d want=%d", field, len(normalized), len(out)*2)
+	}
+	b, err := hex.DecodeString(normalized)
+	if err != nil {
+		return fmt.Errorf("junorpc: invalid %s hex: %w", field, err)
+	}
+	copy(out, b)
+	return nil
 }

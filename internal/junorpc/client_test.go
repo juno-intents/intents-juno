@@ -301,3 +301,165 @@ func TestClient_GetRawTransaction_MapsNotFound(t *testing.T) {
 		t.Fatalf("expected ErrTxNotFound, got %v", err)
 	}
 }
+
+func TestClient_GetOrchardAction_DecodesFromDecodeRawTransaction(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	txid := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
+	rawHex := strings.Repeat("ab", 100)
+
+	nullifierHex := strings.Repeat("11", 32)
+	rkHex := strings.Repeat("22", 32)
+	cmxHex := strings.Repeat("33", 32)
+	epkHex := strings.Repeat("44", 32)
+	cvHex := strings.Repeat("55", 32)
+	encHex := strings.Repeat("66", 580)
+	outHex := strings.Repeat("77", 80)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+
+		switch req.Method {
+		case "getrawtransaction":
+			if len(req.Params) != 2 {
+				t.Fatalf("getrawtransaction params: got %#v", req.Params)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": rawHex,
+				"error":  nil,
+				"id":     req.ID,
+			})
+			return
+		case "decoderawtransaction":
+			if len(req.Params) != 1 || req.Params[0] != rawHex {
+				t.Fatalf("decoderawtransaction params: got %#v want [%q]", req.Params, rawHex)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": map[string]any{
+					"orchard": map[string]any{
+						"actions": []map[string]any{
+							{
+								"nullifier":     nullifierHex,
+								"rk":            rkHex,
+								"cmx":           cmxHex,
+								"ephemeralKey":  epkHex,
+								"encCiphertext": encHex,
+								"outCiphertext": outHex,
+								"cv":            cvHex,
+							},
+						},
+					},
+				},
+				"error": nil,
+				"id":    req.ID,
+			})
+			return
+		default:
+			t.Fatalf("unexpected method: %q", req.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	got, err := c.GetOrchardAction(context.Background(), txid, 0)
+	if err != nil {
+		t.Fatalf("GetOrchardAction: %v", err)
+	}
+
+	if got.Nullifier[0] != 0x11 {
+		t.Fatalf("nullifier[0] mismatch: got=%x want=11", got.Nullifier[0])
+	}
+	if got.RK[0] != 0x22 {
+		t.Fatalf("rk[0] mismatch: got=%x want=22", got.RK[0])
+	}
+	if got.CMX[0] != 0x33 {
+		t.Fatalf("cmx[0] mismatch: got=%x want=33", got.CMX[0])
+	}
+	if got.EphemeralKey[0] != 0x44 {
+		t.Fatalf("ephemeral_key[0] mismatch: got=%x want=44", got.EphemeralKey[0])
+	}
+	if got.CV[0] != 0x55 {
+		t.Fatalf("cv[0] mismatch: got=%x want=55", got.CV[0])
+	}
+	if got.EncCiphertext[0] != 0x66 || got.EncCiphertext[len(got.EncCiphertext)-1] != 0x66 {
+		t.Fatalf("enc ciphertext decode mismatch")
+	}
+	if got.OutCiphertext[0] != 0x77 || got.OutCiphertext[len(got.OutCiphertext)-1] != 0x77 {
+		t.Fatalf("out ciphertext decode mismatch")
+	}
+}
+
+func TestClient_GetOrchardAction_InvalidActionEncoding(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	txid := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
+	rawHex := strings.Repeat("cd", 100)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		switch req.Method {
+		case "getrawtransaction":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": rawHex,
+				"error":  nil,
+				"id":     req.ID,
+			})
+		case "decoderawtransaction":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": map[string]any{
+					"orchard": map[string]any{
+						"actions": []map[string]any{
+							{
+								"nullifier":     "zz", // invalid hex
+								"rk":            strings.Repeat("22", 32),
+								"cmx":           strings.Repeat("33", 32),
+								"ephemeralKey":  strings.Repeat("44", 32),
+								"encCiphertext": strings.Repeat("66", 580),
+								"outCiphertext": strings.Repeat("77", 80),
+								"cv":            strings.Repeat("55", 32),
+							},
+						},
+					},
+				},
+				"error": nil,
+				"id":    req.ID,
+			})
+		default:
+			t.Fatalf("unexpected method: %q", req.Method)
+		}
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.GetOrchardAction(context.Background(), txid, 0)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "nullifier") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
