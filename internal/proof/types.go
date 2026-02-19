@@ -187,6 +187,7 @@ type FulfillmentMessage struct {
 	JobID          common.Hash
 	RequestID      uint64
 	Seal           []byte
+	Journal        []byte
 	Metadata       map[string]string
 	SubmissionPath string
 }
@@ -205,6 +206,7 @@ func EncodeFulfillmentMessage(msg FulfillmentMessage) ([]byte, error) {
 		JobID          string            `json:"job_id"`
 		RequestID      uint64            `json:"request_id"`
 		Seal           string            `json:"seal"`
+		Journal        string            `json:"journal"`
 		Metadata       map[string]string `json:"metadata,omitempty"`
 		SubmissionPath string            `json:"submission_path,omitempty"`
 	}{
@@ -212,6 +214,7 @@ func EncodeFulfillmentMessage(msg FulfillmentMessage) ([]byte, error) {
 		JobID:          msg.JobID.Hex(),
 		RequestID:      msg.RequestID,
 		Seal:           "0x" + hex.EncodeToString(msg.Seal),
+		Journal:        "0x" + hex.EncodeToString(msg.Journal),
 		Metadata:       cloneMap(msg.Metadata),
 		SubmissionPath: strings.TrimSpace(msg.SubmissionPath),
 	}

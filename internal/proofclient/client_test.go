@@ -170,3 +170,45 @@ func TestQueueClient_RequestProofFulfillmentRejectsInvalidJournal(t *testing.T) 
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
+
+func TestQueueClient_RequestProofFulfillmentRejectsMissingJournal(t *testing.T) {
+	t.Parallel()
+
+	producer := &fakeProducer{}
+	consumer := &fakeConsumer{
+		msgCh: make(chan queue.Message, 1),
+		errCh: make(chan error, 1),
+	}
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic: "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		Producer:     producer,
+		Consumer:     consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+
+	jobID := common.HexToHash("0x4314e7904fd1808ad5a2394a4e8e6cf6ccf8802f27195be7d87da01f5c23a1ee")
+	consumer.msgCh <- queue.Message{
+		Topic: "proof.fulfillments.v1",
+		Value: []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99"}`),
+	}
+
+	_, err = client.RequestProof(context.Background(), Request{
+		JobID:        jobID,
+		Pipeline:     "withdraw",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     time.Now().UTC().Add(time.Minute),
+		Priority:     2,
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "missing fulfillment journal") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}

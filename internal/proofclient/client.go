@@ -186,6 +186,9 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 		if err != nil {
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment seal: %w", err)
 		}
+		if strings.TrimSpace(strings.TrimPrefix(res.Journal, "0x")) == "" {
+			return Result{}, true, fmt.Errorf("proofclient: missing fulfillment journal")
+		}
 		journal, err := decodeHex(res.Journal)
 		if err != nil {
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment journal: %w", err)

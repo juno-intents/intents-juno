@@ -2,6 +2,7 @@ package proof
 
 import (
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -53,5 +54,33 @@ func TestDecodeJobRequest_Invalid(t *testing.T) {
 	_, err := DecodeJobRequest([]byte(`{"job_id":"0x01","pipeline":"","image_id":"0x0","journal":"0x","private_input":"0x","deadline":"bad","priority":-1}`))
 	if !errors.Is(err, ErrInvalidJob) {
 		t.Fatalf("expected ErrInvalidJob, got %v", err)
+	}
+}
+
+func TestEncodeFulfillmentMessage_IncludesJournal(t *testing.T) {
+	t.Parallel()
+
+	payload, err := EncodeFulfillmentMessage(FulfillmentMessage{
+		JobID:     common.HexToHash("0x5a6a8f35ea6fbce9ebc657de70e77bb9b7f2030569f9c6fbf46ba783f913be98"),
+		RequestID: 42,
+		Seal:      []byte{0x99},
+		Journal:   []byte{0x01, 0x02},
+	})
+	if err != nil {
+		t.Fatalf("EncodeFulfillmentMessage: %v", err)
+	}
+
+	var msg struct {
+		Version string `json:"version"`
+		Journal string `json:"journal"`
+	}
+	if err := json.Unmarshal(payload, &msg); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if got, want := msg.Version, "proof.fulfillment.v1"; got != want {
+		t.Fatalf("version: got %q want %q", got, want)
+	}
+	if got, want := msg.Journal, "0x0102"; got != want {
+		t.Fatalf("journal: got %q want %q", got, want)
 	}
 }

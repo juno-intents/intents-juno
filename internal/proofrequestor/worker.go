@@ -162,6 +162,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			JobID:          job.JobID,
 			RequestID:      out.RequestID,
 			Seal:           out.Seal,
+			Journal:        job.Journal,
 			Metadata:       out.Metadata,
 			SubmissionPath: out.SubmissionPath,
 		})

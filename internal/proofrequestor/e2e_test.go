@@ -85,6 +85,7 @@ func TestWorker_E2E_FulfillmentDeterministic(t *testing.T) {
 		JobID     string `json:"job_id"`
 		RequestID uint64 `json:"request_id"`
 		Seal      string `json:"seal"`
+		Journal   string `json:"journal"`
 	}
 	if err := json.Unmarshal([]byte(lines[0]), &msg); err != nil {
 		t.Fatalf("decode output: %v", err)
@@ -97,6 +98,9 @@ func TestWorker_E2E_FulfillmentDeterministic(t *testing.T) {
 	}
 	if msg.RequestID != 1 {
 		t.Fatalf("request id: got %d want 1", msg.RequestID)
+	}
+	if got, want := msg.Journal, "0x01"; got != want {
+		t.Fatalf("journal: got %q want %q", got, want)
 	}
 }
 
