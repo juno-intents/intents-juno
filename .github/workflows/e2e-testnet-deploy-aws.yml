@@ -82,21 +82,6 @@ on:
         description: "S3 bucket for oversized Boundless private inputs"
         required: true
         type: string
-      boundless_input_s3_prefix:
-        description: "S3 key prefix for oversized Boundless private inputs"
-        required: true
-        default: "bridge-e2e/boundless-input"
-        type: string
-      boundless_input_s3_region:
-        description: "Optional AWS region override for oversized Boundless input uploads"
-        required: false
-        default: ""
-        type: string
-      boundless_input_s3_presign_ttl:
-        description: "Presigned URL TTL for oversized Boundless input uploads"
-        required: true
-        default: "2h"
-        type: string
       boundless_min_price_wei:
         description: "Boundless min price in wei"
         required: true
@@ -238,9 +223,6 @@ jobs:
             --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
             --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
             --boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}"
-            --boundless-input-s3-prefix "${{ inputs.boundless_input_s3_prefix }}"
-            --boundless-input-s3-region "${{ inputs.boundless_input_s3_region }}"
-            --boundless-input-s3-presign-ttl "${{ inputs.boundless_input_s3_presign_ttl }}"
             --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
             --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
             --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"
