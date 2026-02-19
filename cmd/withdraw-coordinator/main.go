@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -54,13 +53,12 @@ type withdrawRequestedV1 struct {
 
 const (
 	runtimeModeFull = "full"
-	runtimeModeMock = "mock"
 )
 
 func main() {
 	var (
 		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
-		runtimeMode = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode: full|mock")
+		runtimeMode = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode (production binary supports only: full)")
 
 		maxItems             = flag.Int("max-items", 50, "maximum withdrawals per Juno payout tx")
 		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
@@ -283,95 +281,88 @@ func main() {
 		confirmer   withdrawcoordinator.Confirmer
 		extender    withdrawcoordinator.ExpiryExtender
 	)
-	if mode == runtimeModeFull {
-		planner, err = withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
-			Binary:           *txbuildBin,
-			WalletID:         *junoWalletID,
-			ChangeAddress:    *junoChangeAddress,
-			BaseChainID:      uint32(*baseChainID),
-			BridgeAddress:    common.HexToAddress(*bridgeAddr),
-			CoinType:         uint32(*junoCoinType),
-			Account:          uint32(*junoAccount),
-			MinConfirmations: *junoMinConf,
-			ExpiryOffset:     uint32(*junoExpiryOffset),
-			FeeMultiplier:    *junoFeeMultiplier,
-			FeeAddZat:        *junoFeeAddZat,
-			MinChangeZat:     *junoMinChangeZat,
-			MinNoteZat:       *junoMinNoteZat,
-			RPCURL:           *junoRPCURL,
-			RPCUser:          junoRPCUser,
-			RPCPass:          junoRPCPass,
-			ScanURL:          *junoScanURL,
-			ScanBearerToken:  scanBearerToken,
-		})
-		if err != nil {
-			log.Error("init txbuild planner", "err", err)
-			os.Exit(2)
-		}
+	planner, err = withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
+		Binary:           *txbuildBin,
+		WalletID:         *junoWalletID,
+		ChangeAddress:    *junoChangeAddress,
+		BaseChainID:      uint32(*baseChainID),
+		BridgeAddress:    common.HexToAddress(*bridgeAddr),
+		CoinType:         uint32(*junoCoinType),
+		Account:          uint32(*junoAccount),
+		MinConfirmations: *junoMinConf,
+		ExpiryOffset:     uint32(*junoExpiryOffset),
+		FeeMultiplier:    *junoFeeMultiplier,
+		FeeAddZat:        *junoFeeAddZat,
+		MinChangeZat:     *junoMinChangeZat,
+		MinNoteZat:       *junoMinNoteZat,
+		RPCURL:           *junoRPCURL,
+		RPCUser:          junoRPCUser,
+		RPCPass:          junoRPCPass,
+		ScanURL:          *junoScanURL,
+		ScanBearerToken:  scanBearerToken,
+	})
+	if err != nil {
+		log.Error("init txbuild planner", "err", err)
+		os.Exit(2)
+	}
 
-		tssHTTPClient, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile)
-		if err != nil {
-			log.Error("init tss http client", "err", err)
-			os.Exit(2)
-		}
+	tssHTTPClient, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile)
+	if err != nil {
+		log.Error("init tss http client", "err", err)
+		os.Exit(2)
+	}
 
-		tssOpts := []tss.Option{
-			tss.WithHTTPClient(tssHTTPClient),
-			tss.WithMaxResponseBytes(*tssMaxRespBytes),
-		}
-		if *tssInsecureHTTP {
-			tssOpts = append(tssOpts, tss.WithInsecureHTTP())
-		}
-		signer, err = tss.NewClient(*tssURL, tssOpts...)
-		if err != nil {
-			log.Error("init tss client", "err", err)
-			os.Exit(2)
-		}
+	tssOpts := []tss.Option{
+		tss.WithHTTPClient(tssHTTPClient),
+		tss.WithMaxResponseBytes(*tssMaxRespBytes),
+	}
+	if *tssInsecureHTTP {
+		tssOpts = append(tssOpts, tss.WithInsecureHTTP())
+	}
+	signer, err = tss.NewClient(*tssURL, tssOpts...)
+	if err != nil {
+		log.Error("init tss client", "err", err)
+		os.Exit(2)
+	}
 
-		junoClient, err := junorpc.New(*junoRPCURL, junoRPCUser, junoRPCPass,
-			junorpc.WithTimeout(*junoRPCTimeout),
-			junorpc.WithMaxResponseBytes(*junoRPCMaxResp),
-		)
-		if err != nil {
-			log.Error("init junocashd rpc", "err", err)
-			os.Exit(2)
-		}
+	junoClient, err := junorpc.New(*junoRPCURL, junoRPCUser, junoRPCPass,
+		junorpc.WithTimeout(*junoRPCTimeout),
+		junorpc.WithMaxResponseBytes(*junoRPCMaxResp),
+	)
+	if err != nil {
+		log.Error("init junocashd rpc", "err", err)
+		os.Exit(2)
+	}
 
-		broadcaster, err = withdrawcoordinator.NewJunoBroadcaster(junoClient)
-		if err != nil {
-			log.Error("init juno broadcaster", "err", err)
-			os.Exit(2)
-		}
-		confirmer, err = withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll, *junoConfirmWait)
-		if err != nil {
-			log.Error("init juno confirmer", "err", err)
-			os.Exit(2)
-		}
+	broadcaster, err = withdrawcoordinator.NewJunoBroadcaster(junoClient)
+	if err != nil {
+		log.Error("init juno broadcaster", "err", err)
+		os.Exit(2)
+	}
+	confirmer, err = withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll, *junoConfirmWait)
+	if err != nil {
+		log.Error("init juno confirmer", "err", err)
+		os.Exit(2)
+	}
 
-		baseClient, err := httpapi.NewClient(*baseRelayerURL, baseRelayerAuth, httpapi.WithHTTPClient(&http.Client{Timeout: *baseRelayerTimeout}))
-		if err != nil {
-			log.Error("init base-relayer client", "err", err)
-			os.Exit(2)
-		}
-		extendSigner, err := withdrawcoordinator.NewExecExtendSigner(*extendSignerBin, *extendSignerMaxResp)
-		if err != nil {
-			log.Error("init extend signer", "err", err)
-			os.Exit(2)
-		}
-		extender, err = withdrawcoordinator.NewBaseExpiryExtender(withdrawcoordinator.BaseExpiryExtenderConfig{
-			BaseChainID:   *baseChainID,
-			BridgeAddress: common.HexToAddress(*bridgeAddr),
-			GasLimit:      *extendGasLimit,
-		}, baseClient, extendSigner)
-		if err != nil {
-			log.Error("init expiry extender", "err", err)
-			os.Exit(2)
-		}
-	} else {
-		planner = mockPlanner{}
-		signer = mockSigner{}
-		broadcaster = mockBroadcaster{}
-		confirmer = mockConfirmer{}
+	baseClient, err := httpapi.NewClient(*baseRelayerURL, baseRelayerAuth, httpapi.WithHTTPClient(&http.Client{Timeout: *baseRelayerTimeout}))
+	if err != nil {
+		log.Error("init base-relayer client", "err", err)
+		os.Exit(2)
+	}
+	extendSigner, err := withdrawcoordinator.NewExecExtendSigner(*extendSignerBin, *extendSignerMaxResp)
+	if err != nil {
+		log.Error("init extend signer", "err", err)
+		os.Exit(2)
+	}
+	extender, err = withdrawcoordinator.NewBaseExpiryExtender(withdrawcoordinator.BaseExpiryExtenderConfig{
+		BaseChainID:   *baseChainID,
+		BridgeAddress: common.HexToAddress(*bridgeAddr),
+		GasLimit:      *extendGasLimit,
+	}, baseClient, extendSigner)
+	if err != nil {
+		log.Error("init expiry extender", "err", err)
+		os.Exit(2)
 	}
 
 	var elector *withdrawcoordinator.LeaderElector
@@ -619,38 +610,11 @@ func normalizeRuntimeMode(v string) (string, error) {
 	switch mode {
 	case "", runtimeModeFull:
 		return runtimeModeFull, nil
-	case runtimeModeMock:
-		return runtimeModeMock, nil
+	case "mock":
+		return "", fmt.Errorf("--runtime-mode=mock is not supported in this binary")
 	default:
-		return "", fmt.Errorf("--runtime-mode must be one of: %s, %s", runtimeModeFull, runtimeModeMock)
+		return "", fmt.Errorf("--runtime-mode must be %s", runtimeModeFull)
 	}
-}
-
-type mockPlanner struct{}
-
-func (mockPlanner) Plan(_ context.Context, batchID [32]byte, _ []withdraw.Withdrawal) ([]byte, error) {
-	return []byte("mock-plan-" + hex.EncodeToString(batchID[:])), nil
-}
-
-type mockSigner struct{}
-
-func (mockSigner) Sign(_ context.Context, signingSessionID [32]byte, txPlan []byte) ([]byte, error) {
-	data := append(append([]byte(nil), signingSessionID[:]...), txPlan...)
-	sum := sha256.Sum256(data)
-	return []byte("mock-signed-" + hex.EncodeToString(sum[:])), nil
-}
-
-type mockBroadcaster struct{}
-
-func (mockBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, error) {
-	sum := sha256.Sum256(rawTx)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-type mockConfirmer struct{}
-
-func (mockConfirmer) WaitConfirmed(_ context.Context, _ string) error {
-	return nil
 }
 
 func normalizeBlobDriver(v string) string {

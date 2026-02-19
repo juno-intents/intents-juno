@@ -240,7 +240,7 @@ write_stack_config() {
   rpc_pass="\$(openssl rand -hex 16)"
 
   sudo mkdir -p /etc/intents-juno
-  sudo mkdir -p /var/lib/intents-juno/junocashd /var/lib/intents-juno/juno-scan
+  sudo mkdir -p /var/lib/intents-juno/junocashd /var/lib/intents-juno/juno-scan /var/lib/intents-juno/operator-runtime /var/lib/intents-juno/tss-signer
   sudo chown -R ubuntu:ubuntu /var/lib/intents-juno
 
   cat > /tmp/junocashd.conf <<CFG
@@ -268,6 +268,9 @@ JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
 CHECKPOINT_SIGNER_PRIVATE_KEY=\${checkpoint_key}
 OPERATOR_ADDRESS=\${operator_address}
+TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
+TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
 ENV
   sudo install -m 0600 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
 
@@ -325,10 +328,31 @@ EOF_AGG
   cat > /tmp/intents-juno-tss-host.sh <<'EOF_TSS'
 #!/usr/bin/env bash
 set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+[[ -s "${TSS_SIGNER_UFVK_FILE:-}" ]] || {
+  echo "tss-host signer UFVK file is missing or empty: ${TSS_SIGNER_UFVK_FILE:-unset}" >&2
+  exit 1
+}
+[[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+  echo "tss-host spendauth signer binary is missing or not executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+  exit 1
+}
+[[ -n "${TSS_SIGNER_WORK_DIR:-}" ]] || {
+  echo "tss-host signer work directory is not configured (TSS_SIGNER_WORK_DIR)" >&2
+  exit 1
+}
+mkdir -p "${TSS_SIGNER_WORK_DIR}"
 exec /usr/local/bin/tss-host \
   --listen-addr 127.0.0.1:9443 \
   --insecure-http \
-  --signer-bin /bin/true
+  --signer-bin /usr/local/bin/tss-signer \
+  --signer-arg --ufvk-file \
+  --signer-arg "${TSS_SIGNER_UFVK_FILE}" \
+  --signer-arg --spendauth-signer-bin \
+  --signer-arg "${TSS_SPENDAUTH_SIGNER_BIN}" \
+  --signer-arg --work-dir \
+  --signer-arg "${TSS_SIGNER_WORK_DIR}"
 EOF_TSS
   sudo install -m 0755 /tmp/intents-juno-tss-host.sh /usr/local/bin/intents-juno-tss-host.sh
 
@@ -532,11 +556,11 @@ write_stack_config
 
 sudo systemctl daemon-reload
 sudo systemctl enable junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service
-sudo systemctl restart junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service
+sudo systemctl restart junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service
 
 wait_for_sync_and_record_blockstamp
 
-for svc in junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service; do
+for svc in junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service; do
   sudo systemctl is-active --quiet "\$svc"
 done
 

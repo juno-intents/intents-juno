@@ -1,26 +1,24 @@
 package main
 
 import (
-	"context"
-	"encoding/hex"
+	"strings"
 	"testing"
-
-	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
 func TestNormalizeRuntimeMode(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name    string
-		input   string
-		want    string
-		wantErr bool
+		name        string
+		input       string
+		want        string
+		wantErr     bool
+		errContains string
 	}{
 		{name: "default", input: "", want: runtimeModeFull},
 		{name: "full", input: "full", want: runtimeModeFull},
-		{name: "mock", input: "mock", want: runtimeModeMock},
-		{name: "mixed case", input: " MoCk ", want: runtimeModeMock},
+		{name: "mock is rejected", input: "mock", wantErr: true, errContains: "not supported"},
+		{name: "mixed case mock is rejected", input: " MoCk ", wantErr: true, errContains: "not supported"},
 		{name: "invalid", input: "other", wantErr: true},
 	}
 
@@ -33,6 +31,9 @@ func TestNormalizeRuntimeMode(t *testing.T) {
 				if err == nil {
 					t.Fatalf("expected error")
 				}
+				if tc.errContains != "" && !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tc.errContains)) {
+					t.Fatalf("error mismatch: got=%q want_contains=%q", err.Error(), tc.errContains)
+				}
 				return
 			}
 			if err != nil {
@@ -42,44 +43,5 @@ func TestNormalizeRuntimeMode(t *testing.T) {
 				t.Fatalf("mode mismatch: got=%q want=%q", got, tc.want)
 			}
 		})
-	}
-}
-
-func TestMockCoordinatorComponents(t *testing.T) {
-	t.Parallel()
-
-	planner := mockPlanner{}
-	signer := mockSigner{}
-	broadcaster := mockBroadcaster{}
-	confirmer := mockConfirmer{}
-
-	batchID := [32]byte{1, 2, 3}
-	plan, err := planner.Plan(context.Background(), batchID, []withdraw.Withdrawal{{ID: [32]byte{9}}})
-	if err != nil {
-		t.Fatalf("mock planner: %v", err)
-	}
-	if string(plan) == "" {
-		t.Fatalf("mock planner returned empty plan")
-	}
-
-	sessionID := [32]byte{4, 5, 6}
-	signed, err := signer.Sign(context.Background(), sessionID, plan)
-	if err != nil {
-		t.Fatalf("mock signer: %v", err)
-	}
-	if string(signed) == "" {
-		t.Fatalf("mock signer returned empty signed tx")
-	}
-
-	txid, err := broadcaster.Broadcast(context.Background(), signed)
-	if err != nil {
-		t.Fatalf("mock broadcaster: %v", err)
-	}
-	if _, err := hex.DecodeString(txid); err != nil {
-		t.Fatalf("mock broadcaster txid should be hex: %v", err)
-	}
-
-	if err := confirmer.WaitConfirmed(context.Background(), txid); err != nil {
-		t.Fatalf("mock confirmer: %v", err)
 	}
 }

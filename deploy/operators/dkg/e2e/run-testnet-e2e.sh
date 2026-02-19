@@ -61,6 +61,8 @@ Options:
   --boundless-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
   --boundless-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
   --boundless-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
+  --withdraw-coordinator-tss-url <url> optional tss-host URL override for withdraw coordinator
+                                   (defaults to derived http://<witness-rpc-host>:9443)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
@@ -781,6 +783,15 @@ ensure_recipient_min_balance() {
   return 1
 }
 
+derive_tss_url_from_juno_rpc_url() {
+  local rpc_url="$1"
+  if [[ "$rpc_url" =~ ^https?://([^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
+    printf 'http://%s:9443' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  return 1
+}
+
 command_run() {
   shift || true
 
@@ -829,6 +840,7 @@ command_run() {
   local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
   local boundless_witness_wallet_id=""
   local boundless_witness_metadata_timeout_seconds="900"
+  local withdraw_coordinator_tss_url=""
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -1065,6 +1077,15 @@ command_run() {
         boundless_witness_metadata_timeout_seconds="$2"
         shift 2
         ;;
+      --withdraw-coordinator-tss-url)
+        [[ $# -ge 2 ]] || die "missing value for --withdraw-coordinator-tss-url"
+        withdraw_coordinator_tss_url="$2"
+        shift 2
+        ;;
+      --runtime-mode|--withdraw-coordinator-runtime-mode)
+        [[ $# -ge 2 ]] || die "missing value for $1"
+        die "withdraw coordinator mock runtime is forbidden in live e2e (full mode only)"
+        ;;
       --boundless-requestor-key-file)
         [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
         boundless_requestor_key_file="$2"
@@ -1279,6 +1300,9 @@ command_run() {
   [[ -n "$boundless_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
   [[ -n "$boundless_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
   [[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" ]] || die "JUNO_FUNDER_PRIVATE_KEY_HEX is required for run-generated witness metadata"
+  if [[ "${WITHDRAW_COORDINATOR_RUNTIME_MODE:-full}" != "full" ]]; then
+    die "WITHDRAW_COORDINATOR_RUNTIME_MODE must be full; mock runtime is forbidden"
+  fi
   if [[ -n "$bridge_deposit_final_orchard_root" || -n "$bridge_withdraw_final_orchard_root" || -n "$bridge_deposit_checkpoint_height" || -n "$bridge_deposit_checkpoint_block_hash" || -n "$bridge_withdraw_checkpoint_height" || -n "$bridge_withdraw_checkpoint_block_hash" ]]; then
     die "manual bridge checkpoint/orchard root overrides are not supported when --boundless-input-mode guest-witness-v1"
   fi
@@ -1423,6 +1447,8 @@ command_run() {
   local witness_quorum_validated_count=0
   local witness_quorum_validated="false"
   local witness_metadata_source_operator=""
+  local withdraw_coordinator_juno_wallet_id=""
+  local withdraw_coordinator_juno_change_address=""
   local -a witness_pool_operator_labels=()
   local -a witness_healthy_operator_labels=()
   local -a witness_quorum_operator_labels=()
@@ -1579,9 +1605,10 @@ command_run() {
     boundless_witness_juno_scan_url="$witness_metadata_source_scan_url"
     boundless_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
 
-    local generated_wallet_id generated_deposit_txid generated_deposit_action_index
+    local generated_wallet_id generated_recipient_ua generated_deposit_txid generated_deposit_action_index
     local generated_withdraw_txid generated_withdraw_action_index generated_recipient_raw_address_hex generated_ufvk
     generated_wallet_id="$(jq -r '.wallet_id // empty' "$witness_metadata_json")"
+    generated_recipient_ua="$(jq -r '.recipient_ua // empty' "$witness_metadata_json")"
     generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$witness_metadata_json")"
     generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$witness_metadata_json")"
     generated_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json")"
@@ -1590,6 +1617,7 @@ command_run() {
     generated_ufvk="$(jq -r '.ufvk // empty' "$witness_metadata_json")"
 
     [[ -n "$generated_wallet_id" ]] || die "generated witness metadata missing wallet_id: $witness_metadata_json"
+    [[ -n "$generated_recipient_ua" ]] || die "generated witness metadata missing recipient_ua: $witness_metadata_json"
     [[ -n "$generated_deposit_txid" ]] || die "generated witness metadata missing deposit_txid: $witness_metadata_json"
     [[ "$generated_deposit_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata deposit_action_index is invalid: $generated_deposit_action_index"
     [[ -n "$generated_withdraw_txid" ]] || die "generated witness metadata missing withdraw_txid: $witness_metadata_json"
@@ -1597,6 +1625,8 @@ command_run() {
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
+    withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
+    withdraw_coordinator_juno_change_address="$generated_recipient_ua"
 
     local bridge_deployer_start_nonce bridge_deploy_nonce bridge_predicted_address
     bridge_deployer_start_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
@@ -1799,6 +1829,22 @@ command_run() {
   fi
   [[ -n "$bridge_juno_execution_tx_hash" ]] || \
     die "canonical juno execution tx hash is required from run-generated witness metadata"
+  if [[ -z "$withdraw_coordinator_tss_url" ]]; then
+    withdraw_coordinator_tss_url="$(derive_tss_url_from_juno_rpc_url "$boundless_witness_juno_rpc_url" || true)"
+  fi
+  [[ -n "$withdraw_coordinator_juno_wallet_id" ]] || \
+    die "withdraw coordinator juno wallet id is required from generated witness metadata"
+  [[ -n "$withdraw_coordinator_juno_change_address" ]] || \
+    die "withdraw coordinator juno change address is required from generated witness metadata"
+  [[ -n "$withdraw_coordinator_tss_url" ]] || \
+    die "--withdraw-coordinator-tss-url is required for live withdraw coordinator full mode"
+  local withdraw_coordinator_juno_rpc_user_var withdraw_coordinator_juno_rpc_pass_var
+  withdraw_coordinator_juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
+  withdraw_coordinator_juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+  [[ -n "${!withdraw_coordinator_juno_rpc_user_var:-}" ]] || \
+    die "missing env var for withdraw coordinator Juno RPC user: $withdraw_coordinator_juno_rpc_user_var"
+  [[ -n "${!withdraw_coordinator_juno_rpc_pass_var:-}" ]] || \
+    die "missing env var for withdraw coordinator Juno RPC pass: $withdraw_coordinator_juno_rpc_pass_var"
 
   if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
     bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
@@ -2348,14 +2394,29 @@ command_run() {
 
     (
       cd "$REPO_ROOT"
+      local -a withdraw_coordinator_tss_transport_args=()
+      if [[ "$withdraw_coordinator_tss_url" == http://* ]]; then
+        withdraw_coordinator_tss_transport_args+=(--tss-insecure-http)
+      fi
+      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
       go run ./cmd/withdraw-coordinator \
-        --runtime-mode mock \
         --postgres-dsn "$shared_postgres_dsn" \
         --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
         --queue-driver kafka \
         --queue-brokers "$shared_kafka_brokers" \
         --queue-group "$withdraw_coordinator_group" \
         --queue-topics "$withdraw_request_topic" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+        --juno-change-address "$withdraw_coordinator_juno_change_address" \
+        --tss-url "$withdraw_coordinator_tss_url" \
+        "${withdraw_coordinator_tss_transport_args[@]}" \
+        --base-chain-id "$base_chain_id" \
+        --bridge-address "$deployed_bridge_address" \
+        --base-relayer-url "$base_relayer_url" \
+        --extend-signer-bin "$bridge_operator_signer_bin" \
         --blob-driver memory \
         >"$withdraw_coordinator_log" 2>&1
     ) &

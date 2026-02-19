@@ -655,6 +655,12 @@ required_services=(
   checkpoint-aggregator.service
   tss-host.service
 )
+startup_services=(
+  junocashd.service
+  juno-scan.service
+  checkpoint-signer.service
+  checkpoint-aggregator.service
+)
 
 missing_services=0
 for svc in "\${required_services[@]}"; do
@@ -669,15 +675,20 @@ fi
 
 sudo systemctl daemon-reload
 sudo systemctl enable "\${required_services[@]}"
-sudo systemctl restart "\${required_services[@]}"
+sudo systemctl restart "\${startup_services[@]}"
 
-for svc in "\${required_services[@]}"; do
+for svc in "\${startup_services[@]}"; do
   if ! sudo systemctl is-active --quiet "\$svc"; then
     echo "operator stack service failed to start: \$svc" >&2
     sudo systemctl status "\$svc" --no-pager || true
     exit 1
   fi
 done
+if sudo systemctl is-active --quiet tss-host.service; then
+  echo "tss-host service already active"
+else
+  echo "tss-host startup deferred until signer runtime artifacts are provisioned"
+fi
 EOF
 }
 
@@ -925,6 +936,12 @@ EOF
 )"
   log "running distributed dkg ceremony from runner coordinator"
   ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" "bash -lc $(printf '%q' "$runner_execute_ceremony_script")"
+  local completion_ufvk
+  completion_ufvk="$(
+    ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
+      "jq -r '.ufvk // empty' $(printf '%q' "$completion_report")"
+  )"
+  [[ -n "$completion_ufvk" ]] || die "distributed dkg completion report missing ufvk: $completion_report"
 
   for ((idx = 0; idx < operator_count; idx++)); do
     op_index=$((idx + 1))
@@ -989,6 +1006,22 @@ deploy/operators/dkg/operator-export-kms.sh export \
   --s3-sse-kms-key-id "${dkg_kms_key_arn}" \
   --aws-region "${aws_region}" \
   --skip-aws-preflight >"\$kms_receipt"
+
+[[ -x "\$runtime_dir/bin/dkg-admin" ]] || {
+  echo "spendauth signer binary is missing from operator runtime: \$runtime_dir/bin/dkg-admin" >&2
+  exit 1
+}
+printf '%s\n' '${completion_ufvk}' >"\$runtime_dir/ufvk.txt"
+chmod 0600 "\$runtime_dir/ufvk.txt"
+sudo mkdir -p /var/lib/intents-juno
+sudo ln -sfn "\$runtime_dir" /var/lib/intents-juno/operator-runtime
+sudo chown -h ubuntu:ubuntu /var/lib/intents-juno/operator-runtime
+sudo systemctl restart tss-host.service
+if ! sudo systemctl is-active --quiet tss-host.service; then
+  echo "tss-host failed to start with runtime signer artifacts" >&2
+  sudo systemctl status tss-host.service --no-pager || true
+  exit 1
+fi
 
 deploy/operators/dkg/operator.sh status --workdir "\$runtime_dir" >"\$op_root/status.json"
 EOF
@@ -1836,9 +1869,11 @@ command_run() {
 
   local witness_tunnel_scan_base_port="38080"
   local witness_tunnel_rpc_base_port="38232"
+  local witness_tunnel_tss_base_port="39443"
   local witness_quorum_threshold="3"
   local -a witness_juno_scan_urls=()
   local -a witness_juno_rpc_urls=()
+  local -a witness_tss_urls=()
   local -a witness_operator_labels=()
   local witness_idx witness_operator_private_ip
   for ((witness_idx = 0; witness_idx < ${#operator_private_ips[@]}; witness_idx++)); do
@@ -1846,13 +1881,15 @@ command_run() {
     [[ -n "$witness_operator_private_ip" ]] || die "failed to resolve witness operator private ip for index=$witness_idx"
     witness_juno_scan_urls+=("http://127.0.0.1:$((witness_tunnel_scan_base_port + witness_idx))")
     witness_juno_rpc_urls+=("http://127.0.0.1:$((witness_tunnel_rpc_base_port + witness_idx))")
+    witness_tss_urls+=("http://127.0.0.1:$((witness_tunnel_tss_base_port + witness_idx))")
     witness_operator_labels+=("op$((witness_idx + 1))@${witness_operator_private_ip}")
   done
   (( ${#witness_juno_scan_urls[@]} >= witness_quorum_threshold )) || \
     die "witness endpoint pool must satisfy quorum threshold: endpoints=${#witness_juno_scan_urls[@]} threshold=$witness_quorum_threshold"
-  local witness_juno_scan_url witness_juno_rpc_url
+  local witness_juno_scan_url witness_juno_rpc_url witness_tss_url
   witness_juno_scan_url="${witness_juno_scan_urls[0]}"
   witness_juno_rpc_url="${witness_juno_rpc_urls[0]}"
+  witness_tss_url="${witness_tss_urls[0]}"
   local witness_juno_scan_urls_csv witness_juno_rpc_urls_csv witness_operator_labels_csv
   witness_juno_scan_urls_csv="$(IFS=,; printf '%s' "${witness_juno_scan_urls[*]}")"
   witness_juno_rpc_urls_csv="$(IFS=,; printf '%s' "${witness_juno_rpc_urls[*]}")"
@@ -1896,6 +1933,12 @@ command_run() {
     )
     log "shared service remote args assembled"
   fi
+  if forwarded_arg_value "--runtime-mode" "${e2e_args[@]}" >/dev/null 2>&1; then
+    die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --runtime-mode)"
+  fi
+  if forwarded_arg_value "--withdraw-coordinator-runtime-mode" "${e2e_args[@]}" >/dev/null 2>&1; then
+    die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --withdraw-coordinator-runtime-mode)"
+  fi
   remote_args+=("${e2e_args[@]}")
   if forwarded_arg_value "--boundless-witness-juno-scan-url" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --boundless-witness-juno-scan-url with stack-derived witness tunnel endpoint"
@@ -1915,6 +1958,9 @@ command_run() {
   if forwarded_arg_value "--boundless-witness-quorum-threshold" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --boundless-witness-quorum-threshold with stack-derived witness quorum threshold"
   fi
+  if forwarded_arg_value "--withdraw-coordinator-tss-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --withdraw-coordinator-tss-url with stack-derived witness tunnel endpoint"
+  fi
   remote_args+=(
     "--boundless-witness-juno-scan-url" "$witness_juno_scan_url"
     "--boundless-witness-juno-rpc-url" "$witness_juno_rpc_url"
@@ -1922,6 +1968,7 @@ command_run() {
     "--boundless-witness-juno-rpc-urls" "$witness_juno_rpc_urls_csv"
     "--boundless-witness-operator-labels" "$witness_operator_labels_csv"
     "--boundless-witness-quorum-threshold" "$witness_quorum_threshold"
+    "--withdraw-coordinator-tss-url" "$witness_tss_url"
   )
 
   log "assembling remote e2e arguments"
@@ -1944,6 +1991,8 @@ export JUNO_QUEUE_KAFKA_TLS="${with_shared_services}"
 if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
   export JUNO_SCAN_BEARER_TOKEN="\$(tr -d '\r\n' < .ci/secrets/juno-scan-bearer.txt)"
 fi
+[[ -n "\${JUNO_RPC_USER:-}" ]] || { echo "JUNO_RPC_USER is required for withdraw coordinator full mode" >&2; exit 1; }
+[[ -n "\${JUNO_RPC_PASS:-}" ]] || { echo "JUNO_RPC_PASS is required for withdraw coordinator full mode" >&2; exit 1; }
 export AWS_REGION="${aws_region}"
 export AWS_DEFAULT_REGION="${aws_region}"
 if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
@@ -1962,6 +2011,7 @@ operator_ssh_user="${runner_ssh_user}"
 operator_private_ips=($witness_tunnel_private_ip_joined)
 witness_tunnel_scan_base_port="${witness_tunnel_scan_base_port}"
 witness_tunnel_rpc_base_port="${witness_tunnel_rpc_base_port}"
+witness_tunnel_tss_base_port="${witness_tunnel_tss_base_port}"
 witness_tunnel_quorum="${witness_quorum_threshold}"
 declare -a witness_tunnel_pids=()
 declare -a witness_tunnel_ready_labels=()
@@ -1983,6 +2033,7 @@ for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
   witness_operator_label="op$((op_idx + 1))@${operator_ssh_host}"
   witness_tunnel_scan_port=$((witness_tunnel_scan_base_port + op_idx))
   witness_tunnel_rpc_port=$((witness_tunnel_rpc_base_port + op_idx))
+  witness_tunnel_tss_port=$((witness_tunnel_tss_base_port + op_idx))
   tunnel_log="$remote_workdir/reports/witness-tunnel-op$((op_idx + 1)).log"
 
   ssh \
@@ -1996,6 +2047,7 @@ for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
     -N \
     -L "127.0.0.1:${witness_tunnel_scan_port}:127.0.0.1:8080" \
     -L "127.0.0.1:${witness_tunnel_rpc_port}:127.0.0.1:18232" \
+    -L "127.0.0.1:${witness_tunnel_tss_port}:127.0.0.1:9443" \
     "$operator_ssh_user@$operator_ssh_host" \
     >"$tunnel_log" 2>&1 &
   witness_tunnel_pid=$!
@@ -2007,7 +2059,8 @@ for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
       break
     fi
     if timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_scan_port" >/dev/null 2>&1 \
-      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_rpc_port" >/dev/null 2>&1; then
+      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_rpc_port" >/dev/null 2>&1 \
+      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_tss_port" >/dev/null 2>&1; then
       witness_tunnel_ready="true"
       break
     fi
@@ -2016,9 +2069,9 @@ for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
 
   if [[ "$witness_tunnel_ready" == "true" ]]; then
     witness_tunnel_ready_labels+=("$witness_operator_label")
-    echo "witness tunnel ready for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port"
+    echo "witness tunnel ready for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port tss_port=$witness_tunnel_tss_port"
   else
-    echo "witness tunnel readiness failed for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port" >&2
+    echo "witness tunnel readiness failed for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port tss_port=$witness_tunnel_tss_port" >&2
   fi
 done
 
