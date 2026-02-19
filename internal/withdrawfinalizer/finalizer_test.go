@@ -808,6 +808,15 @@ func TestFinalizer_UsesExtractorWitnessFromBatchTxHashWhenConfigured(t *testing.
 	if got, want := extractor.lastReq.WithdrawalID, w.ID; got != want {
 		t.Fatalf("extractor withdrawal id mismatch")
 	}
+	if !bytes.Equal(extractor.lastReq.RecipientUA, w.RecipientUA) {
+		t.Fatalf("extractor recipient ua mismatch")
+	}
+	if extractor.lastReq.AnchorHeight == nil {
+		t.Fatalf("extractor anchor height was nil")
+	}
+	if got, want := *extractor.lastReq.AnchorHeight, int64(cp.Height); got != want {
+		t.Fatalf("extractor anchor height: got %d want %d", got, want)
+	}
 
 	wantInput, err := proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, [][]byte{extractedWitness})
 	if err != nil {

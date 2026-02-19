@@ -7,8 +7,10 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -22,11 +24,13 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
+	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
 type envelope struct {
@@ -43,6 +47,12 @@ type checkpointPackageV1 struct {
 	CreatedAt       time.Time             `json:"createdAt"`
 }
 
+const (
+	defaultJunoScanBearerEnv = "JUNO_SCAN_BEARER_TOKEN"
+	defaultJunoRPCUserEnv    = "JUNO_RPC_USER"
+	defaultJunoRPCPassEnv    = "JUNO_RPC_PASS"
+)
+
 func main() {
 	var (
 		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
@@ -53,6 +63,13 @@ func main() {
 		threshold       = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 		withdrawImageID = flag.String("withdraw-image-id", "", "withdraw zkVM image id (bytes32 hex, required)")
 		owalletOVK      = flag.String("owallet-ovk", "", "optional 32-byte OWallet OVK hex for binary guest private input mode")
+		witnessExtract  = flag.Bool("withdraw-witness-extractor-enabled", false, "enable withdraw witness extraction from juno batch tx via juno-scan + junocashd (auto-enabled with --owallet-ovk)")
+		junoScanURL     = flag.String("juno-scan-url", "", "juno-scan base URL for witness extraction")
+		junoScanWallet  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet id for witness extraction")
+		junoScanBearer  = flag.String("juno-scan-bearer-env", defaultJunoScanBearerEnv, "env var containing optional juno-scan bearer token for witness extraction")
+		junoRPCURL      = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL for witness extraction")
+		junoRPCUserEnv  = flag.String("juno-rpc-user-env", defaultJunoRPCUserEnv, "env var containing junocashd RPC username for witness extraction")
+		junoRPCPassEnv  = flag.String("juno-rpc-pass-env", defaultJunoRPCPassEnv, "env var containing junocashd RPC password for witness extraction")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
@@ -141,6 +158,24 @@ func main() {
 	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: parse --operators: %v\n", err)
+		os.Exit(2)
+	}
+	extractorCfg := withdrawWitnessExtractorConfig{
+		Enabled:       *witnessExtract || len(owalletOVKBytes) == 32,
+		ScanURL:       *junoScanURL,
+		WalletID:      *junoScanWallet,
+		ScanBearerEnv: *junoScanBearer,
+		RPCURL:        *junoRPCURL,
+		RPCUserEnv:    *junoRPCUserEnv,
+		RPCPassEnv:    *junoRPCPassEnv,
+	}
+	if err := validateWithdrawWitnessExtractorConfig(extractorCfg); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	witnessExtractor, err := newWithdrawWitnessExtractor(extractorCfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: init witness extractor: %v\n", err)
 		os.Exit(2)
 	}
 
@@ -242,6 +277,7 @@ func main() {
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
 		OWalletOVKBytes:     owalletOVKBytes,
+		WitnessExtractor:    witnessExtractor,
 	}, store, leaseStore, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)
@@ -264,6 +300,7 @@ func main() {
 		"blobDriver", normalizeBlobDriver(*blobDriver),
 		"blobBucket", strings.TrimSpace(*blobBucket),
 		"blobPrefix", strings.TrimSpace(*blobPrefix),
+		"witnessExtractorEnabled", extractorCfg.Enabled,
 	)
 
 	t := time.NewTicker(*tickInterval)
@@ -358,6 +395,254 @@ func main() {
 			}
 		}
 	}
+}
+
+type withdrawWitnessExtractorConfig struct {
+	Enabled       bool
+	ScanURL       string
+	WalletID      string
+	ScanBearerEnv string
+	RPCURL        string
+	RPCUserEnv    string
+	RPCPassEnv    string
+}
+
+func validateWithdrawWitnessExtractorConfig(cfg withdrawWitnessExtractorConfig) error {
+	if !cfg.Enabled {
+		return nil
+	}
+	if strings.TrimSpace(cfg.ScanURL) == "" {
+		return fmt.Errorf("--juno-scan-url is required when withdraw witness extractor is enabled")
+	}
+	if strings.TrimSpace(cfg.WalletID) == "" {
+		return fmt.Errorf("--juno-scan-wallet-id is required when withdraw witness extractor is enabled")
+	}
+	if strings.TrimSpace(cfg.RPCURL) == "" {
+		return fmt.Errorf("--juno-rpc-url is required when withdraw witness extractor is enabled")
+	}
+	if strings.TrimSpace(cfg.RPCUserEnv) == "" {
+		return fmt.Errorf("--juno-rpc-user-env is required when withdraw witness extractor is enabled")
+	}
+	if strings.TrimSpace(cfg.RPCPassEnv) == "" {
+		return fmt.Errorf("--juno-rpc-pass-env is required when withdraw witness extractor is enabled")
+	}
+	return nil
+}
+
+func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig) (withdrawfinalizer.WithdrawWitnessExtractor, error) {
+	if err := validateWithdrawWitnessExtractorConfig(cfg); err != nil {
+		return nil, err
+	}
+	if !cfg.Enabled {
+		return nil, nil
+	}
+
+	rpcUserEnv := strings.TrimSpace(cfg.RPCUserEnv)
+	rpcPassEnv := strings.TrimSpace(cfg.RPCPassEnv)
+	rpcUser := strings.TrimSpace(os.Getenv(rpcUserEnv))
+	rpcPass := strings.TrimSpace(os.Getenv(rpcPassEnv))
+	if rpcUser == "" || rpcPass == "" {
+		return nil, fmt.Errorf("missing junocashd RPC credentials in env %s/%s", rpcUserEnv, rpcPassEnv)
+	}
+
+	rpcClient, err := junorpc.New(strings.TrimSpace(cfg.RPCURL), rpcUser, rpcPass)
+	if err != nil {
+		return nil, err
+	}
+
+	scanBearer := strings.TrimSpace(os.Getenv(strings.TrimSpace(cfg.ScanBearerEnv)))
+	scanClient := &scanHTTPClient{
+		baseURL: strings.TrimRight(strings.TrimSpace(cfg.ScanURL), "/"),
+		bearer:  scanBearer,
+		hc:      &http.Client{Timeout: 15 * time.Second},
+	}
+	return &withdrawWitnessExtractor{
+		walletID: strings.TrimSpace(cfg.WalletID),
+		builder:  witnessextract.New(scanClient, rpcClient),
+	}, nil
+}
+
+type withdrawWitnessExtractor struct {
+	walletID string
+	builder  *witnessextract.Builder
+}
+
+func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, req withdrawfinalizer.WithdrawWitnessExtractRequest) ([]byte, error) {
+	if e == nil || e.builder == nil {
+		return nil, fmt.Errorf("withdraw witness extractor: nil builder")
+	}
+	txHash := strings.TrimSpace(req.TxHash)
+	if txHash == "" {
+		return nil, fmt.Errorf("withdraw witness extractor: missing tx hash")
+	}
+	if len(req.RecipientUA) != 43 {
+		return nil, fmt.Errorf("withdraw witness extractor: recipient ua must be 43 bytes, got %d", len(req.RecipientUA))
+	}
+
+	var recipientRaw [43]byte
+	copy(recipientRaw[:], req.RecipientUA)
+
+	out, err := e.builder.BuildWithdraw(ctx, witnessextract.WithdrawRequest{
+		WalletID:            e.walletID,
+		TxID:                txHash,
+		ActionIndex:         req.ActionIndex,
+		AnchorHeight:        req.AnchorHeight,
+		WithdrawalID:        req.WithdrawalID,
+		RecipientRawAddress: recipientRaw,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("withdraw witness extractor: build withdraw witness: %w", err)
+	}
+	if len(out.WitnessItem) == 0 {
+		return nil, fmt.Errorf("withdraw witness extractor: empty witness item")
+	}
+	return append([]byte(nil), out.WitnessItem...), nil
+}
+
+type scanHTTPClient struct {
+	baseURL string
+	bearer  string
+	hc      *http.Client
+}
+
+func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) ([]witnessextract.WalletNote, error) {
+	if c == nil || c.hc == nil {
+		return nil, fmt.Errorf("scan client is nil")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, fmt.Errorf("scan client base URL is empty")
+	}
+	wallet := strings.TrimSpace(walletID)
+	if wallet == "" {
+		return nil, fmt.Errorf("wallet id is empty")
+	}
+
+	cursor := ""
+	seen := map[string]struct{}{}
+	out := make([]witnessextract.WalletNote, 0, 1024)
+	for {
+		path := c.baseURL + "/v1/wallets/" + url.PathEscape(wallet) + "/notes?limit=1000"
+		if cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		body, status, err := c.do(ctx, http.MethodGet, path, nil)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("juno-scan list notes status=%d body=%s", status, strings.TrimSpace(string(body)))
+		}
+
+		var resp struct {
+			Notes []struct {
+				TxID        string `json:"txid"`
+				ActionIndex int32  `json:"action_index"`
+				Position    *int64 `json:"position,omitempty"`
+			} `json:"notes"`
+			NextCursor string `json:"next_cursor"`
+		}
+		if err := json.Unmarshal(body, &resp); err != nil {
+			return nil, fmt.Errorf("decode juno-scan list notes: %w", err)
+		}
+		for _, n := range resp.Notes {
+			out = append(out, witnessextract.WalletNote{
+				TxID:        n.TxID,
+				ActionIndex: n.ActionIndex,
+				Position:    n.Position,
+			})
+		}
+
+		next := strings.TrimSpace(resp.NextCursor)
+		if next == "" {
+			break
+		}
+		if _, ok := seen[next]; ok {
+			return nil, fmt.Errorf("juno-scan list notes cursor did not advance")
+		}
+		seen[next] = struct{}{}
+		cursor = next
+	}
+	return out, nil
+}
+
+func (c *scanHTTPClient) OrchardWitness(ctx context.Context, anchorHeight *int64, positions []uint32) (witnessextract.WitnessResponse, error) {
+	if c == nil || c.hc == nil {
+		return witnessextract.WitnessResponse{}, fmt.Errorf("scan client is nil")
+	}
+
+	reqBody := map[string]any{
+		"positions": positions,
+	}
+	if anchorHeight != nil {
+		reqBody["anchor_height"] = *anchorHeight
+	}
+	raw, err := json.Marshal(reqBody)
+	if err != nil {
+		return witnessextract.WitnessResponse{}, err
+	}
+
+	body, status, err := c.do(ctx, http.MethodPost, c.baseURL+"/v1/orchard/witness", raw)
+	if err != nil {
+		return witnessextract.WitnessResponse{}, err
+	}
+	if status != http.StatusOK {
+		return witnessextract.WitnessResponse{}, fmt.Errorf("juno-scan orchard witness status=%d body=%s", status, strings.TrimSpace(string(body)))
+	}
+
+	var resp struct {
+		AnchorHeight int64 `json:"anchor_height"`
+		Root         string
+		Paths        []struct {
+			Position uint32   `json:"position"`
+			AuthPath []string `json:"auth_path"`
+		} `json:"paths"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return witnessextract.WitnessResponse{}, fmt.Errorf("decode juno-scan orchard witness: %w", err)
+	}
+
+	out := witnessextract.WitnessResponse{
+		AnchorHeight: resp.AnchorHeight,
+		Root:         resp.Root,
+		Paths:        make([]witnessextract.WitnessPath, 0, len(resp.Paths)),
+	}
+	for _, p := range resp.Paths {
+		out.Paths = append(out.Paths, witnessextract.WitnessPath{
+			Position: p.Position,
+			AuthPath: append([]string(nil), p.AuthPath...),
+		})
+	}
+	return out, nil
+}
+
+func (c *scanHTTPClient) do(ctx context.Context, method, endpoint string, body []byte) ([]byte, int, error) {
+	var reader io.Reader
+	if len(body) > 0 {
+		reader = bytes.NewReader(body)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, reader)
+	if err != nil {
+		return nil, 0, err
+	}
+	if len(body) > 0 {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if c.bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+c.bearer)
+	}
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 5<<20))
+	if err != nil {
+		return nil, 0, err
+	}
+	return respBody, resp.StatusCode, nil
 }
 
 func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {

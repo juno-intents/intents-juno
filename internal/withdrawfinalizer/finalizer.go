@@ -36,6 +36,7 @@ type Sender interface {
 type WithdrawWitnessExtractRequest struct {
 	TxHash       string
 	ActionIndex  uint32
+	AnchorHeight *int64
 	WithdrawalID [32]byte
 	RecipientUA  []byte
 }
@@ -270,9 +271,15 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 			if b.JunoTxID == "" {
 				return fmt.Errorf("withdrawfinalizer: missing batch juno txid for witness extraction")
 			}
+			const maxInt64Uint64 = uint64(1<<63 - 1)
+			if cp.Height > maxInt64Uint64 {
+				return fmt.Errorf("withdrawfinalizer: checkpoint height %d exceeds int64 for anchor binding", cp.Height)
+			}
+			anchorHeight := int64(cp.Height)
 			extracted, err := f.witnessExtractor.ExtractWithdrawWitness(ctx, WithdrawWitnessExtractRequest{
 				TxHash:       b.JunoTxID,
 				ActionIndex:  uint32(idx),
+				AnchorHeight: &anchorHeight,
 				WithdrawalID: w.ID,
 				RecipientUA:  append([]byte(nil), w.RecipientUA...),
 			})
