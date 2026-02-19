@@ -268,6 +268,15 @@ JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
 CHECKPOINT_SIGNER_PRIVATE_KEY=\${checkpoint_key}
 OPERATOR_ADDRESS=\${operator_address}
+CHECKPOINT_OPERATORS=\${operator_address}
+CHECKPOINT_THRESHOLD=1
+CHECKPOINT_POSTGRES_DSN=
+CHECKPOINT_KAFKA_BROKERS=
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
+CHECKPOINT_BLOB_BUCKET=
+CHECKPOINT_BLOB_PREFIX=checkpoint-packages
+CHECKPOINT_IPFS_API_URL=
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
 TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
 TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
@@ -294,6 +303,22 @@ EOF_SCAN
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+[[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_SIGNATURE_TOPIC:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_SIGNATURE_TOPIC in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 exec /usr/local/bin/checkpoint-signer \
   --juno-rpc-url http://127.0.0.1:18232 \
   --base-chain-id __BASE_CHAIN_ID__ \
@@ -301,8 +326,11 @@ exec /usr/local/bin/checkpoint-signer \
   --confirmations 1 \
   --poll-interval 15s \
   --owner-id "\$(hostname -s)" \
-  --lease-driver memory \
-  --queue-driver stdio
+  --postgres-dsn "\$CHECKPOINT_POSTGRES_DSN" \
+  --lease-driver postgres \
+  --queue-driver kafka \
+  --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-output-topic "\$CHECKPOINT_SIGNATURE_TOPIC"
 EOF_SIGNER
   sed -i "s/__BASE_CHAIN_ID__/${base_chain_id}/g; s/__BRIDGE_ADDRESS__/${bridge_address}/g" /tmp/intents-juno-checkpoint-signer.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-signer.sh /usr/local/bin/intents-juno-checkpoint-signer.sh
@@ -312,15 +340,46 @@ EOF_SIGNER
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
-tail -f /dev/null | /usr/local/bin/checkpoint-aggregator \
+[[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_BLOB_BUCKET:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_IPFS_API_URL:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_IPFS_API_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_OPERATORS:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "\${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+exec /usr/local/bin/checkpoint-aggregator \
   --base-chain-id __BASE_CHAIN_ID__ \
   --bridge-address __BRIDGE_ADDRESS__ \
-  --operators "\$OPERATOR_ADDRESS" \
-  --threshold 1 \
-  --store-driver memory \
-  --blob-driver memory \
-  --ipfs-enabled=false \
-  --queue-driver stdio
+  --operators "\$CHECKPOINT_OPERATORS" \
+  --threshold "\$CHECKPOINT_THRESHOLD" \
+  --store-driver postgres \
+  --postgres-dsn "\$CHECKPOINT_POSTGRES_DSN" \
+  --blob-driver s3 \
+  --blob-bucket "\$CHECKPOINT_BLOB_BUCKET" \
+  --blob-prefix "\${CHECKPOINT_BLOB_PREFIX:-checkpoint-packages}" \
+  --ipfs-enabled=true \
+  --ipfs-api-url "\$CHECKPOINT_IPFS_API_URL" \
+  --queue-driver kafka \
+  --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-input-topics "\${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
+  --queue-output-topic "\${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}"
 EOF_AGG
   sed -i "s/__BASE_CHAIN_ID__/${base_chain_id}/g; s/__BRIDGE_ADDRESS__/${bridge_address}/g" /tmp/intents-juno-checkpoint-aggregator.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
@@ -556,11 +615,11 @@ write_stack_config
 
 sudo systemctl daemon-reload
 sudo systemctl enable junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service
-sudo systemctl restart junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service
+sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
 
-for svc in junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service; do
+for svc in junocashd.service juno-scan.service; do
   sudo systemctl is-active --quiet "\$svc"
 done
 

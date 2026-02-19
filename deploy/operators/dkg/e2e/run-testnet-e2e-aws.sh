@@ -658,8 +658,6 @@ required_services=(
 startup_services=(
   junocashd.service
   juno-scan.service
-  checkpoint-signer.service
-  checkpoint-aggregator.service
 )
 
 missing_services=0
@@ -689,6 +687,7 @@ if sudo systemctl is-active --quiet tss-host.service; then
 else
   echo "tss-host startup deferred until signer runtime artifacts are provisioned"
 fi
+echo "checkpoint-signer/checkpoint-aggregator startup deferred until shared checkpoint config is provisioned"
 EOF
 }
 
@@ -780,6 +779,11 @@ run_distributed_dkg_backup_restore() {
   local dkg_s3_bucket="${16}"
   local dkg_s3_key_prefix="${17}"
   local aws_region="${18}"
+  local shared_postgres_dsn="${19:-}"
+  local shared_kafka_brokers="${20:-}"
+  local shared_ipfs_api_url="${21:-}"
+  local checkpoint_blob_bucket="${22:-}"
+  local checkpoint_blob_prefix="${23:-}"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -1078,6 +1082,65 @@ EOF
       }')"
     operators_json="$(jq --argjson op "$op_json" '. + [$op]' <<<"$operators_json")"
   done
+
+  if [[ -n "$shared_postgres_dsn" || -n "$shared_kafka_brokers" || -n "$shared_ipfs_api_url" ]]; then
+    [[ -n "$shared_postgres_dsn" ]] || die "shared checkpoint service config missing postgres dsn"
+    [[ -n "$shared_kafka_brokers" ]] || die "shared checkpoint service config missing kafka brokers"
+    [[ -n "$shared_ipfs_api_url" ]] || die "shared checkpoint service config missing ipfs api url"
+    [[ -n "$checkpoint_blob_bucket" ]] || die "shared checkpoint service config missing blob bucket"
+    [[ -n "$checkpoint_blob_prefix" ]] || die "shared checkpoint service config missing blob prefix"
+
+    local checkpoint_operators_csv
+    checkpoint_operators_csv="$(jq -r 'map(.operator_id) | join(",")' <<<"$operators_json")"
+    [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operator set for operator stack config"
+
+    local configure_checkpoint_services_script
+    configure_checkpoint_services_script="$(cat <<EOF
+set -euo pipefail
+env_file="/etc/intents-juno/operator-stack.env"
+tmp_env="\$(mktemp)"
+sudo cp "\$env_file" "\$tmp_env"
+sudo chown "\$(id -u):\$(id -g)" "\$tmp_env"
+chmod 600 "\$tmp_env"
+set_env() {
+  local key="\$1"
+  local value="\$2"
+  local tmp_next
+  tmp_next="\$(mktemp)"
+  grep -v "^\${key}=" "\$tmp_env" >"\$tmp_next" || true
+  printf '%s=%s\n' "\$key" "\$value" >>"\$tmp_next"
+  mv "\$tmp_next" "\$tmp_env"
+}
+set_env CHECKPOINT_POSTGRES_DSN "$shared_postgres_dsn"
+set_env CHECKPOINT_KAFKA_BROKERS "$shared_kafka_brokers"
+set_env CHECKPOINT_IPFS_API_URL "$shared_ipfs_api_url"
+set_env CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
+set_env CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
+set_env CHECKPOINT_OPERATORS "$checkpoint_operators_csv"
+set_env CHECKPOINT_THRESHOLD "$threshold"
+set_env CHECKPOINT_SIGNATURE_TOPIC "checkpoints.signatures.v1"
+set_env CHECKPOINT_PACKAGE_TOPIC "checkpoints.packages.v1"
+sudo install -m 0600 "\$tmp_env" "\$env_file"
+rm -f "\$tmp_env"
+sudo systemctl daemon-reload
+sudo systemctl restart checkpoint-signer.service checkpoint-aggregator.service
+for svc in checkpoint-signer.service checkpoint-aggregator.service; do
+  if ! sudo systemctl is-active --quiet "\$svc"; then
+    echo "operator checkpoint service failed after shared config: \$svc" >&2
+    sudo systemctl status "\$svc" --no-pager || true
+    exit 1
+  fi
+done
+EOF
+)"
+
+    for ((idx = 0; idx < operator_count; idx++)); do
+      op_index=$((idx + 1))
+      op_public_ip="${operator_public_ips[$idx]}"
+      log "configuring checkpoint services on operator host op${op_index} for shared infra"
+      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$configure_checkpoint_services_script")"
+    done
+  fi
 
   ensure_dir "$(dirname "$dkg_summary_local_path")"
   jq -n \
@@ -1793,6 +1856,14 @@ command_run() {
   local dkg_summary_remote_path dkg_summary_local_path
   dkg_summary_remote_path="$remote_workdir/reports/dkg-summary.json"
   dkg_summary_local_path="$artifacts_dir/dkg-summary-distributed.json"
+  local shared_postgres_dsn_for_operator=""
+  local checkpoint_blob_bucket_for_operator=""
+  local checkpoint_blob_prefix_for_operator=""
+  if [[ "$with_shared_services" == "true" ]]; then
+    shared_postgres_dsn_for_operator="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_postgres_endpoint}:${shared_postgres_port}/${shared_postgres_db}?sslmode=require"
+    checkpoint_blob_bucket_for_operator="$dkg_s3_bucket"
+    checkpoint_blob_prefix_for_operator="${dkg_s3_key_prefix_out%/}/checkpoint-packages"
+  fi
 
   run_distributed_dkg_backup_restore \
     "$ssh_key_private" \
@@ -1812,7 +1883,12 @@ command_run() {
     "$dkg_kms_key_arn" \
     "$dkg_s3_bucket" \
     "$dkg_s3_key_prefix_out" \
-    "$aws_region"
+    "$aws_region" \
+    "$shared_postgres_dsn_for_operator" \
+    "$shared_kafka_bootstrap_brokers" \
+    "$shared_ipfs_api_url" \
+    "$checkpoint_blob_bucket_for_operator" \
+    "$checkpoint_blob_prefix_for_operator"
 
   copy_remote_secret_file \
     "$ssh_key_private" \

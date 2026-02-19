@@ -101,7 +101,7 @@ Environment:
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
   2) Juno witness tx generation on the configured Juno RPC + juno-scan endpoints
-  3) Checkpoint quorum startup (N signers from DKG operator keys + threshold aggregator)
+  3) Operator-service checkpoint publication (checkpoint-signer + checkpoint-aggregator on operator hosts)
   4) Shared infra validation (Postgres + Kafka + run-bound checkpoint package pin/fetch via IPFS)
   5) Centralized proof-requestor/proof-funder startup on shared topics
   6) Base testnet deploy bootstrap via cmd/bridge-e2e --deploy-only, then relayer-driven bridge flow
@@ -504,96 +504,6 @@ wait_for_log_pattern() {
     elapsed=$((elapsed + 2))
   done
   return 1
-}
-
-build_checkpoint_package_payload_file() {
-  local base_chain_id="$1"
-  local bridge_contract="$2"
-  local threshold="$3"
-  local dkg_summary="$4"
-  local operator_signer_bin="$5"
-  local checkpoint_height="$6"
-  local checkpoint_block_hash="$7"
-  local checkpoint_final_orchard_root="$8"
-  local output_path="$9"
-
-  [[ "$checkpoint_height" =~ ^[0-9]+$ ]] || die "checkpoint height must be numeric: $checkpoint_height"
-  [[ "$checkpoint_block_hash" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint block hash must be bytes32: $checkpoint_block_hash"
-  [[ "$checkpoint_final_orchard_root" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint final orchard root must be bytes32: $checkpoint_final_orchard_root"
-
-  local eip712_domain_type_hash eip712_name_hash eip712_version_hash checkpoint_type_hash
-  local checkpoint_domain_encoded checkpoint_domain_separator checkpoint_struct_encoded checkpoint_struct_hash checkpoint_digest
-  eip712_domain_type_hash="$(cast keccak "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")"
-  eip712_name_hash="$(cast keccak "WJUNO Bridge")"
-  eip712_version_hash="$(cast keccak "1")"
-  checkpoint_type_hash="$(cast keccak "Checkpoint(uint64 height,bytes32 blockHash,bytes32 finalOrchardRoot,uint256 baseChainId,address bridgeContract)")"
-  checkpoint_domain_encoded="$(cast abi-encode "f(bytes32,bytes32,bytes32,uint256,address)" "$eip712_domain_type_hash" "$eip712_name_hash" "$eip712_version_hash" "$base_chain_id" "$bridge_contract")"
-  checkpoint_domain_separator="$(cast keccak "$checkpoint_domain_encoded")"
-  checkpoint_struct_encoded="$(cast abi-encode "f(bytes32,uint64,bytes32,bytes32,uint256,address)" "$checkpoint_type_hash" "$checkpoint_height" "$checkpoint_block_hash" "$checkpoint_final_orchard_root" "$base_chain_id" "$bridge_contract")"
-  checkpoint_struct_hash="$(cast keccak "$checkpoint_struct_encoded")"
-  checkpoint_digest="$(cast keccak "0x1901${checkpoint_domain_separator#0x}${checkpoint_struct_hash#0x}")"
-  [[ "$checkpoint_digest" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "invalid checkpoint digest: $checkpoint_digest"
-
-  local -a checkpoint_signers=()
-  local -a checkpoint_signatures=()
-  local operator_id operator_endpoint checkpoint_sign_resp checkpoint_sign_status checkpoint_sign_env_status checkpoint_sign_env_err checkpoint_signature_hex
-  while IFS=$'\t' read -r operator_id operator_endpoint; do
-    [[ -n "$operator_id" ]] || continue
-    [[ -n "$operator_endpoint" ]] || die "checkpoint signing missing operator endpoint for operator_id=$operator_id"
-
-    set +e
-    checkpoint_sign_resp="$("$operator_signer_bin" sign-digest --digest "$checkpoint_digest" --json --operator-endpoint "$operator_endpoint" 2>&1)"
-    checkpoint_sign_status=$?
-    set -e
-    (( checkpoint_sign_status == 0 )) || \
-      die "checkpoint signing failed via operator signer for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_resp"
-
-    checkpoint_sign_env_status="$(jq -r '.status // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-    if [[ "$checkpoint_sign_env_status" != "ok" ]]; then
-      checkpoint_sign_env_err="$(jq -r '.error.message // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-      [[ -n "$checkpoint_sign_env_err" ]] || checkpoint_sign_env_err="$checkpoint_sign_resp"
-      die "checkpoint signing returned non-ok status for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_env_err"
-    fi
-
-    checkpoint_signature_hex="$(jq -r '.data.signature // (.data.signatures[0] // empty)' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-    checkpoint_signature_hex="${checkpoint_signature_hex#0x}"
-    [[ "$checkpoint_signature_hex" =~ ^[0-9a-fA-F]{130}$ ]] || \
-      die "checkpoint signing returned invalid signature for operator_id=$operator_id endpoint=$operator_endpoint"
-    checkpoint_signers+=("$operator_id")
-    checkpoint_signatures+=("0x$checkpoint_signature_hex")
-  done < <(jq -r '.operators[] | [(.operator_id | ascii_downcase), (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary" | sort)
-
-  (( ${#checkpoint_signatures[@]} >= threshold )) || \
-    die "checkpoint signatures below threshold: got=${#checkpoint_signatures[@]} threshold=$threshold"
-
-  local signers_json signatures_json
-  signers_json="$(json_array_from_args "${checkpoint_signers[@]}")"
-  signatures_json="$(json_array_from_args "${checkpoint_signatures[@]}")"
-  jq -n \
-    --arg digest "$checkpoint_digest" \
-    --argjson height "$checkpoint_height" \
-    --arg block_hash "$checkpoint_block_hash" \
-    --arg final_orchard_root "$checkpoint_final_orchard_root" \
-    --argjson base_chain_id "$base_chain_id" \
-    --arg bridge_contract "$bridge_contract" \
-    --argjson signers "$signers_json" \
-    --argjson signatures "$signatures_json" \
-    --arg created_at "$(timestamp_utc)" \
-    '{
-      version: "checkpoints.package.v1",
-      digest: $digest,
-      checkpoint: {
-        height: $height,
-        blockHash: $block_hash,
-        finalOrchardRoot: $final_orchard_root,
-        baseChainId: $base_chain_id,
-        bridgeContract: $bridge_contract
-      },
-      operatorSetHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      signers: $signers,
-      signatures: $signatures,
-      createdAt: $created_at
-    }' >"$output_path"
 }
 
 run_with_rpc_retry() {
@@ -1375,7 +1285,7 @@ command_run() {
   local proof_failure_topic="${shared_topic_prefix}.proof.failures.${proof_topic_seed}"
   local proof_requestor_group="${shared_topic_prefix}.proof-requestor.${proof_topic_seed}"
   local proof_bridge_consumer_group="${shared_topic_prefix}.bridge-e2e.${proof_topic_seed}"
-  local checkpoint_package_topic="${shared_topic_prefix}.checkpoints.packages.${proof_topic_seed}"
+  local checkpoint_package_topic="checkpoints.packages.v1"
   local deposit_event_topic="${shared_topic_prefix}.deposits.events.${proof_topic_seed}"
   local withdraw_request_topic="${shared_topic_prefix}.withdrawals.requested.${proof_topic_seed}"
   local deposit_relayer_group="${shared_topic_prefix}.deposit-relayer.${proof_topic_seed}"
@@ -1434,6 +1344,10 @@ command_run() {
   else
     command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
   fi
+
+  local checkpoint_operators_csv
+  checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
+  [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operators from dkg summary"
 
   local base_key
   base_key="$(trimmed_file_value "$base_funder_key_file")"
@@ -1875,151 +1789,9 @@ command_run() {
   (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
 
   if [[ "$shared_enabled" == "true" ]]; then
-    local checkpoint_started_at checkpoint_operators_csv
+    local checkpoint_started_at
     checkpoint_started_at="$(timestamp_utc)"
-    checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
-    [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operators from dkg summary"
-
-    local checkpoint_agg_log checkpoint_agg_pid checkpoint_signatures_fifo
-    checkpoint_agg_log="$workdir/reports/checkpoint-aggregator.log"
-    checkpoint_signatures_fifo="$workdir/reports/checkpoint-signatures.fifo"
-    rm -f "$checkpoint_signatures_fifo"
-    mkfifo "$checkpoint_signatures_fifo"
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/checkpoint-aggregator \
-        --base-chain-id "$base_chain_id" \
-        --bridge-address "$bridge_verifier_address" \
-        --operators "$checkpoint_operators_csv" \
-        --threshold "$threshold" \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --store-driver postgres \
-        --blob-driver memory \
-        --ipfs-enabled=true \
-        --ipfs-api-url "$shared_ipfs_api_url" \
-        --queue-driver stdio \
-        --queue-output-topic "$checkpoint_package_topic" \
-        <"$checkpoint_signatures_fifo" \
-        >"$checkpoint_agg_log" 2>&1
-    ) &
-    checkpoint_agg_pid="$!"
-    exec 3>"$checkpoint_signatures_fifo"
-
-    local checkpoint_rpc_user_var checkpoint_rpc_pass_var checkpoint_rpc_user checkpoint_rpc_pass
-    checkpoint_rpc_user_var="$boundless_witness_juno_rpc_user_env"
-    checkpoint_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
-    checkpoint_rpc_user="${!checkpoint_rpc_user_var:-}"
-    checkpoint_rpc_pass="${!checkpoint_rpc_pass_var:-}"
-    [[ -n "$checkpoint_rpc_user" ]] || die "missing Juno RPC user env var for checkpoint signing: $checkpoint_rpc_user_var"
-    [[ -n "$checkpoint_rpc_pass" ]] || die "missing Juno RPC pass env var for checkpoint signing: $checkpoint_rpc_pass_var"
-
-    local checkpoint_tip_resp checkpoint_tip_error checkpoint_tip_height
-    checkpoint_tip_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblockchaininfo" "[]")"
-    checkpoint_tip_error="$(jq -r '.error.message // empty' <<<"$checkpoint_tip_resp")"
-    [[ -z "$checkpoint_tip_error" ]] || die "checkpoint signing failed to fetch Juno tip: $checkpoint_tip_error"
-    checkpoint_tip_height="$(jq -r '.result.blocks // empty' <<<"$checkpoint_tip_resp")"
-    [[ "$checkpoint_tip_height" =~ ^[0-9]+$ ]] || die "checkpoint signing got invalid Juno tip height: $checkpoint_tip_height"
-    (( checkpoint_tip_height >= 1 )) || die "checkpoint signing requires Juno tip >= 1 (got $checkpoint_tip_height)"
-
-    local checkpoint_height checkpoint_hash_params checkpoint_hash_resp checkpoint_hash_error checkpoint_block_hash_raw
-    checkpoint_height=$((checkpoint_tip_height - 1))
-    checkpoint_hash_params="$(jq -cn --argjson height "$checkpoint_height" '[ $height ]')"
-    checkpoint_hash_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblockhash" "$checkpoint_hash_params")"
-    checkpoint_hash_error="$(jq -r '.error.message // empty' <<<"$checkpoint_hash_resp")"
-    [[ -z "$checkpoint_hash_error" ]] || die "checkpoint signing failed to fetch block hash at height=$checkpoint_height: $checkpoint_hash_error"
-    checkpoint_block_hash_raw="$(jq -r '.result // empty' <<<"$checkpoint_hash_resp")"
-    checkpoint_block_hash_raw="${checkpoint_block_hash_raw#0x}"
-    [[ "$checkpoint_block_hash_raw" =~ ^[0-9a-fA-F]{64}$ ]] || die "checkpoint signing got invalid block hash for height=$checkpoint_height: $checkpoint_block_hash_raw"
-
-    local checkpoint_block_params checkpoint_block_resp checkpoint_block_error checkpoint_block_hash checkpoint_final_orchard_root
-    checkpoint_block_params="$(jq -cn --arg hash "$checkpoint_block_hash_raw" '[ $hash, 1 ]')"
-    checkpoint_block_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblock" "$checkpoint_block_params")"
-    checkpoint_block_error="$(jq -r '.error.message // empty' <<<"$checkpoint_block_resp")"
-    [[ -z "$checkpoint_block_error" ]] || die "checkpoint signing failed to fetch block payload at height=$checkpoint_height: $checkpoint_block_error"
-    checkpoint_block_hash="$(jq -r '.result.hash // empty' <<<"$checkpoint_block_resp")"
-    checkpoint_block_hash="${checkpoint_block_hash#0x}"
-    checkpoint_final_orchard_root="$(jq -r '.result.finalorchardroot // empty' <<<"$checkpoint_block_resp")"
-    checkpoint_final_orchard_root="${checkpoint_final_orchard_root#0x}"
-    [[ "$checkpoint_block_hash" =~ ^[0-9a-fA-F]{64}$ ]] || die "checkpoint signing block payload missing hash for height=$checkpoint_height"
-    [[ "$checkpoint_final_orchard_root" =~ ^[0-9a-fA-F]{64}$ ]] || \
-      die "checkpoint signing block payload missing finalorchardroot for height=$checkpoint_height"
-    checkpoint_block_hash="0x$checkpoint_block_hash"
-    checkpoint_final_orchard_root="0x$checkpoint_final_orchard_root"
-
-    local eip712_domain_type_hash eip712_name_hash eip712_version_hash checkpoint_type_hash
-    local checkpoint_domain_encoded checkpoint_domain_separator checkpoint_struct_encoded checkpoint_struct_hash checkpoint_digest
-    eip712_domain_type_hash="$(cast keccak "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")"
-    eip712_name_hash="$(cast keccak "WJUNO Bridge")"
-    eip712_version_hash="$(cast keccak "1")"
-    checkpoint_type_hash="$(cast keccak "Checkpoint(uint64 height,bytes32 blockHash,bytes32 finalOrchardRoot,uint256 baseChainId,address bridgeContract)")"
-    checkpoint_domain_encoded="$(cast abi-encode "f(bytes32,bytes32,bytes32,uint256,address)" "$eip712_domain_type_hash" "$eip712_name_hash" "$eip712_version_hash" "$base_chain_id" "$bridge_verifier_address")"
-    checkpoint_domain_separator="$(cast keccak "$checkpoint_domain_encoded")"
-    checkpoint_struct_encoded="$(cast abi-encode "f(bytes32,uint64,bytes32,bytes32,uint256,address)" "$checkpoint_type_hash" "$checkpoint_height" "$checkpoint_block_hash" "$checkpoint_final_orchard_root" "$base_chain_id" "$bridge_verifier_address")"
-    checkpoint_struct_hash="$(cast keccak "$checkpoint_struct_encoded")"
-    checkpoint_digest="$(cast keccak "0x1901${checkpoint_domain_separator#0x}${checkpoint_struct_hash#0x}")"
-    [[ "$checkpoint_digest" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint signing produced invalid digest: $checkpoint_digest"
-
-    local checkpoint_signatures_published
-    checkpoint_signatures_published=0
-    local operator_id operator_endpoint checkpoint_sign_resp checkpoint_sign_status checkpoint_sign_env_status checkpoint_sign_env_err checkpoint_signature_hex checkpoint_signed_at checkpoint_signature_payload
-    while IFS=$'\t' read -r operator_id operator_endpoint; do
-      [[ -n "$operator_id" ]] || continue
-      [[ -n "$operator_endpoint" ]] || die "checkpoint signing missing operator endpoint for operator_id=$operator_id"
-
-      set +e
-      checkpoint_sign_resp="$("$bridge_operator_signer_bin" sign-digest --digest "$checkpoint_digest" --json --operator-endpoint "$operator_endpoint" 2>&1)"
-      checkpoint_sign_status=$?
-      set -e
-      (( checkpoint_sign_status == 0 )) || \
-        die "checkpoint signing failed via operator signer for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_resp"
-
-      checkpoint_sign_env_status="$(jq -r '.status // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-      if [[ "$checkpoint_sign_env_status" != "ok" ]]; then
-        checkpoint_sign_env_err="$(jq -r '.error.message // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-        [[ -n "$checkpoint_sign_env_err" ]] || checkpoint_sign_env_err="$checkpoint_sign_resp"
-        die "checkpoint signing returned non-ok status for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_env_err"
-      fi
-
-      checkpoint_signature_hex="$(jq -r '.data.signature // (.data.signatures[0] // empty)' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
-      checkpoint_signature_hex="${checkpoint_signature_hex#0x}"
-      [[ "$checkpoint_signature_hex" =~ ^[0-9a-fA-F]{130}$ ]] || \
-        die "checkpoint signing returned invalid signature for operator_id=$operator_id endpoint=$operator_endpoint"
-      checkpoint_signature_hex="0x$checkpoint_signature_hex"
-
-      checkpoint_signed_at="$(timestamp_utc)"
-      checkpoint_signature_payload="$(
-        jq -cn \
-          --arg operator "$operator_id" \
-          --arg digest "$checkpoint_digest" \
-          --arg signature "$checkpoint_signature_hex" \
-          --arg signed_at "$checkpoint_signed_at" \
-          --argjson checkpoint_height "$checkpoint_height" \
-          --arg checkpoint_block_hash "$checkpoint_block_hash" \
-          --arg checkpoint_final_orchard_root "$checkpoint_final_orchard_root" \
-          --argjson checkpoint_base_chain_id "$base_chain_id" \
-          --arg checkpoint_bridge_contract "$bridge_verifier_address" \
-          '{
-            version: "checkpoints.signature.v1",
-            operator: $operator,
-            digest: $digest,
-            signature: $signature,
-            checkpoint: {
-              height: $checkpoint_height,
-              blockHash: $checkpoint_block_hash,
-              finalOrchardRoot: $checkpoint_final_orchard_root,
-              baseChainId: $checkpoint_base_chain_id,
-              bridgeContract: $checkpoint_bridge_contract
-            },
-            signedAt: $signed_at
-          }'
-      )"
-      printf '%s\n' "$checkpoint_signature_payload" >&3 || die "failed to enqueue checkpoint signature for operator_id=$operator_id"
-      checkpoint_signatures_published=$((checkpoint_signatures_published + 1))
-    done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
-
-    (( checkpoint_signatures_published >= threshold )) || \
-      die "checkpoint signature publication below threshold: got=$checkpoint_signatures_published threshold=$threshold"
-
+    log "validating operator-service checkpoint publication via shared infra"
     local shared_status=0
     set +e
     (
@@ -2037,16 +1809,8 @@ command_run() {
     )
     shared_status="$?"
     set -e
-
-    exec 3>&-
-    kill "$checkpoint_agg_pid" >/dev/null 2>&1 || true
-    wait "$checkpoint_agg_pid" >/dev/null 2>&1 || true
-    rm -f "$checkpoint_signatures_fifo"
-
     if (( shared_status != 0 )); then
-      log "shared infra validation failed; showing checkpoint quorum logs"
-      tail -n 200 "$checkpoint_agg_log" >&2 || true
-      die "shared infra validation failed"
+      die "shared infra validation failed (operator-service checkpoint publication)"
     fi
   fi
 
@@ -2459,46 +2223,6 @@ command_run() {
     if ! kill -0 "$withdraw_finalizer_pid" >/dev/null 2>&1; then
       relayer_status=1
     fi
-  fi
-
-  if (( relayer_status == 0 )); then
-    local checkpoint_package_deposit_payload checkpoint_package_withdraw_payload
-    checkpoint_package_deposit_payload="$workdir/reports/checkpoint-package-deposit.json"
-    checkpoint_package_withdraw_payload="$workdir/reports/checkpoint-package-withdraw.json"
-    build_checkpoint_package_payload_file \
-      "$base_chain_id" \
-      "$deployed_bridge_address" \
-      "$threshold" \
-      "$dkg_summary" \
-      "$bridge_operator_signer_bin" \
-      "$bridge_deposit_checkpoint_height" \
-      "$bridge_deposit_checkpoint_block_hash" \
-      "$bridge_deposit_final_orchard_root" \
-      "$checkpoint_package_deposit_payload"
-    build_checkpoint_package_payload_file \
-      "$base_chain_id" \
-      "$deployed_bridge_address" \
-      "$threshold" \
-      "$dkg_summary" \
-      "$bridge_operator_signer_bin" \
-      "$bridge_withdraw_checkpoint_height" \
-      "$bridge_withdraw_checkpoint_block_hash" \
-      "$bridge_withdraw_final_orchard_root" \
-      "$checkpoint_package_withdraw_payload"
-
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/queue-publish \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --topic "$checkpoint_package_topic" \
-        --payload-file "$checkpoint_package_deposit_payload"
-      go run ./cmd/queue-publish \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --topic "$checkpoint_package_topic" \
-        --payload-file "$checkpoint_package_withdraw_payload"
-    ) || relayer_status=1
   fi
 
   if (( relayer_status == 0 )); then
