@@ -45,6 +45,10 @@ The AWS workflow is designed for high-fidelity live runs on a powerful machine a
 2. `run-testnet-e2e-aws.sh` trap performs destroy on exit.
 3. Workflow fallback step always invokes `run-testnet-e2e-aws.sh cleanup ...` as a second destroy guard.
 
+To snapshot a fully synced `junocashd` host into an AMI for `--operator-ami-id`, use:
+
+- `deploy/shared/runbooks/create-synced-junocashd-ami.sh`
+
 GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
 
 - AWS auth:

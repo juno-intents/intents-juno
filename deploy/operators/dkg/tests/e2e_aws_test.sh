@@ -117,6 +117,17 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$outputs_tf" "output \"dkg_s3_key_prefix\"" "dkg s3 prefix output"
 }
 
+test_synced_junocashd_ami_runbook_exists() {
+  local runbook_text
+  runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/create-synced-junocashd-ami.sh")"
+
+  assert_contains "$runbook_text" "create-synced-junocashd-ami.sh create" "ami runbook usage"
+  assert_contains "$runbook_text" "--instance-id" "ami runbook instance id option"
+  assert_contains "$runbook_text" "--aws-region" "ami runbook aws region option"
+  assert_contains "$runbook_text" "ec2 create-image" "ami runbook create-image call"
+  assert_contains "$runbook_text" "ec2 wait image-available" "ami runbook wait for image availability"
+}
+
 test_aws_wrapper_uses_ssh_keepalive_options() {
   local wrapper_script
   local keepalive_count
@@ -316,6 +327,7 @@ main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_remote_shared_prepare_script_waits_for_services
   test_live_e2e_terraform_supports_operator_instances
+  test_synced_junocashd_ami_runbook_exists
   test_aws_wrapper_uses_ssh_keepalive_options
   test_aws_wrapper_supports_operator_fleet_and_distributed_dkg
   test_aws_wrapper_collects_artifacts_after_remote_failures
