@@ -325,4 +325,3 @@ jobs:
           name: e2e-testnet-deploy-aws
           path: |
             ${{ runner.temp }}/aws-live-e2e/artifacts
-            ${{ runner.temp }}/aws-live-e2e/infra

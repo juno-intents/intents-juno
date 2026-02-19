@@ -35,7 +35,7 @@ Options:
   --bridge-withdraw-checkpoint-height <n> optional in manual witness mode; defaults to deposit checkpoint height
   --bridge-withdraw-checkpoint-block-hash <hex> optional in manual witness mode; defaults to deposit checkpoint block hash
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
-  --bridge-juno-execution-tx-hash <hash> optional canonical Juno execution tx hash reported by bridge-e2e
+  --bridge-juno-execution-tx-hash <hash> optional canonical Juno execution tx hash override
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
                                    (default: <dkg coordinator_workdir>/bin/dkg-admin when available, else dkg-admin)
@@ -89,7 +89,7 @@ Options:
   --boundless-timeout-seconds <s> auction timeout (default: 1500)
   --shared-postgres-dsn <dsn>       shared Postgres DSN (required; proof-requestor/proof-funder store + lease backend)
   --shared-kafka-brokers <list>     shared Kafka brokers CSV (required; centralized proof request/fulfillment topics)
-  --shared-ipfs-api-url <url>       shared IPFS API URL (required; checkpoint package publish/pin verification)
+  --shared-ipfs-api-url <url>       shared IPFS API URL (required; operator checkpoint package pin/fetch verification)
   --shared-ecs-cluster-arn <arn>    shared ECS cluster ARN for centralized proof services (optional; enables ECS-managed proof services)
   --shared-proof-requestor-service-name <name> ECS service name for shared proof-requestor
   --shared-proof-funder-service-name <name> ECS service name for shared proof-funder
@@ -105,7 +105,7 @@ Environment:
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
   2) Base operator pre-funding (optional)
-  3) Shared infra validation (Postgres + Kafka + checkpoint package publish/pin to IPFS)
+  3) Shared infra validation (Postgres + Kafka + operator checkpoint package pin/fetch via IPFS)
   4) Centralized proof-requestor/proof-funder startup on shared topics
   5) Base testnet deploy + bridge flow via cmd/bridge-e2e with centralized Kafka proof jobs
 EOF
@@ -114,6 +114,18 @@ EOF
 trimmed_file_value() {
   local path="$1"
   tr -d '\r\n' <"$path"
+}
+
+redact_dkg_summary_json() {
+  local dkg_summary_path="$1"
+  jq '
+    del(.workdir, .coordinator_workdir, .completion_report)
+    | if (.operators? | type) == "array" then
+        .operators |= map(del(.operator_key_file, .backup_package, .runtime_dir, .registration_file))
+      else
+        .
+      end
+  ' "$dkg_summary_path"
 }
 
 json_array_from_args() {
@@ -350,6 +362,73 @@ is_nonce_race_error() {
   [[ "$lowered" == *"nonce too low"* ]] ||
     [[ "$lowered" == *"replacement transaction underpriced"* ]] ||
     [[ "$lowered" == *"already known"* ]]
+}
+
+juno_tx_already_known_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  [[ "$lowered" == *"already in block chain"* ]] ||
+    [[ "$lowered" == *"already known"* ]] ||
+    [[ "$lowered" == *"txn-already-known"* ]] ||
+    [[ "$lowered" == *"transaction already exists"* ]]
+}
+
+juno_rpc_json_call() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local method="$4"
+  local params_json="$5"
+  local payload
+
+  payload="$(
+    jq -cn \
+      --arg method "$method" \
+      --argjson params "$params_json" \
+      '{jsonrpc: "1.0", id: "testnet-e2e", method: $method, params: $params}'
+  )"
+  curl -fsS \
+    --user "$rpc_user:$rpc_pass" \
+    --header "content-type: application/json" \
+    --data-binary "$payload" \
+    "$rpc_url"
+}
+
+juno_rebroadcast_tx() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local txid_raw="$4"
+  local txid getraw_params getraw_resp getraw_error getraw_result
+  local send_params send_resp send_error send_result
+
+  txid="$(trim "$txid_raw")"
+  txid="${txid#0x}"
+  [[ -n "$txid" ]] || die "cannot rebroadcast Juno tx: empty txid"
+
+  getraw_params="$(jq -cn --arg txid "$txid" '[ $txid, false ]')"
+  getraw_resp="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "getrawtransaction" "$getraw_params")"
+  getraw_error="$(jq -r '.error.message // empty' <<<"$getraw_resp")"
+  if [[ -n "$getraw_error" ]]; then
+    die "failed to fetch raw Juno transaction for txid=$txid: $getraw_error"
+  fi
+  getraw_result="$(jq -r '.result // empty' <<<"$getraw_resp")"
+  [[ "$getraw_result" =~ ^[0-9a-fA-F]+$ ]] || die "invalid raw Juno transaction hex returned for txid=$txid"
+
+  send_params="$(jq -cn --arg raw "$getraw_result" '[ $raw ]')"
+  send_resp="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "sendrawtransaction" "$send_params")"
+  send_error="$(jq -r '.error.message // empty' <<<"$send_resp")"
+  if [[ -n "$send_error" ]]; then
+    if juno_tx_already_known_error "$send_error"; then
+      log "juno tx rebroadcast accepted as already known txid=$txid"
+      return 0
+    fi
+    die "failed to rebroadcast Juno tx txid=$txid: $send_error"
+  fi
+  send_result="$(jq -r '.result // empty' <<<"$send_resp")"
+  [[ -n "$send_result" ]] || die "failed to rebroadcast Juno tx txid=$txid: empty sendrawtransaction result"
+  log "juno tx rebroadcast accepted txid=$send_result"
 }
 
 run_with_rpc_retry() {
@@ -1104,7 +1183,7 @@ command_run() {
 
   [[ -n "$shared_postgres_dsn" ]] || die "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
-  [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (checkpoint package publish/pin verification)"
+  [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (operator checkpoint package pin/fetch verification)"
   [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
   local shared_ecs_enabled="false"
   if [[ -n "$shared_ecs_cluster_arn" || -n "$shared_proof_requestor_service_name" || -n "$shared_proof_funder_service_name" ]]; then
@@ -1129,10 +1208,7 @@ command_run() {
     ensure_command aws
   fi
 
-  local bridge_recipient_key_file="$workdir/reports/bridge-recipient.key"
   local bridge_recipient_key_hex="0x$(openssl rand -hex 32)"
-  printf '%s\n' "$bridge_recipient_key_hex" >"$bridge_recipient_key_file"
-  chmod 0600 "$bridge_recipient_key_file"
   local bridge_recipient_address
   bridge_recipient_address="$(cast wallet address --private-key "$bridge_recipient_key_hex")"
   if [[ -z "$bridge_recipient_address" ]]; then
@@ -1224,6 +1300,29 @@ command_run() {
       bridge_withdraw_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_witness_auto_json")"
     fi
   fi
+
+  if [[ -z "$bridge_juno_execution_tx_hash" && -n "$boundless_withdraw_witness_txid" ]]; then
+    bridge_juno_execution_tx_hash="$boundless_withdraw_witness_txid"
+    log "resolved canonical juno execution tx hash from withdraw witness txid=$bridge_juno_execution_tx_hash"
+  fi
+  if [[ -n "$bridge_juno_execution_tx_hash" && -n "$boundless_witness_juno_rpc_url" ]]; then
+    local juno_rpc_user_var juno_rpc_pass_var juno_rpc_user juno_rpc_pass
+    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
+    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+    juno_rpc_user="${!juno_rpc_user_var:-}"
+    juno_rpc_pass="${!juno_rpc_pass_var:-}"
+    if [[ -n "$juno_rpc_user" && -n "$juno_rpc_pass" ]]; then
+      juno_rebroadcast_tx \
+        "$boundless_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$bridge_juno_execution_tx_hash"
+    else
+      log "skipping juno tx rebroadcast (missing env vars $juno_rpc_user_var/$juno_rpc_pass_var)"
+    fi
+  fi
+  [[ -n "$bridge_juno_execution_tx_hash" ]] || \
+    die "canonical juno execution tx hash is required (set --bridge-juno-execution-tx-hash or provide --boundless-withdraw-witness-txid)"
 
   if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
     bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
@@ -1373,9 +1472,7 @@ command_run() {
   if [[ -n "$bridge_proof_inputs_output" ]]; then
     bridge_args+=("--proof-inputs-output" "$bridge_proof_inputs_output")
   fi
-  if [[ -n "$bridge_juno_execution_tx_hash" ]]; then
-    bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
-  fi
+  bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
   bridge_args+=(
     "--boundless-bin" "$boundless_bin"
     "--boundless-rpc-url" "$boundless_rpc_url"
@@ -1626,6 +1723,12 @@ command_run() {
     die "bridge summary missing juno proof-of-execution tx hash: $bridge_summary"
   fi
 
+  local dkg_report_public_json
+  dkg_report_public_json="$(redact_dkg_summary_json "$dkg_summary")"
+  if [[ "$dkg_summary" == "$workdir/reports/dkg-summary.json" ]]; then
+    printf '%s\n' "$dkg_report_public_json" >"$dkg_summary"
+  fi
+
   local boundless_deposit_ivk_configured="false"
   local boundless_withdraw_ovk_configured="false"
   local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
@@ -1717,7 +1820,7 @@ command_run() {
     --arg juno_tx_hash_source "$juno_tx_hash_source" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
-    --argjson dkg "$(cat "$dkg_summary")" \
+    --argjson dkg "$dkg_report_public_json" \
     --argjson bridge "$(cat "$bridge_summary")" \
     '{
       summary_version: 1,

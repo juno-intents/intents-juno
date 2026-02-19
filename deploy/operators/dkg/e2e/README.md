@@ -12,7 +12,9 @@ Current limitation:
 - The workflow currently executes bridge transactions on Base testnet.
 - It does not yet broadcast Juno-chain deposit/withdraw payout transactions end-to-end from this repo.
 - The Base `finalize_withdraw` tx hash is no longer accepted as a Juno proof surrogate.
-- For now, pass a real Juno execution tx hash with `--bridge-juno-execution-tx-hash` when running `run-testnet-e2e.sh`.
+- `run-testnet-e2e.sh` now auto-resolves the canonical Juno execution tx hash from `--boundless-withdraw-witness-txid` when available.
+- When Juno RPC credentials are provided, `run-testnet-e2e.sh` also performs a `sendrawtransaction` rebroadcast probe for that txid.
+- Use `--bridge-juno-execution-tx-hash` only to override the auto-resolved value.
 - `JUNO_FUNDER_PRIVATE_KEY_HEX` is still required in CI and is reserved for the upcoming Juno-chain execution stage.
 
 ## Scripts
