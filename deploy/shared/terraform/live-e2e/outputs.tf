@@ -24,38 +24,63 @@ output "runner_ssh_user" {
 }
 
 output "shared_services_enabled" {
-  description = "Whether shared services host is provisioned."
+  description = "Whether managed shared services are provisioned."
   value       = var.provision_shared_services
 }
 
-output "shared_instance_id" {
-  description = "Shared services EC2 instance ID."
-  value       = try(aws_instance.shared[0].id, null)
+output "shared_postgres_endpoint" {
+  description = "Aurora Postgres writer endpoint hostname."
+  value       = try(aws_rds_cluster.shared[0].endpoint, null)
 }
 
-output "shared_ami_id" {
-  description = "Shared services AMI ID."
-  value       = try(aws_instance.shared[0].ami, null)
-}
-
-output "shared_public_ip" {
-  description = "Shared services public IPv4 address."
-  value       = try(aws_instance.shared[0].public_ip, null)
-}
-
-output "shared_private_ip" {
-  description = "Shared services private IPv4 address."
-  value       = try(aws_instance.shared[0].private_ip, null)
+output "shared_postgres_reader_endpoint" {
+  description = "Aurora Postgres reader endpoint hostname."
+  value       = try(aws_rds_cluster.shared[0].reader_endpoint, null)
 }
 
 output "shared_postgres_port" {
-  description = "Shared Postgres TCP port."
+  description = "Aurora Postgres TCP port."
   value       = var.shared_postgres_port
 }
 
 output "shared_kafka_port" {
-  description = "Shared Kafka TCP port."
+  description = "MSK plaintext Kafka TCP port."
   value       = var.shared_kafka_port
+}
+
+output "shared_kafka_bootstrap_brokers" {
+  description = "MSK bootstrap brokers (plaintext) as comma-separated host:port values."
+  value       = try(aws_msk_cluster.shared[0].bootstrap_brokers, null)
+}
+
+output "shared_ecs_cluster_arn" {
+  description = "Shared ECS cluster ARN."
+  value       = try(aws_ecs_cluster.shared[0].arn, null)
+}
+
+output "shared_proof_requestor_service_name" {
+  description = "Shared proof-requestor ECS service name."
+  value       = try(aws_ecs_service.proof_requestor[0].name, null)
+}
+
+output "shared_proof_funder_service_name" {
+  description = "Shared proof-funder ECS service name."
+  value       = try(aws_ecs_service.proof_funder[0].name, null)
+}
+
+output "shared_proof_services_ecr_repository_url" {
+  description = "ECR repository URL that stores the shared proof-services image."
+  value       = try(aws_ecr_repository.proof_services[0].repository_url, null)
+}
+
+output "shared_ipfs_nlb_dns" {
+  description = "Internal NLB DNS name fronting the IPFS pinning ASG."
+  value       = try(aws_lb.ipfs[0].dns_name, null)
+}
+
+output "shared_ipfs_api_url" {
+  description = "IPFS API URL exposed by the internal NLB."
+  value       = try("http://${aws_lb.ipfs[0].dns_name}:${var.shared_ipfs_api_port}", null)
 }
 
 output "operator_instance_ids" {
@@ -79,7 +104,7 @@ output "operator_private_ips" {
 }
 
 output "effective_instance_profile" {
-  description = "IAM instance profile attached to runner/operator/shared hosts."
+  description = "IAM instance profile attached to runner/operator/ipfs hosts."
   value       = aws_instance.runner.iam_instance_profile
 }
 

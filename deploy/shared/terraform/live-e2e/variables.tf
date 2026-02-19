@@ -100,64 +100,173 @@ variable "subnet_id" {
 }
 
 variable "iam_instance_profile" {
-  description = "Optional IAM instance profile name attached to the runner."
+  description = "Optional IAM instance profile name attached to runner/operator/shared hosts."
   type        = string
   default     = ""
 }
 
 variable "provision_shared_services" {
-  description = "Whether to provision a shared services EC2 host for Postgres+Kafka."
+  description = "Whether to provision managed shared services (Aurora + MSK + ECS + IPFS)."
   type        = bool
   default     = true
 }
 
 variable "shared_instance_type" {
-  description = "EC2 instance type for the shared services host."
+  description = "EC2 instance type for IPFS pinning nodes in the shared ASG."
   type        = string
   default     = "c7i.large"
 }
 
 variable "shared_ami_id" {
-  description = "Optional custom AMI ID for the shared services host (for pre-baked images)."
+  description = "Optional custom AMI ID for the IPFS pinning ASG instances."
   type        = string
   default     = ""
 }
 
 variable "shared_root_volume_size_gb" {
-  description = "Root EBS size in GiB for the shared services host."
+  description = "Root EBS size in GiB for IPFS pinning ASG instances."
   type        = number
   default     = 100
+
+  validation {
+    condition     = var.shared_root_volume_size_gb >= 20
+    error_message = "shared_root_volume_size_gb must be >= 20."
+  }
 }
 
 variable "shared_postgres_user" {
-  description = "Postgres username on shared services host."
+  description = "Aurora Postgres username for shared e2e validation."
   type        = string
   default     = "postgres"
 }
 
 variable "shared_postgres_password" {
-  description = "Postgres password on shared services host."
+  description = "Aurora Postgres password for shared e2e validation."
   type        = string
   default     = "postgres"
   sensitive   = true
 }
 
 variable "shared_postgres_db" {
-  description = "Postgres database name on shared services host."
+  description = "Aurora Postgres database name for shared e2e validation."
   type        = string
   default     = "intents_e2e"
 }
 
 variable "shared_postgres_port" {
-  description = "Postgres TCP port exposed by the shared services host."
+  description = "Aurora Postgres TCP port exposed to the runner."
   type        = number
   default     = 5432
+
+  validation {
+    condition     = var.shared_postgres_port >= 1 && var.shared_postgres_port <= 65535
+    error_message = "shared_postgres_port must be in the range [1, 65535]."
+  }
+}
+
+variable "shared_aurora_instance_class" {
+  description = "Aurora cluster instance class for live e2e shared services."
+  type        = string
+  default     = "db.t4g.medium"
 }
 
 variable "shared_kafka_port" {
-  description = "Kafka TCP port exposed by the shared services host."
+  description = "MSK plaintext bootstrap TCP port exposed to the runner."
   type        = number
   default     = 9092
+
+  validation {
+    condition     = var.shared_kafka_port == 9092
+    error_message = "shared_kafka_port must be 9092 for MSK plaintext bootstrap brokers."
+  }
+}
+
+variable "shared_msk_kafka_version" {
+  description = "MSK Kafka version for live e2e shared services."
+  type        = string
+  default     = "3.6.0"
+}
+
+variable "shared_msk_broker_instance_type" {
+  description = "MSK broker instance type."
+  type        = string
+  default     = "kafka.t3.small"
+}
+
+variable "shared_msk_broker_ebs_volume_size_gb" {
+  description = "MSK broker EBS volume size in GiB."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.shared_msk_broker_ebs_volume_size_gb >= 1
+    error_message = "shared_msk_broker_ebs_volume_size_gb must be >= 1."
+  }
+}
+
+variable "shared_ecs_desired_count" {
+  description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."
+  type        = number
+  default     = 0
+
+  validation {
+    condition     = var.shared_ecs_desired_count >= 0
+    error_message = "shared_ecs_desired_count must be >= 0."
+  }
+}
+
+variable "shared_ecs_task_cpu" {
+  description = "Fargate CPU units for each shared proof-service task definition."
+  type        = number
+  default     = 256
+}
+
+variable "shared_ecs_task_memory" {
+  description = "Fargate memory (MiB) for each shared proof-service task definition."
+  type        = number
+  default     = 512
+}
+
+variable "shared_proof_service_image" {
+  description = "Container image URI for shared proof services (proof-requestor/proof-funder). If empty, use the Terraform-managed ECR repo with :latest."
+  type        = string
+  default     = ""
+}
+
+variable "shared_boundless_requestor_private_key" {
+  description = "Boundless requestor private key used by shared proof-requestor/proof-funder ECS services (hex, optionally 0x-prefixed)."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "shared_ipfs_min_size" {
+  description = "Minimum size for the shared IPFS pinning autoscaling group."
+  type        = number
+  default     = 1
+}
+
+variable "shared_ipfs_max_size" {
+  description = "Maximum size for the shared IPFS pinning autoscaling group."
+  type        = number
+  default     = 1
+}
+
+variable "shared_ipfs_desired_capacity" {
+  description = "Desired capacity for the shared IPFS pinning autoscaling group."
+  type        = number
+  default     = 1
+}
+
+variable "shared_ipfs_api_port" {
+  description = "TCP port exposed for shared IPFS API access through the internal NLB."
+  type        = number
+  default     = 5001
+
+  validation {
+    condition     = var.shared_ipfs_api_port >= 1 && var.shared_ipfs_api_port <= 65535
+    error_message = "shared_ipfs_api_port must be in the range [1, 65535]."
+  }
 }
 
 variable "dkg_s3_key_prefix" {

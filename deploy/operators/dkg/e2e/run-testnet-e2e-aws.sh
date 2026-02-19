@@ -52,7 +52,7 @@ run options:
   --juno-rpc-user-file <path>          file with junocashd RPC username for witness extraction (required)
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
-  --boundless-requestor-key-file <p>   optional file with Boundless requestor private key hex
+  --boundless-requestor-key-file <p>   required file with Boundless requestor private key hex
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
   --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
@@ -185,6 +185,78 @@ cleanup_trap() {
   if ! terraform_destroy_live_e2e "$cleanup_terraform_dir" "$state_file" "$tfvars_file" "$cleanup_aws_profile" "$cleanup_aws_region"; then
     log "cleanup trap destroy failed (manual cleanup may be required)"
   fi
+}
+
+build_and_push_shared_proof_services_image() {
+  local aws_region="$1"
+  local repository_url="$2"
+  local repo_commit="$3"
+
+  [[ -n "$aws_region" ]] || die "aws region is required to build/push shared proof services image"
+  [[ -n "$repository_url" ]] || die "shared proof services repository url is required"
+  [[ -n "$repo_commit" ]] || die "repo commit is required for image tagging"
+
+  local image_tag
+  image_tag="$(printf '%s' "$repo_commit" | cut -c1-12)"
+  [[ -n "$image_tag" ]] || die "failed to derive image tag from commit"
+
+  local registry_host
+  registry_host="${repository_url%%/*}"
+  [[ -n "$registry_host" ]] || die "failed to derive ecr registry host from repository url: $repository_url"
+
+  log "logging into ecr registry: $registry_host"
+  aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null
+
+  log "building shared proof services image: ${repository_url}:${image_tag}"
+  if docker buildx version >/dev/null 2>&1; then
+    docker buildx build --platform linux/amd64 \
+      --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
+      --tag "${repository_url}:${image_tag}" \
+      --tag "${repository_url}:latest" \
+      --push \
+      "$REPO_ROOT"
+  else
+    log "docker buildx unavailable; falling back to docker build + push"
+    docker build \
+      --platform linux/amd64 \
+      --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
+      --tag "${repository_url}:${image_tag}" \
+      --tag "${repository_url}:latest" \
+      "$REPO_ROOT"
+    docker push "${repository_url}:${image_tag}"
+    docker push "${repository_url}:latest"
+  fi
+
+  printf '%s' "${repository_url}:${image_tag}"
+}
+
+rollout_shared_proof_services() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service="$3"
+  local proof_funder_service="$4"
+  local desired_count="$5"
+
+  [[ -n "$aws_region" ]] || die "aws region is required for shared proof service rollout"
+  [[ -n "$cluster_arn" ]] || die "shared ecs cluster arn is required for shared proof service rollout"
+  [[ -n "$proof_requestor_service" ]] || die "proof-requestor service name is required for shared proof service rollout"
+  [[ -n "$proof_funder_service" ]] || die "proof-funder service name is required for shared proof service rollout"
+
+  log "rolling out shared proof-requestor ecs service"
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_requestor_service" \
+    --desired-count "$desired_count" \
+    --force-new-deployment >/dev/null
+
+  log "rolling out shared proof-funder ecs service"
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_funder_service" \
+    --desired-count "$desired_count" \
+    --force-new-deployment >/dev/null
 }
 
 wait_for_ssh() {
@@ -1175,9 +1247,8 @@ command_run() {
   if [[ -n "$shared_ami_id" && ! "$shared_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--shared-ami-id must look like an AMI id (ami-...)"
   fi
-  if [[ -n "$boundless_requestor_key_file" && ! -f "$boundless_requestor_key_file" ]]; then
-    die "boundless requestor key file not found: $boundless_requestor_key_file"
-  fi
+  [[ -n "$boundless_requestor_key_file" ]] || die "--boundless-requestor-key-file is required"
+  [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
 
   ensure_base_dependencies
   ensure_local_command terraform
@@ -1187,6 +1258,9 @@ command_run() {
   ensure_local_command git
   ensure_local_command ssh-keygen
   ensure_local_command openssl
+  if [[ "$with_shared_services" == "true" ]]; then
+    ensure_local_command docker
+  fi
 
   local dkg_threshold="3"
   local forwarded_operator_count=""
@@ -1238,6 +1312,9 @@ command_run() {
   deployment_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
   local shared_postgres_password
   shared_postgres_password="$(openssl rand -hex 16)"
+  local boundless_requestor_key_hex
+  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
+  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
 
   local tfvars_file state_file
   tfvars_file="$infra_dir/terraform.tfvars.json"
@@ -1269,6 +1346,7 @@ command_run() {
     --arg shared_postgres_user "$shared_postgres_user" \
     --arg shared_postgres_password "$shared_postgres_password" \
     --arg shared_postgres_db "$shared_postgres_db" \
+    --arg shared_boundless_requestor_private_key "$boundless_requestor_key_hex" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
     --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
@@ -1291,6 +1369,7 @@ command_run() {
       shared_postgres_user: $shared_postgres_user,
       shared_postgres_password: $shared_postgres_password,
       shared_postgres_db: $shared_postgres_db,
+      shared_boundless_requestor_private_key: $shared_boundless_requestor_private_key,
       shared_postgres_port: $shared_postgres_port,
       shared_kafka_port: $shared_kafka_port,
       dkg_s3_key_prefix: $dkg_s3_key_prefix
@@ -1323,25 +1402,100 @@ command_run() {
       -raw runner_ssh_user
   )"
 
-  local shared_private_ip=""
-  local shared_public_ip=""
+  local shared_postgres_endpoint=""
+  local shared_kafka_bootstrap_brokers=""
+  local shared_ipfs_api_url=""
+  local shared_ecs_cluster_arn=""
+  local shared_proof_requestor_service_name=""
+  local shared_proof_funder_service_name=""
+  local shared_proof_services_ecr_repository_url=""
   if [[ "$with_shared_services" == "true" ]]; then
-    shared_private_ip="$(
+    shared_postgres_endpoint="$(
       env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
         -chdir="$terraform_dir" \
         output \
         -state="$state_file" \
-        -raw shared_private_ip
+        -raw shared_postgres_endpoint
     )"
-    [[ -n "$shared_private_ip" && "$shared_private_ip" != "null" ]] || die "shared services were requested but terraform output shared_private_ip is empty"
-    shared_public_ip="$(
+    [[ -n "$shared_postgres_endpoint" && "$shared_postgres_endpoint" != "null" ]] || die "shared services were requested but terraform output shared_postgres_endpoint is empty"
+
+    shared_kafka_bootstrap_brokers="$(
       env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
         -chdir="$terraform_dir" \
         output \
         -state="$state_file" \
-        -raw shared_public_ip
+        -raw shared_kafka_bootstrap_brokers
     )"
-    [[ -n "$shared_public_ip" && "$shared_public_ip" != "null" ]] || die "shared services were requested but terraform output shared_public_ip is empty"
+    [[ -n "$shared_kafka_bootstrap_brokers" && "$shared_kafka_bootstrap_brokers" != "null" ]] || die "shared services were requested but terraform output shared_kafka_bootstrap_brokers is empty"
+
+    shared_ipfs_api_url="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_ipfs_api_url
+    )"
+    [[ -n "$shared_ipfs_api_url" && "$shared_ipfs_api_url" != "null" ]] || die "shared services were requested but terraform output shared_ipfs_api_url is empty"
+
+    shared_ecs_cluster_arn="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_ecs_cluster_arn
+    )"
+    [[ -n "$shared_ecs_cluster_arn" && "$shared_ecs_cluster_arn" != "null" ]] || die "shared services were requested but terraform output shared_ecs_cluster_arn is empty"
+
+    shared_proof_requestor_service_name="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_proof_requestor_service_name
+    )"
+    [[ -n "$shared_proof_requestor_service_name" && "$shared_proof_requestor_service_name" != "null" ]] || die "shared services were requested but terraform output shared_proof_requestor_service_name is empty"
+
+    shared_proof_funder_service_name="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_proof_funder_service_name
+    )"
+    [[ -n "$shared_proof_funder_service_name" && "$shared_proof_funder_service_name" != "null" ]] || die "shared services were requested but terraform output shared_proof_funder_service_name is empty"
+
+    shared_proof_services_ecr_repository_url="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_proof_services_ecr_repository_url
+    )"
+    [[ -n "$shared_proof_services_ecr_repository_url" && "$shared_proof_services_ecr_repository_url" != "null" ]] || die "shared services were requested but terraform output shared_proof_services_ecr_repository_url is empty"
+
+    local shared_postgres_port_out
+    shared_postgres_port_out="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_postgres_port
+    )"
+    if [[ -n "$shared_postgres_port_out" && "$shared_postgres_port_out" != "null" ]]; then
+      shared_postgres_port="$shared_postgres_port_out"
+    fi
+
+    local shared_kafka_port_out
+    shared_kafka_port_out="$(
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+        -chdir="$terraform_dir" \
+        output \
+        -state="$state_file" \
+        -raw shared_kafka_port
+    )"
+    if [[ -n "$shared_kafka_port_out" && "$shared_kafka_port_out" != "null" ]]; then
+      shared_kafka_port="$shared_kafka_port_out"
+    fi
   fi
 
   local operator_public_ips_json operator_private_ips_json
@@ -1393,26 +1547,28 @@ command_run() {
   [[ -n "$dkg_s3_bucket" && "$dkg_s3_bucket" != "null" ]] || die "terraform output dkg_s3_bucket is empty"
   [[ -n "$dkg_s3_key_prefix_out" && "$dkg_s3_key_prefix_out" != "null" ]] || die "terraform output dkg_s3_key_prefix is empty"
 
-  if [[ "$with_shared_services" == "true" ]]; then
-    wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$shared_public_ip"
-    if ! remote_prepare_shared_host \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$shared_public_ip" \
-      "$shared_private_ip" \
-      "$shared_postgres_user" \
-      "$shared_postgres_password" \
-      "$shared_postgres_db" \
-      "$shared_postgres_port" \
-      "$shared_kafka_port"; then
-      die "failed to prepare shared services host"
-    fi
-  fi
-
   wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$runner_public_ip"
 
   local repo_commit
   repo_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  if [[ "$with_shared_services" == "true" ]]; then
+    local shared_proof_services_image
+    shared_proof_services_image="$(
+      build_and_push_shared_proof_services_image \
+        "$aws_region" \
+        "$shared_proof_services_ecr_repository_url" \
+        "$repo_commit"
+    )"
+    log "shared proof services image pushed: $shared_proof_services_image"
+
+    rollout_shared_proof_services \
+      "$aws_region" \
+      "$shared_ecs_cluster_arn" \
+      "$shared_proof_requestor_service_name" \
+      "$shared_proof_funder_service_name" \
+      "0"
+  fi
+
   log "preparing remote runner host"
   remote_prepare_runner "$ssh_key_private" "$runner_ssh_user" "$runner_public_ip" "$repo_commit"
 
@@ -1512,17 +1668,21 @@ command_run() {
       "$ssh_key_private" \
       "$runner_ssh_user" \
       "$runner_public_ip" \
-      "$shared_private_ip" \
+      "$shared_postgres_endpoint" \
       "$shared_postgres_port" \
-      "$shared_kafka_port"
+      "$shared_kafka_bootstrap_brokers"
 
     local shared_postgres_dsn shared_kafka_brokers
     log "assembling shared service remote args"
-    shared_postgres_dsn="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_private_ip}:${shared_postgres_port}/${shared_postgres_db}?sslmode=disable"
-    shared_kafka_brokers="${shared_private_ip}:${shared_kafka_port}"
+    shared_postgres_dsn="postgres://${shared_postgres_user}:${shared_postgres_password}@${shared_postgres_endpoint}:${shared_postgres_port}/${shared_postgres_db}?sslmode=require"
+    shared_kafka_brokers="$shared_kafka_bootstrap_brokers"
     remote_args+=(
       "--shared-postgres-dsn" "$shared_postgres_dsn"
       "--shared-kafka-brokers" "$shared_kafka_brokers"
+      "--shared-ipfs-api-url" "$shared_ipfs_api_url"
+      "--shared-ecs-cluster-arn" "$shared_ecs_cluster_arn"
+      "--shared-proof-requestor-service-name" "$shared_proof_requestor_service_name"
+      "--shared-proof-funder-service-name" "$shared_proof_funder_service_name"
     )
     log "shared service remote args assembled"
   fi
@@ -1614,21 +1774,16 @@ EOF
   summary_path="$artifacts_dir/reports/testnet-e2e-summary.json"
   if [[ -f "$summary_path" ]]; then
     local juno_tx_hash
-    juno_tx_hash="$(
-      jq -r '[
-        .juno.tx_hash?,
-        .bridge.report.juno.proof_of_execution.tx_hash?,
-        .bridge.report.juno.tx_hash?,
-        .bridge.report.juno.txid?,
-        .bridge.report.withdraw.juno_tx_hash?,
-        .bridge.report.withdraw.juno_txid?,
-        .bridge.report.transactions.juno_withdraw?,
-        .bridge.report.transactions.juno_broadcast?,
-        .bridge.report.transactions.finalize_withdraw?
-      ] | map(select(type == "string" and length > 0)) | .[0] // ""' "$summary_path" 2>/dev/null || true
-    )"
+    local juno_tx_hash_source
+    local juno_tx_hash_expected_source="input.juno_execution_tx_hash"
+    juno_tx_hash="$(jq -r '.juno.tx_hash? // .bridge.report.juno.proof_of_execution.tx_hash? // ""' "$summary_path" 2>/dev/null || true)"
+    juno_tx_hash_source="$(jq -r '.juno.tx_hash_source? // .bridge.report.juno.proof_of_execution.source? // ""' "$summary_path" 2>/dev/null || true)"
     if [[ -n "$juno_tx_hash" ]]; then
-      log "juno_tx_hash=$juno_tx_hash"
+      if [[ "$juno_tx_hash_source" != "$juno_tx_hash_expected_source" ]]; then
+        log "juno_tx_hash=$juno_tx_hash source=$juno_tx_hash_source expected_source=$juno_tx_hash_expected_source"
+      else
+        log "juno_tx_hash=$juno_tx_hash source=$juno_tx_hash_source"
+      fi
     else
       log "juno_tx_hash=unavailable"
     fi

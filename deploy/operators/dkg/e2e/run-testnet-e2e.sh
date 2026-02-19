@@ -28,8 +28,17 @@ Options:
   --bridge-verifier-address <addr> required verifier router address for proof verification
   --bridge-deposit-image-id <hex>  required deposit image ID (bytes32 hex)
   --bridge-withdraw-image-id <hex> required withdraw image ID (bytes32 hex)
+  --bridge-deposit-final-orchard-root <hex> required in manual witness mode; checkpoint root for deposit proof
+  --bridge-withdraw-final-orchard-root <hex> optional in manual witness mode; defaults to deposit root
+  --bridge-deposit-checkpoint-height <n> required in manual witness mode; Juno height for deposit checkpoint
+  --bridge-deposit-checkpoint-block-hash <hex> required in manual witness mode; Juno block hash for deposit checkpoint
+  --bridge-withdraw-checkpoint-height <n> optional in manual witness mode; defaults to deposit checkpoint height
+  --bridge-withdraw-checkpoint-block-hash <hex> optional in manual witness mode; defaults to deposit checkpoint block hash
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
+  --bridge-juno-execution-tx-hash <hash> optional canonical Juno execution tx hash reported by bridge-e2e
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
+  --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
+                                   (default: <dkg coordinator_workdir>/bin/dkg-admin when available, else dkg-admin)
   --boundless-bin <path>           boundless binary (default: boundless)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
   --boundless-market-address <addr> boundless market contract address
@@ -78,8 +87,12 @@ Options:
   --boundless-ramp-up-period-seconds <s> auction ramp period (default: 170)
   --boundless-lock-timeout-seconds <s> auction lock timeout (default: 625)
   --boundless-timeout-seconds <s> auction timeout (default: 1500)
-  --shared-postgres-dsn <dsn>       optional shared Postgres DSN for infra validation
-  --shared-kafka-brokers <list>     optional shared Kafka brokers CSV for infra validation
+  --shared-postgres-dsn <dsn>       shared Postgres DSN (required; proof-requestor/proof-funder store + lease backend)
+  --shared-kafka-brokers <list>     shared Kafka brokers CSV (required; centralized proof request/fulfillment topics)
+  --shared-ipfs-api-url <url>       shared IPFS API URL (required; checkpoint package publish/pin verification)
+  --shared-ecs-cluster-arn <arn>    shared ECS cluster ARN for centralized proof services (optional; enables ECS-managed proof services)
+  --shared-proof-requestor-service-name <name> ECS service name for shared proof-requestor
+  --shared-proof-funder-service-name <name> ECS service name for shared proof-funder
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
   --shared-timeout <duration>       shared infra validation timeout (default: 90s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
@@ -92,13 +105,230 @@ Environment:
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
   2) Base operator pre-funding (optional)
-  3) Base testnet deploy + bridge flow via cmd/bridge-e2e with real Boundless proofs
+  3) Shared infra validation (Postgres + Kafka + checkpoint package publish/pin to IPFS)
+  4) Centralized proof-requestor/proof-funder startup on shared topics
+  5) Base testnet deploy + bridge flow via cmd/bridge-e2e with centralized Kafka proof jobs
 EOF
 }
 
 trimmed_file_value() {
   local path="$1"
   tr -d '\r\n' <"$path"
+}
+
+json_array_from_args() {
+  jq -n --args "$@" '$ARGS.positional'
+}
+
+resolve_aws_region() {
+  local aws_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
+  [[ -n "$aws_region" ]] || die "AWS_REGION or AWS_DEFAULT_REGION is required for shared ECS proof services"
+  printf '%s' "$aws_region"
+}
+
+ecs_register_service_task_definition() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local service_name="$3"
+  local container_name="$4"
+  local command_json="$5"
+
+  local service_json task_definition_arn task_definition_json register_input
+  service_json="$(
+    aws ecs describe-services \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --services "$service_name"
+  )"
+  task_definition_arn="$(jq -r '.services[0].taskDefinition // empty' <<<"$service_json")"
+  [[ -n "$task_definition_arn" ]] || die "failed to resolve task definition for ecs service: $service_name"
+
+  task_definition_json="$(
+    aws ecs describe-task-definition \
+      --region "$aws_region" \
+      --task-definition "$task_definition_arn"
+  )"
+
+  register_input="$(
+    jq \
+      --arg container_name "$container_name" \
+      --argjson command "$command_json" \
+      '
+        .taskDefinition
+        | .containerDefinitions = (
+            .containerDefinitions
+            | map(
+                if .name == $container_name then
+                  .command = $command
+                else
+                  .
+                end
+              )
+          )
+        | del(
+            .taskDefinitionArn,
+            .revision,
+            .status,
+            .requiresAttributes,
+            .compatibilities,
+            .registeredAt,
+            .registeredBy,
+            .deregisteredAt
+          )
+      ' <<<"$task_definition_json"
+  )"
+
+  aws ecs register-task-definition \
+    --region "$aws_region" \
+    --cli-input-json "$register_input" \
+    | jq -r '.taskDefinition.taskDefinitionArn // empty'
+}
+
+ecs_service_log_group() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local service_name="$3"
+  local container_name="$4"
+
+  local service_json task_definition_arn task_definition_json
+  service_json="$(
+    aws ecs describe-services \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --services "$service_name"
+  )"
+  task_definition_arn="$(jq -r '.services[0].taskDefinition // empty' <<<"$service_json")"
+  [[ -n "$task_definition_arn" ]] || return 0
+
+  task_definition_json="$(
+    aws ecs describe-task-definition \
+      --region "$aws_region" \
+      --task-definition "$task_definition_arn"
+  )"
+
+  jq -r \
+    --arg container_name "$container_name" \
+    '.taskDefinition.containerDefinitions[] | select(.name == $container_name) | .logConfiguration.options["awslogs-group"] // empty' \
+    <<<"$task_definition_json"
+}
+
+rollout_shared_proof_services_ecs() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+  local proof_requestor_command_json="$5"
+  local proof_funder_command_json="$6"
+
+  local requestor_task_definition_arn funder_task_definition_arn
+  requestor_task_definition_arn="$(
+    ecs_register_service_task_definition \
+      "$aws_region" \
+      "$cluster_arn" \
+      "$proof_requestor_service_name" \
+      "proof-requestor" \
+      "$proof_requestor_command_json"
+  )"
+  [[ -n "$requestor_task_definition_arn" ]] || die "failed to register proof-requestor task definition revision"
+
+  funder_task_definition_arn="$(
+    ecs_register_service_task_definition \
+      "$aws_region" \
+      "$cluster_arn" \
+      "$proof_funder_service_name" \
+      "proof-funder" \
+      "$proof_funder_command_json"
+  )"
+  [[ -n "$funder_task_definition_arn" ]] || die "failed to register proof-funder task definition revision"
+
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_requestor_service_name" \
+    --task-definition "$requestor_task_definition_arn" \
+    --desired-count 1 \
+    --force-new-deployment >/dev/null
+
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_funder_service_name" \
+    --task-definition "$funder_task_definition_arn" \
+    --desired-count 1 \
+    --force-new-deployment >/dev/null
+
+  aws ecs wait services-stable \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --services "$proof_requestor_service_name" "$proof_funder_service_name"
+}
+
+scale_shared_proof_services_ecs() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+  local desired_count="$5"
+
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_requestor_service_name" \
+    --desired-count "$desired_count" >/dev/null
+
+  aws ecs update-service \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --service "$proof_funder_service_name" \
+    --desired-count "$desired_count" >/dev/null
+
+  aws ecs wait services-stable \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --services "$proof_requestor_service_name" "$proof_funder_service_name"
+}
+
+dump_shared_proof_services_ecs_logs() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+
+  local requestor_log_group funder_log_group
+  requestor_log_group="$(
+    ecs_service_log_group \
+      "$aws_region" \
+      "$cluster_arn" \
+      "$proof_requestor_service_name" \
+      "proof-requestor"
+  )"
+  funder_log_group="$(
+    ecs_service_log_group \
+      "$aws_region" \
+      "$cluster_arn" \
+      "$proof_funder_service_name" \
+      "proof-funder"
+  )"
+
+  if [[ -n "$requestor_log_group" ]]; then
+    log "tailing shared proof-requestor ecs logs from $requestor_log_group"
+    aws logs tail "$requestor_log_group" --region "$aws_region" --since 30m --format short | tail -n 200 >&2 || true
+  fi
+  if [[ -n "$funder_log_group" ]]; then
+    log "tailing shared proof-funder ecs logs from $funder_log_group"
+    aws logs tail "$funder_log_group" --region "$aws_region" --since 30m --format short | tail -n 200 >&2 || true
+  fi
+
+  aws ecs describe-services \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --services "$proof_requestor_service_name" "$proof_funder_service_name" \
+    | jq -r '
+      .services[]
+      | .serviceName as $name
+      | (.events // [])[:5][]
+      | "[\($name)] \(.createdAt) \(.message)"
+    ' >&2 || true
 }
 
 is_transient_rpc_error() {
@@ -325,9 +555,18 @@ command_run() {
   local bridge_verifier_address=""
   local bridge_deposit_image_id=""
   local bridge_withdraw_image_id=""
+  local bridge_deposit_final_orchard_root=""
+  local bridge_withdraw_final_orchard_root=""
+  local bridge_deposit_checkpoint_height=""
+  local bridge_deposit_checkpoint_block_hash=""
+  local bridge_withdraw_checkpoint_height=""
+  local bridge_withdraw_checkpoint_block_hash=""
   local bridge_proof_inputs_output=""
+  local bridge_juno_execution_tx_hash=""
   local bridge_run_timeout=""
+  local bridge_operator_signer_bin=""
   local boundless_auto="true"
+  local boundless_proof_submission_mode="queue"
   local boundless_bin="boundless"
   local boundless_rpc_url="https://mainnet.base.org"
   local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
@@ -370,6 +609,10 @@ command_run() {
   local boundless_timeout_seconds="1500"
   local shared_postgres_dsn=""
   local shared_kafka_brokers=""
+  local shared_ipfs_api_url=""
+  local shared_ecs_cluster_arn=""
+  local shared_proof_requestor_service_name=""
+  local shared_proof_funder_service_name=""
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="90s"
   local shared_output=""
@@ -443,14 +686,54 @@ command_run() {
         bridge_withdraw_image_id="$2"
         shift 2
         ;;
+      --bridge-deposit-final-orchard-root)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-final-orchard-root"
+        bridge_deposit_final_orchard_root="$2"
+        shift 2
+        ;;
+      --bridge-withdraw-final-orchard-root)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-final-orchard-root"
+        bridge_withdraw_final_orchard_root="$2"
+        shift 2
+        ;;
+      --bridge-deposit-checkpoint-height)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-checkpoint-height"
+        bridge_deposit_checkpoint_height="$2"
+        shift 2
+        ;;
+      --bridge-deposit-checkpoint-block-hash)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-deposit-checkpoint-block-hash"
+        bridge_deposit_checkpoint_block_hash="$2"
+        shift 2
+        ;;
+      --bridge-withdraw-checkpoint-height)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-checkpoint-height"
+        bridge_withdraw_checkpoint_height="$2"
+        shift 2
+        ;;
+      --bridge-withdraw-checkpoint-block-hash)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-withdraw-checkpoint-block-hash"
+        bridge_withdraw_checkpoint_block_hash="$2"
+        shift 2
+        ;;
       --bridge-proof-inputs-output)
         [[ $# -ge 2 ]] || die "missing value for --bridge-proof-inputs-output"
         bridge_proof_inputs_output="$2"
         shift 2
         ;;
+      --bridge-juno-execution-tx-hash)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-juno-execution-tx-hash"
+        bridge_juno_execution_tx_hash="$2"
+        shift 2
+        ;;
       --bridge-run-timeout)
         [[ $# -ge 2 ]] || die "missing value for --bridge-run-timeout"
         bridge_run_timeout="$2"
+        shift 2
+        ;;
+      --bridge-operator-signer-bin)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-operator-signer-bin"
+        bridge_operator_signer_bin="$2"
         shift 2
         ;;
       --boundless-bin)
@@ -663,6 +946,26 @@ command_run() {
         shared_kafka_brokers="$2"
         shift 2
         ;;
+      --shared-ipfs-api-url)
+        [[ $# -ge 2 ]] || die "missing value for --shared-ipfs-api-url"
+        shared_ipfs_api_url="$2"
+        shift 2
+        ;;
+      --shared-ecs-cluster-arn)
+        [[ $# -ge 2 ]] || die "missing value for --shared-ecs-cluster-arn"
+        shared_ecs_cluster_arn="$2"
+        shift 2
+        ;;
+      --shared-proof-requestor-service-name)
+        [[ $# -ge 2 ]] || die "missing value for --shared-proof-requestor-service-name"
+        shared_proof_requestor_service_name="$2"
+        shift 2
+        ;;
+      --shared-proof-funder-service-name)
+        [[ $# -ge 2 ]] || die "missing value for --shared-proof-funder-service-name"
+        shared_proof_funder_service_name="$2"
+        shift 2
+        ;;
       --shared-topic-prefix)
         [[ $# -ge 2 ]] || die "missing value for --shared-topic-prefix"
         shared_topic_prefix="$2"
@@ -715,6 +1018,8 @@ command_run() {
   [[ "$boundless_ramp_up_period_seconds" =~ ^[0-9]+$ ]] || die "--boundless-ramp-up-period-seconds must be numeric"
   [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
   [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
+  [[ -z "$bridge_deposit_checkpoint_height" || "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-deposit-checkpoint-height must be numeric"
+  [[ -z "$bridge_withdraw_checkpoint_height" || "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-withdraw-checkpoint-height must be numeric"
   (( boundless_max_price_cap_wei >= boundless_max_price_wei )) || die "--boundless-max-price-cap-wei must be >= --boundless-max-price-wei"
   if [[ "$boundless_input_mode" != "guest-witness-v1" ]]; then
     die "--boundless-input-mode must be guest-witness-v1"
@@ -779,6 +1084,12 @@ command_run() {
     for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
       [[ -f "$witness_file" ]] || die "boundless withdraw witness item file not found: $witness_file"
     done
+    [[ -n "$bridge_deposit_final_orchard_root" ]] || \
+      die "--bridge-deposit-final-orchard-root is required when witness files are provided"
+    [[ -n "$bridge_deposit_checkpoint_height" ]] || \
+      die "--bridge-deposit-checkpoint-height is required when witness files are provided"
+    [[ -n "$bridge_deposit_checkpoint_block_hash" ]] || \
+      die "--bridge-deposit-checkpoint-block-hash is required when witness files are provided"
   fi
 
   if [[ -z "$output_path" ]]; then
@@ -791,12 +1102,18 @@ command_run() {
     shared_output="$workdir/reports/shared-infra-summary.json"
   fi
 
-  local shared_enabled="false"
-  if [[ -n "$shared_postgres_dsn" || -n "$shared_kafka_brokers" ]]; then
-    [[ -n "$shared_postgres_dsn" ]] || die "--shared-kafka-brokers requires --shared-postgres-dsn"
-    [[ -n "$shared_kafka_brokers" ]] || die "--shared-postgres-dsn requires --shared-kafka-brokers"
-    shared_enabled="true"
+  [[ -n "$shared_postgres_dsn" ]] || die "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)"
+  [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
+  [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (checkpoint package publish/pin verification)"
+  [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
+  local shared_ecs_enabled="false"
+  if [[ -n "$shared_ecs_cluster_arn" || -n "$shared_proof_requestor_service_name" || -n "$shared_proof_funder_service_name" ]]; then
+    [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required when shared ECS proof services are enabled"
+    [[ -n "$shared_proof_requestor_service_name" ]] || die "--shared-proof-requestor-service-name is required when shared ECS proof services are enabled"
+    [[ -n "$shared_proof_funder_service_name" ]] || die "--shared-proof-funder-service-name is required when shared ECS proof services are enabled"
+    shared_ecs_enabled="true"
   fi
+  local shared_enabled="true"
 
   ensure_base_dependencies
   ensure_command go
@@ -807,6 +1124,10 @@ command_run() {
     die "boundless-auto requires boundless-cli v1.x+; installed version is '$boundless_version'"
   fi
   ensure_command openssl
+  ensure_command cast
+  if [[ "$shared_ecs_enabled" == "true" ]]; then
+    ensure_command aws
+  fi
 
   local bridge_recipient_key_file="$workdir/reports/bridge-recipient.key"
   local bridge_recipient_key_hex="0x$(openssl rand -hex 32)"
@@ -817,6 +1138,12 @@ command_run() {
   if [[ -z "$bridge_recipient_address" ]]; then
     die "failed to derive bridge recipient address"
   fi
+  local boundless_requestor_key_hex
+  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
+  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
+  local boundless_requestor_address
+  boundless_requestor_address="$(cast wallet address --private-key "$boundless_requestor_key_hex" 2>/dev/null || true)"
+  [[ -n "$boundless_requestor_address" ]] || die "failed to derive boundless requestor address from key file: $boundless_requestor_key_file"
   ensure_dir "$(dirname "$output_path")"
 
   if [[ -d "$workdir" ]]; then
@@ -828,6 +1155,14 @@ command_run() {
     fi
   fi
   ensure_dir "$workdir/reports"
+
+  local proof_topic_seed
+  proof_topic_seed="$(date +%s)-$RANDOM"
+  local proof_request_topic="${shared_topic_prefix}.proof.requests.${proof_topic_seed}"
+  local proof_result_topic="${shared_topic_prefix}.proof.fulfillments.${proof_topic_seed}"
+  local proof_failure_topic="${shared_topic_prefix}.proof.failures.${proof_topic_seed}"
+  local proof_requestor_group="${shared_topic_prefix}.proof-requestor.${proof_topic_seed}"
+  local proof_bridge_consumer_group="${shared_topic_prefix}.bridge-e2e.${proof_topic_seed}"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
@@ -869,7 +1204,54 @@ command_run() {
 
     boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
     boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
+
+    if [[ -z "$bridge_deposit_final_orchard_root" ]]; then
+      bridge_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$deposit_witness_auto_json")"
+    fi
+    if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
+      bridge_withdraw_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$withdraw_witness_auto_json")"
+    fi
+    if [[ -z "$bridge_deposit_checkpoint_height" ]]; then
+      bridge_deposit_checkpoint_height="$(jq -r '.anchor_height // empty' "$deposit_witness_auto_json")"
+    fi
+    if [[ -z "$bridge_deposit_checkpoint_block_hash" ]]; then
+      bridge_deposit_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_witness_auto_json")"
+    fi
+    if [[ -z "$bridge_withdraw_checkpoint_height" ]]; then
+      bridge_withdraw_checkpoint_height="$(jq -r '.anchor_height // empty' "$withdraw_witness_auto_json")"
+    fi
+    if [[ -z "$bridge_withdraw_checkpoint_block_hash" ]]; then
+      bridge_withdraw_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_witness_auto_json")"
+    fi
   fi
+
+  if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
+    bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
+  fi
+  if [[ -z "$bridge_withdraw_checkpoint_height" ]]; then
+    bridge_withdraw_checkpoint_height="$bridge_deposit_checkpoint_height"
+  fi
+  if [[ -z "$bridge_withdraw_checkpoint_block_hash" ]]; then
+    bridge_withdraw_checkpoint_block_hash="$bridge_deposit_checkpoint_block_hash"
+  fi
+  [[ -n "$bridge_deposit_final_orchard_root" ]] || \
+    die "--bridge-deposit-final-orchard-root is required"
+  [[ -n "$bridge_withdraw_final_orchard_root" ]] || \
+    die "--bridge-withdraw-final-orchard-root is required"
+  [[ -n "$bridge_deposit_checkpoint_height" ]] || \
+    die "--bridge-deposit-checkpoint-height is required"
+  [[ -n "$bridge_deposit_checkpoint_block_hash" ]] || \
+    die "--bridge-deposit-checkpoint-block-hash is required"
+  [[ -n "$bridge_withdraw_checkpoint_height" ]] || \
+    die "--bridge-withdraw-checkpoint-height is required"
+  [[ -n "$bridge_withdraw_checkpoint_block_hash" ]] || \
+    die "--bridge-withdraw-checkpoint-block-hash is required"
+  [[ "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || \
+    die "--bridge-deposit-checkpoint-height must be numeric"
+  [[ "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || \
+    die "--bridge-withdraw-checkpoint-height must be numeric"
+  (( bridge_deposit_checkpoint_height > 0 )) || die "--bridge-deposit-checkpoint-height must be > 0"
+  (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
 
   if [[ "$shared_enabled" == "true" ]]; then
     (
@@ -877,6 +1259,7 @@ command_run() {
       go run ./cmd/shared-infra-e2e \
         --postgres-dsn "$shared_postgres_dsn" \
         --kafka-brokers "$shared_kafka_brokers" \
+        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
         --topic-prefix "$shared_topic_prefix" \
         --timeout "$shared_timeout" \
         --output "$shared_summary"
@@ -911,6 +1294,21 @@ command_run() {
         --output "$dkg_summary" \
         --force
     )
+  fi
+
+  if [[ -z "$bridge_operator_signer_bin" ]]; then
+    local coordinator_workdir_from_summary
+    coordinator_workdir_from_summary="$(jq -r '.coordinator_workdir // empty' "$dkg_summary")"
+    if [[ -n "$coordinator_workdir_from_summary" && -x "$coordinator_workdir_from_summary/bin/dkg-admin" ]]; then
+      bridge_operator_signer_bin="$coordinator_workdir_from_summary/bin/dkg-admin"
+    else
+      bridge_operator_signer_bin="dkg-admin"
+    fi
+  fi
+  if [[ "$bridge_operator_signer_bin" == */* ]]; then
+    [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
+  else
+    command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
   fi
 
   local base_key
@@ -955,6 +1353,7 @@ command_run() {
     "--rpc-url" "$base_rpc_url"
     "--chain-id" "$base_chain_id"
     "--deployer-key-file" "$bridge_deployer_key_file"
+    "--operator-signer-bin" "$bridge_operator_signer_bin"
     "--threshold" "$threshold"
     "--contracts-out" "$contracts_out"
     "--recipient" "$bridge_recipient_address"
@@ -965,17 +1364,31 @@ command_run() {
   bridge_args+=("--verifier-address" "$bridge_verifier_address")
   bridge_args+=("--deposit-image-id" "$bridge_deposit_image_id")
   bridge_args+=("--withdraw-image-id" "$bridge_withdraw_image_id")
+  bridge_args+=("--deposit-final-orchard-root" "$bridge_deposit_final_orchard_root")
+  bridge_args+=("--withdraw-final-orchard-root" "$bridge_withdraw_final_orchard_root")
+  bridge_args+=("--deposit-checkpoint-height" "$bridge_deposit_checkpoint_height")
+  bridge_args+=("--deposit-checkpoint-block-hash" "$bridge_deposit_checkpoint_block_hash")
+  bridge_args+=("--withdraw-checkpoint-height" "$bridge_withdraw_checkpoint_height")
+  bridge_args+=("--withdraw-checkpoint-block-hash" "$bridge_withdraw_checkpoint_block_hash")
   if [[ -n "$bridge_proof_inputs_output" ]]; then
     bridge_args+=("--proof-inputs-output" "$bridge_proof_inputs_output")
+  fi
+  if [[ -n "$bridge_juno_execution_tx_hash" ]]; then
+    bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
   fi
   bridge_args+=(
     "--boundless-bin" "$boundless_bin"
     "--boundless-rpc-url" "$boundless_rpc_url"
+    "--boundless-proof-submission-mode" "$boundless_proof_submission_mode"
+    "--boundless-proof-queue-brokers" "$shared_kafka_brokers"
+    "--boundless-proof-request-topic" "$proof_request_topic"
+    "--boundless-proof-result-topic" "$proof_result_topic"
+    "--boundless-proof-failure-topic" "$proof_failure_topic"
+    "--boundless-proof-consumer-group" "$proof_bridge_consumer_group"
     "--boundless-market-address" "$boundless_market_address"
     "--boundless-verifier-router-address" "$boundless_verifier_router_address"
     "--boundless-set-verifier-address" "$boundless_set_verifier_address"
     "--boundless-input-mode" "$boundless_input_mode"
-    "--boundless-requestor-key-file" "$boundless_requestor_key_file"
     "--boundless-deposit-program-url" "$boundless_deposit_program_url"
     "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
     "--boundless-input-s3-bucket" "$boundless_input_s3_bucket"
@@ -1004,35 +1417,205 @@ command_run() {
     bridge_args+=("--boundless-withdraw-witness-item-file" "$witness_file")
   done
 
-  local key_path
-  while IFS= read -r key_path; do
-    [[ -n "$key_path" ]] || continue
-    bridge_args+=("--operator-key-file" "$key_path")
-  done < <(jq -r '.operators[].operator_key_file' "$dkg_summary")
+  local operator_id operator_endpoint
+  while IFS=$'\t' read -r operator_id operator_endpoint; do
+    [[ -n "$operator_id" ]] || continue
+    bridge_args+=("--operator-address" "$operator_id")
+    [[ -n "$operator_endpoint" ]] || die "dkg summary missing operator endpoint for operator_id=$operator_id"
+    bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
+  done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
 
+  local proof_requestor_log="$workdir/reports/proof-requestor.log"
+  local proof_funder_log="$workdir/reports/proof-funder.log"
+  local proof_services_mode="local-process"
+  local proof_requestor_owner="testnet-e2e-proof-requestor-${proof_topic_seed}"
+  local proof_funder_owner="testnet-e2e-proof-funder-${proof_topic_seed}"
+  local proof_requestor_pid=""
+  local proof_funder_pid=""
+  local shared_ecs_region=""
+  local shared_ecs_started="false"
+
+  if [[ "$shared_ecs_enabled" == "true" ]]; then
+    proof_services_mode="shared-ecs"
+    proof_requestor_log=""
+    proof_funder_log=""
+    shared_ecs_region="$(resolve_aws_region)"
+
+    local -a proof_requestor_ecs_command=(
+      "/usr/local/bin/proof-requestor"
+      "--postgres-dsn" "$shared_postgres_dsn"
+      "--store-driver" "postgres"
+      "--owner" "$proof_requestor_owner"
+      "--requestor-address" "$boundless_requestor_address"
+      "--requestor-key-secret-arn" "unused"
+      "--requestor-key-env" "PROOF_REQUESTOR_KEY"
+      "--secrets-driver" "env"
+      "--chain-id" "$base_chain_id"
+      "--submission-mode" "offchain_primary_onchain_fallback"
+      "--order-stream-url" "$boundless_rpc_url"
+      "--boundless-market-address" "$boundless_market_address"
+      "--input-topic" "$proof_request_topic"
+      "--result-topic" "$proof_result_topic"
+      "--failure-topic" "$proof_failure_topic"
+      "--max-inflight-requests" "32"
+      "--request-timeout" "${boundless_timeout_seconds}s"
+      "--queue-driver" "kafka"
+      "--queue-brokers" "$shared_kafka_brokers"
+      "--queue-group" "$proof_requestor_group"
+      "--boundless-bin" "/usr/local/bin/boundless"
+      "--onchain-max-price-per-proof-wei" "$boundless_max_price_cap_wei"
+      "--onchain-max-stake-per-proof-wei" "$boundless_lock_stake_wei"
+    )
+    local -a proof_funder_ecs_command=(
+      "/usr/local/bin/proof-funder"
+      "--postgres-dsn" "$shared_postgres_dsn"
+      "--lease-driver" "postgres"
+      "--owner-id" "$proof_funder_owner"
+      "--owner-address" "$boundless_requestor_address"
+      "--owner-key-secret-arn" "unused"
+      "--owner-key-env" "PROOF_FUNDER_KEY"
+      "--secrets-driver" "env"
+      "--requestor-address" "$boundless_requestor_address"
+      "--queue-driver" "kafka"
+      "--queue-brokers" "$shared_kafka_brokers"
+      "--boundless-bin" "/usr/local/bin/boundless"
+    )
+    local proof_requestor_ecs_command_json
+    local proof_funder_ecs_command_json
+    proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
+    proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
+
+    log "rolling out shared ECS proof-requestor/proof-funder services"
+    rollout_shared_proof_services_ecs \
+      "$shared_ecs_region" \
+      "$shared_ecs_cluster_arn" \
+      "$shared_proof_requestor_service_name" \
+      "$shared_proof_funder_service_name" \
+      "$proof_requestor_ecs_command_json" \
+      "$proof_funder_ecs_command_json"
+    shared_ecs_started="true"
+  else
+    local proof_requestor_bin="$workdir/bin/proof-requestor"
+    local proof_funder_bin="$workdir/bin/proof-funder"
+    ensure_dir "$workdir/bin"
+    (
+      cd "$REPO_ROOT"
+      go build -o "$proof_requestor_bin" ./cmd/proof-requestor
+      go build -o "$proof_funder_bin" ./cmd/proof-funder
+    )
+
+    (
+      cd "$REPO_ROOT"
+      PROOF_REQUESTOR_KEY="$boundless_requestor_key_hex" "$proof_requestor_bin" \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --store-driver postgres \
+        --owner "$proof_requestor_owner" \
+        --requestor-address "$boundless_requestor_address" \
+        --requestor-key-secret-arn "unused" \
+        --requestor-key-env "PROOF_REQUESTOR_KEY" \
+        --secrets-driver env \
+        --chain-id "$base_chain_id" \
+        --submission-mode offchain_primary_onchain_fallback \
+        --order-stream-url "$boundless_rpc_url" \
+        --boundless-market-address "$boundless_market_address" \
+        --input-topic "$proof_request_topic" \
+        --result-topic "$proof_result_topic" \
+        --failure-topic "$proof_failure_topic" \
+        --max-inflight-requests 32 \
+        --request-timeout "${boundless_timeout_seconds}s" \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --queue-group "$proof_requestor_group" \
+        --boundless-bin "$boundless_bin" \
+        --onchain-max-price-per-proof-wei "$boundless_max_price_cap_wei" \
+        --onchain-max-stake-per-proof-wei "$boundless_lock_stake_wei" \
+        >"$proof_requestor_log" 2>&1
+    ) &
+    proof_requestor_pid="$!"
+
+    (
+      cd "$REPO_ROOT"
+      PROOF_FUNDER_KEY="$boundless_requestor_key_hex" "$proof_funder_bin" \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --lease-driver postgres \
+        --owner-id "$proof_funder_owner" \
+        --owner-address "$boundless_requestor_address" \
+        --owner-key-secret-arn "unused" \
+        --owner-key-env "PROOF_FUNDER_KEY" \
+        --secrets-driver env \
+        --requestor-address "$boundless_requestor_address" \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --boundless-bin "$boundless_bin" \
+        >"$proof_funder_log" 2>&1
+    ) &
+    proof_funder_pid="$!"
+
+    sleep 5
+    if ! kill -0 "$proof_requestor_pid" >/dev/null 2>&1; then
+      log "proof-requestor failed to start; showing log"
+      tail -n 200 "$proof_requestor_log" >&2 || true
+      die "proof-requestor did not stay running"
+    fi
+    if ! kill -0 "$proof_funder_pid" >/dev/null 2>&1; then
+      log "proof-funder failed to start; showing log"
+      tail -n 200 "$proof_funder_log" >&2 || true
+      kill "$proof_requestor_pid" >/dev/null 2>&1 || true
+      wait "$proof_requestor_pid" >/dev/null 2>&1 || true
+      die "proof-funder did not stay running"
+    fi
+  fi
+
+  local bridge_status=0
+  set +e
   (
     cd "$REPO_ROOT"
     go run ./cmd/bridge-e2e "${bridge_args[@]}"
   )
+  bridge_status="$?"
+  set -e
+
+  if [[ "$shared_ecs_enabled" == "true" ]]; then
+    if [[ "$shared_ecs_started" == "true" ]]; then
+      scale_shared_proof_services_ecs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name" \
+        "0" || true
+    fi
+  else
+    kill "$proof_requestor_pid" "$proof_funder_pid" >/dev/null 2>&1 || true
+    wait "$proof_requestor_pid" >/dev/null 2>&1 || true
+    wait "$proof_funder_pid" >/dev/null 2>&1 || true
+  fi
+  if (( bridge_status != 0 )); then
+    if [[ "$shared_ecs_enabled" == "true" ]]; then
+      log "bridge-e2e failed; showing shared ECS proof service logs"
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
+    else
+      log "bridge-e2e failed; showing proof-requestor and proof-funder logs"
+      tail -n 200 "$proof_requestor_log" >&2 || true
+      tail -n 200 "$proof_funder_log" >&2 || true
+    fi
+    die "bridge-e2e failed while centralized proof services were running"
+  fi
 
   local juno_tx_hash=""
   local juno_tx_hash_source=""
-  juno_tx_hash="$(
-    jq -r '[
-      .juno.proof_of_execution.tx_hash?,
-      .juno.tx_hash?,
-      .juno.txid?,
-      .withdraw.juno_tx_hash?,
-      .withdraw.juno_txid?,
-      .transactions.juno_withdraw?,
-      .transactions.juno_broadcast?,
-      .transactions.finalize_withdraw?
-    ] | map(select(type == "string" and length > 0)) | .[0] // ""' "$bridge_summary" 2>/dev/null || true
-  )"
+  local juno_tx_hash_expected_source="input.juno_execution_tx_hash"
+  juno_tx_hash="$(jq -r '.juno.proof_of_execution.tx_hash? // ""' "$bridge_summary" 2>/dev/null || true)"
   juno_tx_hash_source="$(
     jq -r '.juno.proof_of_execution.source? // ""' "$bridge_summary" 2>/dev/null || true
   )"
   if [[ -n "$juno_tx_hash" ]]; then
+    if [[ "$juno_tx_hash_source" != "$juno_tx_hash_expected_source" ]]; then
+      die "bridge summary juno proof source mismatch: got=$juno_tx_hash_source want=$juno_tx_hash_expected_source ($bridge_summary)"
+    fi
     if [[ -n "$juno_tx_hash_source" ]]; then
       log "juno_tx_hash=$juno_tx_hash source=$juno_tx_hash_source"
     else
@@ -1076,11 +1659,19 @@ command_run() {
     --arg bridge_verifier_address "$bridge_verifier_address" \
     --arg bridge_deposit_image_id "$bridge_deposit_image_id" \
     --arg bridge_withdraw_image_id "$bridge_withdraw_image_id" \
+    --arg bridge_deposit_final_orchard_root "$bridge_deposit_final_orchard_root" \
+    --arg bridge_withdraw_final_orchard_root "$bridge_withdraw_final_orchard_root" \
+    --arg bridge_deposit_checkpoint_height "$bridge_deposit_checkpoint_height" \
+    --arg bridge_deposit_checkpoint_block_hash "$bridge_deposit_checkpoint_block_hash" \
+    --arg bridge_withdraw_checkpoint_height "$bridge_withdraw_checkpoint_height" \
+    --arg bridge_withdraw_checkpoint_block_hash "$bridge_withdraw_checkpoint_block_hash" \
     --arg bridge_proof_inputs_output "$bridge_proof_inputs_output" \
     --arg bridge_run_timeout "$bridge_run_timeout" \
     --arg boundless_auto "$boundless_auto" \
+    --arg boundless_proof_submission_mode "$boundless_proof_submission_mode" \
     --arg boundless_bin "$boundless_bin" \
     --arg boundless_rpc_url "$boundless_rpc_url" \
+    --arg boundless_requestor_address "$boundless_requestor_address" \
     --arg boundless_input_mode "$boundless_input_mode" \
     --arg boundless_deposit_ivk_configured "$boundless_deposit_ivk_configured" \
     --arg boundless_withdraw_ovk_configured "$boundless_withdraw_ovk_configured" \
@@ -1107,9 +1698,21 @@ command_run() {
     --arg bridge_recipient_address "$bridge_recipient_address" \
     --arg shared_enabled "$shared_enabled" \
     --arg shared_kafka_brokers "$shared_kafka_brokers" \
+    --arg shared_ipfs_api_url "$shared_ipfs_api_url" \
     --arg shared_topic_prefix "$shared_topic_prefix" \
     --arg shared_timeout "$shared_timeout" \
     --arg shared_summary "$shared_summary" \
+    --arg proof_request_topic "$proof_request_topic" \
+    --arg proof_result_topic "$proof_result_topic" \
+    --arg proof_failure_topic "$proof_failure_topic" \
+    --arg proof_requestor_group "$proof_requestor_group" \
+    --arg proof_bridge_consumer_group "$proof_bridge_consumer_group" \
+    --arg proof_services_mode "$proof_services_mode" \
+    --arg shared_ecs_cluster_arn "$shared_ecs_cluster_arn" \
+    --arg shared_proof_requestor_service_name "$shared_proof_requestor_service_name" \
+    --arg shared_proof_funder_service_name "$shared_proof_funder_service_name" \
+    --arg proof_requestor_log "$proof_requestor_log" \
+    --arg proof_funder_log "$proof_funder_log" \
     --arg juno_tx_hash "$juno_tx_hash" \
     --arg juno_tx_hash_source "$juno_tx_hash_source" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
@@ -1136,13 +1739,21 @@ command_run() {
         verifier_address: (if $bridge_verifier_address == "" then null else $bridge_verifier_address end),
         deposit_image_id: (if $bridge_deposit_image_id == "" then null else $bridge_deposit_image_id end),
         withdraw_image_id: (if $bridge_withdraw_image_id == "" then null else $bridge_withdraw_image_id end),
+        deposit_final_orchard_root: (if $bridge_deposit_final_orchard_root == "" then null else $bridge_deposit_final_orchard_root end),
+        withdraw_final_orchard_root: (if $bridge_withdraw_final_orchard_root == "" then null else $bridge_withdraw_final_orchard_root end),
+        deposit_checkpoint_height: (if $bridge_deposit_checkpoint_height == "" then null else ($bridge_deposit_checkpoint_height | tonumber) end),
+        deposit_checkpoint_block_hash: (if $bridge_deposit_checkpoint_block_hash == "" then null else $bridge_deposit_checkpoint_block_hash end),
+        withdraw_checkpoint_height: (if $bridge_withdraw_checkpoint_height == "" then null else ($bridge_withdraw_checkpoint_height | tonumber) end),
+        withdraw_checkpoint_block_hash: (if $bridge_withdraw_checkpoint_block_hash == "" then null else $bridge_withdraw_checkpoint_block_hash end),
         recipient_address: $bridge_recipient_address,
         run_timeout: $bridge_run_timeout,
         proof_inputs_output: $bridge_proof_inputs_output,
         boundless: {
           auto: ($boundless_auto == "true"),
+          submission_mode: (if $boundless_proof_submission_mode == "" then null else $boundless_proof_submission_mode end),
           bin: $boundless_bin,
           rpc_url: $boundless_rpc_url,
+          requestor_address: (if $boundless_requestor_address == "" then null else $boundless_requestor_address end),
           input_mode: $boundless_input_mode,
           guest_witness: {
             enabled: ($boundless_input_mode == "guest-witness-v1"),
@@ -1176,8 +1787,24 @@ command_run() {
         enabled: ($shared_enabled == "true"),
         postgres_configured: ($shared_enabled == "true"),
         kafka_brokers: (if $shared_kafka_brokers == "" then null else $shared_kafka_brokers end),
+        ipfs_api_url: (if $shared_ipfs_api_url == "" then null else $shared_ipfs_api_url end),
         topic_prefix: (if $shared_topic_prefix == "" then null else $shared_topic_prefix end),
         timeout: (if $shared_timeout == "" then null else $shared_timeout end),
+        proof_topics: {
+          request: (if $proof_request_topic == "" then null else $proof_request_topic end),
+          result: (if $proof_result_topic == "" then null else $proof_result_topic end),
+          failure: (if $proof_failure_topic == "" then null else $proof_failure_topic end)
+        },
+        proof_services: {
+          mode: (if $proof_services_mode == "" then null else $proof_services_mode end),
+          requestor_group: (if $proof_requestor_group == "" then null else $proof_requestor_group end),
+          bridge_consumer_group: (if $proof_bridge_consumer_group == "" then null else $proof_bridge_consumer_group end),
+          ecs_cluster_arn: (if $shared_ecs_cluster_arn == "" then null else $shared_ecs_cluster_arn end),
+          requestor_service_name: (if $shared_proof_requestor_service_name == "" then null else $shared_proof_requestor_service_name end),
+          funder_service_name: (if $shared_proof_funder_service_name == "" then null else $shared_proof_funder_service_name end),
+          requestor_log: (if $proof_requestor_log == "" then null else $proof_requestor_log end),
+          funder_log: (if $proof_funder_log == "" then null else $proof_funder_log end)
+        },
         summary_path: (if $shared_summary == "" then null else $shared_summary end),
         report: $shared
       },

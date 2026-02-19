@@ -104,7 +104,10 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$main_tf" "resource \"aws_rds_cluster\" \"shared\"" "aurora shared cluster resource"
   assert_contains "$main_tf" "resource \"aws_msk_cluster\" \"shared\"" "msk shared cluster resource"
   assert_contains "$main_tf" "resource \"aws_ecs_cluster\" \"shared\"" "ecs shared cluster resource"
+  assert_contains "$main_tf" "resource \"aws_ecr_repository\" \"proof_services\"" "proof services ecr repository resource"
   assert_contains "$main_tf" "resource \"aws_ecs_service\" \"proof_requestor\"" "ecs proof requestor service resource"
+  assert_contains "$main_tf" "resource \"aws_ecs_service\" \"proof_funder\"" "ecs proof funder service resource"
+  assert_not_contains "$main_tf" "public.ecr.aws/docker/library/busybox:1.36.1" "busybox placeholder image removed"
   assert_contains "$main_tf" "resource \"aws_autoscaling_group\" \"ipfs\"" "ipfs asg resource"
   assert_contains "$main_tf" "resource \"aws_lb\" \"ipfs\"" "ipfs nlb resource"
   assert_contains "$main_tf" "count = var.operator_instance_count" "operator instance count wiring"
@@ -121,6 +124,8 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$outputs_tf" "output \"shared_postgres_endpoint\"" "aurora endpoint output"
   assert_contains "$outputs_tf" "output \"shared_kafka_bootstrap_brokers\"" "msk brokers output"
   assert_contains "$outputs_tf" "output \"shared_ecs_cluster_arn\"" "ecs cluster output"
+  assert_contains "$outputs_tf" "output \"shared_proof_funder_service_name\"" "ecs proof funder output"
+  assert_contains "$outputs_tf" "output \"shared_proof_services_ecr_repository_url\"" "proof services ecr repository output"
   assert_contains "$outputs_tf" "output \"shared_ipfs_api_url\"" "ipfs api output"
   assert_not_contains "$outputs_tf" "output \"shared_public_ip\"" "legacy shared host output removed"
   assert_not_contains "$outputs_tf" "output \"shared_private_ip\"" "legacy shared host private ip output removed"
@@ -193,9 +198,11 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" "set +e" "remote run temporary errexit disable"
   assert_contains "$wrapper_script_text" "remote_run_status=$?" "remote run exit capture"
   assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
-  assert_contains "$wrapper_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when available"
+  assert_contains "$wrapper_script_text" "log \"juno_tx_hash=\$juno_tx_hash source=\$juno_tx_hash_source\"" "juno tx hash log when available"
   assert_contains "$wrapper_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
   assert_contains "$wrapper_script_text" ".bridge.report.juno.proof_of_execution.tx_hash?" "wrapper checks canonical juno proof path"
+  assert_contains "$wrapper_script_text" ".juno.tx_hash_source? // .bridge.report.juno.proof_of_execution.source?" "wrapper checks canonical juno proof source path"
+  assert_not_contains "$wrapper_script_text" ".bridge.report.transactions.finalize_withdraw?" "wrapper no longer accepts base finalize withdraw as juno hash fallback"
   assert_contains "$wrapper_script_text" "keep-infra enabled after failure; leaving resources up" "keep-infra failure retention log"
   assert_contains "$wrapper_script_text" "cleanup_enabled=\"false\"" "keep-infra disables cleanup on failure"
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
@@ -211,8 +218,16 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "shared_postgres_dsn=\"postgres://" "shared postgres dsn assembly"
   assert_contains "$wrapper_script_text" "sslmode=require" "shared postgres uses tls mode for aurora"
   assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\$shared_kafka_bootstrap_brokers\"" "shared kafka brokers assembly"
+  assert_contains "$wrapper_script_text" "-raw shared_ipfs_api_url" "shared ipfs api output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_postgres_endpoint" "shared postgres endpoint output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_kafka_bootstrap_brokers" "shared kafka bootstrap output retrieval"
+  assert_contains "$wrapper_script_text" "-raw shared_ecs_cluster_arn" "shared ecs cluster output retrieval"
+  assert_contains "$wrapper_script_text" "-raw shared_proof_requestor_service_name" "shared proof requestor output retrieval"
+  assert_contains "$wrapper_script_text" "-raw shared_proof_funder_service_name" "shared proof funder output retrieval"
+  assert_contains "$wrapper_script_text" "-raw shared_proof_services_ecr_repository_url" "proof services ecr repository output retrieval"
+  assert_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "proof services image build invocation"
+  assert_contains "$wrapper_script_text" "aws ecr get-login-password" "proof services ecr login"
+  assert_contains "$wrapper_script_text" "aws ecs update-service" "proof services ecs rollout"
   assert_not_contains "$wrapper_script_text" "-raw shared_public_ip" "no shared host public ip output retrieval"
   assert_not_contains "$wrapper_script_text" "remote_prepare_shared_host" "no shared host preparation hook"
   assert_not_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "no shared host bootstrap fallback"
@@ -223,6 +238,10 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "failed to build remote command line" "remote args assembly error message"
   assert_contains "$wrapper_script_text" "\"--shared-postgres-dsn\" \"\$shared_postgres_dsn\"" "remote shared postgres arg"
   assert_contains "$wrapper_script_text" "\"--shared-kafka-brokers\" \"\$shared_kafka_brokers\"" "remote shared kafka arg"
+  assert_contains "$wrapper_script_text" "\"--shared-ipfs-api-url\" \"\$shared_ipfs_api_url\"" "remote shared ipfs arg"
+  assert_contains "$wrapper_script_text" "\"--shared-ecs-cluster-arn\" \"\$shared_ecs_cluster_arn\"" "remote shared ecs cluster arg"
+  assert_contains "$wrapper_script_text" "\"--shared-proof-requestor-service-name\" \"\$shared_proof_requestor_service_name\"" "remote shared proof requestor arg"
+  assert_contains "$wrapper_script_text" "\"--shared-proof-funder-service-name\" \"\$shared_proof_funder_service_name\"" "remote shared proof funder arg"
 }
 
 test_local_e2e_supports_shared_infra_validation() {
@@ -231,7 +250,27 @@ test_local_e2e_supports_shared_infra_validation() {
 
   assert_contains "$e2e_script_text" "--shared-postgres-dsn" "shared postgres option"
   assert_contains "$e2e_script_text" "--shared-kafka-brokers" "shared kafka option"
+  assert_contains "$e2e_script_text" "--shared-ipfs-api-url" "shared ipfs api option"
+  assert_contains "$e2e_script_text" "--shared-ecs-cluster-arn" "shared ecs cluster option"
+  assert_contains "$e2e_script_text" "--shared-proof-requestor-service-name" "shared proof requestor service option"
+  assert_contains "$e2e_script_text" "--shared-proof-funder-service-name" "shared proof funder service option"
+  assert_contains "$e2e_script_text" "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)" "shared postgres required message"
+  assert_contains "$e2e_script_text" "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)" "shared kafka required message"
+  assert_contains "$e2e_script_text" "--shared-ipfs-api-url is required (checkpoint package publish/pin verification)" "shared ipfs required message"
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
+  assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint probe wiring"
+  assert_contains "$e2e_script_text" "aws ecs register-task-definition" "proof services ecs task definition rollout"
+  assert_contains "$e2e_script_text" "aws ecs update-service" "proof services ecs service update"
+  assert_contains "$e2e_script_text" "aws ecs wait services-stable" "proof services ecs stability wait"
+  assert_contains "$e2e_script_text" "--boundless-proof-submission-mode" "bridge forwards proof submission mode"
+  assert_contains "$e2e_script_text" "\"--boundless-proof-submission-mode\" \"\$boundless_proof_submission_mode\"" "bridge uses centralized proof submission mode value"
+  assert_contains "$e2e_script_text" "\"--boundless-proof-request-topic\" \"\$proof_request_topic\"" "bridge forwards proof request topic"
+  assert_contains "$e2e_script_text" "\"--boundless-proof-result-topic\" \"\$proof_result_topic\"" "bridge forwards proof result topic"
+  assert_contains "$e2e_script_text" "\"--boundless-proof-failure-topic\" \"\$proof_failure_topic\"" "bridge forwards proof failure topic"
+  assert_contains "$e2e_script_text" "\"--boundless-proof-consumer-group\" \"\$proof_bridge_consumer_group\"" "bridge forwards proof consumer group"
+  assert_not_contains "$e2e_script_text" "go run ./cmd/proof-requestor" "proof-requestor no longer runs ad hoc on runner"
+  assert_not_contains "$e2e_script_text" "go run ./cmd/proof-funder" "proof-funder no longer runs ad hoc on runner"
+  assert_not_contains "$e2e_script_text" "\"--boundless-requestor-key-file\" \"\$boundless_requestor_key_file\"" "bridge no longer submits directly with requestor key"
   assert_not_contains "$e2e_script_text" "run_with_rpc_retry 4 3 \"bridge-e2e\"" "bridge e2e should not be re-invoked on transient rpc wrapper retries"
   assert_contains "$e2e_script_text" "go run ./cmd/bridge-e2e \"\${bridge_args[@]}\"" "bridge e2e direct invocation"
   assert_contains "$e2e_script_text" "--boundless-input-mode" "boundless input mode option"
@@ -241,6 +280,17 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--boundless-withdraw-owallet-ovk-hex" "boundless withdraw ovk option"
   assert_contains "$e2e_script_text" "--boundless-deposit-witness-item-file" "boundless deposit witness option"
   assert_contains "$e2e_script_text" "--boundless-withdraw-witness-item-file" "boundless withdraw witness option"
+  assert_contains "$e2e_script_text" "--bridge-deposit-checkpoint-height" "bridge deposit checkpoint height option"
+  assert_contains "$e2e_script_text" "--bridge-deposit-checkpoint-block-hash" "bridge deposit checkpoint block hash option"
+  assert_contains "$e2e_script_text" "--bridge-withdraw-checkpoint-height" "bridge withdraw checkpoint height option"
+  assert_contains "$e2e_script_text" "--bridge-withdraw-checkpoint-block-hash" "bridge withdraw checkpoint block hash option"
+  assert_contains "$e2e_script_text" "\"--deposit-checkpoint-height\" \"\$bridge_deposit_checkpoint_height\"" "bridge forwards deposit checkpoint height"
+  assert_contains "$e2e_script_text" "\"--deposit-checkpoint-block-hash\" \"\$bridge_deposit_checkpoint_block_hash\"" "bridge forwards deposit checkpoint block hash"
+  assert_contains "$e2e_script_text" "\"--withdraw-checkpoint-height\" \"\$bridge_withdraw_checkpoint_height\"" "bridge forwards withdraw checkpoint height"
+  assert_contains "$e2e_script_text" "\"--withdraw-checkpoint-block-hash\" \"\$bridge_withdraw_checkpoint_block_hash\"" "bridge forwards withdraw checkpoint block hash"
+  assert_contains "$e2e_script_text" ".anchor_block_hash // empty" "witness extraction includes anchor block hash wiring"
+  assert_contains "$e2e_script_text" "--bridge-juno-execution-tx-hash" "bridge juno execution tx hash option"
+  assert_contains "$e2e_script_text" "\"--juno-execution-tx-hash\" \"\$bridge_juno_execution_tx_hash\"" "bridge forwards canonical juno execution tx hash"
   assert_not_contains "$e2e_script_text" "--boundless-guest-witness-manifest" "legacy guest witness manifest option removed"
   assert_contains "$e2e_script_text" "boundless_input_mode == \"guest-witness-v1\"" "guest witness mode validation"
   assert_contains "$e2e_script_text" "local guest_witness_manual_mode=\"true\"" "guest witness manual mode default state"
@@ -252,16 +302,20 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "\"--boundless-market-address\" \"\$boundless_market_address\"" "boundless market bridge forwarding"
   assert_contains "$e2e_script_text" "\"--boundless-verifier-router-address\" \"\$boundless_verifier_router_address\"" "boundless verifier router bridge forwarding"
   assert_contains "$e2e_script_text" "\"--boundless-set-verifier-address\" \"\$boundless_set_verifier_address\"" "boundless set verifier bridge forwarding"
-  assert_contains "$e2e_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when present"
+  assert_contains "$e2e_script_text" "log \"juno_tx_hash=\$juno_tx_hash source=\$juno_tx_hash_source\"" "juno tx hash log when present"
   assert_contains "$e2e_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
   assert_contains "$e2e_script_text" ".juno.proof_of_execution.tx_hash?" "bridge summary checks canonical juno proof path"
-  assert_contains "$e2e_script_text" ".transactions.finalize_withdraw?" "bridge summary keeps finalize withdraw fallback"
+  assert_contains "$e2e_script_text" "input.juno_execution_tx_hash" "bridge summary enforces canonical juno proof source"
+  assert_not_contains "$e2e_script_text" ".transactions.finalize_withdraw?" "bridge summary does not accept base finalize withdraw fallback"
   assert_contains "$e2e_script_text" "bridge summary missing juno proof-of-execution tx hash" "bridge summary fails when proof hash missing"
+  assert_contains "$e2e_script_text" "bridge summary juno proof source mismatch" "bridge summary fails on unexpected juno proof source"
   assert_contains "$e2e_script_text" "--arg juno_tx_hash \"\$juno_tx_hash\"" "summary receives juno tx hash"
   assert_contains "$e2e_script_text" "--arg juno_tx_hash_source \"\$juno_tx_hash_source\"" "summary receives juno tx hash source"
   assert_contains "$e2e_script_text" "tx_hash_source: (if \$juno_tx_hash_source == \"\" then null else \$juno_tx_hash_source end)" "summary stores juno tx hash source"
   assert_contains "$e2e_script_text" "tx_hash: (if \$juno_tx_hash == \"\" then null else \$juno_tx_hash end)" "summary stores juno tx hash"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
+  assert_contains "$e2e_script_text" "proof_topics" "shared summary includes proof topics"
+  assert_contains "$e2e_script_text" "proof_services" "shared summary includes proof service metadata"
 }
 
 test_local_e2e_supports_external_dkg_summary_path() {
@@ -280,6 +334,11 @@ test_local_e2e_uses_operator_deployer_key() {
 
   assert_contains "$e2e_script_text" "bridge_deployer_key_file=\"\$(jq -r '.operators[0].operator_key_file // empty' \"\$dkg_summary\")\"" "bridge deployer key derived from first operator"
   assert_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$bridge_deployer_key_file\"" "bridge deployer key forwarded"
+  assert_contains "$e2e_script_text" "\"--operator-signer-bin\" \"\$bridge_operator_signer_bin\"" "bridge operator signer binary forwarded"
+  assert_contains "$e2e_script_text" "bridge_args+=(\"--operator-address\" \"\$operator_id\")" "bridge operator address forwarded from dkg summary"
+  assert_contains "$e2e_script_text" "bridge_args+=(\"--operator-signer-endpoint\" \"\$operator_endpoint\")" "bridge operator signer endpoint forwarded from dkg summary"
+  assert_contains "$e2e_script_text" ".operators[] | [.operator_id, (.endpoint // .grpc_endpoint // \"\")] | @tsv" "operator endpoints sourced from dkg summary"
+  assert_not_contains "$e2e_script_text" "bridge_args+=(\"--operator-key-file\"" "bridge operator key-file signing removed"
   assert_not_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$base_funder_key_file\"" "bridge deployer no longer reuses funder key"
 }
 
@@ -341,6 +400,44 @@ test_aws_workflow_dispatch_input_count_within_limit() {
   fi
 }
 
+test_operator_stack_ami_release_workflow_exists() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
+
+  assert_contains "$workflow_text" "name: release-operator-stack-ami" "operator stack ami workflow name"
+  assert_contains "$workflow_text" "aws_region:" "operator stack ami workflow region input"
+  assert_contains "$workflow_text" "release_tag:" "operator stack ami workflow release tag input"
+  assert_contains "$workflow_text" "build-operator-stack-ami.sh create" "operator stack ami workflow invokes runbook"
+  assert_contains "$workflow_text" "operator-ami-manifest.json" "operator stack ami workflow publishes manifest"
+  assert_contains "$workflow_text" "gh release" "operator stack ami workflow creates/updates release"
+}
+
+test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
+  local runbook_text
+  runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh")"
+
+  assert_contains "$runbook_text" "junocashd.service" "runbook installs junocashd service"
+  assert_contains "$runbook_text" "juno-scan.service" "runbook installs juno-scan service"
+  assert_contains "$runbook_text" "checkpoint-signer.service" "runbook installs checkpoint signer service"
+  assert_contains "$runbook_text" "checkpoint-aggregator.service" "runbook installs checkpoint aggregator service"
+  assert_contains "$runbook_text" "tss-host.service" "runbook installs tss-host service"
+  assert_contains "$runbook_text" "getblockchaininfo" "runbook checks junocashd sync status"
+  assert_contains "$runbook_text" "getbestblockhash" "runbook records synced blockstamp hash"
+  assert_contains "$runbook_text" "create-image" "runbook creates ami"
+  assert_contains "$runbook_text" "operator-ami-manifest.json" "runbook writes operator ami manifest"
+}
+
+test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
+
+  assert_contains "$workflow_text" "Resolve Operator AMI" "aws e2e workflow has operator ami resolve step"
+  assert_contains "$workflow_text" "gh release download" "aws e2e workflow downloads operator ami manifest from release"
+  assert_contains "$workflow_text" "operator-ami-manifest.json" "aws e2e workflow references operator ami manifest"
+  assert_contains "$workflow_text" "operator-stack-ami-latest" "aws e2e workflow resolves latest operator stack ami release tag"
+  assert_contains "$workflow_text" "--operator-ami-id" "aws e2e workflow forwards resolved operator ami id"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -357,6 +454,9 @@ main() {
   test_local_e2e_tops_up_bridge_deployer_balance
   test_local_e2e_uses_managed_nonce_for_funding
   test_aws_workflow_dispatch_input_count_within_limit
+  test_operator_stack_ami_release_workflow_exists
+  test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp
+  test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset
 }
 
 main "$@"
