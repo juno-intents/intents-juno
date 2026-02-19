@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/segmentio/kafka-go"
 )
 
@@ -124,6 +128,33 @@ func TestParseBrokers_DedupAndTrim(t *testing.T) {
 	}
 }
 
+func TestKafkaTLSEnabledFromEnv(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "false", value: "false", want: false},
+		{name: "zero", value: "0", want: false},
+		{name: "true", value: "true", want: true},
+		{name: "one", value: "1", want: true},
+		{name: "yes", value: "yes", want: true},
+		{name: "on", value: "on", want: true},
+		{name: "mixed case and spaces", value: "  TrUE ", want: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envQueueKafkaTLS, tc.value)
+			if got := kafkaTLSEnabledFromEnv(); got != tc.want {
+				t.Fatalf("kafkaTLSEnabledFromEnv(%q) = %t, want %t", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestIsTopicAlreadyExistsError(t *testing.T) {
 	t.Parallel()
 
@@ -166,78 +197,50 @@ func TestIsTopicAlreadyExistsError(t *testing.T) {
 	}
 }
 
-func TestCheckCheckpointIPFS_PublishPinAndFetch(t *testing.T) {
+func TestCheckCheckpointIPFSWithSource_RejectsMismatchedSignatureSet(t *testing.T) {
 	t.Parallel()
 
 	const cid = "bafybeigdyrztmjnd3h6akxw2n3kq7hpvzd5xkz4a2xlfdgr3mxwct6f2da"
 
-	var (
-		mu         sync.Mutex
-		payloadByC = make(map[string][]byte)
-		addCalls   int
-	)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+		BaseChainID:      84532,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+		Signers: []common.Address{
+			common.HexToAddress("0x1234567890123456789012345678901234567890"),
+		},
+		Signatures: []string{
+			"0xdeadbeef",
+		},
+		CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	source := &stubCheckpointPackageSource{
+		record: checkpointPackageRecord{
+			Digest:      digest,
+			IPFSCID:     cid,
+			Payload:     payload,
+			PersistedAt: time.Now().UTC(),
+		},
+	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
-		case "/api/v0/add":
-			if r.Method != http.MethodPost {
-				http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-				return
-			}
-			mr, err := r.MultipartReader()
-			if err != nil {
-				http.Error(w, "bad multipart", http.StatusBadRequest)
-				return
-			}
-			var payload []byte
-			for {
-				part, err := mr.NextPart()
-				if err == io.EOF {
-					break
-				}
-				if err != nil {
-					http.Error(w, "multipart read error", http.StatusBadRequest)
-					return
-				}
-				b, err := io.ReadAll(part)
-				if err != nil {
-					http.Error(w, "multipart part read error", http.StatusBadRequest)
-					return
-				}
-				if part.FormName() == "file" {
-					payload = b
-				}
-			}
-			if len(payload) == 0 {
-				http.Error(w, "missing file payload", http.StatusBadRequest)
-				return
-			}
-			mu.Lock()
-			addCalls++
-			payloadByC[cid] = append([]byte(nil), payload...)
-			mu.Unlock()
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"Name":"checkpoint-package.json","Hash":"`+cid+`","Size":"1234"}`)
 		case "/api/v0/pin/ls":
-			arg := strings.TrimSpace(r.URL.Query().Get("arg"))
-			mu.Lock()
-			_, ok := payloadByC[arg]
-			mu.Unlock()
-			if !ok {
-				http.Error(w, "pin not found", http.StatusNotFound)
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = io.WriteString(w, `{"Keys":{"`+arg+`":{"Type":"recursive"}}}`)
+			_, _ = io.WriteString(w, `{"Keys":{"`+cid+`":{"Type":"recursive"}}}`)
 		case "/api/v0/cat":
-			arg := strings.TrimSpace(r.URL.Query().Get("arg"))
-			mu.Lock()
-			payload, ok := payloadByC[arg]
-			mu.Unlock()
-			if !ok {
-				http.Error(w, "cid not found", http.StatusNotFound)
-				return
-			}
 			_, _ = w.Write(payload)
 		default:
 			http.NotFound(w, r)
@@ -245,44 +248,146 @@ func TestCheckCheckpointIPFS_PublishPinAndFetch(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	rep, err := checkCheckpointIPFS(context.Background(), config{
+	_, err = checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
 		CheckpointIPFSAPIURL: srv.URL,
+	}, source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "verify checkpoint package signatures") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type stubCheckpointPackageSource struct {
+	record checkpointPackageRecord
+	err    error
+
+	mu    sync.Mutex
+	calls int
+	dsn   string
+}
+
+func (s *stubCheckpointPackageSource) Latest(_ context.Context, postgresDSN string) (checkpointPackageRecord, error) {
+	s.mu.Lock()
+	s.calls++
+	s.dsn = postgresDSN
+	s.mu.Unlock()
+	if s.err != nil {
+		return checkpointPackageRecord{}, s.err
+	}
+	return s.record, nil
+}
+
+func (s *stubCheckpointPackageSource) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *stubCheckpointPackageSource) DSN() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.dsn
+}
+
+func TestCheckCheckpointIPFSWithSource_ValidatesOperatorProducedPackage(t *testing.T) {
+	t.Parallel()
+
+	const (
+		cid         = "bafybeigdyrztmjnd3h6akxw2n3kq7hpvzd5xkz4a2xlfdgr3mxwct6f2da"
+		postgresDSN = "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable"
+	)
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+		BaseChainID:      84532,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	sig, err := checkpoint.SignDigest(key, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	operator := crypto.PubkeyToAddress(key.PublicKey)
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+		Signers:         []common.Address{operator},
+		Signatures:      []string{"0x" + hex.EncodeToString(sig)},
+		CreatedAt:       time.Now().UTC(),
 	})
 	if err != nil {
-		t.Fatalf("checkCheckpointIPFS: %v", err)
+		t.Fatalf("marshal payload: %v", err)
+	}
+
+	source := &stubCheckpointPackageSource{
+		record: checkpointPackageRecord{
+			Digest:      digest,
+			IPFSCID:     cid,
+			Payload:     payload,
+			PersistedAt: time.Now().UTC(),
+		},
+	}
+
+	addCalls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/add":
+			addCalls++
+			http.Error(w, "unexpected add call", http.StatusBadRequest)
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"`+cid+`":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rep, err := checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          postgresDSN,
+		CheckpointIPFSAPIURL: srv.URL,
+	}, source)
+	if err != nil {
+		t.Fatalf("checkCheckpointIPFSWithSource: %v", err)
 	}
 	if rep.CID != cid {
 		t.Fatalf("cid mismatch: got %q want %q", rep.CID, cid)
 	}
-	if rep.Digest == "" {
-		t.Fatalf("expected digest in report")
+	if rep.Digest != digest.Hex() {
+		t.Fatalf("digest mismatch: got %q want %q", rep.Digest, digest.Hex())
 	}
-	if rep.SignerCount != 3 {
-		t.Fatalf("signer count mismatch: got %d want 3", rep.SignerCount)
+	if rep.SignerCount != 1 {
+		t.Fatalf("signer count mismatch: got %d want 1", rep.SignerCount)
 	}
-	if rep.Threshold != 3 {
-		t.Fatalf("threshold mismatch: got %d want 3", rep.Threshold)
+	if rep.Threshold != 1 {
+		t.Fatalf("threshold mismatch: got %d want 1", rep.Threshold)
 	}
-	if rep.PublishRoundTripMS < 0 {
-		t.Fatalf("publish round trip must be >= 0, got %d", rep.PublishRoundTripMS)
+	if rep.PublishRoundTripMS != 0 {
+		t.Fatalf("publish round trip mismatch: got %d want 0", rep.PublishRoundTripMS)
 	}
 	if rep.FetchRoundTripMS < 0 {
 		t.Fatalf("fetch round trip must be >= 0, got %d", rep.FetchRoundTripMS)
 	}
-
-	mu.Lock()
-	raw := append([]byte(nil), payloadByC[cid]...)
-	calls := addCalls
-	mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("ipfs add calls: got %d want 1", calls)
+	if source.Calls() != 1 {
+		t.Fatalf("source calls: got %d want 1", source.Calls())
 	}
-
-	var payload map[string]any
-	if err := json.Unmarshal(raw, &payload); err != nil {
-		t.Fatalf("checkpoint payload is not valid json: %v", err)
+	if source.DSN() != postgresDSN {
+		t.Fatalf("source dsn mismatch: got %q want %q", source.DSN(), postgresDSN)
 	}
-	if got := payload["version"]; got != "checkpoints.package.v1" {
-		t.Fatalf("version mismatch: got %#v want %q", got, "checkpoints.package.v1")
+	if addCalls != 0 {
+		t.Fatalf("unexpected ipfs add calls: got %d want 0", addCalls)
 	}
 }

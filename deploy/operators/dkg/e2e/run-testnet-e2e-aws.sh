@@ -14,6 +14,8 @@ cleanup_workdir=""
 cleanup_terraform_dir=""
 cleanup_aws_profile=""
 cleanup_aws_region=""
+cleanup_boundless_requestor_secret_arn=""
+AWS_ENV_ARGS=()
 
 usage() {
   cat <<'EOF'
@@ -57,7 +59,7 @@ run options:
   --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
   --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
-  --shared-kafka-port <port>           shared MSK plaintext Kafka TCP port (default: 9092)
+  --shared-kafka-port <port>           shared MSK TLS Kafka TCP port (default: 9094)
   --keep-infra                         do not destroy infra at the end
 
 cleanup options:
@@ -130,6 +132,50 @@ terraform_env_args() {
   fi
 }
 
+aws_env_args() {
+  local profile="$1"
+  local region="$2"
+  AWS_ENV_ARGS=()
+  if [[ -n "$profile" ]]; then
+    AWS_ENV_ARGS+=("AWS_PROFILE=$profile")
+  fi
+  if [[ -n "$region" ]]; then
+    AWS_ENV_ARGS+=("AWS_REGION=$region")
+    AWS_ENV_ARGS+=("AWS_DEFAULT_REGION=$region")
+  fi
+}
+
+create_boundless_requestor_secret() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local secret_name="$3"
+  local secret_value="$4"
+
+  [[ -n "$secret_name" ]] || die "boundless requestor secret name is required"
+  [[ -n "$secret_value" ]] || die "boundless requestor secret value is required"
+
+  aws_env_args "$aws_profile" "$aws_region"
+  env "${AWS_ENV_ARGS[@]}" aws secretsmanager create-secret \
+    --name "$secret_name" \
+    --description "boundless requestor key for intents-juno live e2e" \
+    --secret-string "$secret_value" \
+    --query 'ARN' \
+    --output text
+}
+
+delete_boundless_requestor_secret() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local secret_id="$3"
+
+  [[ -n "$secret_id" ]] || return 0
+
+  aws_env_args "$aws_profile" "$aws_region"
+  env "${AWS_ENV_ARGS[@]}" aws secretsmanager delete-secret \
+    --secret-id "$secret_id" \
+    --force-delete-without-recovery >/dev/null
+}
+
 terraform_apply_live_e2e() {
   local terraform_dir="$1"
   local state_file="$2"
@@ -171,6 +217,23 @@ terraform_destroy_live_e2e() {
     -var-file="$tfvars_file"
 }
 
+sanitize_dkg_summary_file() {
+  local summary_path="$1"
+  [[ -f "$summary_path" ]] || return 0
+
+  local tmp_path
+  tmp_path="${summary_path}.tmp"
+  jq '
+    del(.workdir, .coordinator_workdir, .completion_report)
+    | if (.operators? | type) == "array" then
+        .operators |= map(del(.operator_key_file, .backup_package, .runtime_dir, .registration_file))
+      else
+        .
+      end
+  ' "$summary_path" >"$tmp_path"
+  mv "$tmp_path" "$summary_path"
+}
+
 cleanup_trap() {
   if [[ "$cleanup_enabled" != "true" ]]; then
     return 0
@@ -184,6 +247,12 @@ cleanup_trap() {
   log "cleanup trap: destroying live e2e infrastructure"
   if ! terraform_destroy_live_e2e "$cleanup_terraform_dir" "$state_file" "$tfvars_file" "$cleanup_aws_profile" "$cleanup_aws_region"; then
     log "cleanup trap destroy failed (manual cleanup may be required)"
+  fi
+  if [[ -n "$cleanup_boundless_requestor_secret_arn" ]]; then
+    log "cleanup trap: deleting boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_aws_region" "$cleanup_boundless_requestor_secret_arn"; then
+      log "cleanup trap secret delete failed (manual cleanup may be required)"
+    fi
   fi
 }
 
@@ -989,6 +1058,7 @@ EOF
 
   ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" "mkdir -p $(printf '%q' "$(dirname "$dkg_summary_remote_path")")"
   scp "${ssh_opts[@]}" "$dkg_summary_local_path" "$ssh_user@$runner_public_ip:$dkg_summary_remote_path"
+  sanitize_dkg_summary_file "$dkg_summary_local_path"
   rm -rf "$staged_bundle_dir"
 }
 
@@ -1046,7 +1116,17 @@ command_cleanup() {
     aws_region="$(jq -r '.aws_region // empty' "$tfvars_file")"
   fi
 
+  local boundless_requestor_secret_arn=""
+  boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+
   terraform_destroy_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
+
+  if [[ -n "$boundless_requestor_secret_arn" ]]; then
+    log "cleanup: deleting boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$aws_profile" "$aws_region" "$boundless_requestor_secret_arn"; then
+      log "cleanup: boundless requestor secret delete failed or secret already removed"
+    fi
+  fi
 }
 
 command_run() {
@@ -1081,7 +1161,7 @@ command_run() {
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
   local shared_postgres_port="5432"
-  local shared_kafka_port="9092"
+  local shared_kafka_port="9094"
   local keep_infra="false"
   local -a e2e_args=()
 
@@ -1346,10 +1426,36 @@ command_run() {
   local boundless_requestor_key_hex
   boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
   [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
+  local boundless_requestor_secret_arn=""
+  if [[ "$with_shared_services" == "true" ]]; then
+    local secret_name_prefix boundless_requestor_secret_name
+    secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
+    secret_name_prefix="${secret_name_prefix#-}"
+    secret_name_prefix="${secret_name_prefix%-}"
+    [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
+    boundless_requestor_secret_name="${secret_name_prefix}-${deployment_id}-boundless-requestor-key"
+    log "creating boundless requestor secret"
+    boundless_requestor_secret_arn="$(
+      create_boundless_requestor_secret \
+        "$aws_profile" \
+        "$aws_region" \
+        "$boundless_requestor_secret_name" \
+        "$boundless_requestor_key_hex"
+    )"
+    [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
+  fi
 
   local tfvars_file state_file
   tfvars_file="$infra_dir/terraform.tfvars.json"
   state_file="$infra_dir/terraform.tfstate"
+
+  cleanup_workdir="$workdir"
+  cleanup_terraform_dir="$terraform_dir"
+  cleanup_aws_profile="$aws_profile"
+  cleanup_aws_region="$aws_region"
+  cleanup_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
+  cleanup_enabled="true"
+  trap cleanup_trap EXIT
 
   local provision_shared_services_json
   if [[ "$with_shared_services" == "true" ]]; then
@@ -1377,9 +1483,12 @@ command_run() {
     --arg shared_postgres_user "$shared_postgres_user" \
     --arg shared_postgres_password "$shared_postgres_password" \
     --arg shared_postgres_db "$shared_postgres_db" \
-    --arg shared_boundless_requestor_private_key "$boundless_requestor_key_hex" \
+    --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
+    --argjson runner_associate_public_ip_address "true" \
+    --argjson operator_associate_public_ip_address "true" \
+    --argjson shared_ecs_assign_public_ip "true" \
     --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
     '{
       aws_region: $aws_region,
@@ -1400,18 +1509,14 @@ command_run() {
       shared_postgres_user: $shared_postgres_user,
       shared_postgres_password: $shared_postgres_password,
       shared_postgres_db: $shared_postgres_db,
-      shared_boundless_requestor_private_key: $shared_boundless_requestor_private_key,
+      shared_boundless_requestor_secret_arn: $shared_boundless_requestor_secret_arn,
       shared_postgres_port: $shared_postgres_port,
       shared_kafka_port: $shared_kafka_port,
+      runner_associate_public_ip_address: $runner_associate_public_ip_address,
+      operator_associate_public_ip_address: $operator_associate_public_ip_address,
+      shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
       dkg_s3_key_prefix: $dkg_s3_key_prefix
     }' >"$tfvars_file"
-
-  cleanup_enabled="true"
-  cleanup_workdir="$workdir"
-  cleanup_terraform_dir="$terraform_dir"
-  cleanup_aws_profile="$aws_profile"
-  cleanup_aws_region="$aws_region"
-  trap cleanup_trap EXIT
 
   log "provisioning AWS runner (deployment_id=$deployment_id)"
   terraform_apply_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
@@ -1735,6 +1840,7 @@ export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
+export JUNO_QUEUE_KAFKA_TLS="${with_shared_services}"
 if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
   export JUNO_SCAN_BEARER_TOKEN="\$(tr -d '\r\n' < .ci/secrets/juno-scan-bearer.txt)"
 fi
@@ -1781,25 +1887,8 @@ EOF
     "$runner_ssh_user@$runner_public_ip:$remote_workdir/reports" \
     "$artifacts_dir/" || true
 
-  scp -r \
-    -i "$ssh_key_private" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=6 \
-    -o TCPKeepAlive=yes \
-    "$runner_ssh_user@$runner_public_ip:$remote_workdir/dkg" \
-    "$artifacts_dir/" || true
-
-  scp -r \
-    -i "$ssh_key_private" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=6 \
-    -o TCPKeepAlive=yes \
-    "$runner_ssh_user@$runner_public_ip:$remote_workdir/dkg-distributed" \
-    "$artifacts_dir/" || true
+  sanitize_dkg_summary_file "$artifacts_dir/reports/dkg-summary.json"
+  sanitize_dkg_summary_file "$artifacts_dir/dkg-summary-distributed.json"
 
   local summary_path
   summary_path="$artifacts_dir/reports/testnet-e2e-summary.json"

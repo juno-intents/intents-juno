@@ -3,6 +3,7 @@ package queue
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -20,6 +21,7 @@ const (
 )
 
 const (
+	envKafkaTLS          = "JUNO_QUEUE_KAFKA_TLS"
 	defaultMaxLineBytes  = 1 << 20
 	defaultKafkaMinBytes = 1
 	defaultKafkaMaxBytes = 10 << 20
@@ -137,6 +139,16 @@ func SplitCommaList(s string) []string {
 	return normalizeList(strings.Split(s, ","))
 }
 
+func queueKafkaTLSEnabled() bool {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(envKafkaTLS)))
+	switch v {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
+}
+
 type kafkaConsumer struct {
 	reader *kafka.Reader
 
@@ -172,13 +184,22 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 		return nil, errors.New("kafka consumer max bytes must be >= min bytes")
 	}
 
-	reader := kafka.NewReader(kafka.ReaderConfig{
+	readerCfg := kafka.ReaderConfig{
 		Brokers:     brokers,
 		GroupID:     strings.TrimSpace(cfg.Group),
 		GroupTopics: topics,
 		MinBytes:    minBytes,
 		MaxBytes:    maxBytes,
-	})
+	}
+	if queueKafkaTLSEnabled() {
+		readerCfg.Dialer = &kafka.Dialer{
+			Timeout: 10 * time.Second,
+			TLS: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}
+	}
+	reader := kafka.NewReader(readerCfg)
 	ctx, cancel := context.WithCancel(parent)
 	c := &kafkaConsumer{
 		reader: reader,
@@ -327,11 +348,20 @@ func newKafkaProducer(cfg ProducerConfig) (Producer, error) {
 		batchTimeout = 10 * time.Millisecond
 	}
 
-	return &kafkaProducer{writer: &kafka.Writer{
+	writer := &kafka.Writer{
 		Addr:         kafka.TCP(brokers...),
 		BatchTimeout: batchTimeout,
 		RequiredAcks: kafka.RequireAll,
-	}}, nil
+	}
+	if queueKafkaTLSEnabled() {
+		writer.Transport = &kafka.Transport{
+			TLS: &tls.Config{
+				MinVersion: tls.VersionTLS12,
+			},
+		}
+	}
+
+	return &kafkaProducer{writer: writer}, nil
 }
 
 func (p *kafkaProducer) Publish(ctx context.Context, topic string, payload []byte) error {

@@ -94,9 +94,27 @@ variable "vpc_id" {
 }
 
 variable "subnet_id" {
-  description = "Optional subnet ID for the runner. If empty, the first public subnet is selected."
+  description = "Optional subnet ID for the runner. If empty, the first subnet in the selected VPC is used."
   type        = string
   default     = ""
+}
+
+variable "shared_subnet_ids" {
+  description = "Optional subnet IDs used by shared Aurora/MSK/ECS/IPFS resources. If empty, the first two subnets in the selected VPC are used."
+  type        = list(string)
+  default     = []
+}
+
+variable "runner_associate_public_ip_address" {
+  description = "Whether to associate a public IPv4 address to the runner EC2 instance."
+  type        = bool
+  default     = false
+}
+
+variable "operator_associate_public_ip_address" {
+  description = "Whether to associate public IPv4 addresses to operator EC2 instances."
+  type        = bool
+  default     = false
 }
 
 variable "iam_instance_profile" {
@@ -171,13 +189,13 @@ variable "shared_aurora_instance_class" {
 }
 
 variable "shared_kafka_port" {
-  description = "MSK plaintext bootstrap TCP port exposed to the runner."
+  description = "MSK TLS bootstrap TCP port exposed to the runner."
   type        = number
-  default     = 9092
+  default     = 9094
 
   validation {
-    condition     = var.shared_kafka_port == 9092
-    error_message = "shared_kafka_port must be 9092 for MSK plaintext bootstrap brokers."
+    condition     = var.shared_kafka_port == 9094
+    error_message = "shared_kafka_port must be 9094 for MSK TLS bootstrap brokers."
   }
 }
 
@@ -227,17 +245,22 @@ variable "shared_ecs_task_memory" {
   default     = 512
 }
 
+variable "shared_ecs_assign_public_ip" {
+  description = "Whether shared ECS proof services should receive public IPv4 addresses."
+  type        = bool
+  default     = false
+}
+
 variable "shared_proof_service_image" {
   description = "Container image URI for shared proof services (proof-requestor/proof-funder). If empty, use the Terraform-managed ECR repo with :latest."
   type        = string
   default     = ""
 }
 
-variable "shared_boundless_requestor_private_key" {
-  description = "Boundless requestor private key used by shared proof-requestor/proof-funder ECS services (hex, optionally 0x-prefixed)."
+variable "shared_boundless_requestor_secret_arn" {
+  description = "Secrets Manager ARN containing the Boundless requestor private key used by shared proof-requestor/proof-funder ECS services."
   type        = string
   default     = ""
-  sensitive   = true
 }
 
 variable "shared_ipfs_min_size" {

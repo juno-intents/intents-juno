@@ -170,3 +170,30 @@ func TestMessageAckNoOp(t *testing.T) {
 		t.Fatalf("Ack: %v", err)
 	}
 }
+
+func TestQueueKafkaTLSEnabled(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "unset", value: "", want: false},
+		{name: "false", value: "false", want: false},
+		{name: "zero", value: "0", want: false},
+		{name: "true", value: "true", want: true},
+		{name: "one", value: "1", want: true},
+		{name: "yes", value: "yes", want: true},
+		{name: "on", value: "on", want: true},
+		{name: "case and space", value: "  TrUe  ", want: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envKafkaTLS, tc.value)
+			if got := queueKafkaTLSEnabled(); got != tc.want {
+				t.Fatalf("queueKafkaTLSEnabled(%q) = %t, want %t", tc.value, got, tc.want)
+			}
+		})
+	}
+}

@@ -69,7 +69,7 @@ test_runner_shared_probe_script_supports_managed_endpoints() {
     build_runner_shared_probe_script \
       "juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com" \
       "5432" \
-      "b-1.juno-live-e2e.kafka.us-east-1.amazonaws.com:9092,b-2.juno-live-e2e.kafka.us-east-1.amazonaws.com:9092"
+      "b-1.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094,b-2.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094"
   )"
 
   assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com/5432'" "aurora readiness check"
@@ -113,6 +113,10 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$variables_tf" "variable \"shared_ami_id\"" "shared ami variable"
   assert_contains "$variables_tf" "variable \"operator_root_volume_size_gb\"" "operator root volume variable"
   assert_contains "$variables_tf" "variable \"operator_base_port\"" "operator base port variable"
+  assert_contains "$variables_tf" "variable \"runner_associate_public_ip_address\"" "runner public ip toggle variable"
+  assert_contains "$variables_tf" "variable \"operator_associate_public_ip_address\"" "operator public ip toggle variable"
+  assert_contains "$variables_tf" "variable \"shared_ecs_assign_public_ip\"" "shared ecs public ip toggle variable"
+  assert_contains "$variables_tf" "variable \"shared_subnet_ids\"" "shared subnet override variable"
   assert_contains "$variables_tf" "variable \"dkg_s3_key_prefix\"" "dkg s3 prefix variable"
   assert_contains "$variables_tf" "variable \"provision_shared_services\"" "shared services toggle variable"
 
@@ -127,6 +131,10 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$main_tf" "resource \"aws_ecr_repository\" \"proof_services\"" "proof services ecr repository resource"
   assert_contains "$main_tf" "resource \"aws_ecs_service\" \"proof_requestor\"" "ecs proof requestor service resource"
   assert_contains "$main_tf" "resource \"aws_ecs_service\" \"proof_funder\"" "ecs proof funder service resource"
+  assert_contains "$main_tf" "client_broker = \"TLS\"" "msk tls-only client transport"
+  assert_not_contains "$main_tf" "TLS_PLAINTEXT" "msk plaintext transport disabled"
+  assert_not_contains "$main_tf" "unauthenticated = true" "msk unauthenticated mode disabled"
+  assert_not_contains "$main_tf" "map-public-ip-on-launch" "no hard public-subnet lookup dependency"
   assert_not_contains "$main_tf" "public.ecr.aws/docker/library/busybox:1.36.1" "busybox placeholder image removed"
   assert_contains "$main_tf" "resource \"aws_autoscaling_group\" \"ipfs\"" "ipfs asg resource"
   assert_contains "$main_tf" "resource \"aws_lb\" \"ipfs\"" "ipfs nlb resource"
@@ -200,6 +208,8 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "dkg_s3_key_prefix" "terraform dkg s3 prefix wiring"
   assert_contains "$wrapper_script_text" "operator_root_volume_size_gb" "terraform operator root volume wiring"
   assert_contains "$wrapper_script_text" "shared_postgres_password" "terraform shared postgres password wiring"
+  assert_contains "$wrapper_script_text" "shared_boundless_requestor_secret_arn" "terraform boundless requestor secret arn wiring"
+  assert_not_contains "$wrapper_script_text" "shared_boundless_requestor_private_key" "terraform boundless requestor private key tfvars wiring removed"
   assert_contains "$wrapper_script_text" "dkg_kms_key_arn" "terraform dkg kms output usage"
   assert_contains "$wrapper_script_text" "dkg_s3_bucket" "terraform dkg bucket output usage"
   assert_contains "$wrapper_script_text" "operator-export-kms.sh export" "operator kms export invocation"
@@ -218,6 +228,9 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" "set +e" "remote run temporary errexit disable"
   assert_contains "$wrapper_script_text" "remote_run_status=$?" "remote run exit capture"
   assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
+  assert_contains "$wrapper_script_text" '$remote_workdir/reports' "report artifacts collected"
+  assert_not_contains "$wrapper_script_text" '$runner_ssh_user@$runner_public_ip:$remote_workdir/dkg' "raw dkg directory artifact collection removed"
+  assert_not_contains "$wrapper_script_text" '$runner_ssh_user@$runner_public_ip:$remote_workdir/dkg-distributed' "raw distributed dkg directory artifact collection removed"
   assert_contains "$wrapper_script_text" "log \"juno_tx_hash=\$juno_tx_hash source=\$juno_tx_hash_source\"" "juno tx hash log when available"
   assert_contains "$wrapper_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
   assert_contains "$wrapper_script_text" ".bridge.report.juno.proof_of_execution.tx_hash?" "wrapper checks canonical juno proof path"
@@ -276,9 +289,9 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--shared-proof-funder-service-name" "shared proof funder service option"
   assert_contains "$e2e_script_text" "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)" "shared postgres required message"
   assert_contains "$e2e_script_text" "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)" "shared kafka required message"
-  assert_contains "$e2e_script_text" "--shared-ipfs-api-url is required (checkpoint package publish/pin verification)" "shared ipfs required message"
+  assert_contains "$e2e_script_text" "--shared-ipfs-api-url is required (operator checkpoint package pin/fetch verification)" "shared ipfs required message"
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
-  assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint probe wiring"
+  assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint package verification wiring"
   assert_contains "$e2e_script_text" "aws ecs register-task-definition" "proof services ecs task definition rollout"
   assert_contains "$e2e_script_text" "aws ecs update-service" "proof services ecs service update"
   assert_contains "$e2e_script_text" "aws ecs wait services-stable" "proof services ecs stability wait"
@@ -310,6 +323,12 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "\"--withdraw-checkpoint-block-hash\" \"\$bridge_withdraw_checkpoint_block_hash\"" "bridge forwards withdraw checkpoint block hash"
   assert_contains "$e2e_script_text" ".anchor_block_hash // empty" "witness extraction includes anchor block hash wiring"
   assert_contains "$e2e_script_text" "--bridge-juno-execution-tx-hash" "bridge juno execution tx hash option"
+  assert_contains "$e2e_script_text" "juno_rpc_json_call" "juno rpc helper function exists"
+  assert_contains "$e2e_script_text" "juno_rebroadcast_tx" "juno rebroadcast helper function exists"
+  assert_contains "$e2e_script_text" "getrawtransaction" "juno rebroadcast fetches raw transaction"
+  assert_contains "$e2e_script_text" "sendrawtransaction" "juno rebroadcast submits raw transaction"
+  assert_contains "$e2e_script_text" "bridge_juno_execution_tx_hash=\"\$boundless_withdraw_witness_txid\"" "bridge auto-resolves canonical juno execution tx hash from withdraw witness txid"
+  assert_contains "$e2e_script_text" "canonical juno execution tx hash is required" "bridge fails fast when canonical juno execution tx hash cannot be resolved"
   assert_contains "$e2e_script_text" "\"--juno-execution-tx-hash\" \"\$bridge_juno_execution_tx_hash\"" "bridge forwards canonical juno execution tx hash"
   assert_not_contains "$e2e_script_text" "--boundless-guest-witness-manifest" "legacy guest witness manifest option removed"
   assert_contains "$e2e_script_text" "boundless_input_mode == \"guest-witness-v1\"" "guest witness mode validation"
@@ -333,9 +352,23 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--arg juno_tx_hash_source \"\$juno_tx_hash_source\"" "summary receives juno tx hash source"
   assert_contains "$e2e_script_text" "tx_hash_source: (if \$juno_tx_hash_source == \"\" then null else \$juno_tx_hash_source end)" "summary stores juno tx hash source"
   assert_contains "$e2e_script_text" "tx_hash: (if \$juno_tx_hash == \"\" then null else \$juno_tx_hash end)" "summary stores juno tx hash"
+  assert_contains "$e2e_script_text" "dkg_report_public_json" "summary builds redacted dkg report payload"
+  assert_contains "$e2e_script_text" "operator_key_file" "summary redaction touches operator key path field"
+  assert_contains "$e2e_script_text" "backup_package" "summary redaction touches backup package path field"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
   assert_contains "$e2e_script_text" "proof_topics" "shared summary includes proof topics"
   assert_contains "$e2e_script_text" "proof_services" "shared summary includes proof service metadata"
+}
+
+test_e2e_workflows_exclude_sensitive_artifact_paths() {
+  local aws_workflow_text local_workflow_text
+  aws_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
+  local_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy.yml")"
+
+  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/artifacts' "aws workflow uploads artifact directory"
+  assert_not_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/infra' "aws workflow no longer uploads terraform infra dir"
+  assert_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/reports' "local workflow uploads reports"
+  assert_not_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/dkg' "local workflow no longer uploads raw dkg directory"
 }
 
 test_local_e2e_supports_external_dkg_summary_path() {
@@ -399,6 +432,23 @@ test_local_e2e_uses_managed_nonce_for_funding() {
   assert_contains "$e2e_script_text" "nonce=\"\$(cast nonce --rpc-url \"\$rpc_url\" --block pending \"\$sender\" 2>/dev/null || true)\"" "nonce resolved per-send from pending state"
   assert_contains "$e2e_script_text" "--async \\" "async cast send to avoid receipt wait stalls"
   assert_contains "$e2e_script_text" "ensure_recipient_min_balance \"\$base_rpc_url\" \"\$base_key\" \"\$funding_sender_address\" \"\$operator\" \"\$base_operator_fund_wei\" \"operator pre-fund\"" "operator prefund uses min-balance helper"
+}
+
+test_non_aws_workflow_wires_shared_ipfs_for_local_e2e() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy.yml")"
+
+  assert_contains "$workflow_text" "Start Shared Infra (Postgres + Kafka + IPFS)" "non-aws workflow shared infra step includes ipfs"
+  assert_contains "$workflow_text" "docker rm -f intents-shared-postgres intents-shared-kafka intents-shared-ipfs" "non-aws workflow removes stale ipfs container"
+  assert_contains "$workflow_text" "--name intents-shared-ipfs" "non-aws workflow starts shared ipfs container"
+  assert_contains "$workflow_text" "ipfs/kubo:v0.32.1" "non-aws workflow pins shared ipfs image"
+  assert_contains "$workflow_text" "E2E_SHARED_IPFS_API_URL=http://127.0.0.1:5001" "non-aws workflow exports shared ipfs api url"
+  assert_contains "$workflow_text" "go run ./cmd/checkpoint-aggregator" "non-aws workflow starts checkpoint aggregator producer"
+  assert_contains "$workflow_text" "go run ./cmd/checkpoint-signer" "non-aws workflow starts checkpoint signer producer"
+  assert_contains "$workflow_text" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "non-aws workflow wires signer private key env"
+  assert_contains "$workflow_text" "checkpoint-aggregator exited early" "non-aws workflow validates checkpoint aggregator startup"
+  assert_contains "$workflow_text" "checkpoint-signer exited early" "non-aws workflow validates checkpoint signer startup"
+  assert_contains "$workflow_text" "--shared-ipfs-api-url \"\$E2E_SHARED_IPFS_API_URL\"" "non-aws workflow forwards shared ipfs api url to local e2e script"
 }
 
 test_aws_workflow_dispatch_input_count_within_limit() {
@@ -469,11 +519,13 @@ main() {
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e
   test_local_e2e_supports_shared_infra_validation
+  test_e2e_workflows_exclude_sensitive_artifact_paths
   test_local_e2e_supports_external_dkg_summary_path
   test_local_e2e_uses_operator_deployer_key
   test_local_e2e_cast_send_handles_already_known_nonce_race
   test_local_e2e_tops_up_bridge_deployer_balance
   test_local_e2e_uses_managed_nonce_for_funding
+  test_non_aws_workflow_wires_shared_ipfs_for_local_e2e
   test_aws_workflow_dispatch_input_count_within_limit
   test_operator_stack_ami_release_workflow_exists
   test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp

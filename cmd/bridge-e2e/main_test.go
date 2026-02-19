@@ -211,6 +211,53 @@ func TestParseArgs_RuntimeSignerRequiresThresholdOperatorAddresses(t *testing.T)
 	}
 }
 
+func TestConsumeOperatorKeyFileFlags(t *testing.T) {
+	t.Parallel()
+
+	remaining, keyFiles, err := consumeOperatorKeyFileFlags([]string{
+		"--rpc-url", "https://example.invalid",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file=/tmp/op2",
+		"--threshold", "3",
+	})
+	if err != nil {
+		t.Fatalf("consumeOperatorKeyFileFlags: %v", err)
+	}
+	if len(keyFiles) != 2 || keyFiles[0] != "/tmp/op1" || keyFiles[1] != "/tmp/op2" {
+		t.Fatalf("unexpected key files: %#v", keyFiles)
+	}
+	if len(remaining) != 4 {
+		t.Fatalf("unexpected remaining args length: got=%d want=4", len(remaining))
+	}
+	if strings.Contains(strings.Join(remaining, " "), "operator-key-file") {
+		t.Fatalf("operator-key-file flag should be removed from remaining args: %#v", remaining)
+	}
+}
+
+func TestConsumeOperatorKeyFileFlags_MissingValue(t *testing.T) {
+	t.Parallel()
+
+	_, _, err := consumeOperatorKeyFileFlags([]string{"--operator-key-file"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "missing value for --operator-key-file") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_RequiresOperatorSignerBin(t *testing.T) {
+	t.Parallel()
+
+	_, err := run(context.Background(), config{})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--operator-signer-bin is required") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseArgs_RejectsWithdrawLargerThanDeposit(t *testing.T) {
 	t.Parallel()
 

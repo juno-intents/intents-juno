@@ -13,12 +13,7 @@ locals {
   }
 }
 
-data "aws_subnets" "public" {
-  filter {
-    name   = "map-public-ip-on-launch"
-    values = ["true"]
-  }
-
+data "aws_subnets" "selected_vpc" {
   dynamic "filter" {
     for_each = var.vpc_id == "" ? [] : [var.vpc_id]
     content {
@@ -29,7 +24,7 @@ data "aws_subnets" "public" {
 }
 
 locals {
-  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.public.ids[0]
+  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.selected_vpc.ids[0]
 }
 
 data "aws_subnet" "selected" {
@@ -38,8 +33,18 @@ data "aws_subnet" "selected" {
 
 locals {
   selected_vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_subnet.selected.vpc_id
-  public_subnets  = sort(data.aws_subnets.public.ids)
-  shared_subnets  = length(local.public_subnets) >= 2 ? slice(local.public_subnets, 0, 2) : local.public_subnets
+}
+
+data "aws_subnets" "shared_vpc" {
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+}
+
+locals {
+  vpc_subnets    = sort(data.aws_subnets.shared_vpc.ids)
+  shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (length(local.vpc_subnets) >= 2 ? slice(local.vpc_subnets, 0, 2) : local.vpc_subnets)
 }
 
 data "aws_subnet" "shared" {
@@ -375,7 +380,7 @@ resource "aws_db_subnet_group" "shared" {
   lifecycle {
     precondition {
       condition     = length(local.shared_subnets) >= 2
-      error_message = "Shared Aurora/MSK resources require at least two public subnets in distinct AZs."
+      error_message = "Shared Aurora/MSK resources require at least two subnets in distinct AZs."
     }
   }
 
@@ -448,13 +453,9 @@ resource "aws_msk_cluster" "shared" {
     }
   }
 
-  client_authentication {
-    unauthenticated = true
-  }
-
   encryption_info {
     encryption_in_transit {
-      client_broker = "TLS_PLAINTEXT"
+      client_broker = "TLS"
       in_cluster    = true
     }
   }
@@ -514,8 +515,8 @@ resource "aws_ecr_repository" "proof_services" {
 }
 
 locals {
-  shared_proof_service_image             = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
-  shared_boundless_requestor_private_key = trimspace(var.shared_boundless_requestor_private_key)
+  shared_proof_service_image            = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
+  shared_boundless_requestor_secret_arn = trimspace(var.shared_boundless_requestor_secret_arn)
 }
 
 resource "aws_cloudwatch_log_group" "proof_requestor" {
@@ -562,8 +563,14 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       command   = ["/usr/local/bin/proof-requestor"]
       environment = [
         {
-          name  = "PROOF_REQUESTOR_KEY"
-          value = local.shared_boundless_requestor_private_key
+          name  = "JUNO_QUEUE_KAFKA_TLS"
+          value = "true"
+        }
+      ]
+      secrets = [
+        {
+          name      = "PROOF_REQUESTOR_KEY"
+          valueFrom = local.shared_boundless_requestor_secret_arn
         }
       ]
       logConfiguration = {
@@ -583,8 +590,8 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       error_message = "shared proof service image must not be empty."
     }
     precondition {
-      condition     = local.shared_boundless_requestor_private_key != ""
-      error_message = "shared_boundless_requestor_private_key must be set when provision_shared_services=true."
+      condition     = local.shared_boundless_requestor_secret_arn != ""
+      error_message = "shared_boundless_requestor_secret_arn must be set when provision_shared_services=true."
     }
   }
 
@@ -609,8 +616,14 @@ resource "aws_ecs_task_definition" "proof_funder" {
       command   = ["/usr/local/bin/proof-funder"]
       environment = [
         {
-          name  = "PROOF_FUNDER_KEY"
-          value = local.shared_boundless_requestor_private_key
+          name  = "JUNO_QUEUE_KAFKA_TLS"
+          value = "true"
+        }
+      ]
+      secrets = [
+        {
+          name      = "PROOF_FUNDER_KEY"
+          valueFrom = local.shared_boundless_requestor_secret_arn
         }
       ]
       logConfiguration = {
@@ -630,8 +643,8 @@ resource "aws_ecs_task_definition" "proof_funder" {
       error_message = "shared proof service image must not be empty."
     }
     precondition {
-      condition     = local.shared_boundless_requestor_private_key != ""
-      error_message = "shared_boundless_requestor_private_key must be set when provision_shared_services=true."
+      condition     = local.shared_boundless_requestor_secret_arn != ""
+      error_message = "shared_boundless_requestor_secret_arn must be set when provision_shared_services=true."
     }
   }
 
@@ -653,7 +666,7 @@ resource "aws_ecs_service" "proof_requestor" {
   network_configuration {
     subnets          = local.shared_subnets
     security_groups  = [aws_security_group.ecs[0].id]
-    assign_public_ip = true
+    assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
   depends_on = [aws_iam_role_policy_attachment.ecs_task_execution]
@@ -676,7 +689,7 @@ resource "aws_ecs_service" "proof_funder" {
   network_configuration {
     subnets          = local.shared_subnets
     security_groups  = [aws_security_group.ecs[0].id]
-    assign_public_ip = true
+    assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
   depends_on = [aws_iam_role_policy_attachment.ecs_task_execution]
@@ -842,7 +855,7 @@ resource "aws_instance" "runner" {
   vpc_security_group_ids = [aws_security_group.runner.id]
   iam_instance_profile   = local.instance_profile_name
 
-  associate_public_ip_address = true
+  associate_public_ip_address = var.runner_associate_public_ip_address
 
   root_block_device {
     volume_type = "gp3"
@@ -872,7 +885,7 @@ resource "aws_instance" "operator" {
   vpc_security_group_ids = [aws_security_group.operator.id]
   iam_instance_profile   = local.instance_profile_name
 
-  associate_public_ip_address = true
+  associate_public_ip_address = var.operator_associate_public_ip_address
 
   root_block_device {
     volume_type = "gp3"
