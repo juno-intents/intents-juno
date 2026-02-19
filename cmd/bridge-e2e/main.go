@@ -83,6 +83,7 @@ type config struct {
 	DepositSeal                 []byte
 	WithdrawSeal                []byte
 	ProofInputsOut              string
+	JunoExecutionTxHash         string
 	OutputPath                  string
 	RunTimeout                  time.Duration
 	Boundless                   boundlessConfig
@@ -171,7 +172,7 @@ const (
 	defaultProofAckTimeout            = 5 * time.Second
 	defaultProofDeadline              = 15 * time.Minute
 	defaultOperatorSignerMaxRespBytes = 1 << 20
-	junoProofSourceFinalizeWithdrawTx = "transactions.finalize_withdraw"
+	junoProofSourceInputExecutionTx   = "input.juno_execution_tx_hash"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
 	deployCodeRecoveryTimeout         = 8 * time.Minute
@@ -467,6 +468,7 @@ func parseArgs(args []string) (config, error) {
 	var boundlessInputS3Prefix string
 	var boundlessInputS3Region string
 	var boundlessProofQueueBrokers string
+	var junoExecutionTxHash string
 
 	fs := flag.NewFlagSet("bridge-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -495,6 +497,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&depositFinalOrchardRootHex, "deposit-final-orchard-root", "", "Juno final orchard root for deposit checkpoint (bytes32 hex)")
 	fs.StringVar(&withdrawFinalOrchardRootHex, "withdraw-final-orchard-root", "", "Juno final orchard root for withdraw checkpoint (bytes32 hex; defaults to --deposit-final-orchard-root)")
 	fs.StringVar(&cfg.ProofInputsOut, "proof-inputs-output", "", "optional path to write proof input artifact bundle")
+	fs.StringVar(&junoExecutionTxHash, "juno-execution-tx-hash", "", "canonical Juno execution tx hash to report under juno.proof_of_execution")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
 
@@ -565,6 +568,7 @@ func parseArgs(args []string) (config, error) {
 	if cfg.RunTimeout <= 0 {
 		return cfg, errors.New("--run-timeout must be > 0")
 	}
+	cfg.JunoExecutionTxHash = strings.TrimSpace(junoExecutionTxHash)
 
 	if deployerKeyFile != "" && cfg.DeployerKeyHex != "" {
 		return cfg, errors.New("use only one of --deployer-key-file or --deployer-key-hex")
@@ -1685,7 +1689,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if finalizeWithdrawTx != (common.Hash{}) {
 		rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
 	}
-	junoProofTxHash, junoProofSource := junoExecutionProofFromFinalizeWithdrawTxHash(finalizeWithdrawTx)
+	junoProofTxHash, junoProofSource := junoExecutionProofFromInputTxHash(cfg.JunoExecutionTxHash)
 	rep.Juno.TxHash = junoProofTxHash
 	rep.Juno.TxID = junoProofTxHash
 	rep.Juno.ProofOfExecution.Available = junoProofTxHash != ""
@@ -1760,11 +1764,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	return &rep, nil
 }
 
-func junoExecutionProofFromFinalizeWithdrawTxHash(finalizeWithdrawTx common.Hash) (string, string) {
-	if finalizeWithdrawTx == (common.Hash{}) {
+func junoExecutionProofFromInputTxHash(junoExecutionTxHash string) (string, string) {
+	junoExecutionTxHash = strings.TrimSpace(junoExecutionTxHash)
+	if junoExecutionTxHash == "" {
 		return "", ""
 	}
-	return finalizeWithdrawTx.Hex(), junoProofSourceFinalizeWithdrawTx
+	return junoExecutionTxHash, junoProofSourceInputExecutionTx
 }
 
 func requestBoundlessProof(

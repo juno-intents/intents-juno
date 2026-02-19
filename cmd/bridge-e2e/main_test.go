@@ -2111,28 +2111,48 @@ func TestUpsertEnvVar(t *testing.T) {
 	}
 }
 
-func TestJunoExecutionProofFromFinalizeWithdrawTxHash(t *testing.T) {
+func TestJunoExecutionProofFromInputTxHash(t *testing.T) {
 	t.Parallel()
 
-	txHash := common.HexToHash("0x1234")
-	gotHash, gotSource := junoExecutionProofFromFinalizeWithdrawTxHash(txHash)
-	if gotHash != txHash.Hex() {
-		t.Fatalf("proof tx hash: got %q want %q", gotHash, txHash.Hex())
+	inputHash := "0x1234"
+	gotHash, gotSource := junoExecutionProofFromInputTxHash(inputHash)
+	if gotHash != inputHash {
+		t.Fatalf("proof tx hash: got %q want %q", gotHash, inputHash)
 	}
-	if gotSource != "transactions.finalize_withdraw" {
-		t.Fatalf("proof source: got %q want %q", gotSource, "transactions.finalize_withdraw")
+	if gotSource != "input.juno_execution_tx_hash" {
+		t.Fatalf("proof source: got %q want %q", gotSource, "input.juno_execution_tx_hash")
 	}
 }
 
-func TestJunoExecutionProofFromFinalizeWithdrawTxHash_EmptyHash(t *testing.T) {
+func TestJunoExecutionProofFromInputTxHash_EmptyHash(t *testing.T) {
 	t.Parallel()
 
-	gotHash, gotSource := junoExecutionProofFromFinalizeWithdrawTxHash(common.Hash{})
+	gotHash, gotSource := junoExecutionProofFromInputTxHash("")
 	if gotHash != "" {
 		t.Fatalf("proof tx hash: got %q want empty", gotHash)
 	}
 	if gotSource != "" {
 		t.Fatalf("proof source: got %q want empty", gotSource)
+	}
+}
+
+func TestParseArgs_JunoExecutionTxHash(t *testing.T) {
+	t.Parallel()
+
+	args := runtimeSignerParseArgsBase(t)
+	args = append(args,
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--juno-execution-tx-hash", "  juno-hash-123  ",
+	)
+
+	cfg, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.JunoExecutionTxHash != "juno-hash-123" {
+		t.Fatalf("juno execution tx hash: got %q want %q", cfg.JunoExecutionTxHash, "juno-hash-123")
 	}
 }
 
