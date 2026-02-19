@@ -821,7 +821,9 @@ run_distributed_dkg_backup_restore() {
   runner_init_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
-export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
+  export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+fi
 dkg_root="$remote_workdir/dkg-distributed"
 rm -rf "\$dkg_root"
 mkdir -p "\$dkg_root/operators" "\$dkg_root/reports"
@@ -904,7 +906,9 @@ EOF
     start_operator_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
-export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
+  export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+fi
 op_root="$operator_root_remote"
 runtime_dir="\$op_root/runtime"
 deploy/operators/dkg/operator.sh stop --workdir "\$runtime_dir" >/dev/null 2>&1 || true
@@ -928,7 +932,9 @@ EOF
   runner_execute_ceremony_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
-export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
+  export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+fi
 deploy/operators/dkg/coordinator.sh preflight --workdir "$coordinator_workdir" --release-tag "${release_tag}"
 deploy/operators/dkg/coordinator.sh run --workdir "$coordinator_workdir" --release-tag "${release_tag}"
 deploy/operators/dkg/test-completiton.sh run \
@@ -957,7 +963,9 @@ EOF
     backup_restore_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
-export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
+  export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
+fi
 op_root="$operator_work_root"
 runtime_dir="\$op_root/runtime"
 age_identity="\$op_root/backup/age-identity.txt"
@@ -1943,6 +1951,21 @@ command_run() {
     "$ssh_key_private" \
     "$remote_repo/.ci/secrets/operator-fleet-ssh.key"
 
+  local witness_tss_ca_local_path
+  witness_tss_ca_local_path="$(mktemp)"
+  scp -i "$ssh_key_private" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    "$runner_ssh_user@${operator_public_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
+    "$witness_tss_ca_local_path"
+  copy_remote_secret_file \
+    "$ssh_key_private" \
+    "$runner_ssh_user" \
+    "$runner_public_ip" \
+    "$witness_tss_ca_local_path" \
+    "$remote_repo/.ci/secrets/witness-tss-ca.pem"
+  rm -f "$witness_tss_ca_local_path"
+
   local witness_tunnel_scan_base_port="38080"
   local witness_tunnel_rpc_base_port="38232"
   local witness_tunnel_tss_base_port="39443"
@@ -1957,7 +1980,7 @@ command_run() {
     [[ -n "$witness_operator_private_ip" ]] || die "failed to resolve witness operator private ip for index=$witness_idx"
     witness_juno_scan_urls+=("http://127.0.0.1:$((witness_tunnel_scan_base_port + witness_idx))")
     witness_juno_rpc_urls+=("http://127.0.0.1:$((witness_tunnel_rpc_base_port + witness_idx))")
-    witness_tss_urls+=("http://127.0.0.1:$((witness_tunnel_tss_base_port + witness_idx))")
+    witness_tss_urls+=("https://127.0.0.1:$((witness_tunnel_tss_base_port + witness_idx))")
     witness_operator_labels+=("op$((witness_idx + 1))@${witness_operator_private_ip}")
   done
   (( ${#witness_juno_scan_urls[@]} >= witness_quorum_threshold )) || \
@@ -2037,6 +2060,9 @@ command_run() {
   if forwarded_arg_value "--withdraw-coordinator-tss-url" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --withdraw-coordinator-tss-url with stack-derived witness tunnel endpoint"
   fi
+  if forwarded_arg_value "--withdraw-coordinator-tss-server-ca-file" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --withdraw-coordinator-tss-server-ca-file with stack-derived witness CA"
+  fi
   remote_args+=(
     "--boundless-witness-juno-scan-url" "$witness_juno_scan_url"
     "--boundless-witness-juno-rpc-url" "$witness_juno_rpc_url"
@@ -2045,6 +2071,7 @@ command_run() {
     "--boundless-witness-operator-labels" "$witness_operator_labels_csv"
     "--boundless-witness-quorum-threshold" "$witness_quorum_threshold"
     "--withdraw-coordinator-tss-url" "$witness_tss_url"
+    "--withdraw-coordinator-tss-server-ca-file" ".ci/secrets/witness-tss-ca.pem"
   )
 
   log "assembling remote e2e arguments"
@@ -2079,6 +2106,10 @@ if [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
 fi
 if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
   export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
+fi
+if ! command -v psql >/dev/null 2>&1; then
+  sudo apt-get update -y
+  sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
 fi
 mkdir -p "$remote_workdir/reports"
 
@@ -2201,7 +2232,7 @@ EOF
   if [[ -f "$summary_path" ]]; then
     local juno_tx_hash
     local juno_tx_hash_source
-    local juno_tx_hash_expected_source="input.juno_execution_tx_hash"
+    local juno_tx_hash_expected_source="withdraw_coordinator.payout_state"
     juno_tx_hash="$(jq -r '.juno.tx_hash? // .bridge.report.juno.proof_of_execution.tx_hash? // ""' "$summary_path" 2>/dev/null || true)"
     juno_tx_hash_source="$(jq -r '.juno.tx_hash_source? // .bridge.report.juno.proof_of_execution.source? // ""' "$summary_path" 2>/dev/null || true)"
     if [[ -n "$juno_tx_hash" ]]; then

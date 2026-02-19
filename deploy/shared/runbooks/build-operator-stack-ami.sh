@@ -280,6 +280,8 @@ CHECKPOINT_IPFS_API_URL=
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
 TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
 TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
+TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
+TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
 ENV
   sudo install -m 0600 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
 
@@ -401,10 +403,19 @@ source /etc/intents-juno/operator-stack.env
   echo "tss-host signer work directory is not configured (TSS_SIGNER_WORK_DIR)" >&2
   exit 1
 }
+[[ -s "${TSS_TLS_CERT_FILE:-}" ]] || {
+  echo "tss-host TLS cert is missing or empty: ${TSS_TLS_CERT_FILE:-unset}" >&2
+  exit 1
+}
+[[ -s "${TSS_TLS_KEY_FILE:-}" ]] || {
+  echo "tss-host TLS key is missing or empty: ${TSS_TLS_KEY_FILE:-unset}" >&2
+  exit 1
+}
 mkdir -p "${TSS_SIGNER_WORK_DIR}"
 exec /usr/local/bin/tss-host \
   --listen-addr 127.0.0.1:9443 \
-  --insecure-http \
+  --tls-cert-file "${TSS_TLS_CERT_FILE}" \
+  --tls-key-file "${TSS_TLS_KEY_FILE}" \
   --signer-bin /usr/local/bin/tss-signer \
   --signer-arg --ufvk-file \
   --signer-arg "${TSS_SIGNER_UFVK_FILE}" \

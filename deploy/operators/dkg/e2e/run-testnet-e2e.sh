@@ -62,7 +62,12 @@ Options:
   --boundless-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
   --boundless-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
   --withdraw-coordinator-tss-url <url> optional tss-host URL override for withdraw coordinator
-                                   (defaults to derived http://<witness-rpc-host>:9443)
+                                   (defaults to derived https://<witness-rpc-host>:9443)
+  --withdraw-coordinator-tss-server-ca-file <path> required tss-host server CA PEM for withdraw coordinator TLS
+  --withdraw-blob-bucket <name>   S3 bucket for withdraw coordinator/finalizer durable blob artifacts
+                                   (default: --boundless-input-s3-bucket)
+  --withdraw-blob-prefix <prefix> S3 prefix for withdraw coordinator/finalizer durable blob artifacts
+                                   (default: withdraw-live)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
@@ -696,9 +701,148 @@ ensure_recipient_min_balance() {
 derive_tss_url_from_juno_rpc_url() {
   local rpc_url="$1"
   if [[ "$rpc_url" =~ ^https?://([^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
-    printf 'http://%s:9443' "${BASH_REMATCH[1]}"
+    printf 'https://%s:9443' "${BASH_REMATCH[1]}"
     return 0
   fi
+  return 1
+}
+
+normalize_hex_prefixed() {
+  local raw="$1"
+  raw="$(trim "$raw")"
+  raw="${raw#0x}"
+  raw="${raw#0X}"
+  if [[ -z "$raw" ]]; then
+    return 1
+  fi
+  if [[ ! "$raw" =~ ^[0-9a-fA-F]+$ ]]; then
+    return 1
+  fi
+  printf '0x%s' "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+}
+
+cast_contract_call_json() {
+  local rpc_url="$1"
+  local contract_addr="$2"
+  local calldata_sig="$3"
+  local decode_sig="$4"
+  shift 4
+
+  local call_data raw_response
+  call_data="$(cast calldata "$calldata_sig" "$@")"
+  raw_response="$(cast call --rpc-url "$rpc_url" "$contract_addr" --data "$call_data")"
+  cast decode-abi --json "$decode_sig" "$raw_response"
+}
+
+cast_contract_call_one() {
+  local rpc_url="$1"
+  local contract_addr="$2"
+  local calldata_sig="$3"
+  local decode_sig="$4"
+  shift 4
+
+  local decoded_json
+  decoded_json="$(
+    cast_contract_call_json \
+      "$rpc_url" \
+      "$contract_addr" \
+      "$calldata_sig" \
+      "$decode_sig" \
+      "$@"
+  )"
+  jq -r '.[0] | if type == "number" then tostring else . end' <<<"$decoded_json"
+}
+
+wait_for_condition() {
+  local timeout_seconds="$1"
+  local interval_seconds="$2"
+  local label="$3"
+  shift 3
+
+  local elapsed=0
+  local status
+  local output=""
+
+  while (( elapsed < timeout_seconds )); do
+    set +e
+    output="$("$@" 2>&1)"
+    status=$?
+    set -e
+    if (( status == 0 )); then
+      return 0
+    fi
+    if [[ -n "$output" ]]; then
+      log "$label pending: $output"
+    else
+      log "$label pending"
+    fi
+    sleep "$interval_seconds"
+    elapsed=$((elapsed + interval_seconds))
+  done
+
+  set +e
+  output="$("$@" 2>&1)"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    if [[ -n "$output" ]]; then
+      log "$label failed: $output"
+    else
+      log "$label failed"
+    fi
+    return 1
+  fi
+  return 0
+}
+
+query_withdrawal_payout_txid() {
+  local postgres_dsn="$1"
+  local withdrawal_id="$2"
+  local withdrawal_id_hex txid
+
+  withdrawal_id_hex="$(trim "$withdrawal_id")"
+  withdrawal_id_hex="${withdrawal_id_hex#0x}"
+  withdrawal_id_hex="${withdrawal_id_hex#0X}"
+  [[ "$withdrawal_id_hex" =~ ^[0-9a-fA-F]{64}$ ]] || \
+    die "invalid withdrawal id for payout tx query: $withdrawal_id"
+
+  txid="$(
+    psql "$postgres_dsn" -Atqc "
+      SELECT wb.juno_txid
+      FROM withdrawal_batch_items wbi
+      JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
+      WHERE wbi.withdrawal_id = decode('${withdrawal_id_hex}', 'hex')
+        AND wb.juno_txid IS NOT NULL
+        AND wb.juno_txid <> ''
+      ORDER BY wb.updated_at DESC
+      LIMIT 1;
+    " 2>/dev/null || true
+  )"
+  printf '%s' "$(trim "$txid")"
+}
+
+wait_for_withdrawal_payout_txid() {
+  local postgres_dsn="$1"
+  local withdrawal_id="$2"
+  local timeout_seconds="$3"
+  local interval_seconds=2
+  local elapsed=0
+  local txid normalized_txid
+
+  while (( elapsed < timeout_seconds )); do
+    txid="$(query_withdrawal_payout_txid "$postgres_dsn" "$withdrawal_id")"
+    if [[ -n "$txid" ]]; then
+      normalized_txid="$(normalize_hex_prefixed "$txid" || true)"
+      if [[ "$normalized_txid" =~ ^0x[0-9a-f]{64}$ ]]; then
+        printf '%s' "$normalized_txid"
+        return 0
+      fi
+      die "invalid Juno payout txid in withdraw coordinator state: $txid"
+    fi
+    sleep "$interval_seconds"
+    elapsed=$((elapsed + interval_seconds))
+  done
+
   return 1
 }
 
@@ -751,6 +895,9 @@ command_run() {
   local boundless_witness_wallet_id=""
   local boundless_witness_metadata_timeout_seconds="900"
   local withdraw_coordinator_tss_url=""
+  local withdraw_coordinator_tss_server_ca_file=""
+  local withdraw_blob_bucket=""
+  local withdraw_blob_prefix="withdraw-live"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -992,6 +1139,21 @@ command_run() {
         withdraw_coordinator_tss_url="$2"
         shift 2
         ;;
+      --withdraw-coordinator-tss-server-ca-file)
+        [[ $# -ge 2 ]] || die "missing value for --withdraw-coordinator-tss-server-ca-file"
+        withdraw_coordinator_tss_server_ca_file="$2"
+        shift 2
+        ;;
+      --withdraw-blob-bucket)
+        [[ $# -ge 2 ]] || die "missing value for --withdraw-blob-bucket"
+        withdraw_blob_bucket="$2"
+        shift 2
+        ;;
+      --withdraw-blob-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --withdraw-blob-prefix"
+        withdraw_blob_prefix="$2"
+        shift 2
+        ;;
       --runtime-mode|--withdraw-coordinator-runtime-mode)
         [[ $# -ge 2 ]] || die "missing value for $1"
         die "withdraw coordinator mock runtime is forbidden in live e2e (full mode only)"
@@ -1187,6 +1349,11 @@ command_run() {
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
   local guest_witness_extract_mode="true"
   [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
+  if [[ -z "$withdraw_blob_bucket" ]]; then
+    withdraw_blob_bucket="$boundless_input_s3_bucket"
+  fi
+  [[ -n "$withdraw_blob_bucket" ]] || die "--withdraw-blob-bucket must not be empty"
+  [[ -n "$withdraw_blob_prefix" ]] || die "--withdraw-blob-prefix must not be empty"
   [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required when --boundless-input-mode guest-witness-v1"
   [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
   [[ "$boundless_witness_metadata_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-witness-metadata-timeout-seconds must be numeric"
@@ -1231,6 +1398,7 @@ command_run() {
   [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (operator checkpoint package pin/fetch verification)"
   [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
+  command -v psql >/dev/null 2>&1 || die "psql is required for live withdrawal payout-state checks (install postgresql client)"
   local shared_ecs_enabled="false"
   if [[ -n "$shared_ecs_cluster_arn" || -n "$shared_proof_requestor_service_name" || -n "$shared_proof_funder_service_name" ]]; then
     [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required when shared ECS proof services are enabled"
@@ -1254,12 +1422,7 @@ command_run() {
     ensure_command aws
   fi
 
-  local bridge_recipient_key_hex="0x$(openssl rand -hex 32)"
-  local bridge_recipient_address
-  bridge_recipient_address="$(cast wallet address --private-key "$bridge_recipient_key_hex")"
-  if [[ -z "$bridge_recipient_address" ]]; then
-    die "failed to derive bridge recipient address"
-  fi
+  local bridge_recipient_address=""
   local boundless_requestor_key_hex
   boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
   [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
@@ -1355,6 +1518,7 @@ command_run() {
   local bridge_deployer_address
   bridge_deployer_address="$(jq -r '.operators[0].operator_id // empty' "$dkg_summary")"
   [[ -n "$bridge_deployer_address" ]] || die "dkg summary missing operators[0].operator_id"
+  bridge_recipient_address="$bridge_deployer_address"
 
   local witness_endpoint_pool_size=0
   local witness_endpoint_healthy_count=0
@@ -1520,13 +1684,11 @@ command_run() {
     boundless_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
 
     local generated_wallet_id generated_recipient_ua generated_deposit_txid generated_deposit_action_index
-    local generated_withdraw_txid generated_withdraw_action_index generated_recipient_raw_address_hex generated_ufvk
+    local generated_recipient_raw_address_hex generated_ufvk
     generated_wallet_id="$(jq -r '.wallet_id // empty' "$witness_metadata_json")"
     generated_recipient_ua="$(jq -r '.recipient_ua // empty' "$witness_metadata_json")"
     generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$witness_metadata_json")"
     generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$witness_metadata_json")"
-    generated_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json")"
-    generated_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$witness_metadata_json")"
     generated_recipient_raw_address_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json")"
     generated_ufvk="$(jq -r '.ufvk // empty' "$witness_metadata_json")"
 
@@ -1534,42 +1696,14 @@ command_run() {
     [[ -n "$generated_recipient_ua" ]] || die "generated witness metadata missing recipient_ua: $witness_metadata_json"
     [[ -n "$generated_deposit_txid" ]] || die "generated witness metadata missing deposit_txid: $witness_metadata_json"
     [[ "$generated_deposit_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata deposit_action_index is invalid: $generated_deposit_action_index"
-    [[ -n "$generated_withdraw_txid" ]] || die "generated witness metadata missing withdraw_txid: $witness_metadata_json"
-    [[ "$generated_withdraw_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata withdraw_action_index is invalid: $generated_withdraw_action_index"
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
 
-    local bridge_deployer_start_nonce bridge_deploy_nonce bridge_predicted_address
-    bridge_deployer_start_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
-    [[ "$bridge_deployer_start_nonce" =~ ^[0-9]+$ ]] || \
-      die "failed to resolve deployer nonce for predicted bridge address: address=$bridge_deployer_address nonce=$bridge_deployer_start_nonce"
-    bridge_deploy_nonce=$((bridge_deployer_start_nonce + 3))
-    bridge_predicted_address="$(cast compute-address --nonce "$bridge_deploy_nonce" "$bridge_deployer_address" | sed -n 's/^Computed Address:[[:space:]]*//p')"
-    [[ "$bridge_predicted_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
-      die "failed to compute predicted bridge address for nonce=$bridge_deploy_nonce deployer=$bridge_deployer_address"
-
-    local boundless_withdraw_witness_withdrawal_id_hex
-    boundless_withdraw_witness_withdrawal_id_hex="$(
-      cd "$REPO_ROOT"
-      deploy/operators/dkg/e2e/compute-bridge-withdrawal-id.sh run \
-        --base-chain-id "$base_chain_id" \
-        --bridge-address "$bridge_predicted_address" \
-        --requester-address "$bridge_deployer_address" \
-        --recipient-raw-address-hex "$generated_recipient_raw_address_hex" \
-        --amount-zat "10000" \
-        --withdraw-nonce "1"
-    )"
-    [[ "$boundless_withdraw_witness_withdrawal_id_hex" =~ ^0x[0-9a-fA-F]{64}$ ]] || \
-      die "computed withdrawal id is invalid: $boundless_withdraw_witness_withdrawal_id_hex"
-
     local deposit_witness_auto_file="$workdir/reports/witness/deposit.witness.bin"
-    local withdraw_witness_auto_file="$workdir/reports/witness/withdraw.witness.bin"
     local deposit_witness_auto_json="$workdir/reports/witness/deposit-witness.json"
-    local withdraw_witness_auto_json="$workdir/reports/witness/withdraw-witness.json"
-    local recipient_raw_address_hex_prefixed="0x${generated_recipient_raw_address_hex}"
 
     local witness_upsert_idx
     for ((witness_upsert_idx = 0; witness_upsert_idx < witness_endpoint_healthy_count; witness_upsert_idx++)); do
@@ -1587,14 +1721,12 @@ command_run() {
     local -a witness_success_labels=()
     local -a witness_success_fingerprints=()
     local -a witness_success_deposit_json=()
-    local -a witness_success_withdraw_json=()
     local -a witness_success_deposit_witness=()
-    local -a witness_success_withdraw_witness=()
 
     for ((witness_idx = 0; witness_idx < witness_endpoint_healthy_count; witness_idx++)); do
       local witness_scan_url witness_rpc_url witness_operator_label
-      local witness_operator_safe_label deposit_candidate_witness withdraw_candidate_witness
-      local deposit_candidate_json withdraw_candidate_json
+      local witness_operator_safe_label deposit_candidate_witness
+      local deposit_candidate_json
       local witness_extract_attempt witness_extract_ok
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
@@ -1605,9 +1737,7 @@ command_run() {
       [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
 
       deposit_candidate_witness="$witness_quorum_dir/deposit-${witness_operator_safe_label}.witness.bin"
-      withdraw_candidate_witness="$witness_quorum_dir/withdraw-${witness_operator_safe_label}.witness.bin"
       deposit_candidate_json="$witness_quorum_dir/deposit-${witness_operator_safe_label}.json"
-      withdraw_candidate_json="$witness_quorum_dir/withdraw-${witness_operator_safe_label}.json"
 
       witness_extract_ok="false"
       for witness_extract_attempt in $(seq 1 6); do
@@ -1623,19 +1753,6 @@ command_run() {
             --txid "$generated_deposit_txid" \
             --action-index "$generated_deposit_action_index" \
             --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json"
-
-          go run ./cmd/juno-witness-extract withdraw \
-            --juno-scan-url "$witness_scan_url" \
-            --wallet-id "$generated_wallet_id" \
-            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-            --juno-rpc-url "$witness_rpc_url" \
-            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-            --txid "$generated_withdraw_txid" \
-            --action-index "$generated_withdraw_action_index" \
-            --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
-            --recipient-raw-address-hex "$recipient_raw_address_hex_prefixed" \
-            --output-witness-item-file "$withdraw_candidate_witness" >"$withdraw_candidate_json"
         ); then
           witness_extract_ok="true"
           break
@@ -1652,33 +1769,22 @@ command_run() {
       fi
 
       local deposit_witness_hex deposit_anchor_height deposit_anchor_hash deposit_final_root
-      local withdraw_witness_hex withdraw_anchor_height withdraw_anchor_hash withdraw_final_root
       deposit_witness_hex="$(jq -r '.witness_item_hex // empty' "$deposit_candidate_json")"
       deposit_anchor_height="$(jq -r '.anchor_height // empty' "$deposit_candidate_json")"
       deposit_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_candidate_json")"
       deposit_final_root="$(jq -r '.final_orchard_root // empty' "$deposit_candidate_json")"
-      withdraw_witness_hex="$(jq -r '.witness_item_hex // empty' "$withdraw_candidate_json")"
-      withdraw_anchor_height="$(jq -r '.anchor_height // empty' "$withdraw_candidate_json")"
-      withdraw_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_candidate_json")"
-      withdraw_final_root="$(jq -r '.final_orchard_root // empty' "$withdraw_candidate_json")"
 
       [[ -n "$deposit_witness_hex" ]] || die "deposit witness output missing witness_item_hex: $deposit_candidate_json"
       [[ -n "$deposit_anchor_height" ]] || die "deposit witness output missing anchor_height: $deposit_candidate_json"
       [[ -n "$deposit_anchor_hash" ]] || die "deposit witness output missing anchor_block_hash: $deposit_candidate_json"
       [[ -n "$deposit_final_root" ]] || die "deposit witness output missing final_orchard_root: $deposit_candidate_json"
-      [[ -n "$withdraw_witness_hex" ]] || die "withdraw witness output missing witness_item_hex: $withdraw_candidate_json"
-      [[ -n "$withdraw_anchor_height" ]] || die "withdraw witness output missing anchor_height: $withdraw_candidate_json"
-      [[ -n "$withdraw_anchor_hash" ]] || die "withdraw witness output missing anchor_block_hash: $withdraw_candidate_json"
-      [[ -n "$withdraw_final_root" ]] || die "withdraw witness output missing final_orchard_root: $withdraw_candidate_json"
 
       local witness_fingerprint
-      witness_fingerprint="${deposit_witness_hex}|${deposit_anchor_height}|${deposit_anchor_hash}|${deposit_final_root}|${withdraw_witness_hex}|${withdraw_anchor_height}|${withdraw_anchor_hash}|${withdraw_final_root}"
+      witness_fingerprint="${deposit_witness_hex}|${deposit_anchor_height}|${deposit_anchor_hash}|${deposit_final_root}"
       witness_success_labels+=("$witness_operator_label")
       witness_success_fingerprints+=("$witness_fingerprint")
       witness_success_deposit_json+=("$deposit_candidate_json")
-      witness_success_withdraw_json+=("$withdraw_candidate_json")
       witness_success_deposit_witness+=("$deposit_candidate_witness")
-      witness_success_withdraw_witness+=("$withdraw_candidate_witness")
       log "witness extraction succeeded for operator=$witness_operator_label"
     done
 
@@ -1707,44 +1813,28 @@ command_run() {
     witness_quorum_validated="true"
 
     cp "${witness_success_deposit_witness[0]}" "$deposit_witness_auto_file"
-    cp "${witness_success_withdraw_witness[0]}" "$withdraw_witness_auto_file"
     cp "${witness_success_deposit_json[0]}" "$deposit_witness_auto_json"
-    cp "${witness_success_withdraw_json[0]}" "$withdraw_witness_auto_json"
 
     boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
-    boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
+    boundless_withdraw_witness_item_files=()
 
     bridge_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$deposit_witness_auto_json")"
-    bridge_withdraw_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$withdraw_witness_auto_json")"
     bridge_deposit_checkpoint_height="$(jq -r '.anchor_height // empty' "$deposit_witness_auto_json")"
     bridge_deposit_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_witness_auto_json")"
-    bridge_withdraw_checkpoint_height="$(jq -r '.anchor_height // empty' "$withdraw_witness_auto_json")"
-    bridge_withdraw_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_witness_auto_json")"
-
-    bridge_juno_execution_tx_hash="$generated_withdraw_txid"
-    log "resolved canonical juno execution tx hash from run-generated withdraw witness txid=$bridge_juno_execution_tx_hash"
+    bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
+    bridge_withdraw_checkpoint_height="$bridge_deposit_checkpoint_height"
+    bridge_withdraw_checkpoint_block_hash="$bridge_deposit_checkpoint_block_hash"
   fi
 
-  if [[ -n "$bridge_juno_execution_tx_hash" && -n "$boundless_witness_juno_rpc_url" ]]; then
-    local juno_rpc_user_var juno_rpc_pass_var juno_rpc_user juno_rpc_pass
-    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
-    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
-    juno_rpc_user="${!juno_rpc_user_var:-}"
-    juno_rpc_pass="${!juno_rpc_pass_var:-}"
-    if [[ -n "$juno_rpc_user" && -n "$juno_rpc_pass" ]]; then
-      juno_rebroadcast_tx \
-        "$boundless_witness_juno_rpc_url" \
-        "$juno_rpc_user" \
-        "$juno_rpc_pass" \
-        "$bridge_juno_execution_tx_hash"
-    else
-      log "skipping juno tx rebroadcast (missing env vars $juno_rpc_user_var/$juno_rpc_pass_var)"
-    fi
-  fi
-  [[ -n "$bridge_juno_execution_tx_hash" ]] || \
-    die "canonical juno execution tx hash is required from run-generated witness metadata"
   if [[ -z "$withdraw_coordinator_tss_url" ]]; then
     withdraw_coordinator_tss_url="$(derive_tss_url_from_juno_rpc_url "$boundless_witness_juno_rpc_url" || true)"
+  fi
+  if [[ -z "$withdraw_coordinator_tss_server_ca_file" ]]; then
+    local default_tss_runtime_dir
+    default_tss_runtime_dir="$(jq -r '.operators[0].runtime_dir // empty' "$dkg_summary" 2>/dev/null || true)"
+    if [[ -n "$default_tss_runtime_dir" ]]; then
+      withdraw_coordinator_tss_server_ca_file="$default_tss_runtime_dir/bundle/tls/ca.pem"
+    fi
   fi
   [[ -n "$withdraw_coordinator_juno_wallet_id" ]] || \
     die "withdraw coordinator juno wallet id is required from generated witness metadata"
@@ -1752,6 +1842,12 @@ command_run() {
     die "withdraw coordinator juno change address is required from generated witness metadata"
   [[ -n "$withdraw_coordinator_tss_url" ]] || \
     die "--withdraw-coordinator-tss-url is required for live withdraw coordinator full mode"
+  [[ "$withdraw_coordinator_tss_url" == https://* ]] || \
+    die "withdraw coordinator tss url must use https: $withdraw_coordinator_tss_url"
+  [[ -n "$withdraw_coordinator_tss_server_ca_file" ]] || \
+    die "--withdraw-coordinator-tss-server-ca-file is required for live withdraw coordinator full mode"
+  [[ -f "$withdraw_coordinator_tss_server_ca_file" ]] || \
+    die "withdraw coordinator tss server ca file not found: $withdraw_coordinator_tss_server_ca_file"
   local withdraw_coordinator_juno_rpc_user_var withdraw_coordinator_juno_rpc_pass_var
   withdraw_coordinator_juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
   withdraw_coordinator_juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
@@ -1870,7 +1966,9 @@ command_run() {
   if [[ -n "$bridge_proof_inputs_output" ]]; then
     bridge_args+=("--proof-inputs-output" "$bridge_proof_inputs_output")
   fi
-  bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
+  if [[ -n "$bridge_juno_execution_tx_hash" ]]; then
+    bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
+  fi
   bridge_args+=(
     "--boundless-bin" "$boundless_bin"
     "--boundless-rpc-url" "$boundless_rpc_url"
@@ -2097,6 +2195,97 @@ command_run() {
   bridge_deployer_key_hex="$(trimmed_file_value "$bridge_deployer_key_file")"
   [[ -n "$bridge_deployer_key_hex" ]] || die "bridge deployer key file is empty: $bridge_deployer_key_file"
 
+  local bridge_fee_bps bridge_relayer_tip_bps bridge_fee_distributor
+  local owner_wjuno_balance_before recipient_wjuno_balance_before
+  local fee_distributor_wjuno_balance_before bridge_wjuno_balance_before
+  bridge_fee_bps="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_bridge_address" \
+      "feeBps()" \
+      "feeBps()(uint96)"
+  )"
+  bridge_relayer_tip_bps="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_bridge_address" \
+      "relayerTipBps()" \
+      "relayerTipBps()(uint96)"
+  )"
+  bridge_fee_distributor="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_bridge_address" \
+      "feeDistributor()" \
+      "feeDistributor()(address)"
+  )"
+  [[ "$bridge_fee_bps" =~ ^[0-9]+$ ]] || die "bridge feeBps is invalid: $bridge_fee_bps"
+  [[ "$bridge_relayer_tip_bps" =~ ^[0-9]+$ ]] || die "bridge relayerTipBps is invalid: $bridge_relayer_tip_bps"
+  [[ "$bridge_fee_distributor" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bridge feeDistributor is invalid: $bridge_fee_distributor"
+  owner_wjuno_balance_before="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_wjuno_address" \
+      "balanceOf(address)" \
+      "balanceOf(address)(uint256)" \
+      "$bridge_deployer_address"
+  )"
+  recipient_wjuno_balance_before="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_wjuno_address" \
+      "balanceOf(address)" \
+      "balanceOf(address)(uint256)" \
+      "$bridge_recipient_address"
+  )"
+  fee_distributor_wjuno_balance_before="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_wjuno_address" \
+      "balanceOf(address)" \
+      "balanceOf(address)(uint256)" \
+      "$bridge_fee_distributor"
+  )"
+  bridge_wjuno_balance_before="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_wjuno_address" \
+      "balanceOf(address)" \
+      "balanceOf(address)(uint256)" \
+      "$deployed_bridge_address"
+  )"
+  [[ "$owner_wjuno_balance_before" =~ ^-?[0-9]+$ ]] || die "owner wjuno balance is invalid before run: $owner_wjuno_balance_before"
+  [[ "$recipient_wjuno_balance_before" =~ ^-?[0-9]+$ ]] || die "recipient wjuno balance is invalid before run: $recipient_wjuno_balance_before"
+  [[ "$fee_distributor_wjuno_balance_before" =~ ^-?[0-9]+$ ]] || \
+    die "fee distributor wjuno balance is invalid before run: $fee_distributor_wjuno_balance_before"
+  [[ "$bridge_wjuno_balance_before" =~ ^-?[0-9]+$ ]] || die "bridge wjuno balance is invalid before run: $bridge_wjuno_balance_before"
+
+  local run_deposit_id=""
+  local run_deposit_amount=""
+  local run_withdrawal_id=""
+  local run_withdraw_requester=""
+  local run_withdraw_amount=""
+  local run_withdraw_fee_bps=""
+  local run_withdraw_recipient_ua=""
+  local invariant_deposit_used="false"
+  local invariant_withdraw_requester=""
+  local invariant_withdraw_amount=""
+  local invariant_withdraw_fee_bps=""
+  local invariant_withdraw_finalized="false"
+  local invariant_withdraw_refunded="true"
+  local invariant_withdraw_recipient_ua=""
+  local invariant_owner_delta_expected=""
+  local invariant_owner_delta_actual=""
+  local invariant_recipient_delta_expected=""
+  local invariant_recipient_delta_actual=""
+  local invariant_recipient_delta_raw=""
+  local invariant_fee_distributor_delta_expected=""
+  local invariant_fee_distributor_delta_actual=""
+  local invariant_bridge_delta_expected=""
+  local invariant_bridge_delta_actual=""
+  local invariant_balance_delta_match="false"
+  local coordinator_payout_juno_tx_hash=""
+
   local base_relayer_log="$workdir/reports/base-relayer.log"
   local deposit_relayer_log="$workdir/reports/deposit-relayer.log"
   local withdraw_coordinator_log="$workdir/reports/withdraw-coordinator.log"
@@ -2158,10 +2347,6 @@ command_run() {
 
     (
       cd "$REPO_ROOT"
-      local -a withdraw_coordinator_tss_transport_args=()
-      if [[ "$withdraw_coordinator_tss_url" == http://* ]]; then
-        withdraw_coordinator_tss_transport_args+=(--tss-insecure-http)
-      fi
       BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
       go run ./cmd/withdraw-coordinator \
         --postgres-dsn "$shared_postgres_dsn" \
@@ -2176,12 +2361,14 @@ command_run() {
         --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
         --juno-change-address "$withdraw_coordinator_juno_change_address" \
         --tss-url "$withdraw_coordinator_tss_url" \
-        "${withdraw_coordinator_tss_transport_args[@]}" \
+        --tss-server-ca-file "$withdraw_coordinator_tss_server_ca_file" \
         --base-chain-id "$base_chain_id" \
         --bridge-address "$deployed_bridge_address" \
         --base-relayer-url "$base_relayer_url" \
         --extend-signer-bin "$bridge_operator_signer_bin" \
-        --blob-driver memory \
+        --blob-driver s3 \
+        --blob-bucket "$withdraw_blob_bucket" \
+        --blob-prefix "$withdraw_blob_prefix" \
         >"$withdraw_coordinator_log" 2>&1
     ) &
     withdraw_coordinator_pid="$!"
@@ -2197,6 +2384,13 @@ command_run() {
           --operator-threshold "$threshold" \
           --withdraw-image-id "$bridge_withdraw_image_id" \
           --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
+          --withdraw-witness-extractor-enabled \
+          --juno-scan-url "$boundless_witness_juno_scan_url" \
+          --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+          --juno-scan-bearer-env "$boundless_witness_juno_scan_bearer_token_env" \
+          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
           --base-relayer-url "$base_relayer_url" \
           --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
           --proof-driver queue \
@@ -2208,7 +2402,9 @@ command_run() {
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_finalizer_group" \
           --queue-topics "$checkpoint_package_topic" \
-          --blob-driver memory \
+          --blob-driver s3 \
+          --blob-bucket "$withdraw_blob_bucket" \
+          --blob-prefix "$withdraw_blob_prefix" \
           >"$withdraw_finalizer_log" 2>&1
     ) &
     withdraw_finalizer_pid="$!"
@@ -2226,13 +2422,10 @@ command_run() {
   fi
 
   if (( relayer_status == 0 )); then
-    local deposit_witness_file withdraw_witness_file
+    local deposit_witness_file
     deposit_witness_file="${boundless_deposit_witness_item_files[0]:-}"
-    withdraw_witness_file="${boundless_withdraw_witness_item_files[0]:-}"
     [[ -n "$deposit_witness_file" ]] || relayer_status=1
-    [[ -n "$withdraw_witness_file" ]] || relayer_status=1
     [[ -f "$deposit_witness_file" ]] || relayer_status=1
-    [[ -f "$withdraw_witness_file" ]] || relayer_status=1
 
     local deposit_event_payload
     deposit_event_payload="$workdir/reports/deposit-event.json"
@@ -2251,6 +2444,12 @@ command_run() {
         --topic "$deposit_event_topic" \
         --payload-file "$deposit_event_payload"
     ) || relayer_status=1
+    if (( relayer_status == 0 )); then
+      run_deposit_id="$(jq -r '.depositId // empty' "$deposit_event_payload" 2>/dev/null || true)"
+      run_deposit_amount="$(jq -r '.amount // empty' "$deposit_event_payload" 2>/dev/null || true)"
+      [[ "$run_deposit_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
+      [[ "$run_deposit_amount" =~ ^[0-9]+$ ]] || relayer_status=1
+    fi
 
     local witness_metadata_json withdraw_recipient_raw_hex withdraw_request_payload
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
@@ -2269,7 +2468,6 @@ command_run() {
         --bridge-address "$deployed_bridge_address" \
         --amount "10000" \
         --recipient-raw-address-hex "$withdraw_recipient_raw_hex" \
-        --proof-witness-item-file "$withdraw_witness_file" \
         --output "$withdraw_request_payload"
       go run ./cmd/queue-publish \
         --queue-driver kafka \
@@ -2277,6 +2475,19 @@ command_run() {
         --topic "$withdraw_request_topic" \
         --payload-file "$withdraw_request_payload"
     ) || relayer_status=1
+    if (( relayer_status == 0 )); then
+      run_withdrawal_id="$(jq -r '.withdrawalId // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_requester="$(jq -r '.requester // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_amount="$(jq -r '.amount // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_fee_bps="$(jq -r '.feeBps // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_recipient_ua="$(jq -r '.recipientUA // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_recipient_ua="$(normalize_hex_prefixed "$run_withdraw_recipient_ua" || true)"
+      [[ "$run_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
+      [[ "$run_withdraw_requester" =~ ^0x[0-9a-fA-F]{40}$ ]] || relayer_status=1
+      [[ "$run_withdraw_amount" =~ ^[0-9]+$ ]] || relayer_status=1
+      [[ "$run_withdraw_fee_bps" =~ ^[0-9]+$ ]] || relayer_status=1
+      [[ "$run_withdraw_recipient_ua" =~ ^0x[0-9a-f]{2,}$ ]] || relayer_status=1
+    fi
   fi
 
   if (( relayer_status == 0 )); then
@@ -2284,6 +2495,234 @@ command_run() {
       relayer_status=1
     fi
     if ! wait_for_log_pattern "$withdraw_finalizer_log" "submitted finalizeWithdrawBatch" 1500; then
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    compute_fee_components() {
+      local amount="$1"
+      local fee_bps="$2"
+      local tip_bps="$3"
+      local fee tip fee_to_distributor net
+      fee=$((amount * fee_bps / 10000))
+      tip=$((fee * tip_bps / 10000))
+      fee_to_distributor=$((fee - tip))
+      net=$((amount - fee))
+      printf '%s %s %s %s\n' "$fee" "$tip" "$fee_to_distributor" "$net"
+    }
+
+    check_relayer_flow_invariants() {
+      local deposit_used
+      deposit_used="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_bridge_address" \
+          "depositUsed(bytes32)" \
+          "depositUsed(bytes32)(bool)" \
+          "$run_deposit_id"
+      )"
+      if [[ "$deposit_used" != "true" ]]; then
+        printf 'depositUsed invariant failed for depositId=%s (got=%s)\n' "$run_deposit_id" "$deposit_used"
+        return 1
+      fi
+
+      local withdrawal_view_json requester_on_chain amount_on_chain fee_bps_on_chain
+      local finalized_on_chain refunded_on_chain recipient_ua_on_chain
+      withdrawal_view_json="$(
+        cast_contract_call_json \
+          "$base_rpc_url" \
+          "$deployed_bridge_address" \
+          "getWithdrawal(bytes32)" \
+          "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
+          "$run_withdrawal_id"
+      )"
+      requester_on_chain="$(jq -r '.[0]' <<<"$withdrawal_view_json")"
+      amount_on_chain="$(jq -r '.[1] | tostring' <<<"$withdrawal_view_json")"
+      fee_bps_on_chain="$(jq -r '.[3] | tostring' <<<"$withdrawal_view_json")"
+      finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$withdrawal_view_json")"
+      refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$withdrawal_view_json")"
+      recipient_ua_on_chain="$(jq -r '.[6]' <<<"$withdrawal_view_json")"
+      recipient_ua_on_chain="$(normalize_hex_prefixed "$recipient_ua_on_chain" || true)"
+      requester_on_chain="$(lower "$requester_on_chain")"
+      recipient_ua_on_chain="$(lower "$recipient_ua_on_chain")"
+
+      if [[ "$requester_on_chain" != "$(lower "$run_withdraw_requester")" ]]; then
+        printf 'getWithdrawal requester mismatch for withdrawalId=%s (got=%s want=%s)\n' \
+          "$run_withdrawal_id" \
+          "$requester_on_chain" \
+          "$(lower "$run_withdraw_requester")"
+        return 1
+      fi
+      if [[ "$amount_on_chain" != "$run_withdraw_amount" ]]; then
+        printf 'getWithdrawal amount mismatch for withdrawalId=%s (got=%s want=%s)\n' \
+          "$run_withdrawal_id" \
+          "$amount_on_chain" \
+          "$run_withdraw_amount"
+        return 1
+      fi
+      if [[ "$fee_bps_on_chain" != "$run_withdraw_fee_bps" ]]; then
+        printf 'getWithdrawal feeBps mismatch for withdrawalId=%s (got=%s want=%s)\n' \
+          "$run_withdrawal_id" \
+          "$fee_bps_on_chain" \
+          "$run_withdraw_fee_bps"
+        return 1
+      fi
+      if [[ "$finalized_on_chain" != "true" ]]; then
+        printf 'getWithdrawal finalized mismatch for withdrawalId=%s (got=%s want=true)\n' \
+          "$run_withdrawal_id" \
+          "$finalized_on_chain"
+        return 1
+      fi
+      if [[ "$refunded_on_chain" != "false" ]]; then
+        printf 'getWithdrawal refunded mismatch for withdrawalId=%s (got=%s want=false)\n' \
+          "$run_withdrawal_id" \
+          "$refunded_on_chain"
+        return 1
+      fi
+      if [[ "$recipient_ua_on_chain" != "$(lower "$run_withdraw_recipient_ua")" ]]; then
+        printf 'getWithdrawal recipientUA mismatch for withdrawalId=%s (got=%s want=%s)\n' \
+          "$run_withdrawal_id" \
+          "$recipient_ua_on_chain" \
+          "$(lower "$run_withdraw_recipient_ua")"
+        return 1
+      fi
+
+      local owner_wjuno_balance_after recipient_wjuno_balance_after
+      local fee_distributor_wjuno_balance_after bridge_wjuno_balance_after
+      owner_wjuno_balance_after="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_wjuno_address" \
+          "balanceOf(address)" \
+          "balanceOf(address)(uint256)" \
+          "$bridge_deployer_address"
+      )"
+      recipient_wjuno_balance_after="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_wjuno_address" \
+          "balanceOf(address)" \
+          "balanceOf(address)(uint256)" \
+          "$bridge_recipient_address"
+      )"
+      fee_distributor_wjuno_balance_after="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_wjuno_address" \
+          "balanceOf(address)" \
+          "balanceOf(address)(uint256)" \
+          "$bridge_fee_distributor"
+      )"
+      bridge_wjuno_balance_after="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_wjuno_address" \
+          "balanceOf(address)" \
+          "balanceOf(address)(uint256)" \
+          "$deployed_bridge_address"
+      )"
+      [[ "$owner_wjuno_balance_after" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$recipient_wjuno_balance_after" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$fee_distributor_wjuno_balance_after" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$bridge_wjuno_balance_after" =~ ^-?[0-9]+$ ]] || return 1
+
+      local deposit_fee deposit_tip deposit_fee_to_distributor deposit_net
+      local withdraw_fee withdraw_tip withdraw_fee_to_distributor withdraw_net
+      read -r deposit_fee deposit_tip deposit_fee_to_distributor deposit_net < <(
+        compute_fee_components "$run_deposit_amount" "$bridge_fee_bps" "$bridge_relayer_tip_bps"
+      )
+      read -r withdraw_fee withdraw_tip withdraw_fee_to_distributor withdraw_net < <(
+        compute_fee_components "$run_withdraw_amount" "$run_withdraw_fee_bps" "$bridge_relayer_tip_bps"
+      )
+      [[ "$deposit_fee" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$deposit_tip" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$deposit_fee_to_distributor" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$deposit_net" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$withdraw_fee" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$withdraw_tip" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$withdraw_fee_to_distributor" =~ ^-?[0-9]+$ ]] || return 1
+      [[ "$withdraw_net" =~ ^-?[0-9]+$ ]] || return 1
+
+      local recipient_equals_owner="false"
+      if [[ "$(lower "$bridge_recipient_address")" == "$(lower "$bridge_deployer_address")" ]]; then
+        recipient_equals_owner="true"
+      fi
+
+      local owner_delta_expected recipient_delta_expected fee_distributor_delta_expected bridge_delta_expected
+      owner_delta_expected=$((deposit_tip - run_withdraw_amount + withdraw_tip))
+      if [[ "$recipient_equals_owner" == "true" ]]; then
+        owner_delta_expected=$((owner_delta_expected + deposit_net))
+        recipient_delta_expected=0
+      else
+        recipient_delta_expected=$deposit_net
+      fi
+      fee_distributor_delta_expected=$((deposit_fee_to_distributor + withdraw_fee_to_distributor))
+      bridge_delta_expected=0
+
+      local owner_delta_actual recipient_delta_raw recipient_delta_actual
+      local fee_distributor_delta_actual bridge_delta_actual
+      owner_delta_actual=$((owner_wjuno_balance_after - owner_wjuno_balance_before))
+      recipient_delta_raw=$((recipient_wjuno_balance_after - recipient_wjuno_balance_before))
+      if [[ "$recipient_equals_owner" == "true" ]]; then
+        recipient_delta_actual=0
+      else
+        recipient_delta_actual="$recipient_delta_raw"
+      fi
+      fee_distributor_delta_actual=$((fee_distributor_wjuno_balance_after - fee_distributor_wjuno_balance_before))
+      bridge_delta_actual=$((bridge_wjuno_balance_after - bridge_wjuno_balance_before))
+
+      if (( owner_delta_actual != owner_delta_expected ||
+            recipient_delta_actual != recipient_delta_expected ||
+            fee_distributor_delta_actual != fee_distributor_delta_expected ||
+            bridge_delta_actual != bridge_delta_expected )); then
+        printf 'balance delta invariant failed: owner got=%s want=%s recipient got=%s raw=%s want=%s feeDistributor got=%s want=%s bridge got=%s want=%s\n' \
+          "$owner_delta_actual" \
+          "$owner_delta_expected" \
+          "$recipient_delta_actual" \
+          "$recipient_delta_raw" \
+          "$recipient_delta_expected" \
+          "$fee_distributor_delta_actual" \
+          "$fee_distributor_delta_expected" \
+          "$bridge_delta_actual" \
+          "$bridge_delta_expected"
+        return 1
+      fi
+
+      invariant_deposit_used="true"
+      invariant_withdraw_requester="$requester_on_chain"
+      invariant_withdraw_amount="$amount_on_chain"
+      invariant_withdraw_fee_bps="$fee_bps_on_chain"
+      invariant_withdraw_finalized="$finalized_on_chain"
+      invariant_withdraw_refunded="$refunded_on_chain"
+      invariant_withdraw_recipient_ua="$recipient_ua_on_chain"
+      invariant_owner_delta_expected="$owner_delta_expected"
+      invariant_owner_delta_actual="$owner_delta_actual"
+      invariant_recipient_delta_expected="$recipient_delta_expected"
+      invariant_recipient_delta_actual="$recipient_delta_actual"
+      invariant_recipient_delta_raw="$recipient_delta_raw"
+      invariant_fee_distributor_delta_expected="$fee_distributor_delta_expected"
+      invariant_fee_distributor_delta_actual="$fee_distributor_delta_actual"
+      invariant_bridge_delta_expected="$bridge_delta_expected"
+      invariant_bridge_delta_actual="$bridge_delta_actual"
+      invariant_balance_delta_match="true"
+      return 0
+    }
+
+    if ! wait_for_condition 900 5 "run-scoped bridge invariants" check_relayer_flow_invariants; then
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    coordinator_payout_juno_tx_hash="$(
+      wait_for_withdrawal_payout_txid \
+        "$shared_postgres_dsn" \
+        "$run_withdrawal_id" \
+        300 || true
+    )"
+    if [[ -z "$coordinator_payout_juno_tx_hash" ]]; then
+      log "missing payout txid for withdrawalId=$run_withdrawal_id from withdraw coordinator state"
       relayer_status=1
     fi
   fi
@@ -2336,24 +2775,13 @@ command_run() {
   fi
 
   local juno_tx_hash=""
-  local juno_tx_hash_source=""
-  local juno_tx_hash_expected_source="input.juno_execution_tx_hash"
-  juno_tx_hash="$(jq -r '.juno.proof_of_execution.tx_hash? // ""' "$bridge_summary" 2>/dev/null || true)"
-  juno_tx_hash_source="$(
-    jq -r '.juno.proof_of_execution.source? // ""' "$bridge_summary" 2>/dev/null || true
-  )"
-  if [[ -n "$juno_tx_hash" ]]; then
-    if [[ "$juno_tx_hash_source" != "$juno_tx_hash_expected_source" ]]; then
-      die "bridge summary juno proof source mismatch: got=$juno_tx_hash_source want=$juno_tx_hash_expected_source ($bridge_summary)"
-    fi
-    if [[ -n "$juno_tx_hash_source" ]]; then
-      log "juno_tx_hash=$juno_tx_hash source=$juno_tx_hash_source"
-    else
-      log "juno_tx_hash=$juno_tx_hash"
-    fi
+  local juno_tx_hash_source="withdraw_coordinator.payout_state"
+  juno_tx_hash="$(normalize_hex_prefixed "$coordinator_payout_juno_tx_hash" || true)"
+  if [[ "$juno_tx_hash" =~ ^0x[0-9a-f]{64}$ ]]; then
+    log "juno_tx_hash=$juno_tx_hash source=$juno_tx_hash_source"
   else
     log "juno_tx_hash=unavailable"
-    die "bridge summary missing juno proof-of-execution tx hash: $bridge_summary"
+    die "withdraw coordinator payout state missing juno tx hash for withdrawalId=$run_withdrawal_id"
   fi
 
   local dkg_report_public_json
@@ -2385,6 +2813,85 @@ command_run() {
   witness_healthy_operator_labels_json="$(json_array_from_args "${witness_healthy_operator_labels[@]}")"
   witness_quorum_operator_labels_json="$(json_array_from_args "${witness_quorum_operator_labels[@]}")"
   witness_failed_operator_labels_json="$(json_array_from_args "${witness_failed_operator_labels[@]}")"
+
+  local run_invariants_json
+  run_invariants_json="$(
+    jq -n \
+      --arg deposit_id "$run_deposit_id" \
+      --arg deposit_amount "$run_deposit_amount" \
+      --arg withdrawal_id "$run_withdrawal_id" \
+      --arg withdraw_requester "$run_withdraw_requester" \
+      --arg withdraw_amount "$run_withdraw_amount" \
+      --arg withdraw_fee_bps "$run_withdraw_fee_bps" \
+      --arg withdraw_recipient_ua "$run_withdraw_recipient_ua" \
+      --arg bridge_fee_bps "$bridge_fee_bps" \
+      --arg bridge_relayer_tip_bps "$bridge_relayer_tip_bps" \
+      --arg bridge_fee_distributor "$bridge_fee_distributor" \
+      --arg deposit_used "$invariant_deposit_used" \
+      --arg invariant_withdraw_requester "$invariant_withdraw_requester" \
+      --arg invariant_withdraw_amount "$invariant_withdraw_amount" \
+      --arg invariant_withdraw_fee_bps "$invariant_withdraw_fee_bps" \
+      --arg invariant_withdraw_finalized "$invariant_withdraw_finalized" \
+      --arg invariant_withdraw_refunded "$invariant_withdraw_refunded" \
+      --arg invariant_withdraw_recipient_ua "$invariant_withdraw_recipient_ua" \
+      --arg invariant_owner_delta_expected "$invariant_owner_delta_expected" \
+      --arg invariant_owner_delta_actual "$invariant_owner_delta_actual" \
+      --arg invariant_recipient_delta_expected "$invariant_recipient_delta_expected" \
+      --arg invariant_recipient_delta_actual "$invariant_recipient_delta_actual" \
+      --arg invariant_recipient_delta_raw "$invariant_recipient_delta_raw" \
+      --arg invariant_fee_distributor_delta_expected "$invariant_fee_distributor_delta_expected" \
+      --arg invariant_fee_distributor_delta_actual "$invariant_fee_distributor_delta_actual" \
+      --arg invariant_bridge_delta_expected "$invariant_bridge_delta_expected" \
+      --arg invariant_bridge_delta_actual "$invariant_bridge_delta_actual" \
+      --arg invariant_balance_delta_match "$invariant_balance_delta_match" \
+      '{
+        deposit_id: (if $deposit_id == "" then null else $deposit_id end),
+        deposit_amount: (if $deposit_amount == "" then null else ($deposit_amount | tonumber) end),
+        withdrawal_id: (if $withdrawal_id == "" then null else $withdrawal_id end),
+        withdrawal_request: {
+          requester: (if $withdraw_requester == "" then null else $withdraw_requester end),
+          amount: (if $withdraw_amount == "" then null else ($withdraw_amount | tonumber) end),
+          fee_bps: (if $withdraw_fee_bps == "" then null else ($withdraw_fee_bps | tonumber) end),
+          recipient_ua: (if $withdraw_recipient_ua == "" then null else $withdraw_recipient_ua end)
+        },
+        bridge_fee_params: {
+          fee_bps: (if $bridge_fee_bps == "" then null else ($bridge_fee_bps | tonumber) end),
+          relayer_tip_bps: (if $bridge_relayer_tip_bps == "" then null else ($bridge_relayer_tip_bps | tonumber) end),
+          fee_distributor: (if $bridge_fee_distributor == "" then null else $bridge_fee_distributor end)
+        },
+        checks: {
+          deposit_used: ($deposit_used == "true"),
+          withdrawal: {
+            requester: (if $invariant_withdraw_requester == "" then null else $invariant_withdraw_requester end),
+            amount: (if $invariant_withdraw_amount == "" then null else ($invariant_withdraw_amount | tonumber) end),
+            fee_bps: (if $invariant_withdraw_fee_bps == "" then null else ($invariant_withdraw_fee_bps | tonumber) end),
+            finalized: ($invariant_withdraw_finalized == "true"),
+            refunded: ($invariant_withdraw_refunded == "true"),
+            recipient_ua: (if $invariant_withdraw_recipient_ua == "" then null else $invariant_withdraw_recipient_ua end)
+          },
+          balance_deltas: {
+            owner: {
+              expected: (if $invariant_owner_delta_expected == "" then null else ($invariant_owner_delta_expected | tonumber) end),
+              actual: (if $invariant_owner_delta_actual == "" then null else ($invariant_owner_delta_actual | tonumber) end)
+            },
+            recipient: {
+              expected: (if $invariant_recipient_delta_expected == "" then null else ($invariant_recipient_delta_expected | tonumber) end),
+              actual: (if $invariant_recipient_delta_actual == "" then null else ($invariant_recipient_delta_actual | tonumber) end),
+              raw_actual: (if $invariant_recipient_delta_raw == "" then null else ($invariant_recipient_delta_raw | tonumber) end)
+            },
+            fee_distributor: {
+              expected: (if $invariant_fee_distributor_delta_expected == "" then null else ($invariant_fee_distributor_delta_expected | tonumber) end),
+              actual: (if $invariant_fee_distributor_delta_actual == "" then null else ($invariant_fee_distributor_delta_actual | tonumber) end)
+            },
+            bridge: {
+              expected: (if $invariant_bridge_delta_expected == "" then null else ($invariant_bridge_delta_expected | tonumber) end),
+              actual: (if $invariant_bridge_delta_actual == "" then null else ($invariant_bridge_delta_actual | tonumber) end)
+            },
+            match: ($invariant_balance_delta_match == "true")
+          }
+        }
+      }'
+  )"
 
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
@@ -2445,6 +2952,8 @@ command_run() {
     --arg boundless_ramp_up_period_seconds "$boundless_ramp_up_period_seconds" \
     --arg boundless_lock_timeout_seconds "$boundless_lock_timeout_seconds" \
     --arg boundless_timeout_seconds "$boundless_timeout_seconds" \
+    --arg withdraw_blob_bucket "$withdraw_blob_bucket" \
+    --arg withdraw_blob_prefix "$withdraw_blob_prefix" \
     --arg bridge_recipient_address "$bridge_recipient_address" \
     --arg shared_enabled "$shared_enabled" \
     --arg shared_kafka_brokers "$shared_kafka_brokers" \
@@ -2466,6 +2975,7 @@ command_run() {
     --arg juno_tx_hash "$juno_tx_hash" \
     --arg juno_tx_hash_source "$juno_tx_hash_source" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
+    --argjson run_invariants "$run_invariants_json" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
     --argjson dkg "$dkg_report_public_json" \
     --argjson bridge "$(cat "$bridge_summary")" \
@@ -2541,6 +3051,11 @@ command_run() {
           lock_timeout_seconds: $boundless_lock_timeout_seconds,
           timeout_seconds: $boundless_timeout_seconds
         },
+        withdraw_blob: {
+          bucket: (if $withdraw_blob_bucket == "" then null else $withdraw_blob_bucket end),
+          prefix: (if $withdraw_blob_prefix == "" then null else $withdraw_blob_prefix end)
+        },
+        live_run_invariants: $run_invariants,
         report: $bridge
       },
       shared_infra: {
