@@ -28,11 +28,6 @@ on:
         required: false
         default: ""
         type: string
-      ssh_allowed_cidr:
-        description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
-        required: false
-        default: ""
-        type: string
       base_rpc_url:
         description: "Base testnet RPC URL"
         required: true
@@ -78,8 +73,12 @@ on:
         description: "Withdraw guest program URL for Boundless"
         required: true
         type: string
-      boundless_witness_config_json:
-        description: "JSON with guest witness extraction args (ivk/ovk/scan+rpd endpoints/wallet ids/txids/action indexes/withdraw fields)"
+      boundless_deposit_owallet_ivk_hex:
+        description: "64-byte oWallet IVK hex for deposit witness extraction"
+        required: true
+        type: string
+      boundless_withdraw_owallet_ovk_hex:
+        description: "32-byte oWallet OVK hex for withdraw witness extraction"
         required: true
         type: string
       boundless_input_s3_bucket:
@@ -236,19 +235,6 @@ jobs:
         run: |
           set -euo pipefail
           WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
-          WITNESS_CFG='${{ inputs.boundless_witness_config_json }}'
-          DEPOSIT_OWALLET_IVK_HEX="$(jq -er '.deposit_owallet_ivk_hex' <<<"$WITNESS_CFG")"
-          WITHDRAW_OWALLET_OVK_HEX="$(jq -er '.withdraw_owallet_ovk_hex' <<<"$WITNESS_CFG")"
-          WITNESS_JUNO_SCAN_URL="$(jq -er '.juno_scan_url' <<<"$WITNESS_CFG")"
-          WITNESS_JUNO_RPC_URL="$(jq -er '.juno_rpc_url' <<<"$WITNESS_CFG")"
-          DEPOSIT_WALLET_ID="$(jq -er '.deposit_wallet_id' <<<"$WITNESS_CFG")"
-          DEPOSIT_TXID="$(jq -er '.deposit_txid' <<<"$WITNESS_CFG")"
-          DEPOSIT_ACTION_INDEX="$(jq -er '.deposit_action_index' <<<"$WITNESS_CFG")"
-          WITHDRAW_WALLET_ID="$(jq -er '.withdraw_wallet_id' <<<"$WITNESS_CFG")"
-          WITHDRAW_TXID="$(jq -er '.withdraw_txid' <<<"$WITNESS_CFG")"
-          WITHDRAW_ACTION_INDEX="$(jq -er '.withdraw_action_index' <<<"$WITNESS_CFG")"
-          WITHDRAW_WITHDRAWAL_ID_HEX="$(jq -er '.withdraw_withdrawal_id_hex' <<<"$WITNESS_CFG")"
-          WITHDRAW_RECIPIENT_RAW_ADDRESS_HEX="$(jq -er '.withdraw_recipient_raw_address_hex' <<<"$WITNESS_CFG")"
 
           ARGS=(
             run
@@ -265,9 +251,6 @@ jobs:
             --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
           )
 
-          if [[ -n "${{ inputs.ssh_allowed_cidr }}" ]]; then
-            ARGS+=(--ssh-allowed-cidr "${{ inputs.ssh_allowed_cidr }}")
-          fi
           ARGS+=(--operator-ami-id "${{ steps.resolve_operator_ami.outputs.operator_ami_id }}")
           ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
 
@@ -284,18 +267,8 @@ jobs:
             --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
             --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
             --boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}"
-            --boundless-deposit-owallet-ivk-hex "$DEPOSIT_OWALLET_IVK_HEX"
-            --boundless-withdraw-owallet-ovk-hex "$WITHDRAW_OWALLET_OVK_HEX"
-            --boundless-witness-juno-scan-url "$WITNESS_JUNO_SCAN_URL"
-            --boundless-witness-juno-rpc-url "$WITNESS_JUNO_RPC_URL"
-            --boundless-deposit-witness-wallet-id "$DEPOSIT_WALLET_ID"
-            --boundless-deposit-witness-txid "$DEPOSIT_TXID"
-            --boundless-deposit-witness-action-index "$DEPOSIT_ACTION_INDEX"
-            --boundless-withdraw-witness-wallet-id "$WITHDRAW_WALLET_ID"
-            --boundless-withdraw-witness-txid "$WITHDRAW_TXID"
-            --boundless-withdraw-witness-action-index "$WITHDRAW_ACTION_INDEX"
-            --boundless-withdraw-witness-withdrawal-id-hex "$WITHDRAW_WITHDRAWAL_ID_HEX"
-            --boundless-withdraw-witness-recipient-raw-address-hex "$WITHDRAW_RECIPIENT_RAW_ADDRESS_HEX"
+            --boundless-deposit-owallet-ivk-hex "${{ inputs.boundless_deposit_owallet_ivk_hex }}"
+            --boundless-withdraw-owallet-ovk-hex "${{ inputs.boundless_withdraw_owallet_ovk_hex }}"
             --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
             --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
             --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"

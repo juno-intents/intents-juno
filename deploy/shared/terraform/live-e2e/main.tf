@@ -353,6 +353,14 @@ resource "aws_security_group" "operator" {
   }
 
   ingress {
+    description     = "SSH from runner"
+    from_port       = 22
+    to_port         = 22
+    protocol        = "tcp"
+    security_groups = [aws_security_group.runner.id]
+  }
+
+  ingress {
     description     = "Operator gRPC from runner"
     from_port       = var.operator_base_port
     to_port         = var.operator_base_port + var.operator_instance_count - 1

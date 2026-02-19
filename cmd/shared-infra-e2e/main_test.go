@@ -26,6 +26,9 @@ func TestParseArgs_Valid(t *testing.T) {
 		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
 		"--kafka-brokers", "127.0.0.1:9092,127.0.0.1:9093",
 		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+		"--checkpoint-min-persisted-at", "2026-01-02T03:04:05Z",
+		"--checkpoint-operators", "0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222",
+		"--checkpoint-threshold", "2",
 		"--topic-prefix", "shared.e2e",
 		"--timeout", "90s",
 		"--output", "/tmp/shared-report.json",
@@ -51,6 +54,15 @@ func TestParseArgs_Valid(t *testing.T) {
 	}
 	if cfg.OutputPath != "/tmp/shared-report.json" {
 		t.Fatalf("output path mismatch: %q", cfg.OutputPath)
+	}
+	if cfg.CheckpointMinPersistedAt.IsZero() {
+		t.Fatalf("expected checkpoint min persisted timestamp")
+	}
+	if got := len(cfg.CheckpointOperators); got != 2 {
+		t.Fatalf("checkpoint operators: got %d want 2", got)
+	}
+	if cfg.CheckpointThreshold != 2 {
+		t.Fatalf("checkpoint threshold mismatch: got %d want 2", cfg.CheckpointThreshold)
 	}
 }
 
@@ -112,6 +124,23 @@ func TestParseArgs_RequiresCheckpointIPFSAPIURL(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 	if !strings.Contains(err.Error(), "--checkpoint-ipfs-api-url") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseArgs_RejectsCheckpointThresholdWithoutOperators(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+		"--kafka-brokers", "127.0.0.1:9092",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+		"--checkpoint-threshold", "1",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--checkpoint-operators") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -264,15 +293,17 @@ type stubCheckpointPackageSource struct {
 	record checkpointPackageRecord
 	err    error
 
-	mu    sync.Mutex
-	calls int
-	dsn   string
+	mu             sync.Mutex
+	calls          int
+	dsn            string
+	minPersistedAt time.Time
 }
 
-func (s *stubCheckpointPackageSource) Latest(_ context.Context, postgresDSN string) (checkpointPackageRecord, error) {
+func (s *stubCheckpointPackageSource) Latest(_ context.Context, postgresDSN string, minPersistedAt time.Time) (checkpointPackageRecord, error) {
 	s.mu.Lock()
 	s.calls++
 	s.dsn = postgresDSN
+	s.minPersistedAt = minPersistedAt
 	s.mu.Unlock()
 	if s.err != nil {
 		return checkpointPackageRecord{}, s.err
@@ -290,6 +321,12 @@ func (s *stubCheckpointPackageSource) DSN() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.dsn
+}
+
+func (s *stubCheckpointPackageSource) MinPersistedAt() time.Time {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.minPersistedAt
 }
 
 func TestCheckCheckpointIPFSWithSource_ValidatesOperatorProducedPackage(t *testing.T) {
@@ -389,5 +426,213 @@ func TestCheckCheckpointIPFSWithSource_ValidatesOperatorProducedPackage(t *testi
 	}
 	if addCalls != 0 {
 		t.Fatalf("unexpected ipfs add calls: got %d want 0", addCalls)
+	}
+}
+
+func TestCheckCheckpointIPFSWithSource_RejectsSignerOutsideExpectedSet(t *testing.T) {
+	t.Parallel()
+
+	const cid = "bafybeigdyrztmjnd3h6akxw2n3kq7hpvzd5xkz4a2xlfdgr3mxwct6f2da"
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	operator := crypto.PubkeyToAddress(key.PublicKey)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+		BaseChainID:      84532,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	sig, err := checkpoint.SignDigest(key, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+		Signers:         []common.Address{operator},
+		Signatures:      []string{"0x" + hex.EncodeToString(sig)},
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	source := &stubCheckpointPackageSource{
+		record: checkpointPackageRecord{
+			Digest:      digest,
+			IPFSCID:     cid,
+			Payload:     payload,
+			PersistedAt: time.Now().UTC(),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"`+cid+`":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	_, err = checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL: srv.URL,
+		CheckpointOperators: []common.Address{
+			common.HexToAddress("0x1000000000000000000000000000000000000001"),
+		},
+		CheckpointThreshold: 1,
+	}, source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "unexpected checkpoint signer") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckCheckpointIPFSWithSource_RejectsBelowThreshold(t *testing.T) {
+	t.Parallel()
+
+	const cid = "bafybeigdyrztmjnd3h6akxw2n3kq7hpvzd5xkz4a2xlfdgr3mxwct6f2da"
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	operator := crypto.PubkeyToAddress(key.PublicKey)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+		BaseChainID:      84532,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	sig, err := checkpoint.SignDigest(key, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+		Signers:         []common.Address{operator},
+		Signatures:      []string{"0x" + hex.EncodeToString(sig)},
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	source := &stubCheckpointPackageSource{
+		record: checkpointPackageRecord{
+			Digest:      digest,
+			IPFSCID:     cid,
+			Payload:     payload,
+			PersistedAt: time.Now().UTC(),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"`+cid+`":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	_, err = checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL: srv.URL,
+		CheckpointOperators:  []common.Address{operator},
+		CheckpointThreshold:  2,
+	}, source)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "checkpoint signer count below threshold") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestCheckCheckpointIPFSWithSource_ForwardsMinPersistedAt(t *testing.T) {
+	t.Parallel()
+
+	const cid = "bafybeigdyrztmjnd3h6akxw2n3kq7hpvzd5xkz4a2xlfdgr3mxwct6f2da"
+	minPersistedAt := time.Date(2026, 2, 1, 3, 4, 5, 0, time.UTC)
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	operator := crypto.PubkeyToAddress(key.PublicKey)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+		FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+		BaseChainID:      84532,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	sig, err := checkpoint.SignDigest(key, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0x3333333333333333333333333333333333333333333333333333333333333333"),
+		Signers:         []common.Address{operator},
+		Signatures:      []string{"0x" + hex.EncodeToString(sig)},
+		CreatedAt:       time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	source := &stubCheckpointPackageSource{
+		record: checkpointPackageRecord{
+			Digest:      digest,
+			IPFSCID:     cid,
+			Payload:     payload,
+			PersistedAt: time.Now().UTC(),
+		},
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"`+cid+`":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(payload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	_, err = checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:               "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL:      srv.URL,
+		CheckpointOperators:       []common.Address{operator},
+		CheckpointThreshold:       1,
+		CheckpointMinPersistedAt:  minPersistedAt,
+	}, source)
+	if err != nil {
+		t.Fatalf("checkCheckpointIPFSWithSource: %v", err)
+	}
+	if got := source.MinPersistedAt(); !got.Equal(minPersistedAt) {
+		t.Fatalf("min persisted at mismatch: got=%s want=%s", got.UTC().Format(time.RFC3339), minPersistedAt.UTC().Format(time.RFC3339))
 	}
 }

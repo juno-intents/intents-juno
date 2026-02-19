@@ -30,6 +30,9 @@ type config struct {
 	PostgresDSN          string
 	KafkaBrokers         []string
 	CheckpointIPFSAPIURL string
+	CheckpointOperators  []common.Address
+	CheckpointThreshold  int
+	CheckpointMinPersistedAt time.Time
 	TopicPrefix          string
 	Timeout              time.Duration
 	OutputPath           string
@@ -87,7 +90,7 @@ type checkpointPackageRecord struct {
 }
 
 type checkpointPackageSource interface {
-	Latest(ctx context.Context, postgresDSN string) (checkpointPackageRecord, error)
+	Latest(ctx context.Context, postgresDSN string, minPersistedAt time.Time) (checkpointPackageRecord, error)
 }
 
 type postgresCheckpointPackageSource struct{}
@@ -183,6 +186,8 @@ func runMain(args []string, stdout io.Writer) error {
 func parseArgs(args []string) (config, error) {
 	var cfg config
 	var brokersRaw string
+	var checkpointOperatorsRaw string
+	var checkpointMinPersistedAtRaw string
 
 	fs := flag.NewFlagSet("shared-infra-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -190,6 +195,9 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.PostgresDSN, "postgres-dsn", "", "Postgres DSN (required)")
 	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required)")
 	fs.StringVar(&cfg.CheckpointIPFSAPIURL, "checkpoint-ipfs-api-url", "", "IPFS API URL for persisted checkpoint package pin/fetch validation (required)")
+	fs.StringVar(&checkpointOperatorsRaw, "checkpoint-operators", "", "comma-separated expected checkpoint signer operator addresses")
+	fs.IntVar(&cfg.CheckpointThreshold, "checkpoint-threshold", 0, "expected minimum checkpoint signer threshold (requires --checkpoint-operators)")
+	fs.StringVar(&checkpointMinPersistedAtRaw, "checkpoint-min-persisted-at", "", "RFC3339 lower bound for checkpoint package persisted_at (run-bound filtering)")
 	fs.StringVar(&cfg.TopicPrefix, "topic-prefix", "shared.infra.e2e", "Kafka probe topic prefix")
 	fs.DurationVar(&cfg.Timeout, "timeout", 90*time.Second, "overall timeout")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output path or '-' for stdout")
@@ -213,6 +221,34 @@ func parseArgs(args []string) (config, error) {
 	cfg.CheckpointIPFSAPIURL = strings.TrimSpace(cfg.CheckpointIPFSAPIURL)
 	if cfg.CheckpointIPFSAPIURL == "" {
 		return cfg, errors.New("--checkpoint-ipfs-api-url is required")
+	}
+	checkpointOperatorsRaw = strings.TrimSpace(checkpointOperatorsRaw)
+	if checkpointOperatorsRaw != "" {
+		operators, err := checkpoint.ParseOperatorAddressesCSV(checkpointOperatorsRaw)
+		if err != nil {
+			return cfg, fmt.Errorf("parse --checkpoint-operators: %w", err)
+		}
+		cfg.CheckpointOperators = operators
+	}
+	if cfg.CheckpointThreshold < 0 {
+		return cfg, errors.New("--checkpoint-threshold must be >= 0")
+	}
+	if cfg.CheckpointThreshold > 0 && len(cfg.CheckpointOperators) == 0 {
+		return cfg, errors.New("--checkpoint-operators is required when --checkpoint-threshold > 0")
+	}
+	if len(cfg.CheckpointOperators) > 0 && cfg.CheckpointThreshold == 0 {
+		return cfg, errors.New("--checkpoint-threshold is required when --checkpoint-operators is set")
+	}
+	if cfg.CheckpointThreshold > len(cfg.CheckpointOperators) {
+		return cfg, fmt.Errorf("--checkpoint-threshold must be <= number of --checkpoint-operators (got threshold=%d operators=%d)", cfg.CheckpointThreshold, len(cfg.CheckpointOperators))
+	}
+	checkpointMinPersistedAtRaw = strings.TrimSpace(checkpointMinPersistedAtRaw)
+	if checkpointMinPersistedAtRaw != "" {
+		parsed, err := time.Parse(time.RFC3339, checkpointMinPersistedAtRaw)
+		if err != nil {
+			return cfg, fmt.Errorf("parse --checkpoint-min-persisted-at: %w", err)
+		}
+		cfg.CheckpointMinPersistedAt = parsed.UTC()
 	}
 
 	cfg.TopicPrefix = strings.TrimSpace(cfg.TopicPrefix)
@@ -493,13 +529,16 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 	if source == nil {
 		return checkpointReport{}, errors.New("checkpoint package source is required")
 	}
-	rec, err := source.Latest(ctx, cfg.PostgresDSN)
+	rec, err := source.Latest(ctx, cfg.PostgresDSN, cfg.CheckpointMinPersistedAt)
 	if err != nil {
 		return checkpointReport{}, fmt.Errorf("load latest checkpoint package: %w", err)
 	}
 
 	payloadBody, err := decodeAndValidateCheckpointPackage(rec)
 	if err != nil {
+		return checkpointReport{}, err
+	}
+	if err := validateCheckpointPackageAgainstConfig(payloadBody, cfg); err != nil {
 		return checkpointReport{}, err
 	}
 
@@ -527,7 +566,7 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 	}, nil
 }
 
-func (postgresCheckpointPackageSource) Latest(ctx context.Context, postgresDSN string) (checkpointPackageRecord, error) {
+func (postgresCheckpointPackageSource) Latest(ctx context.Context, postgresDSN string, minPersistedAt time.Time) (checkpointPackageRecord, error) {
 	postgresDSN = strings.TrimSpace(postgresDSN)
 	if postgresDSN == "" {
 		return checkpointPackageRecord{}, errors.New("checkpoint package query requires --postgres-dsn")
@@ -545,16 +584,33 @@ func (postgresCheckpointPackageSource) Latest(ctx context.Context, postgresDSN s
 		payload   []byte
 		persisted time.Time
 	)
-	err = pool.QueryRow(ctx, `
+	query := `
 		SELECT digest, ipfs_cid, package_json, persisted_at
 		FROM checkpoint_packages
 		WHERE ipfs_cid IS NOT NULL AND btrim(ipfs_cid) <> ''
-		ORDER BY persisted_at DESC
-		LIMIT 1
-	`).Scan(&digestRaw, &ipfsCID, &payload, &persisted)
+	`
+	var row pgx.Row
+	if minPersistedAt.IsZero() {
+		query += `
+			ORDER BY persisted_at DESC
+			LIMIT 1
+		`
+		row = pool.QueryRow(ctx, query)
+	} else {
+		query += `
+			AND persisted_at >= $1
+			ORDER BY persisted_at DESC
+			LIMIT 1
+		`
+		row = pool.QueryRow(ctx, query, minPersistedAt.UTC())
+	}
+	err = row.Scan(&digestRaw, &ipfsCID, &payload, &persisted)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return checkpointPackageRecord{}, errors.New("no operator checkpoint package with IPFS CID found in checkpoint_packages")
+			if minPersistedAt.IsZero() {
+				return checkpointPackageRecord{}, errors.New("no operator checkpoint package with IPFS CID found in checkpoint_packages")
+			}
+			return checkpointPackageRecord{}, fmt.Errorf("no operator checkpoint package with IPFS CID found in checkpoint_packages persisted_at >= %s", minPersistedAt.UTC().Format(time.RFC3339))
 		}
 		return checkpointPackageRecord{}, fmt.Errorf("query checkpoint package: %w", err)
 	}
@@ -620,6 +676,29 @@ func decodeAndValidateCheckpointPackage(rec checkpointPackageRecord) (checkpoint
 		return checkpointPackageV1{}, fmt.Errorf("verify checkpoint package signatures: %w", err)
 	}
 	return payloadBody, nil
+}
+
+func validateCheckpointPackageAgainstConfig(payload checkpointPackageV1, cfg config) error {
+	if cfg.CheckpointThreshold > 0 && len(payload.Signers) < cfg.CheckpointThreshold {
+		return fmt.Errorf(
+			"checkpoint signer count below threshold: signers=%d threshold=%d",
+			len(payload.Signers),
+			cfg.CheckpointThreshold,
+		)
+	}
+	if len(cfg.CheckpointOperators) == 0 {
+		return nil
+	}
+	allowed := make(map[common.Address]struct{}, len(cfg.CheckpointOperators))
+	for _, op := range cfg.CheckpointOperators {
+		allowed[op] = struct{}{}
+	}
+	for _, signer := range payload.Signers {
+		if _, ok := allowed[signer]; !ok {
+			return fmt.Errorf("unexpected checkpoint signer: %s", signer.Hex())
+		}
+	}
+	return nil
 }
 
 func verifyCheckpointPackageSignatures(pkg checkpointPackageV1) error {

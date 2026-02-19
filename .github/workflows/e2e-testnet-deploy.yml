@@ -52,8 +52,20 @@ on:
         description: "S3 bucket for oversized Boundless guest inputs"
         required: true
         type: string
-      boundless_witness_config_json:
-        description: "JSON with guest witness extraction args (ivk/ovk/scan+rpd endpoints/wallet ids/txids/action indexes/withdraw fields)"
+      boundless_deposit_owallet_ivk_hex:
+        description: "64-byte oWallet IVK hex for deposit witness extraction"
+        required: true
+        type: string
+      boundless_withdraw_owallet_ovk_hex:
+        description: "32-byte oWallet OVK hex for withdraw witness extraction"
+        required: true
+        type: string
+      boundless_witness_juno_scan_url:
+        description: "juno-scan URL used for run-generated witness extraction"
+        required: true
+        type: string
+      boundless_witness_juno_rpc_url:
+        description: "junocashd RPC URL used for run-generated witness extraction"
         required: true
         type: string
       boundless_min_price_wei:
@@ -266,81 +278,6 @@ jobs:
         run: |
           set -euo pipefail
           E2E_WORKDIR="${RUNNER_TEMP}/testnet-e2e"
-          WITNESS_CFG='${{ inputs.boundless_witness_config_json }}'
-          DEPOSIT_OWALLET_IVK_HEX="$(jq -er '.deposit_owallet_ivk_hex' <<<"$WITNESS_CFG")"
-          WITHDRAW_OWALLET_OVK_HEX="$(jq -er '.withdraw_owallet_ovk_hex' <<<"$WITNESS_CFG")"
-          WITNESS_JUNO_SCAN_URL="$(jq -er '.juno_scan_url' <<<"$WITNESS_CFG")"
-          WITNESS_JUNO_RPC_URL="$(jq -er '.juno_rpc_url' <<<"$WITNESS_CFG")"
-          DEPOSIT_WALLET_ID="$(jq -er '.deposit_wallet_id' <<<"$WITNESS_CFG")"
-          DEPOSIT_TXID="$(jq -er '.deposit_txid' <<<"$WITNESS_CFG")"
-          DEPOSIT_ACTION_INDEX="$(jq -er '.deposit_action_index' <<<"$WITNESS_CFG")"
-          WITHDRAW_WALLET_ID="$(jq -er '.withdraw_wallet_id' <<<"$WITNESS_CFG")"
-          WITHDRAW_TXID="$(jq -er '.withdraw_txid' <<<"$WITNESS_CFG")"
-          WITHDRAW_ACTION_INDEX="$(jq -er '.withdraw_action_index' <<<"$WITNESS_CFG")"
-          WITHDRAW_WITHDRAWAL_ID_HEX="$(jq -er '.withdraw_withdrawal_id_hex' <<<"$WITNESS_CFG")"
-          WITHDRAW_RECIPIENT_RAW_ADDRESS_HEX="$(jq -er '.withdraw_recipient_raw_address_hex' <<<"$WITNESS_CFG")"
-          CHECKPOINT_OPERATOR_KEY="4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a"
-          CHECKPOINT_OPERATOR_ADDRESS="$(cast wallet address --private-key "0x$CHECKPOINT_OPERATOR_KEY")"
-          CHECKPOINT_TOPIC_SEED="$(date +%s)-$RANDOM"
-          CHECKPOINT_SIGNATURE_TOPIC="checkpoints.signatures.e2e.${CHECKPOINT_TOPIC_SEED}"
-          CHECKPOINT_PACKAGE_TOPIC="checkpoints.packages.e2e.${CHECKPOINT_TOPIC_SEED}"
-          CHECKPOINT_GROUP="checkpoints.aggregator.e2e.${CHECKPOINT_TOPIC_SEED}"
-          CHECKPOINT_AGG_LOG="${RUNNER_TEMP}/checkpoint-aggregator.log"
-          CHECKPOINT_SIGNER_LOG="${RUNNER_TEMP}/checkpoint-signer.log"
-          cleanup_checkpoint_processes() {
-            set +e
-            if [[ -n "${CHECKPOINT_SIGNER_PID:-}" ]]; then
-              kill "$CHECKPOINT_SIGNER_PID" >/dev/null 2>&1 || true
-              wait "$CHECKPOINT_SIGNER_PID" >/dev/null 2>&1 || true
-            fi
-            if [[ -n "${CHECKPOINT_AGG_PID:-}" ]]; then
-              kill "$CHECKPOINT_AGG_PID" >/dev/null 2>&1 || true
-              wait "$CHECKPOINT_AGG_PID" >/dev/null 2>&1 || true
-            fi
-          }
-          trap cleanup_checkpoint_processes EXIT
-          go run ./cmd/checkpoint-aggregator \
-            --base-chain-id "${{ inputs.base_chain_id }}" \
-            --bridge-address "${{ inputs.bridge_verifier_address }}" \
-            --operators "$CHECKPOINT_OPERATOR_ADDRESS" \
-            --threshold 1 \
-            --postgres-dsn "$E2E_SHARED_POSTGRES_DSN" \
-            --store-driver postgres \
-            --blob-driver memory \
-            --ipfs-enabled=true \
-            --ipfs-api-url "$E2E_SHARED_IPFS_API_URL" \
-            --queue-driver kafka \
-            --queue-brokers "$E2E_SHARED_KAFKA_BROKERS" \
-            --queue-group "$CHECKPOINT_GROUP" \
-            --queue-input-topics "$CHECKPOINT_SIGNATURE_TOPIC" \
-            --queue-output-topic "$CHECKPOINT_PACKAGE_TOPIC" \
-            >"$CHECKPOINT_AGG_LOG" 2>&1 &
-          CHECKPOINT_AGG_PID=$!
-          CHECKPOINT_SIGNER_PRIVATE_KEY="$CHECKPOINT_OPERATOR_KEY" \
-            go run ./cmd/checkpoint-signer \
-              --juno-rpc-url "$WITNESS_JUNO_RPC_URL" \
-              --base-chain-id "${{ inputs.base_chain_id }}" \
-              --bridge-address "${{ inputs.bridge_verifier_address }}" \
-              --confirmations 1 \
-              --poll-interval 5s \
-              --owner-id "gha-shared-infra-${CHECKPOINT_TOPIC_SEED}" \
-              --lease-driver memory \
-              --queue-driver kafka \
-              --queue-brokers "$E2E_SHARED_KAFKA_BROKERS" \
-              --queue-output-topic "$CHECKPOINT_SIGNATURE_TOPIC" \
-              >"$CHECKPOINT_SIGNER_LOG" 2>&1 &
-          CHECKPOINT_SIGNER_PID=$!
-          sleep 5
-          if ! kill -0 "$CHECKPOINT_AGG_PID" >/dev/null 2>&1; then
-            echo "checkpoint-aggregator exited early"
-            cat "$CHECKPOINT_AGG_LOG" || true
-            exit 1
-          fi
-          if ! kill -0 "$CHECKPOINT_SIGNER_PID" >/dev/null 2>&1; then
-            echo "checkpoint-signer exited early"
-            cat "$CHECKPOINT_SIGNER_LOG" || true
-            exit 1
-          fi
           ARGS=(
             run
             --workdir "$E2E_WORKDIR"
@@ -361,18 +298,10 @@ jobs:
             --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
             --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
             --boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}"
-            --boundless-deposit-owallet-ivk-hex "$DEPOSIT_OWALLET_IVK_HEX"
-            --boundless-withdraw-owallet-ovk-hex "$WITHDRAW_OWALLET_OVK_HEX"
-            --boundless-witness-juno-scan-url "$WITNESS_JUNO_SCAN_URL"
-            --boundless-witness-juno-rpc-url "$WITNESS_JUNO_RPC_URL"
-            --boundless-deposit-witness-wallet-id "$DEPOSIT_WALLET_ID"
-            --boundless-deposit-witness-txid "$DEPOSIT_TXID"
-            --boundless-deposit-witness-action-index "$DEPOSIT_ACTION_INDEX"
-            --boundless-withdraw-witness-wallet-id "$WITHDRAW_WALLET_ID"
-            --boundless-withdraw-witness-txid "$WITHDRAW_TXID"
-            --boundless-withdraw-witness-action-index "$WITHDRAW_ACTION_INDEX"
-            --boundless-withdraw-witness-withdrawal-id-hex "$WITHDRAW_WITHDRAWAL_ID_HEX"
-            --boundless-withdraw-witness-recipient-raw-address-hex "$WITHDRAW_RECIPIENT_RAW_ADDRESS_HEX"
+            --boundless-deposit-owallet-ivk-hex "${{ inputs.boundless_deposit_owallet_ivk_hex }}"
+            --boundless-withdraw-owallet-ovk-hex "${{ inputs.boundless_withdraw_owallet_ovk_hex }}"
+            --boundless-witness-juno-scan-url "${{ inputs.boundless_witness_juno_scan_url }}"
+            --boundless-witness-juno-rpc-url "${{ inputs.boundless_witness_juno_rpc_url }}"
             --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
             --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
             --boundless-max-price-cap-wei "${{ inputs.boundless_max_price_cap_wei }}"

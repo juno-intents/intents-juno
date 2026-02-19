@@ -46,6 +46,12 @@ run options:
   --operator-root-volume-gb <n>        operator root volume size (default: 100)
   --shared-ami-id <ami-id>             optional custom AMI for shared IPFS pinning ASG instances
   --operator-base-port <port>          first operator grpc port (default: 18443)
+  --runner-associate-public-ip-address <true|false>
+                                        associate public IPv4 address on runner (default: true)
+  --operator-associate-public-ip-address <true|false>
+                                        associate public IPv4 addresses on operators (default: true)
+  --shared-ecs-assign-public-ip <true|false>
+                                        assign public IPv4 addresses on shared ECS tasks (default: false)
   --dkg-s3-key-prefix <prefix>         S3 prefix for KMS-exported key packages (default: dkg/keypackages)
   --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
   --ssh-allowed-cidr <cidr>            inbound SSH CIDR (default: caller public IP /32)
@@ -118,6 +124,20 @@ forwarded_arg_value() {
   done
 
   return 1
+}
+
+normalize_bool_arg() {
+  local flag_name="$1"
+  local value="${2:-}"
+  value="${value,,}"
+  case "$value" in
+    true|false)
+      printf '%s' "$value"
+      ;;
+    *)
+      die "$flag_name must be true or false"
+      ;;
+  esac
 }
 
 terraform_env_args() {
@@ -1146,6 +1166,9 @@ command_run() {
   local operator_root_volume_gb="100"
   local shared_ami_id=""
   local operator_base_port="18443"
+  local runner_associate_public_ip_address="true"
+  local operator_associate_public_ip_address="true"
+  local shared_ecs_assign_public_ip="false"
   local dkg_s3_key_prefix="dkg/keypackages"
   local dkg_release_tag="${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}"
   local operator_count_explicit="false"
@@ -1237,6 +1260,21 @@ command_run() {
         [[ $# -ge 2 ]] || die "missing value for --operator-base-port"
         operator_base_port="$2"
         operator_base_port_explicit="true"
+        shift 2
+        ;;
+      --runner-associate-public-ip-address)
+        [[ $# -ge 2 ]] || die "missing value for --runner-associate-public-ip-address"
+        runner_associate_public_ip_address="$(normalize_bool_arg "--runner-associate-public-ip-address" "$2")"
+        shift 2
+        ;;
+      --operator-associate-public-ip-address)
+        [[ $# -ge 2 ]] || die "missing value for --operator-associate-public-ip-address"
+        operator_associate_public_ip_address="$(normalize_bool_arg "--operator-associate-public-ip-address" "$2")"
+        shift 2
+        ;;
+      --shared-ecs-assign-public-ip)
+        [[ $# -ge 2 ]] || die "missing value for --shared-ecs-assign-public-ip"
+        shared_ecs_assign_public_ip="$(normalize_bool_arg "--shared-ecs-assign-public-ip" "$2")"
         shift 2
         ;;
       --dkg-s3-key-prefix)
@@ -1486,9 +1524,9 @@ command_run() {
     --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
-    --argjson runner_associate_public_ip_address "true" \
-    --argjson operator_associate_public_ip_address "true" \
-    --argjson shared_ecs_assign_public_ip "true" \
+    --argjson runner_associate_public_ip_address "$runner_associate_public_ip_address" \
+    --argjson operator_associate_public_ip_address "$operator_associate_public_ip_address" \
+    --argjson shared_ecs_assign_public_ip "$shared_ecs_assign_public_ip" \
     --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
     '{
       aws_region: $aws_region,
@@ -1537,6 +1575,9 @@ command_run() {
       -state="$state_file" \
       -raw runner_ssh_user
   )"
+  if [[ -z "$runner_public_ip" || "$runner_public_ip" == "null" ]]; then
+    die "terraform output runner_public_ip is empty (set --runner-associate-public-ip-address true or provide alternate runner access)"
+  fi
 
   local shared_postgres_endpoint=""
   local shared_kafka_bootstrap_brokers=""
@@ -1786,6 +1827,21 @@ command_run() {
       "$remote_repo/.ci/secrets/boundless-requestor.key"
   fi
 
+  copy_remote_secret_file \
+    "$ssh_key_private" \
+    "$runner_ssh_user" \
+    "$runner_public_ip" \
+    "$ssh_key_private" \
+    "$remote_repo/.ci/secrets/operator-fleet-ssh.key"
+
+  local witness_operator_private_ip
+  witness_operator_private_ip="${operator_private_ips[0]:-}"
+  [[ -n "$witness_operator_private_ip" ]] || die "failed to resolve witness operator private ip"
+  local witness_tunnel_scan_port="38080"
+  local witness_tunnel_rpc_port="38232"
+  local witness_juno_scan_url="http://127.0.0.1:${witness_tunnel_scan_port}"
+  local witness_juno_rpc_url="http://127.0.0.1:${witness_tunnel_rpc_port}"
+
   local -a remote_args
   remote_args=(
     run
@@ -1823,6 +1879,16 @@ command_run() {
     log "shared service remote args assembled"
   fi
   remote_args+=("${e2e_args[@]}")
+  if forwarded_arg_value "--boundless-witness-juno-scan-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-juno-scan-url with stack-derived witness tunnel endpoint"
+  fi
+  if forwarded_arg_value "--boundless-witness-juno-rpc-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-juno-rpc-url with stack-derived witness tunnel endpoint"
+  fi
+  remote_args+=(
+    "--boundless-witness-juno-scan-url" "$witness_juno_scan_url"
+    "--boundless-witness-juno-rpc-url" "$witness_juno_rpc_url"
+  )
 
   log "assembling remote e2e arguments"
   local remote_joined_args
@@ -1855,6 +1921,57 @@ fi
 if [[ -n "${AWS_SESSION_TOKEN:-}" ]]; then
   export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-}"
 fi
+mkdir -p "$remote_workdir/reports"
+
+operator_ssh_key=".ci/secrets/operator-fleet-ssh.key"
+operator_ssh_host="${witness_operator_private_ip}"
+operator_ssh_user="${runner_ssh_user}"
+scan_tunnel_port="${witness_tunnel_scan_port}"
+rpc_tunnel_port="${witness_tunnel_rpc_port}"
+tunnel_log="$remote_workdir/reports/witness-tunnel.log"
+
+cleanup_witness_tunnel() {
+  set +e
+  if [[ -n "${witness_tunnel_pid:-}" ]]; then
+    kill "$witness_tunnel_pid" >/dev/null 2>&1 || true
+    wait "$witness_tunnel_pid" >/dev/null 2>&1 || true
+  fi
+}
+trap cleanup_witness_tunnel EXIT
+
+ssh \
+  -i "$operator_ssh_key" \
+  -o StrictHostKeyChecking=no \
+  -o UserKnownHostsFile=/dev/null \
+  -o ExitOnForwardFailure=yes \
+  -o ServerAliveInterval=30 \
+  -o ServerAliveCountMax=6 \
+  -o TCPKeepAlive=yes \
+  -N \
+  -L "127.0.0.1:${witness_tunnel_scan_port}:127.0.0.1:8080" \
+  -L "127.0.0.1:${witness_tunnel_rpc_port}:127.0.0.1:18232" \
+  "$operator_ssh_user@$operator_ssh_host" \
+  >"$tunnel_log" 2>&1 &
+witness_tunnel_pid=$!
+
+for attempt in $(seq 1 30); do
+  if ! kill -0 "$witness_tunnel_pid" >/dev/null 2>&1; then
+    echo "witness tunnel exited early" >&2
+    tail -n 200 "$tunnel_log" >&2 || true
+    exit 1
+  fi
+  if timeout 2 bash -lc "</dev/tcp/127.0.0.1/$scan_tunnel_port" >/dev/null 2>&1 \
+    && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$rpc_tunnel_port" >/dev/null 2>&1; then
+    break
+  fi
+  if [[ "$attempt" -eq 30 ]]; then
+    echo "timed out waiting for witness tunnel readiness" >&2
+    tail -n 200 "$tunnel_log" >&2 || true
+    exit 1
+  fi
+  sleep 2
+done
+
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh $remote_joined_args
 EOF
 ); then

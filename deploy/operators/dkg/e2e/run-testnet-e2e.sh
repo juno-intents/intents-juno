@@ -28,14 +28,13 @@ Options:
   --bridge-verifier-address <addr> required verifier router address for proof verification
   --bridge-deposit-image-id <hex>  required deposit image ID (bytes32 hex)
   --bridge-withdraw-image-id <hex> required withdraw image ID (bytes32 hex)
-  --bridge-deposit-final-orchard-root <hex> required in manual witness mode; checkpoint root for deposit proof
-  --bridge-withdraw-final-orchard-root <hex> optional in manual witness mode; defaults to deposit root
-  --bridge-deposit-checkpoint-height <n> required in manual witness mode; Juno height for deposit checkpoint
-  --bridge-deposit-checkpoint-block-hash <hex> required in manual witness mode; Juno block hash for deposit checkpoint
-  --bridge-withdraw-checkpoint-height <n> optional in manual witness mode; defaults to deposit checkpoint height
-  --bridge-withdraw-checkpoint-block-hash <hex> optional in manual witness mode; defaults to deposit checkpoint block hash
+  --bridge-deposit-final-orchard-root <hex> reserved; manual override not supported in guest-witness-v1 mode
+  --bridge-withdraw-final-orchard-root <hex> reserved; manual override not supported in guest-witness-v1 mode
+  --bridge-deposit-checkpoint-height <n> reserved; manual override not supported in guest-witness-v1 mode
+  --bridge-deposit-checkpoint-block-hash <hex> reserved; manual override not supported in guest-witness-v1 mode
+  --bridge-withdraw-checkpoint-height <n> reserved; manual override not supported in guest-witness-v1 mode
+  --bridge-withdraw-checkpoint-block-hash <hex> reserved; manual override not supported in guest-witness-v1 mode
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
-  --bridge-juno-execution-tx-hash <hash> optional canonical Juno execution tx hash override
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
                                    (default: <dkg coordinator_workdir>/bin/dkg-admin when available, else dkg-admin)
@@ -50,23 +49,14 @@ Options:
   --boundless-input-mode <mode>     boundless input mode (guest-witness-v1 only, default: guest-witness-v1)
   --boundless-deposit-owallet-ivk-hex <hex>  64-byte oWallet IVK hex (required for guest-witness-v1)
   --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
-  --boundless-deposit-witness-item-file <path> deposit witness item file (repeat for guest-witness-v1)
-  --boundless-withdraw-witness-item-file <path> withdraw witness item file (repeat for guest-witness-v1)
-  --boundless-witness-juno-scan-url <url> juno-scan URL for witness extraction (optional, guest-witness-v1)
-  --boundless-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (optional, guest-witness-v1)
+  --boundless-witness-juno-scan-url <url> juno-scan URL for witness extraction (required, guest-witness-v1)
+  --boundless-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (required, guest-witness-v1)
   --boundless-witness-juno-scan-bearer-token-env <name> env var for optional juno-scan bearer token
                                    (default: JUNO_SCAN_BEARER_TOKEN)
   --boundless-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
   --boundless-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
-  --boundless-deposit-witness-wallet-id <id> juno-scan wallet id for deposit witness extraction
-  --boundless-deposit-witness-txid <txid> txid for deposit witness extraction
-  --boundless-deposit-witness-action-index <n> orchard action index for deposit witness extraction
-  --boundless-withdraw-witness-wallet-id <id> juno-scan wallet id for withdraw witness extraction
-  --boundless-withdraw-witness-txid <txid> txid for withdraw witness extraction
-  --boundless-withdraw-witness-action-index <n> orchard action index for withdraw witness extraction
-  --boundless-withdraw-witness-withdrawal-id-hex <hex> withdrawal id (32-byte hex) for withdraw witness extraction
-  --boundless-withdraw-witness-recipient-raw-address-hex <hex> recipient raw Orchard address (43-byte hex)
-                                   for withdraw witness extraction
+  --boundless-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
+  --boundless-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
   --boundless-requestor-key-file <path> requestor key file for boundless (required)
   --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
   --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
@@ -104,10 +94,11 @@ Environment:
 
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
-  2) Base operator pre-funding (optional)
-  3) Shared infra validation (Postgres + Kafka + operator checkpoint package pin/fetch via IPFS)
-  4) Centralized proof-requestor/proof-funder startup on shared topics
-  5) Base testnet deploy + bridge flow via cmd/bridge-e2e with centralized Kafka proof jobs
+  2) Juno witness tx generation on the configured Juno RPC + juno-scan endpoints
+  3) Checkpoint quorum startup (N signers from DKG operator keys + threshold aggregator)
+  4) Shared infra validation (Postgres + Kafka + run-bound checkpoint package pin/fetch via IPFS)
+  5) Centralized proof-requestor/proof-funder startup on shared topics
+  6) Base testnet deploy + bridge flow via cmd/bridge-e2e with centralized Kafka proof jobs
 EOF
 }
 
@@ -641,7 +632,6 @@ command_run() {
   local bridge_withdraw_checkpoint_height=""
   local bridge_withdraw_checkpoint_block_hash=""
   local bridge_proof_inputs_output=""
-  local bridge_juno_execution_tx_hash=""
   local bridge_run_timeout=""
   local bridge_operator_signer_bin=""
   local boundless_auto="true"
@@ -661,14 +651,8 @@ command_run() {
   local boundless_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
   local boundless_witness_juno_rpc_user_env="JUNO_RPC_USER"
   local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
-  local boundless_deposit_witness_wallet_id=""
-  local boundless_deposit_witness_txid=""
-  local boundless_deposit_witness_action_index=""
-  local boundless_withdraw_witness_wallet_id=""
-  local boundless_withdraw_witness_txid=""
-  local boundless_withdraw_witness_action_index=""
-  local boundless_withdraw_witness_withdrawal_id_hex=""
-  local boundless_withdraw_witness_recipient_raw_address_hex=""
+  local boundless_witness_wallet_id=""
+  local boundless_witness_metadata_timeout_seconds="900"
   local boundless_requestor_key_file=""
   local boundless_deposit_program_url=""
   local boundless_withdraw_program_url=""
@@ -800,11 +784,6 @@ command_run() {
         bridge_proof_inputs_output="$2"
         shift 2
         ;;
-      --bridge-juno-execution-tx-hash)
-        [[ $# -ge 2 ]] || die "missing value for --bridge-juno-execution-tx-hash"
-        bridge_juno_execution_tx_hash="$2"
-        shift 2
-        ;;
       --bridge-run-timeout)
         [[ $# -ge 2 ]] || die "missing value for --bridge-run-timeout"
         bridge_run_timeout="$2"
@@ -855,16 +834,6 @@ command_run() {
         boundless_withdraw_owallet_ovk_hex="$2"
         shift 2
         ;;
-      --boundless-deposit-witness-item-file)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-item-file"
-        boundless_deposit_witness_item_files+=("$2")
-        shift 2
-        ;;
-      --boundless-withdraw-witness-item-file)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-item-file"
-        boundless_withdraw_witness_item_files+=("$2")
-        shift 2
-        ;;
       --boundless-witness-juno-scan-url)
         [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-url"
         boundless_witness_juno_scan_url="$2"
@@ -890,44 +859,14 @@ command_run() {
         boundless_witness_juno_rpc_pass_env="$2"
         shift 2
         ;;
-      --boundless-deposit-witness-wallet-id)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-wallet-id"
-        boundless_deposit_witness_wallet_id="$2"
+      --boundless-witness-wallet-id)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-wallet-id"
+        boundless_witness_wallet_id="$2"
         shift 2
         ;;
-      --boundless-deposit-witness-txid)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-txid"
-        boundless_deposit_witness_txid="$2"
-        shift 2
-        ;;
-      --boundless-deposit-witness-action-index)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-witness-action-index"
-        boundless_deposit_witness_action_index="$2"
-        shift 2
-        ;;
-      --boundless-withdraw-witness-wallet-id)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-wallet-id"
-        boundless_withdraw_witness_wallet_id="$2"
-        shift 2
-        ;;
-      --boundless-withdraw-witness-txid)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-txid"
-        boundless_withdraw_witness_txid="$2"
-        shift 2
-        ;;
-      --boundless-withdraw-witness-action-index)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-action-index"
-        boundless_withdraw_witness_action_index="$2"
-        shift 2
-        ;;
-      --boundless-withdraw-witness-withdrawal-id-hex)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-withdrawal-id-hex"
-        boundless_withdraw_witness_withdrawal_id_hex="$2"
-        shift 2
-        ;;
-      --boundless-withdraw-witness-recipient-raw-address-hex)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-witness-recipient-raw-address-hex"
-        boundless_withdraw_witness_recipient_raw_address_hex="$2"
+      --boundless-witness-metadata-timeout-seconds)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-metadata-timeout-seconds"
+        boundless_witness_metadata_timeout_seconds="$2"
         shift 2
         ;;
       --boundless-requestor-key-file)
@@ -1119,56 +1058,17 @@ command_run() {
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
-  local guest_witness_manual_mode="true"
-  local guest_witness_extract_mode="false"
+  local guest_witness_extract_mode="true"
   [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
   [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required when --boundless-input-mode guest-witness-v1"
   [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
-
-  local guest_witness_extract_any="false"
-  if [[ -n "$boundless_witness_juno_scan_url" || -n "$boundless_witness_juno_rpc_url" || \
-    -n "$boundless_deposit_witness_wallet_id" || -n "$boundless_deposit_witness_txid" || -n "$boundless_deposit_witness_action_index" || \
-    -n "$boundless_withdraw_witness_wallet_id" || -n "$boundless_withdraw_witness_txid" || -n "$boundless_withdraw_witness_action_index" || \
-    -n "$boundless_withdraw_witness_withdrawal_id_hex" || -n "$boundless_withdraw_witness_recipient_raw_address_hex" ]]; then
-    guest_witness_extract_any="true"
-  fi
-
-  if (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
-    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required when --boundless-withdraw-witness-item-file is set"
-    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required when --boundless-deposit-witness-item-file is set"
-    if [[ "$guest_witness_extract_any" == "true" ]]; then
-      die "guest witness extraction flags cannot be combined with explicit --boundless-*-witness-item-file inputs"
-    fi
-  else
-    guest_witness_manual_mode="false"
-    guest_witness_extract_mode="true"
-    [[ "$boundless_deposit_witness_action_index" =~ ^[0-9]+$ ]] || die "--boundless-deposit-witness-action-index must be numeric when guest witness extraction is enabled"
-    [[ "$boundless_withdraw_witness_action_index" =~ ^[0-9]+$ ]] || die "--boundless-withdraw-witness-action-index must be numeric when guest witness extraction is enabled"
-    [[ -n "$boundless_witness_juno_scan_url" ]] || die "--boundless-witness-juno-scan-url is required when witness files are not provided"
-    [[ -n "$boundless_witness_juno_rpc_url" ]] || die "--boundless-witness-juno-rpc-url is required when witness files are not provided"
-    [[ -n "$boundless_deposit_witness_wallet_id" ]] || die "--boundless-deposit-witness-wallet-id is required when witness files are not provided"
-    [[ -n "$boundless_deposit_witness_txid" ]] || die "--boundless-deposit-witness-txid is required when witness files are not provided"
-    [[ -n "$boundless_deposit_witness_action_index" ]] || die "--boundless-deposit-witness-action-index is required when witness files are not provided"
-    [[ -n "$boundless_withdraw_witness_wallet_id" ]] || die "--boundless-withdraw-witness-wallet-id is required when witness files are not provided"
-    [[ -n "$boundless_withdraw_witness_txid" ]] || die "--boundless-withdraw-witness-txid is required when witness files are not provided"
-    [[ -n "$boundless_withdraw_witness_action_index" ]] || die "--boundless-withdraw-witness-action-index is required when witness files are not provided"
-    [[ -n "$boundless_withdraw_witness_withdrawal_id_hex" ]] || die "--boundless-withdraw-witness-withdrawal-id-hex is required when witness files are not provided"
-    [[ -n "$boundless_withdraw_witness_recipient_raw_address_hex" ]] || die "--boundless-withdraw-witness-recipient-raw-address-hex is required when witness files are not provided"
-  fi
-  local witness_file
-  if [[ "$guest_witness_extract_mode" != "true" ]]; then
-    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-      [[ -f "$witness_file" ]] || die "boundless deposit witness item file not found: $witness_file"
-    done
-    for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
-      [[ -f "$witness_file" ]] || die "boundless withdraw witness item file not found: $witness_file"
-    done
-    [[ -n "$bridge_deposit_final_orchard_root" ]] || \
-      die "--bridge-deposit-final-orchard-root is required when witness files are provided"
-    [[ -n "$bridge_deposit_checkpoint_height" ]] || \
-      die "--bridge-deposit-checkpoint-height is required when witness files are provided"
-    [[ -n "$bridge_deposit_checkpoint_block_hash" ]] || \
-      die "--bridge-deposit-checkpoint-block-hash is required when witness files are provided"
+  [[ "$boundless_witness_metadata_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-witness-metadata-timeout-seconds must be numeric"
+  (( boundless_witness_metadata_timeout_seconds > 0 )) || die "--boundless-witness-metadata-timeout-seconds must be > 0"
+  [[ -n "$boundless_witness_juno_scan_url" ]] || die "--boundless-witness-juno-scan-url is required when guest witness extraction is enabled"
+  [[ -n "$boundless_witness_juno_rpc_url" ]] || die "--boundless-witness-juno-rpc-url is required when guest witness extraction is enabled"
+  [[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" ]] || die "JUNO_FUNDER_PRIVATE_KEY_HEX is required for run-generated witness metadata"
+  if [[ -n "$bridge_deposit_final_orchard_root" || -n "$bridge_withdraw_final_orchard_root" || -n "$bridge_deposit_checkpoint_height" || -n "$bridge_deposit_checkpoint_block_hash" || -n "$bridge_withdraw_checkpoint_height" || -n "$bridge_withdraw_checkpoint_block_hash" ]]; then
+    die "manual bridge checkpoint/orchard root overrides are not supported when --boundless-input-mode guest-witness-v1"
   fi
 
   if [[ -z "$output_path" ]]; then
@@ -1244,126 +1144,7 @@ command_run() {
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
   local shared_summary="$shared_output"
 
-  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
-    ensure_dir "$workdir/reports/witness"
-    local deposit_witness_auto_file="$workdir/reports/witness/deposit.witness.bin"
-    local withdraw_witness_auto_file="$workdir/reports/witness/withdraw.witness.bin"
-    local deposit_witness_auto_json="$workdir/reports/witness/deposit-witness.json"
-    local withdraw_witness_auto_json="$workdir/reports/witness/withdraw-witness.json"
-
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/juno-witness-extract deposit \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$boundless_deposit_witness_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$boundless_deposit_witness_txid" \
-        --action-index "$boundless_deposit_witness_action_index" \
-        --output-witness-item-file "$deposit_witness_auto_file" >"$deposit_witness_auto_json"
-
-      go run ./cmd/juno-witness-extract withdraw \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$boundless_withdraw_witness_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$boundless_withdraw_witness_txid" \
-        --action-index "$boundless_withdraw_witness_action_index" \
-        --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
-        --recipient-raw-address-hex "$boundless_withdraw_witness_recipient_raw_address_hex" \
-        --output-witness-item-file "$withdraw_witness_auto_file" >"$withdraw_witness_auto_json"
-    )
-
-    boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
-    boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
-
-    if [[ -z "$bridge_deposit_final_orchard_root" ]]; then
-      bridge_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$deposit_witness_auto_json")"
-    fi
-    if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
-      bridge_withdraw_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$withdraw_witness_auto_json")"
-    fi
-    if [[ -z "$bridge_deposit_checkpoint_height" ]]; then
-      bridge_deposit_checkpoint_height="$(jq -r '.anchor_height // empty' "$deposit_witness_auto_json")"
-    fi
-    if [[ -z "$bridge_deposit_checkpoint_block_hash" ]]; then
-      bridge_deposit_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_witness_auto_json")"
-    fi
-    if [[ -z "$bridge_withdraw_checkpoint_height" ]]; then
-      bridge_withdraw_checkpoint_height="$(jq -r '.anchor_height // empty' "$withdraw_witness_auto_json")"
-    fi
-    if [[ -z "$bridge_withdraw_checkpoint_block_hash" ]]; then
-      bridge_withdraw_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_witness_auto_json")"
-    fi
-  fi
-
-  if [[ -z "$bridge_juno_execution_tx_hash" && -n "$boundless_withdraw_witness_txid" ]]; then
-    bridge_juno_execution_tx_hash="$boundless_withdraw_witness_txid"
-    log "resolved canonical juno execution tx hash from withdraw witness txid=$bridge_juno_execution_tx_hash"
-  fi
-  if [[ -n "$bridge_juno_execution_tx_hash" && -n "$boundless_witness_juno_rpc_url" ]]; then
-    local juno_rpc_user_var juno_rpc_pass_var juno_rpc_user juno_rpc_pass
-    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
-    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
-    juno_rpc_user="${!juno_rpc_user_var:-}"
-    juno_rpc_pass="${!juno_rpc_pass_var:-}"
-    if [[ -n "$juno_rpc_user" && -n "$juno_rpc_pass" ]]; then
-      juno_rebroadcast_tx \
-        "$boundless_witness_juno_rpc_url" \
-        "$juno_rpc_user" \
-        "$juno_rpc_pass" \
-        "$bridge_juno_execution_tx_hash"
-    else
-      log "skipping juno tx rebroadcast (missing env vars $juno_rpc_user_var/$juno_rpc_pass_var)"
-    fi
-  fi
-  [[ -n "$bridge_juno_execution_tx_hash" ]] || \
-    die "canonical juno execution tx hash is required (set --bridge-juno-execution-tx-hash or provide --boundless-withdraw-witness-txid)"
-
-  if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
-    bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
-  fi
-  if [[ -z "$bridge_withdraw_checkpoint_height" ]]; then
-    bridge_withdraw_checkpoint_height="$bridge_deposit_checkpoint_height"
-  fi
-  if [[ -z "$bridge_withdraw_checkpoint_block_hash" ]]; then
-    bridge_withdraw_checkpoint_block_hash="$bridge_deposit_checkpoint_block_hash"
-  fi
-  [[ -n "$bridge_deposit_final_orchard_root" ]] || \
-    die "--bridge-deposit-final-orchard-root is required"
-  [[ -n "$bridge_withdraw_final_orchard_root" ]] || \
-    die "--bridge-withdraw-final-orchard-root is required"
-  [[ -n "$bridge_deposit_checkpoint_height" ]] || \
-    die "--bridge-deposit-checkpoint-height is required"
-  [[ -n "$bridge_deposit_checkpoint_block_hash" ]] || \
-    die "--bridge-deposit-checkpoint-block-hash is required"
-  [[ -n "$bridge_withdraw_checkpoint_height" ]] || \
-    die "--bridge-withdraw-checkpoint-height is required"
-  [[ -n "$bridge_withdraw_checkpoint_block_hash" ]] || \
-    die "--bridge-withdraw-checkpoint-block-hash is required"
-  [[ "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || \
-    die "--bridge-deposit-checkpoint-height must be numeric"
-  [[ "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || \
-    die "--bridge-withdraw-checkpoint-height must be numeric"
-  (( bridge_deposit_checkpoint_height > 0 )) || die "--bridge-deposit-checkpoint-height must be > 0"
-  (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
-
-  if [[ "$shared_enabled" == "true" ]]; then
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/shared-infra-e2e \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --kafka-brokers "$shared_kafka_brokers" \
-        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
-        --topic-prefix "$shared_topic_prefix" \
-        --timeout "$shared_timeout" \
-        --output "$shared_summary"
-    )
-  fi
+  local bridge_juno_execution_tx_hash=""
 
   (
     cd "$REPO_ROOT/contracts"
@@ -1416,6 +1197,302 @@ command_run() {
   local bridge_deployer_address
   bridge_deployer_address="$(jq -r '.operators[0].operator_id // empty' "$dkg_summary")"
   [[ -n "$bridge_deployer_address" ]] || die "dkg summary missing operators[0].operator_id"
+
+  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
+    ensure_dir "$workdir/reports/witness"
+    local witness_metadata_json witness_wallet_id
+    witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
+    witness_wallet_id="$boundless_witness_wallet_id"
+    if [[ -z "$witness_wallet_id" ]]; then
+      witness_wallet_id="testnet-e2e-${proof_topic_seed}"
+    fi
+
+    local juno_rpc_user_var juno_rpc_pass_var juno_scan_bearer_token_var
+    local juno_rpc_user juno_rpc_pass juno_scan_bearer_token
+    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
+    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+    juno_scan_bearer_token_var="$boundless_witness_juno_scan_bearer_token_env"
+    juno_rpc_user="${!juno_rpc_user_var:-}"
+    juno_rpc_pass="${!juno_rpc_pass_var:-}"
+    juno_scan_bearer_token="${!juno_scan_bearer_token_var:-}"
+    [[ -n "$juno_rpc_user" ]] || die "missing Juno RPC user env var: $juno_rpc_user_var"
+    [[ -n "$juno_rpc_pass" ]] || die "missing Juno RPC pass env var: $juno_rpc_pass_var"
+
+    local -a witness_metadata_args=(
+      run
+      --juno-rpc-url "$boundless_witness_juno_rpc_url"
+      --juno-rpc-user "$juno_rpc_user"
+      --juno-rpc-pass "$juno_rpc_pass"
+      --juno-scan-url "$boundless_witness_juno_scan_url"
+      --funder-private-key-hex "${JUNO_FUNDER_PRIVATE_KEY_HEX}"
+      --wallet-id "$witness_wallet_id"
+      --deposit-amount-zat "100000"
+      --withdraw-amount-zat "10000"
+      --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
+      --output "$witness_metadata_json"
+    )
+    if [[ -n "$juno_scan_bearer_token" ]]; then
+      witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
+    fi
+
+    (
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
+    )
+
+    local generated_wallet_id generated_deposit_txid generated_deposit_action_index
+    local generated_withdraw_txid generated_withdraw_action_index generated_recipient_raw_address_hex
+    generated_wallet_id="$(jq -r '.wallet_id // empty' "$witness_metadata_json")"
+    generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$witness_metadata_json")"
+    generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$witness_metadata_json")"
+    generated_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json")"
+    generated_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$witness_metadata_json")"
+    generated_recipient_raw_address_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json")"
+
+    [[ -n "$generated_wallet_id" ]] || die "generated witness metadata missing wallet_id: $witness_metadata_json"
+    [[ -n "$generated_deposit_txid" ]] || die "generated witness metadata missing deposit_txid: $witness_metadata_json"
+    [[ "$generated_deposit_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata deposit_action_index is invalid: $generated_deposit_action_index"
+    [[ -n "$generated_withdraw_txid" ]] || die "generated witness metadata missing withdraw_txid: $witness_metadata_json"
+    [[ "$generated_withdraw_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata withdraw_action_index is invalid: $generated_withdraw_action_index"
+    [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
+      die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
+
+    local bridge_deployer_start_nonce bridge_deploy_nonce bridge_predicted_address
+    bridge_deployer_start_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
+    [[ "$bridge_deployer_start_nonce" =~ ^[0-9]+$ ]] || \
+      die "failed to resolve deployer nonce for predicted bridge address: address=$bridge_deployer_address nonce=$bridge_deployer_start_nonce"
+    bridge_deploy_nonce=$((bridge_deployer_start_nonce + 3))
+    bridge_predicted_address="$(cast compute-address --nonce "$bridge_deploy_nonce" "$bridge_deployer_address" | sed -n 's/^Computed Address:[[:space:]]*//p')"
+    [[ "$bridge_predicted_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
+      die "failed to compute predicted bridge address for nonce=$bridge_deploy_nonce deployer=$bridge_deployer_address"
+
+    local boundless_withdraw_witness_withdrawal_id_hex
+    boundless_withdraw_witness_withdrawal_id_hex="$(
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/e2e/compute-bridge-withdrawal-id.sh run \
+        --base-chain-id "$base_chain_id" \
+        --bridge-address "$bridge_predicted_address" \
+        --requester-address "$bridge_deployer_address" \
+        --recipient-raw-address-hex "$generated_recipient_raw_address_hex" \
+        --amount-zat "10000" \
+        --withdraw-nonce "1"
+    )"
+    [[ "$boundless_withdraw_witness_withdrawal_id_hex" =~ ^0x[0-9a-fA-F]{64}$ ]] || \
+      die "computed withdrawal id is invalid: $boundless_withdraw_witness_withdrawal_id_hex"
+
+    local deposit_witness_auto_file="$workdir/reports/witness/deposit.witness.bin"
+    local withdraw_witness_auto_file="$workdir/reports/witness/withdraw.witness.bin"
+    local deposit_witness_auto_json="$workdir/reports/witness/deposit-witness.json"
+    local withdraw_witness_auto_json="$workdir/reports/witness/withdraw-witness.json"
+    local recipient_raw_address_hex_prefixed="0x${generated_recipient_raw_address_hex}"
+
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/juno-witness-extract deposit \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$generated_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$generated_deposit_txid" \
+        --action-index "$generated_deposit_action_index" \
+        --output-witness-item-file "$deposit_witness_auto_file" >"$deposit_witness_auto_json"
+
+      go run ./cmd/juno-witness-extract withdraw \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$generated_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$generated_withdraw_txid" \
+        --action-index "$generated_withdraw_action_index" \
+        --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
+        --recipient-raw-address-hex "$recipient_raw_address_hex_prefixed" \
+        --output-witness-item-file "$withdraw_witness_auto_file" >"$withdraw_witness_auto_json"
+    )
+
+    boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
+    boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
+
+    bridge_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$deposit_witness_auto_json")"
+    bridge_withdraw_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$withdraw_witness_auto_json")"
+    bridge_deposit_checkpoint_height="$(jq -r '.anchor_height // empty' "$deposit_witness_auto_json")"
+    bridge_deposit_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_witness_auto_json")"
+    bridge_withdraw_checkpoint_height="$(jq -r '.anchor_height // empty' "$withdraw_witness_auto_json")"
+    bridge_withdraw_checkpoint_block_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_witness_auto_json")"
+
+    bridge_juno_execution_tx_hash="$generated_withdraw_txid"
+    log "resolved canonical juno execution tx hash from run-generated withdraw witness txid=$bridge_juno_execution_tx_hash"
+  fi
+
+  if [[ -n "$bridge_juno_execution_tx_hash" && -n "$boundless_witness_juno_rpc_url" ]]; then
+    local juno_rpc_user_var juno_rpc_pass_var juno_rpc_user juno_rpc_pass
+    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
+    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+    juno_rpc_user="${!juno_rpc_user_var:-}"
+    juno_rpc_pass="${!juno_rpc_pass_var:-}"
+    if [[ -n "$juno_rpc_user" && -n "$juno_rpc_pass" ]]; then
+      juno_rebroadcast_tx \
+        "$boundless_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$bridge_juno_execution_tx_hash"
+    else
+      log "skipping juno tx rebroadcast (missing env vars $juno_rpc_user_var/$juno_rpc_pass_var)"
+    fi
+  fi
+  [[ -n "$bridge_juno_execution_tx_hash" ]] || \
+    die "canonical juno execution tx hash is required from run-generated witness metadata"
+
+  if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
+    bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
+  fi
+  if [[ -z "$bridge_withdraw_checkpoint_height" ]]; then
+    bridge_withdraw_checkpoint_height="$bridge_deposit_checkpoint_height"
+  fi
+  if [[ -z "$bridge_withdraw_checkpoint_block_hash" ]]; then
+    bridge_withdraw_checkpoint_block_hash="$bridge_deposit_checkpoint_block_hash"
+  fi
+  [[ -n "$bridge_deposit_final_orchard_root" ]] || \
+    die "--bridge-deposit-final-orchard-root is required"
+  [[ -n "$bridge_withdraw_final_orchard_root" ]] || \
+    die "--bridge-withdraw-final-orchard-root is required"
+  [[ -n "$bridge_deposit_checkpoint_height" ]] || \
+    die "--bridge-deposit-checkpoint-height is required"
+  [[ -n "$bridge_deposit_checkpoint_block_hash" ]] || \
+    die "--bridge-deposit-checkpoint-block-hash is required"
+  [[ -n "$bridge_withdraw_checkpoint_height" ]] || \
+    die "--bridge-withdraw-checkpoint-height is required"
+  [[ -n "$bridge_withdraw_checkpoint_block_hash" ]] || \
+    die "--bridge-withdraw-checkpoint-block-hash is required"
+  [[ "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || \
+    die "--bridge-deposit-checkpoint-height must be numeric"
+  [[ "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || \
+    die "--bridge-withdraw-checkpoint-height must be numeric"
+  (( bridge_deposit_checkpoint_height > 0 )) || die "--bridge-deposit-checkpoint-height must be > 0"
+  (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
+
+  if [[ "$shared_enabled" == "true" ]]; then
+    local checkpoint_started_at checkpoint_operators_csv checkpoint_topic_seed checkpoint_signature_topic checkpoint_package_topic checkpoint_group
+    checkpoint_started_at="$(timestamp_utc)"
+    checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
+    [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operators from dkg summary"
+    checkpoint_topic_seed="${proof_topic_seed}"
+    checkpoint_signature_topic="checkpoints.signatures.e2e.${checkpoint_topic_seed}"
+    checkpoint_package_topic="checkpoints.packages.e2e.${checkpoint_topic_seed}"
+    checkpoint_group="checkpoints.aggregator.e2e.${checkpoint_topic_seed}"
+
+    local checkpoint_agg_log checkpoint_agg_pid
+    checkpoint_agg_log="$workdir/reports/checkpoint-aggregator.log"
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/checkpoint-aggregator \
+        --base-chain-id "$base_chain_id" \
+        --bridge-address "$bridge_verifier_address" \
+        --operators "$checkpoint_operators_csv" \
+        --threshold "$threshold" \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --store-driver postgres \
+        --blob-driver memory \
+        --ipfs-enabled=true \
+        --ipfs-api-url "$shared_ipfs_api_url" \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --queue-group "$checkpoint_group" \
+        --queue-input-topics "$checkpoint_signature_topic" \
+        --queue-output-topic "$checkpoint_package_topic" \
+        >"$checkpoint_agg_log" 2>&1
+    ) &
+    checkpoint_agg_pid="$!"
+
+    local -a checkpoint_signer_pids=()
+    local -a checkpoint_signer_logs=()
+    local operator_key_file operator_private_key signer_log signer_pid signer_index
+    signer_index=0
+    while IFS= read -r operator_key_file; do
+      [[ -n "$operator_key_file" ]] || continue
+      [[ -f "$operator_key_file" ]] || die "checkpoint signer key file not found: $operator_key_file"
+      operator_private_key="$(trimmed_file_value "$operator_key_file")"
+      operator_private_key="${operator_private_key#0x}"
+      signer_log="$workdir/reports/checkpoint-signer-${signer_index}.log"
+      (
+        cd "$REPO_ROOT"
+        CHECKPOINT_SIGNER_PRIVATE_KEY="$operator_private_key" \
+          go run ./cmd/checkpoint-signer \
+            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+            --base-chain-id "$base_chain_id" \
+            --bridge-address "$bridge_verifier_address" \
+            --confirmations 1 \
+            --poll-interval 5s \
+            --owner-id "testnet-e2e-shared-infra-${checkpoint_topic_seed}-${signer_index}" \
+            --lease-driver memory \
+            --queue-driver kafka \
+            --queue-brokers "$shared_kafka_brokers" \
+            --queue-output-topic "$checkpoint_signature_topic" \
+            >"$signer_log" 2>&1
+      ) &
+      signer_pid="$!"
+      checkpoint_signer_pids+=("$signer_pid")
+      checkpoint_signer_logs+=("$signer_log")
+      signer_index=$((signer_index + 1))
+    done < <(jq -r '.operators[].operator_key_file // empty' "$dkg_summary")
+
+    sleep 5
+    if ! kill -0 "$checkpoint_agg_pid" >/dev/null 2>&1; then
+      log "checkpoint-aggregator exited early"
+      tail -n 200 "$checkpoint_agg_log" >&2 || true
+      die "checkpoint-aggregator did not stay running"
+    fi
+    for signer_pid in "${checkpoint_signer_pids[@]}"; do
+      if ! kill -0 "$signer_pid" >/dev/null 2>&1; then
+        log "checkpoint-signer exited early"
+        for signer_log in "${checkpoint_signer_logs[@]}"; do
+          tail -n 200 "$signer_log" >&2 || true
+        done
+        kill "$checkpoint_agg_pid" >/dev/null 2>&1 || true
+        wait "$checkpoint_agg_pid" >/dev/null 2>&1 || true
+        die "checkpoint-signer did not stay running"
+      fi
+    done
+
+    local shared_status=0
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/shared-infra-e2e \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --kafka-brokers "$shared_kafka_brokers" \
+        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
+        --checkpoint-operators "$checkpoint_operators_csv" \
+        --checkpoint-threshold "$threshold" \
+        --checkpoint-min-persisted-at "$checkpoint_started_at" \
+        --topic-prefix "$shared_topic_prefix" \
+        --timeout "$shared_timeout" \
+        --output "$shared_summary"
+    )
+    shared_status="$?"
+    set -e
+
+    kill "$checkpoint_agg_pid" >/dev/null 2>&1 || true
+    wait "$checkpoint_agg_pid" >/dev/null 2>&1 || true
+    for signer_pid in "${checkpoint_signer_pids[@]}"; do
+      kill "$signer_pid" >/dev/null 2>&1 || true
+    done
+    for signer_pid in "${checkpoint_signer_pids[@]}"; do
+      wait "$signer_pid" >/dev/null 2>&1 || true
+    done
+
+    if (( shared_status != 0 )); then
+      log "shared infra validation failed; showing checkpoint quorum logs"
+      tail -n 200 "$checkpoint_agg_log" >&2 || true
+      for signer_log in "${checkpoint_signer_logs[@]}"; do
+        tail -n 200 "$signer_log" >&2 || true
+      done
+      die "shared infra validation failed"
+    fi
+  fi
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
@@ -1732,7 +1809,7 @@ command_run() {
   local boundless_deposit_ivk_configured="false"
   local boundless_withdraw_ovk_configured="false"
   local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
-  local guest_witness_auto_generate="false"
+  local guest_witness_auto_generate="true"
   local guest_witness_extract_from_chain="false"
   if [[ -n "$boundless_deposit_owallet_ivk_hex" ]]; then
     boundless_deposit_ivk_configured="true"
@@ -1742,9 +1819,6 @@ command_run() {
   fi
   boundless_deposit_witness_item_count="${#boundless_deposit_witness_item_files[@]}"
   boundless_withdraw_witness_item_count="${#boundless_withdraw_witness_item_files[@]}"
-  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_manual_mode" != "true" ]]; then
-    guest_witness_auto_generate="true"
-  fi
   if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
     guest_witness_extract_from_chain="true"
   fi

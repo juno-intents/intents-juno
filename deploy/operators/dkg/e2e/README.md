@@ -8,14 +8,12 @@ This folder provides live-network e2e automation for:
 4. operator boot verification after restore
 5. Base testnet contract deploy + bridge smoke flow (Juno->Base mint and Base->Juno finalize path)
 
-Current limitation:
-- The workflow currently executes bridge transactions on Base testnet.
-- It does not yet broadcast Juno-chain deposit/withdraw payout transactions end-to-end from this repo.
-- The Base `finalize_withdraw` tx hash is no longer accepted as a Juno proof surrogate.
-- `run-testnet-e2e.sh` now auto-resolves the canonical Juno execution tx hash from `--boundless-withdraw-witness-txid` when available.
-- When Juno RPC credentials are provided, `run-testnet-e2e.sh` also performs a `sendrawtransaction` rebroadcast probe for that txid.
-- Use `--bridge-juno-execution-tx-hash` only to override the auto-resolved value.
-- `JUNO_FUNDER_PRIVATE_KEY_HEX` is still required in CI and is reserved for the upcoming Juno-chain execution stage.
+Current behavior:
+- `run-testnet-e2e.sh` generates Juno deposit + withdraw transactions during the run via `generate-juno-witness-metadata.sh`.
+- Witness extraction is run against those generated transactions and feeds `bridge-e2e` directly.
+- The canonical Juno proof-of-execution tx hash is resolved from the generated withdraw tx and enforced.
+- The Base `finalize_withdraw` tx hash is not accepted as a Juno proof surrogate.
+- When Juno RPC credentials are provided, `run-testnet-e2e.sh` performs a `sendrawtransaction` rebroadcast probe for the canonical Juno tx hash.
 
 ## Scripts
 
@@ -32,6 +30,7 @@ Current limitation:
   - Provisions a dedicated AWS EC2 runner with Terraform, managed shared services (Aurora Postgres + MSK + ECS + IPFS pinning ASG), and one dedicated EC2 per operator.
   - Supports pre-baked AMIs (`--runner-ami-id`, `--operator-ami-id`, `--shared-ami-id`) so operators can boot from pre-synced images (`--shared-ami-id` applies to IPFS ASG instances).
   - Executes distributed DKG + backup/restore across those operator hosts, then runs `run-testnet-e2e.sh` against the generated `dkg-summary.json`.
+  - Derives Juno witness extraction endpoints from the deployed operator stack (runner-local SSH tunnel to operator-local `juno-scan` + `junocashd`), not from external txid/endpoint inputs.
   - Exports each restored operator key package to an e2e-scoped KMS+S3 backend and records receipts in the distributed DKG summary.
   - Collects artifacts and destroys infra by default.
 ## AWS Live E2E
@@ -93,32 +92,16 @@ Local invocation example:
 - `run-testnet-e2e.sh` always uses `--boundless-auto`.
 - `--boundless-input-mode` is locked to `guest-witness-v1`.
 - Guest witness mode requires:
-  - explicit witness inputs only (auto generation is disabled in this flow):
-    - `--boundless-deposit-owallet-ivk-hex`
-    - `--boundless-withdraw-owallet-ovk-hex`
-    - `--boundless-deposit-witness-item-file` (repeatable)
-    - `--boundless-withdraw-witness-item-file` (repeatable)
-    - `--bridge-deposit-final-orchard-root` (required in manual witness mode)
-    - `--bridge-withdraw-final-orchard-root` (optional; defaults to deposit root)
-    - `--bridge-deposit-checkpoint-height` (required in manual witness mode)
-    - `--bridge-deposit-checkpoint-block-hash` (required in manual witness mode)
-    - `--bridge-withdraw-checkpoint-height` (optional; defaults to deposit checkpoint height)
-    - `--bridge-withdraw-checkpoint-block-hash` (optional; defaults to deposit checkpoint block hash)
-  - optional witness extraction from live `juno-scan` + `junocashd` when witness item files are omitted:
-    - `--boundless-witness-juno-scan-url`
-    - `--boundless-witness-juno-rpc-url`
-    - `--boundless-deposit-witness-wallet-id`
-    - `--boundless-deposit-witness-txid`
-    - `--boundless-deposit-witness-action-index`
-    - `--boundless-withdraw-witness-wallet-id`
-    - `--boundless-withdraw-witness-txid`
-    - `--boundless-withdraw-witness-action-index`
-    - `--boundless-withdraw-witness-withdrawal-id-hex`
-    - `--boundless-withdraw-witness-recipient-raw-address-hex`
-    - when extraction is used, checkpoint height/hash flags are auto-filled from witness metadata (`anchor_height` + `anchor_block_hash`)
-  - extraction command is also available directly:
-    - `go run ./cmd/juno-witness-extract deposit ...`
-    - `go run ./cmd/juno-witness-extract withdraw ...`
+  - `--boundless-deposit-owallet-ivk-hex`
+  - `--boundless-withdraw-owallet-ovk-hex`
+  - `--boundless-witness-juno-scan-url`
+  - `--boundless-witness-juno-rpc-url`
+  - `JUNO_FUNDER_PRIVATE_KEY_HEX` env var
+- Witness tx generation + extraction are run-owned:
+  - `generate-juno-witness-metadata.sh` creates the Juno deposit/withdraw txs during e2e.
+  - `juno-witness-extract` builds witness items from those generated txs.
+  - Bridge checkpoint height/hash and Orchard roots are auto-filled from extracted witness metadata.
+- Manual witness tx/action/withdraw-id injection is not supported in this flow.
 - No manual seal injection, no prepare-only path, and no no-op verifier path are supported in this flow.
 
 Pricing policy and calculator:
@@ -130,6 +113,7 @@ Pricing policy and calculator:
 
 ```bash
 ./deploy/operators/dkg/e2e/create-funder-wallets.sh create --force
+export JUNO_FUNDER_PRIVATE_KEY_HEX="$(tr -d '\r\n' < ./tmp/funders/juno-funder.key)"
 
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh run \
   --base-rpc-url https://base-sepolia-rpc.example \
@@ -140,6 +124,10 @@ Pricing policy and calculator:
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
+  --boundless-deposit-owallet-ivk-hex <64-byte-hex> \
+  --boundless-withdraw-owallet-ovk-hex <32-byte-hex> \
+  --boundless-witness-juno-scan-url https://juno-scan.example \
+  --boundless-witness-juno-rpc-url https://junocashd-rpc.example \
   --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
   --boundless-deposit-program-url https://.../deposit-guest.elf \
   --boundless-withdraw-program-url https://.../withdraw-guest.elf \
