@@ -262,6 +262,18 @@ func TestRun_RequiresOperatorSignerBin(t *testing.T) {
 	}
 }
 
+func TestRun_RejectsDeployOnly(t *testing.T) {
+	t.Parallel()
+
+	_, err := run(context.Background(), config{DeployOnly: true})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--deploy-only is disabled") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestParseArgs_RejectsWithdrawLargerThanDeposit(t *testing.T) {
 	t.Parallel()
 
@@ -2222,6 +2234,83 @@ func TestComputeFeeBreakdown(t *testing.T) {
 	}
 	if out.Net.Cmp(big.NewInt(99_500)) != 0 {
 		t.Fatalf("net: got %s want 99500", out.Net.String())
+	}
+}
+
+func TestComputeFeeBreakdown_Table(t *testing.T) {
+	t.Parallel()
+
+	testCases := []struct {
+		name      string
+		amount    *big.Int
+		feeBps    uint64
+		tipBps    uint64
+		wantFee   string
+		wantTip   string
+		wantDist  string
+		wantNet   string
+	}{
+		{
+			name:     "nil amount treated as zero",
+			amount:   nil,
+			feeBps:   50,
+			tipBps:   1000,
+			wantFee:  "0",
+			wantTip:  "0",
+			wantDist: "0",
+			wantNet:  "0",
+		},
+		{
+			name:     "fee rounds down below one unit",
+			amount:   big.NewInt(199),
+			feeBps:   50,
+			tipBps:   1000,
+			wantFee:  "0",
+			wantTip:  "0",
+			wantDist: "0",
+			wantNet:  "199",
+		},
+		{
+			name:     "tip rounds down below one unit",
+			amount:   big.NewInt(200),
+			feeBps:   50,
+			tipBps:   3333,
+			wantFee:  "1",
+			wantTip:  "0",
+			wantDist: "1",
+			wantNet:  "199",
+		},
+		{
+			name:     "zero tip bps keeps full fee at distributor",
+			amount:   big.NewInt(10_000),
+			feeBps:   50,
+			tipBps:   0,
+			wantFee:  "50",
+			wantTip:  "0",
+			wantDist: "50",
+			wantNet:  "9950",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := computeFeeBreakdown(tc.amount, tc.feeBps, tc.tipBps)
+			if got.Fee.String() != tc.wantFee {
+				t.Fatalf("fee: got %s want %s", got.Fee.String(), tc.wantFee)
+			}
+			if got.Tip.String() != tc.wantTip {
+				t.Fatalf("tip: got %s want %s", got.Tip.String(), tc.wantTip)
+			}
+			if got.FeeToDistributor.String() != tc.wantDist {
+				t.Fatalf("feeToDistributor: got %s want %s", got.FeeToDistributor.String(), tc.wantDist)
+			}
+			if got.Net.String() != tc.wantNet {
+				t.Fatalf("net: got %s want %s", got.Net.String(), tc.wantNet)
+			}
+		})
 	}
 }
 
