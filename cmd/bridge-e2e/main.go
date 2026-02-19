@@ -156,6 +156,8 @@ const (
 	boundlessInputModeGuestWitnessV1  = "guest-witness-v1"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
+	deployCodeRecoveryTimeout         = 8 * time.Minute
+	deployCodeRecoveryPollInterval    = 5 * time.Second
 	withdrawalFinalizedWaitTimeout    = 60 * time.Second
 	withdrawalFinalizedPollInterval   = 2 * time.Second
 	postFinalizeInvariantWaitTimeout  = 60 * time.Second
@@ -2278,6 +2280,16 @@ func deployContract(ctx context.Context, backend evmBackend, auth *bind.Transact
 		rcpt, err := waitMinedWithGrace(ctx, backend, tx)
 		if err != nil {
 			logProgress("deploy wait mined failed tx=%s: %v", tx.Hash().Hex(), err)
+			if ctx.Err() == nil && isRetriableWaitMinedError(err) {
+				recovered, recoverErr := waitForCodeAtAddress(ctx, backend, addr, deployCodeRecoveryTimeout, deployCodeRecoveryPollInterval)
+				if recoverErr != nil {
+					logProgress("deploy code recovery failed addr=%s tx=%s: %v", addr.Hex(), tx.Hash().Hex(), recoverErr)
+				}
+				if recovered {
+					logProgress("deploy recovered via on-chain code addr=%s tx=%s", addr.Hex(), tx.Hash().Hex())
+					return addr, tx.Hash(), nil
+				}
+			}
 			if ctx.Err() == nil && attempt < 4 && isRetriableWaitMinedError(err) {
 				if nonceErr := refreshAuthNonce(ctx, backend, auth); nonceErr != nil {
 					return common.Address{}, common.Hash{}, fmt.Errorf("%w (and refresh nonce failed: %v)", err, nonceErr)
@@ -2487,6 +2499,43 @@ func waitMinedWithGrace(ctx context.Context, backend bind.DeployBackend, tx *typ
 	graceCtx, graceCancel := context.WithTimeout(ctx, txMinedGraceTimeout)
 	defer graceCancel()
 	return waitMined(graceCtx, backend, tx)
+}
+
+type codeAtBackend interface {
+	CodeAt(ctx context.Context, account common.Address, blockNumber *big.Int) ([]byte, error)
+}
+
+func waitForCodeAtAddress(ctx context.Context, backend codeAtBackend, addr common.Address, timeout time.Duration, pollInterval time.Duration) (bool, error) {
+	if backend == nil {
+		return false, errors.New("nil backend")
+	}
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+	if timeout <= 0 {
+		timeout = pollInterval
+	}
+
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(pollInterval)
+	defer ticker.Stop()
+
+	for {
+		code, err := backend.CodeAt(waitCtx, addr, nil)
+		if err == nil && len(code) > 0 {
+			return true, nil
+		}
+
+		select {
+		case <-waitCtx.Done():
+			if errors.Is(waitCtx.Err(), context.DeadlineExceeded) {
+				return false, nil
+			}
+			return false, waitCtx.Err()
+		case <-ticker.C:
+		}
+	}
 }
 
 func signDigestSorted(digest common.Hash, keys []*ecdsa.PrivateKey) ([][]byte, error) {

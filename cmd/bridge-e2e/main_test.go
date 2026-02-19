@@ -1093,6 +1093,35 @@ type mockGasEstimator struct {
 	tipErr   error
 }
 
+type mockCodeAtResponse struct {
+	code []byte
+	err  error
+}
+
+type mockCodeAtBackend struct {
+	responses []mockCodeAtResponse
+	calls     int
+}
+
+func (m *mockCodeAtBackend) CodeAt(ctx context.Context, _ common.Address, _ *big.Int) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	m.calls++
+	if len(m.responses) == 0 {
+		return nil, nil
+	}
+	idx := m.calls - 1
+	if idx >= len(m.responses) {
+		idx = len(m.responses) - 1
+	}
+	resp := m.responses[idx]
+	if resp.err != nil {
+		return nil, resp.err
+	}
+	return append([]byte(nil), resp.code...), nil
+}
+
 func (m mockGasEstimator) SuggestGasPrice(context.Context) (*big.Int, error) {
 	if m.priceErr != nil {
 		return nil, m.priceErr
@@ -1354,6 +1383,65 @@ func TestIsRetriableWaitMinedError(t *testing.T) {
 				t.Fatalf("isRetriableWaitMinedError(%v) = %v, want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWaitForCodeAtAddress_FindsCode(t *testing.T) {
+	t.Parallel()
+
+	backend := &mockCodeAtBackend{
+		responses: []mockCodeAtResponse{
+			{code: nil},
+			{code: []byte{0x60, 0x00}},
+		},
+	}
+
+	found, err := waitForCodeAtAddress(context.Background(), backend, common.HexToAddress("0x1"), 100*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForCodeAtAddress: %v", err)
+	}
+	if !found {
+		t.Fatalf("expected contract code to be found")
+	}
+	if backend.calls < 2 {
+		t.Fatalf("expected at least 2 code checks, got %d", backend.calls)
+	}
+}
+
+func TestWaitForCodeAtAddress_TimeoutReturnsFalse(t *testing.T) {
+	t.Parallel()
+
+	backend := &mockCodeAtBackend{
+		responses: []mockCodeAtResponse{
+			{code: nil},
+		},
+	}
+
+	found, err := waitForCodeAtAddress(context.Background(), backend, common.HexToAddress("0x1"), 20*time.Millisecond, time.Millisecond)
+	if err != nil {
+		t.Fatalf("waitForCodeAtAddress: %v", err)
+	}
+	if found {
+		t.Fatalf("expected no contract code")
+	}
+	if backend.calls == 0 {
+		t.Fatalf("expected at least 1 code check")
+	}
+}
+
+func TestWaitForCodeAtAddress_ContextCanceled(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	backend := &mockCodeAtBackend{}
+	found, err := waitForCodeAtAddress(ctx, backend, common.HexToAddress("0x1"), 100*time.Millisecond, time.Millisecond)
+	if found {
+		t.Fatalf("expected no contract code")
+	}
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context canceled, got %v", err)
 	}
 }
 
