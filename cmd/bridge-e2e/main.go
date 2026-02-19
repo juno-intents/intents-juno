@@ -1239,6 +1239,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	wjuno := bind.NewBoundContract(wjunoAddr, wjunoABI, client, client, client)
 	bridge := bind.NewBoundContract(bridgeAddr, bridgeABI, client, client, client)
 
+	if cfg.ReuseDeployedContracts {
+		if err := validateReusedBridgeConfig(ctx, bridge, verifierAddr, depositImageID, withdrawImageID); err != nil {
+			return nil, err
+		}
+	}
+
 	if !cfg.ReuseDeployedContracts {
 		setFeeDistributorTx, err = transactAndWait(ctx, client, auth, reg, "setFeeDistributor", fdAddr)
 		if err != nil {
@@ -2085,11 +2091,24 @@ func requestBoundlessProofViaQueue(
 	if err != nil {
 		return nil, "", fmt.Errorf("boundless queue proof request failed for %s: %w", pipeline, err)
 	}
-	if len(result.Seal) == 0 {
-		return nil, "", fmt.Errorf("boundless queue proof returned empty seal for %s", pipeline)
+	if err := validateQueueProofFulfillment(pipeline, expectedJournal, result); err != nil {
+		return nil, "", err
 	}
 
 	return result.Seal, extractQueueProofRequestID(result.Metadata), nil
+}
+
+func validateQueueProofFulfillment(pipeline string, expectedJournal []byte, result proofclient.Result) error {
+	if len(result.Seal) == 0 {
+		return fmt.Errorf("boundless queue proof returned empty seal for %s", pipeline)
+	}
+	if len(result.Journal) == 0 {
+		return fmt.Errorf("boundless queue proof returned empty journal for %s", pipeline)
+	}
+	if !bytes.Equal(result.Journal, expectedJournal) {
+		return fmt.Errorf("boundless queue proof journal mismatch for %s", pipeline)
+	}
+	return nil
 }
 
 func extractQueueProofRequestID(metadata map[string]string) string {
@@ -3172,6 +3191,55 @@ type depositUsedCaller interface {
 	Call(opts *bind.CallOpts, results *[]any, method string, params ...any) error
 }
 
+type contractCaller interface {
+	Call(opts *bind.CallOpts, results *[]any, method string, params ...any) error
+}
+
+func validateReusedBridgeConfig(
+	ctx context.Context,
+	bridge contractCaller,
+	expectedVerifier common.Address,
+	expectedDepositImageID common.Hash,
+	expectedWithdrawImageID common.Hash,
+) error {
+	onChainVerifier, err := callAddress(ctx, bridge, "verifier")
+	if err != nil {
+		return fmt.Errorf("read bridge verifier: %w", err)
+	}
+	if onChainVerifier != expectedVerifier {
+		return fmt.Errorf(
+			"reused bridge verifier mismatch: got=%s want=%s",
+			onChainVerifier.Hex(),
+			expectedVerifier.Hex(),
+		)
+	}
+
+	onChainDepositImageID, err := callHashFromCaller(ctx, bridge, "depositImageId")
+	if err != nil {
+		return fmt.Errorf("read bridge depositImageId: %w", err)
+	}
+	if onChainDepositImageID != expectedDepositImageID {
+		return fmt.Errorf(
+			"reused bridge depositImageId mismatch: got=%s want=%s",
+			onChainDepositImageID.Hex(),
+			expectedDepositImageID.Hex(),
+		)
+	}
+
+	onChainWithdrawImageID, err := callHashFromCaller(ctx, bridge, "withdrawImageId")
+	if err != nil {
+		return fmt.Errorf("read bridge withdrawImageId: %w", err)
+	}
+	if onChainWithdrawImageID != expectedWithdrawImageID {
+		return fmt.Errorf(
+			"reused bridge withdrawImageId mismatch: got=%s want=%s",
+			onChainWithdrawImageID.Hex(),
+			expectedWithdrawImageID.Hex(),
+		)
+	}
+	return nil
+}
+
 func waitDepositUsedAtBlock(ctx context.Context, bridge depositUsedCaller, depositID common.Hash, blockNumber *big.Int, attempts int, interval time.Duration) (bool, error) {
 	if attempts < 1 {
 		attempts = 1
@@ -3247,6 +3315,42 @@ func callUint64(ctx context.Context, c *bind.BoundContract, method string, args 
 		return uint64(v), nil
 	default:
 		return 0, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+}
+
+func callAddress(ctx context.Context, c contractCaller, method string, args ...any) (common.Address, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return common.Address{}, err
+	}
+	if len(res) != 1 {
+		return common.Address{}, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	switch v := res[0].(type) {
+	case common.Address:
+		return v, nil
+	case [20]byte:
+		return common.BytesToAddress(v[:]), nil
+	default:
+		return common.Address{}, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+}
+
+func callHashFromCaller(ctx context.Context, c contractCaller, method string, args ...any) (common.Hash, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return common.Hash{}, err
+	}
+	if len(res) != 1 {
+		return common.Hash{}, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	switch v := res[0].(type) {
+	case common.Hash:
+		return v, nil
+	case [32]byte:
+		return common.BytesToHash(v[:]), nil
+	default:
+		return common.Hash{}, fmt.Errorf("unexpected %s type: %T", method, res[0])
 	}
 }
 

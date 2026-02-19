@@ -32,6 +32,7 @@ type Request struct {
 
 type Result struct {
 	Seal     []byte
+	Journal  []byte
 	Metadata map[string]string
 }
 
@@ -175,6 +176,7 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 	case "proof.fulfillment.v1":
 		var res struct {
 			Seal     string            `json:"seal"`
+			Journal  string            `json:"journal"`
 			Metadata map[string]string `json:"metadata"`
 		}
 		if err := json.Unmarshal(msg.Value, &res); err != nil {
@@ -184,8 +186,13 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 		if err != nil {
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment seal: %w", err)
 		}
+		journal, err := decodeHex(res.Journal)
+		if err != nil {
+			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment journal: %w", err)
+		}
 		return Result{
 			Seal:     seal,
+			Journal:  journal,
 			Metadata: cloneMap(res.Metadata),
 		}, true, nil
 	case "proof.failure.v1":
@@ -233,6 +240,7 @@ func (c *StaticClient) RequestProof(_ context.Context, req Request) (Result, err
 	}
 	return Result{
 		Seal:     append([]byte(nil), c.Result.Seal...),
+		Journal:  append([]byte(nil), c.Result.Journal...),
 		Metadata: cloneMap(c.Result.Metadata),
 	}, nil
 }

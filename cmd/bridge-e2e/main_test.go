@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
 
@@ -1445,6 +1446,163 @@ func TestExtractQueueProofRequestID(t *testing.T) {
 				t.Fatalf("extractQueueProofRequestID() = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestValidateQueueProofFulfillment_RejectsMissingJournal(t *testing.T) {
+	t.Parallel()
+
+	err := validateQueueProofFulfillment(
+		"deposit",
+		[]byte{0x01, 0x02},
+		proofclient.Result{Seal: []byte{0x99}},
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "journal") {
+		t.Fatalf("expected journal validation error, got: %v", err)
+	}
+}
+
+func TestValidateQueueProofFulfillment_RejectsJournalMismatch(t *testing.T) {
+	t.Parallel()
+
+	err := validateQueueProofFulfillment(
+		"withdraw",
+		[]byte{0x01, 0x02},
+		proofclient.Result{
+			Seal:    []byte{0x99},
+			Journal: []byte{0x01, 0x03},
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "journal mismatch") {
+		t.Fatalf("expected journal mismatch error, got: %v", err)
+	}
+}
+
+func TestValidateQueueProofFulfillment_AcceptsMatchingJournal(t *testing.T) {
+	t.Parallel()
+
+	err := validateQueueProofFulfillment(
+		"withdraw",
+		[]byte{0x01, 0x02},
+		proofclient.Result{
+			Seal:    []byte{0x99},
+			Journal: []byte{0x01, 0x02},
+		},
+	)
+	if err != nil {
+		t.Fatalf("validateQueueProofFulfillment: %v", err)
+	}
+}
+
+type mockBridgeConfigCaller struct {
+	responses map[string]mockCallResponse
+	calls     []string
+}
+
+func (m *mockBridgeConfigCaller) Call(_ *bind.CallOpts, results *[]any, method string, params ...any) error {
+	if len(params) != 0 {
+		return errors.New("unexpected params")
+	}
+	m.calls = append(m.calls, method)
+	resp, ok := m.responses[method]
+	if !ok {
+		return errors.New("unexpected method: " + method)
+	}
+	if resp.err != nil {
+		return resp.err
+	}
+	*results = []any{resp.result}
+	return nil
+}
+
+func TestValidateReusedBridgeConfig_RejectsVerifierMismatch(t *testing.T) {
+	t.Parallel()
+
+	depositImageID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	caller := &mockBridgeConfigCaller{
+		responses: map[string]mockCallResponse{
+			"verifier":        {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
+			"depositImageId":  {result: depositImageID},
+			"withdrawImageId": {result: withdrawImageID},
+		},
+	}
+
+	err := validateReusedBridgeConfig(
+		context.Background(),
+		caller,
+		common.HexToAddress("0x00000000000000000000000000000000000000bb"),
+		depositImageID,
+		withdrawImageID,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "verifier mismatch") {
+		t.Fatalf("expected verifier mismatch, got: %v", err)
+	}
+}
+
+func TestValidateReusedBridgeConfig_RejectsImageIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	depositImageID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	caller := &mockBridgeConfigCaller{
+		responses: map[string]mockCallResponse{
+			"verifier":        {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
+			"depositImageId":  {result: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
+			"withdrawImageId": {result: withdrawImageID},
+		},
+	}
+
+	err := validateReusedBridgeConfig(
+		context.Background(),
+		caller,
+		common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+		depositImageID,
+		withdrawImageID,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "depositImageId mismatch") {
+		t.Fatalf("expected deposit image mismatch, got: %v", err)
+	}
+}
+
+func TestValidateReusedBridgeConfig_AcceptsMatchingConfig(t *testing.T) {
+	t.Parallel()
+
+	verifier := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	depositImageID := common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111")
+	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
+	caller := &mockBridgeConfigCaller{
+		responses: map[string]mockCallResponse{
+			"verifier":        {result: verifier},
+			"depositImageId":  {result: depositImageID},
+			"withdrawImageId": {result: withdrawImageID},
+		},
+	}
+
+	err := validateReusedBridgeConfig(
+		context.Background(),
+		caller,
+		verifier,
+		depositImageID,
+		withdrawImageID,
+	)
+	if err != nil {
+		t.Fatalf("validateReusedBridgeConfig: %v", err)
+	}
+	if len(caller.calls) != 3 {
+		t.Fatalf("call count: got=%d want=3", len(caller.calls))
 	}
 }
 
