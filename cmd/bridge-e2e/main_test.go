@@ -1047,6 +1047,33 @@ func TestBuildBoundlessSubmitFileRequestYAML_UsesURLInputAndGroth16Selector(t *t
 	}
 }
 
+func TestShouldUseBoundlessSubmitFile(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		inputMode string
+		inputLen  int
+		want      bool
+	}{
+		{name: "guest witness always uses submit file", inputMode: boundlessInputModeGuestWitnessV1, inputLen: 1, want: true},
+		{name: "private small input keeps submit", inputMode: boundlessInputModePrivate, inputLen: boundlessInlineInputLimitBytes, want: false},
+		{name: "private oversized input switches to submit file", inputMode: boundlessInputModePrivate, inputLen: boundlessInlineInputLimitBytes + 1, want: true},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := boundlessConfig{InputMode: tc.inputMode}
+			got := shouldUseBoundlessSubmitFile(cfg, make([]byte, tc.inputLen))
+			if got != tc.want {
+				t.Fatalf("shouldUseBoundlessSubmitFile(mode=%s,len=%d)=%v want %v", tc.inputMode, tc.inputLen, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestProofInputsFile_WithdrawAmountMarshals(t *testing.T) {
 	t.Parallel()
 

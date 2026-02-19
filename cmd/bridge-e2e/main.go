@@ -1711,7 +1711,7 @@ func requestBoundlessProofOnce(
 
 	requestMode := "submit"
 	var args []string
-	if len(privateInput) > boundlessInlineInputLimitBytes {
+	if shouldUseBoundlessSubmitFile(cfg, privateInput) {
 		if strings.TrimSpace(cfg.InputS3Bucket) == "" {
 			return nil, "", fmt.Errorf(
 				"boundless %s input is %d bytes which exceeds inline limit %d; set --boundless-input-s3-bucket for oversized inputs",
@@ -1826,6 +1826,13 @@ func requestBoundlessProofOnce(
 	}
 
 	return seal, requestID, nil
+}
+
+func shouldUseBoundlessSubmitFile(cfg boundlessConfig, privateInput []byte) bool {
+	if cfg.InputMode == boundlessInputModeGuestWitnessV1 {
+		return true
+	}
+	return len(privateInput) > boundlessInlineInputLimitBytes
 }
 
 func buildBoundlessSubmitFileRequestYAML(
