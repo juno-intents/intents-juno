@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +34,10 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/idempotency"
+	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
 type stringListFlag []string
@@ -51,26 +56,28 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type config struct {
-	RPCURL           string
-	ChainID          uint64
-	DeployerKeyHex   string
-	OperatorKeyFiles []string
-	Threshold        int
-	ContractsOut     string
-	DepositAmount    uint64
-	WithdrawAmount   uint64
-	Recipient        common.Address
-	RecipientSet     bool
-	VerifierAddress  common.Address
-	VerifierSet      bool
-	DepositImageID   common.Hash
-	WithdrawImageID  common.Hash
-	DepositSeal      []byte
-	WithdrawSeal     []byte
-	ProofInputsOut   string
-	OutputPath       string
-	RunTimeout       time.Duration
-	Boundless        boundlessConfig
+	RPCURL                   string
+	ChainID                  uint64
+	DeployerKeyHex           string
+	OperatorKeyFiles         []string
+	Threshold                int
+	ContractsOut             string
+	DepositAmount            uint64
+	WithdrawAmount           uint64
+	DepositFinalOrchardRoot  common.Hash
+	WithdrawFinalOrchardRoot common.Hash
+	Recipient                common.Address
+	RecipientSet             bool
+	VerifierAddress          common.Address
+	VerifierSet              bool
+	DepositImageID           common.Hash
+	WithdrawImageID          common.Hash
+	DepositSeal              []byte
+	WithdrawSeal             []byte
+	ProofInputsOut           string
+	OutputPath               string
+	RunTimeout               time.Duration
+	Boundless                boundlessConfig
 }
 
 type boundlessConfig struct {
@@ -108,6 +115,16 @@ type boundlessConfig struct {
 	TimeoutSeconds      uint64
 
 	RequestorAddress common.Address
+
+	ProofSubmissionMode string
+	ProofQueueBrokers   []string
+	ProofRequestTopic   string
+	ProofResultTopic    string
+	ProofFailureTopic   string
+	ProofConsumerGroup  string
+	ProofQueueMaxBytes  int
+	ProofAckTimeout     time.Duration
+	ProofDeadline       time.Duration
 }
 
 type boundlessWaitResult struct {
@@ -136,6 +153,16 @@ const (
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
 	boundlessInputModeGuestWitnessV1  = "guest-witness-v1"
+	boundlessProofSubmissionDirectCLI = "direct-cli"
+	boundlessProofSubmissionQueue     = "queue"
+	defaultProofRequestTopic          = "proof.requests.v1"
+	defaultProofResultTopic           = "proof.fulfillments.v1"
+	defaultProofFailureTopic          = "proof.failures.v1"
+	defaultProofConsumerGroupPrefix   = "bridge-e2e-proof"
+	defaultProofQueueMaxBytes         = 10 << 20
+	defaultProofAckTimeout            = 5 * time.Second
+	defaultProofDeadline              = 15 * time.Minute
+	junoProofSourceFinalizeWithdrawTx = "transactions.finalize_withdraw"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
 	deployCodeRecoveryTimeout         = 8 * time.Minute
@@ -145,6 +172,17 @@ const (
 	postFinalizeInvariantWaitTimeout  = 60 * time.Second
 	postFinalizeInvariantPollInterval = 2 * time.Second
 	boundlessMarketBalanceOfABIJSON   = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
+
+	depositWitnessLeafIndexOffset = 0
+	depositWitnessAuthPathOffset  = depositWitnessLeafIndexOffset + 4
+	depositWitnessAuthPathLen     = 32 * 32
+	depositWitnessActionOffset    = depositWitnessAuthPathOffset + depositWitnessAuthPathLen
+	depositWitnessCMXOffset       = depositWitnessActionOffset + 32 + 32
+
+	withdrawWitnessIDOffset        = 0
+	withdrawWitnessIDLen           = 32
+	withdrawWitnessRecipientOffset = withdrawWitnessIDOffset + withdrawWitnessIDLen
+	withdrawWitnessRecipientRawLen = 43
 )
 
 type report struct {
@@ -184,6 +222,17 @@ type report struct {
 		FinalizeWithdraw  string `json:"finalize_withdraw"`
 	} `json:"transactions"`
 
+	Juno struct {
+		TxHash string `json:"tx_hash"`
+		TxID   string `json:"txid"`
+
+		ProofOfExecution struct {
+			Available bool   `json:"available"`
+			TxHash    string `json:"tx_hash"`
+			Source    string `json:"source"`
+		} `json:"proof_of_execution"`
+	} `json:"juno"`
+
 	Withdraw struct {
 		WithdrawalID string `json:"withdrawal_id"`
 		PredictedID  string `json:"predicted_withdrawal_id"`
@@ -204,6 +253,7 @@ type report struct {
 
 		Boundless struct {
 			Enabled                bool   `json:"enabled"`
+			SubmissionMode         string `json:"submission_mode,omitempty"`
 			RPCURL                 string `json:"rpc_url,omitempty"`
 			InputMode              string `json:"input_mode,omitempty"`
 			MarketAddress          string `json:"market_address,omitempty"`
@@ -388,6 +438,8 @@ func parseArgs(args []string) (config, error) {
 	var verifierAddressHex string
 	var depositImageIDHex string
 	var withdrawImageIDHex string
+	var depositFinalOrchardRootHex string
+	var withdrawFinalOrchardRootHex string
 	var boundlessRequestorKeyFile string
 	var boundlessRequestorKeyHex string
 	var boundlessDepositOWalletIVKHex string
@@ -401,6 +453,7 @@ func parseArgs(args []string) (config, error) {
 	var boundlessInputS3Bucket string
 	var boundlessInputS3Prefix string
 	var boundlessInputS3Region string
+	var boundlessProofQueueBrokers string
 
 	fs := flag.NewFlagSet("bridge-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -418,6 +471,8 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&verifierAddressHex, "verifier-address", "", "verifier router address (required)")
 	fs.StringVar(&depositImageIDHex, "deposit-image-id", defaultDepositImageIDHex, "deposit image ID (bytes32)")
 	fs.StringVar(&withdrawImageIDHex, "withdraw-image-id", defaultWithdrawImageIDHex, "withdraw image ID (bytes32)")
+	fs.StringVar(&depositFinalOrchardRootHex, "deposit-final-orchard-root", "", "Juno final orchard root for deposit checkpoint (bytes32 hex)")
+	fs.StringVar(&withdrawFinalOrchardRootHex, "withdraw-final-orchard-root", "", "Juno final orchard root for withdraw checkpoint (bytes32 hex; defaults to --deposit-final-orchard-root)")
 	fs.StringVar(&cfg.ProofInputsOut, "proof-inputs-output", "", "optional path to write proof input artifact bundle")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
@@ -454,6 +509,15 @@ func parseArgs(args []string) (config, error) {
 	fs.Uint64Var(&cfg.Boundless.RampUpPeriodSeconds, "boundless-ramp-up-period-seconds", 170, "auction ramp-up period in seconds")
 	fs.Uint64Var(&cfg.Boundless.LockTimeoutSeconds, "boundless-lock-timeout-seconds", 625, "auction lock timeout in seconds")
 	fs.Uint64Var(&cfg.Boundless.TimeoutSeconds, "boundless-timeout-seconds", 1500, "auction timeout in seconds")
+	fs.StringVar(&cfg.Boundless.ProofSubmissionMode, "boundless-proof-submission-mode", boundlessProofSubmissionDirectCLI, "proof submission mode: direct-cli|queue")
+	fs.StringVar(&boundlessProofQueueBrokers, "boundless-proof-queue-brokers", "", "comma-separated Kafka brokers used by centralized proof-requestor")
+	fs.StringVar(&cfg.Boundless.ProofRequestTopic, "boundless-proof-request-topic", defaultProofRequestTopic, "Kafka proof request topic")
+	fs.StringVar(&cfg.Boundless.ProofResultTopic, "boundless-proof-result-topic", defaultProofResultTopic, "Kafka proof fulfillment topic")
+	fs.StringVar(&cfg.Boundless.ProofFailureTopic, "boundless-proof-failure-topic", defaultProofFailureTopic, "Kafka proof failure topic")
+	fs.StringVar(&cfg.Boundless.ProofConsumerGroup, "boundless-proof-consumer-group", "", "Kafka consumer group used by bridge-e2e for proof results/failures")
+	fs.IntVar(&cfg.Boundless.ProofQueueMaxBytes, "boundless-proof-queue-max-bytes", defaultProofQueueMaxBytes, "max Kafka message size for proof queue consumer")
+	fs.DurationVar(&cfg.Boundless.ProofAckTimeout, "boundless-proof-ack-timeout", defaultProofAckTimeout, "proof queue ack timeout")
+	fs.DurationVar(&cfg.Boundless.ProofDeadline, "boundless-proof-deadline", defaultProofDeadline, "default deadline passed to centralized proof-requestor")
 
 	if err := fs.Parse(args); err != nil {
 		return cfg, err
@@ -539,6 +603,11 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	cfg.Boundless.ProofSubmissionMode, err = parseBoundlessProofSubmissionMode(cfg.Boundless.ProofSubmissionMode)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.ProofQueueBrokers = queue.SplitCommaList(boundlessProofQueueBrokers)
 	if !common.IsHexAddress(boundlessMarketAddressHex) {
 		return cfg, errors.New("--boundless-market-address must be a valid hex address")
 	}
@@ -606,6 +675,29 @@ func parseArgs(args []string) (config, error) {
 	if cfg.Boundless.LockTimeoutSeconds > cfg.Boundless.TimeoutSeconds {
 		return cfg, errors.New("--boundless-lock-timeout-seconds must be <= --boundless-timeout-seconds")
 	}
+	if cfg.Boundless.ProofQueueMaxBytes <= 0 {
+		return cfg, errors.New("--boundless-proof-queue-max-bytes must be > 0")
+	}
+	if cfg.Boundless.ProofAckTimeout <= 0 {
+		return cfg, errors.New("--boundless-proof-ack-timeout must be > 0")
+	}
+	if cfg.Boundless.ProofDeadline <= 0 {
+		return cfg, errors.New("--boundless-proof-deadline must be > 0")
+	}
+	if cfg.Boundless.ProofSubmissionMode == boundlessProofSubmissionQueue {
+		if len(cfg.Boundless.ProofQueueBrokers) == 0 {
+			return cfg, errors.New("--boundless-proof-queue-brokers is required when --boundless-proof-submission-mode=queue")
+		}
+		if strings.TrimSpace(cfg.Boundless.ProofRequestTopic) == "" {
+			return cfg, errors.New("--boundless-proof-request-topic is required when --boundless-proof-submission-mode=queue")
+		}
+		if strings.TrimSpace(cfg.Boundless.ProofResultTopic) == "" {
+			return cfg, errors.New("--boundless-proof-result-topic is required when --boundless-proof-submission-mode=queue")
+		}
+		if strings.TrimSpace(cfg.Boundless.ProofFailureTopic) == "" {
+			return cfg, errors.New("--boundless-proof-failure-topic is required when --boundless-proof-submission-mode=queue")
+		}
+	}
 	if !cfg.VerifierSet {
 		return cfg, errors.New("--verifier-address is required")
 	}
@@ -618,7 +710,8 @@ func parseArgs(args []string) (config, error) {
 	if strings.TrimSpace(cfg.Boundless.RPCURL) == "" {
 		return cfg, errors.New("--boundless-rpc-url is required when --boundless-auto is set")
 	}
-	if strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
+	if cfg.Boundless.ProofSubmissionMode == boundlessProofSubmissionDirectCLI &&
+		strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
 		return cfg, errors.New("--boundless-requestor-key-file or --boundless-requestor-key-hex is required when --boundless-auto is set")
 	}
 	if strings.TrimSpace(cfg.Boundless.DepositProgramURL) == "" {
@@ -676,6 +769,21 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
+	if strings.TrimSpace(depositFinalOrchardRootHex) == "" {
+		return cfg, errors.New("--deposit-final-orchard-root is required")
+	}
+	cfg.DepositFinalOrchardRoot, err = parseHash32Flag("--deposit-final-orchard-root", depositFinalOrchardRootHex)
+	if err != nil {
+		return cfg, err
+	}
+	if strings.TrimSpace(withdrawFinalOrchardRootHex) == "" {
+		cfg.WithdrawFinalOrchardRoot = cfg.DepositFinalOrchardRoot
+	} else {
+		cfg.WithdrawFinalOrchardRoot, err = parseHash32Flag("--withdraw-final-orchard-root", withdrawFinalOrchardRootHex)
+		if err != nil {
+			return cfg, err
+		}
+	}
 
 	return cfg, nil
 }
@@ -687,6 +795,18 @@ func parseBoundlessInputMode(raw string) (string, error) {
 		return boundlessInputModeGuestWitnessV1, nil
 	default:
 		return "", errors.New("--boundless-input-mode must be guest-witness-v1")
+	}
+}
+
+func parseBoundlessProofSubmissionMode(raw string) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(raw))
+	switch mode {
+	case "", boundlessProofSubmissionDirectCLI:
+		return boundlessProofSubmissionDirectCLI, nil
+	case boundlessProofSubmissionQueue:
+		return boundlessProofSubmissionQueue, nil
+	default:
+		return "", errors.New("--boundless-proof-submission-mode must be one of: direct-cli, queue")
 	}
 }
 
@@ -744,6 +864,34 @@ func parseHash32Flag(flagName, raw string) (common.Hash, error) {
 		return common.Hash{}, fmt.Errorf("%s must be 32 bytes hex", flagName)
 	}
 	return common.BytesToHash(b), nil
+}
+
+type withdrawWitnessIdentity struct {
+	WithdrawalID common.Hash
+	RecipientUA  []byte
+}
+
+func deriveDepositIDFromWitnessItem(item []byte) (common.Hash, error) {
+	if len(item) != proverinput.DepositWitnessItemLen {
+		return common.Hash{}, fmt.Errorf("deposit witness item len mismatch: got=%d want=%d", len(item), proverinput.DepositWitnessItemLen)
+	}
+	leafIndex := binary.LittleEndian.Uint32(item[depositWitnessLeafIndexOffset : depositWitnessLeafIndexOffset+4])
+	var cm [32]byte
+	copy(cm[:], item[depositWitnessCMXOffset:depositWitnessCMXOffset+32])
+	depositID := idempotency.DepositIDV1(cm, uint64(leafIndex))
+	return common.Hash(depositID), nil
+}
+
+func parseWithdrawWitnessIdentity(item []byte) (withdrawWitnessIdentity, error) {
+	if len(item) != proverinput.WithdrawWitnessItemLen {
+		return withdrawWitnessIdentity{}, fmt.Errorf("withdraw witness item len mismatch: got=%d want=%d", len(item), proverinput.WithdrawWitnessItemLen)
+	}
+	withdrawalID := common.BytesToHash(item[withdrawWitnessIDOffset : withdrawWitnessIDOffset+withdrawWitnessIDLen])
+	recipientUA := append([]byte(nil), item[withdrawWitnessRecipientOffset:withdrawWitnessRecipientOffset+withdrawWitnessRecipientRawLen]...)
+	return withdrawWitnessIdentity{
+		WithdrawalID: withdrawalID,
+		RecipientUA:  recipientUA,
+	}, nil
 }
 
 func parseUint256Flag(flagName, raw string) (*big.Int, error) {
@@ -987,17 +1135,31 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge balance before: %w", err)
 	}
+	if len(cfg.Boundless.DepositWitnessItems) == 0 {
+		return nil, errors.New("missing deposit witness items")
+	}
+	if len(cfg.Boundless.WithdrawWitnessItems) == 0 {
+		return nil, errors.New("missing withdraw witness items")
+	}
+	depositID, err := deriveDepositIDFromWitnessItem(cfg.Boundless.DepositWitnessItems[0])
+	if err != nil {
+		return nil, fmt.Errorf("derive deposit id from witness: %w", err)
+	}
+	withdrawWitnessIdentity, err := parseWithdrawWitnessIdentity(cfg.Boundless.WithdrawWitnessItems[0])
+	if err != nil {
+		return nil, fmt.Errorf("parse withdraw witness identity: %w", err)
+	}
+	recipientUA := withdrawWitnessIdentity.RecipientUA
 
 	header, err := client.HeaderByNumber(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("latest header: %w", err)
 	}
 	cpTemplate := checkpoint.Checkpoint{
-		Height:           header.Number.Uint64(),
-		BlockHash:        header.Hash(),
-		FinalOrchardRoot: crypto.Keccak256Hash([]byte("juno-e2e"), header.Hash().Bytes()),
-		BaseChainID:      cfg.ChainID,
-		BridgeContract:   bridgeAddr,
+		Height:         header.Number.Uint64(),
+		BlockHash:      header.Hash(),
+		BaseChainID:    cfg.ChainID,
+		BridgeContract: bridgeAddr,
 	}
 
 	type checkpointABI struct {
@@ -1022,9 +1184,9 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
 
 	cpDeposit := cpTemplate
+	cpDeposit.FinalOrchardRoot = cfg.DepositFinalOrchardRoot
 	cpWithdraw := cpTemplate
-	depositID := crypto.Keccak256Hash([]byte("bridge-e2e-deposit-1"))
-	recipientUA := []byte{0x01, 0x02, 0x03}
+	cpWithdraw.FinalOrchardRoot = cfg.WithdrawFinalOrchardRoot
 
 	nonceBefore, err := callUint64(ctx, bridge, "withdrawNonce")
 	if err != nil {
@@ -1096,6 +1258,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		ctx,
 		cfg.Boundless,
 		"deposit",
+		depositID,
 		cfg.Boundless.DepositProgramURL,
 		depositImageID,
 		depositBoundlessInput,
@@ -1134,6 +1297,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 	if withdrawalID != predictedWithdrawalID {
 		return nil, fmt.Errorf("predicted withdrawal id mismatch: predicted=%s actual=%s", predictedWithdrawalID.Hex(), withdrawalID.Hex())
+	}
+	if withdrawalID != withdrawWitnessIdentity.WithdrawalID {
+		return nil, fmt.Errorf(
+			"withdraw witness withdrawal id mismatch: witness=%s actual=%s",
+			withdrawWitnessIdentity.WithdrawalID.Hex(),
+			withdrawalID.Hex(),
+		)
 	}
 
 	withdrawView, err := callWithdrawal(ctx, bridge, withdrawalID)
@@ -1256,6 +1426,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		ctx,
 		cfg.Boundless,
 		"withdraw",
+		withdrawalID,
 		cfg.Boundless.WithdrawProgramURL,
 		withdrawImageID,
 		withdrawBoundlessInput,
@@ -1422,6 +1593,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if finalizeWithdrawTx != (common.Hash{}) {
 		rep.Transactions.FinalizeWithdraw = finalizeWithdrawTx.Hex()
 	}
+	junoProofTxHash, junoProofSource := junoExecutionProofFromFinalizeWithdrawTxHash(finalizeWithdrawTx)
+	rep.Juno.TxHash = junoProofTxHash
+	rep.Juno.TxID = junoProofTxHash
+	rep.Juno.ProofOfExecution.Available = junoProofTxHash != ""
+	rep.Juno.ProofOfExecution.TxHash = junoProofTxHash
+	rep.Juno.ProofOfExecution.Source = junoProofSource
 
 	rep.Withdraw.PredictedID = predictedWithdrawalID.Hex()
 	rep.Withdraw.FeeBps = feeBpsAtReq
@@ -1436,6 +1613,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Proof.WithdrawSealBytes = len(cfg.WithdrawSeal)
 	rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
 	if cfg.Boundless.Auto {
+		rep.Proof.Boundless.SubmissionMode = cfg.Boundless.ProofSubmissionMode
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
 		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
 		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
@@ -1490,15 +1668,27 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	return &rep, nil
 }
 
+func junoExecutionProofFromFinalizeWithdrawTxHash(finalizeWithdrawTx common.Hash) (string, string) {
+	if finalizeWithdrawTx == (common.Hash{}) {
+		return "", ""
+	}
+	return finalizeWithdrawTx.Hex(), junoProofSourceFinalizeWithdrawTx
+}
+
 func requestBoundlessProof(
 	ctx context.Context,
 	cfg boundlessConfig,
 	pipeline string,
+	batchID common.Hash,
 	programURL string,
 	imageID common.Hash,
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
+	if cfg.ProofSubmissionMode == boundlessProofSubmissionQueue {
+		return requestBoundlessProofViaQueue(ctx, cfg, pipeline, batchID, imageID, privateInput, expectedJournal)
+	}
+
 	maxPriceWei := new(big.Int).Set(cfg.MaxPriceWei)
 	totalAttempts := cfg.MaxPriceBumpRetries + 1
 
@@ -1565,6 +1755,111 @@ func requestBoundlessProof(
 		)
 		maxPriceWei = nextMaxPriceWei
 	}
+}
+
+func requestBoundlessProofViaQueue(
+	ctx context.Context,
+	cfg boundlessConfig,
+	pipeline string,
+	batchID common.Hash,
+	imageID common.Hash,
+	privateInput []byte,
+	expectedJournal []byte,
+) ([]byte, string, error) {
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver:  queue.DriverKafka,
+		Brokers: cfg.ProofQueueBrokers,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("init proof queue producer for %s: %w", pipeline, err)
+	}
+	defer producer.Close()
+
+	// Ensure response topics exist before creating the consumer to avoid transient
+	// unknown-topic errors on fresh Kafka clusters.
+	probe := []byte(`{"version":"bridge-e2e.proof.queue.probe.v1"}`)
+	for _, topic := range []string{cfg.ProofResultTopic, cfg.ProofFailureTopic} {
+		if err := producer.Publish(ctx, topic, probe); err != nil {
+			return nil, "", fmt.Errorf("publish proof queue topic probe for %s topic=%s: %w", pipeline, topic, err)
+		}
+	}
+
+	group := strings.TrimSpace(cfg.ProofConsumerGroup)
+	if group == "" {
+		group = fmt.Sprintf("%s-%s-%d", defaultProofConsumerGroupPrefix, pipeline, time.Now().UTC().UnixNano())
+	}
+	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
+		Driver:        queue.DriverKafka,
+		Brokers:       cfg.ProofQueueBrokers,
+		Group:         group,
+		Topics:        []string{cfg.ProofResultTopic, cfg.ProofFailureTopic},
+		KafkaMaxBytes: cfg.ProofQueueMaxBytes,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("init proof queue consumer for %s: %w", pipeline, err)
+	}
+	defer consumer.Close()
+
+	client, err := proofclient.NewQueueClient(proofclient.QueueConfig{
+		RequestTopic:    cfg.ProofRequestTopic,
+		ResultTopic:     cfg.ProofResultTopic,
+		FailureTopic:    cfg.ProofFailureTopic,
+		Producer:        producer,
+		Consumer:        consumer,
+		AckTimeout:      cfg.ProofAckTimeout,
+		DefaultDeadline: cfg.ProofDeadline,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("init proof queue client for %s: %w", pipeline, err)
+	}
+
+	jobID := idempotency.ProofJobIDV1(pipeline, batchID, imageID, expectedJournal, privateInput)
+	logProgress(
+		"boundless %s mode=queue request_topic=%s result_topic=%s failure_topic=%s group=%s job_id=%s",
+		pipeline,
+		cfg.ProofRequestTopic,
+		cfg.ProofResultTopic,
+		cfg.ProofFailureTopic,
+		group,
+		jobID.Hex(),
+	)
+	result, err := client.RequestProof(ctx, proofclient.Request{
+		JobID:        jobID,
+		Pipeline:     pipeline,
+		ImageID:      imageID,
+		Journal:      append([]byte(nil), expectedJournal...),
+		PrivateInput: append([]byte(nil), privateInput...),
+		Deadline:     time.Now().UTC().Add(cfg.ProofDeadline),
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("boundless queue proof request failed for %s: %w", pipeline, err)
+	}
+	if len(result.Seal) == 0 {
+		return nil, "", fmt.Errorf("boundless queue proof returned empty seal for %s", pipeline)
+	}
+
+	return result.Seal, extractQueueProofRequestID(result.Metadata), nil
+}
+
+func extractQueueProofRequestID(metadata map[string]string) string {
+	if len(metadata) == 0 {
+		return ""
+	}
+
+	for _, key := range []string{"request_id", "requestId", "requestID"} {
+		value := strings.TrimSpace(metadata[key])
+		if value == "" {
+			continue
+		}
+		if strings.HasPrefix(strings.ToLower(value), "0x") {
+			return strings.ToLower(value)
+		}
+		if n, err := strconv.ParseUint(value, 10, 64); err == nil {
+			return fmt.Sprintf("0x%x", n)
+		}
+		return value
+	}
+	return ""
 }
 
 func requestBoundlessProofOnce(

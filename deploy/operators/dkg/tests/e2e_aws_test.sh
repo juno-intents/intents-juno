@@ -60,28 +60,24 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_not_contains "$script_text" "boundless-market-0.14.1" "legacy boundless crate pin removed"
 }
 
-test_remote_shared_prepare_script_waits_for_services() {
+test_runner_shared_probe_script_supports_managed_endpoints() {
   # shellcheck source=../e2e/run-testnet-e2e-aws.sh
   source "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
 
   local script_text
   script_text="$(
-    build_remote_shared_prepare_script \
-      "10.0.0.10" \
-      "postgres" \
-      "pw" \
-      "intents_e2e" \
+    build_runner_shared_probe_script \
+      "juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com" \
       "5432" \
-      "9092"
+      "b-1.juno-live-e2e.kafka.us-east-1.amazonaws.com:9092,b-2.juno-live-e2e.kafka.us-east-1.amazonaws.com:9092"
   )"
 
-  assert_contains "$script_text" "cloud-init status --wait" "cloud-init wait"
-  assert_contains "$script_text" "run_apt_with_retry install -y ca-certificates curl docker.io netcat-openbsd postgresql-client" "shared host dependencies"
-  assert_contains "$script_text" "docker pull \"\$image\"" "docker pull retry"
-  assert_contains "$script_text" "intents-shared-postgres" "postgres container configured"
-  assert_contains "$script_text" "intents-shared-kafka" "kafka container configured"
-  assert_contains "$script_text" "pg_isready -h 127.0.0.1 -p 5432 -U 'postgres' -d 'intents_e2e'" "postgres readiness check"
-  assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/127.0.0.1/9092'" "kafka readiness check"
+  assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com/5432'" "aurora readiness check"
+  assert_contains "$script_text" "IFS=',' read -r -a broker_list <<<" "broker split"
+  assert_contains "$script_text" "for broker in \"\${broker_list[@]}\"; do" "broker iteration"
+  assert_contains "$script_text" "timeout 2 bash -lc \"</dev/tcp/\${broker_host}/\${broker_port}\"" "broker tcp checks"
+  assert_not_contains "$script_text" "intents-shared-postgres" "no docker postgres container bootstrap"
+  assert_not_contains "$script_text" "intents-shared-kafka" "no docker kafka container bootstrap"
 }
 
 test_live_e2e_terraform_supports_operator_instances() {
@@ -98,12 +94,19 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$variables_tf" "variable \"operator_root_volume_size_gb\"" "operator root volume variable"
   assert_contains "$variables_tf" "variable \"operator_base_port\"" "operator base port variable"
   assert_contains "$variables_tf" "variable \"dkg_s3_key_prefix\"" "dkg s3 prefix variable"
+  assert_contains "$variables_tf" "variable \"provision_shared_services\"" "shared services toggle variable"
 
   assert_contains "$main_tf" "resource \"aws_security_group\" \"operator\"" "operator security group resource"
   assert_contains "$main_tf" "resource \"aws_instance\" \"operator\"" "operator instance resource"
   assert_contains "$main_tf" "resource \"aws_kms_key\" \"dkg\"" "dkg kms key resource"
   assert_contains "$main_tf" "resource \"aws_s3_bucket\" \"dkg_keypackages\"" "dkg s3 bucket resource"
   assert_contains "$main_tf" "resource \"aws_iam_instance_profile\" \"live_e2e\"" "managed instance profile resource"
+  assert_contains "$main_tf" "resource \"aws_rds_cluster\" \"shared\"" "aurora shared cluster resource"
+  assert_contains "$main_tf" "resource \"aws_msk_cluster\" \"shared\"" "msk shared cluster resource"
+  assert_contains "$main_tf" "resource \"aws_ecs_cluster\" \"shared\"" "ecs shared cluster resource"
+  assert_contains "$main_tf" "resource \"aws_ecs_service\" \"proof_requestor\"" "ecs proof requestor service resource"
+  assert_contains "$main_tf" "resource \"aws_autoscaling_group\" \"ipfs\"" "ipfs asg resource"
+  assert_contains "$main_tf" "resource \"aws_lb\" \"ipfs\"" "ipfs nlb resource"
   assert_contains "$main_tf" "count = var.operator_instance_count" "operator instance count wiring"
   assert_contains "$main_tf" "from_port       = var.operator_base_port" "operator grpc ingress start"
   assert_contains "$main_tf" "to_port         = var.operator_base_port + var.operator_instance_count - 1" "operator grpc ingress range"
@@ -115,6 +118,12 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$outputs_tf" "output \"dkg_kms_key_arn\"" "dkg kms output"
   assert_contains "$outputs_tf" "output \"dkg_s3_bucket\"" "dkg s3 bucket output"
   assert_contains "$outputs_tf" "output \"dkg_s3_key_prefix\"" "dkg s3 prefix output"
+  assert_contains "$outputs_tf" "output \"shared_postgres_endpoint\"" "aurora endpoint output"
+  assert_contains "$outputs_tf" "output \"shared_kafka_bootstrap_brokers\"" "msk brokers output"
+  assert_contains "$outputs_tf" "output \"shared_ecs_cluster_arn\"" "ecs cluster output"
+  assert_contains "$outputs_tf" "output \"shared_ipfs_api_url\"" "ipfs api output"
+  assert_not_contains "$outputs_tf" "output \"shared_public_ip\"" "legacy shared host output removed"
+  assert_not_contains "$outputs_tf" "output \"shared_private_ip\"" "legacy shared host private ip output removed"
 }
 
 test_synced_junocashd_ami_runbook_exists() {
@@ -165,6 +174,7 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "shared_ami_id" "terraform shared ami wiring"
   assert_contains "$wrapper_script_text" "dkg_s3_key_prefix" "terraform dkg s3 prefix wiring"
   assert_contains "$wrapper_script_text" "operator_root_volume_size_gb" "terraform operator root volume wiring"
+  assert_contains "$wrapper_script_text" "shared_postgres_password" "terraform shared postgres password wiring"
   assert_contains "$wrapper_script_text" "dkg_kms_key_arn" "terraform dkg kms output usage"
   assert_contains "$wrapper_script_text" "dkg_s3_bucket" "terraform dkg bucket output usage"
   assert_contains "$wrapper_script_text" "operator-export-kms.sh export" "operator kms export invocation"
@@ -185,6 +195,7 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" "log \"collecting artifacts\"" "artifact collection after remote run"
   assert_contains "$wrapper_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when available"
   assert_contains "$wrapper_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
+  assert_contains "$wrapper_script_text" ".bridge.report.juno.proof_of_execution.tx_hash?" "wrapper checks canonical juno proof path"
   assert_contains "$wrapper_script_text" "keep-infra enabled after failure; leaving resources up" "keep-infra failure retention log"
   assert_contains "$wrapper_script_text" "cleanup_enabled=\"false\"" "keep-infra disables cleanup on failure"
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
@@ -198,12 +209,14 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "shared_postgres_password=\"\$(openssl rand -hex 16)\"" "shared postgres password generation"
   assert_contains "$wrapper_script_text" "provision_shared_services" "terraform shared services flag"
   assert_contains "$wrapper_script_text" "shared_postgres_dsn=\"postgres://" "shared postgres dsn assembly"
-  assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\${shared_private_ip}:\${shared_kafka_port}\"" "shared kafka brokers assembly"
-  assert_contains "$wrapper_script_text" "-raw shared_public_ip" "shared public ip output retrieval"
-  assert_contains "$wrapper_script_text" "remote_prepare_shared_host" "shared host preparation hook"
-  assert_contains "$wrapper_script_text" "preparing shared services host (attempt " "shared host preparation retry logs"
-  assert_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "shared host fallback on nonzero ssh exit"
-  assert_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "runner connectivity fallback on nonzero ssh exit"
+  assert_contains "$wrapper_script_text" "sslmode=require" "shared postgres uses tls mode for aurora"
+  assert_contains "$wrapper_script_text" "shared_kafka_brokers=\"\$shared_kafka_bootstrap_brokers\"" "shared kafka brokers assembly"
+  assert_contains "$wrapper_script_text" "-raw shared_postgres_endpoint" "shared postgres endpoint output retrieval"
+  assert_contains "$wrapper_script_text" "-raw shared_kafka_bootstrap_brokers" "shared kafka bootstrap output retrieval"
+  assert_not_contains "$wrapper_script_text" "-raw shared_public_ip" "no shared host public ip output retrieval"
+  assert_not_contains "$wrapper_script_text" "remote_prepare_shared_host" "no shared host preparation hook"
+  assert_not_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "no shared host bootstrap fallback"
+  assert_not_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "no ssh fallback for managed shared stack"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
   assert_contains "$wrapper_script_text" "shared service remote args assembled" "shared args assembly logging"
   assert_contains "$wrapper_script_text" "assembling remote e2e arguments" "remote args assembly logging"
@@ -241,7 +254,12 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "\"--boundless-set-verifier-address\" \"\$boundless_set_verifier_address\"" "boundless set verifier bridge forwarding"
   assert_contains "$e2e_script_text" "log \"juno_tx_hash=\$juno_tx_hash\"" "juno tx hash log when present"
   assert_contains "$e2e_script_text" "log \"juno_tx_hash=unavailable\"" "juno tx hash unavailable log"
+  assert_contains "$e2e_script_text" ".juno.proof_of_execution.tx_hash?" "bridge summary checks canonical juno proof path"
+  assert_contains "$e2e_script_text" ".transactions.finalize_withdraw?" "bridge summary keeps finalize withdraw fallback"
+  assert_contains "$e2e_script_text" "bridge summary missing juno proof-of-execution tx hash" "bridge summary fails when proof hash missing"
   assert_contains "$e2e_script_text" "--arg juno_tx_hash \"\$juno_tx_hash\"" "summary receives juno tx hash"
+  assert_contains "$e2e_script_text" "--arg juno_tx_hash_source \"\$juno_tx_hash_source\"" "summary receives juno tx hash source"
+  assert_contains "$e2e_script_text" "tx_hash_source: (if \$juno_tx_hash_source == \"\" then null else \$juno_tx_hash_source end)" "summary stores juno tx hash source"
   assert_contains "$e2e_script_text" "tx_hash: (if \$juno_tx_hash == \"\" then null else \$juno_tx_hash end)" "summary stores juno tx hash"
   assert_contains "$e2e_script_text" "shared_infra" "shared infra summary section"
 }
@@ -325,7 +343,7 @@ test_aws_workflow_dispatch_input_count_within_limit() {
 
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
-  test_remote_shared_prepare_script_waits_for_services
+  test_runner_shared_probe_script_supports_managed_endpoints
   test_live_e2e_terraform_supports_operator_instances
   test_synced_junocashd_ami_runbook_exists
   test_aws_wrapper_uses_ssh_keepalive_options

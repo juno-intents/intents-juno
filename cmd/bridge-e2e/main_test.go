@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
 
@@ -70,6 +71,7 @@ func TestParseArgs_Valid(t *testing.T) {
 		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -261,6 +263,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
 		"--boundless-min-price-wei", "100000000000000",
 		"--boundless-max-price-wei", "250000000000000",
 		"--boundless-lock-stake-wei", "20000000000000000000",
@@ -298,6 +301,150 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	}
 	if cfg.Boundless.WithdrawProgramURL != "https://example.invalid/withdraw.elf" {
 		t.Fatalf("unexpected withdraw program url: %q", cfg.Boundless.WithdrawProgramURL)
+	}
+}
+
+func TestParseArgs_BoundlessAutoQueueSubmissionModeValidWithoutRequestorKey(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-proof-submission-mode", "queue",
+		"--boundless-proof-queue-brokers", "127.0.0.1:9092",
+		"--boundless-proof-request-topic", "proof.requests.v1",
+		"--boundless-proof-result-topic", "proof.fulfillments.v1",
+		"--boundless-proof-failure-topic", "proof.failures.v1",
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.Boundless.ProofSubmissionMode != "queue" {
+		t.Fatalf("proof submission mode: got=%q want=queue", cfg.Boundless.ProofSubmissionMode)
+	}
+	if got := len(cfg.Boundless.ProofQueueBrokers); got != 1 {
+		t.Fatalf("proof queue brokers: got=%d want=1", got)
+	}
+	if cfg.Boundless.ProofQueueBrokers[0] != "127.0.0.1:9092" {
+		t.Fatalf("proof queue broker: got=%q", cfg.Boundless.ProofQueueBrokers[0])
+	}
+	if cfg.Boundless.RequestorKeyHex != "" {
+		t.Fatalf("requestor key should be optional in queue mode")
+	}
+}
+
+func TestParseArgs_BoundlessAutoQueueSubmissionModeRequiresQueueBrokers(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-proof-submission-mode", "queue",
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-proof-queue-brokers") {
+		t.Fatalf("expected missing proof queue brokers error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoRejectsUnknownProofSubmissionMode(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-proof-submission-mode", "bogus",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--boundless-proof-submission-mode") {
+		t.Fatalf("expected proof submission mode error, got: %v", err)
 	}
 }
 
@@ -371,6 +518,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeValid(t *testing.T) {
 		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -456,6 +604,52 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresInputS3Bucket(t *testing
 	}
 	if !strings.Contains(err.Error(), "--boundless-input-s3-bucket") {
 		t.Fatalf("expected missing s3 bucket error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresDepositFinalOrchardRoot(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--deposit-final-orchard-root") {
+		t.Fatalf("expected missing deposit final orchard root error, got: %v", err)
 	}
 }
 
@@ -735,6 +929,53 @@ func TestParseBoundlessWaitOutput_MissingSeal(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "seal") {
 		t.Fatalf("expected missing seal error, got: %v", err)
+	}
+}
+
+func TestExtractQueueProofRequestID(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name     string
+		metadata map[string]string
+		want     string
+	}{
+		{
+			name:     "missing metadata",
+			metadata: nil,
+			want:     "",
+		},
+		{
+			name: "hex request id",
+			metadata: map[string]string{
+				"request_id": "0xABC123",
+			},
+			want: "0xabc123",
+		},
+		{
+			name: "decimal request id",
+			metadata: map[string]string{
+				"requestID": "42",
+			},
+			want: "0x2a",
+		},
+		{
+			name: "opaque request id",
+			metadata: map[string]string{
+				"requestId": "abc-42",
+			},
+			want: "abc-42",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := extractQueueProofRequestID(tc.metadata); got != tc.want {
+				t.Fatalf("extractQueueProofRequestID() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1055,6 +1296,79 @@ func TestComputePredictedWithdrawalID_Deterministic(t *testing.T) {
 	}
 	if got1 == got3 {
 		t.Fatalf("expected nonce to affect withdrawal id")
+	}
+}
+
+func TestDeriveDepositIDFromWitnessItem(t *testing.T) {
+	t.Parallel()
+
+	item := make([]byte, proverinput.DepositWitnessItemLen)
+	leafIndex := uint32(7)
+	item[0] = byte(leafIndex)
+	var cm [32]byte
+	for i := range cm {
+		cm[i] = byte(0xa0 + i)
+	}
+	copy(item[depositWitnessCMXOffset:depositWitnessCMXOffset+32], cm[:])
+
+	got, err := deriveDepositIDFromWitnessItem(item)
+	if err != nil {
+		t.Fatalf("deriveDepositIDFromWitnessItem: %v", err)
+	}
+	want := idempotency.DepositIDV1(cm, uint64(leafIndex))
+	if got != common.Hash(want) {
+		t.Fatalf("deposit id mismatch: got=%s want=%s", got.Hex(), common.Hash(want).Hex())
+	}
+}
+
+func TestDeriveDepositIDFromWitnessItem_RejectsInvalidLength(t *testing.T) {
+	t.Parallel()
+
+	_, err := deriveDepositIDFromWitnessItem([]byte{0x01})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "deposit witness item len") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestParseWithdrawWitnessIdentity(t *testing.T) {
+	t.Parallel()
+
+	item := make([]byte, proverinput.WithdrawWitnessItemLen)
+	withdrawalID := common.HexToHash("0x7a")
+	copy(item[:32], withdrawalID[:])
+	for i := 0; i < withdrawWitnessRecipientRawLen; i++ {
+		item[withdrawWitnessRecipientOffset+i] = byte(i + 1)
+	}
+
+	got, err := parseWithdrawWitnessIdentity(item)
+	if err != nil {
+		t.Fatalf("parseWithdrawWitnessIdentity: %v", err)
+	}
+	if got.WithdrawalID != withdrawalID {
+		t.Fatalf("withdrawal id mismatch: got=%s want=%s", got.WithdrawalID.Hex(), withdrawalID.Hex())
+	}
+	if len(got.RecipientUA) != withdrawWitnessRecipientRawLen {
+		t.Fatalf("recipient ua len mismatch: got=%d want=%d", len(got.RecipientUA), withdrawWitnessRecipientRawLen)
+	}
+	for i := range got.RecipientUA {
+		if got.RecipientUA[i] != byte(i+1) {
+			t.Fatalf("recipient ua byte[%d] mismatch: got=%d want=%d", i, got.RecipientUA[i], byte(i+1))
+		}
+	}
+}
+
+func TestParseWithdrawWitnessIdentity_RejectsInvalidLength(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseWithdrawWitnessIdentity([]byte{0x01})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "withdraw witness item len") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1521,6 +1835,31 @@ func TestUpsertEnvVar(t *testing.T) {
 	}
 	if got2[1] != "PATH=/custom/bin" {
 		t.Fatalf("expected PATH append at end, got %q", got2[1])
+	}
+}
+
+func TestJunoExecutionProofFromFinalizeWithdrawTxHash(t *testing.T) {
+	t.Parallel()
+
+	txHash := common.HexToHash("0x1234")
+	gotHash, gotSource := junoExecutionProofFromFinalizeWithdrawTxHash(txHash)
+	if gotHash != txHash.Hex() {
+		t.Fatalf("proof tx hash: got %q want %q", gotHash, txHash.Hex())
+	}
+	if gotSource != "transactions.finalize_withdraw" {
+		t.Fatalf("proof source: got %q want %q", gotSource, "transactions.finalize_withdraw")
+	}
+}
+
+func TestJunoExecutionProofFromFinalizeWithdrawTxHash_EmptyHash(t *testing.T) {
+	t.Parallel()
+
+	gotHash, gotSource := junoExecutionProofFromFinalizeWithdrawTxHash(common.Hash{})
+	if gotHash != "" {
+		t.Fatalf("proof tx hash: got %q want empty", gotHash)
+	}
+	if gotSource != "" {
+		t.Fatalf("proof source: got %q want empty", gotSource)
 	}
 }
 

@@ -42,7 +42,7 @@ run options:
   --operator-instance-type <type>      operator instance type (default: c7i.large)
   --operator-ami-id <ami-id>           optional custom AMI for operator hosts
   --operator-root-volume-gb <n>        operator root volume size (default: 100)
-  --shared-ami-id <ami-id>             optional custom AMI for shared services host
+  --shared-ami-id <ami-id>             optional custom AMI for shared IPFS pinning ASG instances
   --operator-base-port <port>          first operator grpc port (default: 18443)
   --dkg-s3-key-prefix <prefix>         S3 prefix for KMS-exported key packages (default: dkg/keypackages)
   --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
@@ -53,11 +53,11 @@ run options:
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
   --boundless-requestor-key-file <p>   optional file with Boundless requestor private key hex
-  --without-shared-services            skip provisioning shared Postgres/Kafka host
-  --shared-postgres-user <user>        shared Postgres username (default: postgres)
-  --shared-postgres-db <name>          shared Postgres DB name (default: intents_e2e)
-  --shared-postgres-port <port>        shared Postgres TCP port (default: 5432)
-  --shared-kafka-port <port>           shared Kafka TCP port (default: 9092)
+  --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
+  --shared-postgres-user <user>        shared Aurora Postgres username (default: postgres)
+  --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
+  --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
+  --shared-kafka-port <port>           shared MSK plaintext Kafka TCP port (default: 9092)
   --keep-infra                         do not destroy infra at the end
 
 cleanup options:
@@ -256,73 +256,13 @@ remote_prepare_operator_host() {
   ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
 
-remote_prepare_shared_host() {
-  local ssh_private_key="$1"
-  local ssh_user="$2"
-  local ssh_host="$3"
-  local shared_private_ip="$4"
-  local shared_postgres_user="$5"
-  local shared_postgres_password="$6"
-  local shared_postgres_db="$7"
-  local shared_postgres_port="$8"
-  local shared_kafka_port="$9"
-
-  local -a ssh_opts=(
-    -i "$ssh_private_key"
-    -o StrictHostKeyChecking=no
-    -o UserKnownHostsFile=/dev/null
-    -o ServerAliveInterval=30
-    -o ServerAliveCountMax=6
-    -o TCPKeepAlive=yes
-  )
-
-  local remote_script
-  remote_script="$(
-    build_remote_shared_prepare_script \
-      "$shared_private_ip" \
-      "$shared_postgres_user" \
-      "$shared_postgres_password" \
-      "$shared_postgres_db" \
-      "$shared_postgres_port" \
-      "$shared_kafka_port"
-  )"
-
-  local attempt
-  local prep_log
-  local ssh_status
-  for attempt in $(seq 1 3); do
-    log "preparing shared services host (attempt $attempt/3)"
-    prep_log="$(mktemp)"
-    set +e
-    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")" 2>&1 | tee "$prep_log"
-    ssh_status="${PIPESTATUS[0]}"
-    set -e
-
-    if (( ssh_status == 0 )); then
-      rm -f "$prep_log"
-      return 0
-    fi
-    if grep -q "shared services ready on host" "$prep_log"; then
-      log "shared services reported ready despite ssh exit status=$ssh_status; continuing"
-      rm -f "$prep_log"
-      return 0
-    fi
-    rm -f "$prep_log"
-    if [[ $attempt -lt 3 ]]; then
-      sleep 5
-    fi
-  done
-
-  return 1
-}
-
 wait_for_shared_connectivity_from_runner() {
   local ssh_private_key="$1"
   local ssh_user="$2"
   local ssh_host="$3"
-  local shared_private_ip="$4"
+  local shared_postgres_host="$4"
   local shared_postgres_port="$5"
-  local shared_kafka_port="$6"
+  local shared_kafka_brokers="$6"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -336,32 +276,17 @@ wait_for_shared_connectivity_from_runner() {
   local remote_script
   remote_script="$(
     build_runner_shared_probe_script \
-      "$shared_private_ip" \
+      "$shared_postgres_host" \
       "$shared_postgres_port" \
-      "$shared_kafka_port"
+      "$shared_kafka_brokers"
   )"
 
   local attempt
-  local probe_log
-  local ssh_status
   for attempt in $(seq 1 3); do
     log "checking shared services connectivity from runner (attempt $attempt/3)"
-    probe_log="$(mktemp)"
-    set +e
-    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")" 2>&1 | tee "$probe_log"
-    ssh_status="${PIPESTATUS[0]}"
-    set -e
-
-    if (( ssh_status == 0 )); then
-      rm -f "$probe_log"
+    if ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"; then
       return 0
     fi
-    if grep -q "shared services reachable from runner" "$probe_log"; then
-      log "shared connectivity reported ready despite ssh exit status=$ssh_status; continuing"
-      rm -f "$probe_log"
-      return 0
-    fi
-    rm -f "$probe_log"
     if [[ $attempt -lt 3 ]]; then
       sleep 5
     fi
@@ -564,120 +489,51 @@ git submodule update --init --recursive
 EOF
 }
 
-build_remote_shared_prepare_script() {
-  local shared_private_ip="$1"
-  local shared_postgres_user="$2"
-  local shared_postgres_password="$3"
-  local shared_postgres_db="$4"
-  local shared_postgres_port="$5"
-  local shared_kafka_port="$6"
+build_runner_shared_probe_script() {
+  local shared_postgres_host="$1"
+  local shared_postgres_port="$2"
+  local shared_kafka_brokers="$3"
 
   cat <<EOF
 set -euo pipefail
-export DEBIAN_FRONTEND=noninteractive
-
-if command -v cloud-init >/dev/null 2>&1; then
-  sudo cloud-init status --wait || true
+IFS=',' read -r -a broker_list <<<'${shared_kafka_brokers}'
+if [[ \${#broker_list[@]} -eq 0 ]]; then
+  echo "no kafka brokers provided by terraform output" >&2
+  exit 1
 fi
 
-run_apt_with_retry() {
-  local attempt
-  for attempt in \$(seq 1 30); do
-    if sudo apt-get "\$@"; then
-      return 0
+for attempt in \$(seq 1 120); do
+  postgres_ready="false"
+  kafka_ready="true"
+  if timeout 2 bash -lc '</dev/tcp/${shared_postgres_host}/${shared_postgres_port}' >/dev/null 2>&1; then
+    postgres_ready="true"
+  fi
+
+  for broker in "\${broker_list[@]}"; do
+    broker="\${broker//[[:space:]]/}"
+    [[ -n "\$broker" ]] || continue
+    broker_host="\${broker%%:*}"
+    broker_port="\${broker##*:}"
+    if [[ -z "\$broker_host" || -z "\$broker_port" || "\$broker_host" == "\$broker_port" ]]; then
+      kafka_ready="false"
+      break
     fi
-    if [[ \$attempt -lt 30 ]]; then
-      sleep 5
+    if ! timeout 2 bash -lc "</dev/tcp/\${broker_host}/\${broker_port}" >/dev/null 2>&1; then
+      kafka_ready="false"
+      break
     fi
   done
-  return 1
-}
 
-docker_pull_with_retry() {
-  local image="\$1"
-  local attempt
-  for attempt in \$(seq 1 12); do
-    if sudo docker pull "\$image"; then
-      return 0
-    fi
-    if [[ \$attempt -lt 12 ]]; then
-      sleep 5
-    fi
-  done
-  return 1
-}
-
-run_apt_with_retry update -y
-run_apt_with_retry install -y ca-certificates curl docker.io netcat-openbsd postgresql-client
-sudo systemctl enable --now docker
-
-docker_pull_with_retry postgres:16-alpine
-docker_pull_with_retry docker.redpanda.com/redpandadata/redpanda:v24.3.7
-
-sudo docker rm -f intents-shared-postgres intents-shared-kafka >/dev/null 2>&1 || true
-
-sudo docker run -d \
-  --name intents-shared-postgres \
-  --restart unless-stopped \
-  -e POSTGRES_USER='${shared_postgres_user}' \
-  -e POSTGRES_PASSWORD='${shared_postgres_password}' \
-  -e POSTGRES_DB='${shared_postgres_db}' \
-  -p ${shared_postgres_port}:5432 \
-  postgres:16-alpine
-
-sudo docker run -d \
-  --name intents-shared-kafka \
-  --restart unless-stopped \
-  -p ${shared_kafka_port}:9092 \
-  docker.redpanda.com/redpandadata/redpanda:v24.3.7 \
-  redpanda start \
-    --overprovisioned \
-    --smp 1 \
-    --memory 1G \
-    --reserve-memory 0M \
-    --node-id 0 \
-    --check=false \
-    --kafka-addr PLAINTEXT://0.0.0.0:9092 \
-    --advertise-kafka-addr PLAINTEXT://${shared_private_ip}:${shared_kafka_port}
-
-for attempt in \$(seq 1 90); do
-  if sudo docker exec intents-shared-postgres pg_isready -h 127.0.0.1 -p 5432 -U '${shared_postgres_user}' -d '${shared_postgres_db}' >/dev/null 2>&1 \
-    && timeout 2 bash -lc '</dev/tcp/127.0.0.1/${shared_kafka_port}' >/dev/null 2>&1; then
-    echo "shared services ready on host"
-    exit 0
-  fi
-  if [[ \$attempt -lt 90 ]]; then
-    sleep 2
-  fi
-done
-
-echo "shared service readiness failed; docker status follows:" >&2
-sudo docker ps -a >&2 || true
-sudo docker logs --tail 80 intents-shared-postgres >&2 || true
-sudo docker logs --tail 80 intents-shared-kafka >&2 || true
-exit 1
-EOF
-}
-
-build_runner_shared_probe_script() {
-  local shared_private_ip="$1"
-  local shared_postgres_port="$2"
-  local shared_kafka_port="$3"
-
-  cat <<EOF
-set -euo pipefail
-for attempt in \$(seq 1 90); do
-  if timeout 2 bash -lc '</dev/tcp/${shared_private_ip}/${shared_postgres_port}' >/dev/null 2>&1 \
-    && timeout 2 bash -lc '</dev/tcp/${shared_private_ip}/${shared_kafka_port}' >/dev/null 2>&1; then
+  if [[ "\$postgres_ready" == "true" && "\$kafka_ready" == "true" ]]; then
     echo "shared services reachable from runner"
     exit 0
   fi
-  if [[ \$attempt -lt 90 ]]; then
+  if [[ \$attempt -lt 120 ]]; then
     sleep 2
   fi
 done
 
-echo "timed out waiting for shared services connectivity from runner to ${shared_private_ip}" >&2
+echo "timed out waiting for shared services connectivity from runner (postgres=${shared_postgres_host}:${shared_postgres_port}, kafka=${shared_kafka_brokers})" >&2
 exit 1
 EOF
 }
@@ -1761,12 +1617,14 @@ EOF
     juno_tx_hash="$(
       jq -r '[
         .juno.tx_hash?,
+        .bridge.report.juno.proof_of_execution.tx_hash?,
         .bridge.report.juno.tx_hash?,
         .bridge.report.juno.txid?,
         .bridge.report.withdraw.juno_tx_hash?,
         .bridge.report.withdraw.juno_txid?,
         .bridge.report.transactions.juno_withdraw?,
-        .bridge.report.transactions.juno_broadcast?
+        .bridge.report.transactions.juno_broadcast?,
+        .bridge.report.transactions.finalize_withdraw?
       ] | map(select(type == "string" and length > 0)) | .[0] // ""' "$summary_path" 2>/dev/null || true
     )"
     if [[ -n "$juno_tx_hash" ]]; then
