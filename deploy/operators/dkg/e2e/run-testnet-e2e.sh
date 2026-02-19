@@ -97,6 +97,13 @@ Options:
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
   --shared-timeout <duration>       shared infra validation timeout (default: 90s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
+  --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: runner)
+  --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
+  --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
+  --relayer-runtime-operator-ssh-key-file <path> SSH key file for distributed relayer runtime operator hosts
+  --aws-dr-region <region>          optional AWS DR region passthrough (recorded in summary metadata only)
+  --refund-after-expiry-window-seconds <n> refund window seconds used only for refund-after-expiry chaos scenario
+                                   (default: 120)
   --output <path>                  summary json output (default: <workdir>/reports/testnet-e2e-summary.json)
   --force                          remove existing workdir before starting
 
@@ -795,6 +802,191 @@ wait_for_condition() {
   return 0
 }
 
+parse_csv_list() {
+  local csv="$1"
+  local -a raw_entries=()
+  local entry
+
+  IFS=',' read -r -a raw_entries <<<"$csv"
+  for entry in "${raw_entries[@]}"; do
+    entry="$(trim "$entry")"
+    [[ -n "$entry" ]] || continue
+    printf '%s\n' "$entry"
+  done
+}
+
+resolve_runner_relayer_host() {
+  local candidate=""
+  candidate="$(
+    hostname -I 2>/dev/null \
+      | awk '
+          {
+            for (i = 1; i <= NF; i++) {
+              if ($i !~ /^127\./) {
+                print $i
+                exit
+              }
+            }
+          }
+        '
+  )"
+  if [[ -z "$candidate" ]]; then
+    candidate="$(hostname -i 2>/dev/null || true)"
+  fi
+  if [[ -z "$candidate" ]] && command -v ip >/dev/null 2>&1; then
+    candidate="$(
+      ip route get 1.1.1.1 2>/dev/null \
+        | awk '
+            /src/ {
+              for (i = 1; i <= NF; i++) {
+                if ($i == "src" && (i + 1) <= NF) {
+                  print $(i + 1)
+                  exit
+                }
+              }
+            }
+          '
+    )"
+  fi
+  candidate="$(trim "$candidate")"
+  [[ -n "$candidate" ]] || return 1
+  printf '%s' "$candidate"
+}
+
+start_remote_relayer_service() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local log_path="$4"
+  shift 4
+
+  (
+    ssh \
+      -i "$ssh_key_file" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$ssh_user@$host" \
+      "$@"
+  ) >"$log_path" 2>&1 &
+  printf '%s' "$!"
+}
+
+stop_remote_relayer_service() {
+  local pid="${1:-}"
+  [[ -n "$pid" ]] || return 0
+  kill "$pid" >/dev/null 2>&1 || true
+  wait "$pid" >/dev/null 2>&1 || true
+}
+
+stage_remote_runtime_file() {
+  local src_path="$1"
+  local host="$2"
+  local ssh_user="$3"
+  local ssh_key_file="$4"
+  local remote_path="$5"
+
+  scp \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$src_path" \
+    "$ssh_user@$host:$remote_path" >/dev/null
+}
+
+endpoint_host_port() {
+  local endpoint="$1"
+  if [[ "$endpoint" =~ ^https?://([^/:]+):([0-9]+)(/.*)?$ ]]; then
+    printf '%s\t%s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+    return 0
+  fi
+  return 1
+}
+
+is_withdraw_not_expired_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  [[ "$lowered" == *"withdrawnotexpired"* ]] ||
+    [[ "$lowered" == *"withdraw not expired"* ]]
+}
+
+inject_operator_endpoint_failure() {
+  local endpoint="$1"
+  local ssh_key_path="$2"
+  local ssh_user="$3"
+  local host port
+  local endpoint_pid=""
+  local endpoint_down="false"
+
+  if ! read -r host port < <(endpoint_host_port "$endpoint"); then
+    printf 'invalid operator endpoint for failure injection: %s\n' "$endpoint" >&2
+    return 1
+  fi
+
+  if [[ "$host" == "127.0.0.1" || "$host" == "localhost" ]]; then
+    endpoint_pid="$(lsof -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null | head -n 1 || true)"
+    if [[ -z "$endpoint_pid" ]]; then
+      printf 'no local listener found for operator endpoint failure injection: %s\n' "$endpoint" >&2
+      return 1
+    fi
+    kill "$endpoint_pid" >/dev/null 2>&1 || true
+  else
+    [[ -n "$ssh_user" ]] || ssh_user="$(id -un)"
+    if [[ -z "$ssh_key_path" || ! -f "$ssh_key_path" ]]; then
+      printf 'ssh key is required for remote operator failure injection: endpoint=%s key=%s\n' "$endpoint" "$ssh_key_path" >&2
+      return 1
+    fi
+
+    endpoint_pid="$(
+      ssh \
+        -i "$ssh_key_path" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=6 \
+        -o TCPKeepAlive=yes \
+        "$ssh_user@$host" \
+        "sudo lsof -tiTCP:$port -sTCP:LISTEN | head -n 1" 2>/dev/null || true
+    )"
+    endpoint_pid="$(trim "$endpoint_pid")"
+    if [[ -z "$endpoint_pid" ]]; then
+      printf 'no remote listener found for operator endpoint failure injection: %s\n' "$endpoint" >&2
+      return 1
+    fi
+
+    ssh \
+      -i "$ssh_key_path" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$ssh_user@$host" \
+      "sudo kill $endpoint_pid" >/dev/null 2>&1 || true
+  fi
+
+  local probe_attempt
+  for probe_attempt in $(seq 1 10); do
+    if ! timeout 2 bash -lc "</dev/tcp/${host}/${port}" >/dev/null 2>&1; then
+      endpoint_down="true"
+      break
+    fi
+    sleep 1
+  done
+  if [[ "$endpoint_down" != "true" ]]; then
+    printf 'operator endpoint remained reachable after injected failure: %s\n' "$endpoint" >&2
+    return 1
+  fi
+
+  printf '%s' "$endpoint_pid"
+}
+
 query_withdrawal_payout_txid() {
   local postgres_dsn="$1"
   local withdrawal_id="$2"
@@ -924,6 +1116,12 @@ command_run() {
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="90s"
   local shared_output=""
+  local relayer_runtime_mode="runner"
+  local relayer_runtime_operator_hosts_csv=""
+  local relayer_runtime_operator_ssh_user=""
+  local relayer_runtime_operator_ssh_key_file=""
+  local aws_dr_region=""
+  local refund_after_expiry_window_seconds="120"
   local output_path=""
   local force="false"
 
@@ -1288,6 +1486,36 @@ command_run() {
         shared_output="$2"
         shift 2
         ;;
+      --relayer-runtime-mode)
+        [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
+        relayer_runtime_mode="$(lower "$2")"
+        shift 2
+        ;;
+      --relayer-runtime-operator-hosts)
+        [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-operator-hosts"
+        relayer_runtime_operator_hosts_csv="$2"
+        shift 2
+        ;;
+      --relayer-runtime-operator-ssh-user)
+        [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-operator-ssh-user"
+        relayer_runtime_operator_ssh_user="$2"
+        shift 2
+        ;;
+      --relayer-runtime-operator-ssh-key-file)
+        [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-operator-ssh-key-file"
+        relayer_runtime_operator_ssh_key_file="$2"
+        shift 2
+        ;;
+      --aws-dr-region)
+        [[ $# -ge 2 ]] || die "missing value for --aws-dr-region"
+        aws_dr_region="$2"
+        shift 2
+        ;;
+      --refund-after-expiry-window-seconds)
+        [[ $# -ge 2 ]] || die "missing value for --refund-after-expiry-window-seconds"
+        refund_after_expiry_window_seconds="$2"
+        shift 2
+        ;;
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output_path="$2"
@@ -1325,6 +1553,12 @@ command_run() {
   [[ "$boundless_ramp_up_period_seconds" =~ ^[0-9]+$ ]] || die "--boundless-ramp-up-period-seconds must be numeric"
   [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
   [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
+  [[ "$refund_after_expiry_window_seconds" =~ ^[0-9]+$ ]] || die "--refund-after-expiry-window-seconds must be numeric"
+  (( refund_after_expiry_window_seconds > 0 )) || die "--refund-after-expiry-window-seconds must be > 0"
+  case "$relayer_runtime_mode" in
+    runner|distributed) ;;
+    *) die "--relayer-runtime-mode must be runner or distributed" ;;
+  esac
   [[ -z "$bridge_deposit_checkpoint_height" || "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-deposit-checkpoint-height must be numeric"
   [[ -z "$bridge_withdraw_checkpoint_height" || "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-withdraw-checkpoint-height must be numeric"
   (( boundless_max_price_cap_wei >= boundless_max_price_wei )) || die "--boundless-max-price-cap-wei must be >= --boundless-max-price-wei"
@@ -1333,6 +1567,20 @@ command_run() {
   fi
   if (( boundless_max_price_bump_retries > 0 && boundless_max_price_bump_multiplier < 2 )); then
     die "--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0"
+  fi
+  local -a relayer_runtime_operator_hosts=()
+  if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+    [[ -n "$relayer_runtime_operator_hosts_csv" ]] || \
+      die "--relayer-runtime-operator-hosts is required when --relayer-runtime-mode=distributed"
+    [[ -n "$relayer_runtime_operator_ssh_user" ]] || \
+      die "--relayer-runtime-operator-ssh-user is required when --relayer-runtime-mode=distributed"
+    [[ -n "$relayer_runtime_operator_ssh_key_file" ]] || \
+      die "--relayer-runtime-operator-ssh-key-file is required when --relayer-runtime-mode=distributed"
+    [[ -f "$relayer_runtime_operator_ssh_key_file" ]] || \
+      die "relayer runtime operator ssh key file not found: $relayer_runtime_operator_ssh_key_file"
+    mapfile -t relayer_runtime_operator_hosts < <(parse_csv_list "$relayer_runtime_operator_hosts_csv")
+    (( ${#relayer_runtime_operator_hosts[@]} > 0 )) || \
+      die "--relayer-runtime-operator-hosts must include at least one host when --relayer-runtime-mode=distributed"
   fi
   if [[ -z "$bridge_run_timeout" ]]; then
     bridge_run_timeout="90m"
@@ -1849,12 +2097,17 @@ command_run() {
   [[ -f "$withdraw_coordinator_tss_server_ca_file" ]] || \
     die "withdraw coordinator tss server ca file not found: $withdraw_coordinator_tss_server_ca_file"
   local withdraw_coordinator_juno_rpc_user_var withdraw_coordinator_juno_rpc_pass_var
+  local withdraw_coordinator_juno_rpc_user_value withdraw_coordinator_juno_rpc_pass_value
+  local withdraw_finalizer_juno_scan_bearer_value=""
   withdraw_coordinator_juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
   withdraw_coordinator_juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
   [[ -n "${!withdraw_coordinator_juno_rpc_user_var:-}" ]] || \
     die "missing env var for withdraw coordinator Juno RPC user: $withdraw_coordinator_juno_rpc_user_var"
   [[ -n "${!withdraw_coordinator_juno_rpc_pass_var:-}" ]] || \
     die "missing env var for withdraw coordinator Juno RPC pass: $withdraw_coordinator_juno_rpc_pass_var"
+  withdraw_coordinator_juno_rpc_user_value="${!withdraw_coordinator_juno_rpc_user_var}"
+  withdraw_coordinator_juno_rpc_pass_value="${!withdraw_coordinator_juno_rpc_pass_var}"
+  withdraw_finalizer_juno_scan_bearer_value="${!boundless_witness_juno_scan_bearer_token_env:-}"
 
   if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
     bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
@@ -2017,6 +2270,186 @@ command_run() {
     [[ -n "$operator_endpoint" ]] || die "dkg summary missing operator endpoint for operator_id=$operator_id"
     bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
   done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
+
+  local direct_cli_user_proof_status="not-run"
+  local direct_cli_user_proof_summary_path=""
+  local direct_cli_user_proof_log=""
+  local direct_cli_user_proof_submission_mode=""
+  local direct_cli_user_proof_deposit_request_id=""
+  local direct_cli_user_proof_withdraw_request_id=""
+
+  run_direct_cli_user_proof_scenario() {
+    local witness_metadata_json direct_cli_withdraw_txid direct_cli_withdraw_action_index
+    local direct_cli_recipient_raw_hex direct_cli_recipient_raw_hex_prefixed
+    local direct_cli_deployer_nonce direct_cli_bridge_deploy_nonce
+    local direct_cli_compute_address_output direct_cli_bridge_address
+    local direct_cli_domain_tag direct_cli_recipient_hash direct_cli_predicted_withdrawal_id
+    local direct_cli_withdraw_witness_file direct_cli_withdraw_witness_json
+    local direct_cli_bridge_summary direct_cli_bridge_log
+    local direct_cli_withdraw_amount="10000"
+    local direct_cli_status
+    local direct_cli_requestor_key_file="$boundless_requestor_key_file"
+    local witness_file
+
+    witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
+    direct_cli_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_recipient_raw_hex_prefixed="$(normalize_hex_prefixed "$direct_cli_recipient_raw_hex" || true)"
+    [[ -n "$direct_cli_withdraw_txid" ]] || return 1
+    [[ "$direct_cli_withdraw_action_index" =~ ^[0-9]+$ ]] || return 1
+    [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
+
+    direct_cli_deployer_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
+    if [[ ! "$direct_cli_deployer_nonce" =~ ^[0-9]+$ ]]; then
+      direct_cli_deployer_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block latest "$bridge_deployer_address" 2>/dev/null || true)"
+    fi
+    [[ "$direct_cli_deployer_nonce" =~ ^[0-9]+$ ]] || return 1
+
+    direct_cli_bridge_deploy_nonce=$((direct_cli_deployer_nonce + 3))
+    direct_cli_compute_address_output="$(cast compute-address --nonce "$direct_cli_bridge_deploy_nonce" "$bridge_deployer_address" 2>/dev/null || true)"
+    if [[ "$direct_cli_compute_address_output" =~ (0x[0-9a-fA-F]{40}) ]]; then
+      direct_cli_bridge_address="${BASH_REMATCH[1]}"
+    else
+      return 1
+    fi
+
+    direct_cli_domain_tag="$(cast format-bytes32-string "WJUNO_WITHDRAW_V1" 2>/dev/null || true)"
+    [[ "$direct_cli_domain_tag" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+
+    direct_cli_recipient_hash="$(cast keccak "$direct_cli_recipient_raw_hex_prefixed" 2>/dev/null || true)"
+    direct_cli_recipient_hash="$(normalize_hex_prefixed "$direct_cli_recipient_hash" || true)"
+    [[ "$direct_cli_recipient_hash" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+    direct_cli_predicted_withdrawal_id="$(
+      cast keccak "$(
+        cast abi-encode \
+          "f(bytes32,uint256,address,uint256,address,uint256,bytes32)" \
+          "$direct_cli_domain_tag" \
+          "$base_chain_id" \
+          "$direct_cli_bridge_address" \
+          "1" \
+          "$bridge_deployer_address" \
+          "$direct_cli_withdraw_amount" \
+          "$direct_cli_recipient_hash"
+      )" 2>/dev/null || true
+    )"
+    direct_cli_predicted_withdrawal_id="$(normalize_hex_prefixed "$direct_cli_predicted_withdrawal_id" || true)"
+    [[ "$direct_cli_predicted_withdrawal_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+    direct_cli_withdraw_witness_file="$workdir/reports/witness/direct-cli-withdraw.witness.bin"
+    direct_cli_withdraw_witness_json="$workdir/reports/witness/direct-cli-withdraw.json"
+    local -a direct_cli_withdraw_extract_cmd=(go run ./cmd/juno-witness-extract)
+    if ! (
+      cd "$REPO_ROOT"
+      "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$withdraw_coordinator_juno_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$direct_cli_withdraw_txid" \
+        --action-index "$direct_cli_withdraw_action_index" \
+        --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
+        --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
+        --output-witness-item-file "$direct_cli_withdraw_witness_file" \
+        >"$direct_cli_withdraw_witness_json"
+    ); then
+      return 1
+    fi
+
+    direct_cli_bridge_summary="$workdir/reports/direct-cli-user-proof-summary.json"
+    direct_cli_bridge_log="$workdir/reports/direct-cli-user-proof.log"
+    local -a direct_cli_bridge_args=()
+    direct_cli_bridge_args+=(
+      "--rpc-url" "$base_rpc_url"
+      "--chain-id" "$base_chain_id"
+      "--deployer-key-file" "$bridge_deployer_key_file"
+      "--operator-signer-bin" "$bridge_operator_signer_bin"
+      "--threshold" "$threshold"
+      "--contracts-out" "$contracts_out"
+      "--recipient" "$bridge_recipient_address"
+      "--boundless-auto"
+      "--run-timeout" "$bridge_run_timeout"
+      "--output" "$direct_cli_bridge_summary"
+      "--verifier-address" "$bridge_verifier_address"
+      "--deposit-image-id" "$bridge_deposit_image_id"
+      "--withdraw-image-id" "$bridge_withdraw_image_id"
+      "--deposit-final-orchard-root" "$bridge_deposit_final_orchard_root"
+      "--withdraw-final-orchard-root" "$bridge_withdraw_final_orchard_root"
+      "--deposit-checkpoint-height" "$bridge_deposit_checkpoint_height"
+      "--deposit-checkpoint-block-hash" "$bridge_deposit_checkpoint_block_hash"
+      "--withdraw-checkpoint-height" "$bridge_withdraw_checkpoint_height"
+      "--withdraw-checkpoint-block-hash" "$bridge_withdraw_checkpoint_block_hash"
+      "--boundless-bin" "$boundless_bin"
+      "--boundless-rpc-url" "$boundless_rpc_url"
+      "--boundless-proof-submission-mode" "direct-cli"
+      "--boundless-market-address" "$boundless_market_address"
+      "--boundless-verifier-router-address" "$boundless_verifier_router_address"
+      "--boundless-set-verifier-address" "$boundless_set_verifier_address"
+      "--boundless-input-mode" "$boundless_input_mode"
+      "--boundless-deposit-program-url" "$boundless_deposit_program_url"
+      "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
+      "--boundless-input-s3-bucket" "$boundless_input_s3_bucket"
+      "--boundless-input-s3-prefix" "$boundless_input_s3_prefix"
+      "--boundless-input-s3-region" "$boundless_input_s3_region"
+      "--boundless-input-s3-presign-ttl" "$boundless_input_s3_presign_ttl"
+      "--boundless-min-price-wei" "$boundless_min_price_wei"
+      "--boundless-max-price-wei" "$boundless_max_price_wei"
+      "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
+      "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
+      "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
+      "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
+      "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
+      "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
+      "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
+      "--boundless-timeout-seconds" "$boundless_timeout_seconds"
+      "--boundless-requestor-key-file" "$direct_cli_requestor_key_file"
+      "--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex"
+      "--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex"
+    )
+    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+      direct_cli_bridge_args+=("--boundless-deposit-witness-item-file" "$witness_file")
+    done
+    direct_cli_bridge_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
+    while IFS=$'\t' read -r operator_id operator_endpoint; do
+      [[ -n "$operator_id" ]] || continue
+      [[ -n "$operator_endpoint" ]] || return 1
+      direct_cli_bridge_args+=("--operator-address" "$operator_id")
+      direct_cli_bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
+    done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
+
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/bridge-e2e "${direct_cli_bridge_args[@]}"
+    ) >"$direct_cli_bridge_log" 2>&1
+    direct_cli_status="$?"
+    set -e
+    if (( direct_cli_status != 0 )); then
+      tail -n 200 "$direct_cli_bridge_log" >&2 || true
+      return 1
+    fi
+
+    direct_cli_user_proof_submission_mode="$(jq -r '.proof.boundless.submission_mode // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    direct_cli_user_proof_deposit_request_id="$(jq -r '.proof.boundless.deposit_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    direct_cli_user_proof_withdraw_request_id="$(jq -r '.proof.boundless.withdraw_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    [[ "$direct_cli_user_proof_submission_mode" == "direct-cli" ]] || return 1
+    [[ -n "$direct_cli_user_proof_deposit_request_id" ]] || return 1
+    [[ -n "$direct_cli_user_proof_withdraw_request_id" ]] || return 1
+
+    direct_cli_user_proof_status="passed"
+    direct_cli_user_proof_summary_path="$direct_cli_bridge_summary"
+    direct_cli_user_proof_log="$direct_cli_bridge_log"
+    return 0
+  }
+
+  direct_cli_user_proof_status="running"
+  if ! run_direct_cli_user_proof_scenario; then
+    direct_cli_user_proof_status="failed"
+    die "direct-cli user proof scenario failed"
+  fi
 
   local proof_requestor_log="$workdir/reports/proof-requestor.log"
   local proof_funder_log="$workdir/reports/proof-funder.log"
@@ -2196,6 +2629,7 @@ command_run() {
   [[ -n "$bridge_deployer_key_hex" ]] || die "bridge deployer key file is empty: $bridge_deployer_key_file"
 
   local bridge_fee_bps bridge_relayer_tip_bps bridge_fee_distributor
+  local bridge_refund_window_seconds bridge_max_expiry_extension_seconds
   local owner_wjuno_balance_before recipient_wjuno_balance_before
   local fee_distributor_wjuno_balance_before bridge_wjuno_balance_before
   bridge_fee_bps="$(
@@ -2219,9 +2653,27 @@ command_run() {
       "feeDistributor()" \
       "feeDistributor()(address)"
   )"
+  bridge_refund_window_seconds="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_bridge_address" \
+      "refundWindowSeconds()" \
+      "refundWindowSeconds()(uint64)"
+  )"
+  bridge_max_expiry_extension_seconds="$(
+    cast_contract_call_one \
+      "$base_rpc_url" \
+      "$deployed_bridge_address" \
+      "maxExpiryExtensionSeconds()" \
+      "maxExpiryExtensionSeconds()(uint64)"
+  )"
   [[ "$bridge_fee_bps" =~ ^[0-9]+$ ]] || die "bridge feeBps is invalid: $bridge_fee_bps"
   [[ "$bridge_relayer_tip_bps" =~ ^[0-9]+$ ]] || die "bridge relayerTipBps is invalid: $bridge_relayer_tip_bps"
   [[ "$bridge_fee_distributor" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bridge feeDistributor is invalid: $bridge_fee_distributor"
+  [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
+    die "bridge refundWindowSeconds is invalid: $bridge_refund_window_seconds"
+  [[ "$bridge_max_expiry_extension_seconds" =~ ^[0-9]+$ ]] || \
+    die "bridge maxExpiryExtensionSeconds is invalid: $bridge_max_expiry_extension_seconds"
   owner_wjuno_balance_before="$(
     cast_contract_call_one \
       "$base_rpc_url" \
@@ -2267,10 +2719,13 @@ command_run() {
   local run_withdraw_amount=""
   local run_withdraw_fee_bps=""
   local run_withdraw_recipient_ua=""
+  local run_withdraw_request_expiry=""
   local invariant_deposit_used="false"
   local invariant_withdraw_requester=""
   local invariant_withdraw_amount=""
   local invariant_withdraw_fee_bps=""
+  local invariant_withdraw_expiry=""
+  local invariant_withdraw_expiry_extended_vs_request="false"
   local invariant_withdraw_finalized="false"
   local invariant_withdraw_refunded="true"
   local invariant_withdraw_recipient_ua=""
@@ -2285,6 +2740,21 @@ command_run() {
   local invariant_bridge_delta_actual=""
   local invariant_balance_delta_match="false"
   local coordinator_payout_juno_tx_hash=""
+  local operator_down_1_status="not-run"
+  local operator_down_2_status="not-run"
+  local operator_down_1_endpoint=""
+  local operator_down_2_endpoint=""
+  local operator_down_1_signature_count=""
+  local operator_down_2_signature_count=""
+  local refund_after_expiry_status="not-run"
+  local refund_after_expiry_withdrawal_id=""
+  local refund_after_expiry_request_expiry=""
+  local refund_after_expiry_refund_tx_hash=""
+  local refund_after_expiry_on_chain_refunded="false"
+  local operator_down_ssh_key_path="$REPO_ROOT/.ci/secrets/operator-fleet-ssh.key"
+  local operator_down_ssh_user=""
+  local -a operator_signer_endpoints=()
+  local operator_failures_injected=0
 
   local base_relayer_log="$workdir/reports/base-relayer.log"
   local deposit_relayer_log="$workdir/reports/deposit-relayer.log"
@@ -2295,11 +2765,65 @@ command_run() {
   local withdraw_coordinator_pid=""
   local withdraw_finalizer_pid=""
   local relayer_status=0
+  local runner_relayer_host=""
+  local base_relayer_listen_host="127.0.0.1"
+  local deposit_relayer_host=""
+  local withdraw_coordinator_host=""
+  local withdraw_finalizer_host=""
+  local distributed_withdraw_coordinator_tss_server_ca_file="$withdraw_coordinator_tss_server_ca_file"
+  local distributed_withdraw_coordinator_tss_url="$withdraw_coordinator_tss_url"
+  local distributed_withdraw_coordinator_juno_rpc_url="$boundless_witness_juno_rpc_url"
+  local distributed_withdraw_finalizer_juno_scan_url="$boundless_witness_juno_scan_url"
+  local distributed_withdraw_finalizer_juno_rpc_url="$boundless_witness_juno_rpc_url"
+
+  operator_down_ssh_user="$(id -un 2>/dev/null || true)"
+  if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+    operator_down_ssh_user="$relayer_runtime_operator_ssh_user"
+    operator_down_ssh_key_path="$relayer_runtime_operator_ssh_key_file"
+  fi
+  mapfile -t operator_signer_endpoints < <(jq -r '.operators[] | (.endpoint // .grpc_endpoint // "")' "$dkg_summary")
+  if (( ${#operator_signer_endpoints[@]} < threshold )); then
+    die "operator endpoint count is below threshold for chaos scenarios: endpoints=${#operator_signer_endpoints[@]} threshold=$threshold"
+  fi
 
   local base_relayer_port base_relayer_url base_relayer_auth_token
   base_relayer_port="$((base_port + 1200))"
-  base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   base_relayer_auth_token="$(openssl rand -hex 24)"
+  if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+    local relayer_host_count
+    relayer_host_count="${#relayer_runtime_operator_hosts[@]}"
+    (( relayer_host_count > 0 )) || \
+      die "--relayer-runtime-operator-hosts must include at least one host when --relayer-runtime-mode=distributed"
+    runner_relayer_host="$(resolve_runner_relayer_host || true)"
+    [[ -n "$runner_relayer_host" ]] || die "failed to resolve runner host for distributed relayer runtime"
+    base_relayer_listen_host="0.0.0.0"
+    base_relayer_url="http://${runner_relayer_host}:${base_relayer_port}"
+
+    deposit_relayer_host="${relayer_runtime_operator_hosts[0]}"
+    withdraw_coordinator_host="${relayer_runtime_operator_hosts[0]}"
+    withdraw_finalizer_host="${relayer_runtime_operator_hosts[$((1 % relayer_host_count))]}"
+    distributed_withdraw_coordinator_tss_url="https://127.0.0.1:9443"
+    distributed_withdraw_coordinator_juno_rpc_url="http://127.0.0.1:18232"
+    distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
+    distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
+    distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
+
+    log "distributed relayer runtime enabled; launching relayers on operator hosts"
+    log "deposit-relayer host=$deposit_relayer_host"
+    log "withdraw-coordinator host=$withdraw_coordinator_host"
+    log "withdraw-finalizer host=$withdraw_finalizer_host"
+
+    if ! stage_remote_runtime_file \
+      "$withdraw_coordinator_tss_server_ca_file" \
+      "$withdraw_coordinator_host" \
+      "$relayer_runtime_operator_ssh_user" \
+      "$relayer_runtime_operator_ssh_key_file" \
+      "$distributed_withdraw_coordinator_tss_server_ca_file"; then
+      relayer_status=1
+    fi
+  else
+    base_relayer_url="http://127.0.0.1:${base_relayer_port}"
+  fi
 
   (
     cd "$REPO_ROOT"
@@ -2308,7 +2832,7 @@ command_run() {
       go run ./cmd/base-relayer \
         --rpc-url "$base_rpc_url" \
         --chain-id "$base_chain_id" \
-        --listen "127.0.0.1:${base_relayer_port}" \
+        --listen "${base_relayer_listen_host}:${base_relayer_port}" \
         >"$base_relayer_log" 2>&1
   ) &
   base_relayer_pid="$!"
@@ -2318,10 +2842,16 @@ command_run() {
   fi
 
   if (( relayer_status == 0 )); then
-    (
-      cd "$REPO_ROOT"
-      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-        go run ./cmd/deposit-relayer \
+    if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+      deposit_relayer_pid="$(
+        start_remote_relayer_service \
+          "$deposit_relayer_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$deposit_relayer_log" \
+          env \
+          BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          /usr/local/bin/deposit-relayer \
           --postgres-dsn "$shared_postgres_dsn" \
           --store-driver postgres \
           --base-chain-id "$base_chain_id" \
@@ -2340,43 +2870,61 @@ command_run() {
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$deposit_relayer_group" \
-          --queue-topics "$deposit_event_topic,$checkpoint_package_topic" \
-          >"$deposit_relayer_log" 2>&1
-    ) &
-    deposit_relayer_pid="$!"
+          --queue-topics "$deposit_event_topic,$checkpoint_package_topic"
+      )"
 
-    (
-      cd "$REPO_ROOT"
-      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-      go run ./cmd/withdraw-coordinator \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --queue-group "$withdraw_coordinator_group" \
-        --queue-topics "$withdraw_request_topic" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
-        --juno-change-address "$withdraw_coordinator_juno_change_address" \
-        --tss-url "$withdraw_coordinator_tss_url" \
-        --tss-server-ca-file "$withdraw_coordinator_tss_server_ca_file" \
-        --base-chain-id "$base_chain_id" \
-        --bridge-address "$deployed_bridge_address" \
-        --base-relayer-url "$base_relayer_url" \
-        --extend-signer-bin "$bridge_operator_signer_bin" \
-        --blob-driver s3 \
-        --blob-bucket "$withdraw_blob_bucket" \
-        --blob-prefix "$withdraw_blob_prefix" \
-        >"$withdraw_coordinator_log" 2>&1
-    ) &
-    withdraw_coordinator_pid="$!"
+      withdraw_coordinator_pid="$(
+        start_remote_relayer_service \
+          "$withdraw_coordinator_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$withdraw_coordinator_log" \
+          env \
+          BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          "$boundless_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
+          "$boundless_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
+          /usr/local/bin/withdraw-coordinator \
+          --postgres-dsn "$shared_postgres_dsn" \
+          --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --queue-group "$withdraw_coordinator_group" \
+          --queue-topics "$withdraw_request_topic" \
+          --juno-rpc-url "$distributed_withdraw_coordinator_juno_rpc_url" \
+          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+          --juno-change-address "$withdraw_coordinator_juno_change_address" \
+          --tss-url "$distributed_withdraw_coordinator_tss_url" \
+          --tss-server-ca-file "$distributed_withdraw_coordinator_tss_server_ca_file" \
+          --base-chain-id "$base_chain_id" \
+          --bridge-address "$deployed_bridge_address" \
+          --base-relayer-url "$base_relayer_url" \
+          --extend-signer-bin "$bridge_operator_signer_bin" \
+          --expiry-safety-margin "30h" \
+          --max-expiry-extension "12h" \
+          --blob-driver s3 \
+          --blob-bucket "$withdraw_blob_bucket" \
+          --blob-prefix "$withdraw_blob_prefix"
+      )"
 
-    (
-      cd "$REPO_ROOT"
-      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-        go run ./cmd/withdraw-finalizer \
+      local -a withdraw_finalizer_remote_env=(
+        env
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token"
+        "$boundless_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
+        "$boundless_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
+      )
+      if [[ -n "$withdraw_finalizer_juno_scan_bearer_value" ]]; then
+        withdraw_finalizer_remote_env+=("$boundless_witness_juno_scan_bearer_token_env=$withdraw_finalizer_juno_scan_bearer_value")
+      fi
+      withdraw_finalizer_pid="$(
+        start_remote_relayer_service \
+          "$withdraw_finalizer_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$withdraw_finalizer_log" \
+          "${withdraw_finalizer_remote_env[@]}" \
+          /usr/local/bin/withdraw-finalizer \
           --postgres-dsn "$shared_postgres_dsn" \
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \
@@ -2385,10 +2933,10 @@ command_run() {
           --withdraw-image-id "$bridge_withdraw_image_id" \
           --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
           --withdraw-witness-extractor-enabled \
-          --juno-scan-url "$boundless_witness_juno_scan_url" \
+          --juno-scan-url "$distributed_withdraw_finalizer_juno_scan_url" \
           --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-scan-bearer-env "$boundless_witness_juno_scan_bearer_token_env" \
-          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+          --juno-rpc-url "$distributed_withdraw_finalizer_juno_rpc_url" \
           --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
           --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
           --base-relayer-url "$base_relayer_url" \
@@ -2404,10 +2952,102 @@ command_run() {
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
+          --blob-prefix "$withdraw_blob_prefix"
+      )"
+    else
+      (
+        cd "$REPO_ROOT"
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          go run ./cmd/deposit-relayer \
+            --postgres-dsn "$shared_postgres_dsn" \
+            --store-driver postgres \
+            --base-chain-id "$base_chain_id" \
+            --bridge-address "$deployed_bridge_address" \
+            --operators "$checkpoint_operators_csv" \
+            --operator-threshold "$threshold" \
+            --deposit-image-id "$bridge_deposit_image_id" \
+            --owallet-ivk "$boundless_deposit_owallet_ivk_hex" \
+            --base-relayer-url "$base_relayer_url" \
+            --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
+            --proof-driver queue \
+            --proof-request-topic "$proof_request_topic" \
+            --proof-result-topic "$proof_result_topic" \
+            --proof-failure-topic "$proof_failure_topic" \
+            --proof-response-group "$deposit_relayer_proof_group" \
+            --queue-driver kafka \
+            --queue-brokers "$shared_kafka_brokers" \
+            --queue-group "$deposit_relayer_group" \
+            --queue-topics "$deposit_event_topic,$checkpoint_package_topic" \
+            >"$deposit_relayer_log" 2>&1
+      ) &
+      deposit_relayer_pid="$!"
+
+      (
+        cd "$REPO_ROOT"
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        go run ./cmd/withdraw-coordinator \
+          --postgres-dsn "$shared_postgres_dsn" \
+          --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --queue-group "$withdraw_coordinator_group" \
+          --queue-topics "$withdraw_request_topic" \
+          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+          --juno-change-address "$withdraw_coordinator_juno_change_address" \
+          --tss-url "$withdraw_coordinator_tss_url" \
+          --tss-server-ca-file "$withdraw_coordinator_tss_server_ca_file" \
+          --base-chain-id "$base_chain_id" \
+          --bridge-address "$deployed_bridge_address" \
+          --base-relayer-url "$base_relayer_url" \
+          --extend-signer-bin "$bridge_operator_signer_bin" \
+          --expiry-safety-margin "30h" \
+          --max-expiry-extension "12h" \
+          --blob-driver s3 \
+          --blob-bucket "$withdraw_blob_bucket" \
           --blob-prefix "$withdraw_blob_prefix" \
-          >"$withdraw_finalizer_log" 2>&1
-    ) &
-    withdraw_finalizer_pid="$!"
+          >"$withdraw_coordinator_log" 2>&1
+      ) &
+      withdraw_coordinator_pid="$!"
+
+      (
+        cd "$REPO_ROOT"
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          go run ./cmd/withdraw-finalizer \
+            --postgres-dsn "$shared_postgres_dsn" \
+            --base-chain-id "$base_chain_id" \
+            --bridge-address "$deployed_bridge_address" \
+            --operators "$checkpoint_operators_csv" \
+            --operator-threshold "$threshold" \
+            --withdraw-image-id "$bridge_withdraw_image_id" \
+            --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
+            --withdraw-witness-extractor-enabled \
+            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+            --juno-scan-bearer-env "$boundless_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --base-relayer-url "$base_relayer_url" \
+            --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
+            --proof-driver queue \
+            --proof-request-topic "$proof_request_topic" \
+            --proof-result-topic "$proof_result_topic" \
+            --proof-failure-topic "$proof_failure_topic" \
+            --proof-response-group "$withdraw_finalizer_proof_group" \
+            --queue-driver kafka \
+            --queue-brokers "$shared_kafka_brokers" \
+            --queue-group "$withdraw_finalizer_group" \
+            --queue-topics "$checkpoint_package_topic" \
+            --blob-driver s3 \
+            --blob-bucket "$withdraw_blob_bucket" \
+            --blob-prefix "$withdraw_blob_prefix" \
+            >"$withdraw_finalizer_log" 2>&1
+      ) &
+      withdraw_finalizer_pid="$!"
+    fi
 
     sleep 5
     if ! kill -0 "$deposit_relayer_pid" >/dev/null 2>&1; then
@@ -2480,12 +3120,14 @@ command_run() {
       run_withdraw_requester="$(jq -r '.requester // empty' "$withdraw_request_payload" 2>/dev/null || true)"
       run_withdraw_amount="$(jq -r '.amount // empty' "$withdraw_request_payload" 2>/dev/null || true)"
       run_withdraw_fee_bps="$(jq -r '.feeBps // empty' "$withdraw_request_payload" 2>/dev/null || true)"
+      run_withdraw_request_expiry="$(jq -r '.expiry // empty' "$withdraw_request_payload" 2>/dev/null || true)"
       run_withdraw_recipient_ua="$(jq -r '.recipientUA // empty' "$withdraw_request_payload" 2>/dev/null || true)"
       run_withdraw_recipient_ua="$(normalize_hex_prefixed "$run_withdraw_recipient_ua" || true)"
       [[ "$run_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
       [[ "$run_withdraw_requester" =~ ^0x[0-9a-fA-F]{40}$ ]] || relayer_status=1
       [[ "$run_withdraw_amount" =~ ^[0-9]+$ ]] || relayer_status=1
       [[ "$run_withdraw_fee_bps" =~ ^[0-9]+$ ]] || relayer_status=1
+      [[ "$run_withdraw_request_expiry" =~ ^[0-9]+$ ]] || relayer_status=1
       [[ "$run_withdraw_recipient_ua" =~ ^0x[0-9a-f]{2,}$ ]] || relayer_status=1
     fi
   fi
@@ -2528,6 +3170,7 @@ command_run() {
       fi
 
       local withdrawal_view_json requester_on_chain amount_on_chain fee_bps_on_chain
+      local expiry_on_chain
       local finalized_on_chain refunded_on_chain recipient_ua_on_chain
       withdrawal_view_json="$(
         cast_contract_call_json \
@@ -2539,6 +3182,7 @@ command_run() {
       )"
       requester_on_chain="$(jq -r '.[0]' <<<"$withdrawal_view_json")"
       amount_on_chain="$(jq -r '.[1] | tostring' <<<"$withdrawal_view_json")"
+      expiry_on_chain="$(jq -r '.[2] | tostring' <<<"$withdrawal_view_json")"
       fee_bps_on_chain="$(jq -r '.[3] | tostring' <<<"$withdrawal_view_json")"
       finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$withdrawal_view_json")"
       refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$withdrawal_view_json")"
@@ -2566,6 +3210,19 @@ command_run() {
           "$run_withdrawal_id" \
           "$fee_bps_on_chain" \
           "$run_withdraw_fee_bps"
+        return 1
+      fi
+      if [[ ! "$expiry_on_chain" =~ ^[0-9]+$ ]]; then
+        printf 'getWithdrawal expiry is invalid for withdrawalId=%s (got=%s)\n' \
+          "$run_withdrawal_id" \
+          "$expiry_on_chain"
+        return 1
+      fi
+      if (( expiry_on_chain <= run_withdraw_request_expiry )); then
+        printf 'withdraw expiry did not increase after forced extension for withdrawalId=%s (on_chain=%s request=%s)\n' \
+          "$run_withdrawal_id" \
+          "$expiry_on_chain" \
+          "$run_withdraw_request_expiry"
         return 1
       fi
       if [[ "$finalized_on_chain" != "true" ]]; then
@@ -2693,6 +3350,8 @@ command_run() {
       invariant_withdraw_requester="$requester_on_chain"
       invariant_withdraw_amount="$amount_on_chain"
       invariant_withdraw_fee_bps="$fee_bps_on_chain"
+      invariant_withdraw_expiry="$expiry_on_chain"
+      invariant_withdraw_expiry_extended_vs_request="true"
       invariant_withdraw_finalized="$finalized_on_chain"
       invariant_withdraw_refunded="$refunded_on_chain"
       invariant_withdraw_recipient_ua="$recipient_ua_on_chain"
@@ -2727,11 +3386,226 @@ command_run() {
     fi
   fi
 
-  kill "$base_relayer_pid" "$deposit_relayer_pid" "$withdraw_coordinator_pid" "$withdraw_finalizer_pid" >/dev/null 2>&1 || true
-  wait "$base_relayer_pid" >/dev/null 2>&1 || true
-  wait "$deposit_relayer_pid" >/dev/null 2>&1 || true
-  wait "$withdraw_coordinator_pid" >/dev/null 2>&1 || true
-  wait "$withdraw_finalizer_pid" >/dev/null 2>&1 || true
+  run_operator_down_threshold_scenario() {
+    local target_down_count="$1"
+    local scenario_endpoint scenario_pid
+    local scenario_digest scenario_output scenario_status scenario_signature_count
+    local operator_signer_probe_bin="$bridge_operator_signer_bin"
+
+    while (( operator_failures_injected < target_down_count )); do
+      local endpoint_idx
+      endpoint_idx=$(( ${#operator_signer_endpoints[@]} - operator_failures_injected - 1 ))
+      if (( endpoint_idx < 0 )); then
+        printf 'insufficient operator endpoints for failure injection: have=%d requested=%d\n' \
+          "${#operator_signer_endpoints[@]}" \
+          "$target_down_count"
+        return 1
+      fi
+
+      scenario_endpoint="${operator_signer_endpoints[$endpoint_idx]}"
+      [[ -n "$scenario_endpoint" ]] || return 1
+      scenario_pid="$(inject_operator_endpoint_failure "$scenario_endpoint" "$operator_down_ssh_key_path" "$operator_down_ssh_user" || true)"
+      [[ -n "$scenario_pid" ]] || return 1
+      operator_failures_injected=$((operator_failures_injected + 1))
+
+      if (( operator_failures_injected == 1 )); then
+        operator_down_1_endpoint="$scenario_endpoint"
+      elif (( operator_failures_injected == 2 )); then
+        operator_down_2_endpoint="$scenario_endpoint"
+      fi
+      log "injected operator endpoint failure count=$operator_failures_injected endpoint=$scenario_endpoint listener_pid=$scenario_pid"
+    done
+
+    scenario_digest="0x$(openssl rand -hex 32)"
+    set +e
+    scenario_output="$("$operator_signer_probe_bin" sign-digest --digest "$scenario_digest" --json 2>&1)"
+    scenario_status=$?
+    set -e
+    if (( scenario_status != 0 )); then
+      printf 'threshold signer probe failed under operator-down scenario count=%s status=%s output=%s\n' \
+        "$target_down_count" \
+        "$scenario_status" \
+        "$scenario_output"
+      return 1
+    fi
+
+    scenario_signature_count="$(
+      jq -r '
+        if .status == "ok" and ((.data.signatures? | type) == "array") then
+          (.data.signatures | length)
+        elif .status == "ok" and ((.data.signature? // "") != "") then
+          1
+        else
+          0
+        end
+      ' <<<"$scenario_output" 2>/dev/null || true
+    )"
+    [[ "$scenario_signature_count" =~ ^[0-9]+$ ]] || return 1
+    if (( scenario_signature_count < threshold )); then
+      printf 'threshold signer probe failed under operator-down scenario count=%s signatures=%s threshold=%s\n' \
+        "$target_down_count" \
+        "$scenario_signature_count" \
+        "$threshold"
+      return 1
+    fi
+
+    if (( target_down_count == 1 )); then
+      operator_down_1_signature_count="$scenario_signature_count"
+    elif (( target_down_count == 2 )); then
+      operator_down_2_signature_count="$scenario_signature_count"
+    fi
+    return 0
+  }
+
+  run_refund_after_expiry_scenario() {
+    local scenario_refund_window_seconds="$1"
+    local witness_metadata_json scenario_recipient_raw_hex
+    local scenario_withdraw_request_payload scenario_request_status
+    local scenario_withdrawal_view_json scenario_refunded_on_chain scenario_finalized_on_chain
+    local scenario_refund_output scenario_refund_status scenario_refund_attempt
+    local scenario_wait_deadline scenario_now
+
+    witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
+    scenario_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    [[ "$scenario_recipient_raw_hex" =~ ^[0-9a-fA-F]{86}$ ]] || return 1
+
+    log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$scenario_refund_window_seconds"
+    set +e
+    scenario_refund_output="$(
+      cast send \
+        --rpc-url "$base_rpc_url" \
+        --private-key "$bridge_deployer_key_hex" \
+        "$deployed_bridge_address" \
+        "setParams(uint96,uint96,uint64,uint64)" \
+        "$bridge_fee_bps" \
+        "$bridge_relayer_tip_bps" \
+        "$scenario_refund_window_seconds" \
+        "$bridge_max_expiry_extension_seconds" 2>&1
+    )"
+    scenario_refund_status=$?
+    set -e
+    if (( scenario_refund_status != 0 )); then
+      printf 'refund-after-expiry scenario failed to configure refund window: status=%s output=%s\n' \
+        "$scenario_refund_status" \
+        "$scenario_refund_output"
+      return 1
+    fi
+
+    scenario_withdraw_request_payload="$workdir/reports/refund-after-expiry-withdraw-request.json"
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/withdraw-request \
+        --rpc-url "$base_rpc_url" \
+        --chain-id "$base_chain_id" \
+        --owner-key-file "$bridge_deployer_key_file" \
+        --wjuno-address "$deployed_wjuno_address" \
+        --bridge-address "$deployed_bridge_address" \
+        --amount "1000" \
+        --recipient-raw-address-hex "$scenario_recipient_raw_hex" \
+        --output "$scenario_withdraw_request_payload"
+    ) >/dev/null 2>&1
+    scenario_request_status=$?
+    set -e
+    if (( scenario_request_status != 0 )); then
+      printf 'refund-after-expiry scenario failed to request withdrawal: status=%s\n' "$scenario_request_status"
+      return 1
+    fi
+
+    refund_after_expiry_withdrawal_id="$(jq -r '.withdrawalId // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
+    refund_after_expiry_request_expiry="$(jq -r '.expiry // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
+    [[ "$refund_after_expiry_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+    [[ "$refund_after_expiry_request_expiry" =~ ^[0-9]+$ ]] || return 1
+
+    scenario_wait_deadline=$(( $(date +%s) + scenario_refund_window_seconds + 240 ))
+    for scenario_refund_attempt in $(seq 1 180); do
+      set +e
+      scenario_refund_output="$(
+        cast send \
+          --rpc-url "$base_rpc_url" \
+          --private-key "$bridge_deployer_key_hex" \
+          "$deployed_bridge_address" \
+          "refund(bytes32)" \
+          "$refund_after_expiry_withdrawal_id" 2>&1
+      )"
+      scenario_refund_status=$?
+      set -e
+      if (( scenario_refund_status == 0 )); then
+        if [[ "$scenario_refund_output" =~ (0x[0-9a-fA-F]{64}) ]]; then
+          refund_after_expiry_refund_tx_hash="$(normalize_hex_prefixed "${BASH_REMATCH[1]}" || true)"
+        fi
+        break
+      fi
+
+      if ! is_withdraw_not_expired_error "$scenario_refund_output"; then
+        printf 'refund-after-expiry scenario refund tx failed: status=%s output=%s\n' \
+          "$scenario_refund_status" \
+          "$scenario_refund_output"
+        return 1
+      fi
+
+      scenario_now="$(date +%s)"
+      if (( scenario_now >= scenario_wait_deadline )); then
+        printf 'refund-after-expiry scenario timed out waiting for expiry withdrawalId=%s expiry=%s\n' \
+          "$refund_after_expiry_withdrawal_id" \
+          "$refund_after_expiry_request_expiry"
+        return 1
+      fi
+      sleep 2
+    done
+    [[ -n "$refund_after_expiry_refund_tx_hash" ]] || return 1
+
+    scenario_withdrawal_view_json="$(
+      cast_contract_call_json \
+        "$base_rpc_url" \
+        "$deployed_bridge_address" \
+        "getWithdrawal(bytes32)" \
+        "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
+        "$refund_after_expiry_withdrawal_id"
+    )"
+    scenario_finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$scenario_withdrawal_view_json")"
+    scenario_refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$scenario_withdrawal_view_json")"
+    if [[ "$scenario_refunded_on_chain" != "true" ]]; then
+      printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
+        "$refund_after_expiry_withdrawal_id" \
+        "$scenario_refunded_on_chain"
+      return 1
+    fi
+    if [[ "$scenario_finalized_on_chain" != "false" ]]; then
+      printf 'refund-after-expiry scenario expected finalized=false for withdrawalId=%s (got=%s)\n' \
+        "$refund_after_expiry_withdrawal_id" \
+        "$scenario_finalized_on_chain"
+      return 1
+    fi
+
+    refund_after_expiry_on_chain_refunded="true"
+    return 0
+  }
+
+  if (( relayer_status == 0 )); then
+    operator_down_1_status="running"
+    if run_operator_down_threshold_scenario 1; then
+      operator_down_1_status="passed"
+    else
+      operator_down_1_status="failed"
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    operator_down_2_status="running"
+    if run_operator_down_threshold_scenario 2; then
+      operator_down_2_status="passed"
+    else
+      operator_down_2_status="failed"
+      relayer_status=1
+    fi
+  fi
+
+  stop_remote_relayer_service "$base_relayer_pid"
+  stop_remote_relayer_service "$deposit_relayer_pid"
+  stop_remote_relayer_service "$withdraw_coordinator_pid"
+  stop_remote_relayer_service "$withdraw_finalizer_pid"
 
   if (( relayer_status != 0 )); then
     log "relayer service orchestration failed; showing service logs"
@@ -2742,6 +3616,16 @@ command_run() {
     bridge_status=1
   else
     bridge_status=0
+  fi
+
+  if (( bridge_status == 0 )); then
+    refund_after_expiry_status="running"
+    if run_refund_after_expiry_scenario "$refund_after_expiry_window_seconds"; then
+      refund_after_expiry_status="passed"
+    else
+      refund_after_expiry_status="failed"
+      bridge_status=1
+    fi
   fi
 
   if [[ "$shared_ecs_enabled" == "true" ]]; then
@@ -2823,6 +3707,7 @@ command_run() {
       --arg withdraw_requester "$run_withdraw_requester" \
       --arg withdraw_amount "$run_withdraw_amount" \
       --arg withdraw_fee_bps "$run_withdraw_fee_bps" \
+      --arg withdraw_request_expiry "$run_withdraw_request_expiry" \
       --arg withdraw_recipient_ua "$run_withdraw_recipient_ua" \
       --arg bridge_fee_bps "$bridge_fee_bps" \
       --arg bridge_relayer_tip_bps "$bridge_relayer_tip_bps" \
@@ -2831,6 +3716,8 @@ command_run() {
       --arg invariant_withdraw_requester "$invariant_withdraw_requester" \
       --arg invariant_withdraw_amount "$invariant_withdraw_amount" \
       --arg invariant_withdraw_fee_bps "$invariant_withdraw_fee_bps" \
+      --arg invariant_withdraw_expiry "$invariant_withdraw_expiry" \
+      --arg invariant_withdraw_expiry_extended_vs_request "$invariant_withdraw_expiry_extended_vs_request" \
       --arg invariant_withdraw_finalized "$invariant_withdraw_finalized" \
       --arg invariant_withdraw_refunded "$invariant_withdraw_refunded" \
       --arg invariant_withdraw_recipient_ua "$invariant_withdraw_recipient_ua" \
@@ -2852,6 +3739,7 @@ command_run() {
           requester: (if $withdraw_requester == "" then null else $withdraw_requester end),
           amount: (if $withdraw_amount == "" then null else ($withdraw_amount | tonumber) end),
           fee_bps: (if $withdraw_fee_bps == "" then null else ($withdraw_fee_bps | tonumber) end),
+          expiry: (if $withdraw_request_expiry == "" then null else ($withdraw_request_expiry | tonumber) end),
           recipient_ua: (if $withdraw_recipient_ua == "" then null else $withdraw_recipient_ua end)
         },
         bridge_fee_params: {
@@ -2865,6 +3753,8 @@ command_run() {
             requester: (if $invariant_withdraw_requester == "" then null else $invariant_withdraw_requester end),
             amount: (if $invariant_withdraw_amount == "" then null else ($invariant_withdraw_amount | tonumber) end),
             fee_bps: (if $invariant_withdraw_fee_bps == "" then null else ($invariant_withdraw_fee_bps | tonumber) end),
+            expiry: (if $invariant_withdraw_expiry == "" then null else ($invariant_withdraw_expiry | tonumber) end),
+            extended_vs_request: ($invariant_withdraw_expiry_extended_vs_request == "true"),
             finalized: ($invariant_withdraw_finalized == "true"),
             refunded: ($invariant_withdraw_refunded == "true"),
             recipient_ua: (if $invariant_withdraw_recipient_ua == "" then null else $invariant_withdraw_recipient_ua end)
@@ -2889,6 +3779,72 @@ command_run() {
             },
             match: ($invariant_balance_delta_match == "true")
           }
+        }
+      }'
+  )"
+
+  local expiry_extension_status="failed"
+  if [[ "$invariant_withdraw_expiry_extended_vs_request" == "true" ]]; then
+    expiry_extension_status="passed"
+  fi
+
+  local chaos_scenarios_json
+  chaos_scenarios_json="$(
+    jq -n \
+      --arg direct_cli_user_proof_status "$direct_cli_user_proof_status" \
+      --arg direct_cli_user_proof_summary_path "$direct_cli_user_proof_summary_path" \
+      --arg direct_cli_user_proof_log "$direct_cli_user_proof_log" \
+      --arg direct_cli_user_proof_submission_mode "$direct_cli_user_proof_submission_mode" \
+      --arg direct_cli_user_proof_deposit_request_id "$direct_cli_user_proof_deposit_request_id" \
+      --arg direct_cli_user_proof_withdraw_request_id "$direct_cli_user_proof_withdraw_request_id" \
+      --arg expiry_extension_status "$expiry_extension_status" \
+      --arg run_withdraw_request_expiry "$run_withdraw_request_expiry" \
+      --arg invariant_withdraw_expiry "$invariant_withdraw_expiry" \
+      --arg invariant_withdraw_expiry_extended_vs_request "$invariant_withdraw_expiry_extended_vs_request" \
+      --arg refund_after_expiry_status "$refund_after_expiry_status" \
+      --arg refund_after_expiry_withdrawal_id "$refund_after_expiry_withdrawal_id" \
+      --arg refund_after_expiry_request_expiry "$refund_after_expiry_request_expiry" \
+      --arg refund_after_expiry_refund_tx_hash "$refund_after_expiry_refund_tx_hash" \
+      --arg refund_after_expiry_on_chain_refunded "$refund_after_expiry_on_chain_refunded" \
+      --arg refund_after_expiry_window_seconds "$refund_after_expiry_window_seconds" \
+      --arg operator_down_1_status "$operator_down_1_status" \
+      --arg operator_down_1_endpoint "$operator_down_1_endpoint" \
+      --arg operator_down_1_signature_count "$operator_down_1_signature_count" \
+      --arg operator_down_2_status "$operator_down_2_status" \
+      --arg operator_down_2_endpoint "$operator_down_2_endpoint" \
+      --arg operator_down_2_signature_count "$operator_down_2_signature_count" \
+      '{
+        direct_cli_user_proof: {
+          status: (if $direct_cli_user_proof_status == "" then null else $direct_cli_user_proof_status end),
+          submission_mode: (if $direct_cli_user_proof_submission_mode == "" then null else $direct_cli_user_proof_submission_mode end),
+          deposit_request_id: (if $direct_cli_user_proof_deposit_request_id == "" then null else $direct_cli_user_proof_deposit_request_id end),
+          withdraw_request_id: (if $direct_cli_user_proof_withdraw_request_id == "" then null else $direct_cli_user_proof_withdraw_request_id end),
+          summary_path: (if $direct_cli_user_proof_summary_path == "" then null else $direct_cli_user_proof_summary_path end),
+          log_path: (if $direct_cli_user_proof_log == "" then null else $direct_cli_user_proof_log end)
+        },
+        expiry_extension: {
+          status: (if $expiry_extension_status == "" then null else $expiry_extension_status end),
+          request_expiry: (if $run_withdraw_request_expiry == "" then null else ($run_withdraw_request_expiry | tonumber) end),
+          on_chain_expiry: (if $invariant_withdraw_expiry == "" then null else ($invariant_withdraw_expiry | tonumber) end),
+          extended_vs_request: ($invariant_withdraw_expiry_extended_vs_request == "true")
+        },
+        refund_after_expiry: {
+          status: (if $refund_after_expiry_status == "" then null else $refund_after_expiry_status end),
+          withdrawal_id: (if $refund_after_expiry_withdrawal_id == "" then null else $refund_after_expiry_withdrawal_id end),
+          request_expiry: (if $refund_after_expiry_request_expiry == "" then null else ($refund_after_expiry_request_expiry | tonumber) end),
+          refund_tx_hash: (if $refund_after_expiry_refund_tx_hash == "" then null else $refund_after_expiry_refund_tx_hash end),
+          on_chain_refunded: ($refund_after_expiry_on_chain_refunded == "true"),
+          refund_window_seconds: (if $refund_after_expiry_window_seconds == "" then null else ($refund_after_expiry_window_seconds | tonumber) end)
+        },
+        operator_down_1: {
+          status: (if $operator_down_1_status == "" then null else $operator_down_1_status end),
+          endpoint: (if $operator_down_1_endpoint == "" then null else $operator_down_1_endpoint end),
+          signature_count: (if $operator_down_1_signature_count == "" then null else ($operator_down_1_signature_count | tonumber) end)
+        },
+        operator_down_2: {
+          status: (if $operator_down_2_status == "" then null else $operator_down_2_status end),
+          endpoint: (if $operator_down_2_endpoint == "" then null else $operator_down_2_endpoint end),
+          signature_count: (if $operator_down_2_signature_count == "" then null else ($operator_down_2_signature_count | tonumber) end)
         }
       }'
   )"
@@ -2960,6 +3916,7 @@ command_run() {
     --arg shared_ipfs_api_url "$shared_ipfs_api_url" \
     --arg shared_topic_prefix "$shared_topic_prefix" \
     --arg shared_timeout "$shared_timeout" \
+    --arg aws_dr_region "$aws_dr_region" \
     --arg shared_summary "$shared_summary" \
     --arg proof_request_topic "$proof_request_topic" \
     --arg proof_result_topic "$proof_result_topic" \
@@ -2976,6 +3933,7 @@ command_run() {
     --arg juno_tx_hash_source "$juno_tx_hash_source" \
     --arg juno_funder_present "${JUNO_FUNDER_PRIVATE_KEY_HEX:+true}" \
     --argjson run_invariants "$run_invariants_json" \
+    --argjson chaos_scenarios "$chaos_scenarios_json" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
     --argjson dkg "$dkg_report_public_json" \
     --argjson bridge "$(cat "$bridge_summary")" \
@@ -3056,6 +4014,7 @@ command_run() {
           prefix: (if $withdraw_blob_prefix == "" then null else $withdraw_blob_prefix end)
         },
         live_run_invariants: $run_invariants,
+        chaos_scenarios: $chaos_scenarios,
         report: $bridge
       },
       shared_infra: {
@@ -3065,6 +4024,7 @@ command_run() {
         ipfs_api_url: (if $shared_ipfs_api_url == "" then null else $shared_ipfs_api_url end),
         topic_prefix: (if $shared_topic_prefix == "" then null else $shared_topic_prefix end),
         timeout: (if $shared_timeout == "" then null else $shared_timeout end),
+        dr_region: (if $aws_dr_region == "" then null else $aws_dr_region end),
         proof_topics: {
           request: (if $proof_request_topic == "" then null else $proof_request_topic end),
           result: (if $proof_result_topic == "" then null else $proof_result_topic end),

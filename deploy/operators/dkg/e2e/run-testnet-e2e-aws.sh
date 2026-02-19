@@ -35,7 +35,10 @@ run options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
   --terraform-dir <path>               terraform dir (default: <repo>/deploy/shared/terraform/live-e2e)
   --aws-region <region>                AWS region (required)
+  --aws-dr-region <region>             AWS DR secondary region used for shared-service readiness checks
   --aws-profile <name>                 optional AWS profile for local execution
+  --enable-aws-dr-readiness-checks     enforce shared-service DR readiness checks (default)
+  --disable-aws-dr-readiness-checks    disable DR readiness checks (allowed only with --without-shared-services)
   --aws-name-prefix <prefix>           terraform name prefix (default: juno-live-e2e)
   --aws-instance-type <type>           runner instance type (default: c7i.4xlarge)
   --runner-ami-id <ami-id>             optional custom AMI for runner host
@@ -66,6 +69,8 @@ run options:
   --shared-postgres-db <name>          shared Aurora Postgres DB name (default: intents_e2e)
   --shared-postgres-port <port>        shared Aurora Postgres TCP port (default: 5432)
   --shared-kafka-port <port>           shared MSK TLS Kafka TCP port (default: 9094)
+  --relayer-runtime-mode <mode>        relayer runtime mode for run-testnet-e2e.sh (runner|distributed, default: distributed)
+  --distributed-relayer-runtime        shorthand for --relayer-runtime-mode distributed
   --keep-infra                         do not destroy infra at the end
 
 cleanup options:
@@ -454,6 +459,45 @@ wait_for_shared_connectivity_from_runner() {
   done
 
   return 1
+}
+
+validate_shared_services_dr_readiness() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local aws_dr_region="$3"
+
+  [[ -n "$aws_dr_region" ]] || die "--aws-dr-region is required when shared services are enabled"
+  [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
+
+  aws_env_args "$aws_profile" "$aws_dr_region"
+  env "${AWS_ENV_ARGS[@]}" aws sts get-caller-identity >/dev/null
+
+  local dr_az_count
+  dr_az_count="$(
+    env "${AWS_ENV_ARGS[@]}" aws ec2 describe-availability-zones \
+      --region "$aws_dr_region" \
+      --all-availability-zones \
+      --query 'length(AvailabilityZones[?State==`available` && (OptInStatus==`opt-in-not-required` || OptInStatus==`opted-in`)])' \
+      --output text
+  )"
+  [[ "$dr_az_count" =~ ^[0-9]+$ ]] || die "failed to resolve DR AZ count in region: $aws_dr_region"
+  (( dr_az_count >= 2 )) || die "DR readiness check failed: region $aws_dr_region must have at least 2 available AZs"
+
+  env "${AWS_ENV_ARGS[@]}" aws rds describe-db-engine-versions \
+    --region "$aws_dr_region" \
+    --engine aurora-postgresql \
+    --default-only \
+    --max-records 1 >/dev/null
+
+  env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
+    --region "$aws_dr_region" \
+    --max-results 1 >/dev/null
+
+  env "${AWS_ENV_ARGS[@]}" aws ecs list-clusters \
+    --region "$aws_dr_region" \
+    --max-items 1 >/dev/null
+
+  log "dr readiness checks passed (primary=$aws_region dr=$aws_dr_region available_azs=$dr_az_count)"
 }
 
 build_remote_prepare_script() {
@@ -1259,7 +1303,9 @@ command_run() {
   local workdir="$REPO_ROOT/tmp/aws-live-e2e"
   local terraform_dir="$REPO_ROOT/deploy/shared/terraform/live-e2e"
   local aws_region=""
+  local aws_dr_region=""
   local aws_profile=""
+  local aws_dr_readiness_checks_enabled="true"
   local aws_name_prefix="juno-live-e2e"
   local aws_instance_type="c7i.4xlarge"
   local runner_ami_id=""
@@ -1289,6 +1335,9 @@ command_run() {
   local shared_postgres_db="intents_e2e"
   local shared_postgres_port="5432"
   local shared_kafka_port="9094"
+  local relayer_runtime_mode="distributed"
+  local relayer_runtime_mode_explicit="false"
+  local distributed_relayer_runtime_explicit="false"
   local keep_infra="false"
   local -a e2e_args=()
 
@@ -1309,10 +1358,23 @@ command_run() {
         aws_region="$2"
         shift 2
         ;;
+      --aws-dr-region)
+        [[ $# -ge 2 ]] || die "missing value for --aws-dr-region"
+        aws_dr_region="$2"
+        shift 2
+        ;;
       --aws-profile)
         [[ $# -ge 2 ]] || die "missing value for --aws-profile"
         aws_profile="$2"
         shift 2
+        ;;
+      --enable-aws-dr-readiness-checks)
+        aws_dr_readiness_checks_enabled="true"
+        shift
+        ;;
+      --disable-aws-dr-readiness-checks)
+        aws_dr_readiness_checks_enabled="false"
+        shift
         ;;
       --aws-name-prefix)
         [[ $# -ge 2 ]] || die "missing value for --aws-name-prefix"
@@ -1450,6 +1512,18 @@ command_run() {
         shared_kafka_port="$2"
         shift 2
         ;;
+      --relayer-runtime-mode)
+        [[ $# -ge 2 ]] || die "missing value for --relayer-runtime-mode"
+        relayer_runtime_mode="$(lower "$2")"
+        relayer_runtime_mode_explicit="true"
+        shift 2
+        ;;
+      --distributed-relayer-runtime)
+        relayer_runtime_mode="distributed"
+        relayer_runtime_mode_explicit="true"
+        distributed_relayer_runtime_explicit="true"
+        shift
+        ;;
       --keep-infra)
         keep_infra="true"
         shift
@@ -1491,6 +1565,17 @@ command_run() {
   [[ -n "$shared_postgres_user" ]] || die "--shared-postgres-user must not be empty"
   [[ -n "$shared_postgres_db" ]] || die "--shared-postgres-db must not be empty"
   [[ -n "$dkg_s3_key_prefix" ]] || die "--dkg-s3-key-prefix must not be empty"
+  case "$relayer_runtime_mode" in
+    runner|distributed) ;;
+    *) die "--relayer-runtime-mode must be runner or distributed" ;;
+  esac
+  if [[ "$with_shared_services" == "true" ]]; then
+    if [[ "$aws_dr_readiness_checks_enabled" != "true" ]]; then
+      die "shared services require DR readiness checks; remove --disable-aws-dr-readiness-checks"
+    fi
+    [[ -n "$aws_dr_region" ]] || die "--aws-dr-region is required when shared services are enabled"
+    [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
+  fi
   if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--runner-ami-id must look like an AMI id (ami-...)"
   fi
@@ -1519,6 +1604,8 @@ command_run() {
   local forwarded_operator_count=""
   local forwarded_operator_base_port=""
   local forwarded_threshold=""
+  local forwarded_relayer_runtime_mode=""
+  local relayer_runtime_mode_forwarded="false"
   if forwarded_operator_count="$(forwarded_arg_value "--operator-count" "${e2e_args[@]}" 2>/dev/null)"; then
     [[ "$forwarded_operator_count" =~ ^[0-9]+$ ]] || die "forwarded --operator-count must be numeric"
     if [[ "$operator_count_explicit" == "true" && "$forwarded_operator_count" != "$operator_instance_count" ]]; then
@@ -1537,8 +1624,30 @@ command_run() {
     [[ "$forwarded_threshold" =~ ^[0-9]+$ ]] || die "forwarded --threshold must be numeric"
     dkg_threshold="$forwarded_threshold"
   fi
+  if forwarded_relayer_runtime_mode="$(forwarded_arg_value "--relayer-runtime-mode" "${e2e_args[@]}" 2>/dev/null)"; then
+    forwarded_relayer_runtime_mode="$(lower "$forwarded_relayer_runtime_mode")"
+    case "$forwarded_relayer_runtime_mode" in
+      runner|distributed) ;;
+      *) die "forwarded --relayer-runtime-mode must be runner or distributed" ;;
+    esac
+    if [[ "$relayer_runtime_mode_explicit" == "true" && "$forwarded_relayer_runtime_mode" != "$relayer_runtime_mode" ]]; then
+      die "forwarded --relayer-runtime-mode ($forwarded_relayer_runtime_mode) conflicts with --relayer-runtime-mode ($relayer_runtime_mode)"
+    fi
+    relayer_runtime_mode="$forwarded_relayer_runtime_mode"
+    relayer_runtime_mode_forwarded="true"
+  fi
+  if [[ "$distributed_relayer_runtime_explicit" == "true" && "$relayer_runtime_mode" != "distributed" ]]; then
+    die "--distributed-relayer-runtime requires relayer runtime mode distributed"
+  fi
   (( dkg_threshold >= 2 )) || die "distributed dkg threshold must be >= 2"
   (( dkg_threshold <= operator_instance_count )) || die "distributed dkg threshold must be <= operator instance count"
+
+  if [[ "$with_shared_services" == "true" ]]; then
+    log "shared services are enabled; validating dr readiness"
+    validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"
+  elif [[ -n "$aws_dr_region" && "$aws_dr_readiness_checks_enabled" == "true" ]]; then
+    log "shared services disabled; skipping dr readiness checks for aws-dr-region=$aws_dr_region"
+  fi
 
   if [[ -z "$ssh_allowed_cidr" ]]; then
     local caller_ip
@@ -2008,6 +2117,9 @@ command_run() {
   if [[ -n "$boundless_requestor_key_file" ]]; then
     remote_args+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
   fi
+  if [[ -n "$aws_dr_region" ]]; then
+    remote_args+=("--aws-dr-region" "$aws_dr_region")
+  fi
   if [[ "$with_shared_services" == "true" ]]; then
     log "waiting for shared services connectivity from runner"
     wait_for_shared_connectivity_from_runner \
@@ -2031,6 +2143,18 @@ command_run() {
       "--shared-proof-funder-service-name" "$shared_proof_funder_service_name"
     )
     log "shared service remote args assembled"
+  fi
+  if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+    [[ -n "$operator_private_ips_csv" ]] || die "distributed relayer runtime requires operator private host list"
+    log "distributed relayer runtime enabled; forwarding operator fleet runtime args"
+    if [[ "$relayer_runtime_mode_forwarded" != "true" ]]; then
+      remote_args+=("--relayer-runtime-mode" "$relayer_runtime_mode")
+    fi
+    remote_args+=(
+      "--relayer-runtime-operator-hosts" "$operator_private_ips_csv"
+      "--relayer-runtime-operator-ssh-user" "$runner_ssh_user"
+      "--relayer-runtime-operator-ssh-key-file" ".ci/secrets/operator-fleet-ssh.key"
+    )
   fi
   if forwarded_arg_value "--runtime-mode" "${e2e_args[@]}" >/dev/null 2>&1; then
     die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --runtime-mode)"
@@ -2098,6 +2222,13 @@ fi
 [[ -n "\${JUNO_RPC_PASS:-}" ]] || { echo "JUNO_RPC_PASS is required for withdraw coordinator full mode" >&2; exit 1; }
 export AWS_REGION="${aws_region}"
 export AWS_DEFAULT_REGION="${aws_region}"
+if [[ -n "${aws_dr_region}" ]]; then
+  export AWS_DR_REGION="${aws_dr_region}"
+fi
+export RELAYER_RUNTIME_MODE="${relayer_runtime_mode}"
+export RELAYER_RUNTIME_OPERATOR_HOSTS="${operator_private_ips_csv}"
+export RELAYER_RUNTIME_OPERATOR_SSH_USER="${runner_ssh_user}"
+export RELAYER_RUNTIME_OPERATOR_SSH_KEY_FILE=".ci/secrets/operator-fleet-ssh.key"
 if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then
   export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-}"
 fi
