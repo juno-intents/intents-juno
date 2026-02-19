@@ -114,6 +114,151 @@ func TestParseArgs_RequiresEnoughOperatorKeys(t *testing.T) {
 	}
 }
 
+func TestParseArgs_AcceptsExistingContractAddresses(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	deployer := filepath.Join(tmp, "deployer.key")
+	op1 := filepath.Join(tmp, "op1.key")
+	op2 := filepath.Join(tmp, "op2.key")
+	op3 := filepath.Join(tmp, "op3.key")
+	requestor := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+
+	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write deployer key: %v", err)
+	}
+	if err := os.WriteFile(op1, []byte("0x59c6995e998f97a5a0044976f6f8f5f2b0f95f4d4e4d7d75e4f3f7c06f2a3d9a\n"), 0o600); err != nil {
+		t.Fatalf("write op1 key: %v", err)
+	}
+	if err := os.WriteFile(op2, []byte("0x8b3a350cf5c34c9194ca3a545d4f0b3f15f65f8f5e89f7e5e301d5e7bc7d3c0d\n"), 0o600); err != nil {
+		t.Fatalf("write op2 key: %v", err)
+	}
+	if err := os.WriteFile(op3, []byte("0x0f4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0\n"), 0o600); err != nil {
+		t.Fatalf("write op3 key: %v", err)
+	}
+	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-file", deployer,
+		"--operator-key-file", op1,
+		"--operator-key-file", op2,
+		"--operator-key-file", op3,
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-requestor-key-file", requestor,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+		"--existing-wjuno-address", "0x00000000000000000000000000000000000000a1",
+		"--existing-operator-registry-address", "0x00000000000000000000000000000000000000b2",
+		"--existing-fee-distributor-address", "0x00000000000000000000000000000000000000c3",
+		"--existing-bridge-address", "0x00000000000000000000000000000000000000d4",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if !cfg.ReuseDeployedContracts {
+		t.Fatalf("reuse deployed contracts: got %v want true", cfg.ReuseDeployedContracts)
+	}
+	if cfg.ExistingWJunoAddress != common.HexToAddress("0x00000000000000000000000000000000000000a1") {
+		t.Fatalf("existing wjuno address: got %s", cfg.ExistingWJunoAddress.Hex())
+	}
+	if cfg.ExistingOperatorRegAddress != common.HexToAddress("0x00000000000000000000000000000000000000b2") {
+		t.Fatalf("existing operator registry address: got %s", cfg.ExistingOperatorRegAddress.Hex())
+	}
+	if cfg.ExistingFeeDistributor != common.HexToAddress("0x00000000000000000000000000000000000000c3") {
+		t.Fatalf("existing fee distributor address: got %s", cfg.ExistingFeeDistributor.Hex())
+	}
+	if cfg.ExistingBridgeAddress != common.HexToAddress("0x00000000000000000000000000000000000000d4") {
+		t.Fatalf("existing bridge address: got %s", cfg.ExistingBridgeAddress.Hex())
+	}
+}
+
+func TestParseArgs_RequiresAllExistingContractAddresses(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	deployer := filepath.Join(tmp, "deployer.key")
+	op1 := filepath.Join(tmp, "op1.key")
+	op2 := filepath.Join(tmp, "op2.key")
+	op3 := filepath.Join(tmp, "op3.key")
+	requestor := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+
+	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write deployer key: %v", err)
+	}
+	if err := os.WriteFile(op1, []byte("0x59c6995e998f97a5a0044976f6f8f5f2b0f95f4d4e4d7d75e4f3f7c06f2a3d9a\n"), 0o600); err != nil {
+		t.Fatalf("write op1 key: %v", err)
+	}
+	if err := os.WriteFile(op2, []byte("0x8b3a350cf5c34c9194ca3a545d4f0b3f15f65f8f5e89f7e5e301d5e7bc7d3c0d\n"), 0o600); err != nil {
+		t.Fatalf("write op2 key: %v", err)
+	}
+	if err := os.WriteFile(op3, []byte("0x0f4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0\n"), 0o600); err != nil {
+		t.Fatalf("write op3 key: %v", err)
+	}
+	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-file", deployer,
+		"--operator-key-file", op1,
+		"--operator-key-file", op2,
+		"--operator-key-file", op3,
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-requestor-key-file", requestor,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+		"--existing-bridge-address", "0x00000000000000000000000000000000000000d4",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "all existing contract address flags must be set together") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func runtimeSignerParseArgsBase(t *testing.T) []string {
 	t.Helper()
 

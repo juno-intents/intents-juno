@@ -28,6 +28,7 @@ Options:
   --bridge-address <address>       Bridge address for standby checkpoint stack
                                    (default: 0x0000000000000000000000000000000000000000)
   --sync-timeout-seconds <n>       max seconds to wait for junocashd sync (default: 21600)
+  --tss-signer-runtime-mode <mode> default tss signer runtime mode (nitro-enclave|host-process, default: nitro-enclave)
   --source-ami-id <ami-id>         optional base AMI id for builder (default: latest Ubuntu 24.04 amd64)
   --vpc-id <vpc-id>                optional VPC id (default: default VPC)
   --subnet-id <subnet-id>          optional subnet id (default: first available subnet in VPC)
@@ -151,6 +152,7 @@ build_remote_bootstrap_script() {
   local base_chain_id="$3"
   local bridge_address="$4"
   local sync_timeout_seconds="$5"
+  local tss_signer_runtime_mode="$6"
 
   cat <<REMOTE_SCRIPT
 #!/usr/bin/env bash
@@ -326,8 +328,17 @@ WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
 JUNO_SCAN_BEARER_TOKEN=
+TSS_SIGNER_RUNTIME_MODE=${tss_signer_runtime_mode}
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
 TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+TSS_NITRO_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer
+TSS_NITRO_ENCLAVE_EIF_FILE=/var/lib/intents-juno/operator-runtime/enclave/spendauth-signer.eif
+TSS_NITRO_ENCLAVE_CID=16
+TSS_NITRO_ATTESTATION_FILE=/var/lib/intents-juno/operator-runtime/attestation/spendauth-attestation.json
+TSS_NITRO_EXPECTED_PCR0=
+TSS_NITRO_EXPECTED_PCR1=
+TSS_NITRO_EXPECTED_PCR2=
+TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS=300
 TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
 TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
 TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
@@ -463,6 +474,151 @@ EOF_AGG
   sed -i "s/__BASE_CHAIN_ID__/${base_chain_id}/g; s/__BRIDGE_ADDRESS__/${bridge_address}/g" /tmp/intents-juno-checkpoint-aggregator.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
 
+  cat > /tmp/intents-juno-spendauth-signer.sh <<'EOF_TSS_SPENDAUTH'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+
+normalize_hex() {
+  local value="${1:-}"
+  value="${value#0x}"
+  printf '%s' "${value,,}"
+}
+
+parse_epoch() {
+  local raw="$1"
+  if [[ "$raw" =~ ^[0-9]+$ ]]; then
+    printf '%s' "$raw"
+    return 0
+  fi
+  date -u -d "$raw" +%s 2>/dev/null
+}
+
+validate_nitro_attestation() {
+  local attestation_file="$1"
+  local expected_pcr0="$2"
+  local expected_pcr1="$3"
+  local expected_pcr2="$4"
+  local expected_cid="$5"
+  local max_age_seconds="$6"
+  local attested_pcr0 attested_pcr1 attested_pcr2 attested_cid attested_timestamp
+  local attested_epoch now_epoch age_seconds
+
+  attested_pcr0="$(jq -er '.pcrs["0"] // .pcr0 // empty' "$attestation_file")" || {
+    echo "tss-host nitro attestation missing pcr0: $attestation_file" >&2
+    return 1
+  }
+  attested_pcr1="$(jq -er '.pcrs["1"] // .pcr1 // empty' "$attestation_file")" || {
+    echo "tss-host nitro attestation missing pcr1: $attestation_file" >&2
+    return 1
+  }
+  attested_pcr2="$(jq -er '.pcrs["2"] // .pcr2 // empty' "$attestation_file")" || {
+    echo "tss-host nitro attestation missing pcr2: $attestation_file" >&2
+    return 1
+  }
+  if [[ "$(normalize_hex "$attested_pcr0")" != "$(normalize_hex "$expected_pcr0")" ]]; then
+    echo "tss-host nitro attestation pcr0 mismatch" >&2
+    return 1
+  fi
+  if [[ "$(normalize_hex "$attested_pcr1")" != "$(normalize_hex "$expected_pcr1")" ]]; then
+    echo "tss-host nitro attestation pcr1 mismatch" >&2
+    return 1
+  fi
+  if [[ "$(normalize_hex "$attested_pcr2")" != "$(normalize_hex "$expected_pcr2")" ]]; then
+    echo "tss-host nitro attestation pcr2 mismatch" >&2
+    return 1
+  fi
+
+  if [[ -n "$expected_cid" ]]; then
+    attested_cid="$(jq -er '.enclave_cid // .enclave.cid // empty' "$attestation_file")" || {
+      echo "tss-host nitro attestation missing enclave cid: $attestation_file" >&2
+      return 1
+    }
+    if [[ "$attested_cid" != "$expected_cid" ]]; then
+      echo "tss-host nitro attestation enclave cid mismatch: expected=$expected_cid actual=$attested_cid" >&2
+      return 1
+    fi
+  fi
+
+  attested_timestamp="$(jq -er '.timestamp // .timestamp_unix // .issued_at // empty' "$attestation_file")" || {
+    echo "tss-host nitro attestation missing timestamp: $attestation_file" >&2
+    return 1
+  }
+  attested_epoch="$(parse_epoch "$attested_timestamp")" || {
+    echo "tss-host nitro attestation timestamp is invalid: $attested_timestamp" >&2
+    return 1
+  }
+  if [[ "$attested_epoch" =~ ^[0-9]{13,}$ ]]; then
+    attested_epoch="$((attested_epoch / 1000))"
+  fi
+  [[ "$attested_epoch" =~ ^[0-9]+$ ]] || {
+    echo "tss-host nitro attestation timestamp did not resolve to epoch seconds: $attested_timestamp" >&2
+    return 1
+  }
+  now_epoch="$(date -u +%s)"
+  age_seconds="$((now_epoch - attested_epoch))"
+  if (( age_seconds < 0 || age_seconds > max_age_seconds )); then
+    echo "tss-host nitro attestation is stale or from the future: age_seconds=$age_seconds max_age_seconds=$max_age_seconds" >&2
+    return 1
+  fi
+}
+
+runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
+case "$runtime_mode" in
+  nitro-enclave)
+    [[ -x "${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_SPENDAUTH_SIGNER_BIN executable: ${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ENCLAVE_EIF_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ENCLAVE_EIF_FILE: ${TSS_NITRO_ENCLAVE_EIF_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ATTESTATION_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ATTESTATION_FILE: ${TSS_NITRO_ATTESTATION_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR0:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR0" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR1:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR1" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR2:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR2" >&2
+      exit 1
+    }
+    [[ "${TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS:-}" =~ ^[0-9]+$ ]] || {
+      echo "tss-host nitro mode requires numeric TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS" >&2
+      exit 1
+    }
+    validate_nitro_attestation \
+      "${TSS_NITRO_ATTESTATION_FILE}" \
+      "${TSS_NITRO_EXPECTED_PCR0}" \
+      "${TSS_NITRO_EXPECTED_PCR1}" \
+      "${TSS_NITRO_EXPECTED_PCR2}" \
+      "${TSS_NITRO_ENCLAVE_CID:-}" \
+      "${TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS}"
+    exec "${TSS_NITRO_SPENDAUTH_SIGNER_BIN}" "$@"
+    ;;
+  host-process)
+    [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    exec "${TSS_SPENDAUTH_SIGNER_BIN}" "$@"
+    ;;
+  *)
+    echo "unsupported TSS_SIGNER_RUNTIME_MODE: ${TSS_SIGNER_RUNTIME_MODE:-unset} (expected nitro-enclave or host-process)" >&2
+    exit 1
+    ;;
+esac
+EOF_TSS_SPENDAUTH
+  sudo install -m 0755 /tmp/intents-juno-spendauth-signer.sh /usr/local/bin/intents-juno-spendauth-signer.sh
+
   cat > /tmp/intents-juno-tss-host.sh <<'EOF_TSS'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -470,10 +626,6 @@ set -euo pipefail
 source /etc/intents-juno/operator-stack.env
 [[ -s "${TSS_SIGNER_UFVK_FILE:-}" ]] || {
   echo "tss-host signer UFVK file is missing or empty: ${TSS_SIGNER_UFVK_FILE:-unset}" >&2
-  exit 1
-}
-[[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
-  echo "tss-host spendauth signer binary is missing or not executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
   exit 1
 }
 [[ -n "${TSS_SIGNER_WORK_DIR:-}" ]] || {
@@ -488,6 +640,49 @@ source /etc/intents-juno/operator-stack.env
   echo "tss-host TLS key is missing or empty: ${TSS_TLS_KEY_FILE:-unset}" >&2
   exit 1
 }
+runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
+case "$runtime_mode" in
+  nitro-enclave)
+    [[ -x "${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_SPENDAUTH_SIGNER_BIN executable: ${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ENCLAVE_EIF_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ENCLAVE_EIF_FILE: ${TSS_NITRO_ENCLAVE_EIF_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ATTESTATION_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ATTESTATION_FILE: ${TSS_NITRO_ATTESTATION_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR0:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR0" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR1:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR1" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR2:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR2" >&2
+      exit 1
+    }
+    [[ "${TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS:-}" =~ ^[0-9]+$ ]] || {
+      echo "tss-host nitro mode requires numeric TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS" >&2
+      exit 1
+    }
+    ;;
+  host-process)
+    [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    ;;
+  *)
+    echo "unsupported TSS_SIGNER_RUNTIME_MODE: ${TSS_SIGNER_RUNTIME_MODE:-unset} (expected nitro-enclave or host-process)" >&2
+    exit 1
+    ;;
+esac
 mkdir -p "${TSS_SIGNER_WORK_DIR}"
 exec /usr/local/bin/tss-host \
   --listen-addr 127.0.0.1:9443 \
@@ -497,7 +692,7 @@ exec /usr/local/bin/tss-host \
   --signer-arg --ufvk-file \
   --signer-arg "${TSS_SIGNER_UFVK_FILE}" \
   --signer-arg --spendauth-signer-bin \
-  --signer-arg "${TSS_SPENDAUTH_SIGNER_BIN}" \
+  --signer-arg /usr/local/bin/intents-juno-spendauth-signer.sh \
   --signer-arg --work-dir \
   --signer-arg "${TSS_SIGNER_WORK_DIR}"
 EOF_TSS
@@ -1112,6 +1307,7 @@ write_bootstrap_metadata() {
     --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     --arg repo_url "${repo_url}" \
     --arg repo_commit "${repo_commit}" \
+    --arg tss_signer_runtime_mode "${tss_signer_runtime_mode}" \
     --arg junocash_release_tag "\$juno_release_tag" \
     --arg juno_scan_release_tag "\$juno_scan_release_tag" \
     --argjson synced_block_height "\$block_height" \
@@ -1133,6 +1329,9 @@ write_bootstrap_metadata() {
       },
       operator: {
         operator_id: \$operator_address
+      },
+      tss: {
+        signer_runtime_mode_default: \$tss_signer_runtime_mode
       },
       services: [
         "junocashd.service",
@@ -1194,6 +1393,7 @@ command_create() {
   local base_chain_id="84532"
   local bridge_address="0x0000000000000000000000000000000000000000"
   local sync_timeout_seconds="21600"
+  local tss_signer_runtime_mode="nitro-enclave"
   local source_ami_id=""
   local vpc_id=""
   local subnet_id=""
@@ -1249,6 +1449,11 @@ command_create() {
       --sync-timeout-seconds)
         [[ $# -ge 2 ]] || die "missing value for --sync-timeout-seconds"
         sync_timeout_seconds="$2"
+        shift 2
+        ;;
+      --tss-signer-runtime-mode)
+        [[ $# -ge 2 ]] || die "missing value for --tss-signer-runtime-mode"
+        tss_signer_runtime_mode="${2,,}"
         shift 2
         ;;
       --source-ami-id)
@@ -1308,6 +1513,10 @@ command_create() {
   [[ -n "$aws_region" ]] || die "--aws-region is required"
   [[ "$sync_timeout_seconds" =~ ^[0-9]+$ ]] || die "--sync-timeout-seconds must be numeric"
   (( sync_timeout_seconds > 0 )) || die "--sync-timeout-seconds must be > 0"
+  case "$tss_signer_runtime_mode" in
+    nitro-enclave|host-process) ;;
+    *) die "--tss-signer-runtime-mode must be nitro-enclave or host-process" ;;
+  esac
   [[ "$base_chain_id" =~ ^[0-9]+$ ]] || die "--base-chain-id must be numeric"
   [[ "$bridge_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "--bridge-address must be a 20-byte hex address"
   if [[ -n "$source_ami_id" && ! "$source_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
@@ -1440,7 +1649,7 @@ command_create() {
 
   local remote_bootstrap_script
   remote_bootstrap_script="$(mktemp)"
-  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" >"$remote_bootstrap_script"
+  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" "$tss_signer_runtime_mode" >"$remote_bootstrap_script"
   chmod 0700 "$remote_bootstrap_script"
 
   local -a ssh_opts
@@ -1513,6 +1722,7 @@ command_create() {
     --arg synced_block_hash "$synced_block_hash" \
     --argjson base_chain_id "$base_chain_id" \
     --arg bridge_address "$bridge_address" \
+    --arg tss_signer_runtime_mode "$tss_signer_runtime_mode" \
     '{
       manifest_version: 1,
       generated_at: $generated_at,
@@ -1536,6 +1746,7 @@ command_create() {
       stack: {
         base_chain_id: $base_chain_id,
         bridge_address: $bridge_address,
+        tss_signer_runtime_mode_default: $tss_signer_runtime_mode,
         services: [
           "junocashd.service",
           "juno-scan.service",

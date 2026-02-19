@@ -10,11 +10,16 @@ source "$SCRIPT_DIR/../common.sh"
 prepare_script_runtime "$SCRIPT_DIR"
 
 cleanup_enabled="false"
-cleanup_workdir=""
 cleanup_terraform_dir=""
 cleanup_aws_profile=""
-cleanup_aws_region=""
-cleanup_boundless_requestor_secret_arn=""
+cleanup_primary_state_file=""
+cleanup_primary_tfvars_file=""
+cleanup_primary_aws_region=""
+cleanup_primary_boundless_requestor_secret_arn=""
+cleanup_dr_state_file=""
+cleanup_dr_tfvars_file=""
+cleanup_dr_aws_region=""
+cleanup_dr_boundless_requestor_secret_arn=""
 AWS_ENV_ARGS=()
 
 usage() {
@@ -35,7 +40,7 @@ run options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
   --terraform-dir <path>               terraform dir (default: <repo>/deploy/shared/terraform/live-e2e)
   --aws-region <region>                AWS region (required)
-  --aws-dr-region <region>             AWS DR secondary region used for shared-service readiness checks
+  --aws-dr-region <region>             AWS DR secondary region for readiness checks and dual-region provisioning
   --aws-profile <name>                 optional AWS profile for local execution
   --enable-aws-dr-readiness-checks     enforce shared-service DR readiness checks (default)
   --disable-aws-dr-readiness-checks    disable DR readiness checks (allowed only with --without-shared-services)
@@ -77,6 +82,7 @@ cleanup options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
   --terraform-dir <path>               terraform dir (default: <repo>/deploy/shared/terraform/live-e2e)
   --aws-region <region>                optional AWS region override
+  --aws-dr-region <region>             optional AWS DR region override
   --aws-profile <name>                 optional AWS profile override
 
 Notes:
@@ -201,6 +207,25 @@ delete_boundless_requestor_secret() {
     --force-delete-without-recovery >/dev/null
 }
 
+run_with_retry() {
+  local description="$1"
+  local max_attempts="$2"
+  local sleep_seconds="$3"
+  shift 3
+
+  local attempt
+  for ((attempt = 1; attempt <= max_attempts; attempt++)); do
+    if "$@"; then
+      return 0
+    fi
+    if (( attempt < max_attempts )); then
+      log "$description failed (attempt $attempt/$max_attempts); retrying in ${sleep_seconds}s"
+      sleep "$sleep_seconds"
+    fi
+  done
+  return 1
+}
+
 terraform_apply_live_e2e() {
   local terraform_dir="$1"
   local state_file="$2"
@@ -209,14 +234,16 @@ terraform_apply_live_e2e() {
   local aws_region="$5"
 
   terraform_env_args "$aws_profile" "$aws_region"
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-    -chdir="$terraform_dir" \
-    apply \
-    -input=false \
-    -auto-approve \
-    -state="$state_file" \
-    -var-file="$tfvars_file"
+  run_with_retry "terraform init (region=$aws_region state=$state_file)" 3 5 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+  run_with_retry "terraform apply (region=$aws_region state=$state_file)" 3 10 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      apply \
+      -input=false \
+      -auto-approve \
+      -state="$state_file" \
+      -var-file="$tfvars_file"
 }
 
 terraform_destroy_live_e2e() {
@@ -232,14 +259,16 @@ terraform_destroy_live_e2e() {
   fi
 
   terraform_env_args "$aws_profile" "$aws_region"
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
-  env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-    -chdir="$terraform_dir" \
-    destroy \
-    -input=false \
-    -auto-approve \
-    -state="$state_file" \
-    -var-file="$tfvars_file"
+  run_with_retry "terraform init (region=$aws_region state=$state_file)" 3 5 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+  run_with_retry "terraform destroy (region=$aws_region state=$state_file)" 3 10 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      destroy \
+      -input=false \
+      -auto-approve \
+      -state="$state_file" \
+      -var-file="$tfvars_file"
 }
 
 sanitize_dkg_summary_file() {
@@ -264,19 +293,31 @@ cleanup_trap() {
     return 0
   fi
 
-  local infra_dir state_file tfvars_file
-  infra_dir="$cleanup_workdir/infra"
-  state_file="$infra_dir/terraform.tfstate"
-  tfvars_file="$infra_dir/terraform.tfvars.json"
-
-  log "cleanup trap: destroying live e2e infrastructure"
-  if ! terraform_destroy_live_e2e "$cleanup_terraform_dir" "$state_file" "$tfvars_file" "$cleanup_aws_profile" "$cleanup_aws_region"; then
-    log "cleanup trap destroy failed (manual cleanup may be required)"
+  if [[ -n "$cleanup_dr_state_file" && -n "$cleanup_dr_tfvars_file" ]]; then
+    log "cleanup trap: destroying dr live e2e infrastructure"
+    if ! terraform_destroy_live_e2e "$cleanup_terraform_dir" "$cleanup_dr_state_file" "$cleanup_dr_tfvars_file" "$cleanup_aws_profile" "$cleanup_dr_aws_region"; then
+      log "cleanup trap dr destroy failed (manual cleanup may be required)"
+    fi
   fi
-  if [[ -n "$cleanup_boundless_requestor_secret_arn" ]]; then
-    log "cleanup trap: deleting boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_aws_region" "$cleanup_boundless_requestor_secret_arn"; then
-      log "cleanup trap secret delete failed (manual cleanup may be required)"
+
+  if [[ -n "$cleanup_primary_state_file" && -n "$cleanup_primary_tfvars_file" ]]; then
+    log "cleanup trap: destroying primary live e2e infrastructure"
+    if ! terraform_destroy_live_e2e "$cleanup_terraform_dir" "$cleanup_primary_state_file" "$cleanup_primary_tfvars_file" "$cleanup_aws_profile" "$cleanup_primary_aws_region"; then
+      log "cleanup trap primary destroy failed (manual cleanup may be required)"
+    fi
+  fi
+
+  if [[ -n "$cleanup_dr_boundless_requestor_secret_arn" ]]; then
+    log "cleanup trap: deleting dr boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_boundless_requestor_secret_arn"; then
+      log "cleanup trap dr secret delete failed (manual cleanup may be required)"
+    fi
+  fi
+
+  if [[ -n "$cleanup_primary_boundless_requestor_secret_arn" ]]; then
+    log "cleanup trap: deleting primary boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_boundless_requestor_secret_arn"; then
+      log "cleanup trap primary secret delete failed (manual cleanup may be required)"
     fi
   fi
 }
@@ -1237,6 +1278,7 @@ command_cleanup() {
   local terraform_dir="$REPO_ROOT/deploy/shared/terraform/live-e2e"
   local aws_profile=""
   local aws_region=""
+  local aws_dr_region=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1260,6 +1302,11 @@ command_cleanup() {
         aws_region="$2"
         shift 2
         ;;
+      --aws-dr-region)
+        [[ $# -ge 2 ]] || die "missing value for --aws-dr-region"
+        aws_dr_region="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -1270,29 +1317,62 @@ command_cleanup() {
     esac
   done
 
-  local infra_dir state_file tfvars_file
+  local infra_dir state_file tfvars_file dr_state_file dr_tfvars_file
   infra_dir="$workdir/infra"
   state_file="$infra_dir/terraform.tfstate"
   tfvars_file="$infra_dir/terraform.tfvars.json"
+  dr_state_file="$infra_dir/dr/terraform.tfstate"
+  dr_tfvars_file="$infra_dir/dr/terraform.tfvars.json"
 
-  if [[ ! -f "$tfvars_file" ]]; then
-    log "cleanup: tfvars file not found; nothing to destroy"
+  if [[ ! -f "$tfvars_file" && ! -f "$dr_tfvars_file" ]]; then
+    log "cleanup: primary/dr tfvars files not found; nothing to destroy"
     return 0
   fi
 
-  if [[ -z "$aws_region" ]]; then
-    aws_region="$(jq -r '.aws_region // empty' "$tfvars_file")"
+  local primary_region_for_cleanup dr_region_for_cleanup
+  primary_region_for_cleanup="$aws_region"
+  dr_region_for_cleanup="$aws_dr_region"
+  if [[ -z "$primary_region_for_cleanup" && -f "$tfvars_file" ]]; then
+    primary_region_for_cleanup="$(jq -r '.aws_region // empty' "$tfvars_file")"
+  fi
+  if [[ -z "$dr_region_for_cleanup" && -f "$dr_tfvars_file" ]]; then
+    dr_region_for_cleanup="$(jq -r '.aws_region // empty' "$dr_tfvars_file")"
   fi
 
   local boundless_requestor_secret_arn=""
-  boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+  local boundless_requestor_secret_arn_dr=""
+  if [[ -f "$tfvars_file" ]]; then
+    boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+  fi
+  if [[ -f "$dr_tfvars_file" ]]; then
+    boundless_requestor_secret_arn_dr="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$dr_tfvars_file")"
+  fi
 
-  terraform_destroy_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
+  if [[ -f "$dr_tfvars_file" ]]; then
+    log "cleanup: destroying dr live e2e infrastructure"
+    if ! terraform_destroy_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$dr_region_for_cleanup"; then
+      log "cleanup: dr destroy failed (manual cleanup may be required)"
+    fi
+  fi
+
+  if [[ -f "$tfvars_file" ]]; then
+    log "cleanup: destroying primary live e2e infrastructure"
+    if ! terraform_destroy_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$primary_region_for_cleanup"; then
+      log "cleanup: primary destroy failed (manual cleanup may be required)"
+    fi
+  fi
+
+  if [[ -n "$boundless_requestor_secret_arn_dr" ]]; then
+    log "cleanup: deleting dr boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$aws_profile" "$dr_region_for_cleanup" "$boundless_requestor_secret_arn_dr"; then
+      log "cleanup: dr boundless requestor secret delete failed or secret already removed"
+    fi
+  fi
 
   if [[ -n "$boundless_requestor_secret_arn" ]]; then
-    log "cleanup: deleting boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$aws_profile" "$aws_region" "$boundless_requestor_secret_arn"; then
-      log "cleanup: boundless requestor secret delete failed or secret already removed"
+    log "cleanup: deleting primary boundless requestor secret"
+    if ! delete_boundless_requestor_secret "$aws_profile" "$primary_region_for_cleanup" "$boundless_requestor_secret_arn"; then
+      log "cleanup: primary boundless requestor secret delete failed or secret already removed"
     fi
   fi
 }
@@ -1671,6 +1751,7 @@ command_run() {
   ssh-keygen -t ed25519 -N "" -f "$ssh_key_private" >/dev/null
 
   local deployment_id
+  local dr_deployment_id=""
   deployment_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
   local shared_postgres_password
   shared_postgres_password="$(openssl rand -hex 16)"
@@ -1678,8 +1759,36 @@ command_run() {
   boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
   [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
   local boundless_requestor_secret_arn=""
+  local boundless_requestor_secret_arn_dr=""
+
+  local tfvars_file state_file
+  local dr_tfvars_file=""
+  local dr_state_file=""
+  tfvars_file="$infra_dir/terraform.tfvars.json"
+  state_file="$infra_dir/terraform.tfstate"
   if [[ "$with_shared_services" == "true" ]]; then
+    dr_tfvars_file="$infra_dir/dr/terraform.tfvars.json"
+    dr_state_file="$infra_dir/dr/terraform.tfstate"
+    ensure_dir "$(dirname "$dr_tfvars_file")"
+  fi
+
+  cleanup_terraform_dir="$terraform_dir"
+  cleanup_aws_profile="$aws_profile"
+  cleanup_primary_state_file="$state_file"
+  cleanup_primary_tfvars_file="$tfvars_file"
+  cleanup_primary_aws_region="$aws_region"
+  cleanup_primary_boundless_requestor_secret_arn=""
+  cleanup_dr_state_file="$dr_state_file"
+  cleanup_dr_tfvars_file="$dr_tfvars_file"
+  cleanup_dr_aws_region="$aws_dr_region"
+  cleanup_dr_boundless_requestor_secret_arn=""
+  cleanup_enabled="true"
+  trap cleanup_trap EXIT
+
+  if [[ "$with_shared_services" == "true" ]]; then
+    dr_deployment_id="${deployment_id}-dr"
     local secret_name_prefix boundless_requestor_secret_name
+    local boundless_requestor_secret_name_dr
     secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
     secret_name_prefix="${secret_name_prefix#-}"
     secret_name_prefix="${secret_name_prefix%-}"
@@ -1694,19 +1803,20 @@ command_run() {
         "$boundless_requestor_key_hex"
     )"
     [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
+    cleanup_primary_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
+
+    boundless_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-boundless-requestor-key"
+    log "creating dr boundless requestor secret"
+    boundless_requestor_secret_arn_dr="$(
+      create_boundless_requestor_secret \
+        "$aws_profile" \
+        "$aws_dr_region" \
+        "$boundless_requestor_secret_name_dr" \
+        "$boundless_requestor_key_hex"
+    )"
+    [[ -n "$boundless_requestor_secret_arn_dr" && "$boundless_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr boundless requestor secret"
+    cleanup_dr_boundless_requestor_secret_arn="$boundless_requestor_secret_arn_dr"
   fi
-
-  local tfvars_file state_file
-  tfvars_file="$infra_dir/terraform.tfvars.json"
-  state_file="$infra_dir/terraform.tfstate"
-
-  cleanup_workdir="$workdir"
-  cleanup_terraform_dir="$terraform_dir"
-  cleanup_aws_profile="$aws_profile"
-  cleanup_aws_region="$aws_region"
-  cleanup_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
-  cleanup_enabled="true"
-  trap cleanup_trap EXIT
 
   local provision_shared_services_json
   if [[ "$with_shared_services" == "true" ]]; then
@@ -1769,8 +1879,23 @@ command_run() {
       dkg_s3_key_prefix: $dkg_s3_key_prefix
     }' >"$tfvars_file"
 
+  if [[ "$with_shared_services" == "true" ]]; then
+    jq \
+      --arg aws_region "$aws_dr_region" \
+      --arg deployment_id "$dr_deployment_id" \
+      --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn_dr" \
+      '.aws_region = $aws_region
+      | .deployment_id = $deployment_id
+      | .shared_boundless_requestor_secret_arn = $shared_boundless_requestor_secret_arn' \
+      "$tfvars_file" >"$dr_tfvars_file"
+  fi
+
   log "provisioning AWS runner (deployment_id=$deployment_id)"
   terraform_apply_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
+  if [[ "$with_shared_services" == "true" ]]; then
+    log "provisioning AWS dr stack (deployment_id=$dr_deployment_id)"
+    terraform_apply_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$aws_dr_region"
+  fi
 
   local runner_public_ip runner_ssh_user
   terraform_env_args "$aws_profile" "$aws_region"

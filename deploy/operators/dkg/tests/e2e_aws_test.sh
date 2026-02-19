@@ -358,6 +358,26 @@ test_aws_wrapper_supports_dr_readiness_and_distributed_relayer_runtime() {
   assert_contains "$wrapper_script_text" "export RELAYER_RUNTIME_OPERATOR_SSH_KEY_FILE=\".ci/secrets/operator-fleet-ssh.key\"" "aws wrapper exports relayer runtime ssh key env for remote e2e"
 }
 
+test_aws_wrapper_provisions_and_cleans_dr_stack() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "local dr_tfvars_file=\"\"" "aws wrapper tracks dr tfvars path"
+  assert_contains "$wrapper_script_text" "local dr_state_file=\"\"" "aws wrapper tracks dr state path"
+  assert_contains "$wrapper_script_text" "local dr_deployment_id=\"\"" "aws wrapper tracks dr deployment id"
+  assert_contains "$wrapper_script_text" "dr_tfvars_file=\"\$infra_dir/dr/terraform.tfvars.json\"" "aws wrapper writes dedicated dr tfvars file"
+  assert_contains "$wrapper_script_text" "dr_state_file=\"\$infra_dir/dr/terraform.tfstate\"" "aws wrapper writes dedicated dr terraform state file"
+  assert_contains "$wrapper_script_text" "dr_deployment_id=\"\${deployment_id}-dr\"" "aws wrapper uses dedicated dr deployment id"
+  assert_contains "$wrapper_script_text" "terraform_apply_live_e2e \"\$terraform_dir\" \"\$dr_state_file\" \"\$dr_tfvars_file\" \"\$aws_profile\" \"\$aws_dr_region\"" "aws wrapper applies dr terraform stack"
+  assert_contains "$wrapper_script_text" "cleanup_dr_state_file=\"\$dr_state_file\"" "aws wrapper registers dr state file for trap cleanup"
+  assert_contains "$wrapper_script_text" "cleanup_dr_tfvars_file=\"\$dr_tfvars_file\"" "aws wrapper registers dr tfvars file for trap cleanup"
+  assert_contains "$wrapper_script_text" "cleanup_dr_aws_region=\"\$aws_dr_region\"" "aws wrapper registers dr region for trap cleanup"
+  assert_contains "$wrapper_script_text" "cleanup_dr_boundless_requestor_secret_arn=\"\$boundless_requestor_secret_arn_dr\"" "aws wrapper registers dr boundless secret for trap cleanup"
+  assert_contains "$wrapper_script_text" "terraform_destroy_live_e2e \"\$cleanup_terraform_dir\" \"\$cleanup_dr_state_file\" \"\$cleanup_dr_tfvars_file\" \"\$cleanup_aws_profile\" \"\$cleanup_dr_aws_region\"" "aws wrapper trap destroys dr terraform stack"
+  assert_contains "$wrapper_script_text" "--aws-dr-region <region>             optional AWS DR region override" "aws wrapper cleanup command supports dr region override"
+  assert_contains "$wrapper_script_text" "terraform_destroy_live_e2e \"\$terraform_dir\" \"\$dr_state_file\" \"\$dr_tfvars_file\" \"\$aws_profile\" \"\$dr_region_for_cleanup\"" "aws wrapper cleanup command destroys dr terraform stack"
+}
+
 test_local_e2e_supports_shared_infra_validation() {
   local e2e_script_text
   e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
@@ -420,12 +440,15 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "start_remote_relayer_service()" "distributed relayer runtime helper exists"
   assert_contains "$e2e_script_text" "stop_remote_relayer_service()" "distributed relayer runtime cleanup helper exists"
   assert_contains "$e2e_script_text" "distributed relayer runtime enabled; launching relayers on operator hosts" "distributed relayer runtime launch log"
+  assert_contains "$e2e_script_text" "base-relayer host=" "distributed relayer runtime logs base-relayer host"
   assert_contains "$e2e_script_text" "deposit-relayer host=" "distributed relayer runtime logs deposit host"
   assert_contains "$e2e_script_text" "withdraw-coordinator host=" "distributed relayer runtime logs coordinator host"
   assert_contains "$e2e_script_text" "withdraw-finalizer host=" "distributed relayer runtime logs finalizer host"
+  assert_contains "$e2e_script_text" "/usr/local/bin/base-relayer" "distributed relayer runtime uses operator-installed base relayer binary"
   assert_contains "$e2e_script_text" "/usr/local/bin/deposit-relayer" "distributed relayer runtime uses operator-installed deposit relayer binary"
   assert_contains "$e2e_script_text" "/usr/local/bin/withdraw-coordinator" "distributed relayer runtime uses operator-installed withdraw coordinator binary"
   assert_contains "$e2e_script_text" "/usr/local/bin/withdraw-finalizer" "distributed relayer runtime uses operator-installed withdraw finalizer binary"
+  assert_not_contains "$e2e_script_text" "resolve_runner_relayer_host()" "distributed relayer runtime no longer depends on runner host discovery"
   assert_not_contains "$e2e_script_text" "--runtime-mode mock" "withdraw coordinator mock runtime removed from live e2e"
   assert_contains "$e2e_script_text" "--juno-rpc-url \"\$boundless_witness_juno_rpc_url\"" "withdraw coordinator uses witness-derived Juno RPC"
   assert_contains "$e2e_script_text" "--juno-wallet-id \"\$withdraw_coordinator_juno_wallet_id\"" "withdraw coordinator receives generated witness wallet id"
@@ -536,6 +559,13 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "balance delta invariant failed" "run-scoped invariants validate fee/balance deltas"
   assert_contains "$e2e_script_text" "run_direct_cli_user_proof_scenario()" "live e2e defines direct-cli proof scenario helper"
   assert_contains "$e2e_script_text" "--boundless-proof-submission-mode\" \"direct-cli\"" "direct-cli proof scenario uses boundless direct-cli mode"
+  assert_contains "$e2e_script_text" "direct-cli-user-proof-deploy-summary.json" "direct-cli proof scenario records deploy bootstrap summary"
+  assert_contains "$e2e_script_text" "--existing-wjuno-address" "direct-cli proof scenario reuses deployed wjuno contract"
+  assert_contains "$e2e_script_text" "--existing-operator-registry-address" "direct-cli proof scenario reuses deployed operator registry contract"
+  assert_contains "$e2e_script_text" "--existing-fee-distributor-address" "direct-cli proof scenario reuses deployed fee distributor contract"
+  assert_contains "$e2e_script_text" "--existing-bridge-address" "direct-cli proof scenario reuses deployed bridge contract"
+  assert_not_contains "$e2e_script_text" 'direct_cli_bridge_deploy_nonce=$((direct_cli_deployer_nonce + 3))' "direct-cli proof scenario no longer predicts bridge address from nonce offset"
+  assert_not_contains "$e2e_script_text" "cast compute-address --nonce" "direct-cli proof scenario no longer relies on cast compute-address prediction"
   assert_contains "$e2e_script_text" "direct-cli user proof scenario failed" "live e2e fails hard when direct-cli proof scenario fails"
   assert_contains "$e2e_script_text" "run_operator_down_threshold_scenario()" "live e2e defines operator-down threshold scenario helper"
   assert_contains "$e2e_script_text" "inject_operator_endpoint_failure()" "live e2e defines operator failure injection helper"
@@ -734,13 +764,30 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_contains "$runbook_text" "--signer-bin /usr/local/bin/tss-signer" "runbook configures tss-host to use real tss-signer binary"
   assert_contains "$runbook_text" "--signer-arg --ufvk-file" "runbook forwards ufvk signer arg"
   assert_contains "$runbook_text" "--signer-arg --spendauth-signer-bin" "runbook forwards spendauth signer arg"
+  assert_contains "$runbook_text" "--signer-arg /usr/local/bin/intents-juno-spendauth-signer.sh" "runbook routes tss spendauth signing through mode-aware wrapper"
   assert_contains "$runbook_text" "TSS_TLS_CERT_FILE=" "runbook records tss tls cert path in operator stack env"
   assert_contains "$runbook_text" "TSS_TLS_KEY_FILE=" "runbook records tss tls key path in operator stack env"
+  assert_contains "$runbook_text" 'local tss_signer_runtime_mode="nitro-enclave"' "runbook defaults tss signer runtime mode to nitro enclave"
+  assert_contains "$runbook_text" "TSS_SIGNER_RUNTIME_MODE=\${tss_signer_runtime_mode}" "runbook wires selected tss signer runtime mode into operator stack env"
+  assert_contains "$runbook_text" "--tss-signer-runtime-mode <mode>" "runbook exposes tss signer runtime mode option"
+  assert_contains "$runbook_text" "--tss-signer-runtime-mode must be nitro-enclave or host-process" "runbook validates tss signer runtime mode option values"
+  assert_contains "$runbook_text" "TSS_NITRO_ENCLAVE_EIF_FILE=" "runbook records nitro enclave image artifact path"
+  assert_contains "$runbook_text" "TSS_NITRO_SPENDAUTH_SIGNER_BIN=" "runbook records nitro spendauth signer bridge binary path"
+  assert_contains "$runbook_text" "TSS_NITRO_ATTESTATION_FILE=" "runbook records nitro attestation evidence file path"
+  assert_contains "$runbook_text" "TSS_NITRO_EXPECTED_PCR0=" "runbook records nitro pcr0 expectation placeholder"
+  assert_contains "$runbook_text" "TSS_NITRO_EXPECTED_PCR1=" "runbook records nitro pcr1 expectation placeholder"
+  assert_contains "$runbook_text" "TSS_NITRO_EXPECTED_PCR2=" "runbook records nitro pcr2 expectation placeholder"
+  assert_contains "$runbook_text" "TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS=300" "runbook defaults nitro attestation freshness window"
   assert_contains "$runbook_text" "--tls-cert-file \"\${TSS_TLS_CERT_FILE}\"" "runbook configures tss-host tls cert"
   assert_contains "$runbook_text" "--tls-key-file \"\${TSS_TLS_KEY_FILE}\"" "runbook configures tss-host tls key"
   assert_not_contains "$runbook_text" "--insecure-http" "runbook removes insecure tss-host http mode"
   assert_contains "$runbook_text" "TSS_SIGNER_UFVK_FILE=" "runbook records ufvk runtime artifact path"
   assert_contains "$runbook_text" "TSS_SPENDAUTH_SIGNER_BIN=" "runbook records spendauth signer runtime artifact path"
+  assert_contains "$runbook_text" "tss-host nitro mode requires TSS_NITRO_ENCLAVE_EIF_FILE" "runbook validates nitro enclave image artifact before tss-host startup"
+  assert_contains "$runbook_text" "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN" "runbook validates host fallback signer binary when host mode is selected"
+  assert_contains "$runbook_text" "unsupported TSS_SIGNER_RUNTIME_MODE" "runbook rejects unknown tss signer runtime mode"
+  assert_contains "$runbook_text" "tss-host nitro attestation pcr0 mismatch" "runbook validates nitro attestation pcr0"
+  assert_not_contains "$runbook_text" '--signer-arg "${TSS_SPENDAUTH_SIGNER_BIN}"' "runbook no longer binds tss-host directly to host spendauth signer"
   assert_not_contains "$runbook_text" "--signer-bin /bin/true" "runbook no longer configures noop tss signer"
   assert_not_contains "$runbook_text" "--runtime-mode mock" "runbook excludes withdraw coordinator mock runtime mode"
   assert_not_contains "$runbook_text" "--proof-driver mock" "runbook excludes mock proof driver settings"
@@ -781,6 +828,7 @@ main() {
   test_aws_wrapper_collects_artifacts_after_remote_failures
   test_aws_wrapper_wires_shared_services_into_remote_e2e
   test_aws_wrapper_supports_dr_readiness_and_distributed_relayer_runtime
+  test_aws_wrapper_provisions_and_cleans_dr_stack
   test_local_e2e_supports_shared_infra_validation
   test_e2e_workflows_exclude_sensitive_artifact_paths
   test_local_e2e_supports_external_dkg_summary_path

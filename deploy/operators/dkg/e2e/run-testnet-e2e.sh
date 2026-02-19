@@ -815,44 +815,6 @@ parse_csv_list() {
   done
 }
 
-resolve_runner_relayer_host() {
-  local candidate=""
-  candidate="$(
-    hostname -I 2>/dev/null \
-      | awk '
-          {
-            for (i = 1; i <= NF; i++) {
-              if ($i !~ /^127\./) {
-                print $i
-                exit
-              }
-            }
-          }
-        '
-  )"
-  if [[ -z "$candidate" ]]; then
-    candidate="$(hostname -i 2>/dev/null || true)"
-  fi
-  if [[ -z "$candidate" ]] && command -v ip >/dev/null 2>&1; then
-    candidate="$(
-      ip route get 1.1.1.1 2>/dev/null \
-        | awk '
-            /src/ {
-              for (i = 1; i <= NF; i++) {
-                if ($i == "src" && (i + 1) <= NF) {
-                  print $(i + 1)
-                  exit
-                }
-              }
-            }
-          '
-    )"
-  fi
-  candidate="$(trim "$candidate")"
-  [[ -n "$candidate" ]] || return 1
-  printf '%s' "$candidate"
-}
-
 start_remote_relayer_service() {
   local host="$1"
   local ssh_user="$2"
@@ -2281,8 +2243,9 @@ command_run() {
   run_direct_cli_user_proof_scenario() {
     local witness_metadata_json direct_cli_withdraw_txid direct_cli_withdraw_action_index
     local direct_cli_recipient_raw_hex direct_cli_recipient_raw_hex_prefixed
-    local direct_cli_deployer_nonce direct_cli_bridge_deploy_nonce
-    local direct_cli_compute_address_output direct_cli_bridge_address
+    local direct_cli_bridge_deploy_summary direct_cli_bridge_deploy_log
+    local direct_cli_deployed_wjuno_address direct_cli_deployed_operator_registry_address
+    local direct_cli_deployed_fee_distributor_address direct_cli_deployed_bridge_address
     local direct_cli_domain_tag direct_cli_recipient_hash direct_cli_predicted_withdrawal_id
     local direct_cli_withdraw_witness_file direct_cli_withdraw_witness_json
     local direct_cli_bridge_summary direct_cli_bridge_log
@@ -2290,6 +2253,10 @@ command_run() {
     local direct_cli_status
     local direct_cli_requestor_key_file="$boundless_requestor_key_file"
     local witness_file
+    local operator_id operator_endpoint
+    local -a direct_cli_bridge_base_args=()
+    local -a direct_cli_bridge_deploy_args=()
+    local -a direct_cli_bridge_run_args=()
 
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
     direct_cli_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json" 2>/dev/null || true)"
@@ -2300,69 +2267,10 @@ command_run() {
     [[ "$direct_cli_withdraw_action_index" =~ ^[0-9]+$ ]] || return 1
     [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
 
-    direct_cli_deployer_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
-    if [[ ! "$direct_cli_deployer_nonce" =~ ^[0-9]+$ ]]; then
-      direct_cli_deployer_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block latest "$bridge_deployer_address" 2>/dev/null || true)"
-    fi
-    [[ "$direct_cli_deployer_nonce" =~ ^[0-9]+$ ]] || return 1
+    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || return 1
+    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || return 1
 
-    direct_cli_bridge_deploy_nonce=$((direct_cli_deployer_nonce + 3))
-    direct_cli_compute_address_output="$(cast compute-address --nonce "$direct_cli_bridge_deploy_nonce" "$bridge_deployer_address" 2>/dev/null || true)"
-    if [[ "$direct_cli_compute_address_output" =~ (0x[0-9a-fA-F]{40}) ]]; then
-      direct_cli_bridge_address="${BASH_REMATCH[1]}"
-    else
-      return 1
-    fi
-
-    direct_cli_domain_tag="$(cast format-bytes32-string "WJUNO_WITHDRAW_V1" 2>/dev/null || true)"
-    [[ "$direct_cli_domain_tag" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
-
-    direct_cli_recipient_hash="$(cast keccak "$direct_cli_recipient_raw_hex_prefixed" 2>/dev/null || true)"
-    direct_cli_recipient_hash="$(normalize_hex_prefixed "$direct_cli_recipient_hash" || true)"
-    [[ "$direct_cli_recipient_hash" =~ ^0x[0-9a-f]{64}$ ]] || return 1
-
-    direct_cli_predicted_withdrawal_id="$(
-      cast keccak "$(
-        cast abi-encode \
-          "f(bytes32,uint256,address,uint256,address,uint256,bytes32)" \
-          "$direct_cli_domain_tag" \
-          "$base_chain_id" \
-          "$direct_cli_bridge_address" \
-          "1" \
-          "$bridge_deployer_address" \
-          "$direct_cli_withdraw_amount" \
-          "$direct_cli_recipient_hash"
-      )" 2>/dev/null || true
-    )"
-    direct_cli_predicted_withdrawal_id="$(normalize_hex_prefixed "$direct_cli_predicted_withdrawal_id" || true)"
-    [[ "$direct_cli_predicted_withdrawal_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
-
-    direct_cli_withdraw_witness_file="$workdir/reports/witness/direct-cli-withdraw.witness.bin"
-    direct_cli_withdraw_witness_json="$workdir/reports/witness/direct-cli-withdraw.json"
-    local -a direct_cli_withdraw_extract_cmd=(go run ./cmd/juno-witness-extract)
-    if ! (
-      cd "$REPO_ROOT"
-      "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$withdraw_coordinator_juno_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$direct_cli_withdraw_txid" \
-        --action-index "$direct_cli_withdraw_action_index" \
-        --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
-        --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
-        --output-witness-item-file "$direct_cli_withdraw_witness_file" \
-        >"$direct_cli_withdraw_witness_json"
-    ); then
-      return 1
-    fi
-
-    direct_cli_bridge_summary="$workdir/reports/direct-cli-user-proof-summary.json"
-    direct_cli_bridge_log="$workdir/reports/direct-cli-user-proof.log"
-    local -a direct_cli_bridge_args=()
-    direct_cli_bridge_args+=(
+    direct_cli_bridge_base_args+=(
       "--rpc-url" "$base_rpc_url"
       "--chain-id" "$base_chain_id"
       "--deployer-key-file" "$bridge_deployer_key_file"
@@ -2372,7 +2280,6 @@ command_run() {
       "--recipient" "$bridge_recipient_address"
       "--boundless-auto"
       "--run-timeout" "$bridge_run_timeout"
-      "--output" "$direct_cli_bridge_summary"
       "--verifier-address" "$bridge_verifier_address"
       "--deposit-image-id" "$bridge_deposit_image_id"
       "--withdraw-image-id" "$bridge_withdraw_image_id"
@@ -2409,21 +2316,111 @@ command_run() {
       "--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex"
       "--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex"
     )
-    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-      direct_cli_bridge_args+=("--boundless-deposit-witness-item-file" "$witness_file")
-    done
-    direct_cli_bridge_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
     while IFS=$'\t' read -r operator_id operator_endpoint; do
       [[ -n "$operator_id" ]] || continue
       [[ -n "$operator_endpoint" ]] || return 1
-      direct_cli_bridge_args+=("--operator-address" "$operator_id")
-      direct_cli_bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
+      direct_cli_bridge_base_args+=("--operator-address" "$operator_id")
+      direct_cli_bridge_base_args+=("--operator-signer-endpoint" "$operator_endpoint")
     done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
+
+    direct_cli_bridge_deploy_summary="$workdir/reports/direct-cli-user-proof-deploy-summary.json"
+    direct_cli_bridge_deploy_log="$workdir/reports/direct-cli-user-proof-deploy.log"
+    direct_cli_bridge_deploy_args=("${direct_cli_bridge_base_args[@]}")
+    direct_cli_bridge_deploy_args+=(
+      "--deploy-only"
+      "--output" "$direct_cli_bridge_deploy_summary"
+    )
+    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+      direct_cli_bridge_deploy_args+=("--boundless-deposit-witness-item-file" "$witness_file")
+    done
+    for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
+      direct_cli_bridge_deploy_args+=("--boundless-withdraw-witness-item-file" "$witness_file")
+    done
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/bridge-e2e "${direct_cli_bridge_deploy_args[@]}"
+    ) >"$direct_cli_bridge_deploy_log" 2>&1
+    direct_cli_status="$?"
+    set -e
+    if (( direct_cli_status != 0 )); then
+      tail -n 200 "$direct_cli_bridge_deploy_log" >&2 || true
+      return 1
+    fi
+
+    direct_cli_deployed_wjuno_address="$(jq -r '.contracts.wjuno // empty' "$direct_cli_bridge_deploy_summary" 2>/dev/null || true)"
+    direct_cli_deployed_operator_registry_address="$(jq -r '.contracts.operator_registry // empty' "$direct_cli_bridge_deploy_summary" 2>/dev/null || true)"
+    direct_cli_deployed_fee_distributor_address="$(jq -r '.contracts.fee_distributor // empty' "$direct_cli_bridge_deploy_summary" 2>/dev/null || true)"
+    direct_cli_deployed_bridge_address="$(jq -r '.contracts.bridge // empty' "$direct_cli_bridge_deploy_summary" 2>/dev/null || true)"
+    [[ "$direct_cli_deployed_wjuno_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
+    [[ "$direct_cli_deployed_operator_registry_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
+    [[ "$direct_cli_deployed_fee_distributor_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
+    [[ "$direct_cli_deployed_bridge_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
+
+    direct_cli_domain_tag="$(cast format-bytes32-string "WJUNO_WITHDRAW_V1" 2>/dev/null || true)"
+    [[ "$direct_cli_domain_tag" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+
+    direct_cli_recipient_hash="$(cast keccak "$direct_cli_recipient_raw_hex_prefixed" 2>/dev/null || true)"
+    direct_cli_recipient_hash="$(normalize_hex_prefixed "$direct_cli_recipient_hash" || true)"
+    [[ "$direct_cli_recipient_hash" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+    direct_cli_predicted_withdrawal_id="$(
+      cast keccak "$(
+        cast abi-encode \
+          "f(bytes32,uint256,address,uint256,address,uint256,bytes32)" \
+          "$direct_cli_domain_tag" \
+          "$base_chain_id" \
+          "$direct_cli_deployed_bridge_address" \
+          "1" \
+          "$bridge_deployer_address" \
+          "$direct_cli_withdraw_amount" \
+          "$direct_cli_recipient_hash"
+      )" 2>/dev/null || true
+    )"
+    direct_cli_predicted_withdrawal_id="$(normalize_hex_prefixed "$direct_cli_predicted_withdrawal_id" || true)"
+    [[ "$direct_cli_predicted_withdrawal_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+    direct_cli_withdraw_witness_file="$workdir/reports/witness/direct-cli-withdraw.witness.bin"
+    direct_cli_withdraw_witness_json="$workdir/reports/witness/direct-cli-withdraw.json"
+    local -a direct_cli_withdraw_extract_cmd=(go run ./cmd/juno-witness-extract)
+    if ! (
+      cd "$REPO_ROOT"
+      "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
+        --juno-scan-url "$boundless_witness_juno_scan_url" \
+        --wallet-id "$withdraw_coordinator_juno_wallet_id" \
+        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+        --txid "$direct_cli_withdraw_txid" \
+        --action-index "$direct_cli_withdraw_action_index" \
+        --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
+        --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
+        --output-witness-item-file "$direct_cli_withdraw_witness_file" \
+        >"$direct_cli_withdraw_witness_json"
+    ); then
+      return 1
+    fi
+
+    direct_cli_bridge_summary="$workdir/reports/direct-cli-user-proof-summary.json"
+    direct_cli_bridge_log="$workdir/reports/direct-cli-user-proof.log"
+    direct_cli_bridge_run_args=("${direct_cli_bridge_base_args[@]}")
+    direct_cli_bridge_run_args+=(
+      "--output" "$direct_cli_bridge_summary"
+      "--existing-wjuno-address" "$direct_cli_deployed_wjuno_address"
+      "--existing-operator-registry-address" "$direct_cli_deployed_operator_registry_address"
+      "--existing-fee-distributor-address" "$direct_cli_deployed_fee_distributor_address"
+      "--existing-bridge-address" "$direct_cli_deployed_bridge_address"
+    )
+    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
+      direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$witness_file")
+    done
+    direct_cli_bridge_run_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
 
     set +e
     (
       cd "$REPO_ROOT"
-      go run ./cmd/bridge-e2e "${direct_cli_bridge_args[@]}"
+      go run ./cmd/bridge-e2e "${direct_cli_bridge_run_args[@]}"
     ) >"$direct_cli_bridge_log" 2>&1
     direct_cli_status="$?"
     set -e
@@ -2765,8 +2762,7 @@ command_run() {
   local withdraw_coordinator_pid=""
   local withdraw_finalizer_pid=""
   local relayer_status=0
-  local runner_relayer_host=""
-  local base_relayer_listen_host="127.0.0.1"
+  local base_relayer_host=""
   local deposit_relayer_host=""
   local withdraw_coordinator_host=""
   local withdraw_finalizer_host=""
@@ -2794,10 +2790,8 @@ command_run() {
     relayer_host_count="${#relayer_runtime_operator_hosts[@]}"
     (( relayer_host_count > 0 )) || \
       die "--relayer-runtime-operator-hosts must include at least one host when --relayer-runtime-mode=distributed"
-    runner_relayer_host="$(resolve_runner_relayer_host || true)"
-    [[ -n "$runner_relayer_host" ]] || die "failed to resolve runner host for distributed relayer runtime"
-    base_relayer_listen_host="0.0.0.0"
-    base_relayer_url="http://${runner_relayer_host}:${base_relayer_port}"
+    base_relayer_host="${relayer_runtime_operator_hosts[0]}"
+    base_relayer_url="http://${base_relayer_host}:${base_relayer_port}"
 
     deposit_relayer_host="${relayer_runtime_operator_hosts[0]}"
     withdraw_coordinator_host="${relayer_runtime_operator_hosts[0]}"
@@ -2809,6 +2803,7 @@ command_run() {
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
 
     log "distributed relayer runtime enabled; launching relayers on operator hosts"
+    log "base-relayer host=$base_relayer_host"
     log "deposit-relayer host=$deposit_relayer_host"
     log "withdraw-coordinator host=$withdraw_coordinator_host"
     log "withdraw-finalizer host=$withdraw_finalizer_host"
@@ -2825,17 +2820,34 @@ command_run() {
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   fi
 
-  (
-    cd "$REPO_ROOT"
-    BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
-      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-      go run ./cmd/base-relayer \
+  if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+    base_relayer_pid="$(
+      start_remote_relayer_service \
+        "$base_relayer_host" \
+        "$relayer_runtime_operator_ssh_user" \
+        "$relayer_runtime_operator_ssh_key_file" \
+        "$base_relayer_log" \
+        env \
+        BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        /usr/local/bin/base-relayer \
         --rpc-url "$base_rpc_url" \
         --chain-id "$base_chain_id" \
-        --listen "${base_relayer_listen_host}:${base_relayer_port}" \
-        >"$base_relayer_log" 2>&1
-  ) &
-  base_relayer_pid="$!"
+        --listen "0.0.0.0:${base_relayer_port}"
+    )"
+  else
+    (
+      cd "$REPO_ROOT"
+      BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
+        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        go run ./cmd/base-relayer \
+          --rpc-url "$base_rpc_url" \
+          --chain-id "$base_chain_id" \
+          --listen "127.0.0.1:${base_relayer_port}" \
+          >"$base_relayer_log" 2>&1
+    ) &
+    base_relayer_pid="$!"
+  fi
   sleep 3
   if ! kill -0 "$base_relayer_pid" >/dev/null 2>&1; then
     relayer_status=1

@@ -59,6 +59,7 @@ type config struct {
 	RPCURL                      string
 	ChainID                     uint64
 	DeployOnly                  bool
+	ReuseDeployedContracts      bool
 	DeployerKeyHex              string
 	OperatorKeyFiles            []string
 	OperatorAddresses           []common.Address
@@ -79,6 +80,10 @@ type config struct {
 	RecipientSet                bool
 	VerifierAddress             common.Address
 	VerifierSet                 bool
+	ExistingWJunoAddress        common.Address
+	ExistingOperatorRegAddress  common.Address
+	ExistingFeeDistributor      common.Address
+	ExistingBridgeAddress       common.Address
 	DepositImageID              common.Hash
 	WithdrawImageID             common.Hash
 	DepositSeal                 []byte
@@ -468,6 +473,10 @@ func parseArgs(args []string) (config, error) {
 	var boundlessInputS3Prefix string
 	var boundlessInputS3Region string
 	var boundlessProofQueueBrokers string
+	var existingWJunoAddressHex string
+	var existingOperatorRegAddressHex string
+	var existingFeeDistributorHex string
+	var existingBridgeAddressHex string
 	var junoExecutionTxHash string
 
 	filteredArgs, operatorKeyFiles, err := consumeOperatorKeyFileFlags(args)
@@ -505,6 +514,10 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
 	fs.BoolVar(&cfg.DeployOnly, "deploy-only", false, "deploy/configure contracts only; skip deposit/withdraw/finalize flow")
+	fs.StringVar(&existingWJunoAddressHex, "existing-wjuno-address", "", "reuse predeployed WJuno contract address (requires all --existing-*-address flags)")
+	fs.StringVar(&existingOperatorRegAddressHex, "existing-operator-registry-address", "", "reuse predeployed OperatorRegistry contract address (requires all --existing-*-address flags)")
+	fs.StringVar(&existingFeeDistributorHex, "existing-fee-distributor-address", "", "reuse predeployed FeeDistributor contract address (requires all --existing-*-address flags)")
+	fs.StringVar(&existingBridgeAddressHex, "existing-bridge-address", "", "reuse predeployed Bridge contract address (requires all --existing-*-address flags)")
 
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
@@ -634,6 +647,50 @@ func parseArgs(args []string) (config, error) {
 		}
 		cfg.VerifierAddress = common.HexToAddress(verifierAddressHex)
 		cfg.VerifierSet = true
+	}
+	existingContractFlags := []struct {
+		flagName string
+		raw      string
+		out      *common.Address
+	}{
+		{
+			flagName: "--existing-wjuno-address",
+			raw:      existingWJunoAddressHex,
+			out:      &cfg.ExistingWJunoAddress,
+		},
+		{
+			flagName: "--existing-operator-registry-address",
+			raw:      existingOperatorRegAddressHex,
+			out:      &cfg.ExistingOperatorRegAddress,
+		},
+		{
+			flagName: "--existing-fee-distributor-address",
+			raw:      existingFeeDistributorHex,
+			out:      &cfg.ExistingFeeDistributor,
+		},
+		{
+			flagName: "--existing-bridge-address",
+			raw:      existingBridgeAddressHex,
+			out:      &cfg.ExistingBridgeAddress,
+		},
+	}
+	providedExistingContractFlags := 0
+	for _, contractFlag := range existingContractFlags {
+		if strings.TrimSpace(contractFlag.raw) != "" {
+			providedExistingContractFlags++
+		}
+	}
+	if providedExistingContractFlags != 0 && providedExistingContractFlags != len(existingContractFlags) {
+		return cfg, errors.New("all existing contract address flags must be set together: --existing-wjuno-address, --existing-operator-registry-address, --existing-fee-distributor-address, --existing-bridge-address")
+	}
+	if providedExistingContractFlags == len(existingContractFlags) {
+		for _, contractFlag := range existingContractFlags {
+			if !common.IsHexAddress(contractFlag.raw) {
+				return cfg, fmt.Errorf("%s must be a valid hex address", contractFlag.flagName)
+			}
+			*contractFlag.out = common.HexToAddress(contractFlag.raw)
+		}
+		cfg.ReuseDeployedContracts = true
 	}
 
 	cfg.DepositImageID, err = parseHash32Flag("--deposit-image-id", depositImageIDHex)
@@ -1115,23 +1172,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	verifierAddr := cfg.VerifierAddress
-
-	wjunoAddr, _, err := deployContract(ctx, client, auth, wjunoABI, wjunoBin, owner)
-	if err != nil {
-		return nil, fmt.Errorf("deploy wjuno: %w", err)
-	}
-	logProgress("deployed wjuno=%s", wjunoAddr.Hex())
-	regAddr, _, err := deployContract(ctx, client, auth, regABI, regBin, owner)
-	if err != nil {
-		return nil, fmt.Errorf("deploy operator registry: %w", err)
-	}
-	logProgress("deployed operator_registry=%s", regAddr.Hex())
-	fdAddr, _, err := deployContract(ctx, client, auth, fdABI, fdBin, owner, wjunoAddr, regAddr)
-	if err != nil {
-		return nil, fmt.Errorf("deploy fee distributor: %w", err)
-	}
-	logProgress("deployed fee_distributor=%s", fdAddr.Hex())
-
 	depositImageID := cfg.DepositImageID
 	withdrawImageID := cfg.WithdrawImageID
 	const feeBps uint64 = 50
@@ -1139,55 +1179,93 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	const refundWindowSeconds uint64 = 24 * 60 * 60
 	const maxExtendSeconds uint64 = 12 * 60 * 60
 
-	bridgeAddr, _, err := deployContract(
-		ctx, client, auth, bridgeABI, bridgeBin,
-		owner,
-		wjunoAddr,
-		fdAddr,
-		regAddr,
-		verifierAddr,
-		depositImageID,
-		withdrawImageID,
-		new(big.Int).SetUint64(feeBps),
-		new(big.Int).SetUint64(tipBps),
-		refundWindowSeconds,
-		maxExtendSeconds,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("deploy bridge: %w", err)
+	var wjunoAddr common.Address
+	var regAddr common.Address
+	var fdAddr common.Address
+	var bridgeAddr common.Address
+	var setFeeDistributorTx common.Hash
+	var setThresholdTx common.Hash
+	var setBridgeWJunoTx common.Hash
+	var setBridgeFeesTx common.Hash
+
+	if cfg.ReuseDeployedContracts {
+		wjunoAddr = cfg.ExistingWJunoAddress
+		regAddr = cfg.ExistingOperatorRegAddress
+		fdAddr = cfg.ExistingFeeDistributor
+		bridgeAddr = cfg.ExistingBridgeAddress
+		logProgress("reusing deployed wjuno=%s", wjunoAddr.Hex())
+		logProgress("reusing deployed operator_registry=%s", regAddr.Hex())
+		logProgress("reusing deployed fee_distributor=%s", fdAddr.Hex())
+		logProgress("reusing deployed bridge=%s", bridgeAddr.Hex())
+	} else {
+		wjunoAddr, _, err = deployContract(ctx, client, auth, wjunoABI, wjunoBin, owner)
+		if err != nil {
+			return nil, fmt.Errorf("deploy wjuno: %w", err)
+		}
+		logProgress("deployed wjuno=%s", wjunoAddr.Hex())
+		regAddr, _, err = deployContract(ctx, client, auth, regABI, regBin, owner)
+		if err != nil {
+			return nil, fmt.Errorf("deploy operator registry: %w", err)
+		}
+		logProgress("deployed operator_registry=%s", regAddr.Hex())
+		fdAddr, _, err = deployContract(ctx, client, auth, fdABI, fdBin, owner, wjunoAddr, regAddr)
+		if err != nil {
+			return nil, fmt.Errorf("deploy fee distributor: %w", err)
+		}
+		logProgress("deployed fee_distributor=%s", fdAddr.Hex())
+
+		bridgeAddr, _, err = deployContract(
+			ctx, client, auth, bridgeABI, bridgeBin,
+			owner,
+			wjunoAddr,
+			fdAddr,
+			regAddr,
+			verifierAddr,
+			depositImageID,
+			withdrawImageID,
+			new(big.Int).SetUint64(feeBps),
+			new(big.Int).SetUint64(tipBps),
+			refundWindowSeconds,
+			maxExtendSeconds,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("deploy bridge: %w", err)
+		}
+		logProgress("deployed bridge=%s", bridgeAddr.Hex())
 	}
-	logProgress("deployed bridge=%s", bridgeAddr.Hex())
 
 	reg := bind.NewBoundContract(regAddr, regABI, client, client, client)
 	fd := bind.NewBoundContract(fdAddr, fdABI, client, client, client)
 	wjuno := bind.NewBoundContract(wjunoAddr, wjunoABI, client, client, client)
 	bridge := bind.NewBoundContract(bridgeAddr, bridgeABI, client, client, client)
 
-	setFeeDistributorTx, err := transactAndWait(ctx, client, auth, reg, "setFeeDistributor", fdAddr)
-	if err != nil {
-		return nil, fmt.Errorf("setFeeDistributor: %w", err)
-	}
-
-	for _, op := range operatorAddrs {
-		if _, err := transactAndWait(ctx, client, auth, reg, "setOperator", op, op, big.NewInt(1), true); err != nil {
-			return nil, fmt.Errorf("setOperator(%s): %w", op.Hex(), err)
+	if !cfg.ReuseDeployedContracts {
+		setFeeDistributorTx, err = transactAndWait(ctx, client, auth, reg, "setFeeDistributor", fdAddr)
+		if err != nil {
+			return nil, fmt.Errorf("setFeeDistributor: %w", err)
 		}
-	}
 
-	setThresholdTx, err := transactAndWait(ctx, client, auth, reg, "setThreshold", big.NewInt(int64(cfg.Threshold)))
-	if err != nil {
-		return nil, fmt.Errorf("setThreshold: %w", err)
-	}
+		for _, op := range operatorAddrs {
+			if _, err := transactAndWait(ctx, client, auth, reg, "setOperator", op, op, big.NewInt(1), true); err != nil {
+				return nil, fmt.Errorf("setOperator(%s): %w", op.Hex(), err)
+			}
+		}
 
-	setBridgeWJunoTx, err := transactAndWait(ctx, client, auth, wjuno, "setBridge", bridgeAddr)
-	if err != nil {
-		return nil, fmt.Errorf("wjuno.setBridge: %w", err)
+		setThresholdTx, err = transactAndWait(ctx, client, auth, reg, "setThreshold", big.NewInt(int64(cfg.Threshold)))
+		if err != nil {
+			return nil, fmt.Errorf("setThreshold: %w", err)
+		}
+
+		setBridgeWJunoTx, err = transactAndWait(ctx, client, auth, wjuno, "setBridge", bridgeAddr)
+		if err != nil {
+			return nil, fmt.Errorf("wjuno.setBridge: %w", err)
+		}
+		setBridgeFeesTx, err = transactAndWait(ctx, client, auth, fd, "setBridge", bridgeAddr)
+		if err != nil {
+			return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
+		}
+		logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
 	}
-	setBridgeFeesTx, err := transactAndWait(ctx, client, auth, fd, "setBridge", bridgeAddr)
-	if err != nil {
-		return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
-	}
-	logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
 
 	registryOperatorCount, err := callUint64(ctx, reg, "operatorCount")
 	if err != nil {
@@ -1250,10 +1328,18 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Checkpoint.Height = cfg.DepositCheckpointHeight
 		rep.Checkpoint.BlockHash = cfg.DepositCheckpointBlockHash.Hex()
 		rep.Checkpoint.FinalOrchardRoot = cfg.DepositFinalOrchardRoot.Hex()
-		rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
-		rep.Transactions.SetThreshold = setThresholdTx.Hex()
-		rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
-		rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
+		if setFeeDistributorTx != (common.Hash{}) {
+			rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
+		}
+		if setThresholdTx != (common.Hash{}) {
+			rep.Transactions.SetThreshold = setThresholdTx.Hex()
+		}
+		if setBridgeWJunoTx != (common.Hash{}) {
+			rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
+		}
+		if setBridgeFeesTx != (common.Hash{}) {
+			rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
+		}
 		rep.Proof.DepositImageID = cfg.DepositImageID.Hex()
 		rep.Proof.WithdrawImageID = cfg.WithdrawImageID.Hex()
 		rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
@@ -1729,10 +1815,18 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Checkpoint.BlockHash = cpDeposit.BlockHash.Hex()
 	rep.Checkpoint.FinalOrchardRoot = cpDeposit.FinalOrchardRoot.Hex()
 
-	rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
-	rep.Transactions.SetThreshold = setThresholdTx.Hex()
-	rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
-	rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
+	if setFeeDistributorTx != (common.Hash{}) {
+		rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
+	}
+	if setThresholdTx != (common.Hash{}) {
+		rep.Transactions.SetThreshold = setThresholdTx.Hex()
+	}
+	if setBridgeWJunoTx != (common.Hash{}) {
+		rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
+	}
+	if setBridgeFeesTx != (common.Hash{}) {
+		rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
+	}
 	if mintBatchTx != (common.Hash{}) {
 		rep.Transactions.MintBatch = mintBatchTx.Hex()
 	}
