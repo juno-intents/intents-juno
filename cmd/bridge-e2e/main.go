@@ -58,6 +58,7 @@ func (f *stringListFlag) Set(value string) error {
 type config struct {
 	RPCURL                      string
 	ChainID                     uint64
+	DeployOnly                  bool
 	DeployerKeyHex              string
 	OperatorKeyFiles            []string
 	OperatorAddresses           []common.Address
@@ -503,6 +504,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&junoExecutionTxHash, "juno-execution-tx-hash", "", "canonical Juno execution tx hash to report under juno.proof_of_execution")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output report path or '-' for stdout")
 	fs.DurationVar(&cfg.RunTimeout, "run-timeout", 8*time.Minute, "overall command timeout (e.g. 8m, 90m)")
+	fs.BoolVar(&cfg.DeployOnly, "deploy-only", false, "deploy/configure contracts only; skip deposit/withdraw/finalize flow")
 
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
@@ -1229,6 +1231,49 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 	if relayerTipBpsOnChain != tipBps {
 		return nil, fmt.Errorf("bridge relayerTipBps mismatch: got=%d want=%d", relayerTipBpsOnChain, tipBps)
+	}
+	if cfg.DeployOnly {
+		rep := &report{
+			GeneratedAtUTC: time.Now().UTC().Format(time.RFC3339),
+			RPCURL:         cfg.RPCURL,
+			ChainID:        cfg.ChainID,
+			OwnerAddress:   owner.Hex(),
+			Recipient:      recipient.Hex(),
+			Operators:      make([]string, 0, len(operatorAddrs)),
+			Threshold:      cfg.Threshold,
+		}
+		rep.Contracts.Verifier = verifierAddr.Hex()
+		rep.Contracts.WJuno = wjunoAddr.Hex()
+		rep.Contracts.OperatorRegistry = regAddr.Hex()
+		rep.Contracts.FeeDistributor = fdAddr.Hex()
+		rep.Contracts.Bridge = bridgeAddr.Hex()
+		rep.Checkpoint.Height = cfg.DepositCheckpointHeight
+		rep.Checkpoint.BlockHash = cfg.DepositCheckpointBlockHash.Hex()
+		rep.Checkpoint.FinalOrchardRoot = cfg.DepositFinalOrchardRoot.Hex()
+		rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
+		rep.Transactions.SetThreshold = setThresholdTx.Hex()
+		rep.Transactions.SetBridgeWJuno = setBridgeWJunoTx.Hex()
+		rep.Transactions.SetBridgeFees = setBridgeFeesTx.Hex()
+		rep.Proof.DepositImageID = cfg.DepositImageID.Hex()
+		rep.Proof.WithdrawImageID = cfg.WithdrawImageID.Hex()
+		rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
+		rep.Proof.Boundless.SubmissionMode = cfg.Boundless.ProofSubmissionMode
+		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
+		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
+		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
+		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
+		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
+		for _, op := range operatorAddrs {
+			rep.Operators = append(rep.Operators, op.Hex())
+		}
+		if cfg.JunoExecutionTxHash != "" {
+			rep.Juno.TxHash = cfg.JunoExecutionTxHash
+			rep.Juno.ProofOfExecution.Available = true
+			rep.Juno.ProofOfExecution.TxHash = cfg.JunoExecutionTxHash
+			rep.Juno.ProofOfExecution.Source = junoProofSourceInputExecutionTx
+		}
+		logProgress("deploy-only mode completed bridge=%s", bridgeAddr.Hex())
+		return rep, nil
 	}
 
 	ownerBalBefore, err := callBalanceOf(ctx, wjuno, owner)

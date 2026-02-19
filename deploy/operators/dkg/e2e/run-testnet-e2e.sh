@@ -102,7 +102,8 @@ This script orchestrates:
   3) Checkpoint quorum startup (N signers from DKG operator keys + threshold aggregator)
   4) Shared infra validation (Postgres + Kafka + run-bound checkpoint package pin/fetch via IPFS)
   5) Centralized proof-requestor/proof-funder startup on shared topics
-  6) Base testnet deploy + bridge flow via cmd/bridge-e2e with centralized Kafka proof jobs
+  6) Base testnet deploy bootstrap via cmd/bridge-e2e --deploy-only, then relayer-driven bridge flow
+     via cmd/base-relayer + cmd/deposit-relayer + cmd/withdraw-coordinator + cmd/withdraw-finalizer
 EOF
 }
 
@@ -485,6 +486,112 @@ witness_scan_upsert_wallet() {
       --data "$payload" \
       "${scan_url%/}/v1/wallets" >/dev/null
   fi
+}
+
+wait_for_log_pattern() {
+  local log_path="$1"
+  local pattern="$2"
+  local timeout_seconds="$3"
+  local elapsed=0
+
+  while (( elapsed < timeout_seconds )); do
+    if [[ -f "$log_path" ]] && grep -Fq "$pattern" "$log_path"; then
+      return 0
+    fi
+    sleep 2
+    elapsed=$((elapsed + 2))
+  done
+  return 1
+}
+
+build_checkpoint_package_payload_file() {
+  local base_chain_id="$1"
+  local bridge_contract="$2"
+  local threshold="$3"
+  local dkg_summary="$4"
+  local operator_signer_bin="$5"
+  local checkpoint_height="$6"
+  local checkpoint_block_hash="$7"
+  local checkpoint_final_orchard_root="$8"
+  local output_path="$9"
+
+  [[ "$checkpoint_height" =~ ^[0-9]+$ ]] || die "checkpoint height must be numeric: $checkpoint_height"
+  [[ "$checkpoint_block_hash" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint block hash must be bytes32: $checkpoint_block_hash"
+  [[ "$checkpoint_final_orchard_root" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint final orchard root must be bytes32: $checkpoint_final_orchard_root"
+
+  local eip712_domain_type_hash eip712_name_hash eip712_version_hash checkpoint_type_hash
+  local checkpoint_domain_encoded checkpoint_domain_separator checkpoint_struct_encoded checkpoint_struct_hash checkpoint_digest
+  eip712_domain_type_hash="$(cast keccak "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")"
+  eip712_name_hash="$(cast keccak "WJUNO Bridge")"
+  eip712_version_hash="$(cast keccak "1")"
+  checkpoint_type_hash="$(cast keccak "Checkpoint(uint64 height,bytes32 blockHash,bytes32 finalOrchardRoot,uint256 baseChainId,address bridgeContract)")"
+  checkpoint_domain_encoded="$(cast abi-encode "f(bytes32,bytes32,bytes32,uint256,address)" "$eip712_domain_type_hash" "$eip712_name_hash" "$eip712_version_hash" "$base_chain_id" "$bridge_contract")"
+  checkpoint_domain_separator="$(cast keccak "$checkpoint_domain_encoded")"
+  checkpoint_struct_encoded="$(cast abi-encode "f(bytes32,uint64,bytes32,bytes32,uint256,address)" "$checkpoint_type_hash" "$checkpoint_height" "$checkpoint_block_hash" "$checkpoint_final_orchard_root" "$base_chain_id" "$bridge_contract")"
+  checkpoint_struct_hash="$(cast keccak "$checkpoint_struct_encoded")"
+  checkpoint_digest="$(cast keccak "0x1901${checkpoint_domain_separator#0x}${checkpoint_struct_hash#0x}")"
+  [[ "$checkpoint_digest" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "invalid checkpoint digest: $checkpoint_digest"
+
+  local -a checkpoint_signers=()
+  local -a checkpoint_signatures=()
+  local operator_id operator_endpoint checkpoint_sign_resp checkpoint_sign_status checkpoint_sign_env_status checkpoint_sign_env_err checkpoint_signature_hex
+  while IFS=$'\t' read -r operator_id operator_endpoint; do
+    [[ -n "$operator_id" ]] || continue
+    [[ -n "$operator_endpoint" ]] || die "checkpoint signing missing operator endpoint for operator_id=$operator_id"
+
+    set +e
+    checkpoint_sign_resp="$("$operator_signer_bin" sign-digest --digest "$checkpoint_digest" --json --operator-endpoint "$operator_endpoint" 2>&1)"
+    checkpoint_sign_status=$?
+    set -e
+    (( checkpoint_sign_status == 0 )) || \
+      die "checkpoint signing failed via operator signer for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_resp"
+
+    checkpoint_sign_env_status="$(jq -r '.status // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+    if [[ "$checkpoint_sign_env_status" != "ok" ]]; then
+      checkpoint_sign_env_err="$(jq -r '.error.message // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+      [[ -n "$checkpoint_sign_env_err" ]] || checkpoint_sign_env_err="$checkpoint_sign_resp"
+      die "checkpoint signing returned non-ok status for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_env_err"
+    fi
+
+    checkpoint_signature_hex="$(jq -r '.data.signature // (.data.signatures[0] // empty)' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+    checkpoint_signature_hex="${checkpoint_signature_hex#0x}"
+    [[ "$checkpoint_signature_hex" =~ ^[0-9a-fA-F]{130}$ ]] || \
+      die "checkpoint signing returned invalid signature for operator_id=$operator_id endpoint=$operator_endpoint"
+    checkpoint_signers+=("$operator_id")
+    checkpoint_signatures+=("0x$checkpoint_signature_hex")
+  done < <(jq -r '.operators[] | [(.operator_id | ascii_downcase), (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary" | sort)
+
+  (( ${#checkpoint_signatures[@]} >= threshold )) || \
+    die "checkpoint signatures below threshold: got=${#checkpoint_signatures[@]} threshold=$threshold"
+
+  local signers_json signatures_json
+  signers_json="$(json_array_from_args "${checkpoint_signers[@]}")"
+  signatures_json="$(json_array_from_args "${checkpoint_signatures[@]}")"
+  jq -n \
+    --arg digest "$checkpoint_digest" \
+    --argjson height "$checkpoint_height" \
+    --arg block_hash "$checkpoint_block_hash" \
+    --arg final_orchard_root "$checkpoint_final_orchard_root" \
+    --argjson base_chain_id "$base_chain_id" \
+    --arg bridge_contract "$bridge_contract" \
+    --argjson signers "$signers_json" \
+    --argjson signatures "$signatures_json" \
+    --arg created_at "$(timestamp_utc)" \
+    '{
+      version: "checkpoints.package.v1",
+      digest: $digest,
+      checkpoint: {
+        height: $height,
+        blockHash: $block_hash,
+        finalOrchardRoot: $final_orchard_root,
+        baseChainId: $base_chain_id,
+        bridgeContract: $bridge_contract
+      },
+      operatorSetHash: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      signers: $signers,
+      signatures: $signatures,
+      createdAt: $created_at
+    }' >"$output_path"
 }
 
 run_with_rpc_retry() {
@@ -1244,6 +1351,14 @@ command_run() {
   local proof_failure_topic="${shared_topic_prefix}.proof.failures.${proof_topic_seed}"
   local proof_requestor_group="${shared_topic_prefix}.proof-requestor.${proof_topic_seed}"
   local proof_bridge_consumer_group="${shared_topic_prefix}.bridge-e2e.${proof_topic_seed}"
+  local checkpoint_package_topic="${shared_topic_prefix}.checkpoints.packages.${proof_topic_seed}"
+  local deposit_event_topic="${shared_topic_prefix}.deposits.events.${proof_topic_seed}"
+  local withdraw_request_topic="${shared_topic_prefix}.withdrawals.requested.${proof_topic_seed}"
+  local deposit_relayer_group="${shared_topic_prefix}.deposit-relayer.${proof_topic_seed}"
+  local deposit_relayer_proof_group="${shared_topic_prefix}.deposit-relayer.proof.${proof_topic_seed}"
+  local withdraw_coordinator_group="${shared_topic_prefix}.withdraw-coordinator.${proof_topic_seed}"
+  local withdraw_finalizer_group="${shared_topic_prefix}.withdraw-finalizer.${proof_topic_seed}"
+  local withdraw_finalizer_proof_group="${shared_topic_prefix}.withdraw-finalizer.proof.${proof_topic_seed}"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
@@ -1714,17 +1829,16 @@ command_run() {
   (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
 
   if [[ "$shared_enabled" == "true" ]]; then
-    local checkpoint_started_at checkpoint_operators_csv checkpoint_topic_seed checkpoint_signature_topic checkpoint_package_topic checkpoint_group
+    local checkpoint_started_at checkpoint_operators_csv
     checkpoint_started_at="$(timestamp_utc)"
     checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
     [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operators from dkg summary"
-    checkpoint_topic_seed="${proof_topic_seed}"
-    checkpoint_signature_topic="checkpoints.signatures.e2e.${checkpoint_topic_seed}"
-    checkpoint_package_topic="checkpoints.packages.e2e.${checkpoint_topic_seed}"
-    checkpoint_group="checkpoints.aggregator.e2e.${checkpoint_topic_seed}"
 
-    local checkpoint_agg_log checkpoint_agg_pid
+    local checkpoint_agg_log checkpoint_agg_pid checkpoint_signatures_fifo
     checkpoint_agg_log="$workdir/reports/checkpoint-aggregator.log"
+    checkpoint_signatures_fifo="$workdir/reports/checkpoint-signatures.fifo"
+    rm -f "$checkpoint_signatures_fifo"
+    mkfifo "$checkpoint_signatures_fifo"
     (
       cd "$REPO_ROOT"
       go run ./cmd/checkpoint-aggregator \
@@ -1737,64 +1851,128 @@ command_run() {
         --blob-driver memory \
         --ipfs-enabled=true \
         --ipfs-api-url "$shared_ipfs_api_url" \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --queue-group "$checkpoint_group" \
-        --queue-input-topics "$checkpoint_signature_topic" \
+        --queue-driver stdio \
         --queue-output-topic "$checkpoint_package_topic" \
+        <"$checkpoint_signatures_fifo" \
         >"$checkpoint_agg_log" 2>&1
     ) &
     checkpoint_agg_pid="$!"
+    exec 3>"$checkpoint_signatures_fifo"
 
-    local -a checkpoint_signer_pids=()
-    local -a checkpoint_signer_logs=()
-    local operator_key_file operator_private_key signer_log signer_pid signer_index
-    signer_index=0
-    while IFS= read -r operator_key_file; do
-      [[ -n "$operator_key_file" ]] || continue
-      [[ -f "$operator_key_file" ]] || die "checkpoint signer key file not found: $operator_key_file"
-      operator_private_key="$(trimmed_file_value "$operator_key_file")"
-      operator_private_key="${operator_private_key#0x}"
-      signer_log="$workdir/reports/checkpoint-signer-${signer_index}.log"
-      (
-        cd "$REPO_ROOT"
-        CHECKPOINT_SIGNER_PRIVATE_KEY="$operator_private_key" \
-          go run ./cmd/checkpoint-signer \
-            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-            --base-chain-id "$base_chain_id" \
-            --bridge-address "$bridge_verifier_address" \
-            --confirmations 1 \
-            --poll-interval 5s \
-            --owner-id "testnet-e2e-shared-infra-${checkpoint_topic_seed}-${signer_index}" \
-            --lease-driver memory \
-            --queue-driver kafka \
-            --queue-brokers "$shared_kafka_brokers" \
-            --queue-output-topic "$checkpoint_signature_topic" \
-            >"$signer_log" 2>&1
-      ) &
-      signer_pid="$!"
-      checkpoint_signer_pids+=("$signer_pid")
-      checkpoint_signer_logs+=("$signer_log")
-      signer_index=$((signer_index + 1))
-    done < <(jq -r '.operators[].operator_key_file // empty' "$dkg_summary")
+    local checkpoint_rpc_user_var checkpoint_rpc_pass_var checkpoint_rpc_user checkpoint_rpc_pass
+    checkpoint_rpc_user_var="$boundless_witness_juno_rpc_user_env"
+    checkpoint_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+    checkpoint_rpc_user="${!checkpoint_rpc_user_var:-}"
+    checkpoint_rpc_pass="${!checkpoint_rpc_pass_var:-}"
+    [[ -n "$checkpoint_rpc_user" ]] || die "missing Juno RPC user env var for checkpoint signing: $checkpoint_rpc_user_var"
+    [[ -n "$checkpoint_rpc_pass" ]] || die "missing Juno RPC pass env var for checkpoint signing: $checkpoint_rpc_pass_var"
 
-    sleep 5
-    if ! kill -0 "$checkpoint_agg_pid" >/dev/null 2>&1; then
-      log "checkpoint-aggregator exited early"
-      tail -n 200 "$checkpoint_agg_log" >&2 || true
-      die "checkpoint-aggregator did not stay running"
-    fi
-    for signer_pid in "${checkpoint_signer_pids[@]}"; do
-      if ! kill -0 "$signer_pid" >/dev/null 2>&1; then
-        log "checkpoint-signer exited early"
-        for signer_log in "${checkpoint_signer_logs[@]}"; do
-          tail -n 200 "$signer_log" >&2 || true
-        done
-        kill "$checkpoint_agg_pid" >/dev/null 2>&1 || true
-        wait "$checkpoint_agg_pid" >/dev/null 2>&1 || true
-        die "checkpoint-signer did not stay running"
+    local checkpoint_tip_resp checkpoint_tip_error checkpoint_tip_height
+    checkpoint_tip_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblockchaininfo" "[]")"
+    checkpoint_tip_error="$(jq -r '.error.message // empty' <<<"$checkpoint_tip_resp")"
+    [[ -z "$checkpoint_tip_error" ]] || die "checkpoint signing failed to fetch Juno tip: $checkpoint_tip_error"
+    checkpoint_tip_height="$(jq -r '.result.blocks // empty' <<<"$checkpoint_tip_resp")"
+    [[ "$checkpoint_tip_height" =~ ^[0-9]+$ ]] || die "checkpoint signing got invalid Juno tip height: $checkpoint_tip_height"
+    (( checkpoint_tip_height >= 1 )) || die "checkpoint signing requires Juno tip >= 1 (got $checkpoint_tip_height)"
+
+    local checkpoint_height checkpoint_hash_params checkpoint_hash_resp checkpoint_hash_error checkpoint_block_hash_raw
+    checkpoint_height=$((checkpoint_tip_height - 1))
+    checkpoint_hash_params="$(jq -cn --argjson height "$checkpoint_height" '[ $height ]')"
+    checkpoint_hash_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblockhash" "$checkpoint_hash_params")"
+    checkpoint_hash_error="$(jq -r '.error.message // empty' <<<"$checkpoint_hash_resp")"
+    [[ -z "$checkpoint_hash_error" ]] || die "checkpoint signing failed to fetch block hash at height=$checkpoint_height: $checkpoint_hash_error"
+    checkpoint_block_hash_raw="$(jq -r '.result // empty' <<<"$checkpoint_hash_resp")"
+    checkpoint_block_hash_raw="${checkpoint_block_hash_raw#0x}"
+    [[ "$checkpoint_block_hash_raw" =~ ^[0-9a-fA-F]{64}$ ]] || die "checkpoint signing got invalid block hash for height=$checkpoint_height: $checkpoint_block_hash_raw"
+
+    local checkpoint_block_params checkpoint_block_resp checkpoint_block_error checkpoint_block_hash checkpoint_final_orchard_root
+    checkpoint_block_params="$(jq -cn --arg hash "$checkpoint_block_hash_raw" '[ $hash, 1 ]')"
+    checkpoint_block_resp="$(juno_rpc_json_call "$boundless_witness_juno_rpc_url" "$checkpoint_rpc_user" "$checkpoint_rpc_pass" "getblock" "$checkpoint_block_params")"
+    checkpoint_block_error="$(jq -r '.error.message // empty' <<<"$checkpoint_block_resp")"
+    [[ -z "$checkpoint_block_error" ]] || die "checkpoint signing failed to fetch block payload at height=$checkpoint_height: $checkpoint_block_error"
+    checkpoint_block_hash="$(jq -r '.result.hash // empty' <<<"$checkpoint_block_resp")"
+    checkpoint_block_hash="${checkpoint_block_hash#0x}"
+    checkpoint_final_orchard_root="$(jq -r '.result.finalorchardroot // empty' <<<"$checkpoint_block_resp")"
+    checkpoint_final_orchard_root="${checkpoint_final_orchard_root#0x}"
+    [[ "$checkpoint_block_hash" =~ ^[0-9a-fA-F]{64}$ ]] || die "checkpoint signing block payload missing hash for height=$checkpoint_height"
+    [[ "$checkpoint_final_orchard_root" =~ ^[0-9a-fA-F]{64}$ ]] || \
+      die "checkpoint signing block payload missing finalorchardroot for height=$checkpoint_height"
+    checkpoint_block_hash="0x$checkpoint_block_hash"
+    checkpoint_final_orchard_root="0x$checkpoint_final_orchard_root"
+
+    local eip712_domain_type_hash eip712_name_hash eip712_version_hash checkpoint_type_hash
+    local checkpoint_domain_encoded checkpoint_domain_separator checkpoint_struct_encoded checkpoint_struct_hash checkpoint_digest
+    eip712_domain_type_hash="$(cast keccak "EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)")"
+    eip712_name_hash="$(cast keccak "WJUNO Bridge")"
+    eip712_version_hash="$(cast keccak "1")"
+    checkpoint_type_hash="$(cast keccak "Checkpoint(uint64 height,bytes32 blockHash,bytes32 finalOrchardRoot,uint256 baseChainId,address bridgeContract)")"
+    checkpoint_domain_encoded="$(cast abi-encode "f(bytes32,bytes32,bytes32,uint256,address)" "$eip712_domain_type_hash" "$eip712_name_hash" "$eip712_version_hash" "$base_chain_id" "$bridge_verifier_address")"
+    checkpoint_domain_separator="$(cast keccak "$checkpoint_domain_encoded")"
+    checkpoint_struct_encoded="$(cast abi-encode "f(bytes32,uint64,bytes32,bytes32,uint256,address)" "$checkpoint_type_hash" "$checkpoint_height" "$checkpoint_block_hash" "$checkpoint_final_orchard_root" "$base_chain_id" "$bridge_verifier_address")"
+    checkpoint_struct_hash="$(cast keccak "$checkpoint_struct_encoded")"
+    checkpoint_digest="$(cast keccak "0x1901${checkpoint_domain_separator#0x}${checkpoint_struct_hash#0x}")"
+    [[ "$checkpoint_digest" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "checkpoint signing produced invalid digest: $checkpoint_digest"
+
+    local checkpoint_signatures_published
+    checkpoint_signatures_published=0
+    local operator_id operator_endpoint checkpoint_sign_resp checkpoint_sign_status checkpoint_sign_env_status checkpoint_sign_env_err checkpoint_signature_hex checkpoint_signed_at checkpoint_signature_payload
+    while IFS=$'\t' read -r operator_id operator_endpoint; do
+      [[ -n "$operator_id" ]] || continue
+      [[ -n "$operator_endpoint" ]] || die "checkpoint signing missing operator endpoint for operator_id=$operator_id"
+
+      set +e
+      checkpoint_sign_resp="$("$bridge_operator_signer_bin" sign-digest --digest "$checkpoint_digest" --json --operator-endpoint "$operator_endpoint" 2>&1)"
+      checkpoint_sign_status=$?
+      set -e
+      (( checkpoint_sign_status == 0 )) || \
+        die "checkpoint signing failed via operator signer for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_resp"
+
+      checkpoint_sign_env_status="$(jq -r '.status // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+      if [[ "$checkpoint_sign_env_status" != "ok" ]]; then
+        checkpoint_sign_env_err="$(jq -r '.error.message // empty' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+        [[ -n "$checkpoint_sign_env_err" ]] || checkpoint_sign_env_err="$checkpoint_sign_resp"
+        die "checkpoint signing returned non-ok status for operator_id=$operator_id endpoint=$operator_endpoint: $checkpoint_sign_env_err"
       fi
-    done
+
+      checkpoint_signature_hex="$(jq -r '.data.signature // (.data.signatures[0] // empty)' <<<"$checkpoint_sign_resp" 2>/dev/null || true)"
+      checkpoint_signature_hex="${checkpoint_signature_hex#0x}"
+      [[ "$checkpoint_signature_hex" =~ ^[0-9a-fA-F]{130}$ ]] || \
+        die "checkpoint signing returned invalid signature for operator_id=$operator_id endpoint=$operator_endpoint"
+      checkpoint_signature_hex="0x$checkpoint_signature_hex"
+
+      checkpoint_signed_at="$(timestamp_utc)"
+      checkpoint_signature_payload="$(
+        jq -cn \
+          --arg operator "$operator_id" \
+          --arg digest "$checkpoint_digest" \
+          --arg signature "$checkpoint_signature_hex" \
+          --arg signed_at "$checkpoint_signed_at" \
+          --argjson checkpoint_height "$checkpoint_height" \
+          --arg checkpoint_block_hash "$checkpoint_block_hash" \
+          --arg checkpoint_final_orchard_root "$checkpoint_final_orchard_root" \
+          --argjson checkpoint_base_chain_id "$base_chain_id" \
+          --arg checkpoint_bridge_contract "$bridge_verifier_address" \
+          '{
+            version: "checkpoints.signature.v1",
+            operator: $operator,
+            digest: $digest,
+            signature: $signature,
+            checkpoint: {
+              height: $checkpoint_height,
+              blockHash: $checkpoint_block_hash,
+              finalOrchardRoot: $checkpoint_final_orchard_root,
+              baseChainId: $checkpoint_base_chain_id,
+              bridgeContract: $checkpoint_bridge_contract
+            },
+            signedAt: $signed_at
+          }'
+      )"
+      printf '%s\n' "$checkpoint_signature_payload" >&3 || die "failed to enqueue checkpoint signature for operator_id=$operator_id"
+      checkpoint_signatures_published=$((checkpoint_signatures_published + 1))
+    done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
+
+    (( checkpoint_signatures_published >= threshold )) || \
+      die "checkpoint signature publication below threshold: got=$checkpoint_signatures_published threshold=$threshold"
 
     local shared_status=0
     set +e
@@ -1814,21 +1992,14 @@ command_run() {
     shared_status="$?"
     set -e
 
+    exec 3>&-
     kill "$checkpoint_agg_pid" >/dev/null 2>&1 || true
     wait "$checkpoint_agg_pid" >/dev/null 2>&1 || true
-    for signer_pid in "${checkpoint_signer_pids[@]}"; do
-      kill "$signer_pid" >/dev/null 2>&1 || true
-    done
-    for signer_pid in "${checkpoint_signer_pids[@]}"; do
-      wait "$signer_pid" >/dev/null 2>&1 || true
-    done
+    rm -f "$checkpoint_signatures_fifo"
 
     if (( shared_status != 0 )); then
       log "shared infra validation failed; showing checkpoint quorum logs"
       tail -n 200 "$checkpoint_agg_log" >&2 || true
-      for signer_log in "${checkpoint_signer_logs[@]}"; do
-        tail -n 200 "$signer_log" >&2 || true
-      done
       die "shared infra validation failed"
     fi
   fi
@@ -1867,6 +2038,7 @@ command_run() {
   bridge_args+=(
     "--rpc-url" "$base_rpc_url"
     "--chain-id" "$base_chain_id"
+    "--deploy-only"
     "--deployer-key-file" "$bridge_deployer_key_file"
     "--operator-signer-bin" "$bridge_operator_signer_bin"
     "--threshold" "$threshold"
@@ -2083,10 +2255,270 @@ command_run() {
   set +e
   (
     cd "$REPO_ROOT"
-    go run ./cmd/bridge-e2e "${bridge_args[@]}"
+    go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
   )
   bridge_status="$?"
   set -e
+  if (( bridge_status != 0 )); then
+    if [[ "$shared_ecs_enabled" == "true" ]]; then
+      log "bridge-e2e deploy bootstrap failed; showing shared ECS proof service logs"
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
+    else
+      log "bridge-e2e deploy bootstrap failed; showing proof-requestor and proof-funder logs"
+      tail -n 200 "$proof_requestor_log" >&2 || true
+      tail -n 200 "$proof_funder_log" >&2 || true
+    fi
+    die "bridge-e2e deploy bootstrap failed while centralized proof services were running"
+  fi
+
+  local deployed_bridge_address deployed_wjuno_address
+  deployed_bridge_address="$(jq -r '.contracts.bridge // empty' "$bridge_summary")"
+  deployed_wjuno_address="$(jq -r '.contracts.wjuno // empty' "$bridge_summary")"
+  [[ "$deployed_bridge_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
+    die "bridge summary missing deployed contracts.bridge address: $bridge_summary"
+  [[ "$deployed_wjuno_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
+    die "bridge summary missing deployed contracts.wjuno address: $bridge_summary"
+
+  local bridge_deployer_key_hex
+  bridge_deployer_key_hex="$(trimmed_file_value "$bridge_deployer_key_file")"
+  [[ -n "$bridge_deployer_key_hex" ]] || die "bridge deployer key file is empty: $bridge_deployer_key_file"
+
+  local base_relayer_log="$workdir/reports/base-relayer.log"
+  local deposit_relayer_log="$workdir/reports/deposit-relayer.log"
+  local withdraw_coordinator_log="$workdir/reports/withdraw-coordinator.log"
+  local withdraw_finalizer_log="$workdir/reports/withdraw-finalizer.log"
+  local base_relayer_pid=""
+  local deposit_relayer_pid=""
+  local withdraw_coordinator_pid=""
+  local withdraw_finalizer_pid=""
+  local relayer_status=0
+
+  local base_relayer_port base_relayer_url base_relayer_auth_token
+  base_relayer_port="$((base_port + 1200))"
+  base_relayer_url="http://127.0.0.1:${base_relayer_port}"
+  base_relayer_auth_token="$(openssl rand -hex 24)"
+
+  (
+    cd "$REPO_ROOT"
+    BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
+      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+      go run ./cmd/base-relayer \
+        --rpc-url "$base_rpc_url" \
+        --chain-id "$base_chain_id" \
+        --listen "127.0.0.1:${base_relayer_port}" \
+        >"$base_relayer_log" 2>&1
+  ) &
+  base_relayer_pid="$!"
+  sleep 3
+  if ! kill -0 "$base_relayer_pid" >/dev/null 2>&1; then
+    relayer_status=1
+  fi
+
+  if (( relayer_status == 0 )); then
+    (
+      cd "$REPO_ROOT"
+      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        go run ./cmd/deposit-relayer \
+          --postgres-dsn "$shared_postgres_dsn" \
+          --store-driver postgres \
+          --base-chain-id "$base_chain_id" \
+          --bridge-address "$deployed_bridge_address" \
+          --operators "$checkpoint_operators_csv" \
+          --operator-threshold "$threshold" \
+          --deposit-image-id "$bridge_deposit_image_id" \
+          --owallet-ivk "$boundless_deposit_owallet_ivk_hex" \
+          --base-relayer-url "$base_relayer_url" \
+          --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
+          --proof-driver queue \
+          --proof-request-topic "$proof_request_topic" \
+          --proof-result-topic "$proof_result_topic" \
+          --proof-failure-topic "$proof_failure_topic" \
+          --proof-response-group "$deposit_relayer_proof_group" \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --queue-group "$deposit_relayer_group" \
+          --queue-topics "$deposit_event_topic,$checkpoint_package_topic" \
+          >"$deposit_relayer_log" 2>&1
+    ) &
+    deposit_relayer_pid="$!"
+
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/withdraw-coordinator \
+        --runtime-mode mock \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --queue-group "$withdraw_coordinator_group" \
+        --queue-topics "$withdraw_request_topic" \
+        --blob-driver memory \
+        >"$withdraw_coordinator_log" 2>&1
+    ) &
+    withdraw_coordinator_pid="$!"
+
+    (
+      cd "$REPO_ROOT"
+      BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        go run ./cmd/withdraw-finalizer \
+          --postgres-dsn "$shared_postgres_dsn" \
+          --base-chain-id "$base_chain_id" \
+          --bridge-address "$deployed_bridge_address" \
+          --operators "$checkpoint_operators_csv" \
+          --operator-threshold "$threshold" \
+          --withdraw-image-id "$bridge_withdraw_image_id" \
+          --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
+          --base-relayer-url "$base_relayer_url" \
+          --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
+          --proof-driver queue \
+          --proof-request-topic "$proof_request_topic" \
+          --proof-result-topic "$proof_result_topic" \
+          --proof-failure-topic "$proof_failure_topic" \
+          --proof-response-group "$withdraw_finalizer_proof_group" \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --queue-group "$withdraw_finalizer_group" \
+          --queue-topics "$checkpoint_package_topic" \
+          --blob-driver memory \
+          >"$withdraw_finalizer_log" 2>&1
+    ) &
+    withdraw_finalizer_pid="$!"
+
+    sleep 5
+    if ! kill -0 "$deposit_relayer_pid" >/dev/null 2>&1; then
+      relayer_status=1
+    fi
+    if ! kill -0 "$withdraw_coordinator_pid" >/dev/null 2>&1; then
+      relayer_status=1
+    fi
+    if ! kill -0 "$withdraw_finalizer_pid" >/dev/null 2>&1; then
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    local checkpoint_package_deposit_payload checkpoint_package_withdraw_payload
+    checkpoint_package_deposit_payload="$workdir/reports/checkpoint-package-deposit.json"
+    checkpoint_package_withdraw_payload="$workdir/reports/checkpoint-package-withdraw.json"
+    build_checkpoint_package_payload_file \
+      "$base_chain_id" \
+      "$deployed_bridge_address" \
+      "$threshold" \
+      "$dkg_summary" \
+      "$bridge_operator_signer_bin" \
+      "$bridge_deposit_checkpoint_height" \
+      "$bridge_deposit_checkpoint_block_hash" \
+      "$bridge_deposit_final_orchard_root" \
+      "$checkpoint_package_deposit_payload"
+    build_checkpoint_package_payload_file \
+      "$base_chain_id" \
+      "$deployed_bridge_address" \
+      "$threshold" \
+      "$dkg_summary" \
+      "$bridge_operator_signer_bin" \
+      "$bridge_withdraw_checkpoint_height" \
+      "$bridge_withdraw_checkpoint_block_hash" \
+      "$bridge_withdraw_final_orchard_root" \
+      "$checkpoint_package_withdraw_payload"
+
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/queue-publish \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --topic "$checkpoint_package_topic" \
+        --payload-file "$checkpoint_package_deposit_payload"
+      go run ./cmd/queue-publish \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --topic "$checkpoint_package_topic" \
+        --payload-file "$checkpoint_package_withdraw_payload"
+    ) || relayer_status=1
+  fi
+
+  if (( relayer_status == 0 )); then
+    local deposit_witness_file withdraw_witness_file
+    deposit_witness_file="${boundless_deposit_witness_item_files[0]:-}"
+    withdraw_witness_file="${boundless_withdraw_witness_item_files[0]:-}"
+    [[ -n "$deposit_witness_file" ]] || relayer_status=1
+    [[ -n "$withdraw_witness_file" ]] || relayer_status=1
+    [[ -f "$deposit_witness_file" ]] || relayer_status=1
+    [[ -f "$withdraw_witness_file" ]] || relayer_status=1
+
+    local deposit_event_payload
+    deposit_event_payload="$workdir/reports/deposit-event.json"
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/deposit-event \
+        --base-chain-id "$base_chain_id" \
+        --bridge-address "$deployed_bridge_address" \
+        --recipient "$bridge_recipient_address" \
+        --amount "100000" \
+        --witness-item-file "$deposit_witness_file" \
+        --output "$deposit_event_payload"
+      go run ./cmd/queue-publish \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --topic "$deposit_event_topic" \
+        --payload-file "$deposit_event_payload"
+    ) || relayer_status=1
+
+    local witness_metadata_json withdraw_recipient_raw_hex withdraw_request_payload
+    witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
+    withdraw_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    if [[ ! "$withdraw_recipient_raw_hex" =~ ^[0-9a-fA-F]{86}$ ]]; then
+      relayer_status=1
+    fi
+    withdraw_request_payload="$workdir/reports/withdraw-request-event.json"
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/withdraw-request \
+        --rpc-url "$base_rpc_url" \
+        --chain-id "$base_chain_id" \
+        --owner-key-file "$bridge_deployer_key_file" \
+        --wjuno-address "$deployed_wjuno_address" \
+        --bridge-address "$deployed_bridge_address" \
+        --amount "10000" \
+        --recipient-raw-address-hex "$withdraw_recipient_raw_hex" \
+        --proof-witness-item-file "$withdraw_witness_file" \
+        --output "$withdraw_request_payload"
+      go run ./cmd/queue-publish \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --topic "$withdraw_request_topic" \
+        --payload-file "$withdraw_request_payload"
+    ) || relayer_status=1
+  fi
+
+  if (( relayer_status == 0 )); then
+    if ! wait_for_log_pattern "$deposit_relayer_log" "submitted mintBatch" 900; then
+      relayer_status=1
+    fi
+    if ! wait_for_log_pattern "$withdraw_finalizer_log" "submitted finalizeWithdrawBatch" 1500; then
+      relayer_status=1
+    fi
+  fi
+
+  kill "$base_relayer_pid" "$deposit_relayer_pid" "$withdraw_coordinator_pid" "$withdraw_finalizer_pid" >/dev/null 2>&1 || true
+  wait "$base_relayer_pid" >/dev/null 2>&1 || true
+  wait "$deposit_relayer_pid" >/dev/null 2>&1 || true
+  wait "$withdraw_coordinator_pid" >/dev/null 2>&1 || true
+  wait "$withdraw_finalizer_pid" >/dev/null 2>&1 || true
+
+  if (( relayer_status != 0 )); then
+    log "relayer service orchestration failed; showing service logs"
+    tail -n 200 "$base_relayer_log" >&2 || true
+    tail -n 200 "$deposit_relayer_log" >&2 || true
+    tail -n 200 "$withdraw_coordinator_log" >&2 || true
+    tail -n 200 "$withdraw_finalizer_log" >&2 || true
+    bridge_status=1
+  else
+    bridge_status=0
+  fi
 
   if [[ "$shared_ecs_enabled" == "true" ]]; then
     if [[ "$shared_ecs_started" == "true" ]]; then
@@ -2104,18 +2536,18 @@ command_run() {
   fi
   if (( bridge_status != 0 )); then
     if [[ "$shared_ecs_enabled" == "true" ]]; then
-      log "bridge-e2e failed; showing shared ECS proof service logs"
+      log "relayer-driven bridge e2e failed; showing shared ECS proof service logs"
       dump_shared_proof_services_ecs_logs \
         "$shared_ecs_region" \
         "$shared_ecs_cluster_arn" \
         "$shared_proof_requestor_service_name" \
         "$shared_proof_funder_service_name"
     else
-      log "bridge-e2e failed; showing proof-requestor and proof-funder logs"
+      log "relayer-driven bridge e2e failed; showing proof-requestor and proof-funder logs"
       tail -n 200 "$proof_requestor_log" >&2 || true
       tail -n 200 "$proof_funder_log" >&2 || true
     fi
-    die "bridge-e2e failed while centralized proof services were running"
+    die "relayer-driven bridge e2e failed while centralized proof services were running"
   fi
 
   local juno_tx_hash=""

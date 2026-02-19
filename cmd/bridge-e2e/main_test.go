@@ -59,6 +59,7 @@ func TestParseArgs_Valid(t *testing.T) {
 	cfg, err := parseArgs([]string{
 		"--rpc-url", "https://example-rpc.invalid",
 		"--chain-id", "84532",
+		"--deploy-only",
 		"--deployer-key-file", deployer,
 		"--operator-key-file", op1,
 		"--operator-key-file", op2,
@@ -86,6 +87,9 @@ func TestParseArgs_Valid(t *testing.T) {
 	}
 	if cfg.ChainID != 84532 {
 		t.Fatalf("chain-id: got %d", cfg.ChainID)
+	}
+	if !cfg.DeployOnly {
+		t.Fatalf("deploy-only: got %v want true", cfg.DeployOnly)
 	}
 	if len(cfg.OperatorKeyFiles) != 3 {
 		t.Fatalf("operator keys: got %d", len(cfg.OperatorKeyFiles))
