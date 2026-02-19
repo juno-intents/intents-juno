@@ -203,6 +203,34 @@ jobs:
           printf '%s\n' "${{ secrets.JUNO_SCAN_BEARER_TOKEN }}" > .ci/secrets/juno-scan-bearer.txt
           chmod 0600 .ci/secrets/juno-rpc-user.txt .ci/secrets/juno-rpc-pass.txt .ci/secrets/juno-scan-bearer.txt
 
+      - name: Resolve Operator AMI
+        id: resolve_operator_ami
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolved_operator_ami_id="${{ inputs.operator_ami_id }}"
+          if [[ -n "$resolved_operator_ami_id" ]]; then
+            echo "Using operator AMI from workflow input: $resolved_operator_ami_id"
+          else
+            manifest_path="${RUNNER_TEMP}/operator-ami-manifest.json"
+            gh release download "operator-stack-ami-latest" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "operator-ami-manifest.json" \
+              --output "$manifest_path"
+
+            resolved_operator_ami_id="$(jq -er --arg region "${{ inputs.aws_region }}" '.regions[$region].ami_id // empty' "$manifest_path")"
+            if [[ -z "$resolved_operator_ami_id" ]]; then
+              echo "operator-stack-ami-latest manifest does not contain region ${{ inputs.aws_region }}"
+              exit 1
+            fi
+            echo "Resolved operator AMI from release operator-stack-ami-latest: $resolved_operator_ami_id"
+          fi
+
+          echo "operator_ami_id=$resolved_operator_ami_id" >> "$GITHUB_OUTPUT"
+
       - name: Run AWS Live E2E
         shell: bash
         run: |
@@ -240,9 +268,7 @@ jobs:
           if [[ -n "${{ inputs.ssh_allowed_cidr }}" ]]; then
             ARGS+=(--ssh-allowed-cidr "${{ inputs.ssh_allowed_cidr }}")
           fi
-          if [[ -n "${{ inputs.operator_ami_id }}" ]]; then
-            ARGS+=(--operator-ami-id "${{ inputs.operator_ami_id }}")
-          fi
+          ARGS+=(--operator-ami-id "${{ steps.resolve_operator_ami.outputs.operator_ami_id }}")
           ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
 
           E2E_ARGS=(

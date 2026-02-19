@@ -1,0 +1,139 @@
+name: release-operator-stack-ami
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region for operator AMI build"
+        required: true
+        default: "us-east-1"
+        type: string
+      aws_instance_type:
+        description: "EC2 instance type for temporary AMI builder"
+        required: true
+        default: "c7i.4xlarge"
+        type: string
+      aws_name_prefix:
+        description: "Name prefix for AMI and temporary build resources"
+        required: true
+        default: "intents-juno-operator-stack"
+        type: string
+      sync_timeout_seconds:
+        description: "Max seconds to wait for junocashd sync"
+        required: true
+        default: "21600"
+        type: string
+      release_tag:
+        description: "Release tag to create/update"
+        required: true
+        default: "operator-stack-ami-latest"
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_ROLE_TO_ASSUME == '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required AWS Auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" ]]; then
+              echo "AWS_ACCESS_KEY_ID secret is required when AWS_ROLE_TO_ASSUME is not set"
+              exit 1
+            fi
+            if [[ -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "AWS_SECRET_ACCESS_KEY secret is required when AWS_ROLE_TO_ASSUME is not set"
+              exit 1
+            fi
+          fi
+
+      - name: Build Operator Stack AMI
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+
+          ./deploy/shared/runbooks/build-operator-stack-ami.sh create \
+            --aws-region "${{ inputs.aws_region }}" \
+            --instance-type "${{ inputs.aws_instance_type }}" \
+            --name-prefix "${{ inputs.aws_name_prefix }}" \
+            --repo-commit "${GITHUB_SHA}" \
+            --sync-timeout-seconds "${{ inputs.sync_timeout_seconds }}" \
+            --manifest-out ".ci/out/operator-ami-manifest.json" \
+            --metadata-out ".ci/out/operator-stack-bootstrap.json" | tee ".ci/out/operator-ami-id.txt"
+
+          sha256sum ".ci/out/operator-ami-manifest.json" > ".ci/out/operator-ami-manifest.json.sha256"
+          sha256sum ".ci/out/operator-stack-bootstrap.json" > ".ci/out/operator-stack-bootstrap.json.sha256"
+
+      - name: Create or Update Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+
+          ami_id="$(tr -d '\r\n' < .ci/out/operator-ami-id.txt)"
+          region="${{ inputs.aws_region }}"
+          block_height="$(jq -r '.junocashd.synced_block_height' .ci/out/operator-ami-manifest.json)"
+          block_hash="$(jq -r '.junocashd.synced_block_hash' .ci/out/operator-ami-manifest.json)"
+          notes="Operator stack AMI release for ${region}
+
+          AMI: ${ami_id}
+          Synced blockstamp: height=${block_height} hash=${block_hash}
+          Repo commit: ${GITHUB_SHA}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              ".ci/out/operator-ami-manifest.json" \
+              ".ci/out/operator-ami-manifest.json.sha256" \
+              ".ci/out/operator-stack-bootstrap.json" \
+              ".ci/out/operator-stack-bootstrap.json.sha256" \
+              --clobber
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" \
+              ".ci/out/operator-ami-manifest.json" \
+              ".ci/out/operator-ami-manifest.json.sha256" \
+              ".ci/out/operator-stack-bootstrap.json" \
+              ".ci/out/operator-stack-bootstrap.json.sha256" \
+              --title "$tag" \
+              --notes "$notes"
+          fi
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-stack-ami-release
+          path: |
+            .ci/out/operator-ami-id.txt
+            .ci/out/operator-ami-manifest.json
+            .ci/out/operator-ami-manifest.json.sha256
+            .ci/out/operator-stack-bootstrap.json
+            .ci/out/operator-stack-bootstrap.json.sha256

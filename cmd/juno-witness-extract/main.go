@@ -106,7 +106,7 @@ func runDeposit(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	builder, err := newBuilder(cfg)
+	builder, jrpc, err := newBuilder(cfg)
 	if err != nil {
 		return err
 	}
@@ -127,6 +127,10 @@ func runDeposit(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	anchorBlockHash, err := anchorBlockHashAtHeight(ctx, jrpc, res.AnchorHeight)
+	if err != nil {
+		return err
+	}
 	if err := writeWitnessFile(cfg.OutputWitnessFile, res.WitnessItem); err != nil {
 		return err
 	}
@@ -137,6 +141,7 @@ func runDeposit(args []string, stdout io.Writer) error {
 		"action_index":        cfg.ActionIndex,
 		"position":            res.Position,
 		"anchor_height":       res.AnchorHeight,
+		"anchor_block_hash":   anchorBlockHash,
 		"final_orchard_root":  res.FinalOrchardRoot.Hex(),
 		"witness_item_hex":    hexutil.Encode(res.WitnessItem),
 		"witness_item_output": cfg.OutputWitnessFile,
@@ -179,7 +184,7 @@ func runWithdraw(args []string, stdout io.Writer) error {
 	var recipientRaw [43]byte
 	copy(recipientRaw[:], recipientRawBytes)
 
-	builder, err := newBuilder(cfg)
+	builder, jrpc, err := newBuilder(cfg)
 	if err != nil {
 		return err
 	}
@@ -202,6 +207,10 @@ func runWithdraw(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	anchorBlockHash, err := anchorBlockHashAtHeight(ctx, jrpc, res.AnchorHeight)
+	if err != nil {
+		return err
+	}
 	if err := writeWitnessFile(cfg.OutputWitnessFile, res.WitnessItem); err != nil {
 		return err
 	}
@@ -212,6 +221,7 @@ func runWithdraw(args []string, stdout io.Writer) error {
 		"action_index":             cfg.ActionIndex,
 		"position":                 res.Position,
 		"anchor_height":            res.AnchorHeight,
+		"anchor_block_hash":        anchorBlockHash,
 		"final_orchard_root":       res.FinalOrchardRoot.Hex(),
 		"withdrawal_id":            hexutil.Encode(withdrawalID[:]),
 		"recipient_raw_address":    hexutil.Encode(recipientRaw[:]),
@@ -221,15 +231,15 @@ func runWithdraw(args []string, stdout io.Writer) error {
 	return writeJSON(stdout, out)
 }
 
-func newBuilder(cfg commonFlags) (*witnessextract.Builder, error) {
+func newBuilder(cfg commonFlags) (*witnessextract.Builder, *junorpc.Client, error) {
 	rpcUser := os.Getenv(strings.TrimSpace(cfg.RPCUserEnv))
 	rpcPass := os.Getenv(strings.TrimSpace(cfg.RPCPassEnv))
 	if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
-		return nil, fmt.Errorf("missing junocashd RPC credentials in env %s/%s", cfg.RPCUserEnv, cfg.RPCPassEnv)
+		return nil, nil, fmt.Errorf("missing junocashd RPC credentials in env %s/%s", cfg.RPCUserEnv, cfg.RPCPassEnv)
 	}
 	jrpc, err := junorpc.New(cfg.RPCURL, rpcUser, rpcPass)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	bearerToken := os.Getenv(strings.TrimSpace(cfg.ScanBearerTokenEnv))
 	scan := &scanHTTPClient{
@@ -237,7 +247,21 @@ func newBuilder(cfg commonFlags) (*witnessextract.Builder, error) {
 		bearer:  strings.TrimSpace(bearerToken),
 		hc:      &http.Client{Timeout: 15 * time.Second},
 	}
-	return witnessextract.New(scan, jrpc), nil
+	return witnessextract.New(scan, jrpc), jrpc, nil
+}
+
+func anchorBlockHashAtHeight(ctx context.Context, jrpc *junorpc.Client, anchorHeight int64) (string, error) {
+	if jrpc == nil {
+		return "", errors.New("nil junocashd rpc client")
+	}
+	if anchorHeight < 0 {
+		return "", fmt.Errorf("invalid anchor height %d", anchorHeight)
+	}
+	blockHash, err := jrpc.GetBlockHash(ctx, uint64(anchorHeight))
+	if err != nil {
+		return "", fmt.Errorf("get block hash at anchor height %d: %w", anchorHeight, err)
+	}
+	return blockHash.Hex(), nil
 }
 
 func writeWitnessFile(path string, b []byte) error {

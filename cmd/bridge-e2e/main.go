@@ -56,28 +56,36 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type config struct {
-	RPCURL                   string
-	ChainID                  uint64
-	DeployerKeyHex           string
-	OperatorKeyFiles         []string
-	Threshold                int
-	ContractsOut             string
-	DepositAmount            uint64
-	WithdrawAmount           uint64
-	DepositFinalOrchardRoot  common.Hash
-	WithdrawFinalOrchardRoot common.Hash
-	Recipient                common.Address
-	RecipientSet             bool
-	VerifierAddress          common.Address
-	VerifierSet              bool
-	DepositImageID           common.Hash
-	WithdrawImageID          common.Hash
-	DepositSeal              []byte
-	WithdrawSeal             []byte
-	ProofInputsOut           string
-	OutputPath               string
-	RunTimeout               time.Duration
-	Boundless                boundlessConfig
+	RPCURL                      string
+	ChainID                     uint64
+	DeployerKeyHex              string
+	OperatorKeyFiles            []string
+	OperatorAddresses           []common.Address
+	OperatorSignerBin           string
+	OperatorSignerEndpoints     []string
+	OperatorSignerMaxRespBytes  int
+	Threshold                   int
+	ContractsOut                string
+	DepositAmount               uint64
+	WithdrawAmount              uint64
+	DepositCheckpointHeight     uint64
+	DepositCheckpointBlockHash  common.Hash
+	WithdrawCheckpointHeight    uint64
+	WithdrawCheckpointBlockHash common.Hash
+	DepositFinalOrchardRoot     common.Hash
+	WithdrawFinalOrchardRoot    common.Hash
+	Recipient                   common.Address
+	RecipientSet                bool
+	VerifierAddress             common.Address
+	VerifierSet                 bool
+	DepositImageID              common.Hash
+	WithdrawImageID             common.Hash
+	DepositSeal                 []byte
+	WithdrawSeal                []byte
+	ProofInputsOut              string
+	OutputPath                  string
+	RunTimeout                  time.Duration
+	Boundless                   boundlessConfig
 }
 
 type boundlessConfig struct {
@@ -162,6 +170,7 @@ const (
 	defaultProofQueueMaxBytes         = 10 << 20
 	defaultProofAckTimeout            = 5 * time.Second
 	defaultProofDeadline              = 15 * time.Minute
+	defaultOperatorSignerMaxRespBytes = 1 << 20
 	junoProofSourceFinalizeWithdrawTx = "transactions.finalize_withdraw"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
@@ -434,10 +443,14 @@ func parseArgs(args []string) (config, error) {
 	var cfg config
 	var deployerKeyFile string
 	var operatorKeyFiles stringListFlag
+	var operatorAddressFlags stringListFlag
+	var operatorSignerEndpoints stringListFlag
 	var recipientHex string
 	var verifierAddressHex string
 	var depositImageIDHex string
 	var withdrawImageIDHex string
+	var depositCheckpointBlockHashHex string
+	var withdrawCheckpointBlockHashHex string
 	var depositFinalOrchardRootHex string
 	var withdrawFinalOrchardRootHex string
 	var boundlessRequestorKeyFile string
@@ -463,10 +476,18 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&deployerKeyFile, "deployer-key-file", "", "file containing deployer private key hex")
 	fs.StringVar(&cfg.DeployerKeyHex, "deployer-key-hex", "", "deployer private key hex")
 	fs.Var(&operatorKeyFiles, "operator-key-file", "operator private key file path (repeat)")
+	fs.Var(&operatorAddressFlags, "operator-address", "operator address (repeat; required with --operator-signer-bin)")
+	fs.StringVar(&cfg.OperatorSignerBin, "operator-signer-bin", "", "external operator signer binary path (must support `sign-digest --digest <0x..> --json`)")
+	fs.Var(&operatorSignerEndpoints, "operator-signer-endpoint", "operator signer endpoint (repeat; forwarded to --operator-signer-bin when set)")
+	fs.IntVar(&cfg.OperatorSignerMaxRespBytes, "operator-signer-max-response-bytes", defaultOperatorSignerMaxRespBytes, "maximum bytes allowed in operator signer response")
 	fs.IntVar(&cfg.Threshold, "threshold", 3, "operator quorum threshold")
 	fs.StringVar(&cfg.ContractsOut, "contracts-out", "contracts/out", "path to foundry build output directory")
 	fs.Uint64Var(&cfg.DepositAmount, "deposit-amount", 100_000, "mintBatch item amount (wJUNO base units)")
 	fs.Uint64Var(&cfg.WithdrawAmount, "withdraw-amount", 10_000, "request/finalize amount (wJUNO base units)")
+	fs.Uint64Var(&cfg.DepositCheckpointHeight, "deposit-checkpoint-height", 0, "Juno checkpoint height used for deposit checkpoint signing")
+	fs.StringVar(&depositCheckpointBlockHashHex, "deposit-checkpoint-block-hash", "", "Juno checkpoint block hash for deposit checkpoint signing (bytes32 hex)")
+	fs.Uint64Var(&cfg.WithdrawCheckpointHeight, "withdraw-checkpoint-height", 0, "Juno checkpoint height used for withdraw checkpoint signing (defaults to --deposit-checkpoint-height)")
+	fs.StringVar(&withdrawCheckpointBlockHashHex, "withdraw-checkpoint-block-hash", "", "Juno checkpoint block hash for withdraw checkpoint signing (bytes32 hex; defaults to --deposit-checkpoint-block-hash)")
 	fs.StringVar(&recipientHex, "recipient", "", "optional recipient address for mint (defaults to deployer)")
 	fs.StringVar(&verifierAddressHex, "verifier-address", "", "verifier router address (required)")
 	fs.StringVar(&depositImageIDHex, "deposit-image-id", defaultDepositImageIDHex, "deposit image ID (bytes32)")
@@ -560,8 +581,35 @@ func parseArgs(args []string) (config, error) {
 	}
 
 	cfg.OperatorKeyFiles = append(cfg.OperatorKeyFiles, operatorKeyFiles...)
-	if len(cfg.OperatorKeyFiles) < cfg.Threshold {
+	cfg.OperatorSignerBin = strings.TrimSpace(cfg.OperatorSignerBin)
+	cfg.OperatorSignerEndpoints = append(cfg.OperatorSignerEndpoints, operatorSignerEndpoints...)
+	if cfg.OperatorSignerMaxRespBytes <= 0 {
+		return cfg, errors.New("--operator-signer-max-response-bytes must be > 0")
+	}
+
+	cfg.OperatorAddresses = make([]common.Address, 0, len(operatorAddressFlags))
+	seenOperators := make(map[common.Address]struct{}, len(operatorAddressFlags))
+	for _, rawAddr := range operatorAddressFlags {
+		if !common.IsHexAddress(rawAddr) {
+			return cfg, fmt.Errorf("--operator-address must be a valid hex address: %q", rawAddr)
+		}
+		op := common.HexToAddress(rawAddr)
+		if _, exists := seenOperators[op]; exists {
+			return cfg, fmt.Errorf("duplicate --operator-address: %s", op.Hex())
+		}
+		seenOperators[op] = struct{}{}
+		cfg.OperatorAddresses = append(cfg.OperatorAddresses, op)
+	}
+
+	if cfg.OperatorSignerBin != "" {
+		if len(cfg.OperatorAddresses) < cfg.Threshold {
+			return cfg, fmt.Errorf("need at least %d operator addresses (--operator-address), got %d", cfg.Threshold, len(cfg.OperatorAddresses))
+		}
+	} else if len(cfg.OperatorKeyFiles) < cfg.Threshold {
 		return cfg, fmt.Errorf("need at least %d operator keys, got %d", cfg.Threshold, len(cfg.OperatorKeyFiles))
+	}
+	if len(cfg.OperatorAddresses) > 0 && len(cfg.OperatorAddresses) < cfg.Threshold {
+		return cfg, fmt.Errorf("need at least %d operator addresses (--operator-address), got %d", cfg.Threshold, len(cfg.OperatorAddresses))
 	}
 
 	if recipientHex != "" {
@@ -784,6 +832,30 @@ func parseArgs(args []string) (config, error) {
 			return cfg, err
 		}
 	}
+	if cfg.DepositCheckpointHeight == 0 {
+		return cfg, errors.New("--deposit-checkpoint-height is required and must be > 0")
+	}
+	if strings.TrimSpace(depositCheckpointBlockHashHex) == "" {
+		return cfg, errors.New("--deposit-checkpoint-block-hash is required")
+	}
+	cfg.DepositCheckpointBlockHash, err = parseHash32Flag("--deposit-checkpoint-block-hash", depositCheckpointBlockHashHex)
+	if err != nil {
+		return cfg, err
+	}
+	withdrawCheckpointHeightSet := cfg.WithdrawCheckpointHeight != 0
+	withdrawCheckpointHashSet := strings.TrimSpace(withdrawCheckpointBlockHashHex) != ""
+	if withdrawCheckpointHeightSet != withdrawCheckpointHashSet {
+		return cfg, errors.New("--withdraw-checkpoint-height and --withdraw-checkpoint-block-hash must be set together")
+	}
+	if !withdrawCheckpointHeightSet {
+		cfg.WithdrawCheckpointHeight = cfg.DepositCheckpointHeight
+		cfg.WithdrawCheckpointBlockHash = cfg.DepositCheckpointBlockHash
+	} else {
+		cfg.WithdrawCheckpointBlockHash, err = parseHash32Flag("--withdraw-checkpoint-block-hash", withdrawCheckpointBlockHashHex)
+		if err != nil {
+			return cfg, err
+		}
+	}
 
 	return cfg, nil
 }
@@ -962,17 +1034,41 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	auth.Nonce = new(big.Int).SetUint64(startNonce)
 	logProgress("deployer=%s start_nonce=%d", owner.Hex(), startNonce)
 
-	operatorKeys := make([]*ecdsa.PrivateKey, 0, len(cfg.OperatorKeyFiles))
-	for _, path := range cfg.OperatorKeyFiles {
-		b, err := os.ReadFile(path)
+	var (
+		operatorAddrs []common.Address
+		digestSigner  operatorDigestSigner
+	)
+	if cfg.OperatorSignerBin != "" {
+		operatorAddrs = append(operatorAddrs, cfg.OperatorAddresses...)
+		signer, err := newExecOperatorDigestSigner(
+			cfg.OperatorSignerBin,
+			cfg.OperatorSignerEndpoints,
+			cfg.OperatorSignerMaxRespBytes,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("read operator key %s: %w", path, err)
+			return nil, fmt.Errorf("configure operator signer: %w", err)
 		}
-		key, err := parsePrivateKeyHex(strings.TrimSpace(string(b)))
+		digestSigner = signer
+	} else {
+		operatorKeys, err := loadOperatorPrivateKeys(cfg.OperatorKeyFiles)
 		if err != nil {
-			return nil, fmt.Errorf("parse operator key %s: %w", path, err)
+			return nil, err
 		}
-		operatorKeys = append(operatorKeys, key)
+		signer, err := newLocalOperatorDigestSigner(operatorKeys)
+		if err != nil {
+			return nil, fmt.Errorf("configure local operator signer: %w", err)
+		}
+		digestSigner = signer
+		if len(cfg.OperatorAddresses) > 0 {
+			operatorAddrs = append(operatorAddrs, cfg.OperatorAddresses...)
+		} else {
+			for _, key := range operatorKeys {
+				operatorAddrs = append(operatorAddrs, crypto.PubkeyToAddress(key.PublicKey))
+			}
+		}
+	}
+	if len(operatorAddrs) < cfg.Threshold {
+		return nil, fmt.Errorf("operator set smaller than threshold: operators=%d threshold=%d", len(operatorAddrs), cfg.Threshold)
 	}
 
 	recipient := owner
@@ -1051,10 +1147,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("setFeeDistributor: %w", err)
 	}
 
-	operatorAddrs := make([]common.Address, 0, len(operatorKeys))
-	for _, k := range operatorKeys {
-		op := crypto.PubkeyToAddress(k.PublicKey)
-		operatorAddrs = append(operatorAddrs, op)
+	for _, op := range operatorAddrs {
 		if _, err := transactAndWait(ctx, client, auth, reg, "setOperator", op, op, big.NewInt(1), true); err != nil {
 			return nil, fmt.Errorf("setOperator(%s): %w", op.Hex(), err)
 		}
@@ -1151,17 +1244,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 	recipientUA := withdrawWitnessIdentity.RecipientUA
 
-	header, err := client.HeaderByNumber(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("latest header: %w", err)
-	}
-	cpTemplate := checkpoint.Checkpoint{
-		Height:         header.Number.Uint64(),
-		BlockHash:      header.Hash(),
-		BaseChainID:    cfg.ChainID,
-		BridgeContract: bridgeAddr,
-	}
-
 	type checkpointABI struct {
 		Height           uint64
 		BlockHash        common.Hash
@@ -1183,10 +1265,20 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	depositFees := computeFeeBreakdown(depositAmount, feeBpsOnChain, relayerTipBpsOnChain)
 	withdrawAmount := new(big.Int).SetUint64(cfg.WithdrawAmount)
 
-	cpDeposit := cpTemplate
-	cpDeposit.FinalOrchardRoot = cfg.DepositFinalOrchardRoot
-	cpWithdraw := cpTemplate
-	cpWithdraw.FinalOrchardRoot = cfg.WithdrawFinalOrchardRoot
+	cpDeposit := checkpoint.Checkpoint{
+		Height:           cfg.DepositCheckpointHeight,
+		BlockHash:        cfg.DepositCheckpointBlockHash,
+		FinalOrchardRoot: cfg.DepositFinalOrchardRoot,
+		BaseChainID:      cfg.ChainID,
+		BridgeContract:   bridgeAddr,
+	}
+	cpWithdraw := checkpoint.Checkpoint{
+		Height:           cfg.WithdrawCheckpointHeight,
+		BlockHash:        cfg.WithdrawCheckpointBlockHash,
+		FinalOrchardRoot: cfg.WithdrawFinalOrchardRoot,
+		BaseChainID:      cfg.ChainID,
+		BridgeContract:   bridgeAddr,
+	}
 
 	nonceBefore, err := callUint64(ctx, bridge, "withdrawNonce")
 	if err != nil {
@@ -1194,7 +1286,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 
 	depositDigest := checkpoint.Digest(cpDeposit)
-	cpDepositSigs, err := signDigestSorted(depositDigest, operatorKeys[:cfg.Threshold])
+	cpDepositSigs, err := signDigestQuorum(ctx, digestSigner, depositDigest, operatorAddrs, cfg.Threshold)
 	if err != nil {
 		return nil, fmt.Errorf("sign deposit checkpoint digest: %w", err)
 	}
@@ -1319,7 +1411,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("extendWithdrawDigest: %w", err)
 	}
-	extendSigs, err := signDigestSorted(extendDigest, operatorKeys[:cfg.Threshold])
+	extendSigs, err := signDigestQuorum(ctx, digestSigner, extendDigest, operatorAddrs, cfg.Threshold)
 	if err != nil {
 		return nil, fmt.Errorf("sign extend digest: %w", err)
 	}
@@ -1341,7 +1433,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	net := new(big.Int).Set(withdrawFees.Net)
 
 	withdrawDigest := checkpoint.Digest(cpWithdraw)
-	cpWithdrawSigs, err := signDigestSorted(withdrawDigest, operatorKeys[:cfg.Threshold])
+	cpWithdrawSigs, err := signDigestQuorum(ctx, digestSigner, withdrawDigest, operatorAddrs, cfg.Threshold)
 	if err != nil {
 		return nil, fmt.Errorf("sign withdraw checkpoint digest: %w", err)
 	}
@@ -2689,24 +2781,278 @@ func waitForCodeAtAddress(ctx context.Context, backend codeAtBackend, addr commo
 	}
 }
 
-func signDigestSorted(digest common.Hash, keys []*ecdsa.PrivateKey) ([][]byte, error) {
+type operatorDigestSigner interface {
+	SignDigest(ctx context.Context, digest common.Hash) ([][]byte, error)
+}
+
+type localOperatorDigestSigner struct {
+	keys []*ecdsa.PrivateKey
+}
+
+func newLocalOperatorDigestSigner(keys []*ecdsa.PrivateKey) (*localOperatorDigestSigner, error) {
+	if len(keys) == 0 {
+		return nil, errors.New("empty operator signing key set")
+	}
+	cp := make([]*ecdsa.PrivateKey, 0, len(keys))
+	for i, k := range keys {
+		if k == nil {
+			return nil, fmt.Errorf("nil operator key at index %d", i)
+		}
+		cp = append(cp, k)
+	}
+	return &localOperatorDigestSigner{keys: cp}, nil
+}
+
+func (s *localOperatorDigestSigner) SignDigest(_ context.Context, digest common.Hash) ([][]byte, error) {
+	if s == nil || len(s.keys) == 0 {
+		return nil, errors.New("nil local operator signer")
+	}
+	out := make([][]byte, 0, len(s.keys))
+	for _, key := range s.keys {
+		sig, err := checkpoint.SignDigest(key, digest)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sig)
+	}
+	return out, nil
+}
+
+type execOperatorDigestSignerCommandFn func(ctx context.Context, bin string, args []string) ([]byte, []byte, error)
+
+type execOperatorDigestSigner struct {
+	bin              string
+	endpoints        []string
+	maxResponseBytes int
+	execCommand      execOperatorDigestSignerCommandFn
+}
+
+func newExecOperatorDigestSigner(bin string, endpoints []string, maxResponseBytes int) (*execOperatorDigestSigner, error) {
+	if strings.TrimSpace(bin) == "" {
+		return nil, errors.New("missing operator signer binary")
+	}
+	if maxResponseBytes <= 0 {
+		return nil, errors.New("operator signer max response bytes must be > 0")
+	}
+	out := &execOperatorDigestSigner{
+		bin:              strings.TrimSpace(bin),
+		maxResponseBytes: maxResponseBytes,
+		execCommand:      runExecOperatorDigestSignerCommand,
+	}
+	for _, endpoint := range endpoints {
+		trimmed := strings.TrimSpace(endpoint)
+		if trimmed == "" {
+			continue
+		}
+		out.endpoints = append(out.endpoints, trimmed)
+	}
+	return out, nil
+}
+
+func (s *execOperatorDigestSigner) SignDigest(ctx context.Context, digest common.Hash) ([][]byte, error) {
+	if s == nil || s.execCommand == nil {
+		return nil, errors.New("nil operator signer")
+	}
+	args := []string{
+		"sign-digest",
+		"--digest", digest.Hex(),
+		"--json",
+	}
+	for _, endpoint := range s.endpoints {
+		args = append(args, "--operator-endpoint", endpoint)
+	}
+
+	stdout, stderr, err := s.execCommand(ctx, s.bin, args)
+	if err != nil {
+		msg := strings.TrimSpace(string(stderr))
+		if msg == "" {
+			msg = strings.TrimSpace(string(stdout))
+		}
+		if msg == "" {
+			return nil, fmt.Errorf("execute operator signer: %w", err)
+		}
+		return nil, fmt.Errorf("execute operator signer: %w: %s", err, msg)
+	}
+	if len(stdout) > s.maxResponseBytes {
+		return nil, errors.New("operator signer response too large")
+	}
+
+	var env struct {
+		Version string          `json:"version"`
+		Status  string          `json:"status"`
+		Data    json.RawMessage `json:"data"`
+		Error   *struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(stdout, &env); err != nil {
+		return nil, fmt.Errorf("decode operator signer response: %w", err)
+	}
+	if env.Version != "v1" {
+		return nil, fmt.Errorf("unexpected operator signer response version %q", env.Version)
+	}
+	if env.Status == "err" {
+		msg := "unknown operator signer error"
+		code := ""
+		if env.Error != nil {
+			msg = strings.TrimSpace(env.Error.Message)
+			code = strings.TrimSpace(env.Error.Code)
+		}
+		if msg == "" {
+			msg = "unknown operator signer error"
+		}
+		if code != "" {
+			return nil, fmt.Errorf("operator signer (%s): %s", code, msg)
+		}
+		return nil, fmt.Errorf("operator signer: %s", msg)
+	}
+	if env.Status != "ok" {
+		return nil, fmt.Errorf("unexpected operator signer status %q", env.Status)
+	}
+	if len(env.Data) == 0 {
+		return nil, errors.New("operator signer returned empty data")
+	}
+
+	var data struct {
+		Signatures []string `json:"signatures"`
+		Signature  string   `json:"signature"`
+	}
+	if err := json.Unmarshal(env.Data, &data); err != nil {
+		return nil, fmt.Errorf("decode operator signer data: %w", err)
+	}
+
+	hexSigs := data.Signatures
+	if len(hexSigs) == 0 && strings.TrimSpace(data.Signature) != "" {
+		hexSigs = []string{data.Signature}
+	}
+	if len(hexSigs) == 0 {
+		return nil, errors.New("operator signer returned no signatures")
+	}
+
+	out := make([][]byte, 0, len(hexSigs))
+	for i, sHex := range hexSigs {
+		sig, err := decodeHexBytesStrict(sHex)
+		if err != nil {
+			return nil, fmt.Errorf("decode signature[%d]: %w", i, err)
+		}
+		out = append(out, sig)
+	}
+	return out, nil
+}
+
+func runExecOperatorDigestSignerCommand(ctx context.Context, bin string, args []string) ([]byte, []byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	err := cmd.Run()
+	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func decodeHexBytesStrict(s string) ([]byte, error) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "0x"))
+	if s == "" {
+		return nil, errors.New("empty hex")
+	}
+	b, err := hex.DecodeString(s)
+	if err != nil {
+		return nil, err
+	}
+	return b, nil
+}
+
+func loadOperatorPrivateKeys(paths []string) ([]*ecdsa.PrivateKey, error) {
+	keys := make([]*ecdsa.PrivateKey, 0, len(paths))
+	for _, path := range paths {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read operator key %s: %w", path, err)
+		}
+		key, err := parsePrivateKeyHex(strings.TrimSpace(string(b)))
+		if err != nil {
+			return nil, fmt.Errorf("parse operator key %s: %w", path, err)
+		}
+		keys = append(keys, key)
+	}
+	return keys, nil
+}
+
+func signDigestQuorum(
+	ctx context.Context,
+	signer operatorDigestSigner,
+	digest common.Hash,
+	operatorAddrs []common.Address,
+	threshold int,
+) ([][]byte, error) {
+	if signer == nil {
+		return nil, errors.New("nil operator signer")
+	}
+	rawSigs, err := signer.SignDigest(ctx, digest)
+	if err != nil {
+		return nil, err
+	}
+	return canonicalizeThresholdSignatures(digest, rawSigs, operatorAddrs, threshold)
+}
+
+func canonicalizeThresholdSignatures(
+	digest common.Hash,
+	sigs [][]byte,
+	operatorAddrs []common.Address,
+	threshold int,
+) ([][]byte, error) {
+	if threshold < 1 {
+		return nil, fmt.Errorf("threshold must be >= 1, got %d", threshold)
+	}
+	if len(operatorAddrs) < threshold {
+		return nil, fmt.Errorf("operator set smaller than threshold: operators=%d threshold=%d", len(operatorAddrs), threshold)
+	}
+	if len(sigs) == 0 {
+		return nil, errors.New("empty signature set")
+	}
+
+	allowed := make(map[common.Address]struct{}, len(operatorAddrs))
+	for _, op := range operatorAddrs {
+		allowed[op] = struct{}{}
+	}
+
 	type pair struct {
 		addr common.Address
 		sig  []byte
 	}
-	pairs := make([]pair, 0, len(keys))
-	for _, k := range keys {
-		sig, err := checkpoint.SignDigest(k, digest)
-		if err != nil {
-			return nil, err
+	pairs := make([]pair, 0, len(sigs))
+	for i, sig := range sigs {
+		if len(sig) != 65 {
+			return nil, fmt.Errorf("signature[%d] invalid length %d", i, len(sig))
 		}
-		pairs = append(pairs, pair{addr: crypto.PubkeyToAddress(k.PublicKey), sig: sig})
+		signerAddr, err := checkpoint.RecoverSigner(digest, sig)
+		if err != nil {
+			return nil, fmt.Errorf("recover signer for signature[%d]: %w", i, err)
+		}
+		if _, ok := allowed[signerAddr]; !ok {
+			return nil, fmt.Errorf("signature[%d] recovered unknown operator %s", i, signerAddr.Hex())
+		}
+		pairs = append(pairs, pair{
+			addr: signerAddr,
+			sig:  append([]byte(nil), sig...),
+		})
 	}
+
 	sort.Slice(pairs, func(i, j int) bool {
 		return bytes.Compare(pairs[i].addr.Bytes(), pairs[j].addr.Bytes()) < 0
 	})
-	out := make([][]byte, 0, len(pairs))
-	for _, p := range pairs {
+	for i := 1; i < len(pairs); i++ {
+		if pairs[i].addr == pairs[i-1].addr {
+			return nil, fmt.Errorf("duplicate operator signature: %s", pairs[i].addr.Hex())
+		}
+	}
+	if len(pairs) < threshold {
+		return nil, fmt.Errorf("insufficient operator signatures: got=%d want=%d", len(pairs), threshold)
+	}
+
+	out := make([][]byte, 0, threshold)
+	for _, p := range pairs[:threshold] {
 		out = append(out, p.sig)
 	}
 	return out, nil

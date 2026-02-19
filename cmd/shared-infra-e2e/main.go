@@ -1,40 +1,50 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/segmentio/kafka-go"
 )
 
 type config struct {
-	PostgresDSN   string
-	KafkaBrokers  []string
-	TopicPrefix   string
-	Timeout       time.Duration
-	OutputPath    string
-	MaxLineBytes  int
-	KafkaMaxBytes int
-	AckTimeout    time.Duration
+	PostgresDSN          string
+	KafkaBrokers         []string
+	CheckpointIPFSAPIURL string
+	TopicPrefix          string
+	Timeout              time.Duration
+	OutputPath           string
+	MaxLineBytes         int
+	KafkaMaxBytes        int
+	AckTimeout           time.Duration
 }
 
 type report struct {
-	Version        string         `json:"version"`
-	GeneratedAtUTC string         `json:"generated_at_utc"`
-	DurationMS     int64          `json:"duration_ms"`
-	Postgres       postgresReport `json:"postgres"`
-	Kafka          kafkaReport    `json:"kafka"`
+	Version        string           `json:"version"`
+	GeneratedAtUTC string           `json:"generated_at_utc"`
+	DurationMS     int64            `json:"duration_ms"`
+	Postgres       postgresReport   `json:"postgres"`
+	Kafka          kafkaReport      `json:"kafka"`
+	Checkpoint     checkpointReport `json:"checkpoint"`
 }
 
 type postgresReport struct {
@@ -49,6 +59,38 @@ type kafkaReport struct {
 	PayloadBytes int    `json:"payload_bytes"`
 	RoundTripMS  int64  `json:"round_trip_ms"`
 }
+
+type checkpointReport struct {
+	Digest             string `json:"digest"`
+	CID                string `json:"cid"`
+	SignerCount        int    `json:"signer_count"`
+	Threshold          int    `json:"threshold"`
+	PublishRoundTripMS int64  `json:"publish_round_trip_ms"`
+	FetchRoundTripMS   int64  `json:"fetch_round_trip_ms"`
+}
+
+type checkpointPackageV1 struct {
+	Version         string                `json:"version"`
+	Digest          common.Hash           `json:"digest"`
+	Checkpoint      checkpoint.Checkpoint `json:"checkpoint"`
+	OperatorSetHash common.Hash           `json:"operatorSetHash"`
+	Signers         []common.Address      `json:"signers"`
+	Signatures      []string              `json:"signatures"`
+	CreatedAt       time.Time             `json:"createdAt"`
+}
+
+var checkpointProbePrivateKeys = []string{
+	"4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a",
+	"ac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+	"59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+}
+
+const (
+	checkpointProbeThreshold      = 3
+	checkpointProbeBaseChainID    = 84532
+	checkpointProbeBridgeAddrHex  = "0x000000000000000000000000000000000000bEEF"
+	checkpointProbeMaxResponseLen = 1 << 20
+)
 
 func main() {
 	if err := runMain(os.Args[1:], os.Stdout); err != nil {
@@ -97,6 +139,20 @@ func runMain(args []string, stdout io.Writer) error {
 		return fmt.Errorf("kafka check: %w", err)
 	}
 	rep.Kafka = kRep
+
+	var cpRep checkpointReport
+	if err := runWithRetry(ctx, 2*time.Second, func(stepCtx context.Context) error {
+		out, err := checkCheckpointIPFS(stepCtx, cfg)
+		if err != nil {
+			return err
+		}
+		cpRep = out
+		return nil
+	}); err != nil {
+		return fmt.Errorf("checkpoint ipfs check: %w", err)
+	}
+	rep.Checkpoint = cpRep
+
 	rep.DurationMS = time.Since(started).Milliseconds()
 
 	out, err := json.MarshalIndent(rep, "", "  ")
@@ -128,6 +184,7 @@ func parseArgs(args []string) (config, error) {
 
 	fs.StringVar(&cfg.PostgresDSN, "postgres-dsn", "", "Postgres DSN (required)")
 	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required)")
+	fs.StringVar(&cfg.CheckpointIPFSAPIURL, "checkpoint-ipfs-api-url", "", "IPFS API URL for checkpoint publish/pin validation (required)")
 	fs.StringVar(&cfg.TopicPrefix, "topic-prefix", "shared.infra.e2e", "Kafka probe topic prefix")
 	fs.DurationVar(&cfg.Timeout, "timeout", 90*time.Second, "overall timeout")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output path or '-' for stdout")
@@ -147,6 +204,10 @@ func parseArgs(args []string) (config, error) {
 	cfg.KafkaBrokers = parseBrokers(brokersRaw)
 	if len(cfg.KafkaBrokers) == 0 {
 		return cfg, errors.New("--kafka-brokers is required")
+	}
+	cfg.CheckpointIPFSAPIURL = strings.TrimSpace(cfg.CheckpointIPFSAPIURL)
+	if cfg.CheckpointIPFSAPIURL == "" {
+		return cfg, errors.New("--checkpoint-ipfs-api-url is required")
 	}
 
 	cfg.TopicPrefix = strings.TrimSpace(cfg.TopicPrefix)
@@ -402,4 +463,212 @@ func isTopicAlreadyExistsError(err error) bool {
 	}
 	var kafkaErr kafka.Error
 	return errors.As(err, &kafkaErr) && kafkaErr == kafka.TopicAlreadyExists
+}
+
+func checkCheckpointIPFS(ctx context.Context, cfg config) (checkpointReport, error) {
+	bridge := common.HexToAddress(checkpointProbeBridgeAddrHex)
+	now := time.Now().UTC()
+
+	blockHashSeed := sha256.Sum256([]byte("shared.infra.e2e.checkpoint.block." + now.Format(time.RFC3339Nano)))
+	orchardRootSeed := sha256.Sum256([]byte("shared.infra.e2e.checkpoint.root." + now.Format(time.RFC3339Nano)))
+
+	cp := checkpoint.Checkpoint{
+		Height:           uint64(now.Unix()),
+		BlockHash:        common.BytesToHash(blockHashSeed[:]),
+		FinalOrchardRoot: common.BytesToHash(orchardRootSeed[:]),
+		BaseChainID:      checkpointProbeBaseChainID,
+		BridgeContract:   bridge,
+	}
+	digest := checkpoint.Digest(cp)
+
+	operators := make([]common.Address, 0, len(checkpointProbePrivateKeys))
+	signatures := make([][]byte, 0, len(checkpointProbePrivateKeys))
+	for _, keyHex := range checkpointProbePrivateKeys {
+		key, err := crypto.HexToECDSA(keyHex)
+		if err != nil {
+			return checkpointReport{}, fmt.Errorf("decode checkpoint probe key: %w", err)
+		}
+		operator := crypto.PubkeyToAddress(key.PublicKey)
+		operators = append(operators, operator)
+		sig, err := checkpoint.SignDigest(key, digest)
+		if err != nil {
+			return checkpointReport{}, fmt.Errorf("sign checkpoint digest: %w", err)
+		}
+		signatures = append(signatures, sig)
+	}
+
+	agg, err := checkpoint.NewAggregator(checkpoint.AggregatorConfig{
+		BaseChainID:    cp.BaseChainID,
+		BridgeContract: cp.BridgeContract,
+		Operators:      operators,
+		Threshold:      checkpointProbeThreshold,
+		MaxOpen:        1,
+		MaxEmitted:     8,
+		Now:            time.Now,
+	})
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("init probe aggregator: %w", err)
+	}
+
+	var pkg *checkpoint.CheckpointPackageV1
+	for i := range operators {
+		out, ok, err := agg.AddSignature(checkpoint.SignatureMessageV1{
+			Operator:   operators[i],
+			Digest:     digest,
+			Signature:  signatures[i],
+			Checkpoint: cp,
+			SignedAt:   now,
+		})
+		if err != nil {
+			return checkpointReport{}, fmt.Errorf("add probe signature: %w", err)
+		}
+		if ok {
+			pkg = out
+		}
+	}
+	if pkg == nil {
+		return checkpointReport{}, errors.New("checkpoint probe did not emit package")
+	}
+
+	verifier, err := checkpoint.NewQuorumVerifier(operators, checkpointProbeThreshold)
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("init probe quorum verifier: %w", err)
+	}
+	if _, err := verifier.VerifyCheckpointSignatures(cp, pkg.Signatures); err != nil {
+		return checkpointReport{}, fmt.Errorf("verify checkpoint signatures: %w", err)
+	}
+
+	payloadBody := checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          pkg.Digest,
+		Checkpoint:      pkg.Checkpoint,
+		OperatorSetHash: pkg.OperatorSetHash,
+		Signers:         append([]common.Address(nil), pkg.Signers...),
+		Signatures:      make([]string, 0, len(pkg.Signatures)),
+		CreatedAt:       pkg.CreatedAt.UTC(),
+	}
+	for _, sig := range pkg.Signatures {
+		payloadBody.Signatures = append(payloadBody.Signatures, "0x"+hex.EncodeToString(sig))
+	}
+	payload, err := json.Marshal(payloadBody)
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("marshal checkpoint package payload: %w", err)
+	}
+
+	pinner, err := checkpoint.NewHTTPIPFSPinner(checkpoint.HTTPIPFSConfig{
+		APIURL: cfg.CheckpointIPFSAPIURL,
+	})
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("init ipfs pinner: %w", err)
+	}
+	persist, err := checkpoint.NewPackagePersistence(checkpoint.PackagePersistenceConfig{
+		PackageStore: checkpoint.NewMemoryPackageStore(),
+		IPFSPinner:   pinner,
+		Now:          time.Now,
+	})
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("init package persistence: %w", err)
+	}
+
+	publishStarted := time.Now()
+	rec, err := persist.Persist(ctx, checkpoint.PackageEnvelope{
+		Digest:          payloadBody.Digest,
+		Checkpoint:      payloadBody.Checkpoint,
+		OperatorSetHash: payloadBody.OperatorSetHash,
+		Payload:         payload,
+	})
+	publishMS := time.Since(publishStarted).Milliseconds()
+	if err != nil {
+		return checkpointReport{}, fmt.Errorf("persist probe package: %w", err)
+	}
+	if strings.TrimSpace(rec.IPFSCID) == "" {
+		return checkpointReport{}, errors.New("ipfs probe returned empty cid")
+	}
+
+	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, rec.IPFSCID); err != nil {
+		return checkpointReport{}, err
+	}
+
+	fetchStarted := time.Now()
+	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, rec.IPFSCID)
+	fetchMS := time.Since(fetchStarted).Milliseconds()
+	if err != nil {
+		return checkpointReport{}, err
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		return checkpointReport{}, fmt.Errorf("ipfs payload mismatch: cid=%s", rec.IPFSCID)
+	}
+
+	return checkpointReport{
+		Digest:             payloadBody.Digest.Hex(),
+		CID:                rec.IPFSCID,
+		SignerCount:        len(payloadBody.Signers),
+		Threshold:          checkpointProbeThreshold,
+		PublishRoundTripMS: publishMS,
+		FetchRoundTripMS:   fetchMS,
+	}, nil
+}
+
+func ensureIPFSPin(ctx context.Context, apiURL string, cid string) error {
+	cid = strings.TrimSpace(cid)
+	if cid == "" {
+		return errors.New("ipfs pin probe cid is required")
+	}
+	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/pin/ls?arg=" + url.QueryEscape(cid)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return fmt.Errorf("build ipfs pin/ls request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("call ipfs pin/ls: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, checkpointProbeMaxResponseLen))
+	if err != nil {
+		return fmt.Errorf("read ipfs pin/ls response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("ipfs pin/ls failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	var out struct {
+		Keys map[string]json.RawMessage `json:"Keys"`
+	}
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return fmt.Errorf("parse ipfs pin/ls response: %w", err)
+	}
+	for key := range out.Keys {
+		if key == cid {
+			return nil
+		}
+	}
+	return fmt.Errorf("ipfs pin/ls missing cid %s", cid)
+}
+
+func fetchIPFSPayload(ctx context.Context, apiURL string, cid string) ([]byte, error) {
+	cid = strings.TrimSpace(cid)
+	if cid == "" {
+		return nil, errors.New("ipfs fetch cid is required")
+	}
+	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/cat?arg=" + url.QueryEscape(cid)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build ipfs cat request: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("call ipfs cat: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, checkpointProbeMaxResponseLen))
+	if err != nil {
+		return nil, fmt.Errorf("read ipfs cat response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("ipfs cat failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+	return raw, nil
 }

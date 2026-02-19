@@ -177,6 +177,65 @@ jobs:
           printf '%s\n' "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/boundless-requestor.key
           chmod 0600 .ci/secrets/boundless-requestor.key
 
+      - name: Start Shared Infra (Postgres + Kafka)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker rm -f intents-shared-postgres intents-shared-kafka >/dev/null 2>&1 || true
+
+          docker run -d \
+            --name intents-shared-postgres \
+            --restart unless-stopped \
+            -e POSTGRES_USER=postgres \
+            -e POSTGRES_PASSWORD=postgres \
+            -e POSTGRES_DB=intents_e2e \
+            -p 5432:5432 \
+            postgres:16-alpine
+
+          docker run -d \
+            --name intents-shared-kafka \
+            --restart unless-stopped \
+            -p 9092:9092 \
+            docker.redpanda.com/redpandadata/redpanda:v24.3.7 \
+            redpanda start \
+              --overprovisioned \
+              --smp 1 \
+              --memory 1G \
+              --reserve-memory 0M \
+              --node-id 0 \
+              --check=false \
+              --kafka-addr PLAINTEXT://0.0.0.0:9092 \
+              --advertise-kafka-addr PLAINTEXT://127.0.0.1:9092
+
+          for attempt in $(seq 1 30); do
+            if docker exec intents-shared-postgres pg_isready -h 127.0.0.1 -p 5432 -U postgres -d intents_e2e >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "postgres readiness check failed"
+              docker logs intents-shared-postgres || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          for attempt in $(seq 1 30); do
+            if timeout 2 bash -lc '</dev/tcp/127.0.0.1/9092' >/dev/null 2>&1; then
+              break
+            fi
+            if [[ "$attempt" -eq 30 ]]; then
+              echo "kafka readiness check failed"
+              docker logs intents-shared-kafka || true
+              exit 1
+            fi
+            sleep 2
+          done
+
+          {
+            echo "E2E_SHARED_POSTGRES_DSN=postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable"
+            echo "E2E_SHARED_KAFKA_BROKERS=127.0.0.1:9092"
+          } >> "$GITHUB_ENV"
+
       - name: Run Testnet E2E
         shell: bash
         env:
@@ -206,6 +265,8 @@ jobs:
             --base-rpc-url "${{ inputs.base_rpc_url }}"
             --base-chain-id "${{ inputs.base_chain_id }}"
             --base-funder-key-file ".ci/secrets/base-funder.key"
+            --shared-postgres-dsn "$E2E_SHARED_POSTGRES_DSN"
+            --shared-kafka-brokers "$E2E_SHARED_KAFKA_BROKERS"
             --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
             --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
             --bridge-verifier-address "${{ inputs.bridge_verifier_address }}"

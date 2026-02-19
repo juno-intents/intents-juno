@@ -80,6 +80,26 @@ test_runner_shared_probe_script_supports_managed_endpoints() {
   assert_not_contains "$script_text" "intents-shared-kafka" "no docker kafka container bootstrap"
 }
 
+test_remote_operator_prepare_script_boots_full_stack_services() {
+  # shellcheck source=../e2e/run-testnet-e2e-aws.sh
+  source "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
+
+  local script_text
+  script_text="$(build_remote_operator_prepare_script deadbeef)"
+
+  assert_contains "$script_text" "required_services=(" "operator prep defines required services"
+  assert_contains "$script_text" "junocashd.service" "operator prep requires junocashd"
+  assert_contains "$script_text" "juno-scan.service" "operator prep requires juno-scan"
+  assert_contains "$script_text" "checkpoint-signer.service" "operator prep requires checkpoint signer"
+  assert_contains "$script_text" "checkpoint-aggregator.service" "operator prep requires checkpoint aggregator"
+  assert_contains "$script_text" "tss-host.service" "operator prep requires tss-host"
+  assert_contains "$script_text" "systemctl cat \"\$svc\"" "operator prep validates service units exist"
+  assert_contains "$script_text" "systemctl enable \"\${required_services[@]}\"" "operator prep enables full stack services"
+  assert_contains "$script_text" "systemctl restart \"\${required_services[@]}\"" "operator prep restarts full stack services"
+  assert_contains "$script_text" "systemctl is-active --quiet \"\$svc\"" "operator prep verifies services are active"
+  assert_contains "$script_text" "operator host is missing required stack service unit" "operator prep fails when stack service unit is missing"
+}
+
 test_live_e2e_terraform_supports_operator_instances() {
   local main_tf variables_tf outputs_tf
   main_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/main.tf")"
@@ -441,6 +461,7 @@ test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
+  test_remote_operator_prepare_script_boots_full_stack_services
   test_live_e2e_terraform_supports_operator_instances
   test_synced_junocashd_ami_runbook_exists
   test_aws_wrapper_uses_ssh_keepalive_options

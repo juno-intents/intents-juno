@@ -9,12 +9,15 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 )
@@ -72,6 +75,8 @@ func TestParseArgs_Valid(t *testing.T) {
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -102,6 +107,107 @@ func TestParseArgs_RequiresEnoughOperatorKeys(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func runtimeSignerParseArgsBase(t *testing.T) []string {
+	t.Helper()
+
+	tmp := t.TempDir()
+	deployer := filepath.Join(tmp, "deployer.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+
+	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write deployer key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	return []string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-file", deployer,
+		"--operator-signer-bin", "dkg-admin",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-proof-submission-mode", "queue",
+		"--boundless-proof-queue-brokers", "127.0.0.1:9092",
+		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	}
+}
+
+func TestParseArgs_RuntimeSignerValidWithoutOperatorKeys(t *testing.T) {
+	t.Parallel()
+
+	args := runtimeSignerParseArgsBase(t)
+	args = append(args,
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--operator-signer-endpoint", "http://127.0.0.1:18080",
+		"--operator-signer-endpoint", "http://127.0.0.1:18081",
+	)
+
+	cfg, err := parseArgs(args)
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.OperatorSignerBin != "dkg-admin" {
+		t.Fatalf("operator signer bin: got %q", cfg.OperatorSignerBin)
+	}
+	if len(cfg.OperatorKeyFiles) != 0 {
+		t.Fatalf("operator key files: got %d, want 0", len(cfg.OperatorKeyFiles))
+	}
+	if len(cfg.OperatorAddresses) != 3 {
+		t.Fatalf("operator addresses: got %d, want 3", len(cfg.OperatorAddresses))
+	}
+	if len(cfg.OperatorSignerEndpoints) != 2 {
+		t.Fatalf("operator signer endpoints: got %d, want 2", len(cfg.OperatorSignerEndpoints))
+	}
+}
+
+func TestParseArgs_RuntimeSignerRequiresOperatorAddresses(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs(runtimeSignerParseArgsBase(t))
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--operator-address") {
+		t.Fatalf("expected operator address error, got: %v", err)
+	}
+}
+
+func TestParseArgs_RuntimeSignerRequiresThresholdOperatorAddresses(t *testing.T) {
+	t.Parallel()
+
+	args := runtimeSignerParseArgsBase(t)
+	args = append(args,
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+	)
+
+	_, err := parseArgs(args)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "operator addresses") {
+		t.Fatalf("expected operator addresses threshold error, got: %v", err)
 	}
 }
 
@@ -264,6 +370,8 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 		"--boundless-min-price-wei", "100000000000000",
 		"--boundless-max-price-wei", "250000000000000",
 		"--boundless-lock-stake-wei", "20000000000000000000",
@@ -341,6 +449,8 @@ func TestParseArgs_BoundlessAutoQueueSubmissionModeValidWithoutRequestorKey(t *t
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -392,6 +502,8 @@ func TestParseArgs_BoundlessAutoQueueSubmissionModeRequiresQueueBrokers(t *testi
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -439,6 +551,8 @@ func TestParseArgs_BoundlessAutoRejectsUnknownProofSubmissionMode(t *testing.T) 
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -519,6 +633,8 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeValid(t *testing.T) {
 		"--boundless-deposit-witness-item-file", depositWitness,
 		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -650,6 +766,163 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresDepositFinalOrchardRoot(
 	}
 	if !strings.Contains(err.Error(), "--deposit-final-orchard-root") {
 		t.Fatalf("expected missing deposit final orchard root error, got: %v", err)
+	}
+}
+
+func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresDepositCheckpointHeight(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--deposit-checkpoint-height") {
+		t.Fatalf("expected missing deposit checkpoint height error, got: %v", err)
+	}
+}
+
+func TestParseArgs_CheckpointFieldsDefaultWithdrawToDeposit(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.DepositCheckpointHeight != 777 {
+		t.Fatalf("deposit checkpoint height: got=%d want=777", cfg.DepositCheckpointHeight)
+	}
+	wantBlockHash := common.HexToHash("0x" + strings.Repeat("44", 32))
+	if cfg.DepositCheckpointBlockHash != wantBlockHash {
+		t.Fatalf("deposit checkpoint block hash: got=%s want=%s", cfg.DepositCheckpointBlockHash.Hex(), wantBlockHash.Hex())
+	}
+	if cfg.WithdrawCheckpointHeight != cfg.DepositCheckpointHeight {
+		t.Fatalf("withdraw checkpoint height default mismatch: got=%d want=%d", cfg.WithdrawCheckpointHeight, cfg.DepositCheckpointHeight)
+	}
+	if cfg.WithdrawCheckpointBlockHash != cfg.DepositCheckpointBlockHash {
+		t.Fatalf("withdraw checkpoint block hash default mismatch: got=%s want=%s", cfg.WithdrawCheckpointBlockHash.Hex(), cfg.DepositCheckpointBlockHash.Hex())
+	}
+}
+
+func TestParseArgs_CheckpointFieldsRequireWithdrawPair(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--boundless-auto",
+		"--boundless-bin", "boundless",
+		"--boundless-rpc-url", "https://mainnet.base.org",
+		"--boundless-input-mode", "guest-witness-v1",
+		"--boundless-requestor-key-file", requestorKey,
+		"--boundless-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+		"--withdraw-checkpoint-height", "778",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "--withdraw-checkpoint-height and --withdraw-checkpoint-block-hash") {
+		t.Fatalf("expected withdraw checkpoint pair validation error, got: %v", err)
 	}
 }
 
@@ -1952,6 +2225,163 @@ func TestNormalizeRecipientDeltaActual_RecipientDiffersFromOwner(t *testing.T) {
 	got.Add(got, big.NewInt(1))
 	if raw.Cmp(big.NewInt(99_500)) != 0 {
 		t.Fatalf("normalized recipient delta aliases input: got raw %s want 99500", raw.String())
+	}
+}
+
+func TestCanonicalizeThresholdSignatures_SortsAndTrims(t *testing.T) {
+	t.Parallel()
+
+	k1, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(k1): %v", err)
+	}
+	k2, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(k2): %v", err)
+	}
+	k3, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(k3): %v", err)
+	}
+
+	digest := common.HexToHash("0x1234")
+	sig2, err := checkpoint.SignDigest(k2, digest)
+	if err != nil {
+		t.Fatalf("SignDigest(k2): %v", err)
+	}
+	sig1, err := checkpoint.SignDigest(k1, digest)
+	if err != nil {
+		t.Fatalf("SignDigest(k1): %v", err)
+	}
+	sig3, err := checkpoint.SignDigest(k3, digest)
+	if err != nil {
+		t.Fatalf("SignDigest(k3): %v", err)
+	}
+
+	ops := []common.Address{
+		crypto.PubkeyToAddress(k1.PublicKey),
+		crypto.PubkeyToAddress(k2.PublicKey),
+		crypto.PubkeyToAddress(k3.PublicKey),
+	}
+	got, err := canonicalizeThresholdSignatures(
+		digest,
+		[][]byte{sig2, sig1, sig3},
+		ops,
+		2,
+	)
+	if err != nil {
+		t.Fatalf("canonicalizeThresholdSignatures: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("signature count: got %d want 2", len(got))
+	}
+
+	gotSigners := make([]common.Address, 0, len(got))
+	for i, sig := range got {
+		signer, err := checkpoint.RecoverSigner(digest, sig)
+		if err != nil {
+			t.Fatalf("RecoverSigner(sig[%d]): %v", i, err)
+		}
+		gotSigners = append(gotSigners, signer)
+	}
+	if bytes.Compare(gotSigners[0][:], gotSigners[1][:]) >= 0 {
+		t.Fatalf("signatures not sorted ascending: %s then %s", gotSigners[0], gotSigners[1])
+	}
+
+	want := append([]common.Address(nil), ops...)
+	sort.Slice(want, func(i, j int) bool {
+		return bytes.Compare(want[i][:], want[j][:]) < 0
+	})
+	if gotSigners[0] != want[0] || gotSigners[1] != want[1] {
+		t.Fatalf("unexpected signer set: got [%s, %s] want [%s, %s]", gotSigners[0], gotSigners[1], want[0], want[1])
+	}
+}
+
+func TestCanonicalizeThresholdSignatures_RejectsUnknownSigner(t *testing.T) {
+	t.Parallel()
+
+	allowedKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(allowed): %v", err)
+	}
+	unknownKey, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey(unknown): %v", err)
+	}
+
+	digest := common.HexToHash("0x55")
+	unknownSig, err := checkpoint.SignDigest(unknownKey, digest)
+	if err != nil {
+		t.Fatalf("SignDigest(unknown): %v", err)
+	}
+
+	_, err = canonicalizeThresholdSignatures(
+		digest,
+		[][]byte{unknownSig},
+		[]common.Address{crypto.PubkeyToAddress(allowedKey.PublicKey)},
+		1,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "unknown operator") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestExecOperatorDigestSigner_SignDigest(t *testing.T) {
+	t.Parallel()
+
+	signer, err := newExecOperatorDigestSigner(
+		"/usr/local/bin/operator-runtime-signer",
+		[]string{"https://op1.example.invalid:8443", "https://op2.example.invalid:8443"},
+		4096,
+	)
+	if err != nil {
+		t.Fatalf("newExecOperatorDigestSigner: %v", err)
+	}
+
+	digest := common.HexToHash("0xabcdef")
+	key, err := crypto.GenerateKey()
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	sig, err := checkpoint.SignDigest(key, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	wantArgs := []string{
+		"sign-digest",
+		"--digest", digest.Hex(),
+		"--json",
+		"--operator-endpoint", "https://op1.example.invalid:8443",
+		"--operator-endpoint", "https://op2.example.invalid:8443",
+	}
+	signer.execCommand = func(_ context.Context, bin string, args []string) ([]byte, []byte, error) {
+		if bin != "/usr/local/bin/operator-runtime-signer" {
+			t.Fatalf("bin: got %q", bin)
+		}
+		if len(args) != len(wantArgs) {
+			t.Fatalf("args len: got %d want %d (%v)", len(args), len(wantArgs), args)
+		}
+		for i := range args {
+			if args[i] != wantArgs[i] {
+				t.Fatalf("args[%d]: got %q want %q", i, args[i], wantArgs[i])
+			}
+		}
+		resp := []byte(`{"version":"v1","status":"ok","data":{"signatures":["0x` + hex.EncodeToString(sig) + `"]}}`)
+		return resp, nil, nil
+	}
+
+	got, err := signer.SignDigest(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("signature count: got %d want 1", len(got))
+	}
+	if !bytes.Equal(got[0], sig) {
+		t.Fatalf("signature mismatch")
 	}
 }
 

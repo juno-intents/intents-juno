@@ -17,6 +17,7 @@ import (
 func TestRunMain_Deposit_WritesWitnessFileAndStdoutJSON(t *testing.T) {
 	txid := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
 	rootHex := "0x" + strings.Repeat("99", 32)
+	anchorBlockHash := strings.Repeat("88", 32)
 
 	scanSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -66,6 +67,12 @@ func TestRunMain_Deposit_WritesWitnessFileAndStdoutJSON(t *testing.T) {
 		method, _ := req["method"].(string)
 		id := req["id"]
 		switch method {
+		case "getblockhash":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"result": anchorBlockHash,
+				"error":  nil,
+				"id":     id,
+			})
 		case "getrawtransaction":
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"result": rawHex,
@@ -137,6 +144,7 @@ func TestRunMain_Deposit_WritesWitnessFileAndStdoutJSON(t *testing.T) {
 
 	var out struct {
 		FinalOrchardRoot string `json:"final_orchard_root"`
+		AnchorBlockHash  string `json:"anchor_block_hash"`
 		Position         uint32 `json:"position"`
 		WitnessItemHex   string `json:"witness_item_hex"`
 	}
@@ -145,6 +153,9 @@ func TestRunMain_Deposit_WritesWitnessFileAndStdoutJSON(t *testing.T) {
 	}
 	if out.FinalOrchardRoot != rootHex {
 		t.Fatalf("root mismatch: got=%s want=%s", out.FinalOrchardRoot, rootHex)
+	}
+	if out.AnchorBlockHash != "0x"+anchorBlockHash {
+		t.Fatalf("anchor block hash mismatch: got=%s want=%s", out.AnchorBlockHash, "0x"+anchorBlockHash)
 	}
 	if out.Position != 7 {
 		t.Fatalf("position mismatch: got=%d want=7", out.Position)

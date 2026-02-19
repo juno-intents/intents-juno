@@ -558,6 +558,37 @@ cd "\$HOME/intents-juno"
 git fetch --tags origin
 git checkout ${repo_commit}
 git submodule update --init --recursive
+
+required_services=(
+  junocashd.service
+  juno-scan.service
+  checkpoint-signer.service
+  checkpoint-aggregator.service
+  tss-host.service
+)
+
+missing_services=0
+for svc in "\${required_services[@]}"; do
+  if ! sudo systemctl cat "\$svc" >/dev/null 2>&1; then
+    echo "operator host is missing required stack service unit: \$svc" >&2
+    missing_services=1
+  fi
+done
+if (( missing_services != 0 )); then
+  exit 1
+fi
+
+sudo systemctl daemon-reload
+sudo systemctl enable "\${required_services[@]}"
+sudo systemctl restart "\${required_services[@]}"
+
+for svc in "\${required_services[@]}"; do
+  if ! sudo systemctl is-active --quiet "\$svc"; then
+    echo "operator stack service failed to start: \$svc" >&2
+    sudo systemctl status "\$svc" --no-pager || true
+    exit 1
+  fi
+done
 EOF
 }
 
