@@ -55,6 +55,150 @@ data "aws_ami" "ubuntu" {
   }
 }
 
+locals {
+  runner_ami_id   = var.runner_ami_id != "" ? var.runner_ami_id : data.aws_ami.ubuntu.id
+  operator_ami_id = var.operator_ami_id != "" ? var.operator_ami_id : data.aws_ami.ubuntu.id
+  shared_ami_id   = var.shared_ami_id != "" ? var.shared_ami_id : data.aws_ami.ubuntu.id
+
+  dkg_bucket_base = trim(replace(lower(local.resource_name), "_", "-"), "-")
+  dkg_bucket_name = trim(substr("${local.dkg_bucket_base}-dkgpk", 0, 63), "-")
+
+  managed_instance_profile_enabled = var.iam_instance_profile == ""
+  instance_profile_name            = local.managed_instance_profile_enabled ? aws_iam_instance_profile.live_e2e[0].name : var.iam_instance_profile
+}
+
+resource "aws_kms_key" "dkg" {
+  description             = "Live e2e DKG key package envelope key"
+  deletion_window_in_days = 7
+  enable_key_rotation     = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-dkg-kms"
+  })
+}
+
+resource "aws_kms_alias" "dkg" {
+  name          = "alias/${local.resource_name}-dkg"
+  target_key_id = aws_kms_key.dkg.key_id
+}
+
+resource "aws_s3_bucket" "dkg_keypackages" {
+  bucket        = local.dkg_bucket_name
+  force_destroy = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-dkg-keypackages"
+  })
+}
+
+resource "aws_s3_bucket_public_access_block" "dkg_keypackages" {
+  bucket = aws_s3_bucket.dkg_keypackages.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_versioning" "dkg_keypackages" {
+  bucket = aws_s3_bucket.dkg_keypackages.id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "dkg_keypackages" {
+  bucket = aws_s3_bucket.dkg_keypackages.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      kms_master_key_id = aws_kms_key.dkg.arn
+      sse_algorithm     = "aws:kms"
+    }
+    bucket_key_enabled = true
+  }
+}
+
+data "aws_iam_policy_document" "live_e2e_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "live_e2e" {
+  count = local.managed_instance_profile_enabled ? 1 : 0
+
+  name               = "${local.resource_name}-instance-role"
+  assume_role_policy = data.aws_iam_policy_document.live_e2e_assume_role.json
+
+  tags = local.common_tags
+}
+
+data "aws_iam_policy_document" "live_e2e_inline" {
+  statement {
+    sid    = "AllowDKGBucketList"
+    effect = "Allow"
+    actions = [
+      "s3:GetBucketLocation",
+      "s3:ListBucket"
+    ]
+    resources = [
+      aws_s3_bucket.dkg_keypackages.arn
+    ]
+  }
+
+  statement {
+    sid    = "AllowDKGBucketObjects"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:AbortMultipartUpload",
+      "s3:ListBucketMultipartUploads",
+      "s3:ListMultipartUploadParts"
+    ]
+    resources = [
+      "${aws_s3_bucket.dkg_keypackages.arn}/*"
+    ]
+  }
+
+  statement {
+    sid    = "AllowDKGKMS"
+    effect = "Allow"
+    actions = [
+      "kms:Encrypt",
+      "kms:Decrypt",
+      "kms:ReEncrypt*",
+      "kms:GenerateDataKey*",
+      "kms:DescribeKey"
+    ]
+    resources = [
+      aws_kms_key.dkg.arn
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "live_e2e_inline" {
+  count = local.managed_instance_profile_enabled ? 1 : 0
+
+  name   = "${local.resource_name}-instance-inline"
+  role   = aws_iam_role.live_e2e[0].id
+  policy = data.aws_iam_policy_document.live_e2e_inline.json
+}
+
+resource "aws_iam_instance_profile" "live_e2e" {
+  count = local.managed_instance_profile_enabled ? 1 : 0
+
+  name = "${local.resource_name}-instance-profile"
+  role = aws_iam_role.live_e2e[0].name
+}
+
 resource "aws_key_pair" "runner" {
   key_name   = "${local.resource_name}-ssh"
   public_key = trimspace(var.ssh_public_key)
@@ -161,12 +305,12 @@ resource "aws_security_group" "operator" {
 }
 
 resource "aws_instance" "runner" {
-  ami                    = data.aws_ami.ubuntu.id
+  ami                    = local.runner_ami_id
   instance_type          = var.instance_type
   key_name               = aws_key_pair.runner.key_name
   subnet_id              = local.selected_subnet_id
   vpc_security_group_ids = [aws_security_group.runner.id]
-  iam_instance_profile   = var.iam_instance_profile == "" ? null : var.iam_instance_profile
+  iam_instance_profile   = local.instance_profile_name
 
   associate_public_ip_address = true
 
@@ -191,12 +335,12 @@ resource "aws_instance" "runner" {
 resource "aws_instance" "shared" {
   count = var.provision_shared_services ? 1 : 0
 
-  ami                    = data.aws_ami.ubuntu.id
+  ami                    = local.shared_ami_id
   instance_type          = var.shared_instance_type
   key_name               = aws_key_pair.runner.key_name
   subnet_id              = local.selected_subnet_id
   vpc_security_group_ids = [aws_security_group.shared[0].id]
-  iam_instance_profile   = var.iam_instance_profile == "" ? null : var.iam_instance_profile
+  iam_instance_profile   = local.instance_profile_name
 
   associate_public_ip_address = true
 
@@ -250,12 +394,12 @@ resource "aws_instance" "shared" {
 resource "aws_instance" "operator" {
   count = var.operator_instance_count
 
-  ami                    = data.aws_ami.ubuntu.id
+  ami                    = local.operator_ami_id
   instance_type          = var.operator_instance_type
   key_name               = aws_key_pair.runner.key_name
   subnet_id              = local.selected_subnet_id
   vpc_security_group_ids = [aws_security_group.operator.id]
-  iam_instance_profile   = var.iam_instance_profile == "" ? null : var.iam_instance_profile
+  iam_instance_profile   = local.instance_profile_name
 
   associate_public_ip_address = true
 

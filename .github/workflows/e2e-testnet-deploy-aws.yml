@@ -23,6 +23,11 @@ on:
         required: true
         default: "c7i.large"
         type: string
+      operator_ami_id:
+        description: "Optional pre-synced operator AMI id (ami-...)"
+        required: false
+        default: ""
+        type: string
       ssh_allowed_cidr:
         description: "Optional SSH CIDR allowlist (auto-detected caller /32 if empty)"
         required: false
@@ -207,6 +212,9 @@ jobs:
 
           if [[ -n "${{ inputs.ssh_allowed_cidr }}" ]]; then
             ARGS+=(--ssh-allowed-cidr "${{ inputs.ssh_allowed_cidr }}")
+          fi
+          if [[ -n "${{ inputs.operator_ami_id }}" ]]; then
+            ARGS+=(--operator-ami-id "${{ inputs.operator_ami_id }}")
           fi
           ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
 

@@ -366,7 +366,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeValid(t *testing.T) {
 	}
 }
 
-func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t *testing.T) {
+func TestParseArgs_BoundlessAutoGuestWitnessModeRequiresExplicitWitnessInputs(t *testing.T) {
 	t.Parallel()
 
 	tmp := t.TempDir()
@@ -375,7 +375,7 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t
 		t.Fatalf("write requestor key: %v", err)
 	}
 
-	cfg, err := parseArgs([]string{
+	_, err := parseArgs([]string{
 		"--rpc-url", "https://example-rpc.invalid",
 		"--chain-id", "84532",
 		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
@@ -392,20 +392,11 @@ func TestParseArgs_BoundlessAutoGuestWitnessModeAutoGeneratesWhenInputsOmitted(t
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
 		"--boundless-input-s3-bucket", "test-bucket",
 	})
-	if err != nil {
-		t.Fatalf("parseArgs: %v", err)
+	if err == nil {
+		t.Fatalf("expected error")
 	}
-	if cfg.Boundless.InputMode != "guest-witness-v1" {
-		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
-	}
-	if !cfg.Boundless.GuestWitnessAuto {
-		t.Fatalf("expected guest witness auto mode")
-	}
-	if len(cfg.Boundless.DepositWitnessItems) != 0 {
-		t.Fatalf("expected no preloaded deposit witness items in auto mode")
-	}
-	if len(cfg.Boundless.WithdrawWitnessItems) != 0 {
-		t.Fatalf("expected no preloaded withdraw witness items in auto mode")
+	if !strings.Contains(err.Error(), "guest witness auto generation is disabled") {
+		t.Fatalf("expected disabled guest witness auto error, got: %v", err)
 	}
 }
 

@@ -26,7 +26,9 @@ Current limitation:
   - Optionally validates shared Postgres/Kafka infra first via `cmd/shared-infra-e2e` when `--shared-postgres-dsn` and `--shared-kafka-brokers` are provided.
 - `run-testnet-e2e-aws.sh`:
   - Provisions a dedicated AWS EC2 runner with Terraform, plus shared-services EC2 (Postgres+Kafka by default) and one dedicated EC2 per operator.
+  - Supports pre-baked AMIs (`--runner-ami-id`, `--operator-ami-id`, `--shared-ami-id`) so operators can boot from a pre-synced `junocashd` image.
   - Executes distributed DKG + backup/restore across those operator hosts, then runs `run-testnet-e2e.sh` against the generated `dkg-summary.json`.
+  - Exports each restored operator key package to an e2e-scoped KMS+S3 backend and records receipts in the distributed DKG summary.
   - Collects artifacts and destroys infra by default.
 ## AWS Live E2E
 
@@ -75,9 +77,7 @@ Local invocation example:
 - The e2e runs in strict proof mode only.
 - `run-testnet-e2e.sh` always uses `--boundless-auto`.
 - `--boundless-input-mode` defaults to `private-input` and also supports `guest-witness-v1` with:
-  - automatic deterministic witness generation by default via:
-    - `--boundless-guest-witness-manifest` (default: `zk/witness_fixture/cli/Cargo.toml`)
-  - optional manual override:
+  - explicit witness inputs only (auto generation is disabled in this flow):
     - `--boundless-deposit-owallet-ivk-hex`
     - `--boundless-withdraw-owallet-ovk-hex`
     - `--boundless-deposit-witness-item-file` (repeatable)

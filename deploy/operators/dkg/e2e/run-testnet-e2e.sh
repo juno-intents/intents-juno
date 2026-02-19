@@ -650,18 +650,15 @@ command_run() {
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
-  local guest_witness_manual_mode="false"
+  local guest_witness_manual_mode="true"
   if [[ "$boundless_input_mode" == "guest-witness-v1" ]]; then
     [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
-    if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
-      (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
-      guest_witness_manual_mode="true"
-      [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required in guest witness manual mode"
-      [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required in guest witness manual mode"
-      (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required in guest witness manual mode"
-      (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required in guest witness manual mode"
-    fi
+    [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required when --boundless-input-mode guest-witness-v1"
+    [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
+    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || die "--boundless-deposit-witness-item-file is required when --boundless-input-mode guest-witness-v1"
+    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || die "--boundless-withdraw-witness-item-file is required when --boundless-input-mode guest-witness-v1"
   else
+    guest_witness_manual_mode="false"
     if [[ -n "$boundless_deposit_owallet_ivk_hex" || -n "$boundless_withdraw_owallet_ovk_hex" ]] || \
       (( ${#boundless_deposit_witness_item_files[@]} > 0 || ${#boundless_withdraw_witness_item_files[@]} > 0 )); then
       die "--boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file require --boundless-input-mode guest-witness-v1"

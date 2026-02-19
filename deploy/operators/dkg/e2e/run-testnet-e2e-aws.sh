@@ -36,11 +36,15 @@ run options:
   --aws-profile <name>                 optional AWS profile for local execution
   --aws-name-prefix <prefix>           terraform name prefix (default: juno-live-e2e)
   --aws-instance-type <type>           runner instance type (default: c7i.4xlarge)
+  --runner-ami-id <ami-id>             optional custom AMI for runner host
   --aws-root-volume-gb <n>             root volume size (default: 200)
   --operator-instance-count <n>        operator host count (default: 5)
   --operator-instance-type <type>      operator instance type (default: c7i.large)
+  --operator-ami-id <ami-id>           optional custom AMI for operator hosts
   --operator-root-volume-gb <n>        operator root volume size (default: 100)
+  --shared-ami-id <ami-id>             optional custom AMI for shared services host
   --operator-base-port <port>          first operator grpc port (default: 18443)
+  --dkg-s3-key-prefix <prefix>         S3 prefix for KMS-exported key packages (default: dkg/keypackages)
   --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
   --ssh-allowed-cidr <cidr>            inbound SSH CIDR (default: caller public IP /32)
   --base-funder-key-file <path>        file with Base funder private key hex (required)
@@ -710,6 +714,10 @@ run_distributed_dkg_backup_restore() {
   local dkg_summary_local_path="${12}"
   local operator_public_ips_csv="${13}"
   local operator_private_ips_csv="${14}"
+  local dkg_kms_key_arn="${15}"
+  local dkg_s3_bucket="${16}"
+  local dkg_s3_key_prefix="${17}"
+  local aws_region="${18}"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -884,6 +892,7 @@ age_identity="\$op_root/backup/age-identity.txt"
 age_payload="\$op_root/backup/age-recipient.json"
 age_backup="\$op_root/exports/keypackage-backup.json"
 backup_zip="\$op_root/backup-packages/dkg-backup.zip"
+kms_receipt="\$op_root/exports/kms-export-receipt.json"
 
 mkdir -p "\$op_root/backup" "\$op_root/exports" "\$op_root/backup-packages"
 
@@ -919,6 +928,16 @@ deploy/operators/dkg/operator.sh run \
   --workdir "\$runtime_dir" \
   --release-tag "${release_tag}" \
   --daemon
+
+deploy/operators/dkg/operator-export-kms.sh export \
+  --workdir "\$runtime_dir" \
+  --release-tag "${release_tag}" \
+  --kms-key-id "${dkg_kms_key_arn}" \
+  --s3-bucket "${dkg_s3_bucket}" \
+  --s3-key-prefix "${dkg_s3_key_prefix}" \
+  --s3-sse-kms-key-id "${dkg_kms_key_arn}" \
+  --aws-region "${aws_region}" \
+  --skip-aws-preflight >"\$kms_receipt"
 
 deploy/operators/dkg/operator.sh status --workdir "\$runtime_dir" >"\$op_root/status.json"
 EOF
@@ -960,6 +979,7 @@ EOF
       --arg endpoint "https://${op_private_ip}:${op_port}" \
       --arg runtime_dir "$remote_workdir/dkg-distributed/operators/op${op_index}/runtime" \
       --arg backup_package "$remote_workdir/dkg-distributed/operators/op${op_index}/backup-packages/dkg-backup.zip" \
+      --arg kms_receipt "$remote_workdir/dkg-distributed/operators/op${op_index}/exports/kms-export-receipt.json" \
       --argjson status "$status_json" \
       '{
         index: $index,
@@ -969,6 +989,7 @@ EOF
         endpoint: $endpoint,
         runtime_dir: $runtime_dir,
         backup_package: $backup_package,
+        kms_receipt: $kms_receipt,
         status: $status
       }')"
     operators_json="$(jq --argjson op "$op_json" '. + [$op]' <<<"$operators_json")"
@@ -981,6 +1002,9 @@ EOF
     --arg coordinator_workdir "$coordinator_workdir" \
     --arg completion_report "$completion_report" \
     --arg network "testnet" \
+    --arg kms_key_arn "$dkg_kms_key_arn" \
+    --arg kms_s3_bucket "$dkg_s3_bucket" \
+    --arg kms_s3_key_prefix "$dkg_s3_key_prefix" \
     --argjson operator_count "$operator_count" \
     --argjson threshold "$threshold" \
     --argjson operators "$operators_json" \
@@ -993,6 +1017,11 @@ EOF
       network: $network,
       operator_count: $operator_count,
       threshold: $threshold,
+      dkg_secrets: {
+        kms_key_arn: $kms_key_arn,
+        s3_bucket: $kms_s3_bucket,
+        s3_key_prefix: $kms_s3_key_prefix
+      },
       operators: $operators
     }' >"$dkg_summary_local_path"
 
@@ -1067,11 +1096,15 @@ command_run() {
   local aws_profile=""
   local aws_name_prefix="juno-live-e2e"
   local aws_instance_type="c7i.4xlarge"
+  local runner_ami_id=""
   local aws_root_volume_gb="200"
   local operator_instance_count="5"
   local operator_instance_type="c7i.large"
+  local operator_ami_id=""
   local operator_root_volume_gb="100"
+  local shared_ami_id=""
   local operator_base_port="18443"
+  local dkg_s3_key_prefix="dkg/keypackages"
   local dkg_release_tag="${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}"
   local operator_count_explicit="false"
   local operator_base_port_explicit="false"
@@ -1119,6 +1152,11 @@ command_run() {
         aws_instance_type="$2"
         shift 2
         ;;
+      --runner-ami-id)
+        [[ $# -ge 2 ]] || die "missing value for --runner-ami-id"
+        runner_ami_id="$2"
+        shift 2
+        ;;
       --aws-root-volume-gb)
         [[ $# -ge 2 ]] || die "missing value for --aws-root-volume-gb"
         aws_root_volume_gb="$2"
@@ -1135,15 +1173,30 @@ command_run() {
         operator_instance_type="$2"
         shift 2
         ;;
+      --operator-ami-id)
+        [[ $# -ge 2 ]] || die "missing value for --operator-ami-id"
+        operator_ami_id="$2"
+        shift 2
+        ;;
       --operator-root-volume-gb)
         [[ $# -ge 2 ]] || die "missing value for --operator-root-volume-gb"
         operator_root_volume_gb="$2"
+        shift 2
+        ;;
+      --shared-ami-id)
+        [[ $# -ge 2 ]] || die "missing value for --shared-ami-id"
+        shared_ami_id="$2"
         shift 2
         ;;
       --operator-base-port)
         [[ $# -ge 2 ]] || die "missing value for --operator-base-port"
         operator_base_port="$2"
         operator_base_port_explicit="true"
+        shift 2
+        ;;
+      --dkg-s3-key-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --dkg-s3-key-prefix"
+        dkg_s3_key_prefix="$2"
         shift 2
         ;;
       --dkg-release-tag)
@@ -1228,6 +1281,16 @@ command_run() {
   [[ "$shared_kafka_port" =~ ^[0-9]+$ ]] || die "--shared-kafka-port must be numeric"
   [[ -n "$shared_postgres_user" ]] || die "--shared-postgres-user must not be empty"
   [[ -n "$shared_postgres_db" ]] || die "--shared-postgres-db must not be empty"
+  [[ -n "$dkg_s3_key_prefix" ]] || die "--dkg-s3-key-prefix must not be empty"
+  if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
+    die "--runner-ami-id must look like an AMI id (ami-...)"
+  fi
+  if [[ -n "$operator_ami_id" && ! "$operator_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
+    die "--operator-ami-id must look like an AMI id (ami-...)"
+  fi
+  if [[ -n "$shared_ami_id" && ! "$shared_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
+    die "--shared-ami-id must look like an AMI id (ami-...)"
+  fi
   if [[ -n "$boundless_requestor_key_file" && ! -f "$boundless_requestor_key_file" ]]; then
     die "boundless requestor key file not found: $boundless_requestor_key_file"
   fi
@@ -1308,10 +1371,13 @@ command_run() {
     --arg deployment_id "$deployment_id" \
     --arg name_prefix "$aws_name_prefix" \
     --arg instance_type "$aws_instance_type" \
+    --arg runner_ami_id "$runner_ami_id" \
     --argjson root_volume_size_gb "$aws_root_volume_gb" \
     --argjson operator_instance_count "$operator_instance_count" \
     --arg operator_instance_type "$operator_instance_type" \
+    --arg operator_ami_id "$operator_ami_id" \
     --argjson operator_root_volume_size_gb "$operator_root_volume_gb" \
+    --arg shared_ami_id "$shared_ami_id" \
     --argjson operator_base_port "$operator_base_port" \
     --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
     --arg ssh_public_key "$(cat "$ssh_key_public")" \
@@ -1321,15 +1387,19 @@ command_run() {
     --arg shared_postgres_db "$shared_postgres_db" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
+    --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
       name_prefix: $name_prefix,
       instance_type: $instance_type,
+      runner_ami_id: $runner_ami_id,
       root_volume_size_gb: $root_volume_size_gb,
       operator_instance_count: $operator_instance_count,
       operator_instance_type: $operator_instance_type,
+      operator_ami_id: $operator_ami_id,
       operator_root_volume_size_gb: $operator_root_volume_size_gb,
+      shared_ami_id: $shared_ami_id,
       operator_base_port: $operator_base_port,
       allowed_ssh_cidr: $allowed_ssh_cidr,
       ssh_public_key: $ssh_public_key,
@@ -1338,7 +1408,8 @@ command_run() {
       shared_postgres_password: $shared_postgres_password,
       shared_postgres_db: $shared_postgres_db,
       shared_postgres_port: $shared_postgres_port,
-      shared_kafka_port: $shared_kafka_port
+      shared_kafka_port: $shared_kafka_port,
+      dkg_s3_key_prefix: $dkg_s3_key_prefix
     }' >"$tfvars_file"
 
   cleanup_enabled="true"
@@ -1412,6 +1483,32 @@ command_run() {
   (( ${#operator_public_ips[@]} == operator_instance_count )) || die "terraform operator_public_ips count mismatch: expected=$operator_instance_count got=${#operator_public_ips[@]}"
   (( ${#operator_private_ips[@]} == operator_instance_count )) || die "terraform operator_private_ips count mismatch: expected=$operator_instance_count got=${#operator_private_ips[@]}"
 
+  local dkg_kms_key_arn dkg_s3_bucket dkg_s3_key_prefix_out
+  dkg_kms_key_arn="$(
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      output \
+      -state="$state_file" \
+      -raw dkg_kms_key_arn
+  )"
+  dkg_s3_bucket="$(
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      output \
+      -state="$state_file" \
+      -raw dkg_s3_bucket
+  )"
+  dkg_s3_key_prefix_out="$(
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      output \
+      -state="$state_file" \
+      -raw dkg_s3_key_prefix
+  )"
+  [[ -n "$dkg_kms_key_arn" && "$dkg_kms_key_arn" != "null" ]] || die "terraform output dkg_kms_key_arn is empty"
+  [[ -n "$dkg_s3_bucket" && "$dkg_s3_bucket" != "null" ]] || die "terraform output dkg_s3_bucket is empty"
+  [[ -n "$dkg_s3_key_prefix_out" && "$dkg_s3_key_prefix_out" != "null" ]] || die "terraform output dkg_s3_key_prefix is empty"
+
   if [[ "$with_shared_services" == "true" ]]; then
     wait_for_ssh "$ssh_key_private" "$runner_ssh_user" "$shared_public_ip"
     if ! remote_prepare_shared_host \
@@ -1461,7 +1558,11 @@ command_run() {
     "$dkg_summary_remote_path" \
     "$dkg_summary_local_path" \
     "$operator_public_ips_csv" \
-    "$operator_private_ips_csv"
+    "$operator_private_ips_csv" \
+    "$dkg_kms_key_arn" \
+    "$dkg_s3_bucket" \
+    "$dkg_s3_key_prefix_out" \
+    "$aws_region"
 
   copy_remote_secret_file \
     "$ssh_key_private" \

@@ -20,6 +20,12 @@ variable "instance_type" {
   default     = "c7i.4xlarge"
 }
 
+variable "runner_ami_id" {
+  description = "Optional custom AMI ID for the runner instance (for pre-baked/synced images)."
+  type        = string
+  default     = ""
+}
+
 variable "root_volume_size_gb" {
   description = "Root EBS size in GiB."
   type        = number
@@ -41,6 +47,12 @@ variable "operator_instance_type" {
   description = "EC2 instance type for each dedicated operator host."
   type        = string
   default     = "c7i.large"
+}
+
+variable "operator_ami_id" {
+  description = "Optional custom AMI ID for operator instances (for pre-baked/synced images)."
+  type        = string
+  default     = ""
 }
 
 variable "operator_root_volume_size_gb" {
@@ -105,6 +117,12 @@ variable "shared_instance_type" {
   default     = "c7i.large"
 }
 
+variable "shared_ami_id" {
+  description = "Optional custom AMI ID for the shared services host (for pre-baked images)."
+  type        = string
+  default     = ""
+}
+
 variable "shared_root_volume_size_gb" {
   description = "Root EBS size in GiB for the shared services host."
   type        = number
@@ -140,4 +158,10 @@ variable "shared_kafka_port" {
   description = "Kafka TCP port exposed by the shared services host."
   type        = number
   default     = 9092
+}
+
+variable "dkg_s3_key_prefix" {
+  description = "S3 key prefix used for operator DKG key-package exports."
+  type        = string
+  default     = "dkg/keypackages"
 }
