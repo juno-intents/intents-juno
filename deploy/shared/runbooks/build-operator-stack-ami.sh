@@ -345,6 +345,301 @@ TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
 ENV
   sudo install -m 0600 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
 
+  cat > /tmp/operator-stack-hydrator.env <<'EOF_HYDRATOR_ENV'
+OPERATOR_STACK_CONFIG_JSON_PATH=/etc/intents-juno/operator-stack-config.json
+OPERATOR_STACK_CONFIG_SECRET_ID=
+OPERATOR_STACK_CONFIG_SECRET_REGION=
+EOF_HYDRATOR_ENV
+  sudo install -m 0600 /tmp/operator-stack-hydrator.env /etc/intents-juno/operator-stack-hydrator.env
+
+  cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'
+#!/usr/bin/env bash
+set -euo pipefail
+
+stack_env_file="/etc/intents-juno/operator-stack.env"
+hydrator_env_file="/etc/intents-juno/operator-stack-hydrator.env"
+json_source_file=""
+secret_source_file=""
+
+log() {
+  printf 'config-hydrator: %s\n' "$*" >&2
+}
+
+fail() {
+  log "$*"
+  exit 1
+}
+
+cleanup() {
+  rm -f "$json_source_file" "$secret_source_file"
+}
+trap cleanup EXIT
+
+# shellcheck disable=SC1091
+[[ -f "$hydrator_env_file" ]] && source "$hydrator_env_file"
+
+[[ -s "$stack_env_file" ]] || fail "operator stack env is missing: $stack_env_file"
+
+read_env_value() {
+  local key="$1"
+  awk -v key="$key" -F= '
+    $1 == key {
+      print substr($0, index($0, "=") + 1)
+      found = 1
+      exit
+    }
+    END {
+      if (!found) {
+        exit 1
+      }
+    }
+  ' "$stack_env_file"
+}
+
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN {
+      updated = 0
+    }
+    index($0, key "=") == 1 {
+      print key "=" value
+      updated = 1
+      next
+    }
+    {
+      print
+    }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" > "$tmp"
+  install -m 0600 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
+resolve_secret_region() {
+  if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_REGION:-}" ]]; then
+    printf '%s' "$OPERATOR_STACK_CONFIG_SECRET_REGION"
+    return 0
+  fi
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    printf '%s' "$AWS_REGION"
+    return 0
+  fi
+  if [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    printf '%s' "$AWS_DEFAULT_REGION"
+    return 0
+  fi
+
+  local token identity_doc
+  token="$(curl -fsS --max-time 2 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
+  [[ -n "$token" ]] || return 1
+  identity_doc="$(curl -fsS --max-time 2 -H "X-aws-ec2-metadata-token: $token" 'http://169.254.169.254/latest/dynamic/instance-identity/document' || true)"
+  [[ -n "$identity_doc" ]] || return 1
+  jq -er '.region // empty' <<<"$identity_doc"
+}
+
+load_secret_source() {
+  local secret_id="$1"
+  [[ -n "$secret_id" ]] || return 0
+  command -v aws >/dev/null 2>&1 || fail "aws cli is required to load OPERATOR_STACK_CONFIG_SECRET_ID"
+
+  local secret_region secret_payload
+  secret_region="$(resolve_secret_region)" || fail "unable to resolve aws region for OPERATOR_STACK_CONFIG_SECRET_ID"
+  secret_payload="$(aws --region "$secret_region" secretsmanager get-secret-value --secret-id "$secret_id" --query SecretString --output text)"
+  [[ -n "$secret_payload" && "$secret_payload" != "None" ]] || fail "secret payload is empty for OPERATOR_STACK_CONFIG_SECRET_ID=$secret_id"
+
+  secret_source_file="$(mktemp)"
+  printf '%s' "$secret_payload" > "$secret_source_file"
+  jq -e . "$secret_source_file" >/dev/null 2>&1 || fail "secret OPERATOR_STACK_CONFIG_SECRET_ID must contain JSON object"
+}
+
+load_json_source() {
+  local source_path="${OPERATOR_STACK_CONFIG_JSON_PATH:-/etc/intents-juno/operator-stack-config.json}"
+  if [[ -z "$source_path" || ! -f "$source_path" ]]; then
+    return 0
+  fi
+
+  json_source_file="$(mktemp)"
+  cat "$source_path" > "$json_source_file"
+  jq -e . "$json_source_file" >/dev/null 2>&1 || fail "operator stack config json is invalid: $source_path"
+}
+
+json_lookup() {
+  local source_file="$1"
+  local key="$2"
+  [[ -n "$source_file" && -s "$source_file" ]] || return 1
+
+  local value
+  value="$(
+    jq -er --arg key "$key" '
+      def read_key($obj):
+        if ($obj | type) != "object" then empty
+        else (
+          $obj[$key]
+          // $obj[($key | ascii_downcase)]
+          // empty
+        )
+        end;
+      read_key(.)
+      // read_key(.operator_stack // {})
+      // read_key(.operator_stack_env // {})
+      // (if $key == "CHECKPOINT_POSTGRES_DSN" then (.checkpoint.postgres_dsn // empty) else empty end)
+      // (if $key == "CHECKPOINT_KAFKA_BROKERS" then ((.checkpoint.kafka_brokers // empty) | if type == "array" then join(",") else tostring end) else empty end)
+      // (if $key == "CHECKPOINT_BLOB_BUCKET" then (.checkpoint.blob_bucket // empty) else empty end)
+      // (if $key == "CHECKPOINT_BLOB_PREFIX" then (.checkpoint.blob_prefix // empty) else empty end)
+      // (if $key == "CHECKPOINT_IPFS_API_URL" then (.checkpoint.ipfs_api_url // empty) else empty end)
+      // (if $key == "CHECKPOINT_SIGNATURE_TOPIC" then (.checkpoint.signature_topic // empty) else empty end)
+      // (if $key == "CHECKPOINT_PACKAGE_TOPIC" then (.checkpoint.package_topic // empty) else empty end)
+      // (if $key == "CHECKPOINT_OPERATORS" then ((.checkpoint.operators // empty) | if type == "array" then join(",") else tostring end) else empty end)
+      // (if $key == "CHECKPOINT_THRESHOLD" then (.checkpoint.threshold // empty | tostring) else empty end)
+      // (if $key == "JUNO_QUEUE_KAFKA_TLS" then (.checkpoint.kafka_tls // empty | tostring) else empty end)
+      // (if $key == "TSS_NITRO_EXPECTED_PCR0" then (.tss.nitro.expected_pcr0 // empty) else empty end)
+      // (if $key == "TSS_NITRO_EXPECTED_PCR1" then (.tss.nitro.expected_pcr1 // empty) else empty end)
+      // (if $key == "TSS_NITRO_EXPECTED_PCR2" then (.tss.nitro.expected_pcr2 // empty) else empty end)
+      | if type == "string" then . else tostring end
+      | select(length > 0)
+    ' "$source_file" 2>/dev/null || true
+  )"
+  [[ -n "$value" ]] || return 1
+  printf '%s' "$value"
+}
+
+resolve_value() {
+  local key="$1"
+  local current_value="${2:-}"
+  local value=""
+
+  if value="$(json_lookup "$secret_source_file" "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  if value="$(json_lookup "$json_source_file" "$key" 2>/dev/null)"; then
+    printf '%s' "$value"
+    return 0
+  fi
+  if [[ -n "$current_value" ]]; then
+    printf '%s' "$current_value"
+    return 0
+  fi
+  return 1
+}
+
+normalize_pcr() {
+  local raw="${1:-}"
+  raw="${raw#0x}"
+  printf '%s' "${raw,,}"
+}
+
+required_key() {
+  local key="$1"
+  local value="$2"
+  [[ -n "$value" ]] || fail "requires $key in $stack_env_file (set it directly, via OPERATOR_STACK_CONFIG_JSON_PATH, or via OPERATOR_STACK_CONFIG_SECRET_ID)"
+}
+
+load_json_source
+load_secret_source "${OPERATOR_STACK_CONFIG_SECRET_ID:-}"
+
+checkpoint_postgres_dsn="$(resolve_value "CHECKPOINT_POSTGRES_DSN" "$(read_env_value CHECKPOINT_POSTGRES_DSN || true)" || true)"
+checkpoint_kafka_brokers="$(resolve_value "CHECKPOINT_KAFKA_BROKERS" "$(read_env_value CHECKPOINT_KAFKA_BROKERS || true)" || true)"
+checkpoint_blob_bucket="$(resolve_value "CHECKPOINT_BLOB_BUCKET" "$(read_env_value CHECKPOINT_BLOB_BUCKET || true)" || true)"
+checkpoint_blob_prefix="$(resolve_value "CHECKPOINT_BLOB_PREFIX" "$(read_env_value CHECKPOINT_BLOB_PREFIX || true)" || true)"
+checkpoint_ipfs_api_url="$(resolve_value "CHECKPOINT_IPFS_API_URL" "$(read_env_value CHECKPOINT_IPFS_API_URL || true)" || true)"
+checkpoint_signature_topic="$(resolve_value "CHECKPOINT_SIGNATURE_TOPIC" "$(read_env_value CHECKPOINT_SIGNATURE_TOPIC || true)" || true)"
+checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env_value CHECKPOINT_PACKAGE_TOPIC || true)" || true)"
+checkpoint_operators="$(resolve_value "CHECKPOINT_OPERATORS" "$(read_env_value CHECKPOINT_OPERATORS || true)" || true)"
+checkpoint_threshold="$(resolve_value "CHECKPOINT_THRESHOLD" "$(read_env_value CHECKPOINT_THRESHOLD || true)" || true)"
+kafka_tls="$(resolve_value "JUNO_QUEUE_KAFKA_TLS" "$(read_env_value JUNO_QUEUE_KAFKA_TLS || true)" || true)"
+
+runtime_mode="$(printf '%s' "$(read_env_value TSS_SIGNER_RUNTIME_MODE || printf 'nitro-enclave')" | tr '[:upper:]' '[:lower:]')"
+pcr0="$(resolve_value "TSS_NITRO_EXPECTED_PCR0" "$(read_env_value TSS_NITRO_EXPECTED_PCR0 || true)" || true)"
+pcr1="$(resolve_value "TSS_NITRO_EXPECTED_PCR1" "$(read_env_value TSS_NITRO_EXPECTED_PCR1 || true)" || true)"
+pcr2="$(resolve_value "TSS_NITRO_EXPECTED_PCR2" "$(read_env_value TSS_NITRO_EXPECTED_PCR2 || true)" || true)"
+
+required_key "CHECKPOINT_POSTGRES_DSN" "$checkpoint_postgres_dsn"
+required_key "CHECKPOINT_KAFKA_BROKERS" "$checkpoint_kafka_brokers"
+required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
+required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
+required_key "CHECKPOINT_OPERATORS" "$checkpoint_operators"
+required_key "CHECKPOINT_THRESHOLD" "$checkpoint_threshold"
+
+case "$checkpoint_postgres_dsn" in
+  *sslmode=require*|*sslmode=verify-ca*|*sslmode=verify-full*) ;;
+  *)
+    fail "requires CHECKPOINT_POSTGRES_DSN to include sslmode=require (or verify-ca/verify-full)"
+    ;;
+esac
+
+case "${kafka_tls,,}" in
+  1|true|yes|on)
+    kafka_tls="true"
+    ;;
+  *)
+    fail "requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport"
+    ;;
+esac
+
+[[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
+
+if [[ "$runtime_mode" == "nitro-enclave" ]]; then
+  required_key "TSS_NITRO_EXPECTED_PCR0 when TSS_SIGNER_RUNTIME_MODE=nitro-enclave" "$pcr0"
+  required_key "TSS_NITRO_EXPECTED_PCR1 when TSS_SIGNER_RUNTIME_MODE=nitro-enclave" "$pcr1"
+  required_key "TSS_NITRO_EXPECTED_PCR2 when TSS_SIGNER_RUNTIME_MODE=nitro-enclave" "$pcr2"
+  pcr0="$(normalize_pcr "$pcr0")"
+  pcr1="$(normalize_pcr "$pcr1")"
+  pcr2="$(normalize_pcr "$pcr2")"
+  [[ "$pcr0" =~ ^[0-9a-f]{96}$ ]] || fail "requires TSS_NITRO_EXPECTED_PCR0 as 96 hex chars"
+  [[ "$pcr1" =~ ^[0-9a-f]{96}$ ]] || fail "requires TSS_NITRO_EXPECTED_PCR1 as 96 hex chars"
+  [[ "$pcr2" =~ ^[0-9a-f]{96}$ ]] || fail "requires TSS_NITRO_EXPECTED_PCR2 as 96 hex chars"
+fi
+
+tmp_env="$(mktemp)"
+cp "$stack_env_file" "$tmp_env"
+chmod 0600 "$tmp_env"
+
+set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
+set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
+set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
+set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
+set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
+set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
+set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "$kafka_tls"
+
+if [[ -n "$checkpoint_blob_prefix" ]]; then
+  set_env_value "$tmp_env" CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
+fi
+if [[ -n "$checkpoint_signature_topic" ]]; then
+  set_env_value "$tmp_env" CHECKPOINT_SIGNATURE_TOPIC "$checkpoint_signature_topic"
+fi
+if [[ -n "$checkpoint_package_topic" ]]; then
+  set_env_value "$tmp_env" CHECKPOINT_PACKAGE_TOPIC "$checkpoint_package_topic"
+fi
+if [[ "$runtime_mode" == "nitro-enclave" ]]; then
+  set_env_value "$tmp_env" TSS_NITRO_EXPECTED_PCR0 "$pcr0"
+  set_env_value "$tmp_env" TSS_NITRO_EXPECTED_PCR1 "$pcr1"
+  set_env_value "$tmp_env" TSS_NITRO_EXPECTED_PCR2 "$pcr2"
+fi
+
+install -m 0600 "$tmp_env" "$stack_env_file"
+rm -f "$tmp_env"
+
+if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_ID:-}" ]]; then
+  log "hydrated operator stack config from Secrets Manager and local env"
+elif [[ -n "${OPERATOR_STACK_CONFIG_JSON_PATH:-}" && -f "${OPERATOR_STACK_CONFIG_JSON_PATH}" ]]; then
+  log "hydrated operator stack config from json artifact and local env"
+else
+  log "hydrated operator stack config from existing $stack_env_file values"
+fi
+EOF_CONFIG_HYDRATOR
+  sudo install -m 0755 /tmp/intents-juno-config-hydrator.sh /usr/local/bin/intents-juno-config-hydrator.sh
+
   cat > /tmp/intents-juno-juno-scan.sh <<'EOF_SCAN'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1109,11 +1404,31 @@ WantedBy=multi-user.target
 EOF_SCAN_SERVICE
   sudo install -m 0644 /tmp/juno-scan.service /etc/systemd/system/juno-scan.service
 
+  cat > /tmp/intents-juno-config-hydrator.service <<'EOF_CONFIG_HYDRATOR_SERVICE'
+[Unit]
+Description=Intents Juno Operator config hydrator
+After=network-online.target
+Wants=network-online.target
+Before=checkpoint-signer.service checkpoint-aggregator.service tss-host.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/intents-juno/operator-stack-hydrator.env
+ExecStart=/usr/local/bin/intents-juno-config-hydrator.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF_CONFIG_HYDRATOR_SERVICE
+  sudo install -m 0644 /tmp/intents-juno-config-hydrator.service /etc/systemd/system/intents-juno-config-hydrator.service
+
   cat > /tmp/checkpoint-signer.service <<'EOF_SIGNER_SERVICE'
 [Unit]
 Description=Intents Juno Operator checkpoint-signer
-After=junocashd.service
-Requires=junocashd.service
+After=junocashd.service intents-juno-config-hydrator.service
+Requires=junocashd.service intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1132,8 +1447,8 @@ EOF_SIGNER_SERVICE
   cat > /tmp/checkpoint-aggregator.service <<'EOF_AGG_SERVICE'
 [Unit]
 Description=Intents Juno Operator checkpoint-aggregator
-After=checkpoint-signer.service
-Requires=checkpoint-signer.service
+After=checkpoint-signer.service intents-juno-config-hydrator.service
+Requires=checkpoint-signer.service intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1152,8 +1467,9 @@ EOF_AGG_SERVICE
   cat > /tmp/tss-host.service <<'EOF_TSS_SERVICE'
 [Unit]
 Description=Intents Juno Operator tss-host
-After=network-online.target
+After=network-online.target intents-juno-config-hydrator.service
 Wants=network-online.target
+Requires=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1192,8 +1508,8 @@ EOF_BASE_RELAYER_SERVICE
   cat > /tmp/deposit-relayer.service <<'EOF_DEPOSIT_RELAYER_SERVICE'
 [Unit]
 Description=Intents Juno Operator deposit-relayer
-After=base-relayer.service
-Requires=base-relayer.service
+After=base-relayer.service intents-juno-config-hydrator.service
+Requires=base-relayer.service intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1212,8 +1528,8 @@ EOF_DEPOSIT_RELAYER_SERVICE
   cat > /tmp/withdraw-coordinator.service <<'EOF_WITHDRAW_COORDINATOR_SERVICE'
 [Unit]
 Description=Intents Juno Operator withdraw-coordinator
-After=base-relayer.service junocashd.service tss-host.service
-Requires=base-relayer.service junocashd.service tss-host.service
+After=base-relayer.service junocashd.service tss-host.service intents-juno-config-hydrator.service
+Requires=base-relayer.service junocashd.service tss-host.service intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1232,8 +1548,8 @@ EOF_WITHDRAW_COORDINATOR_SERVICE
   cat > /tmp/withdraw-finalizer.service <<'EOF_WITHDRAW_FINALIZER_SERVICE'
 [Unit]
 Description=Intents Juno Operator withdraw-finalizer
-After=base-relayer.service junocashd.service juno-scan.service
-Requires=base-relayer.service junocashd.service juno-scan.service
+After=base-relayer.service junocashd.service juno-scan.service intents-juno-config-hydrator.service
+Requires=base-relayer.service junocashd.service juno-scan.service intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1334,6 +1650,7 @@ write_bootstrap_metadata() {
         signer_runtime_mode_default: \$tss_signer_runtime_mode
       },
       services: [
+        "intents-juno-config-hydrator.service",
         "junocashd.service",
         "juno-scan.service",
         "checkpoint-signer.service",
@@ -1348,7 +1665,7 @@ write_bootstrap_metadata() {
 }
 
 run_with_retry sudo apt-get update -y
-run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl
+run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl awscli
 
 install_junocash
 install_juno_scan
@@ -1356,7 +1673,7 @@ install_intents_binaries
 write_stack_config
 
 sudo systemctl daemon-reload
-sudo systemctl enable junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service
+sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service
 sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
@@ -1748,6 +2065,7 @@ command_create() {
         bridge_address: $bridge_address,
         tss_signer_runtime_mode_default: $tss_signer_runtime_mode,
         services: [
+          "intents-juno-config-hydrator.service",
           "junocashd.service",
           "juno-scan.service",
           "checkpoint-signer.service",
