@@ -33,6 +33,17 @@ type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
 }
 
+type WithdrawWitnessExtractRequest struct {
+	TxHash       string
+	ActionIndex  uint32
+	WithdrawalID [32]byte
+	RecipientUA  []byte
+}
+
+type WithdrawWitnessExtractor interface {
+	ExtractWithdrawWitness(ctx context.Context, req WithdrawWitnessExtractRequest) ([]byte, error)
+}
+
 type CheckpointPackage struct {
 	Checkpoint         checkpoint.Checkpoint
 	OperatorSignatures [][]byte
@@ -58,6 +69,8 @@ type Config struct {
 
 	ProofRequestTimeout time.Duration
 	ProofPriority       int
+
+	WitnessExtractor WithdrawWitnessExtractor
 }
 
 type Finalizer struct {
@@ -71,7 +84,8 @@ type Finalizer struct {
 
 	log *slog.Logger
 
-	quorumVerifier *checkpoint.QuorumVerifier
+	quorumVerifier   *checkpoint.QuorumVerifier
+	witnessExtractor WithdrawWitnessExtractor
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
@@ -121,13 +135,14 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 	}
 
 	return &Finalizer{
-		cfg:            cfg,
-		store:          store,
-		leaseStore:     leaseStore,
-		sender:         sender,
-		prover:         prover,
-		log:            log,
-		quorumVerifier: quorumVerifier,
+		cfg:              cfg,
+		store:            store,
+		leaseStore:       leaseStore,
+		sender:           sender,
+		prover:           prover,
+		log:              log,
+		quorumVerifier:   quorumVerifier,
+		witnessExtractor: cfg.WitnessExtractor,
 	}, nil
 }
 
@@ -233,7 +248,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 
 	items := make([]bridgeabi.FinalizeItem, 0, len(b.WithdrawalIDs))
 	witnessItems := make([][]byte, 0, len(b.WithdrawalIDs))
-	for _, wid := range b.WithdrawalIDs {
+	for idx, wid := range b.WithdrawalIDs {
 		w, err := f.store.GetWithdrawal(ctx, wid)
 		if err != nil {
 			return err
@@ -249,7 +264,27 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 			RecipientUAHash: crypto.Keccak256Hash(w.RecipientUA),
 			NetAmount:       new(big.Int).SetUint64(net),
 		})
-		witnessItems = append(witnessItems, append([]byte(nil), w.ProofWitnessItem...))
+
+		witnessItem := append([]byte(nil), w.ProofWitnessItem...)
+		if len(f.cfg.OWalletOVKBytes) == 32 && f.witnessExtractor != nil {
+			if b.JunoTxID == "" {
+				return fmt.Errorf("withdrawfinalizer: missing batch juno txid for witness extraction")
+			}
+			extracted, err := f.witnessExtractor.ExtractWithdrawWitness(ctx, WithdrawWitnessExtractRequest{
+				TxHash:       b.JunoTxID,
+				ActionIndex:  uint32(idx),
+				WithdrawalID: w.ID,
+				RecipientUA:  append([]byte(nil), w.RecipientUA...),
+			})
+			if err != nil {
+				return fmt.Errorf("withdrawfinalizer: extract proof witness item: %w", err)
+			}
+			if len(extracted) == 0 {
+				return fmt.Errorf("withdrawfinalizer: empty extracted proof witness item for batch index %d", idx)
+			}
+			witnessItem = append([]byte(nil), extracted...)
+		}
+		witnessItems = append(witnessItems, witnessItem)
 	}
 
 	journal, err := bridgeabi.EncodeWithdrawJournal(bridgeabi.WithdrawJournal{
