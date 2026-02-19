@@ -51,6 +51,10 @@ Options:
   --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
   --boundless-witness-juno-scan-url <url> juno-scan URL for witness extraction (required, guest-witness-v1)
   --boundless-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (required, guest-witness-v1)
+  --boundless-witness-juno-scan-urls <csv> optional comma-separated juno-scan URL pool for witness extraction failover
+  --boundless-witness-juno-rpc-urls <csv> optional comma-separated junocashd RPC URL pool for witness extraction failover
+  --boundless-witness-operator-labels <csv> optional comma-separated labels aligned with witness endpoint pools
+  --boundless-witness-quorum-threshold <n> witness endpoint quorum threshold (default: 3)
   --boundless-witness-juno-scan-bearer-token-env <name> env var for optional juno-scan bearer token
                                    (default: JUNO_SCAN_BEARER_TOKEN)
   --boundless-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
@@ -422,6 +426,67 @@ juno_rebroadcast_tx() {
   log "juno tx rebroadcast accepted txid=$send_result"
 }
 
+witness_scan_healthcheck() {
+  local scan_url="$1"
+  local scan_bearer_token="${2:-}"
+  local -a headers=()
+  if [[ -n "$scan_bearer_token" ]]; then
+    headers+=(--header "Authorization: Bearer $scan_bearer_token")
+  fi
+  curl -fsS --max-time 5 "${headers[@]}" "${scan_url%/}/v1/health" >/dev/null
+}
+
+witness_rpc_healthcheck() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local params_json response rpc_error rpc_result
+
+  params_json='[]'
+  response="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "getblockcount" "$params_json" 2>/dev/null || true)"
+  [[ -n "$response" ]] || return 1
+
+  rpc_error="$(jq -r '.error.message // empty' <<<"$response" 2>/dev/null || true)"
+  [[ -z "$rpc_error" ]] || return 1
+  rpc_result="$(jq -r '.result // empty' <<<"$response" 2>/dev/null || true)"
+  [[ "$rpc_result" =~ ^[0-9]+$ ]]
+}
+
+witness_pair_healthcheck() {
+  local scan_url="$1"
+  local rpc_url="$2"
+  local rpc_user="$3"
+  local rpc_pass="$4"
+  local scan_bearer_token="${5:-}"
+
+  witness_scan_healthcheck "$scan_url" "$scan_bearer_token" || return 1
+  witness_rpc_healthcheck "$rpc_url" "$rpc_user" "$rpc_pass" || return 1
+}
+
+witness_scan_upsert_wallet() {
+  local scan_url="$1"
+  local scan_bearer_token="$2"
+  local wallet_id="$3"
+  local ufvk="$4"
+  local payload
+
+  payload="$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')"
+  if [[ -n "$scan_bearer_token" ]]; then
+    curl -fsS \
+      --max-time 10 \
+      --header "Content-Type: application/json" \
+      --header "Authorization: Bearer $scan_bearer_token" \
+      --data "$payload" \
+      "${scan_url%/}/v1/wallets" >/dev/null
+  else
+    curl -fsS \
+      --max-time 10 \
+      --header "Content-Type: application/json" \
+      --data "$payload" \
+      "${scan_url%/}/v1/wallets" >/dev/null
+  fi
+}
+
 run_with_rpc_retry() {
   local attempts="$1"
   local delay_seconds="$2"
@@ -648,6 +713,10 @@ command_run() {
   local -a boundless_withdraw_witness_item_files=()
   local boundless_witness_juno_scan_url=""
   local boundless_witness_juno_rpc_url=""
+  local boundless_witness_juno_scan_urls_csv=""
+  local boundless_witness_juno_rpc_urls_csv=""
+  local boundless_witness_operator_labels_csv=""
+  local boundless_witness_quorum_threshold="3"
   local boundless_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
   local boundless_witness_juno_rpc_user_env="JUNO_RPC_USER"
   local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
@@ -842,6 +911,26 @@ command_run() {
       --boundless-witness-juno-rpc-url)
         [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-url"
         boundless_witness_juno_rpc_url="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-scan-urls)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-urls"
+        boundless_witness_juno_scan_urls_csv="$2"
+        shift 2
+        ;;
+      --boundless-witness-juno-rpc-urls)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-urls"
+        boundless_witness_juno_rpc_urls_csv="$2"
+        shift 2
+        ;;
+      --boundless-witness-operator-labels)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-operator-labels"
+        boundless_witness_operator_labels_csv="$2"
+        shift 2
+        ;;
+      --boundless-witness-quorum-threshold)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-quorum-threshold"
+        boundless_witness_quorum_threshold="$2"
         shift 2
         ;;
       --boundless-witness-juno-scan-bearer-token-env)
@@ -1064,8 +1153,24 @@ command_run() {
   [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
   [[ "$boundless_witness_metadata_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-witness-metadata-timeout-seconds must be numeric"
   (( boundless_witness_metadata_timeout_seconds > 0 )) || die "--boundless-witness-metadata-timeout-seconds must be > 0"
-  [[ -n "$boundless_witness_juno_scan_url" ]] || die "--boundless-witness-juno-scan-url is required when guest witness extraction is enabled"
-  [[ -n "$boundless_witness_juno_rpc_url" ]] || die "--boundless-witness-juno-rpc-url is required when guest witness extraction is enabled"
+  [[ "$boundless_witness_quorum_threshold" =~ ^[0-9]+$ ]] || die "--boundless-witness-quorum-threshold must be numeric"
+  (( boundless_witness_quorum_threshold > 0 )) || die "--boundless-witness-quorum-threshold must be > 0"
+  if [[ -z "$boundless_witness_juno_scan_urls_csv" ]]; then
+    boundless_witness_juno_scan_urls_csv="$boundless_witness_juno_scan_url"
+  fi
+  if [[ -z "$boundless_witness_juno_rpc_urls_csv" ]]; then
+    boundless_witness_juno_rpc_urls_csv="$boundless_witness_juno_rpc_url"
+  fi
+  [[ -n "$boundless_witness_juno_scan_urls_csv" ]] || die "one of --boundless-witness-juno-scan-url or --boundless-witness-juno-scan-urls is required when guest witness extraction is enabled"
+  [[ -n "$boundless_witness_juno_rpc_urls_csv" ]] || die "one of --boundless-witness-juno-rpc-url or --boundless-witness-juno-rpc-urls is required when guest witness extraction is enabled"
+  if [[ -z "$boundless_witness_juno_scan_url" ]]; then
+    boundless_witness_juno_scan_url="$(trim "${boundless_witness_juno_scan_urls_csv%%,*}")"
+  fi
+  if [[ -z "$boundless_witness_juno_rpc_url" ]]; then
+    boundless_witness_juno_rpc_url="$(trim "${boundless_witness_juno_rpc_urls_csv%%,*}")"
+  fi
+  [[ -n "$boundless_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
+  [[ -n "$boundless_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
   [[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" ]] || die "JUNO_FUNDER_PRIVATE_KEY_HEX is required for run-generated witness metadata"
   if [[ -n "$bridge_deposit_final_orchard_root" || -n "$bridge_withdraw_final_orchard_root" || -n "$bridge_deposit_checkpoint_height" || -n "$bridge_deposit_checkpoint_block_hash" || -n "$bridge_withdraw_checkpoint_height" || -n "$bridge_withdraw_checkpoint_block_hash" ]]; then
     die "manual bridge checkpoint/orchard root overrides are not supported when --boundless-input-mode guest-witness-v1"
@@ -1198,6 +1303,16 @@ command_run() {
   bridge_deployer_address="$(jq -r '.operators[0].operator_id // empty' "$dkg_summary")"
   [[ -n "$bridge_deployer_address" ]] || die "dkg summary missing operators[0].operator_id"
 
+  local witness_endpoint_pool_size=0
+  local witness_endpoint_healthy_count=0
+  local witness_quorum_validated_count=0
+  local witness_quorum_validated="false"
+  local witness_metadata_source_operator=""
+  local -a witness_pool_operator_labels=()
+  local -a witness_healthy_operator_labels=()
+  local -a witness_quorum_operator_labels=()
+  local -a witness_failed_operator_labels=()
+
   if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
     ensure_dir "$workdir/reports/witness"
     local witness_metadata_json witness_wallet_id
@@ -1218,36 +1333,146 @@ command_run() {
     [[ -n "$juno_rpc_user" ]] || die "missing Juno RPC user env var: $juno_rpc_user_var"
     [[ -n "$juno_rpc_pass" ]] || die "missing Juno RPC pass env var: $juno_rpc_pass_var"
 
-    local -a witness_metadata_args=(
-      run
-      --juno-rpc-url "$boundless_witness_juno_rpc_url"
-      --juno-rpc-user "$juno_rpc_user"
-      --juno-rpc-pass "$juno_rpc_pass"
-      --juno-scan-url "$boundless_witness_juno_scan_url"
-      --funder-private-key-hex "${JUNO_FUNDER_PRIVATE_KEY_HEX}"
-      --wallet-id "$witness_wallet_id"
-      --deposit-amount-zat "100000"
-      --withdraw-amount-zat "10000"
-      --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
-      --output "$witness_metadata_json"
-    )
-    if [[ -n "$juno_scan_bearer_token" ]]; then
-      witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
+    local witness_quorum_threshold
+    witness_quorum_threshold="$boundless_witness_quorum_threshold"
+
+    local -a witness_scan_urls_raw=()
+    local -a witness_rpc_urls_raw=()
+    local -a witness_operator_labels_raw=()
+    local -a witness_scan_urls=()
+    local -a witness_rpc_urls=()
+    local -a witness_operator_labels=()
+    local witness_entry
+
+    IFS=',' read -r -a witness_scan_urls_raw <<<"$boundless_witness_juno_scan_urls_csv"
+    for witness_entry in "${witness_scan_urls_raw[@]}"; do
+      witness_entry="$(trim "$witness_entry")"
+      [[ -n "$witness_entry" ]] || continue
+      witness_scan_urls+=("$witness_entry")
+    done
+
+    IFS=',' read -r -a witness_rpc_urls_raw <<<"$boundless_witness_juno_rpc_urls_csv"
+    for witness_entry in "${witness_rpc_urls_raw[@]}"; do
+      witness_entry="$(trim "$witness_entry")"
+      [[ -n "$witness_entry" ]] || continue
+      witness_rpc_urls+=("$witness_entry")
+    done
+
+    (( ${#witness_scan_urls[@]} > 0 )) || die "witness endpoint pool is empty: --boundless-witness-juno-scan-urls"
+    (( ${#witness_scan_urls[@]} == ${#witness_rpc_urls[@]} )) || \
+      die "witness endpoint pool mismatch: scan_urls=${#witness_scan_urls[@]} rpc_urls=${#witness_rpc_urls[@]}"
+
+    if [[ -n "$boundless_witness_operator_labels_csv" ]]; then
+      IFS=',' read -r -a witness_operator_labels_raw <<<"$boundless_witness_operator_labels_csv"
+      for witness_entry in "${witness_operator_labels_raw[@]}"; do
+        witness_entry="$(trim "$witness_entry")"
+        [[ -n "$witness_entry" ]] || continue
+        witness_operator_labels+=("$witness_entry")
+      done
+      (( ${#witness_operator_labels[@]} == ${#witness_scan_urls[@]} )) || \
+        die "witness operator labels count mismatch: labels=${#witness_operator_labels[@]} endpoints=${#witness_scan_urls[@]}"
+    else
+      local witness_idx
+      for ((witness_idx = 0; witness_idx < ${#witness_scan_urls[@]}; witness_idx++)); do
+        witness_operator_labels+=("witness-op$((witness_idx + 1))")
+      done
     fi
 
-    (
-      cd "$REPO_ROOT"
-      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
-    )
+    witness_endpoint_pool_size="${#witness_scan_urls[@]}"
+    witness_pool_operator_labels=("${witness_operator_labels[@]}")
+    (( witness_endpoint_pool_size >= witness_quorum_threshold )) || \
+      die "configured witness endpoint pool is below quorum threshold: configured=$witness_endpoint_pool_size threshold=$witness_quorum_threshold"
+
+    local -a witness_healthy_scan_urls=()
+    local -a witness_healthy_rpc_urls=()
+    local -a witness_healthy_labels=()
+    local witness_idx
+    for ((witness_idx = 0; witness_idx < witness_endpoint_pool_size; witness_idx++)); do
+      local witness_scan_url witness_rpc_url witness_operator_label
+      witness_scan_url="${witness_scan_urls[$witness_idx]}"
+      witness_rpc_url="${witness_rpc_urls[$witness_idx]}"
+      witness_operator_label="${witness_operator_labels[$witness_idx]}"
+      if witness_pair_healthcheck "$witness_scan_url" "$witness_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$juno_scan_bearer_token"; then
+        witness_healthy_scan_urls+=("$witness_scan_url")
+        witness_healthy_rpc_urls+=("$witness_rpc_url")
+        witness_healthy_labels+=("$witness_operator_label")
+        log "witness endpoint healthy operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+      else
+        log "witness endpoint unhealthy operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+      fi
+    done
+
+    witness_endpoint_healthy_count="${#witness_healthy_scan_urls[@]}"
+    witness_healthy_operator_labels=("${witness_healthy_labels[@]}")
+    (( witness_endpoint_healthy_count >= witness_quorum_threshold )) || \
+      die "failed to build healthy witness endpoint pool with quorum: healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold configured=$witness_endpoint_pool_size"
+
+    local witness_metadata_generated="false"
+    local witness_metadata_source_scan_url=""
+    local witness_metadata_source_rpc_url=""
+    for ((witness_idx = 0; witness_idx < witness_endpoint_healthy_count; witness_idx++)); do
+      local witness_scan_url witness_rpc_url witness_operator_label
+      local witness_operator_safe_label witness_wallet_id_attempt witness_metadata_attempt_json
+      witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
+      witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
+      witness_operator_label="${witness_healthy_labels[$witness_idx]}"
+      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_.-' '_')"
+      witness_operator_safe_label="${witness_operator_safe_label#_}"
+      witness_operator_safe_label="${witness_operator_safe_label%_}"
+      [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
+      witness_metadata_attempt_json="$workdir/reports/witness/generated-witness-metadata-${witness_operator_safe_label}.json"
+      if (( witness_idx == 0 )); then
+        witness_wallet_id_attempt="$witness_wallet_id"
+      else
+        witness_wallet_id_attempt="${witness_wallet_id}-${witness_operator_safe_label}"
+      fi
+
+      local -a witness_metadata_args=(
+        run
+        --juno-rpc-url "$witness_rpc_url"
+        --juno-rpc-user "$juno_rpc_user"
+        --juno-rpc-pass "$juno_rpc_pass"
+        --juno-scan-url "$witness_scan_url"
+        --funder-private-key-hex "${JUNO_FUNDER_PRIVATE_KEY_HEX}"
+        --wallet-id "$witness_wallet_id_attempt"
+        --deposit-amount-zat "100000"
+        --withdraw-amount-zat "10000"
+        --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
+        --output "$witness_metadata_attempt_json"
+      )
+      if [[ -n "$juno_scan_bearer_token" ]]; then
+        witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
+      fi
+
+      if (
+        cd "$REPO_ROOT"
+        deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
+      ); then
+        cp "$witness_metadata_attempt_json" "$witness_metadata_json"
+        witness_metadata_source_scan_url="$witness_scan_url"
+        witness_metadata_source_rpc_url="$witness_rpc_url"
+        witness_metadata_source_operator="$witness_operator_label"
+        witness_metadata_generated="true"
+        log "generated witness metadata from operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+        break
+      fi
+      log "witness metadata generation failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url; trying next healthy endpoint"
+    done
+
+    [[ "$witness_metadata_generated" == "true" ]] || \
+      die "failed to generate witness metadata from healthy witness endpoint pool"
+    boundless_witness_juno_scan_url="$witness_metadata_source_scan_url"
+    boundless_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
 
     local generated_wallet_id generated_deposit_txid generated_deposit_action_index
-    local generated_withdraw_txid generated_withdraw_action_index generated_recipient_raw_address_hex
+    local generated_withdraw_txid generated_withdraw_action_index generated_recipient_raw_address_hex generated_ufvk
     generated_wallet_id="$(jq -r '.wallet_id // empty' "$witness_metadata_json")"
     generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$witness_metadata_json")"
     generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$witness_metadata_json")"
     generated_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json")"
     generated_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$witness_metadata_json")"
     generated_recipient_raw_address_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json")"
+    generated_ufvk="$(jq -r '.ufvk // empty' "$witness_metadata_json")"
 
     [[ -n "$generated_wallet_id" ]] || die "generated witness metadata missing wallet_id: $witness_metadata_json"
     [[ -n "$generated_deposit_txid" ]] || die "generated witness metadata missing deposit_txid: $witness_metadata_json"
@@ -1256,6 +1481,7 @@ command_run() {
     [[ "$generated_withdraw_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata withdraw_action_index is invalid: $generated_withdraw_action_index"
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
+    [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
 
     local bridge_deployer_start_nonce bridge_deploy_nonce bridge_predicted_address
     bridge_deployer_start_nonce="$(cast nonce --rpc-url "$base_rpc_url" --block pending "$bridge_deployer_address" 2>/dev/null || true)"
@@ -1286,32 +1512,145 @@ command_run() {
     local withdraw_witness_auto_json="$workdir/reports/witness/withdraw-witness.json"
     local recipient_raw_address_hex_prefixed="0x${generated_recipient_raw_address_hex}"
 
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/juno-witness-extract deposit \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$generated_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$generated_deposit_txid" \
-        --action-index "$generated_deposit_action_index" \
-        --output-witness-item-file "$deposit_witness_auto_file" >"$deposit_witness_auto_json"
+    local witness_upsert_idx
+    for ((witness_upsert_idx = 0; witness_upsert_idx < witness_endpoint_healthy_count; witness_upsert_idx++)); do
+      local witness_scan_url witness_operator_label
+      witness_scan_url="${witness_healthy_scan_urls[$witness_upsert_idx]}"
+      witness_operator_label="${witness_healthy_labels[$witness_upsert_idx]}"
+      if ! witness_scan_upsert_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$generated_ufvk"; then
+        log "witness wallet upsert failed for operator=$witness_operator_label scan_url=$witness_scan_url (continuing; extraction will determine usable quorum)"
+      fi
+    done
 
-      go run ./cmd/juno-witness-extract withdraw \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$generated_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$generated_withdraw_txid" \
-        --action-index "$generated_withdraw_action_index" \
-        --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
-        --recipient-raw-address-hex "$recipient_raw_address_hex_prefixed" \
-        --output-witness-item-file "$withdraw_witness_auto_file" >"$withdraw_witness_auto_json"
-    )
+    local witness_quorum_dir
+    witness_quorum_dir="$workdir/reports/witness/quorum"
+    ensure_dir "$witness_quorum_dir"
+    local -a witness_success_labels=()
+    local -a witness_success_fingerprints=()
+    local -a witness_success_deposit_json=()
+    local -a witness_success_withdraw_json=()
+    local -a witness_success_deposit_witness=()
+    local -a witness_success_withdraw_witness=()
+
+    for ((witness_idx = 0; witness_idx < witness_endpoint_healthy_count; witness_idx++)); do
+      local witness_scan_url witness_rpc_url witness_operator_label
+      local witness_operator_safe_label deposit_candidate_witness withdraw_candidate_witness
+      local deposit_candidate_json withdraw_candidate_json
+      local witness_extract_attempt witness_extract_ok
+      witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
+      witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
+      witness_operator_label="${witness_healthy_labels[$witness_idx]}"
+      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_.-' '_')"
+      witness_operator_safe_label="${witness_operator_safe_label#_}"
+      witness_operator_safe_label="${witness_operator_safe_label%_}"
+      [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
+
+      deposit_candidate_witness="$witness_quorum_dir/deposit-${witness_operator_safe_label}.witness.bin"
+      withdraw_candidate_witness="$witness_quorum_dir/withdraw-${witness_operator_safe_label}.witness.bin"
+      deposit_candidate_json="$witness_quorum_dir/deposit-${witness_operator_safe_label}.json"
+      withdraw_candidate_json="$witness_quorum_dir/withdraw-${witness_operator_safe_label}.json"
+
+      witness_extract_ok="false"
+      for witness_extract_attempt in $(seq 1 6); do
+        if (
+          cd "$REPO_ROOT"
+          go run ./cmd/juno-witness-extract deposit \
+            --juno-scan-url "$witness_scan_url" \
+            --wallet-id "$generated_wallet_id" \
+            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$witness_rpc_url" \
+            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --txid "$generated_deposit_txid" \
+            --action-index "$generated_deposit_action_index" \
+            --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json"
+
+          go run ./cmd/juno-witness-extract withdraw \
+            --juno-scan-url "$witness_scan_url" \
+            --wallet-id "$generated_wallet_id" \
+            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$witness_rpc_url" \
+            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --txid "$generated_withdraw_txid" \
+            --action-index "$generated_withdraw_action_index" \
+            --withdrawal-id-hex "$boundless_withdraw_witness_withdrawal_id_hex" \
+            --recipient-raw-address-hex "$recipient_raw_address_hex_prefixed" \
+            --output-witness-item-file "$withdraw_candidate_witness" >"$withdraw_candidate_json"
+        ); then
+          witness_extract_ok="true"
+          break
+        fi
+        if (( witness_extract_attempt < 6 )); then
+          sleep 5
+        fi
+      done
+
+      if [[ "$witness_extract_ok" != "true" ]]; then
+        witness_failed_operator_labels+=("$witness_operator_label")
+        log "witness extraction failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+        continue
+      fi
+
+      local deposit_witness_hex deposit_anchor_height deposit_anchor_hash deposit_final_root
+      local withdraw_witness_hex withdraw_anchor_height withdraw_anchor_hash withdraw_final_root
+      deposit_witness_hex="$(jq -r '.witness_item_hex // empty' "$deposit_candidate_json")"
+      deposit_anchor_height="$(jq -r '.anchor_height // empty' "$deposit_candidate_json")"
+      deposit_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$deposit_candidate_json")"
+      deposit_final_root="$(jq -r '.final_orchard_root // empty' "$deposit_candidate_json")"
+      withdraw_witness_hex="$(jq -r '.witness_item_hex // empty' "$withdraw_candidate_json")"
+      withdraw_anchor_height="$(jq -r '.anchor_height // empty' "$withdraw_candidate_json")"
+      withdraw_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$withdraw_candidate_json")"
+      withdraw_final_root="$(jq -r '.final_orchard_root // empty' "$withdraw_candidate_json")"
+
+      [[ -n "$deposit_witness_hex" ]] || die "deposit witness output missing witness_item_hex: $deposit_candidate_json"
+      [[ -n "$deposit_anchor_height" ]] || die "deposit witness output missing anchor_height: $deposit_candidate_json"
+      [[ -n "$deposit_anchor_hash" ]] || die "deposit witness output missing anchor_block_hash: $deposit_candidate_json"
+      [[ -n "$deposit_final_root" ]] || die "deposit witness output missing final_orchard_root: $deposit_candidate_json"
+      [[ -n "$withdraw_witness_hex" ]] || die "withdraw witness output missing witness_item_hex: $withdraw_candidate_json"
+      [[ -n "$withdraw_anchor_height" ]] || die "withdraw witness output missing anchor_height: $withdraw_candidate_json"
+      [[ -n "$withdraw_anchor_hash" ]] || die "withdraw witness output missing anchor_block_hash: $withdraw_candidate_json"
+      [[ -n "$withdraw_final_root" ]] || die "withdraw witness output missing final_orchard_root: $withdraw_candidate_json"
+
+      local witness_fingerprint
+      witness_fingerprint="${deposit_witness_hex}|${deposit_anchor_height}|${deposit_anchor_hash}|${deposit_final_root}|${withdraw_witness_hex}|${withdraw_anchor_height}|${withdraw_anchor_hash}|${withdraw_final_root}"
+      witness_success_labels+=("$witness_operator_label")
+      witness_success_fingerprints+=("$witness_fingerprint")
+      witness_success_deposit_json+=("$deposit_candidate_json")
+      witness_success_withdraw_json+=("$withdraw_candidate_json")
+      witness_success_deposit_witness+=("$deposit_candidate_witness")
+      witness_success_withdraw_witness+=("$withdraw_candidate_witness")
+      log "witness extraction succeeded for operator=$witness_operator_label"
+    done
+
+    witness_quorum_validated_count="${#witness_success_labels[@]}"
+    witness_quorum_operator_labels=("${witness_success_labels[@]}")
+    (( witness_quorum_validated_count >= witness_quorum_threshold )) || \
+      die "failed to extract witness from quorum of operators: success=$witness_quorum_validated_count threshold=$witness_quorum_threshold"
+
+    local -a witness_unique_fingerprints=()
+    local witness_fingerprint witness_existing_fingerprint witness_known_fingerprint
+    for witness_fingerprint in "${witness_success_fingerprints[@]}"; do
+      witness_known_fingerprint="false"
+      for witness_existing_fingerprint in "${witness_unique_fingerprints[@]}"; do
+        if [[ "$witness_existing_fingerprint" == "$witness_fingerprint" ]]; then
+          witness_known_fingerprint="true"
+          break
+        fi
+      done
+      if [[ "$witness_known_fingerprint" != "true" ]]; then
+        witness_unique_fingerprints+=("$witness_fingerprint")
+      fi
+    done
+    if (( ${#witness_unique_fingerprints[@]} != 1 )); then
+      die "witness quorum consistency mismatch across operators: operators=$(IFS=,; printf '%s' "${witness_success_labels[*]}")"
+    fi
+    witness_quorum_validated="true"
+
+    cp "${witness_success_deposit_witness[0]}" "$deposit_witness_auto_file"
+    cp "${witness_success_withdraw_witness[0]}" "$withdraw_witness_auto_file"
+    cp "${witness_success_deposit_json[0]}" "$deposit_witness_auto_json"
+    cp "${witness_success_withdraw_json[0]}" "$withdraw_witness_auto_json"
 
     boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
     boundless_withdraw_witness_item_files=("$withdraw_witness_auto_file")
@@ -1823,6 +2162,13 @@ command_run() {
     guest_witness_extract_from_chain="true"
   fi
 
+  local witness_pool_operator_labels_json witness_healthy_operator_labels_json
+  local witness_quorum_operator_labels_json witness_failed_operator_labels_json
+  witness_pool_operator_labels_json="$(json_array_from_args "${witness_pool_operator_labels[@]}")"
+  witness_healthy_operator_labels_json="$(json_array_from_args "${witness_healthy_operator_labels[@]}")"
+  witness_quorum_operator_labels_json="$(json_array_from_args "${witness_quorum_operator_labels[@]}")"
+  witness_failed_operator_labels_json="$(json_array_from_args "${witness_failed_operator_labels[@]}")"
+
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
     --arg workdir "$workdir" \
@@ -1856,6 +2202,16 @@ command_run() {
     --arg guest_witness_extract_from_chain "$guest_witness_extract_from_chain" \
     --argjson boundless_deposit_witness_item_count "$boundless_deposit_witness_item_count" \
     --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
+    --argjson boundless_witness_quorum_threshold "$boundless_witness_quorum_threshold" \
+    --argjson witness_endpoint_pool_size "$witness_endpoint_pool_size" \
+    --argjson witness_endpoint_healthy_count "$witness_endpoint_healthy_count" \
+    --arg witness_metadata_source_operator "$witness_metadata_source_operator" \
+    --argjson witness_pool_operator_labels "$witness_pool_operator_labels_json" \
+    --argjson witness_healthy_operator_labels "$witness_healthy_operator_labels_json" \
+    --argjson witness_quorum_operator_labels "$witness_quorum_operator_labels_json" \
+    --argjson witness_failed_operator_labels "$witness_failed_operator_labels_json" \
+    --argjson witness_quorum_validated_count "$witness_quorum_validated_count" \
+    --arg witness_quorum_validated "$witness_quorum_validated" \
     --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
     --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
     --arg boundless_input_s3_bucket "$boundless_input_s3_bucket" \
@@ -1939,7 +2295,17 @@ command_run() {
             deposit_owallet_ivk_configured: ($boundless_deposit_ivk_configured == "true"),
             withdraw_owallet_ovk_configured: ($boundless_withdraw_ovk_configured == "true"),
             deposit_witness_item_count: $boundless_deposit_witness_item_count,
-            withdraw_witness_item_count: $boundless_withdraw_witness_item_count
+            withdraw_witness_item_count: $boundless_withdraw_witness_item_count,
+            endpoint_quorum_threshold: $boundless_witness_quorum_threshold,
+            endpoint_pool_size: $witness_endpoint_pool_size,
+            endpoint_healthy_count: $witness_endpoint_healthy_count,
+            metadata_source_operator: (if $witness_metadata_source_operator == "" then null else $witness_metadata_source_operator end),
+            pool_operator_labels: $witness_pool_operator_labels,
+            healthy_operator_labels: $witness_healthy_operator_labels,
+            quorum_operator_labels: $witness_quorum_operator_labels,
+            failed_operator_labels: $witness_failed_operator_labels,
+            quorum_validated_count: $witness_quorum_validated_count,
+            quorum_validated: ($witness_quorum_validated == "true")
           },
           deposit_program_url: (if $boundless_deposit_program_url == "" then null else $boundless_deposit_program_url end),
           withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),

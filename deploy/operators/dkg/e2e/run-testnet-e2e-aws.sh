@@ -1834,13 +1834,31 @@ command_run() {
     "$ssh_key_private" \
     "$remote_repo/.ci/secrets/operator-fleet-ssh.key"
 
-  local witness_operator_private_ip
-  witness_operator_private_ip="${operator_private_ips[0]:-}"
-  [[ -n "$witness_operator_private_ip" ]] || die "failed to resolve witness operator private ip"
-  local witness_tunnel_scan_port="38080"
-  local witness_tunnel_rpc_port="38232"
-  local witness_juno_scan_url="http://127.0.0.1:${witness_tunnel_scan_port}"
-  local witness_juno_rpc_url="http://127.0.0.1:${witness_tunnel_rpc_port}"
+  local witness_tunnel_scan_base_port="38080"
+  local witness_tunnel_rpc_base_port="38232"
+  local witness_quorum_threshold="3"
+  local -a witness_juno_scan_urls=()
+  local -a witness_juno_rpc_urls=()
+  local -a witness_operator_labels=()
+  local witness_idx witness_operator_private_ip
+  for ((witness_idx = 0; witness_idx < ${#operator_private_ips[@]}; witness_idx++)); do
+    witness_operator_private_ip="${operator_private_ips[$witness_idx]}"
+    [[ -n "$witness_operator_private_ip" ]] || die "failed to resolve witness operator private ip for index=$witness_idx"
+    witness_juno_scan_urls+=("http://127.0.0.1:$((witness_tunnel_scan_base_port + witness_idx))")
+    witness_juno_rpc_urls+=("http://127.0.0.1:$((witness_tunnel_rpc_base_port + witness_idx))")
+    witness_operator_labels+=("op$((witness_idx + 1))@${witness_operator_private_ip}")
+  done
+  (( ${#witness_juno_scan_urls[@]} >= witness_quorum_threshold )) || \
+    die "witness endpoint pool must satisfy quorum threshold: endpoints=${#witness_juno_scan_urls[@]} threshold=$witness_quorum_threshold"
+  local witness_juno_scan_url witness_juno_rpc_url
+  witness_juno_scan_url="${witness_juno_scan_urls[0]}"
+  witness_juno_rpc_url="${witness_juno_rpc_urls[0]}"
+  local witness_juno_scan_urls_csv witness_juno_rpc_urls_csv witness_operator_labels_csv
+  witness_juno_scan_urls_csv="$(IFS=,; printf '%s' "${witness_juno_scan_urls[*]}")"
+  witness_juno_rpc_urls_csv="$(IFS=,; printf '%s' "${witness_juno_rpc_urls[*]}")"
+  witness_operator_labels_csv="$(IFS=,; printf '%s' "${witness_operator_labels[*]}")"
+  local witness_tunnel_private_ip_joined
+  witness_tunnel_private_ip_joined="$(shell_join "${operator_private_ips[@]}")"
 
   local -a remote_args
   remote_args=(
@@ -1885,9 +1903,25 @@ command_run() {
   if forwarded_arg_value "--boundless-witness-juno-rpc-url" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --boundless-witness-juno-rpc-url with stack-derived witness tunnel endpoint"
   fi
+  if forwarded_arg_value "--boundless-witness-juno-scan-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-juno-scan-urls with stack-derived witness tunnel endpoint pool"
+  fi
+  if forwarded_arg_value "--boundless-witness-juno-rpc-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-juno-rpc-urls with stack-derived witness tunnel endpoint pool"
+  fi
+  if forwarded_arg_value "--boundless-witness-operator-labels" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-operator-labels with stack-derived witness operator labels"
+  fi
+  if forwarded_arg_value "--boundless-witness-quorum-threshold" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --boundless-witness-quorum-threshold with stack-derived witness quorum threshold"
+  fi
   remote_args+=(
     "--boundless-witness-juno-scan-url" "$witness_juno_scan_url"
     "--boundless-witness-juno-rpc-url" "$witness_juno_rpc_url"
+    "--boundless-witness-juno-scan-urls" "$witness_juno_scan_urls_csv"
+    "--boundless-witness-juno-rpc-urls" "$witness_juno_rpc_urls_csv"
+    "--boundless-witness-operator-labels" "$witness_operator_labels_csv"
+    "--boundless-witness-quorum-threshold" "$witness_quorum_threshold"
   )
 
   log "assembling remote e2e arguments"
@@ -1924,53 +1958,79 @@ fi
 mkdir -p "$remote_workdir/reports"
 
 operator_ssh_key=".ci/secrets/operator-fleet-ssh.key"
-operator_ssh_host="${witness_operator_private_ip}"
 operator_ssh_user="${runner_ssh_user}"
-scan_tunnel_port="${witness_tunnel_scan_port}"
-rpc_tunnel_port="${witness_tunnel_rpc_port}"
-tunnel_log="$remote_workdir/reports/witness-tunnel.log"
+operator_private_ips=($witness_tunnel_private_ip_joined)
+witness_tunnel_scan_base_port="${witness_tunnel_scan_base_port}"
+witness_tunnel_rpc_base_port="${witness_tunnel_rpc_base_port}"
+witness_tunnel_quorum="${witness_quorum_threshold}"
+declare -a witness_tunnel_pids=()
+declare -a witness_tunnel_ready_labels=()
 
 cleanup_witness_tunnel() {
   set +e
-  if [[ -n "${witness_tunnel_pid:-}" ]]; then
+  local witness_tunnel_pid
+  for witness_tunnel_pid in "${witness_tunnel_pids[@]}"; do
     kill "$witness_tunnel_pid" >/dev/null 2>&1 || true
+  done
+  for witness_tunnel_pid in "${witness_tunnel_pids[@]}"; do
     wait "$witness_tunnel_pid" >/dev/null 2>&1 || true
-  fi
+  done
 }
 trap cleanup_witness_tunnel EXIT
 
-ssh \
-  -i "$operator_ssh_key" \
-  -o StrictHostKeyChecking=no \
-  -o UserKnownHostsFile=/dev/null \
-  -o ExitOnForwardFailure=yes \
-  -o ServerAliveInterval=30 \
-  -o ServerAliveCountMax=6 \
-  -o TCPKeepAlive=yes \
-  -N \
-  -L "127.0.0.1:${witness_tunnel_scan_port}:127.0.0.1:8080" \
-  -L "127.0.0.1:${witness_tunnel_rpc_port}:127.0.0.1:18232" \
-  "$operator_ssh_user@$operator_ssh_host" \
-  >"$tunnel_log" 2>&1 &
-witness_tunnel_pid=$!
+for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
+  operator_ssh_host="${operator_private_ips[$op_idx]}"
+  witness_operator_label="op$((op_idx + 1))@${operator_ssh_host}"
+  witness_tunnel_scan_port=$((witness_tunnel_scan_base_port + op_idx))
+  witness_tunnel_rpc_port=$((witness_tunnel_rpc_base_port + op_idx))
+  tunnel_log="$remote_workdir/reports/witness-tunnel-op$((op_idx + 1)).log"
 
-for attempt in $(seq 1 30); do
-  if ! kill -0 "$witness_tunnel_pid" >/dev/null 2>&1; then
-    echo "witness tunnel exited early" >&2
-    tail -n 200 "$tunnel_log" >&2 || true
-    exit 1
+  ssh \
+    -i "$operator_ssh_key" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    -N \
+    -L "127.0.0.1:${witness_tunnel_scan_port}:127.0.0.1:8080" \
+    -L "127.0.0.1:${witness_tunnel_rpc_port}:127.0.0.1:18232" \
+    "$operator_ssh_user@$operator_ssh_host" \
+    >"$tunnel_log" 2>&1 &
+  witness_tunnel_pid=$!
+  witness_tunnel_pids+=("$witness_tunnel_pid")
+
+  witness_tunnel_ready="false"
+  for attempt in $(seq 1 20); do
+    if ! kill -0 "$witness_tunnel_pid" >/dev/null 2>&1; then
+      break
+    fi
+    if timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_scan_port" >/dev/null 2>&1 \
+      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_rpc_port" >/dev/null 2>&1; then
+      witness_tunnel_ready="true"
+      break
+    fi
+    sleep 1
+  done
+
+  if [[ "$witness_tunnel_ready" == "true" ]]; then
+    witness_tunnel_ready_labels+=("$witness_operator_label")
+    echo "witness tunnel ready for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port"
+  else
+    echo "witness tunnel readiness failed for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port" >&2
   fi
-  if timeout 2 bash -lc "</dev/tcp/127.0.0.1/$scan_tunnel_port" >/dev/null 2>&1 \
-    && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$rpc_tunnel_port" >/dev/null 2>&1; then
-    break
-  fi
-  if [[ "$attempt" -eq 30 ]]; then
-    echo "timed out waiting for witness tunnel readiness" >&2
-    tail -n 200 "$tunnel_log" >&2 || true
-    exit 1
-  fi
-  sleep 2
 done
+
+if (( ${#witness_tunnel_ready_labels[@]} < witness_tunnel_quorum )); then
+  echo "insufficient witness tunnels ready for quorum: ready=${#witness_tunnel_ready_labels[@]} threshold=$witness_tunnel_quorum" >&2
+  for tunnel_log in "$remote_workdir"/reports/witness-tunnel-op*.log; do
+    [[ -f "$tunnel_log" ]] || continue
+    echo "--- witness tunnel log tail: $tunnel_log ---" >&2
+    tail -n 80 "$tunnel_log" >&2 || true
+  done
+  exit 1
+fi
 
 ./deploy/operators/dkg/e2e/run-testnet-e2e.sh $remote_joined_args
 EOF
