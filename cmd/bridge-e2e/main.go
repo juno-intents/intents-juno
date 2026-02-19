@@ -17,7 +17,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -80,8 +79,6 @@ type boundlessConfig struct {
 	Bin                     string
 	RPCURL                  string
 	InputMode               string
-	GuestWitnessAuto        bool
-	GuestWitnessManifest    string
 	DepositOWalletIVKBytes  []byte
 	WithdrawOWalletOVKBytes []byte
 	DepositWitnessItems     [][]byte
@@ -119,31 +116,6 @@ type boundlessWaitResult struct {
 	SealHex      string
 }
 
-type guestWitnessCommandOutput struct {
-	Pipeline         string `json:"pipeline"`
-	FinalOrchardRoot string `json:"final_orchard_root"`
-	DepositID        string `json:"deposit_id"`
-	RecipientUA      string `json:"recipient_ua"`
-	OWalletIVK       string `json:"owallet_ivk"`
-	OWalletOVK       string `json:"owallet_ovk"`
-	WitnessItem      string `json:"witness_item"`
-}
-
-type guestDepositFixture struct {
-	FinalOrchardRoot common.Hash
-	DepositID        common.Hash
-	RecipientUA      []byte
-	OWalletIVKBytes  []byte
-	WitnessItem      []byte
-}
-
-type guestWithdrawFixture struct {
-	FinalOrchardRoot common.Hash
-	RecipientUA      []byte
-	OWalletOVKBytes  []byte
-	WitnessItem      []byte
-}
-
 const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
@@ -157,15 +129,12 @@ const (
 	defaultBoundlessMarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
 	defaultBoundlessRouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
 	defaultBoundlessSetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-	defaultGuestWitnessManifestPath        = "zk/witness_fixture/cli/Cargo.toml"
 	defaultBoundlessInputS3Prefix          = "bridge-e2e/boundless-input"
 	defaultBoundlessInputS3PresignTTL      = 2 * time.Hour
-	boundlessInlineInputLimitBytes         = 2048
 	boundlessGroth16SelectorHex            = "73c457ba"
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
-	boundlessInputModePrivate         = "private-input"
 	boundlessInputModeGuestWitnessV1  = "guest-witness-v1"
 	txMinedWaitTimeout                = 180 * time.Second
 	txMinedGraceTimeout               = 240 * time.Second
@@ -237,7 +206,6 @@ type report struct {
 			Enabled                bool   `json:"enabled"`
 			RPCURL                 string `json:"rpc_url,omitempty"`
 			InputMode              string `json:"input_mode,omitempty"`
-			GuestWitnessAuto       bool   `json:"guest_witness_auto,omitempty"`
 			MarketAddress          string `json:"market_address,omitempty"`
 			VerifierRouter         string `json:"verifier_router_address,omitempty"`
 			SetVerifier            string `json:"set_verifier_address,omitempty"`
@@ -426,7 +394,6 @@ func parseArgs(args []string) (config, error) {
 	var boundlessWithdrawOWalletOVKHex string
 	var boundlessDepositWitnessItemFiles stringListFlag
 	var boundlessWithdrawWitnessItemFiles stringListFlag
-	var boundlessGuestWitnessManifest string
 	var boundlessMinPriceWei string
 	var boundlessMaxPriceWei string
 	var boundlessMaxPriceCapWei string
@@ -458,7 +425,7 @@ func parseArgs(args []string) (config, error) {
 	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
 	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
 	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
-	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModePrivate, "Boundless input mode: private-input or guest-witness-v1")
+	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModeGuestWitnessV1, "Boundless input mode (required): guest-witness-v1")
 	var boundlessMarketAddressHex string
 	var boundlessVerifierRouterHex string
 	var boundlessSetVerifierHex string
@@ -471,7 +438,6 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&boundlessWithdrawOWalletOVKHex, "boundless-withdraw-owallet-ovk-hex", "", "32-byte oWallet OVK hex for guest-witness-v1 withdraw input mode")
 	fs.Var(&boundlessDepositWitnessItemFiles, "boundless-deposit-witness-item-file", "deposit guest witness item file path (repeat for guest-witness-v1)")
 	fs.Var(&boundlessWithdrawWitnessItemFiles, "boundless-withdraw-witness-item-file", "withdraw guest witness item file path (repeat for guest-witness-v1)")
-	fs.StringVar(&boundlessGuestWitnessManifest, "boundless-guest-witness-manifest", defaultGuestWitnessManifestPath, "Cargo manifest path for auto guest witness generation (used in guest-witness-v1 auto mode)")
 	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
 	fs.StringVar(&cfg.Boundless.WithdrawProgramURL, "boundless-withdraw-program-url", "", "withdraw guest program URL for Boundless proof requests")
 	fs.StringVar(&boundlessInputS3Bucket, "boundless-input-s3-bucket", "", "S3 bucket used for oversized boundless private inputs (>2048 bytes)")
@@ -573,7 +539,6 @@ func parseArgs(args []string) (config, error) {
 	if err != nil {
 		return cfg, err
 	}
-	cfg.Boundless.GuestWitnessManifest = strings.TrimSpace(boundlessGuestWitnessManifest)
 	if !common.IsHexAddress(boundlessMarketAddressHex) {
 		return cfg, errors.New("--boundless-market-address must be a valid hex address")
 	}
@@ -662,64 +627,54 @@ func parseArgs(args []string) (config, error) {
 	if strings.TrimSpace(cfg.Boundless.WithdrawProgramURL) == "" {
 		return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
 	}
-	if cfg.Boundless.InputMode == boundlessInputModeGuestWitnessV1 {
-		if cfg.Boundless.InputS3Bucket == "" {
-			return cfg, errors.New("--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1")
-		}
-		manualIVKSet := strings.TrimSpace(boundlessDepositOWalletIVKHex) != ""
-		manualOVKSet := strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != ""
-		manualDepositItemsSet := len(boundlessDepositWitnessItemFiles) > 0
-		manualWithdrawItemsSet := len(boundlessWithdrawWitnessItemFiles) > 0
-		manualAny := manualIVKSet || manualOVKSet || manualDepositItemsSet || manualWithdrawItemsSet
-		manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
+	if cfg.Boundless.InputS3Bucket == "" {
+		return cfg, errors.New("--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1")
+	}
+	manualIVKSet := strings.TrimSpace(boundlessDepositOWalletIVKHex) != ""
+	manualOVKSet := strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != ""
+	manualDepositItemsSet := len(boundlessDepositWitnessItemFiles) > 0
+	manualWithdrawItemsSet := len(boundlessWithdrawWitnessItemFiles) > 0
+	manualAny := manualIVKSet || manualOVKSet || manualDepositItemsSet || manualWithdrawItemsSet
+	manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
 
-		if manualAny && !manualAll {
-			return cfg, errors.New("all guest witness manual inputs must be set together: --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, --boundless-withdraw-witness-item-file")
-		}
+	if manualAny && !manualAll {
+		return cfg, errors.New("all guest witness manual inputs must be set together: --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, --boundless-withdraw-witness-item-file")
+	}
+	if !manualAll {
+		return cfg, errors.New("guest witness auto generation is disabled; provide --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file")
+	}
 
-		if !manualAll {
-			return cfg, errors.New("guest witness auto generation is disabled; provide --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file")
-		}
-
-		cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
-			"--boundless-deposit-owallet-ivk-hex",
-			boundlessDepositOWalletIVKHex,
-			64,
-		)
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
-			"--boundless-withdraw-owallet-ovk-hex",
-			boundlessWithdrawOWalletOVKHex,
-			32,
-		)
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-deposit-witness-item-file",
-			boundlessDepositWitnessItemFiles,
-			proverinput.DepositWitnessItemLen,
-		)
-		if err != nil {
-			return cfg, err
-		}
-		cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-withdraw-witness-item-file",
-			boundlessWithdrawWitnessItemFiles,
-			proverinput.WithdrawWitnessItemLen,
-		)
-		if err != nil {
-			return cfg, err
-		}
-	} else {
-		if strings.TrimSpace(boundlessDepositOWalletIVKHex) != "" || strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != "" {
-			return cfg, errors.New("--boundless-deposit-owallet-ivk-hex and --boundless-withdraw-owallet-ovk-hex require --boundless-input-mode guest-witness-v1")
-		}
-		if len(boundlessDepositWitnessItemFiles) > 0 || len(boundlessWithdrawWitnessItemFiles) > 0 {
-			return cfg, errors.New("--boundless-deposit-witness-item-file and --boundless-withdraw-witness-item-file require --boundless-input-mode guest-witness-v1")
-		}
+	cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
+		"--boundless-deposit-owallet-ivk-hex",
+		boundlessDepositOWalletIVKHex,
+		64,
+	)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
+		"--boundless-withdraw-owallet-ovk-hex",
+		boundlessWithdrawOWalletOVKHex,
+		32,
+	)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
+		"--boundless-deposit-witness-item-file",
+		boundlessDepositWitnessItemFiles,
+		proverinput.DepositWitnessItemLen,
+	)
+	if err != nil {
+		return cfg, err
+	}
+	cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
+		"--boundless-withdraw-witness-item-file",
+		boundlessWithdrawWitnessItemFiles,
+		proverinput.WithdrawWitnessItemLen,
+	)
+	if err != nil {
+		return cfg, err
 	}
 
 	return cfg, nil
@@ -728,12 +683,10 @@ func parseArgs(args []string) (config, error) {
 func parseBoundlessInputMode(raw string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	switch mode {
-	case "", boundlessInputModePrivate:
-		return boundlessInputModePrivate, nil
-	case boundlessInputModeGuestWitnessV1:
+	case "", boundlessInputModeGuestWitnessV1:
 		return boundlessInputModeGuestWitnessV1, nil
 	default:
-		return "", errors.New("--boundless-input-mode must be private-input or guest-witness-v1")
+		return "", errors.New("--boundless-input-mode must be guest-witness-v1")
 	}
 }
 
@@ -1105,26 +1058,18 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
-	depositBoundlessInput := depositPrivateInput
-	switch cfg.Boundless.InputMode {
-	case boundlessInputModePrivate:
-		// Keep existing JSON envelope mode for non-guest compatibility.
-	case boundlessInputModeGuestWitnessV1:
-		if len(cfg.Boundless.DepositWitnessItems) != len(mintItems) {
-			return nil, fmt.Errorf(
-				"deposit witness item count mismatch: got=%d want=%d",
-				len(cfg.Boundless.DepositWitnessItems),
-				len(mintItems),
-			)
-		}
-		var ivk [64]byte
-		copy(ivk[:], cfg.Boundless.DepositOWalletIVKBytes)
-		depositBoundlessInput, err = proverinput.EncodeDepositGuestPrivateInput(cpDeposit, ivk, cfg.Boundless.DepositWitnessItems)
-		if err != nil {
-			return nil, fmt.Errorf("encode deposit guest private input: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported boundless input mode: %s", cfg.Boundless.InputMode)
+	if len(cfg.Boundless.DepositWitnessItems) != len(mintItems) {
+		return nil, fmt.Errorf(
+			"deposit witness item count mismatch: got=%d want=%d",
+			len(cfg.Boundless.DepositWitnessItems),
+			len(mintItems),
+		)
+	}
+	var ivk [64]byte
+	copy(ivk[:], cfg.Boundless.DepositOWalletIVKBytes)
+	depositBoundlessInput, err := proverinput.EncodeDepositGuestPrivateInput(cpDeposit, ivk, cfg.Boundless.DepositWitnessItems)
+	if err != nil {
+		return nil, fmt.Errorf("encode deposit guest private input: %w", err)
 	}
 
 	predictedWithdrawalID, err := computePredictedWithdrawalID(cfg.ChainID, bridgeAddr, nonceBefore+1, owner, withdrawAmount, recipientUA)
@@ -1253,26 +1198,18 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw private input: %w", err)
 	}
-	withdrawBoundlessInput := withdrawPrivateInput
-	switch cfg.Boundless.InputMode {
-	case boundlessInputModePrivate:
-		// Keep existing JSON envelope mode for non-guest compatibility.
-	case boundlessInputModeGuestWitnessV1:
-		if len(cfg.Boundless.WithdrawWitnessItems) != len(finalizeItems) {
-			return nil, fmt.Errorf(
-				"withdraw witness item count mismatch: got=%d want=%d",
-				len(cfg.Boundless.WithdrawWitnessItems),
-				len(finalizeItems),
-			)
-		}
-		var ovk [32]byte
-		copy(ovk[:], cfg.Boundless.WithdrawOWalletOVKBytes)
-		withdrawBoundlessInput, err = proverinput.EncodeWithdrawGuestPrivateInput(cpWithdraw, ovk, cfg.Boundless.WithdrawWitnessItems)
-		if err != nil {
-			return nil, fmt.Errorf("encode withdraw guest private input: %w", err)
-		}
-	default:
-		return nil, fmt.Errorf("unsupported boundless input mode: %s", cfg.Boundless.InputMode)
+	if len(cfg.Boundless.WithdrawWitnessItems) != len(finalizeItems) {
+		return nil, fmt.Errorf(
+			"withdraw witness item count mismatch: got=%d want=%d",
+			len(cfg.Boundless.WithdrawWitnessItems),
+			len(finalizeItems),
+		)
+	}
+	var ovk [32]byte
+	copy(ovk[:], cfg.Boundless.WithdrawOWalletOVKBytes)
+	withdrawBoundlessInput, err := proverinput.EncodeWithdrawGuestPrivateInput(cpWithdraw, ovk, cfg.Boundless.WithdrawWitnessItems)
+	if err != nil {
+		return nil, fmt.Errorf("encode withdraw guest private input: %w", err)
 	}
 
 	var proofInputsPath string
@@ -1501,7 +1438,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if cfg.Boundless.Auto {
 		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
 		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
-		rep.Proof.Boundless.GuestWitnessAuto = cfg.Boundless.GuestWitnessAuto
 		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
 		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
 		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
@@ -1640,103 +1576,53 @@ func requestBoundlessProofOnce(
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
-	if err := validateBoundlessInputPreflight(cfg.InputMode, pipeline, programURL, privateInput); err != nil {
-		return nil, "", err
-	}
-
 	privateKey := strings.TrimPrefix(strings.TrimSpace(cfg.RequestorKeyHex), "0x")
 	biddingStart := time.Now().UTC().Unix() + int64(cfg.BiddingDelaySeconds)
 
-	requestMode := "submit"
-	var args []string
-	if shouldUseBoundlessSubmitFile(cfg, privateInput) {
-		if strings.TrimSpace(cfg.InputS3Bucket) == "" {
-			return nil, "", fmt.Errorf(
-				"boundless %s input is %d bytes which exceeds inline limit %d; set --boundless-input-s3-bucket for oversized inputs",
-				pipeline,
-				len(privateInput),
-				boundlessInlineInputLimitBytes,
-			)
-		}
-
-		inputURL, err := uploadBoundlessInputToS3(ctx, cfg, pipeline, privateInput)
-		if err != nil {
-			return nil, "", err
-		}
-		requestYAML, err := buildBoundlessSubmitFileRequestYAML(
-			cfg,
-			programURL,
-			inputURL,
-			imageID,
-			expectedJournal,
-			biddingStart,
-		)
-		if err != nil {
-			return nil, "", fmt.Errorf("build boundless submit-file request for %s: %w", pipeline, err)
-		}
-
-		reqFile, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-request-*.yaml")
-		if err != nil {
-			return nil, "", fmt.Errorf("create boundless request file for %s: %w", pipeline, err)
-		}
-		reqPath := reqFile.Name()
-		defer os.Remove(reqPath)
-		if err := reqFile.Close(); err != nil {
-			return nil, "", fmt.Errorf("close boundless request file for %s: %w", pipeline, err)
-		}
-		if err := os.WriteFile(reqPath, requestYAML, 0o600); err != nil {
-			return nil, "", fmt.Errorf("write boundless request file for %s: %w", pipeline, err)
-		}
-
-		requestMode = "submit-file"
-		args = []string{
-			"requestor", "submit-file",
-			reqPath,
-			"--wait",
-			"--requestor-rpc-url", cfg.RPCURL,
-			"--requestor-private-key", privateKey,
-			"--boundless-market-address", cfg.MarketAddress.Hex(),
-			"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-			"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-		}
-	} else {
-		tmp, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-input-*.bin")
-		if err != nil {
-			return nil, "", fmt.Errorf("create boundless input file for %s: %w", pipeline, err)
-		}
-		tmpPath := tmp.Name()
-		defer os.Remove(tmpPath)
-		if err := tmp.Close(); err != nil {
-			return nil, "", fmt.Errorf("close boundless input file for %s: %w", pipeline, err)
-		}
-		if err := os.WriteFile(tmpPath, privateInput, 0o600); err != nil {
-			return nil, "", fmt.Errorf("write boundless input file for %s: %w", pipeline, err)
-		}
-
-		args = []string{
-			"requestor", "submit",
-			"--program-url", programURL,
-			"--input-file", tmpPath,
-			"--proof-type", "groth16",
-			"--wait",
-			"--requestor-rpc-url", cfg.RPCURL,
-			"--requestor-private-key", privateKey,
-			"--boundless-market-address", cfg.MarketAddress.Hex(),
-			"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-			"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-			"--min-price", cfg.MinPriceWei.String(),
-			"--max-price", cfg.MaxPriceWei.String(),
-			"--lock-collateral", cfg.LockStakeWei.String(),
-			"--bidding-start", strconv.FormatInt(biddingStart, 10),
-			"--ramp-up-period", strconv.FormatUint(cfg.RampUpPeriodSeconds, 10),
-			"--lock-timeout", strconv.FormatUint(cfg.LockTimeoutSeconds, 10),
-			"--timeout", strconv.FormatUint(cfg.TimeoutSeconds, 10),
-		}
+	if strings.TrimSpace(cfg.InputS3Bucket) == "" {
+		return nil, "", errors.New("--boundless-input-s3-bucket is required for guest-witness-v1 submissions")
+	}
+	inputURL, err := uploadBoundlessInputToS3(ctx, cfg, pipeline, privateInput)
+	if err != nil {
+		return nil, "", err
+	}
+	requestYAML, err := buildBoundlessSubmitFileRequestYAML(
+		cfg,
+		programURL,
+		inputURL,
+		imageID,
+		expectedJournal,
+		biddingStart,
+	)
+	if err != nil {
+		return nil, "", fmt.Errorf("build boundless submit-file request for %s: %w", pipeline, err)
+	}
+	reqFile, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-request-*.yaml")
+	if err != nil {
+		return nil, "", fmt.Errorf("create boundless request file for %s: %w", pipeline, err)
+	}
+	reqPath := reqFile.Name()
+	defer os.Remove(reqPath)
+	if err := reqFile.Close(); err != nil {
+		return nil, "", fmt.Errorf("close boundless request file for %s: %w", pipeline, err)
+	}
+	if err := os.WriteFile(reqPath, requestYAML, 0o600); err != nil {
+		return nil, "", fmt.Errorf("write boundless request file for %s: %w", pipeline, err)
+	}
+	args := []string{
+		"requestor", "submit-file",
+		reqPath,
+		"--wait",
+		"--requestor-rpc-url", cfg.RPCURL,
+		"--requestor-private-key", privateKey,
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
 	}
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
 	cmd.Env = buildBoundlessCommandEnv()
-	logProgress("boundless %s cmd=%s mode=%s", pipeline, cfg.Bin, requestMode)
+	logProgress("boundless %s cmd=%s mode=submit-file", pipeline, cfg.Bin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		msg := strings.TrimSpace(string(out))
@@ -1752,10 +1638,7 @@ func requestBoundlessProofOnce(
 			}
 			msg += " (fallback get-proof failed: " + fallbackErr.Error() + ")"
 		}
-		if version := boundlessPrivateInputVersion(privateInput); version != "" {
-			msg += " (input_version=" + version + ")"
-		}
-		return nil, "", fmt.Errorf("boundless %s failed for %s: %s", requestMode, pipeline, msg)
+		return nil, "", fmt.Errorf("boundless submit-file failed for %s: %s", pipeline, msg)
 	}
 
 	seal, requestID, err := parseBoundlessProofOutput(out, pipeline, expectedJournal)
@@ -1764,13 +1647,6 @@ func requestBoundlessProofOnce(
 	}
 
 	return seal, requestID, nil
-}
-
-func shouldUseBoundlessSubmitFile(cfg boundlessConfig, privateInput []byte) bool {
-	if cfg.InputMode == boundlessInputModeGuestWitnessV1 {
-		return true
-	}
-	return len(privateInput) > boundlessInlineInputLimitBytes
 }
 
 func buildBoundlessSubmitFileRequestYAML(
@@ -2052,158 +1928,6 @@ func buildBoundlessCommandEnv() []string {
 	return upsertEnvVar(env, "PATH", pathValue)
 }
 
-func generateGuestWitnessDepositFixture(
-	ctx context.Context,
-	cfg boundlessConfig,
-	baseChainID uint64,
-	bridgeAddr common.Address,
-	baseRecipient common.Address,
-	amount uint64,
-) (guestDepositFixture, error) {
-	if baseChainID > uint64(^uint32(0)) {
-		return guestDepositFixture{}, fmt.Errorf("guest witness: base chain id %d exceeds uint32", baseChainID)
-	}
-	out, err := runGuestWitnessFixtureCommand(ctx, cfg, []string{
-		"deposit",
-		"--base-chain-id", strconv.FormatUint(baseChainID, 10),
-		"--bridge-address", bridgeAddr.Hex(),
-		"--base-recipient", baseRecipient.Hex(),
-		"--amount", strconv.FormatUint(amount, 10),
-	})
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-
-	var parsed guestWitnessCommandOutput
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		return guestDepositFixture{}, fmt.Errorf("decode guest witness deposit fixture output: %w", err)
-	}
-
-	root, err := parseHash32Flag("guest witness final_orchard_root", parsed.FinalOrchardRoot)
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-	depositID, err := parseHash32Flag("guest witness deposit_id", parsed.DepositID)
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-	recipientUA, err := parseHexBytesFlag("guest witness recipient_ua", parsed.RecipientUA)
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-	if len(recipientUA) != 43 {
-		return guestDepositFixture{}, fmt.Errorf("guest witness recipient_ua must be 43 bytes, got %d", len(recipientUA))
-	}
-	ivk, err := parseHexFixedLength("guest witness owallet_ivk", parsed.OWalletIVK, 64)
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-	witnessItem, err := parseHexBytesFlag("guest witness witness_item", parsed.WitnessItem)
-	if err != nil {
-		return guestDepositFixture{}, err
-	}
-	if len(witnessItem) != proverinput.DepositWitnessItemLen {
-		return guestDepositFixture{}, fmt.Errorf(
-			"guest witness deposit witness item length mismatch: got=%d want=%d",
-			len(witnessItem),
-			proverinput.DepositWitnessItemLen,
-		)
-	}
-
-	return guestDepositFixture{
-		FinalOrchardRoot: root,
-		DepositID:        depositID,
-		RecipientUA:      append([]byte(nil), recipientUA...),
-		OWalletIVKBytes:  append([]byte(nil), ivk...),
-		WitnessItem:      append([]byte(nil), witnessItem...),
-	}, nil
-}
-
-func generateGuestWitnessWithdrawFixture(
-	ctx context.Context,
-	cfg boundlessConfig,
-	baseChainID uint64,
-	bridgeAddr common.Address,
-	withdrawalID common.Hash,
-	netAmount uint64,
-) (guestWithdrawFixture, error) {
-	if baseChainID > uint64(^uint32(0)) {
-		return guestWithdrawFixture{}, fmt.Errorf("guest witness: base chain id %d exceeds uint32", baseChainID)
-	}
-	out, err := runGuestWitnessFixtureCommand(ctx, cfg, []string{
-		"withdraw",
-		"--base-chain-id", strconv.FormatUint(baseChainID, 10),
-		"--bridge-address", bridgeAddr.Hex(),
-		"--withdrawal-id", withdrawalID.Hex(),
-		"--net-amount", strconv.FormatUint(netAmount, 10),
-	})
-	if err != nil {
-		return guestWithdrawFixture{}, err
-	}
-
-	var parsed guestWitnessCommandOutput
-	if err := json.Unmarshal(out, &parsed); err != nil {
-		return guestWithdrawFixture{}, fmt.Errorf("decode guest witness withdraw fixture output: %w", err)
-	}
-
-	root, err := parseHash32Flag("guest witness final_orchard_root", parsed.FinalOrchardRoot)
-	if err != nil {
-		return guestWithdrawFixture{}, err
-	}
-	recipientUA, err := parseHexBytesFlag("guest witness recipient_ua", parsed.RecipientUA)
-	if err != nil {
-		return guestWithdrawFixture{}, err
-	}
-	if len(recipientUA) != 43 {
-		return guestWithdrawFixture{}, fmt.Errorf("guest witness recipient_ua must be 43 bytes, got %d", len(recipientUA))
-	}
-	ovk, err := parseHexFixedLength("guest witness owallet_ovk", parsed.OWalletOVK, 32)
-	if err != nil {
-		return guestWithdrawFixture{}, err
-	}
-	witnessItem, err := parseHexBytesFlag("guest witness witness_item", parsed.WitnessItem)
-	if err != nil {
-		return guestWithdrawFixture{}, err
-	}
-	if len(witnessItem) != proverinput.WithdrawWitnessItemLen {
-		return guestWithdrawFixture{}, fmt.Errorf(
-			"guest witness withdraw witness item length mismatch: got=%d want=%d",
-			len(witnessItem),
-			proverinput.WithdrawWitnessItemLen,
-		)
-	}
-
-	return guestWithdrawFixture{
-		FinalOrchardRoot: root,
-		RecipientUA:      append([]byte(nil), recipientUA...),
-		OWalletOVKBytes:  append([]byte(nil), ovk...),
-		WitnessItem:      append([]byte(nil), witnessItem...),
-	}, nil
-}
-
-func runGuestWitnessFixtureCommand(ctx context.Context, cfg boundlessConfig, args []string) ([]byte, error) {
-	manifest := strings.TrimSpace(cfg.GuestWitnessManifest)
-	if manifest == "" {
-		return nil, errors.New("guest witness manifest path is required for guest-witness-v1 auto mode")
-	}
-	cmdArgs := []string{"run", "--quiet", "--manifest-path", manifest, "--"}
-	cmdArgs = append(cmdArgs, args...)
-	cmd := exec.CommandContext(ctx, "cargo", cmdArgs...)
-	cmd.Env = buildBoundlessCommandEnv()
-
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	out, err := cmd.Output()
-	if err != nil {
-		msg := strings.TrimSpace(stderr.String())
-		if msg == "" {
-			msg = err.Error()
-		}
-		return nil, fmt.Errorf("guest witness command failed: %s", msg)
-	}
-	return bytes.TrimSpace(out), nil
-}
-
 func prependPathEntries(pathValue string, entries ...string) string {
 	parts := strings.Split(pathValue, ":")
 	existing := make(map[string]struct{}, len(parts))
@@ -2258,49 +1982,6 @@ func isRetriableBoundlessLockFailure(msg string) bool {
 		strings.Contains(lowered, "request expired") ||
 		strings.Contains(lowered, "expired without fulfillment") ||
 		strings.Contains(lowered, "unable to lock")
-}
-
-func boundlessPrivateInputVersion(privateInput []byte) string {
-	trimmed := bytes.TrimSpace(privateInput)
-	if len(trimmed) == 0 || trimmed[0] != '{' {
-		return ""
-	}
-
-	var envelope struct {
-		Version string `json:"version"`
-	}
-	if err := json.Unmarshal(trimmed, &envelope); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(envelope.Version)
-}
-
-func validateBoundlessInputPreflight(inputMode, pipeline, programURL string, privateInput []byte) error {
-	if inputMode != boundlessInputModePrivate {
-		return nil
-	}
-	version := boundlessPrivateInputVersion(privateInput)
-	if version == "" {
-		return nil
-	}
-	if !looksLikeGuestProgramURL(programURL) {
-		return nil
-	}
-	return fmt.Errorf(
-		"boundless %s input preflight failed: program %q looks like a real guest binary, but --boundless-input-mode=private-input produced %s JSON envelope; use --boundless-input-mode=%s with real witness artifacts",
-		pipeline,
-		programURL,
-		version,
-		boundlessInputModeGuestWitnessV1,
-	)
-}
-
-func looksLikeGuestProgramURL(programURL string) bool {
-	url := strings.ToLower(strings.TrimSpace(programURL))
-	if url == "" || !strings.Contains(url, ".elf") {
-		return false
-	}
-	return strings.Contains(url, "/deposit-guest-") || strings.Contains(url, "/withdraw-guest-")
 }
 
 var (

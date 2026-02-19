@@ -49,6 +49,9 @@ run options:
   --ssh-allowed-cidr <cidr>            inbound SSH CIDR (default: caller public IP /32)
   --base-funder-key-file <path>        file with Base funder private key hex (required)
   --juno-funder-key-file <path>        file with Juno funder private key hex (required)
+  --juno-rpc-user-file <path>          file with junocashd RPC username for witness extraction (required)
+  --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
+  --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
   --boundless-requestor-key-file <p>   optional file with Boundless requestor private key hex
   --without-shared-services            skip provisioning shared Postgres/Kafka host
   --shared-postgres-user <user>        shared Postgres username (default: postgres)
@@ -1111,6 +1114,9 @@ command_run() {
   local ssh_allowed_cidr=""
   local base_funder_key_file=""
   local juno_funder_key_file=""
+  local juno_rpc_user_file=""
+  local juno_rpc_pass_file=""
+  local juno_scan_bearer_token_file=""
   local boundless_requestor_key_file=""
   local with_shared_services="true"
   local shared_postgres_user="postgres"
@@ -1219,6 +1225,21 @@ command_run() {
         juno_funder_key_file="$2"
         shift 2
         ;;
+      --juno-rpc-user-file)
+        [[ $# -ge 2 ]] || die "missing value for --juno-rpc-user-file"
+        juno_rpc_user_file="$2"
+        shift 2
+        ;;
+      --juno-rpc-pass-file)
+        [[ $# -ge 2 ]] || die "missing value for --juno-rpc-pass-file"
+        juno_rpc_pass_file="$2"
+        shift 2
+        ;;
+      --juno-scan-bearer-token-file)
+        [[ $# -ge 2 ]] || die "missing value for --juno-scan-bearer-token-file"
+        juno_scan_bearer_token_file="$2"
+        shift 2
+        ;;
       --boundless-requestor-key-file)
         [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
         boundless_requestor_key_file="$2"
@@ -1270,8 +1291,15 @@ command_run() {
   [[ -n "$aws_region" ]] || die "--aws-region is required"
   [[ -n "$base_funder_key_file" ]] || die "--base-funder-key-file is required"
   [[ -n "$juno_funder_key_file" ]] || die "--juno-funder-key-file is required"
+  [[ -n "$juno_rpc_user_file" ]] || die "--juno-rpc-user-file is required"
+  [[ -n "$juno_rpc_pass_file" ]] || die "--juno-rpc-pass-file is required"
   [[ -f "$base_funder_key_file" ]] || die "base funder key file not found: $base_funder_key_file"
   [[ -f "$juno_funder_key_file" ]] || die "juno funder key file not found: $juno_funder_key_file"
+  [[ -f "$juno_rpc_user_file" ]] || die "juno rpc user file not found: $juno_rpc_user_file"
+  [[ -f "$juno_rpc_pass_file" ]] || die "juno rpc pass file not found: $juno_rpc_pass_file"
+  if [[ -n "$juno_scan_bearer_token_file" && ! -f "$juno_scan_bearer_token_file" ]]; then
+    die "juno scan bearer token file not found: $juno_scan_bearer_token_file"
+  fi
   [[ "$operator_instance_count" =~ ^[0-9]+$ ]] || die "--operator-instance-count must be numeric"
   [[ "$operator_root_volume_gb" =~ ^[0-9]+$ ]] || die "--operator-root-volume-gb must be numeric"
   [[ "$operator_base_port" =~ ^[0-9]+$ ]] || die "--operator-base-port must be numeric"
@@ -1578,6 +1606,29 @@ command_run() {
     "$juno_funder_key_file" \
     "$remote_repo/.ci/secrets/juno-funder.key"
 
+  copy_remote_secret_file \
+    "$ssh_key_private" \
+    "$runner_ssh_user" \
+    "$runner_public_ip" \
+    "$juno_rpc_user_file" \
+    "$remote_repo/.ci/secrets/juno-rpc-user.txt"
+
+  copy_remote_secret_file \
+    "$ssh_key_private" \
+    "$runner_ssh_user" \
+    "$runner_public_ip" \
+    "$juno_rpc_pass_file" \
+    "$remote_repo/.ci/secrets/juno-rpc-pass.txt"
+
+  if [[ -n "$juno_scan_bearer_token_file" ]]; then
+    copy_remote_secret_file \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$juno_scan_bearer_token_file" \
+      "$remote_repo/.ci/secrets/juno-scan-bearer.txt"
+  fi
+
   if [[ -n "$boundless_requestor_key_file" ]]; then
     copy_remote_secret_file \
       "$ssh_key_private" \
@@ -1635,6 +1686,11 @@ set -euo pipefail
 cd "$remote_repo"
 export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
+export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
+export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
+if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
+  export JUNO_SCAN_BEARER_TOKEN="\$(tr -d '\r\n' < .ci/secrets/juno-scan-bearer.txt)"
+fi
 export AWS_REGION="${aws_region}"
 export AWS_DEFAULT_REGION="${aws_region}"
 if [[ -n "${AWS_ACCESS_KEY_ID:-}" ]]; then

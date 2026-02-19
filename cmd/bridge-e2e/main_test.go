@@ -27,6 +27,8 @@ func TestParseArgs_Valid(t *testing.T) {
 	op2 := filepath.Join(tmp, "op2.key")
 	op3 := filepath.Join(tmp, "op3.key")
 	requestor := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
 
 	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write deployer key: %v", err)
@@ -43,6 +45,12 @@ func TestParseArgs_Valid(t *testing.T) {
 	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
 	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
 
 	cfg, err := parseArgs([]string{
 		"--rpc-url", "https://example-rpc.invalid",
@@ -57,6 +65,11 @@ func TestParseArgs_Valid(t *testing.T) {
 		"--boundless-requestor-key-file", requestor,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
 	})
 	if err != nil {
 		t.Fatalf("parseArgs: %v", err)
@@ -213,8 +226,16 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 
 	tmp := t.TempDir()
 	requestorKey := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
 	if err := os.WriteFile(requestorKey, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
 		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
 	}
 
 	cfg, err := parseArgs([]string{
@@ -228,13 +249,18 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 		"--boundless-auto",
 		"--boundless-bin", "boundless",
 		"--boundless-rpc-url", "https://mainnet.base.org",
-		"--boundless-input-mode", "private-input",
+		"--boundless-input-mode", "guest-witness-v1",
 		"--boundless-market-address", "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82",
 		"--boundless-verifier-router-address", "0x0b144e07a0826182b6b59788c34b32bfa86fb711",
 		"--boundless-set-verifier-address", "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104",
 		"--boundless-requestor-key-file", requestorKey,
 		"--boundless-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--boundless-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--boundless-input-s3-bucket", "test-bucket",
+		"--boundless-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--boundless-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--boundless-deposit-witness-item-file", depositWitness,
+		"--boundless-withdraw-witness-item-file", withdrawWitness,
 		"--boundless-min-price-wei", "100000000000000",
 		"--boundless-max-price-wei", "250000000000000",
 		"--boundless-lock-stake-wei", "20000000000000000000",
@@ -252,7 +278,7 @@ func TestParseArgs_BoundlessAutoValid(t *testing.T) {
 	if cfg.Boundless.Bin != "boundless" {
 		t.Fatalf("unexpected boundless bin: %q", cfg.Boundless.Bin)
 	}
-	if cfg.Boundless.InputMode != "private-input" {
+	if cfg.Boundless.InputMode != "guest-witness-v1" {
 		t.Fatalf("unexpected boundless input mode: %q", cfg.Boundless.InputMode)
 	}
 	if cfg.Boundless.MarketAddress != common.HexToAddress("0xFd152dADc5183870710FE54f939Eae3aB9F0fE82") {
@@ -303,7 +329,7 @@ func TestParseArgs_BoundlessAutoRejectsJournalInputMode(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "private-input") {
+	if !strings.Contains(err.Error(), "guest-witness-v1") {
 		t.Fatalf("expected boundless input mode error, got: %v", err)
 	}
 }
@@ -939,57 +965,6 @@ func TestBoundlessFundingShortfallWei(t *testing.T) {
 	}
 }
 
-func TestBoundlessPrivateInputVersion_DetectsKnownJSONEnvelope(t *testing.T) {
-	t.Parallel()
-
-	got := boundlessPrivateInputVersion([]byte(`{"version":"deposit.private_input.v1","items":[]}`))
-	if got != "deposit.private_input.v1" {
-		t.Fatalf("input version: got %q", got)
-	}
-}
-
-func TestBoundlessPrivateInputVersion_IgnoresBinaryOrMissingVersion(t *testing.T) {
-	t.Parallel()
-
-	if got := boundlessPrivateInputVersion([]byte{0x01, 0x02, 0x03}); got != "" {
-		t.Fatalf("expected empty version for binary input, got %q", got)
-	}
-
-	if got := boundlessPrivateInputVersion([]byte(`{"items":[]}`)); got != "" {
-		t.Fatalf("expected empty version for json without version, got %q", got)
-	}
-}
-
-func TestValidateBoundlessInputPreflight_PrivateInputRejectsGuestProgramURL(t *testing.T) {
-	t.Parallel()
-
-	err := validateBoundlessInputPreflight(
-		boundlessInputModePrivate,
-		"deposit",
-		"https://github.com/juno-intents/intents-juno/releases/download/boundless-guests/deposit-guest-deadbeef.elf",
-		[]byte(`{"version":"deposit.private_input.v1","items":[]}`),
-	)
-	if err == nil {
-		t.Fatalf("expected preflight error")
-	}
-	if !strings.Contains(err.Error(), "guest-witness-v1") {
-		t.Fatalf("expected guest-witness-v1 guidance, got: %v", err)
-	}
-}
-
-func TestValidateBoundlessInputPreflight_GuestWitnessModeAllowsGuestProgramURL(t *testing.T) {
-	t.Parallel()
-
-	if err := validateBoundlessInputPreflight(
-		boundlessInputModeGuestWitnessV1,
-		"deposit",
-		"https://github.com/juno-intents/intents-juno/releases/download/boundless-guests/deposit-guest-deadbeef.elf",
-		[]byte{0x01, 0x02},
-	); err != nil {
-		t.Fatalf("unexpected preflight error: %v", err)
-	}
-}
-
 func TestBuildBoundlessSubmitFileRequestYAML_UsesURLInputAndGroth16Selector(t *testing.T) {
 	t.Parallel()
 
@@ -1035,33 +1010,6 @@ func TestBuildBoundlessSubmitFileRequestYAML_UsesURLInputAndGroth16Selector(t *t
 	}
 	if !strings.Contains(raw, "maxPrice: 50000000000000") {
 		t.Fatalf("expected maxPrice in yaml: %s", raw)
-	}
-}
-
-func TestShouldUseBoundlessSubmitFile(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name      string
-		inputMode string
-		inputLen  int
-		want      bool
-	}{
-		{name: "guest witness always uses submit file", inputMode: boundlessInputModeGuestWitnessV1, inputLen: 1, want: true},
-		{name: "private small input keeps submit", inputMode: boundlessInputModePrivate, inputLen: boundlessInlineInputLimitBytes, want: false},
-		{name: "private oversized input switches to submit file", inputMode: boundlessInputModePrivate, inputLen: boundlessInlineInputLimitBytes + 1, want: true},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			cfg := boundlessConfig{InputMode: tc.inputMode}
-			got := shouldUseBoundlessSubmitFile(cfg, make([]byte, tc.inputLen))
-			if got != tc.want {
-				t.Fatalf("shouldUseBoundlessSubmitFile(mode=%s,len=%d)=%v want %v", tc.inputMode, tc.inputLen, got, tc.want)
-			}
-		})
 	}
 }
 

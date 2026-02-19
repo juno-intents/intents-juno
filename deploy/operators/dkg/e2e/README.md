@@ -80,7 +80,8 @@ Local invocation example:
 
 - The e2e runs in strict proof mode only.
 - `run-testnet-e2e.sh` always uses `--boundless-auto`.
-- `--boundless-input-mode` defaults to `private-input` and also supports `guest-witness-v1` with:
+- `--boundless-input-mode` is locked to `guest-witness-v1`.
+- Guest witness mode requires:
   - explicit witness inputs only (auto generation is disabled in this flow):
     - `--boundless-deposit-owallet-ivk-hex`
     - `--boundless-withdraw-owallet-ovk-hex`
