@@ -3464,6 +3464,37 @@ command_run() {
     local scenario_withdrawal_view_json scenario_refunded_on_chain scenario_finalized_on_chain
     local scenario_refund_output scenario_refund_status scenario_refund_attempt
     local scenario_wait_deadline scenario_now
+    local scenario_restore_output scenario_restore_status
+    local scenario_params_mutated="false"
+
+    restore_refund_after_expiry_params() {
+      if [[ "$scenario_params_mutated" != "true" ]]; then
+        return 0
+      fi
+      log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$bridge_refund_window_seconds"
+      set +e
+      scenario_restore_output="$(
+        cast send \
+          --rpc-url "$base_rpc_url" \
+          --private-key "$bridge_deployer_key_hex" \
+          "$deployed_bridge_address" \
+          "setParams(uint96,uint96,uint64,uint64)" \
+          "$bridge_fee_bps" \
+          "$bridge_relayer_tip_bps" \
+          "$bridge_refund_window_seconds" \
+          "$bridge_max_expiry_extension_seconds" 2>&1
+      )"
+      scenario_restore_status=$?
+      set -e
+      if (( scenario_restore_status != 0 )); then
+        printf 'refund-after-expiry scenario failed to restore bridge params: status=%s output=%s\n' \
+          "$scenario_restore_status" \
+          "$scenario_restore_output"
+        return 1
+      fi
+      scenario_params_mutated="false"
+      return 0
+    }
 
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
     scenario_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
@@ -3490,6 +3521,7 @@ command_run() {
         "$scenario_refund_output"
       return 1
     fi
+    scenario_params_mutated="true"
 
     scenario_withdraw_request_payload="$workdir/reports/refund-after-expiry-withdraw-request.json"
     set +e
@@ -3509,13 +3541,20 @@ command_run() {
     set -e
     if (( scenario_request_status != 0 )); then
       printf 'refund-after-expiry scenario failed to request withdrawal: status=%s\n' "$scenario_request_status"
+      restore_refund_after_expiry_params || true
       return 1
     fi
 
     refund_after_expiry_withdrawal_id="$(jq -r '.withdrawalId // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
     refund_after_expiry_request_expiry="$(jq -r '.expiry // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
-    [[ "$refund_after_expiry_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
-    [[ "$refund_after_expiry_request_expiry" =~ ^[0-9]+$ ]] || return 1
+    if [[ ! "$refund_after_expiry_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
+    if [[ ! "$refund_after_expiry_request_expiry" =~ ^[0-9]+$ ]]; then
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
 
     scenario_wait_deadline=$(( $(date +%s) + scenario_refund_window_seconds + 240 ))
     for scenario_refund_attempt in $(seq 1 180); do
@@ -3541,6 +3580,7 @@ command_run() {
         printf 'refund-after-expiry scenario refund tx failed: status=%s output=%s\n' \
           "$scenario_refund_status" \
           "$scenario_refund_output"
+        restore_refund_after_expiry_params || true
         return 1
       fi
 
@@ -3549,11 +3589,15 @@ command_run() {
         printf 'refund-after-expiry scenario timed out waiting for expiry withdrawalId=%s expiry=%s\n' \
           "$refund_after_expiry_withdrawal_id" \
           "$refund_after_expiry_request_expiry"
+        restore_refund_after_expiry_params || true
         return 1
       fi
       sleep 2
     done
-    [[ -n "$refund_after_expiry_refund_tx_hash" ]] || return 1
+    if [[ -z "$refund_after_expiry_refund_tx_hash" ]]; then
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
 
     scenario_withdrawal_view_json="$(
       cast_contract_call_json \
@@ -3569,16 +3613,21 @@ command_run() {
       printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
         "$refund_after_expiry_withdrawal_id" \
         "$scenario_refunded_on_chain"
+      restore_refund_after_expiry_params || true
       return 1
     fi
     if [[ "$scenario_finalized_on_chain" != "false" ]]; then
       printf 'refund-after-expiry scenario expected finalized=false for withdrawalId=%s (got=%s)\n' \
         "$refund_after_expiry_withdrawal_id" \
         "$scenario_finalized_on_chain"
+      restore_refund_after_expiry_params || true
       return 1
     fi
 
     refund_after_expiry_on_chain_refunded="true"
+    if ! restore_refund_after_expiry_params; then
+      return 1
+    fi
     return 0
   }
 

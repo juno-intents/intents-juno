@@ -527,6 +527,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "withdraw expiry did not increase after forced extension" "run-scoped invariants assert on-chain expiry extension"
   assert_contains "$e2e_script_text" "run_refund_after_expiry_scenario()" "live e2e defines refund-after-expiry chaos scenario helper"
   assert_contains "$e2e_script_text" "Bridge.setParams(uint96,uint96,uint64,uint64)" "refund-after-expiry scenario temporarily configures bridge refund window"
+  assert_contains "$e2e_script_text" "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "refund-after-expiry scenario restores original bridge params"
   assert_contains "$e2e_script_text" "refund(bytes32)" "refund-after-expiry scenario calls on-chain refund"
   assert_contains "$e2e_script_text" "withdrawal refund did not transition to refunded=true" "refund-after-expiry scenario asserts on-chain refunded state"
   assert_contains "$e2e_script_text" "refund_after_expiry_status" "refund-after-expiry scenario status tracked"
