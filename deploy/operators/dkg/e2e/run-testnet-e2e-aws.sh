@@ -1305,7 +1305,7 @@ set_env() {
 }
 
 if [[ -f "\$hydrator_env_file" ]]; then
-  configured_json_path="\$(awk -F= '/^OPERATOR_STACK_CONFIG_JSON_PATH=/{print substr(\$0, index(\$0, "=")+1); exit}' "\$hydrator_env_file")"
+  configured_json_path="\$(sudo awk -F= '/^OPERATOR_STACK_CONFIG_JSON_PATH=/{print substr(\$0, index(\$0, "=")+1); exit}' "\$hydrator_env_file")"
   if [[ -n "\$configured_json_path" ]]; then
     config_json_path="\$configured_json_path"
   fi

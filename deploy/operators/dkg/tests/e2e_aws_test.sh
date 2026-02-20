@@ -318,6 +318,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "tss-host restart deferred until hydrator config has been staged" "aws wrapper defers tss-host restart until hydrator input staging"
   assert_contains "$wrapper_script_text" "staging hydrator config and restarting operator stack services on op" "aws wrapper stages hydrator config per operator"
   assert_contains "$wrapper_script_text" "default_config_json_path=\"/etc/intents-juno/operator-stack-config.json\"" "aws wrapper stages hydrator json to operator stack config path"
+  assert_contains "$wrapper_script_text" 'configured_json_path="\$(sudo awk -F=' "aws wrapper reads root-owned hydrator env via sudo"
   assert_contains "$wrapper_script_text" 'staged hydrator config at \$config_json_path with TSS_SIGNER_RUNTIME_MODE=\$tss_signer_runtime_mode' "aws wrapper logs staged hydrator config and runtime mode"
   assert_contains "$wrapper_script_text" 'set_env "\$tmp_env" TSS_SIGNER_RUNTIME_MODE "\$tss_signer_runtime_mode"' "aws wrapper sets explicit tss signer runtime mode in operator stack env"
   assert_contains "$wrapper_script_text" "nitro signer artifacts or PCR expectations unavailable; forcing TSS_SIGNER_RUNTIME_MODE=host-process for e2e orchestration" "aws wrapper explicitly selects host-process mode when nitro prerequisites are unavailable"
