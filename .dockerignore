@@ -1,0 +1,16 @@
+.git
+.github
+.idea
+.vscode
+tmp
+
+# Local Terraform state and provider caches are never needed in image builds.
+**/.terraform
+**/*.tfstate
+**/*.tfstate.*
+
+# Keep build context lean for deterministic local iteration.
+**/node_modules
+**/target
+**/dist
+**/.cache

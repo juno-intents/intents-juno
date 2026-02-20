@@ -242,6 +242,8 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_not_contains "$wrapper_script_text" "shared_boundless_requestor_private_key" "terraform boundless requestor private key tfvars wiring removed"
   assert_contains "$wrapper_script_text" "dkg_kms_key_arn" "terraform dkg kms output usage"
   assert_contains "$wrapper_script_text" "dkg_s3_bucket" "terraform dkg bucket output usage"
+  assert_contains "$wrapper_script_text" "defaulting --boundless-input-s3-bucket to terraform dkg bucket output" "aws wrapper defaults boundless input bucket to dkg output"
+  assert_contains "$wrapper_script_text" "\"--boundless-input-s3-bucket\" \"\$dkg_s3_bucket\"" "aws wrapper forwards dkg bucket as boundless input bucket fallback"
   assert_contains "$wrapper_script_text" "operator-export-kms.sh export" "operator kms export invocation"
   assert_contains "$wrapper_script_text" "remote_prepare_operator_host" "remote operator host preparation hook"
   assert_contains "$wrapper_script_text" "run_distributed_dkg_backup_restore" "distributed dkg orchestration hook"
@@ -269,6 +271,7 @@ test_aws_wrapper_collects_artifacts_after_remote_failures() {
   assert_contains "$wrapper_script_text" ".bridge.report.juno.proof_of_execution.tx_hash?" "wrapper checks canonical juno proof path"
   assert_contains "$wrapper_script_text" ".juno.tx_hash_source? // .bridge.report.juno.proof_of_execution.source?" "wrapper checks canonical juno proof source path"
   assert_not_contains "$wrapper_script_text" ".bridge.report.transactions.finalize_withdraw?" "wrapper no longer accepts base finalize withdraw as juno hash fallback"
+  assert_contains "$wrapper_script_text" "keep-infra enabled; cleanup trap disabled for all run phases" "keep-infra disables cleanup before pre-run failures"
   assert_contains "$wrapper_script_text" "keep-infra enabled after failure; leaving resources up" "keep-infra failure retention log"
   assert_contains "$wrapper_script_text" "cleanup_enabled=\"false\"" "keep-infra disables cleanup on failure"
   assert_contains "$wrapper_script_text" 'remote live e2e run failed (status=$remote_run_status)' "remote failure reported after artifact collection"
@@ -293,7 +296,16 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "-raw shared_proof_requestor_service_name" "shared proof requestor output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_proof_funder_service_name" "shared proof funder output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_proof_services_ecr_repository_url" "proof services ecr repository output retrieval"
+  assert_contains "$wrapper_script_text" "reusing deployment_id from existing tfvars" "aws wrapper reuses deployment id for iterative reruns"
+  assert_contains "$wrapper_script_text" "reusing dr deployment_id from existing tfvars" "aws wrapper reuses dr deployment id for iterative reruns"
+  assert_contains "$wrapper_script_text" "boundless_requestor_secret_exists" "aws wrapper can verify preexisting boundless requestor secret"
+  assert_contains "$wrapper_script_text" "reusing boundless requestor secret:" "aws wrapper reuses existing primary boundless requestor secret"
+  assert_contains "$wrapper_script_text" "reusing dr boundless requestor secret:" "aws wrapper reuses existing dr boundless requestor secret"
   assert_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "proof services image build invocation"
+  assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\"" "proof services image reference global initialized"
+  assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\${repository_url}:\${image_tag}\"" "proof services image reference global assignment"
+  assert_contains "$wrapper_script_text" "shared_proof_services_image=\"\$SHARED_PROOF_SERVICES_IMAGE\"" "proof services image build call reads explicit global output"
+  assert_not_contains "$wrapper_script_text" 'shared_proof_services_image="$( build_and_push_shared_proof_services_image' "proof services image build no longer masks failure via command substitution"
   assert_contains "$wrapper_script_text" "aws ecr get-login-password" "proof services ecr login"
   assert_contains "$wrapper_script_text" "aws ecs update-service" "proof services ecs rollout"
   assert_not_contains "$wrapper_script_text" "-raw shared_public_ip" "no shared host public ip output retrieval"
@@ -357,6 +369,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "command -v psql" "aws wrapper ensures psql is available on remote runner"
   assert_contains "$wrapper_script_text" "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --runtime-mode)" "aws wrapper rejects forwarded runtime-mode flag"
   assert_contains "$wrapper_script_text" "if [[ \"\${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}\" == \"1\" ]]; then" "aws wrapper allows explicit insecure dkg opt-in only"
+  assert_contains "$wrapper_script_text" 'export JUNO_DKG_NETWORK_MODE="vpc-private"' "aws wrapper pins dkg network mode to private vpc transport"
   assert_not_contains "$wrapper_script_text" "--boundless-deposit-witness-txid" "aws wrapper no longer forwards external deposit txid"
   assert_not_contains "$wrapper_script_text" "--boundless-withdraw-witness-txid" "aws wrapper no longer forwards external withdraw txid"
 }
@@ -373,6 +386,7 @@ test_aws_wrapper_supports_dr_readiness_and_distributed_relayer_runtime() {
   assert_contains "$wrapper_script_text" "validate_shared_services_dr_readiness()" "aws wrapper defines dr readiness validator"
   assert_contains "$wrapper_script_text" "aws ec2 describe-availability-zones" "aws wrapper checks dr region az availability"
   assert_contains "$wrapper_script_text" "aws rds describe-db-engine-versions" "aws wrapper checks dr region aurora api readiness"
+  assert_contains "$wrapper_script_text" "--max-records 20" "aws wrapper uses valid rds max-records for readiness check"
   assert_contains "$wrapper_script_text" "aws kafka list-clusters-v2" "aws wrapper checks dr region msk api readiness"
   assert_contains "$wrapper_script_text" "aws ecs list-clusters" "aws wrapper checks dr region ecs api readiness"
   assert_contains "$wrapper_script_text" "--aws-dr-region is required when shared services are enabled" "aws wrapper requires dr region when shared services enabled"
@@ -398,12 +412,23 @@ test_aws_wrapper_provisions_and_cleans_dr_stack() {
   local wrapper_script_text
   wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
 
+  assert_contains "$wrapper_script_text" "ami_exists_in_region()" "aws wrapper defines regional ami existence helper"
+  assert_contains "$wrapper_script_text" "resolve_dr_ami_id()" "aws wrapper defines dr ami resolver helper"
+  assert_contains "$wrapper_script_text" "aws ec2 describe-images" "aws wrapper queries ec2 image api for dr ami validation"
+  assert_contains "$wrapper_script_text" "--image-ids \"\$ami_id\"" "aws wrapper checks candidate ami id directly"
+  assert_contains "$wrapper_script_text" "falling back to Terraform region default AMI" "aws wrapper logs dr ami fallback to region default"
   assert_contains "$wrapper_script_text" "local dr_tfvars_file=\"\"" "aws wrapper tracks dr tfvars path"
   assert_contains "$wrapper_script_text" "local dr_state_file=\"\"" "aws wrapper tracks dr state path"
   assert_contains "$wrapper_script_text" "local dr_deployment_id=\"\"" "aws wrapper tracks dr deployment id"
   assert_contains "$wrapper_script_text" "dr_tfvars_file=\"\$infra_dir/dr/terraform.tfvars.json\"" "aws wrapper writes dedicated dr tfvars file"
   assert_contains "$wrapper_script_text" "dr_state_file=\"\$infra_dir/dr/terraform.tfstate\"" "aws wrapper writes dedicated dr terraform state file"
   assert_contains "$wrapper_script_text" "dr_deployment_id=\"\${deployment_id}-dr\"" "aws wrapper uses dedicated dr deployment id"
+  assert_contains "$wrapper_script_text" "dr_runner_ami_id=\"\$(resolve_dr_ami_id \"\$aws_profile\" \"\$aws_dr_region\" \"runner\" \"\$runner_ami_id\")\"" "aws wrapper resolves runner dr ami by region"
+  assert_contains "$wrapper_script_text" "dr_operator_ami_id=\"\$(resolve_dr_ami_id \"\$aws_profile\" \"\$aws_dr_region\" \"operator\" \"\$operator_ami_id\")\"" "aws wrapper resolves operator dr ami by region"
+  assert_contains "$wrapper_script_text" "dr_shared_ami_id=\"\$(resolve_dr_ami_id \"\$aws_profile\" \"\$aws_dr_region\" \"shared\" \"\$shared_ami_id\")\"" "aws wrapper resolves shared dr ami by region"
+  assert_contains "$wrapper_script_text" "| .runner_ami_id = \$runner_ami_id" "aws wrapper writes dr runner ami override into dr tfvars"
+  assert_contains "$wrapper_script_text" "| .operator_ami_id = \$operator_ami_id" "aws wrapper writes dr operator ami override into dr tfvars"
+  assert_contains "$wrapper_script_text" "| .shared_ami_id = \$shared_ami_id" "aws wrapper writes dr shared ami override into dr tfvars"
   assert_contains "$wrapper_script_text" "terraform_apply_live_e2e \"\$terraform_dir\" \"\$dr_state_file\" \"\$dr_tfvars_file\" \"\$aws_profile\" \"\$aws_dr_region\"" "aws wrapper applies dr terraform stack"
   assert_contains "$wrapper_script_text" "cleanup_dr_state_file=\"\$dr_state_file\"" "aws wrapper registers dr state file for trap cleanup"
   assert_contains "$wrapper_script_text" "cleanup_dr_tfvars_file=\"\$dr_tfvars_file\"" "aws wrapper registers dr tfvars file for trap cleanup"
@@ -919,6 +944,45 @@ test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
   assert_not_contains "$workflow_text" "--boundless-withdraw-witness-txid" "aws workflow no longer forwards external withdraw txid"
 }
 
+test_proof_services_dockerfile_limits_cargo_memory() {
+  local dockerfile_text
+  dockerfile_text="$(cat "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile")"
+
+  assert_contains "$dockerfile_text" "ENV CARGO_BUILD_JOBS=1" "proof services dockerfile serializes cargo builds for lower memory pressure"
+  assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_LTO=false" "proof services dockerfile disables release lto for lower linker memory use"
+  assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_DEBUG=0" "proof services dockerfile disables release debuginfo in cargo profile"
+  assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" "proof services dockerfile increases release codegen units to lower peak memory"
+  assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_STRIP=symbols" "proof services dockerfile strips release symbols to reduce build and artifact size"
+  assert_contains "$dockerfile_text" "ENV RUSTFLAGS=\"-C debuginfo=0\"" "proof services dockerfile disables rust debuginfo to lower memory pressure"
+}
+
+test_root_dockerignore_excludes_local_bloat_from_build_context() {
+  local dockerignore_text
+  dockerignore_text="$(cat "$REPO_ROOT/.dockerignore")"
+
+  assert_contains "$dockerignore_text" "tmp" "root dockerignore excludes local tmp workspace from image build context"
+  assert_contains "$dockerignore_text" "**/.terraform" "root dockerignore excludes terraform provider cache dirs"
+  assert_contains "$dockerignore_text" "**/*.tfstate" "root dockerignore excludes terraform state files"
+  assert_contains "$dockerignore_text" "**/*.tfstate.*" "root dockerignore excludes terraform state backup/lock artifacts"
+}
+
+test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" 'run_with_retry "remote runner ssh readiness"' "aws wrapper retries ssh readiness before remote runner bootstrap"
+  assert_contains "$wrapper_script_text" 'wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host"' "aws wrapper remote runner bootstrap explicitly rechecks ssh reachability"
+}
+
+test_aws_wrapper_reuses_iterative_ssh_keypair() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" 'if [[ -s "$ssh_key_private" && -s "$ssh_key_public" ]]; then' "aws wrapper reuses existing iterative ssh keypair when present"
+  assert_contains "$wrapper_script_text" 'log "reusing existing ssh keypair from prior run: $ssh_key_private"' "aws wrapper logs ssh keypair reuse"
+  assert_not_contains "$wrapper_script_text" 'rm -f "$ssh_key_private" "$ssh_key_public"' "aws wrapper no longer unconditionally deletes iterative ssh keypair"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -946,6 +1010,10 @@ main() {
   test_bridge_guest_release_workflow_exists
   test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp
   test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset
+  test_proof_services_dockerfile_limits_cargo_memory
+  test_root_dockerignore_excludes_local_bloat_from_build_context
+  test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare
+  test_aws_wrapper_reuses_iterative_ssh_keypair
 }
 
 main "$@"

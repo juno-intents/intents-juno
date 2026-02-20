@@ -329,8 +329,26 @@ is_tailscale_active() {
   [[ "$backend" == "Running" && "$online" == "true" ]]
 }
 
+dkg_network_mode() {
+  local mode="${JUNO_DKG_NETWORK_MODE:-tailscale}"
+  mode="$(lower "$(trim "$mode")")"
+  case "$mode" in
+    tailscale|vpc-private)
+      printf '%s' "$mode"
+      ;;
+    *)
+      die "invalid JUNO_DKG_NETWORK_MODE: $mode (expected tailscale or vpc-private)"
+      ;;
+  esac
+}
+
 require_tailscale_active() {
   ensure_base_dependencies
+  local network_mode
+  network_mode="$(dkg_network_mode)"
+  if [[ "$network_mode" == "vpc-private" ]]; then
+    return 0
+  fi
   if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-}" == "1" ]]; then
     log "WARNING: JUNO_DKG_ALLOW_INSECURE_NETWORK=1; skipping tailscale activity check"
     return 0

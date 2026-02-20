@@ -128,6 +128,20 @@ test_require_tailscale_active_allows_insecure_override() {
   rm -rf "$tmp_bin"
 }
 
+test_require_tailscale_active_allows_vpc_private_mode() {
+  local tmp_bin
+  tmp_bin="$(mktemp -d)"
+
+  (
+    unset JUNO_DKG_ALLOW_INSECURE_NETWORK
+    export JUNO_DKG_NETWORK_MODE="vpc-private"
+    PATH="$tmp_bin:$PATH"
+    require_tailscale_active >/dev/null
+  )
+
+  rm -rf "$tmp_bin"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -136,6 +150,7 @@ main() {
   test_repair_executable_file
   test_remove_macos_quarantine_calls_xattr
   test_require_tailscale_active_allows_insecure_override
+  test_require_tailscale_active_allows_vpc_private_mode
 }
 
 main "$@"

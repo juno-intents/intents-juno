@@ -12,6 +12,12 @@ FROM rust:1.91-bookworm AS boundless-builder
 ARG BOUNDLESS_CLI_VERSION=1.2.0
 ARG BOUNDLESS_REF_TAG=v1.2.1
 ARG BOUNDLESS_RELEASE_BRANCH=release-1.2
+ENV CARGO_BUILD_JOBS=1
+ENV CARGO_PROFILE_RELEASE_LTO=false
+ENV CARGO_PROFILE_RELEASE_DEBUG=0
+ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16
+ENV CARGO_PROFILE_RELEASE_STRIP=symbols
+ENV RUSTFLAGS="-C debuginfo=0"
 
 RUN apt-get update -y && \
   apt-get install -y --no-install-recommends ca-certificates git pkg-config libssl-dev perl && \

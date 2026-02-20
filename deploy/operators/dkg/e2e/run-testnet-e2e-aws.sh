@@ -21,6 +21,7 @@ cleanup_dr_tfvars_file=""
 cleanup_dr_aws_region=""
 cleanup_dr_boundless_requestor_secret_arn=""
 AWS_ENV_ARGS=()
+SHARED_PROOF_SERVICES_IMAGE=""
 
 usage() {
   cat <<'EOF'
@@ -211,6 +212,18 @@ delete_boundless_requestor_secret() {
     --force-delete-without-recovery >/dev/null
 }
 
+boundless_requestor_secret_exists() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local secret_id="$3"
+
+  [[ -n "$secret_id" ]] || return 1
+
+  aws_env_args "$aws_profile" "$aws_region"
+  env "${AWS_ENV_ARGS[@]}" aws secretsmanager describe-secret \
+    --secret-id "$secret_id" >/dev/null 2>&1
+}
+
 run_with_retry() {
   local description="$1"
   local max_attempts="$2"
@@ -327,9 +340,10 @@ cleanup_trap() {
 }
 
 build_and_push_shared_proof_services_image() {
-  local aws_region="$1"
-  local repository_url="$2"
-  local repo_commit="$3"
+  local aws_profile="$1"
+  local aws_region="$2"
+  local repository_url="$3"
+  local repo_commit="$4"
 
   [[ -n "$aws_region" ]] || die "aws region is required to build/push shared proof services image"
   [[ -n "$repository_url" ]] || die "shared proof services repository url is required"
@@ -343,8 +357,10 @@ build_and_push_shared_proof_services_image() {
   registry_host="${repository_url%%/*}"
   [[ -n "$registry_host" ]] || die "failed to derive ecr registry host from repository url: $repository_url"
 
+  aws_env_args "$aws_profile" "$aws_region"
+
   log "logging into ecr registry: $registry_host"
-  aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null
+  env "${AWS_ENV_ARGS[@]}" aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null
 
   log "building shared proof services image: ${repository_url}:${image_tag}"
   if docker buildx version >/dev/null 2>&1; then
@@ -366,23 +382,27 @@ build_and_push_shared_proof_services_image() {
     docker push "${repository_url}:latest"
   fi
 
-  printf '%s' "${repository_url}:${image_tag}"
+  SHARED_PROOF_SERVICES_IMAGE="${repository_url}:${image_tag}"
+  export SHARED_PROOF_SERVICES_IMAGE
 }
 
 rollout_shared_proof_services() {
-  local aws_region="$1"
-  local cluster_arn="$2"
-  local proof_requestor_service="$3"
-  local proof_funder_service="$4"
-  local desired_count="$5"
+  local aws_profile="$1"
+  local aws_region="$2"
+  local cluster_arn="$3"
+  local proof_requestor_service="$4"
+  local proof_funder_service="$5"
+  local desired_count="$6"
 
   [[ -n "$aws_region" ]] || die "aws region is required for shared proof service rollout"
   [[ -n "$cluster_arn" ]] || die "shared ecs cluster arn is required for shared proof service rollout"
   [[ -n "$proof_requestor_service" ]] || die "proof-requestor service name is required for shared proof service rollout"
   [[ -n "$proof_funder_service" ]] || die "proof-funder service name is required for shared proof service rollout"
 
+  aws_env_args "$aws_profile" "$aws_region"
+
   log "rolling out shared proof-requestor ecs service"
-  aws ecs update-service \
+  env "${AWS_ENV_ARGS[@]}" aws ecs update-service \
     --region "$aws_region" \
     --cluster "$cluster_arn" \
     --service "$proof_requestor_service" \
@@ -390,7 +410,7 @@ rollout_shared_proof_services() {
     --force-new-deployment >/dev/null
 
   log "rolling out shared proof-funder ecs service"
-  aws ecs update-service \
+  env "${AWS_ENV_ARGS[@]}" aws ecs update-service \
     --region "$aws_region" \
     --cluster "$cluster_arn" \
     --service "$proof_funder_service" \
@@ -435,15 +455,22 @@ remote_prepare_runner() {
     -i "$ssh_private_key"
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
+    -o ConnectTimeout=10
+    -o BatchMode=yes
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=6
     -o TCPKeepAlive=yes
   )
 
+  run_with_retry "remote runner ssh readiness" 6 10 \
+    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" 'echo ready' >/dev/null 2>&1
+  wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host"
+
   local remote_script
   remote_script="$(build_remote_prepare_script "$repo_commit")"
 
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+  run_with_retry "remote runner bootstrap" 3 15 \
+    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
 
 remote_prepare_operator_host() {
@@ -532,7 +559,7 @@ validate_shared_services_dr_readiness() {
     --region "$aws_dr_region" \
     --engine aurora-postgresql \
     --default-only \
-    --max-records 1 >/dev/null
+    --max-records 20 >/dev/null
 
   env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
     --region "$aws_dr_region" \
@@ -543,6 +570,46 @@ validate_shared_services_dr_readiness() {
     --max-items 1 >/dev/null
 
   log "dr readiness checks passed (primary=$aws_region dr=$aws_dr_region available_azs=$dr_az_count)"
+}
+
+ami_exists_in_region() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local ami_id="$3"
+
+  [[ -n "$ami_id" ]] || return 1
+
+  local image_count
+  aws_env_args "$aws_profile" "$aws_region"
+  image_count="$(
+    env "${AWS_ENV_ARGS[@]}" aws ec2 describe-images \
+      --region "$aws_region" \
+      --image-ids "$ami_id" \
+      --query 'length(Images)' \
+      --output text 2>/dev/null || true
+  )"
+
+  [[ "$image_count" == "1" ]]
+}
+
+resolve_dr_ami_id() {
+  local aws_profile="$1"
+  local aws_dr_region="$2"
+  local ami_role="$3"
+  local candidate_ami_id="$4"
+
+  if [[ -z "$candidate_ami_id" ]]; then
+    printf ''
+    return 0
+  fi
+
+  if ami_exists_in_region "$aws_profile" "$aws_dr_region" "$candidate_ami_id"; then
+    printf '%s' "$candidate_ami_id"
+    return 0
+  fi
+
+  log "$ami_role AMI $candidate_ami_id unavailable in DR region $aws_dr_region; falling back to Terraform region default AMI"
+  printf ''
 }
 
 build_remote_prepare_script() {
@@ -910,6 +977,7 @@ run_distributed_dkg_backup_restore() {
   runner_init_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
+export JUNO_DKG_NETWORK_MODE="vpc-private"
 if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
   export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
 fi
@@ -995,6 +1063,7 @@ EOF
     start_operator_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
+export JUNO_DKG_NETWORK_MODE="vpc-private"
 if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
   export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
 fi
@@ -1021,6 +1090,7 @@ EOF
   runner_execute_ceremony_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
+export JUNO_DKG_NETWORK_MODE="vpc-private"
 if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
   export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
 fi
@@ -1052,6 +1122,7 @@ EOF
     backup_restore_script="$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
+export JUNO_DKG_NETWORK_MODE="vpc-private"
 if [[ "${JUNO_DKG_ALLOW_INSECURE_NETWORK:-0}" == "1" ]]; then
   export JUNO_DKG_ALLOW_INSECURE_NETWORK=1
 fi
@@ -1904,19 +1975,13 @@ command_run() {
   local ssh_key_private ssh_key_public
   ssh_key_private="$ssh_dir/id_ed25519"
   ssh_key_public="$ssh_dir/id_ed25519.pub"
-  rm -f "$ssh_key_private" "$ssh_key_public"
-  ssh-keygen -t ed25519 -N "" -f "$ssh_key_private" >/dev/null
-
-  local deployment_id
-  local dr_deployment_id=""
-  deployment_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
-  local shared_postgres_password
-  shared_postgres_password="$(openssl rand -hex 16)"
-  local boundless_requestor_key_hex
-  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
-  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
-  local boundless_requestor_secret_arn=""
-  local boundless_requestor_secret_arn_dr=""
+  if [[ -s "$ssh_key_private" && -s "$ssh_key_public" ]]; then
+    log "reusing existing ssh keypair from prior run: $ssh_key_private"
+  else
+    rm -f "$ssh_key_private"
+    rm -f "$ssh_key_public"
+    ssh-keygen -t ed25519 -N "" -f "$ssh_key_private" >/dev/null
+  fi
 
   local tfvars_file state_file
   local dr_tfvars_file=""
@@ -1929,6 +1994,50 @@ command_run() {
     ensure_dir "$(dirname "$dr_tfvars_file")"
   fi
 
+  local existing_deployment_id=""
+  local existing_shared_postgres_password=""
+  local existing_boundless_requestor_secret_arn=""
+  local existing_dr_deployment_id=""
+  local existing_boundless_requestor_secret_arn_dr=""
+  if [[ -f "$tfvars_file" ]]; then
+    existing_deployment_id="$(jq -r '.deployment_id // empty' "$tfvars_file")"
+    existing_shared_postgres_password="$(jq -r '.shared_postgres_password // empty' "$tfvars_file")"
+    existing_boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+  fi
+  if [[ "$with_shared_services" == "true" && -f "$dr_tfvars_file" ]]; then
+    existing_dr_deployment_id="$(jq -r '.deployment_id // empty' "$dr_tfvars_file")"
+    existing_boundless_requestor_secret_arn_dr="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$dr_tfvars_file")"
+  fi
+
+  local deployment_id
+  local dr_deployment_id=""
+  if [[ -n "$existing_deployment_id" ]]; then
+    deployment_id="$existing_deployment_id"
+    log "reusing deployment_id from existing tfvars: $deployment_id"
+  else
+    deployment_id="$(date -u +%Y%m%d%H%M%S)-$(openssl rand -hex 3)"
+  fi
+  if [[ "$with_shared_services" == "true" ]]; then
+    if [[ -n "$existing_dr_deployment_id" ]]; then
+      dr_deployment_id="$existing_dr_deployment_id"
+      log "reusing dr deployment_id from existing tfvars: $dr_deployment_id"
+    else
+      dr_deployment_id="${deployment_id}-dr"
+    fi
+  fi
+
+  local shared_postgres_password
+  if [[ -n "$existing_shared_postgres_password" ]]; then
+    shared_postgres_password="$existing_shared_postgres_password"
+  else
+    shared_postgres_password="$(openssl rand -hex 16)"
+  fi
+  local boundless_requestor_key_hex
+  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
+  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
+  local boundless_requestor_secret_arn=""
+  local boundless_requestor_secret_arn_dr=""
+
   cleanup_terraform_dir="$terraform_dir"
   cleanup_aws_profile="$aws_profile"
   cleanup_primary_state_file="$state_file"
@@ -1940,38 +2049,51 @@ command_run() {
   cleanup_dr_aws_region="$aws_dr_region"
   cleanup_dr_boundless_requestor_secret_arn=""
   cleanup_enabled="true"
+  if [[ "$keep_infra" == "true" ]]; then
+    cleanup_enabled="false"
+    log "keep-infra enabled; cleanup trap disabled for all run phases"
+  fi
   trap cleanup_trap EXIT
 
   if [[ "$with_shared_services" == "true" ]]; then
-    dr_deployment_id="${deployment_id}-dr"
     local secret_name_prefix boundless_requestor_secret_name
     local boundless_requestor_secret_name_dr
     secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
     secret_name_prefix="${secret_name_prefix#-}"
     secret_name_prefix="${secret_name_prefix%-}"
     [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
-    boundless_requestor_secret_name="${secret_name_prefix}-${deployment_id}-boundless-requestor-key"
-    log "creating boundless requestor secret"
-    boundless_requestor_secret_arn="$(
-      create_boundless_requestor_secret \
-        "$aws_profile" \
-        "$aws_region" \
-        "$boundless_requestor_secret_name" \
-        "$boundless_requestor_key_hex"
-    )"
-    [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
+    if [[ -n "$existing_boundless_requestor_secret_arn" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_boundless_requestor_secret_arn"; then
+      boundless_requestor_secret_arn="$existing_boundless_requestor_secret_arn"
+      log "reusing boundless requestor secret: $boundless_requestor_secret_arn"
+    else
+      boundless_requestor_secret_name="${secret_name_prefix}-${deployment_id}-boundless-requestor-key"
+      log "creating boundless requestor secret"
+      boundless_requestor_secret_arn="$(
+        create_boundless_requestor_secret \
+          "$aws_profile" \
+          "$aws_region" \
+          "$boundless_requestor_secret_name" \
+          "$boundless_requestor_key_hex"
+      )"
+      [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
+    fi
     cleanup_primary_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
 
-    boundless_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-boundless-requestor-key"
-    log "creating dr boundless requestor secret"
-    boundless_requestor_secret_arn_dr="$(
-      create_boundless_requestor_secret \
-        "$aws_profile" \
-        "$aws_dr_region" \
-        "$boundless_requestor_secret_name_dr" \
-        "$boundless_requestor_key_hex"
-    )"
-    [[ -n "$boundless_requestor_secret_arn_dr" && "$boundless_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr boundless requestor secret"
+    if [[ -n "$existing_boundless_requestor_secret_arn_dr" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_boundless_requestor_secret_arn_dr"; then
+      boundless_requestor_secret_arn_dr="$existing_boundless_requestor_secret_arn_dr"
+      log "reusing dr boundless requestor secret: $boundless_requestor_secret_arn_dr"
+    else
+      boundless_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-boundless-requestor-key"
+      log "creating dr boundless requestor secret"
+      boundless_requestor_secret_arn_dr="$(
+        create_boundless_requestor_secret \
+          "$aws_profile" \
+          "$aws_dr_region" \
+          "$boundless_requestor_secret_name_dr" \
+          "$boundless_requestor_key_hex"
+      )"
+      [[ -n "$boundless_requestor_secret_arn_dr" && "$boundless_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr boundless requestor secret"
+    fi
     cleanup_dr_boundless_requestor_secret_arn="$boundless_requestor_secret_arn_dr"
   fi
 
@@ -2037,13 +2159,24 @@ command_run() {
     }' >"$tfvars_file"
 
   if [[ "$with_shared_services" == "true" ]]; then
+    local dr_runner_ami_id dr_operator_ami_id dr_shared_ami_id
+    dr_runner_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "runner" "$runner_ami_id")"
+    dr_operator_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "operator" "$operator_ami_id")"
+    dr_shared_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "shared" "$shared_ami_id")"
+
     jq \
       --arg aws_region "$aws_dr_region" \
       --arg deployment_id "$dr_deployment_id" \
       --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn_dr" \
+      --arg runner_ami_id "$dr_runner_ami_id" \
+      --arg operator_ami_id "$dr_operator_ami_id" \
+      --arg shared_ami_id "$dr_shared_ami_id" \
       '.aws_region = $aws_region
       | .deployment_id = $deployment_id
-      | .shared_boundless_requestor_secret_arn = $shared_boundless_requestor_secret_arn' \
+      | .shared_boundless_requestor_secret_arn = $shared_boundless_requestor_secret_arn
+      | .runner_ami_id = $runner_ami_id
+      | .operator_ami_id = $operator_ami_id
+      | .shared_ami_id = $shared_ami_id' \
       "$tfvars_file" >"$dr_tfvars_file"
   fi
 
@@ -2225,15 +2358,17 @@ command_run() {
   repo_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   if [[ "$with_shared_services" == "true" ]]; then
     local shared_proof_services_image
-    shared_proof_services_image="$(
-      build_and_push_shared_proof_services_image \
-        "$aws_region" \
-        "$shared_proof_services_ecr_repository_url" \
-        "$repo_commit"
-    )"
+    build_and_push_shared_proof_services_image \
+      "$aws_profile" \
+      "$aws_region" \
+      "$shared_proof_services_ecr_repository_url" \
+      "$repo_commit"
+    shared_proof_services_image="$SHARED_PROOF_SERVICES_IMAGE"
+    [[ -n "$shared_proof_services_image" ]] || die "shared proof services image build completed without image reference"
     log "shared proof services image pushed: $shared_proof_services_image"
 
     rollout_shared_proof_services \
+      "$aws_profile" \
       "$aws_region" \
       "$shared_ecs_cluster_arn" \
       "$shared_proof_requestor_service_name" \
@@ -2469,6 +2604,10 @@ command_run() {
     die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --withdraw-coordinator-runtime-mode)"
   fi
   remote_args+=("${e2e_args[@]}")
+  if ! forwarded_arg_value "--boundless-input-s3-bucket" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "defaulting --boundless-input-s3-bucket to terraform dkg bucket output"
+    remote_args+=("--boundless-input-s3-bucket" "$dkg_s3_bucket")
+  fi
   if forwarded_arg_value "--boundless-witness-juno-scan-url" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --boundless-witness-juno-scan-url with stack-derived witness tunnel endpoint"
   fi
@@ -2517,6 +2656,7 @@ command_run() {
 set -euo pipefail
 cd "$remote_repo"
 export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
+export JUNO_DKG_NETWORK_MODE="vpc-private"
 export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
