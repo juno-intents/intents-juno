@@ -300,6 +300,7 @@ write_stack_config() {
  rpcpassword=\${rpc_pass}
 CFG
   sudo install -m 0600 /tmp/junocashd.conf /etc/intents-juno/junocashd.conf
+  sudo chown ubuntu:ubuntu /etc/intents-juno/junocashd.conf
 
   sudo /usr/local/bin/operator-keygen --private-key-path /etc/intents-juno/checkpoint-signer.key >/tmp/operator-meta.json
   sudo chown ubuntu:ubuntu /etc/intents-juno/checkpoint-signer.key
@@ -380,6 +381,7 @@ TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
 TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
 ENV
   sudo install -m 0600 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
+  sudo chown ubuntu:ubuntu /etc/intents-juno/operator-stack.env
 
   cat > /tmp/operator-stack-hydrator.env <<'EOF_HYDRATOR_ENV'
 OPERATOR_STACK_CONFIG_JSON_PATH=/etc/intents-juno/operator-stack-config.json
