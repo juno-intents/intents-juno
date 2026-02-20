@@ -1191,6 +1191,7 @@ deploy/operators/dkg/operator-export-kms.sh export \
 printf '%s\n' '${completion_ufvk}' >"\$runtime_dir/ufvk.txt"
 chmod 0600 "\$runtime_dir/ufvk.txt"
 sudo mkdir -p /var/lib/intents-juno
+sudo rm -rf /var/lib/intents-juno/operator-runtime
 sudo ln -sfn "\$runtime_dir" /var/lib/intents-juno/operator-runtime
 sudo chown -h ubuntu:ubuntu /var/lib/intents-juno/operator-runtime
 echo "tss-host restart deferred until hydrator config has been staged"

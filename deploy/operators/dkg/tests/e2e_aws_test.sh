@@ -251,6 +251,8 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" '--out "\$age_backup" \' "distributed dkg backup-age output path wiring"
   assert_contains "$wrapper_script_text" '--out "\$age_backup" \
   --force' "distributed dkg backup-age overwrites prior backup output"
+  assert_contains "$wrapper_script_text" "sudo rm -rf /var/lib/intents-juno/operator-runtime" "distributed dkg replaces preexisting operator-runtime directory before linking restored runtime"
+  assert_contains "$wrapper_script_text" 'sudo ln -sfn "\$runtime_dir" /var/lib/intents-juno/operator-runtime' "distributed dkg links restored runtime at canonical operator-runtime path"
   assert_contains "$wrapper_script_text" 'run_with_retry "starting operator daemon op${op_index}" 3 10 \' "distributed dkg wraps operator daemon startup with retry guard"
   assert_contains "$wrapper_script_text" 'ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '\''%q'\'' "$start_operator_script")"' "distributed dkg retry executes operator daemon startup over ssh"
   assert_contains "$wrapper_script_text" "--dkg-summary-path" "external dkg summary forwarding"
