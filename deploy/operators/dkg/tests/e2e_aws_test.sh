@@ -771,6 +771,8 @@ test_bridge_guest_release_workflow_exists() {
 
   assert_contains "$workflow_text" "name: release-bridge-guest-programs" "bridge guest release workflow name"
   assert_contains "$workflow_text" "release_tag:" "bridge guest release workflow release tag input"
+  assert_contains "$workflow_text" 'export PATH="$HOME/.risc0/bin:$PATH"' "bridge guest release workflow adds rzup install path to shell"
+  assert_contains "$workflow_text" "command -v rzup >/dev/null 2>&1" "bridge guest release workflow verifies rzup availability"
   assert_contains "$workflow_text" "cargo risczero build --manifest-path zk/deposit_guest/guest/Cargo.toml" "bridge guest release workflow builds deposit guest"
   assert_contains "$workflow_text" "cargo risczero build --manifest-path zk/withdraw_guest/guest/Cargo.toml" "bridge guest release workflow builds withdraw guest"
   assert_contains "$workflow_text" "r0vm --id --elf" "bridge guest release workflow computes image ids"

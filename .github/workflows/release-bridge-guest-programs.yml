@@ -32,9 +32,11 @@ jobs:
           if ! command -v rzup >/dev/null 2>&1; then
             curl -sSfL https://risczero.com/install | bash
           fi
+          export PATH="$HOME/.risc0/bin:$PATH"
           rzup install
 
           command -v r0vm >/dev/null 2>&1
+          command -v rzup >/dev/null 2>&1
           cargo risczero --version
           r0vm --version
 
