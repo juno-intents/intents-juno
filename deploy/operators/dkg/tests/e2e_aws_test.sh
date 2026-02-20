@@ -770,8 +770,8 @@ test_long_running_aws_workflows_request_extended_oidc_session() {
   ami_workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
   aws_e2e_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
 
-  assert_contains "$ami_workflow_text" "role-duration-seconds: 43200" "operator stack ami workflow requests extended oidc session duration"
-  assert_contains "$aws_e2e_workflow_text" "role-duration-seconds: 43200" "aws e2e workflow requests extended oidc session duration"
+  assert_contains "$ami_workflow_text" "role-duration-seconds: 21600" "operator stack ami workflow requests extended oidc session duration"
+  assert_contains "$aws_e2e_workflow_text" "role-duration-seconds: 21600" "aws e2e workflow requests extended oidc session duration"
 }
 
 test_bridge_guest_release_workflow_exists() {
