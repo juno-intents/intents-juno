@@ -140,6 +140,7 @@ jobs:
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 43200
           aws-region: ${{ inputs.aws_region }}
 
       - name: Configure AWS Credentials (Static Secrets)

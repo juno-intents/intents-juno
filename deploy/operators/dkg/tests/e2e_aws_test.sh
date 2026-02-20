@@ -765,6 +765,15 @@ test_operator_stack_ami_release_workflow_supports_explicit_network_inputs() {
   assert_contains "$workflow_text" "--subnet-id" "operator stack ami workflow forwards resolved subnet id"
 }
 
+test_long_running_aws_workflows_request_extended_oidc_session() {
+  local ami_workflow_text aws_e2e_workflow_text
+  ami_workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
+  aws_e2e_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
+
+  assert_contains "$ami_workflow_text" "role-duration-seconds: 43200" "operator stack ami workflow requests extended oidc session duration"
+  assert_contains "$aws_e2e_workflow_text" "role-duration-seconds: 43200" "aws e2e workflow requests extended oidc session duration"
+}
+
 test_bridge_guest_release_workflow_exists() {
   local workflow_text
   workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-bridge-guest-programs.yml")"
@@ -933,6 +942,7 @@ main() {
   test_aws_workflow_dispatch_input_count_within_limit
   test_operator_stack_ami_release_workflow_exists
   test_operator_stack_ami_release_workflow_supports_explicit_network_inputs
+  test_long_running_aws_workflows_request_extended_oidc_session
   test_bridge_guest_release_workflow_exists
   test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp
   test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset
