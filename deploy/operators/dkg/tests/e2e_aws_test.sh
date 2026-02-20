@@ -754,6 +754,29 @@ test_operator_stack_ami_release_workflow_exists() {
   assert_contains "$workflow_text" "gh release" "operator stack ami workflow creates/updates release"
 }
 
+test_operator_stack_ami_release_workflow_supports_explicit_network_inputs() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
+
+  assert_contains "$workflow_text" "aws_vpc_id:" "operator stack ami workflow exposes optional vpc input"
+  assert_contains "$workflow_text" "aws_subnet_id:" "operator stack ami workflow exposes optional subnet input"
+  assert_contains "$workflow_text" "Resolve Builder Network" "operator stack ami workflow resolves builder network defaults when unset"
+  assert_contains "$workflow_text" "--vpc-id" "operator stack ami workflow forwards resolved vpc id"
+  assert_contains "$workflow_text" "--subnet-id" "operator stack ami workflow forwards resolved subnet id"
+}
+
+test_bridge_guest_release_workflow_exists() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-bridge-guest-programs.yml")"
+
+  assert_contains "$workflow_text" "name: release-bridge-guest-programs" "bridge guest release workflow name"
+  assert_contains "$workflow_text" "release_tag:" "bridge guest release workflow release tag input"
+  assert_contains "$workflow_text" "cargo risczero build --manifest-path zk/deposit_guest/guest/Cargo.toml" "bridge guest release workflow builds deposit guest"
+  assert_contains "$workflow_text" "cargo risczero build --manifest-path zk/withdraw_guest/guest/Cargo.toml" "bridge guest release workflow builds withdraw guest"
+  assert_contains "$workflow_text" "r0vm --id --elf" "bridge guest release workflow computes image ids"
+  assert_contains "$workflow_text" "gh release" "bridge guest release workflow creates/updates release"
+}
+
 test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   local runbook_text
   runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh")"
@@ -849,6 +872,8 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_not_contains "$runbook_text" "sslmode=disable" "runbook excludes insecure postgres tls disable mode"
   assert_contains "$runbook_text" "getblockchaininfo" "runbook checks junocashd sync status"
   assert_contains "$runbook_text" "getbestblockhash" "runbook records synced blockstamp hash"
+  assert_contains "$runbook_text" 'rpc_user: \$junocash_rpc_user' "runbook bootstrap metadata records junocash rpc username"
+  assert_contains "$runbook_text" 'rpc_password: \$junocash_rpc_pass' "runbook bootstrap metadata records junocash rpc password"
   assert_contains "$runbook_text" "create-image" "runbook creates ami"
   assert_contains "$runbook_text" "operator-ami-manifest.json" "runbook writes operator ami manifest"
 }
@@ -893,6 +918,8 @@ main() {
   test_non_aws_workflow_wires_shared_ipfs_for_local_e2e
   test_aws_workflow_dispatch_input_count_within_limit
   test_operator_stack_ami_release_workflow_exists
+  test_operator_stack_ami_release_workflow_supports_explicit_network_inputs
+  test_bridge_guest_release_workflow_exists
   test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp
   test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset
 }

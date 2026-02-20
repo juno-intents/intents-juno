@@ -18,6 +18,16 @@ on:
         required: true
         default: "intents-juno-operator-stack"
         type: string
+      aws_vpc_id:
+        description: "Optional VPC id for AMI builder instance"
+        required: false
+        default: ""
+        type: string
+      aws_subnet_id:
+        description: "Optional subnet id for AMI builder instance"
+        required: false
+        default: ""
+        type: string
       sync_timeout_seconds:
         description: "Max seconds to wait for junocashd sync"
         required: true
@@ -72,6 +82,52 @@ jobs:
             fi
           fi
 
+      - name: Resolve Builder Network
+        id: resolve_network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolved_vpc_id="${{ inputs.aws_vpc_id }}"
+          if [[ -z "$resolved_vpc_id" ]]; then
+            resolved_vpc_id="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true Name=state,Values=available --query 'Vpcs[0].VpcId' --output text)"
+            if [[ "$resolved_vpc_id" == "None" ]]; then
+              resolved_vpc_id=""
+            fi
+          fi
+          if [[ -z "$resolved_vpc_id" ]]; then
+            resolved_vpc_id="$(aws ec2 describe-vpcs --filters Name=state,Values=available --query 'Vpcs[0].VpcId' --output text)"
+            if [[ "$resolved_vpc_id" == "None" ]]; then
+              resolved_vpc_id=""
+            fi
+          fi
+          if [[ -z "$resolved_vpc_id" ]]; then
+            echo "failed to resolve VPC id; set workflow input aws_vpc_id"
+            exit 1
+          fi
+
+          resolved_subnet_id="${{ inputs.aws_subnet_id }}"
+          if [[ -z "$resolved_subnet_id" ]]; then
+            resolved_subnet_id="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$resolved_vpc_id" Name=state,Values=available Name=map-public-ip-on-launch,Values=true --query 'Subnets[0].SubnetId' --output text)"
+            if [[ "$resolved_subnet_id" == "None" ]]; then
+              resolved_subnet_id=""
+            fi
+          fi
+          if [[ -z "$resolved_subnet_id" ]]; then
+            resolved_subnet_id="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$resolved_vpc_id" Name=state,Values=available --query 'Subnets[0].SubnetId' --output text)"
+            if [[ "$resolved_subnet_id" == "None" ]]; then
+              resolved_subnet_id=""
+            fi
+          fi
+          if [[ -z "$resolved_subnet_id" ]]; then
+            echo "failed to resolve subnet id in VPC $resolved_vpc_id; set workflow input aws_subnet_id"
+            exit 1
+          fi
+
+          echo "Resolved builder network: vpc_id=$resolved_vpc_id subnet_id=$resolved_subnet_id"
+          echo "vpc_id=$resolved_vpc_id" >> "$GITHUB_OUTPUT"
+          echo "subnet_id=$resolved_subnet_id" >> "$GITHUB_OUTPUT"
+
       - name: Build Operator Stack AMI
         shell: bash
         run: |
@@ -82,6 +138,8 @@ jobs:
             --aws-region "${{ inputs.aws_region }}" \
             --instance-type "${{ inputs.aws_instance_type }}" \
             --name-prefix "${{ inputs.aws_name_prefix }}" \
+            --vpc-id "${{ steps.resolve_network.outputs.vpc_id }}" \
+            --subnet-id "${{ steps.resolve_network.outputs.subnet_id }}" \
             --repo-commit "${GITHUB_SHA}" \
             --sync-timeout-seconds "${{ inputs.sync_timeout_seconds }}" \
             --manifest-out ".ci/out/operator-ami-manifest.json" \
