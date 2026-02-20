@@ -245,6 +245,39 @@ install_intents_binaries() {
   sudo install -m 0755 "\$out_dir/withdraw-finalizer" /usr/local/bin/withdraw-finalizer
 }
 
+install_aws_cli() {
+  if command -v aws >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local arch bundle_name bundle_url workdir
+  arch="\$(uname -m)"
+  case "\$arch" in
+    x86_64|amd64)
+      bundle_name="awscli-exe-linux-x86_64.zip"
+      ;;
+    aarch64|arm64)
+      bundle_name="awscli-exe-linux-aarch64.zip"
+      ;;
+    *)
+      echo "unsupported architecture for aws cli install: \$arch" >&2
+      return 1
+      ;;
+  esac
+
+  bundle_url="https://awscli.amazonaws.com/\$bundle_name"
+  workdir="\$(mktemp -d)"
+  curl -fsSL "\$bundle_url" -o "\$workdir/awscliv2.zip"
+  (
+    cd "\$workdir"
+    unzip -q awscliv2.zip
+    sudo ./aws/install --update
+  )
+  rm -rf "\$workdir"
+
+  command -v aws >/dev/null 2>&1
+}
+
 write_stack_config() {
   local rpc_user rpc_pass checkpoint_key operator_address
   rpc_user="juno"
@@ -1672,7 +1705,8 @@ write_bootstrap_metadata() {
 }
 
 run_with_retry sudo apt-get update -y
-run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl awscli
+run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl unzip
+run_with_retry install_aws_cli
 
 install_junocash
 install_juno_scan
