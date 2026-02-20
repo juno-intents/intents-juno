@@ -880,6 +880,8 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_not_contains "$runbook_text" "sslmode=disable" "runbook excludes insecure postgres tls disable mode"
   assert_contains "$runbook_text" "getblockchaininfo" "runbook checks junocashd sync status"
   assert_contains "$runbook_text" "getbestblockhash" "runbook records synced blockstamp hash"
+  assert_contains "$runbook_text" "sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env" "runbook reads junocash rpc user via sudo for root-owned env file"
+  assert_contains "$runbook_text" "sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env" "runbook reads junocash rpc password via sudo for root-owned env file"
   assert_contains "$runbook_text" 'rpc_user: \$junocash_rpc_user' "runbook bootstrap metadata records junocash rpc username"
   assert_contains "$runbook_text" 'rpc_password: \$junocash_rpc_pass' "runbook bootstrap metadata records junocash rpc password"
   assert_contains "$runbook_text" "create-image" "runbook creates ami"

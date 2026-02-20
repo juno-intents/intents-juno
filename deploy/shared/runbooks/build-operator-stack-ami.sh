@@ -1604,8 +1604,8 @@ EOF_WITHDRAW_FINALIZER_SERVICE
 
 wait_for_sync_and_record_blockstamp() {
   local rpc_user rpc_pass rpc_args info blocks headers progress block_hash now sync_deadline
-  rpc_user="\$(grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-  rpc_pass="\$(grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
   rpc_args=(-testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
 
   sync_deadline=\$(( \$(date +%s) + __BOOTSTRAP_SYNC_TIMEOUT_SECONDS__ ))
@@ -1654,8 +1654,8 @@ write_bootstrap_metadata() {
   juno_scan_release_tag="\$(cat "\$HOME/.juno-scan-release-tag")"
   block_height="\$(sed -n '1p' "\$HOME/.junocash-blockstamp")"
   block_hash="\$(sed -n '2p' "\$HOME/.junocash-blockstamp")"
-  rpc_user="\$(grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-  rpc_pass="\$(grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 
   jq -n \
     --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -1728,8 +1728,8 @@ done
 write_bootstrap_metadata
 
 sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service || true
-rpc_user="\$(grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-rpc_pass="\$(grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true
 for _ in \$(seq 1 60); do
   if ! pgrep -x junocashd >/dev/null 2>&1; then
