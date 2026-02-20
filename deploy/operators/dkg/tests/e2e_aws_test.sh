@@ -837,7 +837,7 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_contains "$runbook_text" "TSS_TLS_CERT_FILE=" "runbook records tss tls cert path in operator stack env"
   assert_contains "$runbook_text" "TSS_TLS_KEY_FILE=" "runbook records tss tls key path in operator stack env"
   assert_contains "$runbook_text" 'local tss_signer_runtime_mode="nitro-enclave"' "runbook defaults tss signer runtime mode to nitro enclave"
-  assert_contains "$runbook_text" "TSS_SIGNER_RUNTIME_MODE=\${tss_signer_runtime_mode}" "runbook wires selected tss signer runtime mode into operator stack env"
+  assert_contains "$runbook_text" "TSS_SIGNER_RUNTIME_MODE=__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__" "runbook wires selected tss signer runtime mode into operator stack env"
   assert_contains "$runbook_text" "--tss-signer-runtime-mode <mode>" "runbook exposes tss signer runtime mode option"
   assert_contains "$runbook_text" "--tss-signer-runtime-mode must be nitro-enclave or host-process" "runbook validates tss signer runtime mode option values"
   assert_contains "$runbook_text" "TSS_NITRO_ENCLAVE_EIF_FILE=" "runbook records nitro enclave image artifact path"

@@ -154,7 +154,8 @@ build_remote_bootstrap_script() {
   local sync_timeout_seconds="$5"
   local tss_signer_runtime_mode="$6"
 
-  cat <<REMOTE_SCRIPT
+  local script
+  script="$(cat <<'REMOTE_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -215,11 +216,11 @@ install_juno_scan() {
 install_intents_binaries() {
   local repo_dir="\$HOME/intents-juno"
   if [[ ! -d "\$repo_dir/.git" ]]; then
-    git clone "${repo_url}" "\$repo_dir"
+    git clone "__BOOTSTRAP_REPO_URL__" "\$repo_dir"
   fi
   cd "\$repo_dir"
   git fetch --tags origin
-  git checkout "${repo_commit}"
+  git checkout "__BOOTSTRAP_REPO_COMMIT__"
 
   local out_dir
   out_dir="\$(mktemp -d)"
@@ -288,8 +289,8 @@ CHECKPOINT_BLOB_BUCKET=
 CHECKPOINT_BLOB_PREFIX=checkpoint-packages
 CHECKPOINT_IPFS_API_URL=
 JUNO_QUEUE_KAFKA_TLS=true
-BASE_CHAIN_ID=${base_chain_id}
-BRIDGE_ADDRESS=${bridge_address}
+BASE_CHAIN_ID=__BOOTSTRAP_BASE_CHAIN_ID__
+BRIDGE_ADDRESS=__BOOTSTRAP_BRIDGE_ADDRESS__
 BASE_RELAYER_RPC_URL=
 BASE_RELAYER_LISTEN_ADDR=127.0.0.1:18081
 BASE_RELAYER_URL=http://127.0.0.1:18081
@@ -328,7 +329,7 @@ WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
 JUNO_SCAN_BEARER_TOKEN=
-TSS_SIGNER_RUNTIME_MODE=${tss_signer_runtime_mode}
+TSS_SIGNER_RUNTIME_MODE=__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
 TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
 TSS_NITRO_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer
@@ -703,7 +704,7 @@ exec /usr/local/bin/checkpoint-signer \
   --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
   --queue-output-topic "\$CHECKPOINT_SIGNATURE_TOPIC"
 EOF_SIGNER
-  sed -i "s/__BASE_CHAIN_ID__/${base_chain_id}/g; s/__BRIDGE_ADDRESS__/${bridge_address}/g" /tmp/intents-juno-checkpoint-signer.sh
+  sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-signer.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-signer.sh /usr/local/bin/intents-juno-checkpoint-signer.sh
 
   cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'
@@ -766,7 +767,7 @@ exec /usr/local/bin/checkpoint-aggregator \
   --queue-input-topics "\${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
   --queue-output-topic "\${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}"
 EOF_AGG
-  sed -i "s/__BASE_CHAIN_ID__/${base_chain_id}/g; s/__BRIDGE_ADDRESS__/${bridge_address}/g" /tmp/intents-juno-checkpoint-aggregator.sh
+  sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-aggregator.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
 
   cat > /tmp/intents-juno-spendauth-signer.sh <<'EOF_TSS_SPENDAUTH'
@@ -1572,7 +1573,7 @@ wait_for_sync_and_record_blockstamp() {
   rpc_pass="\$(grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
   rpc_args=(-testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
 
-  sync_deadline=\$(( \$(date +%s) + ${sync_timeout_seconds} ))
+  sync_deadline=\$(( \$(date +%s) + __BOOTSTRAP_SYNC_TIMEOUT_SECONDS__ ))
 
   for _ in \$(seq 1 180); do
     if /usr/local/bin/junocash-cli "\${rpc_args[@]}" getblockchaininfo >/tmp/blockchaininfo.json 2>/dev/null; then
@@ -1623,9 +1624,9 @@ write_bootstrap_metadata() {
 
   jq -n \
     --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-    --arg repo_url "${repo_url}" \
-    --arg repo_commit "${repo_commit}" \
-    --arg tss_signer_runtime_mode "${tss_signer_runtime_mode}" \
+    --arg repo_url "__BOOTSTRAP_REPO_URL__" \
+    --arg repo_commit "__BOOTSTRAP_REPO_COMMIT__" \
+    --arg tss_signer_runtime_mode "__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__" \
     --arg junocash_release_tag "\$juno_release_tag" \
     --arg juno_scan_release_tag "\$juno_scan_release_tag" \
     --arg junocash_rpc_user "\$rpc_user" \
@@ -1702,6 +1703,16 @@ for _ in \$(seq 1 60); do
 done
 sync
 REMOTE_SCRIPT
+)"
+
+  script="${script//__BOOTSTRAP_REPO_URL__/$repo_url}"
+  script="${script//__BOOTSTRAP_REPO_COMMIT__/$repo_commit}"
+  script="${script//__BOOTSTRAP_BASE_CHAIN_ID__/$base_chain_id}"
+  script="${script//__BOOTSTRAP_BRIDGE_ADDRESS__/$bridge_address}"
+  script="${script//__BOOTSTRAP_SYNC_TIMEOUT_SECONDS__/$sync_timeout_seconds}"
+  script="${script//__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__/$tss_signer_runtime_mode}"
+
+  printf '%s\n' "$script"
 }
 
 command_create() {
