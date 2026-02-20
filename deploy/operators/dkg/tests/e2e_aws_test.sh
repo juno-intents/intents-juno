@@ -817,6 +817,8 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_contains "$runbook_text" "CHECKPOINT_KAFKA_BROKERS=" "runbook records checkpoint kafka brokers placeholder in operator stack env"
   assert_contains "$runbook_text" "CHECKPOINT_BLOB_BUCKET=" "runbook records checkpoint blob bucket placeholder in operator stack env"
   assert_contains "$runbook_text" "CHECKPOINT_IPFS_API_URL=" "runbook records checkpoint ipfs api placeholder in operator stack env"
+  assert_contains "$runbook_text" "sudo chown ubuntu:ubuntu /etc/intents-juno/checkpoint-signer.key" "runbook grants checkpoint key access to ubuntu services"
+  assert_contains "$runbook_text" "sudo chmod 0600 /etc/intents-juno/checkpoint-signer.key" "runbook enforces checkpoint key file permissions after keygen"
   assert_contains "$runbook_text" "BASE_RELAYER_PRIVATE_KEYS=" "runbook records base relayer signer key placeholder in operator stack env"
   assert_contains "$runbook_text" "BASE_RELAYER_AUTH_TOKEN=" "runbook records base relayer auth token placeholder in operator stack env"
   assert_contains "$runbook_text" "DEPOSIT_IMAGE_ID=" "runbook records deposit relayer image id placeholder in operator stack env"

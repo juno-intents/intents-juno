@@ -302,6 +302,8 @@ CFG
   sudo install -m 0600 /tmp/junocashd.conf /etc/intents-juno/junocashd.conf
 
   sudo /usr/local/bin/operator-keygen --private-key-path /etc/intents-juno/checkpoint-signer.key >/tmp/operator-meta.json
+  sudo chown ubuntu:ubuntu /etc/intents-juno/checkpoint-signer.key
+  sudo chmod 0600 /etc/intents-juno/checkpoint-signer.key
   operator_address="\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)"
   [[ -n "\$operator_address" ]] || { echo "failed to resolve operator address" >&2; return 1; }
   checkpoint_key="\$(tr -d '\r\n' < /etc/intents-juno/checkpoint-signer.key)"
