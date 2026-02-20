@@ -247,6 +247,8 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "operator-export-kms.sh export" "operator kms export invocation"
   assert_contains "$wrapper_script_text" "remote_prepare_operator_host" "remote operator host preparation hook"
   assert_contains "$wrapper_script_text" "run_distributed_dkg_backup_restore" "distributed dkg orchestration hook"
+  assert_contains "$wrapper_script_text" 'run_with_retry "starting operator daemon op${op_index}" 3 10 \' "distributed dkg wraps operator daemon startup with retry guard"
+  assert_contains "$wrapper_script_text" 'ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '\''%q'\'' "$start_operator_script")"' "distributed dkg retry executes operator daemon startup over ssh"
   assert_contains "$wrapper_script_text" "--dkg-summary-path" "external dkg summary forwarding"
   assert_contains "$wrapper_script_text" "-json operator_public_ips" "terraform operator public ips output retrieval"
   assert_contains "$wrapper_script_text" "-json operator_private_ips" "terraform operator private ips output retrieval"

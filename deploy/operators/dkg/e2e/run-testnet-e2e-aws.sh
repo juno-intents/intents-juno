@@ -1080,7 +1080,9 @@ EOF
 )"
 
     log "starting operator daemon op${op_index} on ${op_public_ip}:${op_port}"
-    ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$start_operator_script")"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_public_ip"
+    run_with_retry "starting operator daemon op${op_index}" 3 10 \
+      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$start_operator_script")"
   done
 
   local coordinator_workdir completion_report
