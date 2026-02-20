@@ -1137,6 +1137,8 @@ backup_zip="\$op_root/backup-packages/dkg-backup.zip"
 kms_receipt="\$op_root/exports/kms-export-receipt.json"
 
 mkdir -p "\$op_root/backup" "\$op_root/exports" "\$op_root/backup-packages"
+# Iterative --keep-infra runs must overwrite prior backup/receipt artifacts.
+rm -f "\$age_backup" "\$backup_zip" "\$kms_receipt"
 
 deploy/operators/dkg/operator-export-kms.sh age-recipient \
   --identity-file "\$age_identity" \
@@ -1147,7 +1149,8 @@ deploy/operators/dkg/operator-export-kms.sh backup-age \
   --workdir "\$runtime_dir" \
   --release-tag "${release_tag}" \
   --age-recipient "\$age_recipient" \
-  --out "\$age_backup"
+  --out "\$age_backup" \
+  --force
 
 deploy/operators/dkg/backup-package.sh create \
   --workdir "\$runtime_dir" \
