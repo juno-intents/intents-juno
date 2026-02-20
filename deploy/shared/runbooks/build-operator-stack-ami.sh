@@ -1711,6 +1711,7 @@ REMOTE_SCRIPT
   script="${script//__BOOTSTRAP_BRIDGE_ADDRESS__/$bridge_address}"
   script="${script//__BOOTSTRAP_SYNC_TIMEOUT_SECONDS__/$sync_timeout_seconds}"
   script="${script//__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__/$tss_signer_runtime_mode}"
+  script="${script//\\\$/\$}"
 
   printf '%s\n' "$script"
 }
