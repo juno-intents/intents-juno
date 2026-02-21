@@ -1055,9 +1055,14 @@ EOF
     bundle_remote="$remote_workdir/dkg-distributed/operators/op${op_index}/bundle.tar.gz"
     operator_root_remote="$remote_workdir/dkg-distributed/operators/op${op_index}"
 
-    scp "${ssh_opts[@]}" "$ssh_user@$runner_public_ip:$bundle_remote" "$bundle_local"
-    ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "mkdir -p $(printf '%q' "$operator_root_remote")"
-    scp "${ssh_opts[@]}" "$bundle_local" "$ssh_user@$op_public_ip:$bundle_remote"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$runner_public_ip"
+    run_with_retry "copying distributed bundle op${op_index} from runner" 3 5 \
+      scp "${ssh_opts[@]}" "$ssh_user@$runner_public_ip:$bundle_remote" "$bundle_local"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_public_ip"
+    run_with_retry "staging distributed bundle op${op_index} directory" 3 5 \
+      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "mkdir -p $(printf '%q' "$operator_root_remote")"
+    run_with_retry "copying distributed bundle op${op_index} to operator" 3 5 \
+      scp "${ssh_opts[@]}" "$bundle_local" "$ssh_user@$op_public_ip:$bundle_remote"
 
     local start_operator_script
     start_operator_script="$(cat <<EOF
