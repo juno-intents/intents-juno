@@ -1960,6 +1960,8 @@ command_run() {
       local witness_operator_safe_label deposit_candidate_witness
       local deposit_candidate_json
       local witness_extract_attempt witness_extract_ok
+      local witness_extract_deadline_epoch witness_extract_error_file witness_extract_last_error
+      local witness_extract_wait_logged witness_extract_sleep_seconds
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_idx]}"
@@ -1972,7 +1974,16 @@ command_run() {
       deposit_candidate_json="$witness_quorum_dir/deposit-${witness_operator_safe_label}.json"
 
       witness_extract_ok="false"
-      for witness_extract_attempt in $(seq 1 6); do
+      witness_extract_last_error=""
+      witness_extract_wait_logged="false"
+      witness_extract_sleep_seconds=5
+      witness_extract_deadline_epoch=$(( $(date +%s) + boundless_witness_metadata_timeout_seconds ))
+      witness_extract_error_file="$witness_quorum_dir/deposit-${witness_operator_safe_label}.extract.err"
+
+      witness_extract_attempt=0
+      while true; do
+        witness_extract_attempt=$((witness_extract_attempt + 1))
+        rm -f "$deposit_candidate_json"
         if (
           cd "$REPO_ROOT"
           go run ./cmd/juno-witness-extract deposit \
@@ -1984,19 +1995,32 @@ command_run() {
             --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
             --txid "$generated_deposit_txid" \
             --action-index "$generated_deposit_action_index" \
-            --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json"
+            --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json" 2>"$witness_extract_error_file"
         ); then
           witness_extract_ok="true"
+          rm -f "$witness_extract_error_file"
           break
         fi
-        if (( witness_extract_attempt < 6 )); then
-          sleep 5
+        witness_extract_last_error="$(tail -n 1 "$witness_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+        if grep -qi "note not found" "$witness_extract_error_file"; then
+          if [[ "$witness_extract_wait_logged" != "true" ]]; then
+            log "waiting for note visibility on operator=$witness_operator_label wallet=$generated_wallet_id txid=$generated_deposit_txid action_index=$generated_deposit_action_index"
+            witness_extract_wait_logged="true"
+          fi
         fi
+        if (( $(date +%s) >= witness_extract_deadline_epoch )); then
+          break
+        fi
+        sleep "$witness_extract_sleep_seconds"
       done
 
       if [[ "$witness_extract_ok" != "true" ]]; then
         witness_failed_operator_labels+=("$witness_operator_label")
-        log "witness extraction failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+        if [[ -n "$witness_extract_last_error" ]]; then
+          log "witness extraction failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url last_error=$witness_extract_last_error"
+        else
+          log "witness extraction failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+        fi
         continue
       fi
 

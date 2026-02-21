@@ -604,6 +604,8 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "failed to generate witness metadata from healthy witness endpoint pool" "witness metadata generation uses failover pool"
   assert_contains "$e2e_script_text" "witness quorum consistency mismatch across operators" "witness flow fails when operators disagree on witness bytes or anchors"
   assert_contains "$e2e_script_text" "failed to extract witness from quorum of operators" "witness flow enforces quorum extraction threshold"
+  assert_contains "$e2e_script_text" "witness_extract_deadline_epoch" "witness extraction uses deadline-based retry window for operator index lag"
+  assert_contains "$e2e_script_text" "waiting for note visibility on operator=" "witness extraction logs note indexing wait state per operator"
   assert_contains "$e2e_script_text" "generate-juno-witness-metadata.sh" "run-generated witness metadata command"
   assert_contains "$e2e_script_text" "generated-witness-metadata.json" "run-generated witness metadata output"
   assert_not_contains "$e2e_script_text" "compute-bridge-withdrawal-id.sh run" "withdraw witness ids are no longer precomputed from predicted bridge nonce"
