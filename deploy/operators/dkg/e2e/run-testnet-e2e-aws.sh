@@ -1456,6 +1456,13 @@ if ! sudo systemctl is-active --quiet intents-juno-config-hydrator.service; then
   sudo systemctl status intents-juno-config-hydrator.service --no-pager || true
   exit 1
 fi
+if [[ ! -s "\$stack_env_file" ]]; then
+  echo "operator stack env missing after hydrator update: \$stack_env_file" >&2
+  exit 1
+fi
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo chgrp ubuntu "\$stack_env_file"
+sudo chmod 0640 "\$stack_env_file"
 
 sudo systemctl restart tss-host.service
 if ! sudo systemctl is-active --quiet tss-host.service; then

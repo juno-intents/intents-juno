@@ -665,7 +665,7 @@ if [[ "$runtime_mode" == "nitro-enclave" ]]; then
   set_env_value "$tmp_env" TSS_NITRO_EXPECTED_PCR2 "$pcr2"
 fi
 
-install -m 0600 "$tmp_env" "$stack_env_file"
+install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"
 rm -f "$tmp_env"
 
 if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_ID:-}" ]]; then
