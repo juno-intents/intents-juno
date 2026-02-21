@@ -121,6 +121,23 @@ test_scan_note_lookup_fails_fast_on_repeated_http_errors() {
   fi
 }
 
+test_rpc_calls_fail_fast_on_repeated_transport_errors() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"JUNO_RPC_TRANSPORT_FAILURES_MAX"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define a max consecutive RPC transport failure threshold\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to track consecutive RPC transport failures\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"juno rpc endpoint repeatedly unreachable"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to fail fast when the RPC endpoint is repeatedly unreachable\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
@@ -131,6 +148,7 @@ main() {
   test_witness_generation_serializes_orchard_spends
   test_scan_note_lookup_uses_paginated_notes_api
   test_scan_note_lookup_fails_fast_on_repeated_http_errors
+  test_rpc_calls_fail_fast_on_repeated_transport_errors
 }
 
 main "$@"

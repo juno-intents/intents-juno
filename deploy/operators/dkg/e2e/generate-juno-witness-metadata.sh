@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$SCRIPT_DIR/../common.sh"
 prepare_script_runtime "$SCRIPT_DIR"
 
+JUNO_RPC_TRANSPORT_FAILURES_MAX="${JUNO_RPC_TRANSPORT_FAILURES_MAX:-8}"
+JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE=0
+
 usage() {
   cat <<'USAGE'
 Usage:
@@ -320,7 +323,11 @@ juno_rpc_json_call() {
   local rpc_pass="$3"
   local method="$4"
   local params_json="$5"
-  local payload
+  local payload resp
+  local failures_max="$JUNO_RPC_TRANSPORT_FAILURES_MAX"
+  if ! [[ "$failures_max" =~ ^[0-9]+$ ]] || (( failures_max < 1 )); then
+    failures_max=8
+  fi
 
   payload="$({
     jq -cn \
@@ -328,11 +335,21 @@ juno_rpc_json_call() {
       --argjson params "$params_json" \
       '{jsonrpc: "1.0", id: "witness-meta", method: $method, params: $params}'
   })"
-  curl -fsS \
-    --user "$rpc_user:$rpc_pass" \
-    --header "content-type: application/json" \
-    --data-binary "$payload" \
-    "$rpc_url"
+  if ! resp="$(
+    curl -fsS \
+      --user "$rpc_user:$rpc_pass" \
+      --header "content-type: application/json" \
+      --data-binary "$payload" \
+      "$rpc_url"
+  )"; then
+    JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE=$((JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE + 1))
+    if (( JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE >= failures_max )); then
+      die "juno rpc endpoint repeatedly unreachable url=$rpc_url consecutive_failures=$JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE"
+    fi
+    return 1
+  fi
+  JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE=0
+  printf '%s' "$resp"
 }
 
 juno_rpc_result() {
