@@ -1705,12 +1705,22 @@ command_run() {
 
   if [[ -z "$bridge_operator_signer_bin" ]]; then
     local coordinator_workdir_from_summary
-    coordinator_workdir_from_summary="$(jq -r '.coordinator_workdir // empty' "$dkg_summary")"
-    if [[ -n "$coordinator_workdir_from_summary" && -x "$coordinator_workdir_from_summary/bin/dkg-admin" ]]; then
-      bridge_operator_signer_bin="$coordinator_workdir_from_summary/bin/dkg-admin"
-    else
-      bridge_operator_signer_bin="dkg-admin"
+    local -a bridge_operator_signer_candidates=()
+    coordinator_workdir_from_summary="$(jq -r '.coordinator_workdir // .coordinator.workdir // empty' "$dkg_summary")"
+    if [[ -n "$coordinator_workdir_from_summary" ]]; then
+      bridge_operator_signer_candidates+=("$coordinator_workdir_from_summary/bin/dkg-admin")
     fi
+    bridge_operator_signer_candidates+=(
+      "$workdir/dkg-distributed/coordinator/bin/dkg-admin"
+      "$workdir/dkg/coordinator/bin/dkg-admin"
+    )
+    for bridge_operator_signer_candidate in "${bridge_operator_signer_candidates[@]}"; do
+      if [[ -x "$bridge_operator_signer_candidate" ]]; then
+        bridge_operator_signer_bin="$bridge_operator_signer_candidate"
+        break
+      fi
+    done
+    [[ -n "$bridge_operator_signer_bin" ]] || bridge_operator_signer_bin="dkg-admin"
   fi
   if [[ "$bridge_operator_signer_bin" == */* ]]; then
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
