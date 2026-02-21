@@ -524,7 +524,7 @@ wait_for_shared_connectivity_from_runner() {
   local attempt
   for attempt in $(seq 1 3); do
     log "checking shared services connectivity from runner (attempt $attempt/3)"
-    if ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"; then
+    if ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" 'bash -s' <<<"$remote_script"; then
       return 0
     fi
     if [[ $attempt -lt 3 ]]; then

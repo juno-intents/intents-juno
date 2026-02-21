@@ -337,6 +337,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_not_contains "$wrapper_script_text" "shared services reported ready despite ssh exit status" "no shared host bootstrap fallback"
   assert_not_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "no ssh fallback for managed shared stack"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
+  assert_contains "$wrapper_script_text" "if ssh \"\${ssh_opts[@]}\" \"\$ssh_user@\$ssh_host\" 'bash -s' <<<\"\$remote_script\"; then" "shared connectivity probe executes remote script via stdin for reliable ssh exit status"
   assert_contains "$wrapper_script_text" "tss-host restart deferred until hydrator config has been staged" "aws wrapper defers tss-host restart until hydrator input staging"
   assert_contains "$wrapper_script_text" "staging hydrator config and restarting operator stack services on op" "aws wrapper stages hydrator config per operator"
   assert_contains "$wrapper_script_text" "default_config_json_path=\"/etc/intents-juno/operator-stack-config.json\"" "aws wrapper stages hydrator json to operator stack config path"
