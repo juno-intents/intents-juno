@@ -2436,7 +2436,6 @@ command_run() {
     [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
 
     (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || return 1
-    (( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || return 1
 
     direct_cli_bridge_base_args+=(
       "--rpc-url" "$base_rpc_url"

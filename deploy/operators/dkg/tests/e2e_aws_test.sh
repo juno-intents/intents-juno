@@ -689,6 +689,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "balance delta invariant failed" "run-scoped invariants validate fee/balance deltas"
   assert_contains "$e2e_script_text" "run_direct_cli_user_proof_scenario()" "live e2e defines direct-cli proof scenario helper"
   assert_contains "$e2e_script_text" "--boundless-proof-submission-mode\" \"direct-cli\"" "direct-cli proof scenario uses boundless direct-cli mode"
+  assert_not_contains "$e2e_script_text" '(( ${#boundless_withdraw_witness_item_files[@]} > 0 )) || return 1' "direct-cli proof scenario does not require pre-generated withdraw witness files"
   assert_contains "$e2e_script_text" "direct-cli-user-proof-deploy-summary.json" "direct-cli proof scenario records deploy bootstrap summary"
   assert_contains "$e2e_script_text" "--existing-wjuno-address" "direct-cli proof scenario reuses deployed wjuno contract"
   assert_contains "$e2e_script_text" "--existing-operator-registry-address" "direct-cli proof scenario reuses deployed operator registry contract"
