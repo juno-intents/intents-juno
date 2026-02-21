@@ -852,6 +852,8 @@ if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
 fi
 cd "\$HOME/intents-juno"
 git fetch --tags origin
+git reset --hard
+git clean -fd
 git checkout ${repo_commit}
 git submodule update --init --recursive
 mkdir -p .ci/secrets
@@ -890,6 +892,8 @@ if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
 fi
 cd "\$HOME/intents-juno"
 git fetch --tags origin
+git reset --hard
+git clean -fd
 git checkout ${repo_commit}
 git submodule update --init --recursive
 
