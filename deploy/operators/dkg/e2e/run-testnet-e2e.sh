@@ -2497,12 +2497,6 @@ command_run() {
       "--deploy-only"
       "--output" "$direct_cli_bridge_deploy_summary"
     )
-    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-      direct_cli_bridge_deploy_args+=("--boundless-deposit-witness-item-file" "$witness_file")
-    done
-    for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
-      direct_cli_bridge_deploy_args+=("--boundless-withdraw-witness-item-file" "$witness_file")
-    done
     set +e
     (
       cd "$REPO_ROOT"
