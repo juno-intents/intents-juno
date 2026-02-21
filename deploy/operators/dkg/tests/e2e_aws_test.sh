@@ -983,6 +983,7 @@ test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare() {
 
   assert_contains "$wrapper_script_text" 'run_with_retry "remote runner ssh readiness"' "aws wrapper retries ssh readiness before remote runner bootstrap"
   assert_contains "$wrapper_script_text" 'wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host"' "aws wrapper remote runner bootstrap explicitly rechecks ssh reachability"
+  assert_contains "$wrapper_script_text" 'run_with_retry "remote operator host bootstrap"' "aws wrapper retries remote operator host bootstrap"
 }
 
 test_aws_wrapper_reuses_iterative_ssh_keypair() {

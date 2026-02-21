@@ -491,7 +491,9 @@ remote_prepare_operator_host() {
   local remote_script
   remote_script="$(build_remote_operator_prepare_script "$repo_commit")"
 
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
+  wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host"
+  run_with_retry "remote operator host bootstrap" 3 15 \
+    ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
 
 wait_for_shared_connectivity_from_runner() {
