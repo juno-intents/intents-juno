@@ -585,6 +585,7 @@ scan_find_action_index() {
   local txid="$4"
   local deadline_epoch="$5"
   local auth_header base_url url body action now next_cursor cursor encoded_cursor
+  local scan_http_failures_consecutive=0
   local -A seen_cursors=()
 
   auth_header="$(scan_auth_header "$bearer")"
@@ -612,8 +613,20 @@ scan_find_action_index() {
         body="$(curl -fsS "$url" || true)"
       fi
       if [[ -z "$body" ]]; then
+        scan_http_failures_consecutive=$((scan_http_failures_consecutive + 1))
+        if (( scan_http_failures_consecutive >= 6 )); then
+          die "juno-scan notes endpoint repeatedly failed wallet=$wallet_id txid=$txid"
+        fi
         break
       fi
+      if ! jq -e '.notes | type == "array"' >/dev/null 2>&1 <<<"$body"; then
+        scan_http_failures_consecutive=$((scan_http_failures_consecutive + 1))
+        if (( scan_http_failures_consecutive >= 6 )); then
+          die "juno-scan notes endpoint repeatedly failed wallet=$wallet_id txid=$txid"
+        fi
+        break
+      fi
+      scan_http_failures_consecutive=0
 
       action="$({
         jq -r \

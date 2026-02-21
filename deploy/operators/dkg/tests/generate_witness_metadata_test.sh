@@ -108,6 +108,19 @@ test_scan_note_lookup_uses_paginated_notes_api() {
   fi
 }
 
+test_scan_note_lookup_fails_fast_on_repeated_http_errors() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"scan_http_failures_consecutive"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to track consecutive scan HTTP failures during note lookup\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"juno-scan notes endpoint repeatedly failed"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to fail fast on repeated juno-scan note endpoint failures\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
@@ -117,6 +130,7 @@ main() {
   test_operation_result_poll_uses_full_queue_query
   test_witness_generation_serializes_orchard_spends
   test_scan_note_lookup_uses_paginated_notes_api
+  test_scan_note_lookup_fails_fast_on_repeated_http_errors
 }
 
 main "$@"
