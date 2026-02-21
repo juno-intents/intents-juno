@@ -1054,6 +1054,19 @@ test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset() {
   assert_contains "$wrapper_script_text" "failed to resolve operator stack AMI; pass --operator-ami-id or build one via deploy/shared/runbooks/build-operator-stack-ami.sh" "aws wrapper hard-fails when no operator stack ami is available"
 }
 
+test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "derive_owallet_keys_from_ufvk()" "aws wrapper defines ufvk->owallet key derivation helper"
+  assert_contains "$wrapper_script_text" "deploy/operators/dkg/e2e/ufvk-derive-keys/Cargo.toml" "aws wrapper uses tracked ufvk derivation helper manifest"
+  assert_contains "$wrapper_script_text" "distributed dkg completion report produced invalid owallet key derivation output" "aws wrapper fails on malformed ufvk derivation output"
+  assert_contains "$wrapper_script_text" "provided --boundless-deposit-owallet-ivk-hex does not match distributed dkg ufvk-derived value" "aws wrapper rejects deposit ivk mismatch against distributed dkg ufvk"
+  assert_contains "$wrapper_script_text" "provided --boundless-withdraw-owallet-ovk-hex does not match distributed dkg ufvk-derived value" "aws wrapper rejects withdraw ovk mismatch against distributed dkg ufvk"
+  assert_contains "$wrapper_script_text" "defaulting --boundless-deposit-owallet-ivk-hex from distributed dkg completion report ufvk" "aws wrapper auto-fills deposit ivk when not forwarded"
+  assert_contains "$wrapper_script_text" "defaulting --boundless-withdraw-owallet-ovk-hex from distributed dkg completion report ufvk" "aws wrapper auto-fills withdraw ovk when not forwarded"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -1086,6 +1099,7 @@ main() {
   test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare
   test_aws_wrapper_reuses_iterative_ssh_keypair
   test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset
+  test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk
 }
 
 main "$@"

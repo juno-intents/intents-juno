@@ -1,0 +1,12 @@
+[package]
+name = "ufvk-derive-keys"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow = "1.0.100"
+bech32 = "0.11.0"
+f4jumble = "0.1.1"
+hex = "0.4.3"
+orchard = "0.11.0"
