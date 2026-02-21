@@ -1961,6 +1961,10 @@ command_run() {
     ensure_local_command docker
   fi
 
+  ensure_dir "$workdir"
+  workdir="$(cd "$workdir" && pwd)"
+  terraform_dir="$(cd "$terraform_dir" && pwd)"
+
   local dkg_threshold="3"
   local forwarded_operator_count=""
   local forwarded_operator_base_port=""
