@@ -584,10 +584,11 @@ scan_find_action_index() {
   local wallet_id="$3"
   local txid="$4"
   local deadline_epoch="$5"
-  local auth_header url body action now
+  local auth_header base_url url body action now next_cursor cursor encoded_cursor
+  local -A seen_cursors=()
 
   auth_header="$(scan_auth_header "$bearer")"
-  url="${scan_url%/}/v1/wallets/${wallet_id}/notes?spent=true&limit=1000"
+  base_url="${scan_url%/}/v1/wallets/${wallet_id}/notes?limit=1000"
   txid="$(trim_txid "$txid")"
 
   while true; do
@@ -596,29 +597,47 @@ scan_find_action_index() {
       die "timed out waiting for juno-scan note indexing wallet=$wallet_id txid=$txid"
     fi
 
-    if [[ -n "$auth_header" ]]; then
-      body="$(curl -fsS --header "$auth_header" "$url" || true)"
-    else
-      body="$(curl -fsS "$url" || true)"
-    fi
-    if [[ -z "$body" ]]; then
-      sleep 4
-      continue
-    fi
+    cursor=""
+    seen_cursors=()
+    while true; do
+      url="$base_url"
+      if [[ -n "$cursor" ]]; then
+        encoded_cursor="$(jq -rn --arg value "$cursor" '$value|@uri')"
+        url="${url}&cursor=${encoded_cursor}"
+      fi
 
-    action="$({
-      jq -r \
-        --arg txid "$txid" \
-        '
-          .notes
-          | map(select((.txid // "" | ascii_downcase) == $txid and (.position != null)))
-          | (if length > 0 then .[0].action_index else empty end)
-        ' <<<"$body" 2>/dev/null || true
-    })"
-    if [[ "$action" =~ ^[0-9]+$ ]]; then
-      printf '%s' "$action"
-      return 0
-    fi
+      if [[ -n "$auth_header" ]]; then
+        body="$(curl -fsS --header "$auth_header" "$url" || true)"
+      else
+        body="$(curl -fsS "$url" || true)"
+      fi
+      if [[ -z "$body" ]]; then
+        break
+      fi
+
+      action="$({
+        jq -r \
+          --arg txid "$txid" \
+          '
+            .notes
+            | map(select((.txid // "" | ascii_downcase) == $txid and (.position != null)))
+            | (if length > 0 then .[0].action_index else empty end)
+          ' <<<"$body" 2>/dev/null || true
+      })"
+      if [[ "$action" =~ ^[0-9]+$ ]]; then
+        printf '%s' "$action"
+        return 0
+      fi
+
+      next_cursor="$(jq -r '.next_cursor // empty' <<<"$body" 2>/dev/null || true)"
+      next_cursor="$(trim "$next_cursor")"
+      [[ -n "$next_cursor" ]] || break
+      if [[ -n "${seen_cursors[$next_cursor]+x}" ]]; then
+        break
+      fi
+      seen_cursors["$next_cursor"]=1
+      cursor="$next_cursor"
+    done
     sleep 4
   done
 }

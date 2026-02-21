@@ -91,6 +91,23 @@ test_witness_generation_serializes_orchard_spends() {
   fi
 }
 
+test_scan_note_lookup_uses_paginated_notes_api() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"/notes?limit=1000"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to query paginated juno-scan notes endpoint\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" == *"spent=true&limit=1000"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh not to force spent=true filter on notes endpoint\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"next_cursor"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to handle juno-scan notes pagination cursor\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
@@ -99,6 +116,7 @@ main() {
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_result_poll_uses_full_queue_query
   test_witness_generation_serializes_orchard_spends
+  test_scan_note_lookup_uses_paginated_notes_api
 }
 
 main "$@"
