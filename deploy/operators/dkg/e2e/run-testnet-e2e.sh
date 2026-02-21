@@ -707,6 +707,40 @@ ensure_recipient_min_balance() {
   return 1
 }
 
+assert_prefund_sender_budget() {
+  local rpc_url="$1"
+  local funding_sender_address="$2"
+  local prefund_operator_count="$3"
+  local per_operator_prefund_wei="$4"
+  local bridge_deployer_required_wei="$5"
+
+  local per_transfer_gas_limit_wei="21000"
+  local conservative_gas_price_wei="5000000000"
+  local transfer_retry_budget="3"
+  local transfer_count gas_reserve_wei min_gas_reserve_wei
+  local operator_prefund_total_wei required_total_wei funding_sender_balance_wei
+
+  transfer_count=$((prefund_operator_count + 1))
+  gas_reserve_wei=$((transfer_count * per_transfer_gas_limit_wei * conservative_gas_price_wei * transfer_retry_budget))
+  min_gas_reserve_wei="5000000000000000"
+  if (( gas_reserve_wei < min_gas_reserve_wei )); then
+    gas_reserve_wei="$min_gas_reserve_wei"
+  fi
+
+  operator_prefund_total_wei=$((prefund_operator_count * per_operator_prefund_wei))
+  required_total_wei=$((operator_prefund_total_wei + bridge_deployer_required_wei + gas_reserve_wei))
+
+  funding_sender_balance_wei="$(cast balance --rpc-url "$rpc_url" "$funding_sender_address" 2>/dev/null || true)"
+  [[ "$funding_sender_balance_wei" =~ ^[0-9]+$ ]] || \
+    die "failed to read base funder balance for pre-fund budget check: address=$funding_sender_address balance=$funding_sender_balance_wei"
+
+  if (( funding_sender_balance_wei < required_total_wei )); then
+    local shortfall_wei
+    shortfall_wei=$((required_total_wei - funding_sender_balance_wei))
+    die "insufficient base funder balance for operator/deployer pre-funding: address=$funding_sender_address balance_wei=$funding_sender_balance_wei required_wei=$required_total_wei shortfall_wei=$shortfall_wei operator_prefund_total_wei=$operator_prefund_total_wei bridge_deployer_required_wei=$bridge_deployer_required_wei gas_reserve_wei=$gas_reserve_wei"
+  fi
+}
+
 derive_tss_url_from_juno_rpc_url() {
   local rpc_url="$1"
   if [[ "$rpc_url" =~ ^https?://([^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
@@ -1833,9 +1867,38 @@ command_run() {
   base_key="$(trimmed_file_value "$base_funder_key_file")"
 
   local bridge_deployer_address
+  local bridge_deployer_required_wei="0"
   bridge_deployer_address="$(jq -r '.operators[0].operator_id // empty' "$dkg_summary")"
   [[ -n "$bridge_deployer_address" ]] || die "dkg summary missing operators[0].operator_id"
   bridge_recipient_address="$bridge_deployer_address"
+
+  if (( base_operator_fund_wei > 0 )); then
+    ensure_command cast
+    local prefund_funding_sender_address
+    local prefund_operator_count
+    prefund_funding_sender_address="$(cast wallet address --private-key "$base_key")"
+    [[ -n "$prefund_funding_sender_address" ]] || die "failed to derive funding sender address"
+
+    prefund_operator_count="$(jq -r '.operators | length' "$dkg_summary")"
+    [[ "$prefund_operator_count" =~ ^[0-9]+$ ]] || \
+      die "dkg summary operators length is invalid: $prefund_operator_count"
+    (( prefund_operator_count >= 1 )) || die "dkg summary operators length must be >= 1"
+
+    bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
+    # Bridge deployment retries can require a high fee cap on Base testnet; keep
+    # a hard floor so replacement transactions do not fail with insufficient funds.
+    local bridge_deployer_min_wei="70000000000000000"
+    if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
+      bridge_deployer_required_wei="$bridge_deployer_min_wei"
+    fi
+
+    assert_prefund_sender_budget \
+      "$base_rpc_url" \
+      "$prefund_funding_sender_address" \
+      "$prefund_operator_count" \
+      "$base_operator_fund_wei" \
+      "$bridge_deployer_required_wei"
+  fi
 
   local witness_endpoint_pool_size=0
   local witness_endpoint_healthy_count=0
@@ -2251,15 +2314,6 @@ command_run() {
       ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$operator" "$base_operator_fund_wei" "operator pre-fund" || \
         die "failed to pre-fund operator: address=$operator required_wei=$base_operator_fund_wei"
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
-
-    local bridge_deployer_required_wei
-    bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
-    # Bridge deployment retries can require a high fee cap on Base testnet; keep
-    # a hard floor so replacement transactions do not fail with insufficient funds.
-    local bridge_deployer_min_wei="70000000000000000"
-    if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
-      bridge_deployer_required_wei="$bridge_deployer_min_wei"
-    fi
     ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$bridge_deployer_address" "$bridge_deployer_required_wei" "bridge deployer" || \
       die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
   fi
