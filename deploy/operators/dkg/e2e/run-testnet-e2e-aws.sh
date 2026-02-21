@@ -829,6 +829,11 @@ if (( missing_services != 0 )); then
   exit 1
 fi
 
+# Normalize stack config file access so ubuntu-owned services can start on reused AMIs.
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo chgrp ubuntu /etc/intents-juno/junocashd.conf /etc/intents-juno/operator-stack.env /etc/intents-juno/operator-stack-hydrator.env /etc/intents-juno/operator-stack-config.json /etc/intents-juno/checkpoint-signer.key
+sudo chmod 0640 /etc/intents-juno/junocashd.conf /etc/intents-juno/operator-stack.env /etc/intents-juno/operator-stack-hydrator.env /etc/intents-juno/operator-stack-config.json /etc/intents-juno/checkpoint-signer.key
+
 sudo systemctl daemon-reload
 sudo systemctl enable "\${required_services[@]}"
 sudo systemctl restart "\${startup_services[@]}"
