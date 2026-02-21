@@ -1367,7 +1367,8 @@ sudo cp "\$stack_env_file" "\$tmp_env"
 sudo chown "\$(id -u):\$(id -g)" "\$tmp_env"
 chmod 600 "\$tmp_env"
 set_env "\$tmp_env" TSS_SIGNER_RUNTIME_MODE "\$tss_signer_runtime_mode"
-sudo install -m 0600 "\$tmp_env" "\$stack_env_file"
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo install -m 0640 -o root -g ubuntu "\$tmp_env" "\$stack_env_file"
 rm -f "\$tmp_env"
 
 tmp_json="\$(mktemp)"
@@ -1420,8 +1421,8 @@ else
       JUNO_QUEUE_KAFKA_TLS: "true"
     }' >"\$tmp_json"
 fi
-sudo install -d -m 0700 "\$(dirname "\$config_json_path")"
-sudo install -m 0600 "\$tmp_json" "\$config_json_path"
+sudo install -d -m 0750 -o root -g ubuntu "\$(dirname "\$config_json_path")"
+sudo install -m 0640 -o root -g ubuntu "\$tmp_json" "\$config_json_path"
 rm -f "\$tmp_json"
 
 echo "staged hydrator config at \$config_json_path with TSS_SIGNER_RUNTIME_MODE=\$tss_signer_runtime_mode"
