@@ -2762,7 +2762,7 @@ for ((op_idx = 0; op_idx < \${#operator_private_ips[@]}; op_idx++)); do
   witness_tunnel_scan_port=\$((witness_tunnel_scan_base_port + op_idx))
   witness_tunnel_rpc_port=\$((witness_tunnel_rpc_base_port + op_idx))
   witness_tunnel_tss_port=\$((witness_tunnel_tss_base_port + op_idx))
-  tunnel_log="$remote_workdir/reports/witness-tunnel-op$((op_idx + 1)).log"
+  tunnel_log="$remote_workdir/reports/witness-tunnel-op\$((op_idx + 1)).log"
 
   ssh \
     -i "\$operator_ssh_key" \

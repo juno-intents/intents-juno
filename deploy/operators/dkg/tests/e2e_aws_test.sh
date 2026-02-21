@@ -388,6 +388,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "witness-tss-ca.pem" "aws wrapper stages tss ca on runner"
   assert_contains "$wrapper_script_text" "witness_tss_urls+=(\"https://127.0.0.1:" "aws wrapper uses https for tss tunnel URLs"
   assert_contains "$wrapper_script_text" "for ((op_idx = 0; op_idx < \\\${#operator_private_ips[@]}; op_idx++)); do" "aws wrapper iterates operator fleet for witness tunnels"
+  assert_contains "$wrapper_script_text" "witness-tunnel-op\\\$((op_idx + 1)).log" "aws wrapper escapes witness tunnel log label arithmetic during remote script render"
   assert_contains "$wrapper_script_text" "witness_tunnel_scan_port=\\\$((witness_tunnel_scan_base_port + op_idx))" "aws wrapper assigns scan tunnel ports per operator"
   assert_contains "$wrapper_script_text" "witness_tunnel_rpc_port=\\\$((witness_tunnel_rpc_base_port + op_idx))" "aws wrapper assigns rpc tunnel ports per operator"
   assert_contains "$wrapper_script_text" "witness_tunnel_tss_port=\\\$((witness_tunnel_tss_base_port + op_idx))" "aws wrapper assigns tss tunnel ports per operator"
