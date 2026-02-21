@@ -846,41 +846,42 @@ func parseArgs(args []string) (config, error) {
 	if manualAny && !manualAll {
 		return cfg, errors.New("all guest witness manual inputs must be set together: --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, --boundless-withdraw-witness-item-file")
 	}
-	if !manualAll {
+	if !manualAll && !cfg.DeployOnly {
 		return cfg, errors.New("guest witness auto generation is disabled; provide --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file")
 	}
-
-	cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
-		"--boundless-deposit-owallet-ivk-hex",
-		boundlessDepositOWalletIVKHex,
-		64,
-	)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
-		"--boundless-withdraw-owallet-ovk-hex",
-		boundlessWithdrawOWalletOVKHex,
-		32,
-	)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
-		"--boundless-deposit-witness-item-file",
-		boundlessDepositWitnessItemFiles,
-		proverinput.DepositWitnessItemLen,
-	)
-	if err != nil {
-		return cfg, err
-	}
-	cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
-		"--boundless-withdraw-witness-item-file",
-		boundlessWithdrawWitnessItemFiles,
-		proverinput.WithdrawWitnessItemLen,
-	)
-	if err != nil {
-		return cfg, err
+	if manualAll {
+		cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
+			"--boundless-deposit-owallet-ivk-hex",
+			boundlessDepositOWalletIVKHex,
+			64,
+		)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
+			"--boundless-withdraw-owallet-ovk-hex",
+			boundlessWithdrawOWalletOVKHex,
+			32,
+		)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
+			"--boundless-deposit-witness-item-file",
+			boundlessDepositWitnessItemFiles,
+			proverinput.DepositWitnessItemLen,
+		)
+		if err != nil {
+			return cfg, err
+		}
+		cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
+			"--boundless-withdraw-witness-item-file",
+			boundlessWithdrawWitnessItemFiles,
+			proverinput.WithdrawWitnessItemLen,
+		)
+		if err != nil {
+			return cfg, err
+		}
 	}
 	if strings.TrimSpace(depositFinalOrchardRootHex) == "" {
 		return cfg, errors.New("--deposit-final-orchard-root is required")
