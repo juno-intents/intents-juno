@@ -580,26 +580,6 @@ json_error() {
     '{version:"v1",status:"err",error:{code:\$code,message:\$message}}'
 }
 
-endpoint_reachable() {
-  local endpoint="\$1"
-  local rest host port
-
-  [[ -n "\$endpoint" ]] || return 0
-  [[ "\$endpoint" == https://* ]] || return 0
-
-  rest="\${endpoint#https://}"
-  host="\${rest%:*}"
-  port="\${rest##*:}"
-  if [[ -z "\$host" || -z "\$port" || "\$host" == "\$rest" || ! "\$port" =~ ^[0-9]+$ ]]; then
-    return 0
-  fi
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 2 bash -c ":</dev/tcp/\$host/\$port" >/dev/null 2>&1
-    return \$?
-  fi
-  bash -c ":</dev/tcp/\$host/\$port" >/dev/null 2>&1
-}
-
 main() {
   local command="\${1:-}"
   local digest=""
@@ -656,7 +636,6 @@ main() {
       done
     fi
     [[ "\$include_entry" == "true" ]] || continue
-    endpoint_reachable "\$endpoint" || continue
     [[ -f "\$key_file" ]] || continue
 
     key_hex="\$(tr -d '[:space:]' <"\$key_file" 2>/dev/null || true)"
@@ -668,7 +647,7 @@ main() {
   done < <(jq -c '.[]' "\$MAP_FILE")
 
   if (( \${#signatures[@]} == 0 )); then
-    json_error "no_signatures" "no reachable operator signatures were produced"
+    json_error "no_signatures" "no operator signatures were produced"
     return 1
   fi
 

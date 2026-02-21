@@ -77,8 +77,8 @@ test_operator_signer_fallback_exists_for_bins_without_sign_digest() {
   assert_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer exists"
   assert_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback log message exists"
   assert_contains "$script_text" "bridge_operator_signer_bin=\"\$(write_e2e_operator_digest_signer \"\$dkg_summary\" \"\$workdir/bin\")\"" "fallback signer shim is wired into bridge signer selection"
-  assert_contains "$script_text" "/dev/tcp/" "fallback signer shim checks operator endpoint tcp reachability"
   assert_contains "$script_text" "cast wallet sign --private-key" "fallback signer shim signs digests with operator keys"
+  assert_contains "$script_text" "no operator signatures were produced" "fallback signer emits explicit no-signatures error"
 }
 
 main() {
