@@ -22,6 +22,7 @@ Options:
   --juno-scan-bearer-token <token>   optional juno-scan bearer token
   --funder-private-key-hex <hex>     optional funder private key hex (32-byte); converted to testnet WIF
   --funder-wif <wif>                 optional funder WIF (used directly when provided)
+  --funder-seed-phrase <seed>        optional 24-word seed phrase used to select/recover funded unified account
   --wallet-id <id>                   optional juno-scan wallet id (default: generated run id)
   --deposit-amount-zat <n>           deposit witness tx amount in zatoshis (default: 100000)
   --withdraw-amount-zat <n>          withdraw witness tx amount in zatoshis (default: 10000)
@@ -353,15 +354,13 @@ juno_wait_operation_txid() {
   local rpc_pass="$3"
   local opid="$4"
   local deadline_epoch="$5"
-  local resp status txid err_msg now params_json
-
-  params_json="$(jq -cn --arg opid "$opid" '[ $opid ]')"
+  local resp status txid err_msg now op_json
   while true; do
     now="$(date +%s)"
     if (( now >= deadline_epoch )); then
       die "timed out waiting for juno operation result opid=$opid"
     fi
-    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationresult" "$params_json" || true)"
+    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationresult" "[]" || true)"
     if [[ -z "$resp" || "$resp" == "null" ]]; then
       sleep 2
       continue
@@ -374,16 +373,21 @@ juno_wait_operation_txid() {
       sleep 2
       continue
     fi
-    status="$(jq -r '.[0].status // empty' <<<"$resp")"
+    op_json="$(jq -c --arg opid "$opid" '[.[] | select((.id // "") == $opid)] | .[0] // empty' <<<"$resp" 2>/dev/null || true)"
+    if [[ -z "$op_json" || "$op_json" == "null" ]]; then
+      sleep 2
+      continue
+    fi
+    status="$(jq -r '.status // empty' <<<"$op_json")"
     case "$status" in
       success)
-        txid="$(jq -r '.[0].result.txid // empty' <<<"$resp")"
+        txid="$(jq -r '.result.txid // empty' <<<"$op_json")"
         [[ -n "$txid" ]] || die "operation succeeded without txid opid=$opid"
         trim_txid "$txid"
         return 0
         ;;
       failed)
-        err_msg="$(jq -r '.[0].error.message // "unknown error"' <<<"$resp")"
+        err_msg="$(jq -r '.error.message // "unknown error"' <<<"$op_json")"
         die "operation failed opid=$opid error=$err_msg"
         ;;
       *)
@@ -391,6 +395,82 @@ juno_wait_operation_txid() {
         ;;
     esac
   done
+}
+
+juno_select_funded_unified_address() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local accounts_json account_id balance_json funded_zat candidate_ua
+
+  accounts_json="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_listaccounts" '[]' || true)"
+  if [[ -z "$accounts_json" || "$accounts_json" == "null" ]]; then
+    return 1
+  fi
+
+  while IFS= read -r account_id; do
+    [[ "$account_id" =~ ^[0-9]+$ ]] || continue
+    balance_json="$({
+      juno_rpc_result \
+        "$rpc_url" \
+        "$rpc_user" \
+        "$rpc_pass" \
+        "z_getbalanceforaccount" \
+        "$(jq -cn --argjson account "$account_id" '[ $account, 1 ]')" || true
+    })"
+    funded_zat="$(jq -r '.pools // {} | to_entries | map((.value.valueZat // 0) | tonumber) | add // 0' <<<"${balance_json:-null}" 2>/dev/null || echo 0)"
+    [[ "$funded_zat" =~ ^[0-9]+$ ]] || funded_zat=0
+    if (( funded_zat > 0 )); then
+      candidate_ua="$(jq -r --argjson account "$account_id" '.[] | select(.account == $account) | .addresses[0].ua // empty' <<<"$accounts_json")"
+      if [[ -n "$candidate_ua" ]]; then
+        printf '%s' "$candidate_ua"
+        return 0
+      fi
+    fi
+  done < <(jq -r '.[]?.account // empty' <<<"$accounts_json")
+
+  return 1
+}
+
+juno_wallet_has_mnemonic_seed() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local resp err
+
+  resp="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "z_getseedphrase" '[]' || true)"
+  [[ -n "$resp" ]] || return 1
+  err="$(jq -r '.error.message // empty' <<<"$resp" 2>/dev/null || true)"
+  if [[ -z "$err" ]]; then
+    return 0
+  fi
+  if [[ "$(lower "$err")" == *"does not have a mnemonic seed phrase"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+juno_recover_wallet_from_seed_phrase() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local seed_phrase="$4"
+  local chain_height birthday_height
+
+  chain_height="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "getblockcount" '[]' | jq -r '.')"
+  [[ "$chain_height" =~ ^[0-9]+$ ]] || chain_height=0
+  if (( chain_height > 2000 )); then
+    birthday_height=$((chain_height - 2000))
+  else
+    birthday_height=0
+  fi
+
+  juno_rpc_result \
+    "$rpc_url" \
+    "$rpc_user" \
+    "$rpc_pass" \
+    "z_recoverwallet" \
+    "$(jq -cn --arg mnemonic "$seed_phrase" --argjson birthday "$birthday_height" '[ $mnemonic, $birthday ]')" >/dev/null
 }
 
 juno_wait_tx_confirmed() {
@@ -500,6 +580,7 @@ command_run() {
   local juno_scan_bearer_token=""
   local funder_wif=""
   local funder_private_key_hex=""
+  local funder_seed_phrase=""
   local wallet_id=""
   local deposit_amount_zat="100000"
   local withdraw_amount_zat="10000"
@@ -543,6 +624,11 @@ command_run() {
         funder_private_key_hex="$2"
         shift 2
         ;;
+      --funder-seed-phrase)
+        [[ $# -ge 2 ]] || die "missing value for --funder-seed-phrase"
+        funder_seed_phrase="$2"
+        shift 2
+        ;;
       --wallet-id)
         [[ $# -ge 2 ]] || die "missing value for --wallet-id"
         wallet_id="$2"
@@ -582,8 +668,8 @@ command_run() {
   [[ -n "$juno_rpc_user" ]] || die "--juno-rpc-user is required"
   [[ -n "$juno_rpc_pass" ]] || die "--juno-rpc-pass is required"
   [[ -n "$juno_scan_url" ]] || die "--juno-scan-url is required"
-  if [[ -z "$funder_wif" && -z "$funder_private_key_hex" ]]; then
-    die "one of --funder-wif or --funder-private-key-hex is required"
+  if [[ -z "$funder_wif" && -z "$funder_private_key_hex" && -z "$funder_seed_phrase" ]]; then
+    die "one of --funder-wif, --funder-private-key-hex, or --funder-seed-phrase is required"
   fi
   [[ "$deposit_amount_zat" =~ ^[0-9]+$ ]] || die "--deposit-amount-zat must be numeric"
   [[ "$withdraw_amount_zat" =~ ^[0-9]+$ ]] || die "--withdraw-amount-zat must be numeric"
@@ -594,11 +680,6 @@ command_run() {
   ensure_command jq
   ensure_command curl
   ensure_command python3
-
-  if [[ -n "$funder_private_key_hex" ]]; then
-    funder_wif="$(hex_to_testnet_wif "$funder_private_key_hex")"
-  fi
-  [[ -n "$funder_wif" ]] || die "failed to resolve funder WIF"
 
   if [[ -z "$wallet_id" ]]; then
     wallet_id="testnet-e2e-$(date -u +%Y%m%d%H%M%S)-$RANDOM"
@@ -628,24 +709,44 @@ command_run() {
 
   scan_upsert_wallet "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$ufvk"
 
-  local import_params import_result funder_taddr listaddresses_json
-  import_params="$(jq -cn --arg wif "$funder_wif" '[ $wif, "", false ]')"
-  import_result="$({
-    juno_rpc_result_allow_key_exists "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "importprivkey" "$import_params" || true
-  })"
-  funder_taddr="$(jq -r 'if type == "string" then . else empty end' <<<"${import_result:-null}")"
+  local funder_from_address="" funder_taddr="" funder_source_kind=""
+  if [[ -n "$funder_seed_phrase" ]]; then
+    funder_source_kind="seed_phrase_unified_account"
+    funder_from_address="$(juno_select_funded_unified_address "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" || true)"
+    if [[ -z "$funder_from_address" ]]; then
+      if ! juno_wallet_has_mnemonic_seed "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass"; then
+        juno_recover_wallet_from_seed_phrase "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_seed_phrase"
+      fi
+      funder_from_address="$(juno_select_funded_unified_address "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" || true)"
+    fi
+    [[ -n "$funder_from_address" ]] || die "failed to resolve funded unified account for --funder-seed-phrase"
+  else
+    if [[ -n "$funder_private_key_hex" ]]; then
+      funder_wif="$(hex_to_testnet_wif "$funder_private_key_hex")"
+    fi
+    [[ -n "$funder_wif" ]] || die "failed to resolve funder WIF"
+    funder_source_kind="transparent_wif"
 
-  if [[ -z "$funder_taddr" ]]; then
-    listaddresses_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "listaddresses" '[]' || true)"
-    funder_taddr="$({
-      jq -r '
-        .[]
-        | select(.source == "imported")
-        | .transparent.addresses[]?
-      ' <<<"${listaddresses_json:-[]}" | head -n 1
+    local import_params import_result listaddresses_json
+    import_params="$(jq -cn --arg wif "$funder_wif" '[ $wif, "", false ]')"
+    import_result="$({
+      juno_rpc_result_allow_key_exists "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "importprivkey" "$import_params" || true
     })"
+    funder_taddr="$(jq -r 'if type == "string" then . else empty end' <<<"${import_result:-null}")"
+
+    if [[ -z "$funder_taddr" ]]; then
+      listaddresses_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "listaddresses" '[]' || true)"
+      funder_taddr="$({
+        jq -r '
+          .[]
+          | select(.source == "imported")
+          | .transparent.addresses[]?
+        ' <<<"${listaddresses_json:-[]}" | head -n 1
+      })"
+    fi
+    [[ -n "$funder_taddr" ]] || die "failed to derive funder transparent address from imported private key"
+    funder_from_address="$funder_taddr"
   fi
-  [[ -n "$funder_taddr" ]] || die "failed to derive funder transparent address from imported private key"
 
   local deposit_amount_dec withdraw_amount_dec
   deposit_amount_dec="$(zat_to_decimal "$deposit_amount_zat")"
@@ -658,7 +759,7 @@ command_run() {
       "$juno_rpc_user" \
       "$juno_rpc_pass" \
       "z_sendmany" \
-      "$(jq -cn --arg from "$funder_taddr" --arg to "$recipient_ua" --arg amt "$deposit_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1, 0 ]')" \
+      "$(jq -cn --arg from "$funder_from_address" --arg to "$recipient_ua" --arg amt "$deposit_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
       | jq -r '.'
   })"
   [[ -n "$deposit_opid" && "$deposit_opid" != "null" ]] || die "failed to submit deposit witness tx"
@@ -669,7 +770,7 @@ command_run() {
       "$juno_rpc_user" \
       "$juno_rpc_pass" \
       "z_sendmany" \
-      "$(jq -cn --arg from "$funder_taddr" --arg to "$recipient_ua" --arg amt "$withdraw_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1, 0 ]')" \
+      "$(jq -cn --arg from "$funder_from_address" --arg to "$recipient_ua" --arg amt "$withdraw_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
       | jq -r '.'
   })"
   [[ -n "$withdraw_opid" && "$withdraw_opid" != "null" ]] || die "failed to submit withdraw witness tx"
@@ -695,6 +796,8 @@ command_run() {
       --arg recipient_raw_address_hex "$recipient_raw_address_hex" \
       --arg ufvk "$ufvk" \
       --arg funder_taddr "$funder_taddr" \
+      --arg funder_source_address "$funder_from_address" \
+      --arg funder_source_kind "$funder_source_kind" \
       --arg deposit_txid "$deposit_txid" \
       --arg withdraw_txid "$withdraw_txid" \
       --argjson deposit_action_index "$deposit_action_index" \
@@ -709,6 +812,8 @@ command_run() {
         recipient_raw_address_hex: $recipient_raw_address_hex,
         ufvk: $ufvk,
         funder_taddr: $funder_taddr,
+        funder_source_address: $funder_source_address,
+        funder_source_kind: $funder_source_kind,
         deposit_amount_zat: $deposit_amount_zat,
         withdraw_amount_zat: $withdraw_amount_zat,
         deposit_txid: $deposit_txid,

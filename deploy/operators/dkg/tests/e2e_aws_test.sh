@@ -602,7 +602,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_not_contains "$e2e_script_text" "compute-bridge-withdrawal-id.sh run" "withdraw witness ids are no longer precomputed from predicted bridge nonce"
   assert_contains "$e2e_script_text" "go run ./cmd/juno-witness-extract deposit" "deposit witness extraction command"
   assert_not_contains "$e2e_script_text" "go run ./cmd/juno-witness-extract withdraw" "withdraw witness extraction is no longer pre-generated from metadata txids"
-  assert_contains "$e2e_script_text" "JUNO_FUNDER_PRIVATE_KEY_HEX is required for run-generated witness metadata" "run-generated witness requires juno funder key env"
+  assert_contains "$e2e_script_text" "one of JUNO_FUNDER_PRIVATE_KEY_HEX or JUNO_FUNDER_SEED_PHRASE is required for run-generated witness metadata" "run-generated witness requires juno funder key or seed env"
   assert_contains "$e2e_script_text" "--boundless-deposit-witness-item-file" "boundless deposit witness option"
   assert_contains "$e2e_script_text" "--boundless-withdraw-witness-item-file" "boundless withdraw witness option"
   assert_not_contains "$e2e_script_text" "--boundless-deposit-witness-wallet-id" "manual witness wallet id flag removed"

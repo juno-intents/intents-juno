@@ -34,9 +34,29 @@ test_decode_orchard_receiver_rejects_invalid_input() {
   fi
 }
 
+test_script_supports_seed_phrase_funder_argument() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--funder-seed-phrase"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --funder-seed-phrase\n' >&2
+    exit 1
+  fi
+}
+
+test_operation_result_poll_uses_full_queue_query() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *'"z_getoperationresult" "[]"'* ]]; then
+    printf 'expected juno_wait_operation_txid to query z_getoperationresult with [] and filter by opid\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
+  test_script_supports_seed_phrase_funder_argument
+  test_operation_result_poll_uses_full_queue_query
 }
 
 main "$@"

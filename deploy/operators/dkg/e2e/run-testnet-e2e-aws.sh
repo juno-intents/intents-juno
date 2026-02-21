@@ -65,7 +65,8 @@ run options:
   --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
   --ssh-allowed-cidr <cidr>            inbound SSH CIDR (default: caller public IP /32)
   --base-funder-key-file <path>        file with Base funder private key hex (required)
-  --juno-funder-key-file <path>        file with Juno funder private key hex (required)
+  --juno-funder-key-file <path>        optional file with Juno funder private key hex
+  --juno-funder-seed-file <path>       optional file with Juno funder seed phrase
   --juno-rpc-user-file <path>          file with junocashd RPC username for witness extraction (required)
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
@@ -1673,6 +1674,7 @@ command_run() {
   local ssh_allowed_cidr=""
   local base_funder_key_file=""
   local juno_funder_key_file=""
+  local juno_funder_seed_file=""
   local juno_rpc_user_file=""
   local juno_rpc_pass_file=""
   local juno_scan_bearer_token_file=""
@@ -1815,6 +1817,11 @@ command_run() {
         juno_funder_key_file="$2"
         shift 2
         ;;
+      --juno-funder-seed-file)
+        [[ $# -ge 2 ]] || die "missing value for --juno-funder-seed-file"
+        juno_funder_seed_file="$2"
+        shift 2
+        ;;
       --juno-rpc-user-file)
         [[ $# -ge 2 ]] || die "missing value for --juno-rpc-user-file"
         juno_rpc_user_file="$2"
@@ -1892,11 +1899,18 @@ command_run() {
 
   [[ -n "$aws_region" ]] || die "--aws-region is required"
   [[ -n "$base_funder_key_file" ]] || die "--base-funder-key-file is required"
-  [[ -n "$juno_funder_key_file" ]] || die "--juno-funder-key-file is required"
+  if [[ -z "$juno_funder_key_file" && -z "$juno_funder_seed_file" ]]; then
+    die "one of --juno-funder-key-file or --juno-funder-seed-file is required"
+  fi
   [[ -n "$juno_rpc_user_file" ]] || die "--juno-rpc-user-file is required"
   [[ -n "$juno_rpc_pass_file" ]] || die "--juno-rpc-pass-file is required"
   [[ -f "$base_funder_key_file" ]] || die "base funder key file not found: $base_funder_key_file"
-  [[ -f "$juno_funder_key_file" ]] || die "juno funder key file not found: $juno_funder_key_file"
+  if [[ -n "$juno_funder_key_file" && ! -f "$juno_funder_key_file" ]]; then
+    die "juno funder key file not found: $juno_funder_key_file"
+  fi
+  if [[ -n "$juno_funder_seed_file" && ! -f "$juno_funder_seed_file" ]]; then
+    die "juno funder seed file not found: $juno_funder_seed_file"
+  fi
   [[ -f "$juno_rpc_user_file" ]] || die "juno rpc user file not found: $juno_rpc_user_file"
   [[ -f "$juno_rpc_pass_file" ]] || die "juno rpc pass file not found: $juno_rpc_pass_file"
   if [[ -n "$juno_scan_bearer_token_file" && ! -f "$juno_scan_bearer_token_file" ]]; then
@@ -2511,12 +2525,23 @@ command_run() {
     "$base_funder_key_file" \
     "$remote_repo/.ci/secrets/base-funder.key"
 
-  copy_remote_secret_file \
-    "$ssh_key_private" \
-    "$runner_ssh_user" \
-    "$runner_public_ip" \
-    "$juno_funder_key_file" \
-    "$remote_repo/.ci/secrets/juno-funder.key"
+  if [[ -n "$juno_funder_key_file" ]]; then
+    copy_remote_secret_file \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$juno_funder_key_file" \
+      "$remote_repo/.ci/secrets/juno-funder.key"
+  fi
+
+  if [[ -n "$juno_funder_seed_file" ]]; then
+    copy_remote_secret_file \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$juno_funder_seed_file" \
+      "$remote_repo/.ci/secrets/juno-funder.seed.txt"
+  fi
 
   copy_remote_secret_file \
     "$ssh_key_private" \
@@ -2713,7 +2738,12 @@ set -euo pipefail
 cd "$remote_repo"
 export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
 export JUNO_DKG_NETWORK_MODE="vpc-private"
-export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
+if [[ -f .ci/secrets/juno-funder.key ]]; then
+  export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
+fi
+if [[ -f .ci/secrets/juno-funder.seed.txt ]]; then
+  export JUNO_FUNDER_SEED_PHRASE="\$(tr -d '\r\n' < .ci/secrets/juno-funder.seed.txt)"
+fi
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
 # Live e2e queues target TLS-enabled Kafka brokers in both managed and forwarded shared modes.
