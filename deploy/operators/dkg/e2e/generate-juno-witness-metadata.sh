@@ -398,26 +398,41 @@ juno_wait_operation_txid() {
   local rpc_pass="$3"
   local opid="$4"
   local deadline_epoch="$5"
-  local resp status txid err_msg now op_json
+  local resp status txid err_msg now op_json op_list_params
+  local op_missing_since_epoch op_missing_grace_seconds
+  op_list_params="$(jq -cn --arg opid "$opid" '[[ $opid ]]')"
+  op_missing_grace_seconds=120
+  op_missing_since_epoch="$(date +%s)"
+
   while true; do
     now="$(date +%s)"
     if (( now >= deadline_epoch )); then
       die "timed out waiting for juno operation result opid=$opid"
     fi
-    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationresult" "[]" || true)"
+    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationstatus" "$op_list_params" || true)"
     if [[ -z "$resp" || "$resp" == "null" ]]; then
+      if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
+        die "operation missing from wallet queue for too long opid=$opid"
+      fi
       sleep 2
       continue
     fi
     if [[ "$(jq -r 'type' <<<"$resp")" != "array" ]]; then
+      if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
+        die "operation missing from wallet queue for too long opid=$opid"
+      fi
       sleep 2
       continue
     fi
     if [[ "$(jq -r 'length' <<<"$resp")" == "0" ]]; then
+      if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
+        die "operation missing from wallet queue for too long opid=$opid"
+      fi
       sleep 2
       continue
     fi
-    op_json="$(jq -c --arg opid "$opid" '[.[] | select((.id // "") == $opid)] | .[0] // empty' <<<"$resp" 2>/dev/null || true)"
+    op_missing_since_epoch="$now"
+    op_json="$(jq -c '.[0] // empty' <<<"$resp" 2>/dev/null || true)"
     if [[ -z "$op_json" || "$op_json" == "null" ]]; then
       sleep 2
       continue
