@@ -639,6 +639,9 @@ main() {
     [[ -f "\$key_file" ]] || continue
 
     key_hex="\$(tr -d '[:space:]' <"\$key_file" 2>/dev/null || true)"
+    if [[ "\$key_hex" =~ ^[0-9a-fA-F]{64}\$ ]]; then
+      key_hex="0x\$key_hex"
+    fi
     [[ "\$key_hex" =~ ^0x[0-9a-fA-F]{64}\$ ]] || continue
     signature="\$(cast wallet sign --private-key "\$key_hex" "\$digest" 2>/dev/null || true)"
     if [[ "\$signature" =~ ^0x[0-9a-fA-F]{130}\$ ]]; then
