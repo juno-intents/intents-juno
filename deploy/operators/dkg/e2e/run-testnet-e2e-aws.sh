@@ -831,8 +831,25 @@ fi
 
 # Normalize stack config file access so ubuntu-owned services can start on reused AMIs.
 sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
-sudo chgrp ubuntu /etc/intents-juno/junocashd.conf /etc/intents-juno/operator-stack.env /etc/intents-juno/operator-stack-hydrator.env /etc/intents-juno/operator-stack-config.json /etc/intents-juno/checkpoint-signer.key
-sudo chmod 0640 /etc/intents-juno/junocashd.conf /etc/intents-juno/operator-stack.env /etc/intents-juno/operator-stack-hydrator.env /etc/intents-juno/operator-stack-config.json /etc/intents-juno/checkpoint-signer.key
+required_stack_access_files=(
+  /etc/intents-juno/junocashd.conf
+  /etc/intents-juno/operator-stack.env
+  /etc/intents-juno/checkpoint-signer.key
+)
+optional_stack_access_files=(
+  /etc/intents-juno/operator-stack-hydrator.env
+  /etc/intents-juno/operator-stack-config.json
+)
+for stack_file in "\${required_stack_access_files[@]}"; do
+  [[ -f "\$stack_file" ]] || { echo "operator host missing required stack config file: \$stack_file" >&2; exit 1; }
+done
+stack_access_files=("\${required_stack_access_files[@]}" "\${optional_stack_access_files[@]}")
+for stack_file in "\${stack_access_files[@]}"; do
+  if [[ -f "\$stack_file" ]]; then
+    sudo chgrp ubuntu "\$stack_file"
+    sudo chmod 0640 "\$stack_file"
+  fi
+done
 
 sudo systemctl daemon-reload
 sudo systemctl enable "\${required_services[@]}"
