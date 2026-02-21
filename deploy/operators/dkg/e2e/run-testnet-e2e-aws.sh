@@ -617,6 +617,34 @@ resolve_dr_ami_id() {
   printf ''
 }
 
+resolve_latest_operator_stack_ami() {
+  local aws_profile="$1"
+  local aws_region="$2"
+
+  local image_json
+  aws_env_args "$aws_profile" "$aws_region"
+  image_json="$(
+    env "${AWS_ENV_ARGS[@]}" aws ec2 describe-images \
+      --region "$aws_region" \
+      --owners self \
+      --filters "Name=name,Values=intents-juno-operator-stack-*" "Name=state,Values=available" \
+      --query 'reverse(sort_by(Images,&CreationDate))[0].{ImageId:ImageId,Name:Name,CreationDate:CreationDate}' \
+      --output json
+  )"
+
+  local image_id image_name image_created_at
+  image_id="$(jq -r '.ImageId // empty' <<<"$image_json")"
+  image_name="$(jq -r '.Name // empty' <<<"$image_json")"
+  image_created_at="$(jq -r '.CreationDate // empty' <<<"$image_json")"
+
+  if [[ -z "$image_id" ]]; then
+    return 1
+  fi
+
+  log "defaulting --operator-ami-id to latest operator stack AMI: $image_id (name=$image_name created=$image_created_at)"
+  printf '%s' "$image_id"
+}
+
 build_remote_prepare_script() {
   local repo_commit="$1"
   cat <<EOF
@@ -1971,6 +1999,12 @@ command_run() {
   if [[ "$with_shared_services" == "true" ]]; then
     ensure_local_command docker
   fi
+
+  if [[ -z "$operator_ami_id" ]]; then
+    operator_ami_id="$(resolve_latest_operator_stack_ami "$aws_profile" "$aws_region" || true)"
+    [[ -n "$operator_ami_id" ]] || die "failed to resolve operator stack AMI; pass --operator-ami-id or build one via deploy/shared/runbooks/build-operator-stack-ami.sh"
+  fi
+  [[ "$operator_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]] || die "--operator-ami-id must look like an AMI id (ami-...)"
 
   ensure_dir "$workdir"
   workdir="$(cd "$workdir" && pwd)"

@@ -1044,6 +1044,16 @@ test_aws_wrapper_reuses_iterative_ssh_keypair() {
   assert_not_contains "$wrapper_script_text" 'rm -f "$ssh_key_private" "$ssh_key_public"' "aws wrapper no longer unconditionally deletes iterative ssh keypair"
 }
 
+test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "resolve_latest_operator_stack_ami()" "aws wrapper defines operator stack ami resolver"
+  assert_contains "$wrapper_script_text" "Name=name,Values=intents-juno-operator-stack-*" "aws wrapper queries latest operator stack ami by naming convention"
+  assert_contains "$wrapper_script_text" "defaulting --operator-ami-id to latest operator stack AMI" "aws wrapper logs auto-selected operator stack ami"
+  assert_contains "$wrapper_script_text" "failed to resolve operator stack AMI; pass --operator-ami-id or build one via deploy/shared/runbooks/build-operator-stack-ami.sh" "aws wrapper hard-fails when no operator stack ami is available"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -1075,6 +1085,7 @@ main() {
   test_root_dockerignore_excludes_local_bloat_from_build_context
   test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare
   test_aws_wrapper_reuses_iterative_ssh_keypair
+  test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset
 }
 
 main "$@"
