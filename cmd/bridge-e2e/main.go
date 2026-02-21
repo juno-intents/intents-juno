@@ -163,6 +163,7 @@ const (
 	defaultBoundlessSetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
 	defaultBoundlessInputS3Prefix          = "bridge-e2e/boundless-input"
 	defaultBoundlessInputS3PresignTTL      = 2 * time.Hour
+	defaultBoundlessProofAttemptGrace      = 2 * time.Minute
 	boundlessGroth16SelectorHex            = "73c457ba"
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
@@ -2198,7 +2199,9 @@ func requestBoundlessProofOnce(
 		requestID := extractBoundlessRequestID(out)
 		if requestID != "" {
 			logProgress("boundless %s submit returned error after request_id=%s; attempting get-proof fallback", pipeline, requestID)
-			seal, fallbackErr := waitForBoundlessProof(ctx, cfg, privateKey, pipeline, requestID, expectedJournal)
+			attemptCtx, cancel := context.WithTimeout(ctx, boundlessProofAttemptTimeout(cfg))
+			seal, fallbackErr := waitForBoundlessProof(attemptCtx, cfg, privateKey, pipeline, requestID, expectedJournal)
+			cancel()
 			if fallbackErr == nil {
 				return seal, requestID, nil
 			}
@@ -2399,6 +2402,14 @@ func waitForBoundlessProof(
 	}
 }
 
+func boundlessProofAttemptTimeout(cfg boundlessConfig) time.Duration {
+	timeout := time.Duration(cfg.BiddingDelaySeconds+cfg.TimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		return defaultProofDeadline
+	}
+	return timeout + defaultBoundlessProofAttemptGrace
+}
+
 func parseBoundlessProofOutput(output []byte, pipeline string, expectedJournal []byte) ([]byte, string, error) {
 	parsed, err := parseBoundlessWaitOutput(output)
 	if err != nil {
@@ -2544,6 +2555,7 @@ func isRetriableBoundlessLockFailure(msg string) bool {
 	lowered := strings.ToLower(msg)
 	return strings.Contains(lowered, "request timed out") ||
 		strings.Contains(lowered, "not fulfilled") ||
+		strings.Contains(lowered, "get-proof timeout") ||
 		strings.Contains(lowered, "lock timeout") ||
 		strings.Contains(lowered, "request expired") ||
 		strings.Contains(lowered, "expired without fulfillment") ||

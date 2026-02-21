@@ -1771,6 +1771,7 @@ func TestIsRetriableBoundlessLockFailure(t *testing.T) {
 	}{
 		{name: "request timed out", msg: "boundless submit-offer failed for deposit: request timed out", want: true},
 		{name: "not fulfilled", msg: "boundless get-proof failed for withdraw request_id=0xabc: request not fulfilled", want: true},
+		{name: "get-proof timeout", msg: "boundless get-proof timeout for deposit request_id=0xabc: context deadline exceeded", want: true},
 		{name: "lock timeout", msg: "primary prover lock timeout reached", want: true},
 		{name: "request expired", msg: "request expired before lock", want: true},
 		{name: "non lock failure", msg: "boundless journal mismatch for deposit", want: false},
@@ -1785,6 +1786,19 @@ func TestIsRetriableBoundlessLockFailure(t *testing.T) {
 				t.Fatalf("isRetriableBoundlessLockFailure(%q) = %v, want %v", tc.msg, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestBoundlessProofAttemptTimeout(t *testing.T) {
+	t.Parallel()
+
+	cfg := boundlessConfig{
+		BiddingDelaySeconds: 85,
+		TimeoutSeconds:      1500,
+	}
+	want := 28*time.Minute + 25*time.Second
+	if got := boundlessProofAttemptTimeout(cfg); got != want {
+		t.Fatalf("boundlessProofAttemptTimeout() = %s, want %s", got, want)
 	}
 }
 
