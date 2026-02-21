@@ -643,7 +643,7 @@ main() {
       key_hex="0x\$key_hex"
     fi
     [[ "\$key_hex" =~ ^0x[0-9a-fA-F]{64}\$ ]] || continue
-    signature="\$(cast wallet sign --private-key "\$key_hex" "\$digest" 2>/dev/null || true)"
+    signature="\$(cast wallet sign --no-hash --private-key "\$key_hex" "\$digest" 2>/dev/null || true)"
     if [[ "\$signature" =~ ^0x[0-9a-fA-F]{130}\$ ]]; then
       signatures+=("\$signature")
     fi
