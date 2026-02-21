@@ -1720,7 +1720,9 @@ command_run() {
         break
       fi
     done
-    [[ -n "$bridge_operator_signer_bin" ]] || bridge_operator_signer_bin="dkg-admin"
+    if [[ -z "$bridge_operator_signer_bin" ]]; then
+      bridge_operator_signer_bin="$(ensure_dkg_binary "dkg-admin" "$JUNO_DKG_VERSION_DEFAULT" "$workdir/bin")"
+    fi
   fi
   if [[ "$bridge_operator_signer_bin" == */* ]]; then
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"

@@ -513,7 +513,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" ".coordinator_workdir // .coordinator.workdir // empty" "local e2e signer resolution supports sanitized coordinator workdir variants"
   assert_contains "$e2e_script_text" '"$workdir/dkg-distributed/coordinator/bin/dkg-admin"' "local e2e signer resolution prefers distributed dkg signer in workdir"
   assert_contains "$e2e_script_text" '"$workdir/dkg/coordinator/bin/dkg-admin"' "local e2e signer resolution falls back to legacy dkg signer in workdir"
-  assert_contains "$e2e_script_text" "bridge_operator_signer_bin=\"dkg-admin\"" "local e2e signer resolution retains PATH fallback only after workdir candidates"
+  assert_contains "$e2e_script_text" 'bridge_operator_signer_bin="$(ensure_dkg_binary "dkg-admin" "$JUNO_DKG_VERSION_DEFAULT" "$workdir/bin")"' "local e2e signer resolution installs dkg-admin when workdir candidates are absent"
   assert_not_contains "$e2e_script_text" "go run ./cmd/checkpoint-aggregator" "synthetic checkpoint aggregator startup removed from local e2e"
   assert_not_contains "$e2e_script_text" "--queue-driver stdio" "synthetic stdio queue path removed from local e2e"
   assert_not_contains "$e2e_script_text" "checkpoint-signatures.fifo" "synthetic checkpoint fifo path removed from local e2e"
