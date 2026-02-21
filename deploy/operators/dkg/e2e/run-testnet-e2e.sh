@@ -2480,8 +2480,6 @@ command_run() {
       "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
       "--boundless-timeout-seconds" "$boundless_timeout_seconds"
       "--boundless-requestor-key-file" "$direct_cli_requestor_key_file"
-      "--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex"
-      "--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex"
     )
     while IFS=$'\t' read -r operator_id operator_endpoint; do
       [[ -n "$operator_id" ]] || continue
@@ -2573,6 +2571,8 @@ command_run() {
       "--existing-fee-distributor-address" "$direct_cli_deployed_fee_distributor_address"
       "--existing-bridge-address" "$direct_cli_deployed_bridge_address"
     )
+    direct_cli_bridge_run_args+=("--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex")
+    direct_cli_bridge_run_args+=("--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex")
     for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
       direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$witness_file")
     done
