@@ -57,8 +57,21 @@ test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop() {
     "prefund budget check runs before operator prefund loop"
 }
 
+test_base_balance_queries_retry_on_transient_rpc_failures() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "read_balance_wei_with_retry()" "cast balance retry helper exists"
+  assert_contains "$script_text" "run_with_rpc_retry 6 3 \"cast balance\"" "cast balance reads use rpc retry wrapper"
+  assert_contains "$script_text" "failed to read \$label from cast after retries" "recipient balance failure includes explicit retry context"
+  assert_contains "$script_text" "base funder balance for pre-fund budget check" "prefund sender balance lookup label is explicit"
+  assert_contains "$script_text" "balance=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$recipient\" \"\$label balance\")\"" "recipient prefund loop uses balance retry helper"
+  assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
+  test_base_balance_queries_retry_on_transient_rpc_failures
 }
 
 main "$@"

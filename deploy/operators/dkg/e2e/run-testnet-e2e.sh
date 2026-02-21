@@ -692,8 +692,7 @@ ensure_recipient_min_balance() {
 
   local attempt balance topup_wei
   for attempt in $(seq 1 12); do
-    balance="$(cast balance --rpc-url "$rpc_url" "$recipient")"
-    [[ "$balance" =~ ^[0-9]+$ ]] || die "unexpected $label balance from cast: $balance"
+    balance="$(read_balance_wei_with_retry "$rpc_url" "$recipient" "$label balance")"
     if (( balance >= min_balance_wei )); then
       return 0
     fi
@@ -705,6 +704,23 @@ ensure_recipient_min_balance() {
   done
 
   return 1
+}
+
+read_balance_wei_with_retry() {
+  local rpc_url="$1"
+  local address="$2"
+  local label="$3"
+  local balance_raw
+
+  if ! balance_raw="$(run_with_rpc_retry 6 3 "cast balance" cast balance --rpc-url "$rpc_url" "$address")"; then
+    balance_raw="$(trim "$balance_raw")"
+    die "failed to read $label from cast after retries: address=$address error=$balance_raw"
+  fi
+
+  balance_raw="$(trim "$balance_raw")"
+  [[ "$balance_raw" =~ ^[0-9]+$ ]] || \
+    die "failed to read $label from cast after retries: address=$address error=$balance_raw"
+  printf '%s' "$balance_raw"
 }
 
 assert_prefund_sender_budget() {
@@ -730,9 +746,7 @@ assert_prefund_sender_budget() {
   operator_prefund_total_wei=$((prefund_operator_count * per_operator_prefund_wei))
   required_total_wei=$((operator_prefund_total_wei + bridge_deployer_required_wei + gas_reserve_wei))
 
-  funding_sender_balance_wei="$(cast balance --rpc-url "$rpc_url" "$funding_sender_address" 2>/dev/null || true)"
-  [[ "$funding_sender_balance_wei" =~ ^[0-9]+$ ]] || \
-    die "failed to read base funder balance for pre-fund budget check: address=$funding_sender_address balance=$funding_sender_balance_wei"
+  funding_sender_balance_wei="$(read_balance_wei_with_retry "$rpc_url" "$funding_sender_address" "base funder balance for pre-fund budget check")"
 
   if (( funding_sender_balance_wei < required_total_wei )); then
     local shortfall_wei
