@@ -74,6 +74,23 @@ test_operation_result_poll_uses_full_queue_query() {
   fi
 }
 
+test_witness_generation_serializes_orchard_spends() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"submit_and_confirm_witness_tx()"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define submit_and_confirm_witness_tx helper\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'deposit_txid="$(submit_and_confirm_witness_tx'* ]]; then
+    printf 'expected deposit witness tx to use serialized send/wait helper\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'withdraw_txid="$(submit_and_confirm_witness_tx'* ]]; then
+    printf 'expected withdraw witness tx to use serialized send/wait helper\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
@@ -81,6 +98,7 @@ main() {
   test_script_supports_explicit_funder_source_address_argument
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_result_poll_uses_full_queue_query
+  test_witness_generation_serializes_orchard_spends
 }
 
 main "$@"

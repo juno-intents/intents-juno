@@ -424,6 +424,32 @@ juno_wait_operation_txid() {
   done
 }
 
+submit_and_confirm_witness_tx() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local from_address="$4"
+  local recipient_ua="$5"
+  local amount_dec="$6"
+  local deadline_epoch="$7"
+
+  local opid txid
+  opid="$({
+    juno_rpc_result \
+      "$rpc_url" \
+      "$rpc_user" \
+      "$rpc_pass" \
+      "z_sendmany" \
+      "$(jq -cn --arg from "$from_address" --arg to "$recipient_ua" --arg amt "$amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
+      | jq -r '.'
+  })"
+  [[ -n "$opid" && "$opid" != "null" ]] || die "failed to submit witness tx"
+
+  txid="$(juno_wait_operation_txid "$rpc_url" "$rpc_user" "$rpc_pass" "$opid" "$deadline_epoch")"
+  juno_wait_tx_confirmed "$rpc_url" "$rpc_user" "$rpc_pass" "$txid" "$deadline_epoch"
+  printf '%s' "$txid"
+}
+
 juno_select_funded_unified_address() {
   local rpc_url="$1"
   local rpc_user="$2"
@@ -792,35 +818,9 @@ command_run() {
   deposit_amount_dec="$(zat_to_decimal "$deposit_amount_zat")"
   withdraw_amount_dec="$(zat_to_decimal "$withdraw_amount_zat")"
 
-  local deposit_opid withdraw_opid
-  deposit_opid="$({
-    juno_rpc_result \
-      "$juno_rpc_url" \
-      "$juno_rpc_user" \
-      "$juno_rpc_pass" \
-      "z_sendmany" \
-      "$(jq -cn --arg from "$funder_from_address" --arg to "$recipient_ua" --arg amt "$deposit_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
-      | jq -r '.'
-  })"
-  [[ -n "$deposit_opid" && "$deposit_opid" != "null" ]] || die "failed to submit deposit witness tx"
-
-  withdraw_opid="$({
-    juno_rpc_result \
-      "$juno_rpc_url" \
-      "$juno_rpc_user" \
-      "$juno_rpc_pass" \
-      "z_sendmany" \
-      "$(jq -cn --arg from "$funder_from_address" --arg to "$recipient_ua" --arg amt "$withdraw_amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
-      | jq -r '.'
-  })"
-  [[ -n "$withdraw_opid" && "$withdraw_opid" != "null" ]] || die "failed to submit withdraw witness tx"
-
   local deposit_txid withdraw_txid
-  deposit_txid="$(juno_wait_operation_txid "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$deposit_opid" "$deadline_epoch")"
-  withdraw_txid="$(juno_wait_operation_txid "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$withdraw_opid" "$deadline_epoch")"
-
-  juno_wait_tx_confirmed "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$deposit_txid" "$deadline_epoch"
-  juno_wait_tx_confirmed "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$withdraw_txid" "$deadline_epoch"
+  deposit_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$deposit_amount_dec" "$deadline_epoch")"
+  withdraw_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$withdraw_amount_dec" "$deadline_epoch")"
 
   local deposit_action_index withdraw_action_index
   deposit_action_index="$(scan_find_action_index "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$deposit_txid" "$deadline_epoch")"
