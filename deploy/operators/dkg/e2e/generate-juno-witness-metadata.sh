@@ -51,6 +51,32 @@ zat_to_decimal() {
   printf '%d.%08d' "$whole" "$frac"
 }
 
+normalize_mnemonic_seed_phrase() {
+  local raw="$1"
+  local line normalized
+
+  while IFS= read -r line; do
+    line="$(lower "$(trim "$line")")"
+    line="$(printf '%s' "$line" | tr '\t' ' ' | tr -s ' ')"
+    line="${line# }"
+    line="${line% }"
+    [[ -n "$line" ]] || continue
+    if [[ "$line" =~ ^([a-z]+[[:space:]]+){23}[a-z]+$ ]]; then
+      printf '%s' "$line"
+      return 0
+    fi
+  done < <(printf '%s\n' "$raw")
+
+  normalized="$(printf '%s' "$raw" | tr '\r\n\t' '   ' | tr -s ' ')"
+  normalized="$(lower "$(trim "$normalized")")"
+  if [[ "$normalized" =~ ^([a-z]+[[:space:]]+){23}[a-z]+$ ]]; then
+    printf '%s' "$normalized"
+    return 0
+  fi
+
+  die "failed to normalize mnemonic seed phrase to 24 words"
+}
+
 hex_to_testnet_wif() {
   local key_hex="$1"
   python3 - "$key_hex" <<'PY'
@@ -670,6 +696,9 @@ command_run() {
   [[ -n "$juno_scan_url" ]] || die "--juno-scan-url is required"
   if [[ -z "$funder_wif" && -z "$funder_private_key_hex" && -z "$funder_seed_phrase" ]]; then
     die "one of --funder-wif, --funder-private-key-hex, or --funder-seed-phrase is required"
+  fi
+  if [[ -n "$funder_seed_phrase" ]]; then
+    funder_seed_phrase="$(normalize_mnemonic_seed_phrase "$funder_seed_phrase")"
   fi
   [[ "$deposit_amount_zat" =~ ^[0-9]+$ ]] || die "--deposit-amount-zat must be numeric"
   [[ "$withdraw_amount_zat" =~ ^[0-9]+$ ]] || die "--withdraw-amount-zat must be numeric"

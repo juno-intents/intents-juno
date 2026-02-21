@@ -2746,7 +2746,7 @@ if [[ -f .ci/secrets/juno-funder.key ]]; then
   export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"
 fi
 if [[ -f .ci/secrets/juno-funder.seed.txt ]]; then
-  export JUNO_FUNDER_SEED_PHRASE="\$(tr -d '\r\n' < .ci/secrets/juno-funder.seed.txt)"
+  export JUNO_FUNDER_SEED_PHRASE="\$(cat .ci/secrets/juno-funder.seed.txt)"
 fi
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"

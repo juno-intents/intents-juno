@@ -257,6 +257,8 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "--juno-funder-seed-file" "juno funder seed option"
   assert_contains "$wrapper_script_text" "--operator-root-volume-gb" "operator root volume option"
   assert_contains "$wrapper_script_text" "one of --juno-funder-key-file or --juno-funder-seed-file is required" "juno funder source requirement"
+  assert_contains "$wrapper_script_text" "export JUNO_FUNDER_SEED_PHRASE=\"\\\$(cat .ci/secrets/juno-funder.seed.txt)\"" "aws wrapper preserves multiline seed file content for downstream normalization"
+  assert_not_contains "$wrapper_script_text" "export JUNO_FUNDER_SEED_PHRASE=\"\$(tr -d '\\r\\n' < .ci/secrets/juno-funder.seed.txt)\"" "aws wrapper no longer flattens wrapped seed file content"
   assert_contains "$wrapper_script_text" "workdir=\"\$(cd \"\$workdir\" && pwd)\"" "aws wrapper canonicalizes workdir path"
   assert_contains "$wrapper_script_text" "terraform_dir=\"\$(cd \"\$terraform_dir\" && pwd)\"" "aws wrapper canonicalizes terraform dir path"
   assert_contains "$wrapper_script_text" "operator_instance_count" "terraform operator count wiring"

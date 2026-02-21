@@ -43,6 +43,19 @@ test_script_supports_seed_phrase_funder_argument() {
   fi
 }
 
+test_seed_phrase_normalization_handles_wrapped_seed_files() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"normalize_mnemonic_seed_phrase"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to normalize wrapped seed phrase content\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'funder_seed_phrase="$(normalize_mnemonic_seed_phrase "$funder_seed_phrase")"'* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to normalize --funder-seed-phrase input before recovery/send logic\n' >&2
+    exit 1
+  fi
+}
+
 test_operation_result_poll_uses_full_queue_query() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -56,6 +69,7 @@ main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
   test_script_supports_seed_phrase_funder_argument
+  test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_result_poll_uses_full_queue_query
 }
 
