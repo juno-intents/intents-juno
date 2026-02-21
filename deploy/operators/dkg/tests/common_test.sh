@@ -17,6 +17,16 @@ assert_eq() {
   fi
 }
 
+assert_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" != *"$needle"* ]]; then
+    printf 'assert_contains failed: %s: missing=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 test_normalize_eth_address() {
   local got
   got="$(normalize_eth_address "0x52908400098527886E0F7030069857D2E4169EE7")"
@@ -142,6 +152,17 @@ test_require_tailscale_active_allows_vpc_private_mode() {
   rm -rf "$tmp_bin"
 }
 
+test_aws_dependency_install_fallback_exists() {
+  local common_text
+  common_text="$(cat "$SCRIPT_DIR/../common.sh")"
+
+  assert_contains "$common_text" "install_aws_cli()" "common defines aws cli installer fallback"
+  assert_contains "$common_text" "awscli-exe-linux-x86_64.zip" "common aws installer supports amd64 bundle"
+  assert_contains "$common_text" "awscli-exe-linux-aarch64.zip" "common aws installer supports arm64 bundle"
+  assert_contains "$common_text" "if ! apt_install awscli; then" "common aws dependency path falls back when apt package is unavailable"
+  assert_contains "$common_text" "install_aws_cli || die \"failed to install awscli\"" "common aws dependency path uses installer fallback"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -151,6 +172,7 @@ main() {
   test_remove_macos_quarantine_calls_xattr
   test_require_tailscale_active_allows_insecure_override
   test_require_tailscale_active_allows_vpc_private_mode
+  test_aws_dependency_install_fallback_exists
 }
 
 main "$@"

@@ -218,6 +218,55 @@ apt_install() {
   fi
 }
 
+install_aws_cli() {
+  if have_cmd aws; then
+    return 0
+  fi
+
+  local arch bundle_name bundle_url workdir
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64|amd64)
+      bundle_name="awscli-exe-linux-x86_64.zip"
+      ;;
+    aarch64|arm64)
+      bundle_name="awscli-exe-linux-aarch64.zip"
+      ;;
+    *)
+      log "unsupported architecture for aws cli install: $arch"
+      return 1
+      ;;
+  esac
+
+  have_cmd unzip || apt_install unzip || return 1
+
+  bundle_url="https://awscli.amazonaws.com/$bundle_name"
+  workdir="$(mktemp -d)"
+  if ! curl -fsSL "$bundle_url" -o "$workdir/awscliv2.zip"; then
+    rm -rf "$workdir"
+    return 1
+  fi
+
+  (
+    set -e
+    cd "$workdir"
+    unzip -q awscliv2.zip
+    if [[ "$(id -u)" -eq 0 ]]; then
+      ./aws/install --update
+    elif have_cmd sudo; then
+      sudo ./aws/install --update
+    else
+      exit 1
+    fi
+  ) || {
+    rm -rf "$workdir"
+    return 1
+  }
+
+  rm -rf "$workdir"
+  have_cmd aws
+}
+
 brew_install_formula() {
   if ! have_cmd brew; then
     log "homebrew not found; installing Homebrew"
@@ -289,7 +338,9 @@ ensure_command() {
       if [[ "$os" == "darwin" ]]; then
         brew_install_formula awscli || die "failed to install awscli"
       else
-        apt_install awscli || die "failed to install awscli"
+        if ! apt_install awscli; then
+          install_aws_cli || die "failed to install awscli"
+        fi
       fi
       ;;
     age|age-keygen)
