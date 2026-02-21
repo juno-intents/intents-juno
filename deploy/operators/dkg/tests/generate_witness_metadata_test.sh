@@ -138,6 +138,19 @@ test_rpc_calls_fail_fast_on_repeated_transport_errors() {
   fi
 }
 
+test_tx_confirmation_uses_numeric_getrawtransaction_verbosity() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *'params_json="$(jq -cn --arg txid "$txid" '\''[ $txid, 1 ]'\'')"'* ]]; then
+    printf 'expected juno_wait_tx_confirmed to call getrawtransaction with numeric verbosity (1)\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" == *'params_json="$(jq -cn --arg txid "$txid" '\''[ $txid, true ]'\'')"'* ]]; then
+    printf 'expected juno_wait_tx_confirmed not to use boolean getrawtransaction verbosity\n' >&2
+    exit 1
+  fi
+}
+
 main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
@@ -149,6 +162,7 @@ main() {
   test_scan_note_lookup_uses_paginated_notes_api
   test_scan_note_lookup_fails_fast_on_repeated_http_errors
   test_rpc_calls_fail_fast_on_repeated_transport_errors
+  test_tx_confirmation_uses_numeric_getrawtransaction_verbosity
 }
 
 main "$@"

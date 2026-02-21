@@ -551,7 +551,7 @@ juno_wait_tx_confirmed() {
   local deadline_epoch="$5"
   local params_json resp confirmations now
 
-  params_json="$(jq -cn --arg txid "$txid" '[ $txid, true ]')"
+  params_json="$(jq -cn --arg txid "$txid" '[ $txid, 1 ]')"
   while true; do
     now="$(date +%s)"
     if (( now >= deadline_epoch )); then
