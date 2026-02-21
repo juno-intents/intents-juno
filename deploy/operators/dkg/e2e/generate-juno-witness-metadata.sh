@@ -12,6 +12,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   generate-juno-witness-metadata.sh run [options]
+  generate-juno-witness-metadata.sh decode-orchard-raw --address <ua>
 
 Options:
   --juno-rpc-url <url>               required junocashd RPC URL
@@ -85,13 +86,20 @@ print(out)
 PY
 }
 
-bech32m_decode_raw_hex() {
+decode_orchard_receiver_raw_hex() {
   local addr="$1"
   python3 - "$addr" <<'PY'
+import hashlib
 import sys
 
 CHARSET = 'qpzry9x8gf2tvdw0s3jn54khce6mua7l'
 BECH32M_CONST = 0x2BC830A3
+F4JUMBLE_MIN_LENGTH = 48
+F4JUMBLE_MAX_LENGTH = 4194368
+F4JUMBLE_LEFT_MAX = 64
+PADDING_LENGTH = 16
+ORCHARD_TYPECODE = 3
+ORCHARD_RAW_LENGTH = 43
 
 
 def polymod(values):
@@ -138,6 +146,63 @@ def convertbits(data, frombits, tobits, pad=False):
     return out
 
 
+def xor_into(dst, src):
+    for i in range(min(len(dst), len(src))):
+        dst[i] ^= src[i]
+
+
+def f4_h_round(left, right, i):
+    personalization = b'UA_F4Jumble_H' + bytes([i, 0, 0])
+    digest = hashlib.blake2b(bytes(right), digest_size=len(left), person=personalization).digest()
+    xor_into(left, digest)
+
+
+def f4_g_round(left, right, i):
+    outbytes = 64
+    chunk_count = (len(right) + outbytes - 1) // outbytes
+    for j in range(chunk_count):
+        personalization = b'UA_F4Jumble_G' + bytes([i, j & 0xFF, (j >> 8) & 0xFF])
+        digest = hashlib.blake2b(bytes(left), digest_size=outbytes, person=personalization).digest()
+        start = j * outbytes
+        end = min(len(right), start + outbytes)
+        for k in range(start, end):
+            right[k] ^= digest[k - start]
+
+
+def f4jumble_inv_mut(message):
+    if not (F4JUMBLE_MIN_LENGTH <= len(message) <= F4JUMBLE_MAX_LENGTH):
+        raise SystemExit('invalid f4jumble length')
+    left_length = min(F4JUMBLE_LEFT_MAX, len(message) // 2)
+    left = bytearray(message[:left_length])
+    right = bytearray(message[left_length:])
+    f4_h_round(left, right, 1)
+    f4_g_round(left, right, 1)
+    f4_h_round(left, right, 0)
+    f4_g_round(left, right, 0)
+    message[:left_length] = left
+    message[left_length:] = right
+
+
+def read_compact_size(payload, idx):
+    if idx >= len(payload):
+        raise SystemExit('tlv_invalid')
+    first = payload[idx]
+    idx += 1
+    if first <= 252:
+        return first, idx
+    if first == 253:
+        if idx + 2 > len(payload):
+            raise SystemExit('tlv_invalid')
+        return int.from_bytes(payload[idx:idx + 2], 'little'), idx + 2
+    if first == 254:
+        if idx + 4 > len(payload):
+            raise SystemExit('tlv_invalid')
+        return int.from_bytes(payload[idx:idx + 4], 'little'), idx + 4
+    if idx + 8 > len(payload):
+        raise SystemExit('tlv_invalid')
+    return int.from_bytes(payload[idx:idx + 8], 'little'), idx + 8
+
+
 address = sys.argv[1].strip()
 if not address:
     raise SystemExit('empty bech32m address')
@@ -151,6 +216,8 @@ if pos <= 0 or pos + 7 > len(address):
     raise SystemExit('invalid bech32m separator/length')
 hrp = address[:pos]
 raw_data = address[pos + 1:]
+if len(hrp) > PADDING_LENGTH:
+    raise SystemExit('invalid hrp length')
 try:
     data = [CHARSET.index(c) for c in raw_data]
 except ValueError:
@@ -161,8 +228,62 @@ payload5 = data[:-6]
 payload8 = convertbits(payload5, 5, 8, pad=False)
 if payload8 is None:
     raise SystemExit('invalid bech32m payload conversion')
-print(bytes(payload8).hex())
+
+decoded = bytearray(payload8)
+f4jumble_inv_mut(decoded)
+if len(decoded) < PADDING_LENGTH:
+    raise SystemExit('invalid zip316 payload length')
+padding = decoded[-PADDING_LENGTH:]
+if padding[:len(hrp)] != hrp.encode():
+    raise SystemExit('invalid zip316 padding prefix')
+if any(b != 0 for b in padding[len(hrp):]):
+    raise SystemExit('invalid zip316 padding suffix')
+tlv = bytes(decoded[:-PADDING_LENGTH])
+
+idx = 0
+orchard_raw = None
+while idx < len(tlv):
+    typecode, idx = read_compact_size(tlv, idx)
+    value_len, idx = read_compact_size(tlv, idx)
+    if idx + value_len > len(tlv):
+        raise SystemExit('tlv_invalid')
+    value = tlv[idx:idx + value_len]
+    idx += value_len
+    if typecode == ORCHARD_TYPECODE:
+        orchard_raw = value
+        break
+
+if orchard_raw is None:
+    raise SystemExit('orchard receiver missing from unified address')
+if len(orchard_raw) != ORCHARD_RAW_LENGTH:
+    raise SystemExit('decoded orchard receiver must be 43 bytes')
+print(orchard_raw.hex())
 PY
+}
+
+command_decode_orchard_raw() {
+  shift || true
+  local address=""
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --address)
+        [[ $# -ge 2 ]] || die "missing value for --address"
+        address="$2"
+        shift 2
+        ;;
+      -h|--help)
+        usage
+        exit 0
+        ;;
+      *)
+        die "unknown argument for decode-orchard-raw: $1"
+        ;;
+    esac
+  done
+
+  [[ -n "$address" ]] || die "--address is required"
+  decode_orchard_receiver_raw_hex "$address"
 }
 
 juno_rpc_json_call() {
@@ -502,7 +623,7 @@ command_run() {
   receivers_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_listunifiedreceivers" "$(jq -cn --arg ua "$recipient_ua" '[ $ua ]')")"
   recipient_orchard_receiver="$(jq -r '.orchard // empty' <<<"$receivers_json")"
   [[ -n "$recipient_orchard_receiver" ]] || die "failed to resolve orchard receiver from recipient unified address"
-  recipient_raw_address_hex="$(bech32m_decode_raw_hex "$recipient_orchard_receiver")"
+  recipient_raw_address_hex="$(decode_orchard_receiver_raw_hex "$recipient_orchard_receiver")"
   [[ ${#recipient_raw_address_hex} -eq 86 ]] || die "decoded recipient raw orchard address must be 43 bytes"
 
   scan_upsert_wallet "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$ufvk"
@@ -610,6 +731,7 @@ main() {
   local cmd="${1:-run}"
   case "$cmd" in
     run) command_run "$@" ;;
+    decode-orchard-raw) command_decode_orchard_raw "$@" ;;
     -h|--help|"")
       usage
       ;;
