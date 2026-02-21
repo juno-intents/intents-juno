@@ -43,6 +43,15 @@ test_script_supports_seed_phrase_funder_argument() {
   fi
 }
 
+test_script_supports_explicit_funder_source_address_argument() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--funder-source-address"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --funder-source-address\n' >&2
+    exit 1
+  fi
+}
+
 test_seed_phrase_normalization_handles_wrapped_seed_files() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -69,6 +78,7 @@ main() {
   test_decode_orchard_receiver_raw_hex
   test_decode_orchard_receiver_rejects_invalid_input
   test_script_supports_seed_phrase_funder_argument
+  test_script_supports_explicit_funder_source_address_argument
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_result_poll_uses_full_queue_query
 }

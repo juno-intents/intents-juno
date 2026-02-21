@@ -110,6 +110,7 @@ Options:
 Environment:
   JUNO_FUNDER_PRIVATE_KEY_HEX      optional juno funder private key hex used for transparent witness funding.
   JUNO_FUNDER_SEED_PHRASE          optional juno funder seed phrase used for orchard/unified witness funding.
+  JUNO_FUNDER_SOURCE_ADDRESS       optional explicit funded source address already present in witness RPC wallets.
 
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
@@ -1587,8 +1588,8 @@ command_run() {
   fi
   [[ -n "$boundless_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
   [[ -n "$boundless_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
-  if [[ -z "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" && -z "${JUNO_FUNDER_SEED_PHRASE:-}" ]]; then
-    die "one of JUNO_FUNDER_PRIVATE_KEY_HEX or JUNO_FUNDER_SEED_PHRASE is required for run-generated witness metadata"
+  if [[ -z "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" && -z "${JUNO_FUNDER_SEED_PHRASE:-}" && -z "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
+    die "one of JUNO_FUNDER_PRIVATE_KEY_HEX, JUNO_FUNDER_SEED_PHRASE, or JUNO_FUNDER_SOURCE_ADDRESS is required for run-generated witness metadata"
   fi
   if [[ "${WITHDRAW_COORDINATOR_RUNTIME_MODE:-full}" != "full" ]]; then
     die "WITHDRAW_COORDINATOR_RUNTIME_MODE must be full; mock runtime is forbidden"
@@ -1883,7 +1884,9 @@ command_run() {
         --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
         --output "$witness_metadata_attempt_json"
       )
-      if [[ -n "${JUNO_FUNDER_SEED_PHRASE:-}" ]]; then
+      if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
+        witness_metadata_args+=("--funder-source-address" "${JUNO_FUNDER_SOURCE_ADDRESS}")
+      elif [[ -n "${JUNO_FUNDER_SEED_PHRASE:-}" ]]; then
         witness_metadata_args+=("--funder-seed-phrase" "${JUNO_FUNDER_SEED_PHRASE}")
       else
         witness_metadata_args+=("--funder-private-key-hex" "${JUNO_FUNDER_PRIVATE_KEY_HEX}")
@@ -4011,7 +4014,7 @@ command_run() {
     --arg proof_funder_log "$proof_funder_log" \
     --arg juno_tx_hash "$juno_tx_hash" \
     --arg juno_tx_hash_source "$juno_tx_hash_source" \
-    --arg juno_funder_present "$([[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" || -n "${JUNO_FUNDER_SEED_PHRASE:-}" ]] && printf 'true' || printf '')" \
+    --arg juno_funder_present "$([[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" || -n "${JUNO_FUNDER_SEED_PHRASE:-}" || -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]] && printf 'true' || printf '')" \
     --argjson run_invariants "$run_invariants_json" \
     --argjson chaos_scenarios "$chaos_scenarios_json" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \

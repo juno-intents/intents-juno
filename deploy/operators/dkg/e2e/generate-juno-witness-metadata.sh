@@ -23,6 +23,7 @@ Options:
   --funder-private-key-hex <hex>     optional funder private key hex (32-byte); converted to testnet WIF
   --funder-wif <wif>                 optional funder WIF (used directly when provided)
   --funder-seed-phrase <seed>        optional 24-word seed phrase used to select/recover funded unified account
+  --funder-source-address <address>  optional explicit funded source address already available on the RPC wallet
   --wallet-id <id>                   optional juno-scan wallet id (default: generated run id)
   --deposit-amount-zat <n>           deposit witness tx amount in zatoshis (default: 100000)
   --withdraw-amount-zat <n>          withdraw witness tx amount in zatoshis (default: 10000)
@@ -607,6 +608,7 @@ command_run() {
   local funder_wif=""
   local funder_private_key_hex=""
   local funder_seed_phrase=""
+  local funder_source_address=""
   local wallet_id=""
   local deposit_amount_zat="100000"
   local withdraw_amount_zat="10000"
@@ -655,6 +657,11 @@ command_run() {
         funder_seed_phrase="$2"
         shift 2
         ;;
+      --funder-source-address)
+        [[ $# -ge 2 ]] || die "missing value for --funder-source-address"
+        funder_source_address="$2"
+        shift 2
+        ;;
       --wallet-id)
         [[ $# -ge 2 ]] || die "missing value for --wallet-id"
         wallet_id="$2"
@@ -694,9 +701,10 @@ command_run() {
   [[ -n "$juno_rpc_user" ]] || die "--juno-rpc-user is required"
   [[ -n "$juno_rpc_pass" ]] || die "--juno-rpc-pass is required"
   [[ -n "$juno_scan_url" ]] || die "--juno-scan-url is required"
-  if [[ -z "$funder_wif" && -z "$funder_private_key_hex" && -z "$funder_seed_phrase" ]]; then
-    die "one of --funder-wif, --funder-private-key-hex, or --funder-seed-phrase is required"
+  if [[ -z "$funder_wif" && -z "$funder_private_key_hex" && -z "$funder_seed_phrase" && -z "$funder_source_address" ]]; then
+    die "one of --funder-wif, --funder-private-key-hex, --funder-seed-phrase, or --funder-source-address is required"
   fi
+  funder_source_address="$(trim "$funder_source_address")"
   if [[ -n "$funder_seed_phrase" ]]; then
     funder_seed_phrase="$(normalize_mnemonic_seed_phrase "$funder_seed_phrase")"
   fi
@@ -739,7 +747,10 @@ command_run() {
   scan_upsert_wallet "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$ufvk"
 
   local funder_from_address="" funder_taddr="" funder_source_kind=""
-  if [[ -n "$funder_seed_phrase" ]]; then
+  if [[ -n "$funder_source_address" ]]; then
+    funder_source_kind="explicit_source_address"
+    funder_from_address="$funder_source_address"
+  elif [[ -n "$funder_seed_phrase" ]]; then
     funder_source_kind="seed_phrase_unified_account"
     funder_from_address="$(juno_select_funded_unified_address "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" || true)"
     if [[ -z "$funder_from_address" ]]; then

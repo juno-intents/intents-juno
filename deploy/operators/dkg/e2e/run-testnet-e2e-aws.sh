@@ -67,6 +67,8 @@ run options:
   --base-funder-key-file <path>        file with Base funder private key hex (required)
   --juno-funder-key-file <path>        optional file with Juno funder private key hex
   --juno-funder-seed-file <path>       optional file with Juno funder seed phrase
+  --juno-funder-source-address-file <path>
+                                       optional file with explicit funded Juno source address
   --juno-rpc-user-file <path>          file with junocashd RPC username for witness extraction (required)
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
@@ -1675,6 +1677,7 @@ command_run() {
   local base_funder_key_file=""
   local juno_funder_key_file=""
   local juno_funder_seed_file=""
+  local juno_funder_source_address_file=""
   local juno_rpc_user_file=""
   local juno_rpc_pass_file=""
   local juno_scan_bearer_token_file=""
@@ -1822,6 +1825,11 @@ command_run() {
         juno_funder_seed_file="$2"
         shift 2
         ;;
+      --juno-funder-source-address-file)
+        [[ $# -ge 2 ]] || die "missing value for --juno-funder-source-address-file"
+        juno_funder_source_address_file="$2"
+        shift 2
+        ;;
       --juno-rpc-user-file)
         [[ $# -ge 2 ]] || die "missing value for --juno-rpc-user-file"
         juno_rpc_user_file="$2"
@@ -1899,8 +1907,8 @@ command_run() {
 
   [[ -n "$aws_region" ]] || die "--aws-region is required"
   [[ -n "$base_funder_key_file" ]] || die "--base-funder-key-file is required"
-  if [[ -z "$juno_funder_key_file" && -z "$juno_funder_seed_file" ]]; then
-    die "one of --juno-funder-key-file or --juno-funder-seed-file is required"
+  if [[ -z "$juno_funder_key_file" && -z "$juno_funder_seed_file" && -z "$juno_funder_source_address_file" ]]; then
+    die "one of --juno-funder-key-file, --juno-funder-seed-file, or --juno-funder-source-address-file is required"
   fi
   [[ -n "$juno_rpc_user_file" ]] || die "--juno-rpc-user-file is required"
   [[ -n "$juno_rpc_pass_file" ]] || die "--juno-rpc-pass-file is required"
@@ -1910,6 +1918,9 @@ command_run() {
   fi
   if [[ -n "$juno_funder_seed_file" && ! -f "$juno_funder_seed_file" ]]; then
     die "juno funder seed file not found: $juno_funder_seed_file"
+  fi
+  if [[ -n "$juno_funder_source_address_file" && ! -f "$juno_funder_source_address_file" ]]; then
+    die "juno funder source address file not found: $juno_funder_source_address_file"
   fi
   [[ -f "$juno_rpc_user_file" ]] || die "juno rpc user file not found: $juno_rpc_user_file"
   [[ -f "$juno_rpc_pass_file" ]] || die "juno rpc pass file not found: $juno_rpc_pass_file"
@@ -2547,6 +2558,15 @@ command_run() {
       "$remote_repo/.ci/secrets/juno-funder.seed.txt"
   fi
 
+  if [[ -n "$juno_funder_source_address_file" ]]; then
+    copy_remote_secret_file \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$juno_funder_source_address_file" \
+      "$remote_repo/.ci/secrets/juno-funder.ua"
+  fi
+
   copy_remote_secret_file \
     "$ssh_key_private" \
     "$runner_ssh_user" \
@@ -2747,6 +2767,9 @@ if [[ -f .ci/secrets/juno-funder.key ]]; then
 fi
 if [[ -f .ci/secrets/juno-funder.seed.txt ]]; then
   export JUNO_FUNDER_SEED_PHRASE="\$(cat .ci/secrets/juno-funder.seed.txt)"
+fi
+if [[ -f .ci/secrets/juno-funder.ua ]]; then
+  export JUNO_FUNDER_SOURCE_ADDRESS="\$(tr -d '\r\n' < .ci/secrets/juno-funder.ua)"
 fi
 export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
 export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
