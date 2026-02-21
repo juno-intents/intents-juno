@@ -279,6 +279,7 @@ resource "aws_security_group" "shared" {
     protocol    = "tcp"
     security_groups = compact([
       aws_security_group.runner.id,
+      aws_security_group.operator.id,
       try(aws_security_group.ecs[0].id, "")
     ])
   }
@@ -290,6 +291,7 @@ resource "aws_security_group" "shared" {
     protocol    = "tcp"
     security_groups = compact([
       aws_security_group.runner.id,
+      aws_security_group.operator.id,
       try(aws_security_group.ecs[0].id, "")
     ])
   }
@@ -321,11 +323,14 @@ resource "aws_security_group" "ipfs" {
   vpc_id      = local.selected_vpc_id
 
   ingress {
-    description     = "IPFS API from runner"
-    from_port       = var.shared_ipfs_api_port
-    to_port         = var.shared_ipfs_api_port
-    protocol        = "tcp"
-    security_groups = [aws_security_group.runner.id]
+    description = "IPFS API from runner"
+    from_port   = var.shared_ipfs_api_port
+    to_port     = var.shared_ipfs_api_port
+    protocol    = "tcp"
+    security_groups = [
+      aws_security_group.runner.id,
+      aws_security_group.operator.id
+    ]
   }
 
   egress {

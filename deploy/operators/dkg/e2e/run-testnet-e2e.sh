@@ -95,7 +95,7 @@ Options:
   --shared-proof-requestor-service-name <name> ECS service name for shared proof-requestor
   --shared-proof-funder-service-name <name> ECS service name for shared proof-funder
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
-  --shared-timeout <duration>       shared infra validation timeout (default: 90s)
+  --shared-timeout <duration>       shared infra validation timeout (default: 300s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
   --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: runner)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
@@ -863,6 +863,97 @@ stage_remote_runtime_file() {
     "$ssh_user@$host:$remote_path" >/dev/null
 }
 
+configure_remote_operator_checkpoint_services_for_bridge() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local bridge_address="$4"
+  local base_chain_id="$5"
+
+  local remote_script
+  remote_script="$(cat <<'EOF'
+set -euo pipefail
+bridge_address="$1"
+base_chain_id="$2"
+
+stack_env_file="/etc/intents-juno/operator-stack.env"
+hydrator_env_file="/etc/intents-juno/operator-stack-hydrator.env"
+config_json_path="/etc/intents-juno/operator-stack-config.json"
+
+if [[ -f "$hydrator_env_file" ]]; then
+  configured_json_path="$(sudo awk -F= '/^OPERATOR_STACK_CONFIG_JSON_PATH=/{print substr($0, index($0, "=")+1); exit}' "$hydrator_env_file")"
+  if [[ -n "$configured_json_path" ]]; then
+    config_json_path="$configured_json_path"
+  fi
+fi
+
+[[ -s "$stack_env_file" ]] || {
+  echo "operator stack env is missing: $stack_env_file" >&2
+  exit 1
+}
+[[ -s "$config_json_path" ]] || {
+  echo "operator stack config json is missing: $config_json_path" >&2
+  exit 1
+}
+
+tmp_json="$(mktemp)"
+tmp_next="$(mktemp)"
+sudo cp "$config_json_path" "$tmp_json"
+sudo chown "$(id -u):$(id -g)" "$tmp_json"
+chmod 600 "$tmp_json"
+
+jq \
+  --arg bridge "$bridge_address" \
+  --arg chain "$base_chain_id" \
+  '
+  .BRIDGE_ADDRESS = $bridge
+  | .BASE_CHAIN_ID = $chain
+  | .JUNO_QUEUE_KAFKA_TLS = (
+      if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
+        "true"
+      else
+        .JUNO_QUEUE_KAFKA_TLS
+      end
+    )
+  ' "$tmp_json" >"$tmp_next"
+
+sudo install -d -m 0750 -o root -g ubuntu "$(dirname "$config_json_path")"
+sudo install -m 0640 -o root -g ubuntu "$tmp_next" "$config_json_path"
+rm -f "$tmp_json" "$tmp_next"
+
+sudo systemctl daemon-reload
+sudo systemctl restart intents-juno-config-hydrator.service
+if ! sudo systemctl is-active --quiet intents-juno-config-hydrator.service; then
+  echo "operator stack config hydrator failed after bridge config update" >&2
+  sudo systemctl status intents-juno-config-hydrator.service --no-pager || true
+  exit 1
+fi
+
+sudo systemctl restart checkpoint-signer.service checkpoint-aggregator.service
+sleep 2
+
+for svc in checkpoint-signer.service checkpoint-aggregator.service; do
+  if ! sudo systemctl is-active --quiet "$svc"; then
+    echo "operator checkpoint service failed after bridge config update: $svc" >&2
+    sudo systemctl status "$svc" --no-pager || true
+    sudo journalctl -u "$svc" -n 120 --no-pager || true
+    exit 1
+  fi
+done
+EOF
+)"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id")" <<<"$remote_script"
+}
+
 endpoint_host_port() {
   local endpoint="$1"
   if [[ "$endpoint" =~ ^https?://([^/:]+):([0-9]+)(/.*)?$ ]]; then
@@ -1078,7 +1169,7 @@ command_run() {
   local shared_proof_requestor_service_name=""
   local shared_proof_funder_service_name=""
   local shared_topic_prefix="shared.infra.e2e"
-  local shared_timeout="90s"
+  local shared_timeout="300s"
   local shared_output=""
   local relayer_runtime_mode="runner"
   local relayer_runtime_operator_hosts_csv=""
@@ -1863,7 +1954,7 @@ command_run() {
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_idx]}"
-      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_.-' '_')"
+      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_-' '_')"
       witness_operator_safe_label="${witness_operator_safe_label#_}"
       witness_operator_safe_label="${witness_operator_safe_label%_}"
       [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
@@ -1968,7 +2059,7 @@ command_run() {
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_idx]}"
-      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_.-' '_')"
+      witness_operator_safe_label="$(printf '%s' "$witness_operator_label" | tr -cs '[:alnum:]_-' '_')"
       witness_operator_safe_label="${witness_operator_safe_label#_}"
       witness_operator_safe_label="${witness_operator_safe_label%_}"
       [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
@@ -2147,32 +2238,6 @@ command_run() {
     die "--bridge-withdraw-checkpoint-height must be numeric"
   (( bridge_deposit_checkpoint_height > 0 )) || die "--bridge-deposit-checkpoint-height must be > 0"
   (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
-
-  if [[ "$shared_enabled" == "true" ]]; then
-    local checkpoint_started_at
-    checkpoint_started_at="$(timestamp_utc)"
-    log "validating operator-service checkpoint publication via shared infra"
-    local shared_status=0
-    set +e
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/shared-infra-e2e \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --kafka-brokers "$shared_kafka_brokers" \
-        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
-        --checkpoint-operators "$checkpoint_operators_csv" \
-        --checkpoint-threshold "$threshold" \
-        --checkpoint-min-persisted-at "$checkpoint_started_at" \
-        --topic-prefix "$shared_topic_prefix" \
-        --timeout "$shared_timeout" \
-        --output "$shared_summary"
-    )
-    shared_status="$?"
-    set -e
-    if (( shared_status != 0 )); then
-      die "shared infra validation failed (operator-service checkpoint publication)"
-    fi
-  fi
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
@@ -2669,6 +2734,54 @@ command_run() {
     die "bridge summary missing deployed contracts.bridge address: $bridge_summary"
   [[ "$deployed_wjuno_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
     die "bridge summary missing deployed contracts.wjuno address: $bridge_summary"
+
+  if [[ "$shared_enabled" == "true" ]]; then
+    local checkpoint_started_at
+    checkpoint_started_at="$(timestamp_utc)"
+
+    if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+      (( ${#relayer_runtime_operator_hosts[@]} > 0 )) || \
+        die "shared checkpoint validation requires --relayer-runtime-operator-hosts when --relayer-runtime-mode=distributed"
+      [[ -n "$relayer_runtime_operator_ssh_user" ]] || \
+        die "shared checkpoint validation requires --relayer-runtime-operator-ssh-user when --relayer-runtime-mode=distributed"
+      [[ -f "$relayer_runtime_operator_ssh_key_file" ]] || \
+        die "shared checkpoint validation requires readable --relayer-runtime-operator-ssh-key-file when --relayer-runtime-mode=distributed"
+
+      local checkpoint_host
+      for checkpoint_host in "${relayer_runtime_operator_hosts[@]}"; do
+        log "updating operator checkpoint bridge config host=$checkpoint_host bridge=$deployed_bridge_address"
+        configure_remote_operator_checkpoint_services_for_bridge \
+          "$checkpoint_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$deployed_bridge_address" \
+          "$base_chain_id" || \
+          die "failed to update checkpoint bridge config on host=$checkpoint_host"
+      done
+    fi
+
+    log "validating operator-service checkpoint publication via shared infra"
+    local shared_status=0
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/shared-infra-e2e \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --kafka-brokers "$shared_kafka_brokers" \
+        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
+        --checkpoint-operators "$checkpoint_operators_csv" \
+        --checkpoint-threshold "$threshold" \
+        --checkpoint-min-persisted-at "$checkpoint_started_at" \
+        --topic-prefix "$shared_topic_prefix" \
+        --timeout "$shared_timeout" \
+        --output "$shared_summary"
+    )
+    shared_status="$?"
+    set -e
+    if (( shared_status != 0 )); then
+      die "shared infra validation failed (operator-service checkpoint publication)"
+    fi
+  fi
 
   local bridge_deployer_key_hex
   bridge_deployer_key_hex="$(trimmed_file_value "$bridge_deployer_key_file")"
