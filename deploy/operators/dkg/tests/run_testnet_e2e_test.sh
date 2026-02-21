@@ -69,9 +69,22 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
+test_operator_signer_fallback_exists_for_bins_without_sign_digest() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "supports_sign_digest_subcommand()" "operator signer capability probe helper exists"
+  assert_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer exists"
+  assert_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback log message exists"
+  assert_contains "$script_text" "bridge_operator_signer_bin=\"\$(write_e2e_operator_digest_signer \"\$dkg_summary\" \"\$workdir/bin\")\"" "fallback signer shim is wired into bridge signer selection"
+  assert_contains "$script_text" "/dev/tcp/" "fallback signer shim checks operator endpoint tcp reachability"
+  assert_contains "$script_text" "cast wallet sign --private-key" "fallback signer shim signs digests with operator keys"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
+  test_operator_signer_fallback_exists_for_bins_without_sign_digest
 }
 
 main "$@"

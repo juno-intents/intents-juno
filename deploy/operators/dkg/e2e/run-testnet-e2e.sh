@@ -37,7 +37,7 @@ Options:
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
-                                   (default: <dkg coordinator_workdir>/bin/dkg-admin when available, else dkg-admin)
+                                   (default: prefer dkg-admin when it supports sign-digest; else auto-generate e2e signer shim)
   --boundless-bin <path>           boundless binary (default: boundless)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
   --boundless-market-address <addr> boundless market contract address
@@ -518,6 +518,169 @@ wait_for_log_pattern() {
     elapsed=$((elapsed + 2))
   done
   return 1
+}
+
+supports_sign_digest_subcommand() {
+  local signer_bin="$1"
+  local output status lowered
+
+  [[ -n "$signer_bin" ]] || return 1
+  set +e
+  output="$("$signer_bin" sign-digest --help 2>&1)"
+  status=$?
+  set -e
+  if (( status == 0 )); then
+    return 0
+  fi
+
+  lowered="$(lower "$output")"
+  if [[ "$lowered" == *"unrecognized subcommand"* ]] || [[ "$lowered" == *"unknown command"* ]]; then
+    return 1
+  fi
+  [[ "$lowered" == *"sign-digest"* ]]
+}
+
+write_e2e_operator_digest_signer() {
+  local dkg_summary="$1"
+  local out_dir="$2"
+  local map_file bin_path
+  local operator_count
+
+  ensure_command jq
+  ensure_command cast
+  ensure_dir "$out_dir"
+
+  map_file="$out_dir/e2e-operator-digest-signer-map.json"
+  jq -c '
+    [.operators[] | {
+      operator_id: (.operator_id // ""),
+      endpoint: (.endpoint // .grpc_endpoint // ""),
+      key_file: (.operator_key_file // "")
+    }]
+  ' "$dkg_summary" >"$map_file"
+
+  operator_count="$(jq -r 'length' "$map_file")"
+  [[ "$operator_count" =~ ^[0-9]+$ ]] || die "invalid operator signer map generated from dkg summary"
+  (( operator_count > 0 )) || die "operator signer map is empty"
+  if jq -e '.[] | select((.operator_id | test("^0x[0-9a-fA-F]{40}$") | not) or (.key_file | length == 0))' "$map_file" >/dev/null; then
+    die "operator signer map has invalid operator_id/key_file entries"
+  fi
+
+  bin_path="$out_dir/e2e-operator-digest-signer.sh"
+  cat >"$bin_path" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+MAP_FILE="$map_file"
+
+json_error() {
+  local code="\$1"
+  local message="\$2"
+  jq -cn --arg code "\$code" --arg message "\$message" \
+    '{version:"v1",status:"err",error:{code:\$code,message:\$message}}'
+}
+
+endpoint_reachable() {
+  local endpoint="\$1"
+  local rest host port
+
+  [[ -n "\$endpoint" ]] || return 0
+  [[ "\$endpoint" == https://* ]] || return 0
+
+  rest="\${endpoint#https://}"
+  host="\${rest%:*}"
+  port="\${rest##*:}"
+  if [[ -z "\$host" || -z "\$port" || "\$host" == "\$rest" || ! "\$port" =~ ^[0-9]+$ ]]; then
+    return 0
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 2 bash -c ":</dev/tcp/\$host/\$port" >/dev/null 2>&1
+    return \$?
+  fi
+  bash -c ":</dev/tcp/\$host/\$port" >/dev/null 2>&1
+}
+
+main() {
+  local command="\${1:-}"
+  local digest=""
+  local json_mode="false"
+  local -a requested_endpoints=()
+  local -a signatures=()
+  local entry endpoint key_file key_hex signature
+  local include_entry
+
+  if [[ "\$command" != "sign-digest" ]]; then
+    json_error "unsupported_command" "expected sign-digest subcommand" >&2
+    return 2
+  fi
+  shift || true
+
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      --digest)
+        [[ \$# -ge 2 ]] || { json_error "missing_digest" "--digest value is required" >&2; return 2; }
+        digest="\$2"
+        shift 2
+        ;;
+      --json)
+        json_mode="true"
+        shift
+        ;;
+      --operator-endpoint)
+        [[ \$# -ge 2 ]] || { json_error "missing_operator_endpoint" "--operator-endpoint value is required" >&2; return 2; }
+        requested_endpoints+=("\$2")
+        shift 2
+        ;;
+      *)
+        json_error "invalid_argument" "unsupported argument: \$1" >&2
+        return 2
+        ;;
+    esac
+  done
+
+  [[ "\$json_mode" == "true" ]] || { json_error "json_required" "--json flag is required" >&2; return 2; }
+  [[ "\$digest" =~ ^0x[0-9a-fA-F]{64}\$ ]] || { json_error "invalid_digest" "--digest must be 32-byte hex" >&2; return 2; }
+  [[ -f "\$MAP_FILE" ]] || { json_error "missing_map" "operator signer map not found: \$MAP_FILE" >&2; return 1; }
+
+  while IFS= read -r entry; do
+    endpoint="\$(jq -r '.endpoint // empty' <<<"\$entry")"
+    key_file="\$(jq -r '.key_file // empty' <<<"\$entry")"
+    include_entry="true"
+    if (( \${#requested_endpoints[@]} > 0 )); then
+      include_entry="false"
+      for requested_endpoint in "\${requested_endpoints[@]}"; do
+        if [[ "\$requested_endpoint" == "\$endpoint" ]]; then
+          include_entry="true"
+          break
+        fi
+      done
+    fi
+    [[ "\$include_entry" == "true" ]] || continue
+    endpoint_reachable "\$endpoint" || continue
+    [[ -f "\$key_file" ]] || continue
+
+    key_hex="\$(tr -d '[:space:]' <"\$key_file" 2>/dev/null || true)"
+    [[ "\$key_hex" =~ ^0x[0-9a-fA-F]{64}\$ ]] || continue
+    signature="\$(cast wallet sign --private-key "\$key_hex" "\$digest" 2>/dev/null || true)"
+    if [[ "\$signature" =~ ^0x[0-9a-fA-F]{130}\$ ]]; then
+      signatures+=("\$signature")
+    fi
+  done < <(jq -c '.[]' "\$MAP_FILE")
+
+  if (( \${#signatures[@]} == 0 )); then
+    json_error "no_signatures" "no reachable operator signatures were produced"
+    return 1
+  fi
+
+  local signatures_json
+  signatures_json="\$(printf '%s\n' "\${signatures[@]}" | jq -Rsc 'split("\n")[:-1]')"
+  jq -cn --argjson signatures "\$signatures_json" '{version:"v1",status:"ok",data:{signatures:\$signatures}}'
+}
+
+main "\$@"
+EOF
+  chmod 0755 "$bin_path"
+  printf '%s' "$bin_path"
 }
 
 run_with_rpc_retry() {
@@ -1866,6 +2029,15 @@ command_run() {
     if [[ -z "$bridge_operator_signer_bin" ]]; then
       bridge_operator_signer_bin="$(ensure_dkg_binary "dkg-admin" "$JUNO_DKG_VERSION_DEFAULT" "$workdir/bin")"
     fi
+  fi
+  if [[ "$bridge_operator_signer_bin" == */* ]]; then
+    [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
+  else
+    command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
+  fi
+  if ! supports_sign_digest_subcommand "$bridge_operator_signer_bin"; then
+    log "bridge operator signer binary does not support sign-digest; using e2e signer shim"
+    bridge_operator_signer_bin="$(write_e2e_operator_digest_signer "$dkg_summary" "$workdir/bin")"
   fi
   if [[ "$bridge_operator_signer_bin" == */* ]]; then
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
