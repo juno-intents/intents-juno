@@ -133,6 +133,12 @@ test_remote_operator_prepare_script_boots_full_stack_services() {
   assert_contains "$script_text" "if [[ -f \"\$stack_file\" ]]; then" "operator prep skips optional stack files when absent"
   assert_contains "$script_text" "sudo chgrp ubuntu \"\$stack_file\"" "operator prep normalizes stack file group ownership"
   assert_contains "$script_text" "sudo chmod 0640 \"\$stack_file\"" "operator prep normalizes stack file read permissions for ubuntu services"
+  assert_contains "$script_text" "checkpoint_runtime_wrappers=(" "operator prep defines checkpoint wrapper retrofit list"
+  assert_contains "$script_text" "/usr/local/bin/intents-juno-checkpoint-signer.sh" "operator prep retrofits checkpoint-signer wrapper env export behavior"
+  assert_contains "$script_text" "/usr/local/bin/intents-juno-checkpoint-aggregator.sh" "operator prep retrofits checkpoint-aggregator wrapper env export behavior"
+  assert_contains "$script_text" "grep -q \"source /etc/intents-juno/operator-stack.env\" \"\$checkpoint_wrapper\"" "operator prep detects wrappers sourcing stack env"
+  assert_contains "$script_text" "grep -q '^set -a$' \"\$checkpoint_wrapper\"" "operator prep skips wrappers already exporting stack env"
+  assert_contains "$script_text" "sudo perl -0pi -e 's/# shellcheck disable=SC1091\\nsource \\/etc\\/intents-juno\\/operator-stack\\.env/# shellcheck disable=SC1091\\nset -a\\nsource \\/etc\\/intents-juno\\/operator-stack.env\\nset +a/' \"\$checkpoint_wrapper\"" "operator prep injects set -a/set +a around stack env source for legacy wrappers"
   assert_contains "$script_text" "systemctl enable \"\${required_services[@]}\"" "operator prep enables full stack services"
   assert_contains "$script_text" "systemctl restart \"\${startup_services[@]}\"" "operator prep restarts boot-critical services"
   assert_contains "$script_text" "systemctl is-active --quiet \"\$svc\"" "operator prep verifies services are active"
@@ -203,12 +209,17 @@ test_live_e2e_terraform_supports_operator_instances() {
 test_synced_junocashd_ami_runbook_exists() {
   local runbook_text
   runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/create-synced-junocashd-ami.sh")"
+  local operator_runbook_text
+  operator_runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh")"
 
   assert_contains "$runbook_text" "create-synced-junocashd-ami.sh create" "ami runbook usage"
   assert_contains "$runbook_text" "--instance-id" "ami runbook instance id option"
   assert_contains "$runbook_text" "--aws-region" "ami runbook aws region option"
   assert_contains "$runbook_text" "ec2 create-image" "ami runbook create-image call"
   assert_contains "$runbook_text" "ec2 wait image-available" "ami runbook wait for image availability"
+  assert_contains "$operator_runbook_text" "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "operator runbook defines checkpoint-signer wrapper"
+  assert_contains "$operator_runbook_text" "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "operator runbook defines checkpoint-aggregator wrapper"
+  assert_contains "$operator_runbook_text" "# shellcheck disable=SC1091"$'\n'"set -a"$'\n'"source /etc/intents-juno/operator-stack.env"$'\n'"set +a" "operator runbook wrappers export sourced stack env vars to child processes"
 }
 
 test_aws_wrapper_uses_ssh_keepalive_options() {

@@ -851,6 +851,19 @@ for stack_file in "\${stack_access_files[@]}"; do
   fi
 done
 
+# Backfill legacy AMIs where checkpoint wrappers source stack env without exporting to child processes.
+checkpoint_runtime_wrappers=(
+  /usr/local/bin/intents-juno-checkpoint-signer.sh
+  /usr/local/bin/intents-juno-checkpoint-aggregator.sh
+)
+for checkpoint_wrapper in "\${checkpoint_runtime_wrappers[@]}"; do
+  [[ -f "\$checkpoint_wrapper" ]] || continue
+  if grep -q "source /etc/intents-juno/operator-stack.env" "\$checkpoint_wrapper" \
+    && ! grep -q '^set -a$' "\$checkpoint_wrapper"; then
+    sudo perl -0pi -e 's/# shellcheck disable=SC1091\nsource \/etc\/intents-juno\/operator-stack\.env/# shellcheck disable=SC1091\nset -a\nsource \/etc\/intents-juno\/operator-stack.env\nset +a/' "\$checkpoint_wrapper"
+  fi
+done
+
 sudo systemctl daemon-reload
 sudo systemctl enable "\${required_services[@]}"
 sudo systemctl restart "\${startup_services[@]}"

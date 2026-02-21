@@ -697,7 +697,9 @@ EOF_SCAN
 #!/usr/bin/env bash
 set -euo pipefail
 # shellcheck disable=SC1091
+set -a
 source /etc/intents-juno/operator-stack.env
+set +a
 [[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -748,7 +750,9 @@ EOF_SIGNER
 #!/usr/bin/env bash
 set -euo pipefail
 # shellcheck disable=SC1091
+set -a
 source /etc/intents-juno/operator-stack.env
+set +a
 [[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
