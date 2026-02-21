@@ -419,7 +419,7 @@ juno_rebroadcast_tx() {
   txid="${txid#0x}"
   [[ -n "$txid" ]] || die "cannot rebroadcast Juno tx: empty txid"
 
-  getraw_params="$(jq -cn --arg txid "$txid" '[ $txid, false ]')"
+  getraw_params="$(jq -cn --arg txid "$txid" '[ $txid ]')"
   getraw_resp="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "getrawtransaction" "$getraw_params")"
   getraw_error="$(jq -r '.error.message // empty' <<<"$getraw_resp")"
   if [[ -n "$getraw_error" ]]; then

@@ -239,6 +239,12 @@ func TestClient_GetRawTransaction_ParsesConfirmations(t *testing.T) {
 		if req.Method != "getrawtransaction" {
 			t.Fatalf("method: got %q want %q", req.Method, "getrawtransaction")
 		}
+		if len(req.Params) != 2 {
+			t.Fatalf("params: got %#v want 2 items", req.Params)
+		}
+		if req.Params[1] != float64(1) {
+			t.Fatalf("verbosity param mismatch: got %v want %v", req.Params[1], float64(1))
+		}
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"result": map[string]any{
 				"txid":          wantTxID,
@@ -329,8 +335,11 @@ func TestClient_GetOrchardAction_DecodesFromDecodeRawTransaction(t *testing.T) {
 
 		switch req.Method {
 		case "getrawtransaction":
-			if len(req.Params) != 2 {
-				t.Fatalf("getrawtransaction params: got %#v", req.Params)
+			if len(req.Params) != 1 {
+				t.Fatalf("getrawtransaction params: got %#v want [txid]", req.Params)
+			}
+			if req.Params[0] != txid {
+				t.Fatalf("getrawtransaction txid param: got %v want %v", req.Params[0], txid)
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"result": rawHex,

@@ -215,7 +215,7 @@ func (c *Client) GetRawTransaction(ctx context.Context, txid string) (RawTransac
 		Confirmations int64  `json:"confirmations"`
 	}
 	var res rawTxResult
-	err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(strings.TrimSpace(txid), "0x"), true}, &res)
+	err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(strings.TrimSpace(txid), "0x"), 1}, &res)
 	if err != nil {
 		var rpcErr *RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == -5 {
@@ -244,7 +244,7 @@ func (c *Client) GetOrchardAction(ctx context.Context, txid string, actionIndex 
 	}
 
 	var rawHex string
-	if err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(txHash.Hex(), "0x"), false}, &rawHex); err != nil {
+	if err := c.call(ctx, "getrawtransaction", []any{strings.TrimPrefix(txHash.Hex(), "0x")}, &rawHex); err != nil {
 		return out, err
 	}
 	rawHex = strings.TrimSpace(rawHex)

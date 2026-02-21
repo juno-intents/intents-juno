@@ -630,6 +630,8 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "juno_rpc_json_call" "juno rpc helper function exists"
   assert_contains "$e2e_script_text" "juno_rebroadcast_tx" "juno rebroadcast helper function exists"
   assert_contains "$e2e_script_text" "getrawtransaction" "juno rebroadcast fetches raw transaction"
+  assert_contains "$e2e_script_text" 'getraw_params="$(jq -cn --arg txid "$txid" '\''[ $txid ]'\'')"' "juno rebroadcast uses single-arg getrawtransaction call"
+  assert_not_contains "$e2e_script_text" '[ $txid, false ]' "juno rebroadcast does not use boolean getrawtransaction verbosity"
   assert_contains "$e2e_script_text" "sendrawtransaction" "juno rebroadcast submits raw transaction"
   assert_not_contains "$e2e_script_text" "bridge_juno_execution_tx_hash=\"\$generated_withdraw_txid\"" "bridge no longer uses pre-generated withdraw tx hash as canonical juno proof source"
   assert_not_contains "$e2e_script_text" "canonical juno execution tx hash is required" "pre-generated canonical juno proof hash gate removed"
