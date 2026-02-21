@@ -590,6 +590,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--boundless-withdraw-owallet-ovk-hex" "boundless withdraw ovk option"
   assert_contains "$e2e_script_text" "--boundless-witness-wallet-id" "witness wallet id override option"
   assert_contains "$e2e_script_text" "--boundless-witness-metadata-timeout-seconds" "witness metadata timeout option"
+  assert_contains "$e2e_script_text" "--pre-upsert-scan-urls" "witness metadata pre-upserts wallet across quorum scan endpoints before tx submission"
   assert_contains "$e2e_script_text" "--boundless-witness-juno-scan-urls" "witness scan endpoint pool option"
   assert_contains "$e2e_script_text" "--boundless-witness-juno-rpc-urls" "witness rpc endpoint pool option"
   assert_contains "$e2e_script_text" "--boundless-witness-operator-labels" "witness operator labels option"

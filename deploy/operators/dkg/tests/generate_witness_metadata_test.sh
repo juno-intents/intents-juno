@@ -52,6 +52,19 @@ test_script_supports_explicit_funder_source_address_argument() {
   fi
 }
 
+test_script_supports_pre_upsert_scan_urls_argument() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--pre-upsert-scan-urls"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --pre-upsert-scan-urls for quorum pre-registration\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"pre_upsert_scan_urls_csv"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to parse pre-upsert scan URL CSV input\n' >&2
+    exit 1
+  fi
+}
+
 test_seed_phrase_normalization_handles_wrapped_seed_files() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -164,6 +177,7 @@ main() {
   test_decode_orchard_receiver_rejects_invalid_input
   test_script_supports_seed_phrase_funder_argument
   test_script_supports_explicit_funder_source_address_argument
+  test_script_supports_pre_upsert_scan_urls_argument
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_status_poll_targets_specific_opid_and_fails_fast_when_missing
   test_witness_generation_serializes_orchard_spends

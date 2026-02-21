@@ -22,6 +22,7 @@ Options:
   --juno-rpc-user <user>             required junocashd RPC username
   --juno-rpc-pass <pass>             required junocashd RPC password
   --juno-scan-url <url>              required juno-scan URL
+  --pre-upsert-scan-urls <csv>       optional comma-separated juno-scan URLs to pre-register wallet before tx send
   --juno-scan-bearer-token <token>   optional juno-scan bearer token
   --funder-private-key-hex <hex>     optional funder private key hex (32-byte); converted to testnet WIF
   --funder-wif <wif>                 optional funder WIF (used directly when provided)
@@ -694,6 +695,7 @@ command_run() {
   local juno_rpc_user=""
   local juno_rpc_pass=""
   local juno_scan_url=""
+  local pre_upsert_scan_urls_csv=""
   local juno_scan_bearer_token=""
   local funder_wif=""
   local funder_private_key_hex=""
@@ -725,6 +727,11 @@ command_run() {
       --juno-scan-url)
         [[ $# -ge 2 ]] || die "missing value for --juno-scan-url"
         juno_scan_url="$2"
+        shift 2
+        ;;
+      --pre-upsert-scan-urls)
+        [[ $# -ge 2 ]] || die "missing value for --pre-upsert-scan-urls"
+        pre_upsert_scan_urls_csv="$2"
         shift 2
         ;;
       --juno-scan-bearer-token)
@@ -834,7 +841,31 @@ command_run() {
   recipient_raw_address_hex="$(decode_orchard_receiver_raw_hex "$recipient_orchard_receiver")"
   [[ ${#recipient_raw_address_hex} -eq 86 ]] || die "decoded recipient raw orchard address must be 43 bytes"
 
-  scan_upsert_wallet "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$ufvk"
+  local -a pre_upsert_scan_urls=()
+  local -a pre_upsert_scan_urls_raw=()
+  local -A pre_upsert_scan_urls_seen=()
+  local pre_upsert_scan_url scan_url_entry
+  pre_upsert_scan_urls+=("$juno_scan_url")
+  pre_upsert_scan_urls_seen["$juno_scan_url"]=1
+  if [[ -n "$pre_upsert_scan_urls_csv" ]]; then
+    IFS=',' read -r -a pre_upsert_scan_urls_raw <<<"$pre_upsert_scan_urls_csv"
+    for scan_url_entry in "${pre_upsert_scan_urls_raw[@]}"; do
+      scan_url_entry="$(trim "$scan_url_entry")"
+      [[ -n "$scan_url_entry" ]] || continue
+      if [[ -z "${pre_upsert_scan_urls_seen[$scan_url_entry]+x}" ]]; then
+        pre_upsert_scan_urls+=("$scan_url_entry")
+        pre_upsert_scan_urls_seen["$scan_url_entry"]=1
+      fi
+    done
+  fi
+  for pre_upsert_scan_url in "${pre_upsert_scan_urls[@]}"; do
+    if ! scan_upsert_wallet "$pre_upsert_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$ufvk"; then
+      if [[ "$pre_upsert_scan_url" == "$juno_scan_url" ]]; then
+        die "failed to upsert witness wallet on primary juno-scan endpoint: $pre_upsert_scan_url"
+      fi
+      log "witness wallet pre-upsert failed on scan endpoint: $pre_upsert_scan_url (continuing)"
+    fi
+  done
 
   local funder_from_address="" funder_taddr="" funder_source_kind=""
   if [[ -n "$funder_source_address" ]]; then

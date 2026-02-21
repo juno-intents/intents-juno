@@ -1855,6 +1855,8 @@ command_run() {
     local witness_metadata_generated="false"
     local witness_metadata_source_scan_url=""
     local witness_metadata_source_rpc_url=""
+    local witness_metadata_pre_upsert_scan_urls_csv=""
+    witness_metadata_pre_upsert_scan_urls_csv="$(IFS=,; printf '%s' "${witness_healthy_scan_urls[*]}")"
     for ((witness_idx = 0; witness_idx < witness_endpoint_healthy_count; witness_idx++)); do
       local witness_scan_url witness_rpc_url witness_operator_label
       local witness_operator_safe_label witness_wallet_id_attempt witness_metadata_attempt_json
@@ -1878,6 +1880,7 @@ command_run() {
         --juno-rpc-user "$juno_rpc_user"
         --juno-rpc-pass "$juno_rpc_pass"
         --juno-scan-url "$witness_scan_url"
+        --pre-upsert-scan-urls "$witness_metadata_pre_upsert_scan_urls_csv"
         --wallet-id "$witness_wallet_id_attempt"
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
