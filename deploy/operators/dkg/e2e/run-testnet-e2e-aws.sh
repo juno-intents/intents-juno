@@ -2747,25 +2747,25 @@ declare -a witness_tunnel_ready_labels=()
 cleanup_witness_tunnel() {
   set +e
   local witness_tunnel_pid
-  for witness_tunnel_pid in "${witness_tunnel_pids[@]}"; do
-    kill "$witness_tunnel_pid" >/dev/null 2>&1 || true
+  for witness_tunnel_pid in "\${witness_tunnel_pids[@]}"; do
+    kill "\$witness_tunnel_pid" >/dev/null 2>&1 || true
   done
-  for witness_tunnel_pid in "${witness_tunnel_pids[@]}"; do
-    wait "$witness_tunnel_pid" >/dev/null 2>&1 || true
+  for witness_tunnel_pid in "\${witness_tunnel_pids[@]}"; do
+    wait "\$witness_tunnel_pid" >/dev/null 2>&1 || true
   done
 }
 trap cleanup_witness_tunnel EXIT
 
-for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
-  operator_ssh_host="${operator_private_ips[$op_idx]}"
-  witness_operator_label="op$((op_idx + 1))@${operator_ssh_host}"
-  witness_tunnel_scan_port=$((witness_tunnel_scan_base_port + op_idx))
-  witness_tunnel_rpc_port=$((witness_tunnel_rpc_base_port + op_idx))
-  witness_tunnel_tss_port=$((witness_tunnel_tss_base_port + op_idx))
+for ((op_idx = 0; op_idx < \${#operator_private_ips[@]}; op_idx++)); do
+  operator_ssh_host="\${operator_private_ips[\$op_idx]}"
+  witness_operator_label="op\$((op_idx + 1))@\${operator_ssh_host}"
+  witness_tunnel_scan_port=\$((witness_tunnel_scan_base_port + op_idx))
+  witness_tunnel_rpc_port=\$((witness_tunnel_rpc_base_port + op_idx))
+  witness_tunnel_tss_port=\$((witness_tunnel_tss_base_port + op_idx))
   tunnel_log="$remote_workdir/reports/witness-tunnel-op$((op_idx + 1)).log"
 
   ssh \
-    -i "$operator_ssh_key" \
+    -i "\$operator_ssh_key" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
     -o ExitOnForwardFailure=yes \
@@ -2773,42 +2773,42 @@ for ((op_idx = 0; op_idx < ${#operator_private_ips[@]}; op_idx++)); do
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     -N \
-    -L "127.0.0.1:${witness_tunnel_scan_port}:127.0.0.1:8080" \
-    -L "127.0.0.1:${witness_tunnel_rpc_port}:127.0.0.1:18232" \
-    -L "127.0.0.1:${witness_tunnel_tss_port}:127.0.0.1:9443" \
-    "$operator_ssh_user@$operator_ssh_host" \
-    >"$tunnel_log" 2>&1 &
-  witness_tunnel_pid=$!
-  witness_tunnel_pids+=("$witness_tunnel_pid")
+    -L "127.0.0.1:\${witness_tunnel_scan_port}:127.0.0.1:8080" \
+    -L "127.0.0.1:\${witness_tunnel_rpc_port}:127.0.0.1:18232" \
+    -L "127.0.0.1:\${witness_tunnel_tss_port}:127.0.0.1:9443" \
+    "\$operator_ssh_user@\$operator_ssh_host" \
+    >"\$tunnel_log" 2>&1 &
+  witness_tunnel_pid=\$!
+  witness_tunnel_pids+=("\$witness_tunnel_pid")
 
   witness_tunnel_ready="false"
-  for attempt in $(seq 1 20); do
-    if ! kill -0 "$witness_tunnel_pid" >/dev/null 2>&1; then
+  for attempt in \$(seq 1 20); do
+    if ! kill -0 "\$witness_tunnel_pid" >/dev/null 2>&1; then
       break
     fi
-    if timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_scan_port" >/dev/null 2>&1 \
-      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_rpc_port" >/dev/null 2>&1 \
-      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/$witness_tunnel_tss_port" >/dev/null 2>&1; then
+    if timeout 2 bash -lc "</dev/tcp/127.0.0.1/\$witness_tunnel_scan_port" >/dev/null 2>&1 \
+      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/\$witness_tunnel_rpc_port" >/dev/null 2>&1 \
+      && timeout 2 bash -lc "</dev/tcp/127.0.0.1/\$witness_tunnel_tss_port" >/dev/null 2>&1; then
       witness_tunnel_ready="true"
       break
     fi
     sleep 1
   done
 
-  if [[ "$witness_tunnel_ready" == "true" ]]; then
-    witness_tunnel_ready_labels+=("$witness_operator_label")
-    echo "witness tunnel ready for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port tss_port=$witness_tunnel_tss_port"
+  if [[ "\$witness_tunnel_ready" == "true" ]]; then
+    witness_tunnel_ready_labels+=("\$witness_operator_label")
+    echo "witness tunnel ready for operator=\$witness_operator_label scan_port=\$witness_tunnel_scan_port rpc_port=\$witness_tunnel_rpc_port tss_port=\$witness_tunnel_tss_port"
   else
-    echo "witness tunnel readiness failed for operator=$witness_operator_label scan_port=$witness_tunnel_scan_port rpc_port=$witness_tunnel_rpc_port tss_port=$witness_tunnel_tss_port" >&2
+    echo "witness tunnel readiness failed for operator=\$witness_operator_label scan_port=\$witness_tunnel_scan_port rpc_port=\$witness_tunnel_rpc_port tss_port=\$witness_tunnel_tss_port" >&2
   fi
 done
 
-if (( ${#witness_tunnel_ready_labels[@]} < witness_tunnel_quorum )); then
-  echo "insufficient witness tunnels ready for quorum: ready=${#witness_tunnel_ready_labels[@]} threshold=$witness_tunnel_quorum" >&2
+if (( \${#witness_tunnel_ready_labels[@]} < witness_tunnel_quorum )); then
+  echo "insufficient witness tunnels ready for quorum: ready=\${#witness_tunnel_ready_labels[@]} threshold=\$witness_tunnel_quorum" >&2
   for tunnel_log in "$remote_workdir"/reports/witness-tunnel-op*.log; do
-    [[ -f "$tunnel_log" ]] || continue
-    echo "--- witness tunnel log tail: $tunnel_log ---" >&2
-    tail -n 80 "$tunnel_log" >&2 || true
+    [[ -f "\$tunnel_log" ]] || continue
+    echo "--- witness tunnel log tail: \$tunnel_log ---" >&2
+    tail -n 80 "\$tunnel_log" >&2 || true
   done
   exit 1
 fi
