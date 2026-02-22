@@ -2179,7 +2179,7 @@ command_run() {
     if (( witness_endpoint_healthy_count > 1 )); then
       witness_timeout_slice_seconds=$((boundless_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))
     fi
-    (( witness_timeout_slice_seconds >= 120 )) || witness_timeout_slice_seconds=120
+    (( witness_timeout_slice_seconds >= 300 )) || witness_timeout_slice_seconds=300
     if (( witness_timeout_slice_seconds > boundless_witness_metadata_timeout_seconds )); then
       witness_timeout_slice_seconds="$boundless_witness_metadata_timeout_seconds"
     fi
