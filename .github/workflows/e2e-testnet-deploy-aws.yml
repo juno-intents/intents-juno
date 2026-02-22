@@ -8,6 +8,11 @@ on:
         required: true
         default: "us-east-1"
         type: string
+      aws_dr_region:
+        description: "AWS DR secondary region for shared services readiness/provisioning"
+        required: true
+        default: "us-west-2"
+        type: string
       aws_instance_type:
         description: "EC2 instance type for live e2e runner"
         required: true
@@ -242,6 +247,7 @@ jobs:
             run
             --workdir "$WORKDIR"
             --aws-region "${{ inputs.aws_region }}"
+            --aws-dr-region "${{ inputs.aws_dr_region }}"
             --aws-instance-type "${{ inputs.aws_instance_type }}"
             --operator-instance-count "${{ inputs.operator_instance_count }}"
             --operator-instance-type "${{ inputs.operator_instance_type }}"
