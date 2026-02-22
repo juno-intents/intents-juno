@@ -75,6 +75,10 @@ run options:
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
   --boundless-requestor-key-file <p>   required file with Boundless requestor private key hex
+  --shared-boundless-requestor-secret-arn <arn>
+                                       optional pre-existing primary-region secret ARN for shared proof services
+  --shared-boundless-requestor-secret-arn-dr <arn>
+                                       optional pre-existing DR-region secret ARN for shared proof services
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
                                        requires forwarded shared args after '--':
                                          --shared-postgres-dsn
@@ -1799,6 +1803,8 @@ command_run() {
   local juno_rpc_pass_file=""
   local juno_scan_bearer_token_file=""
   local boundless_requestor_key_file=""
+  local shared_boundless_requestor_secret_arn_override=""
+  local shared_boundless_requestor_secret_arn_dr_override=""
   local with_shared_services="true"
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
@@ -1967,6 +1973,16 @@ command_run() {
         boundless_requestor_key_file="$2"
         shift 2
         ;;
+      --shared-boundless-requestor-secret-arn)
+        [[ $# -ge 2 ]] || die "missing value for --shared-boundless-requestor-secret-arn"
+        shared_boundless_requestor_secret_arn_override="$2"
+        shift 2
+        ;;
+      --shared-boundless-requestor-secret-arn-dr)
+        [[ $# -ge 2 ]] || die "missing value for --shared-boundless-requestor-secret-arn-dr"
+        shared_boundless_requestor_secret_arn_dr_override="$2"
+        shift 2
+        ;;
       --without-shared-services)
         with_shared_services="false"
         shift
@@ -2064,6 +2080,10 @@ command_run() {
     fi
     [[ -n "$aws_dr_region" ]] || die "--aws-dr-region is required when shared services are enabled"
     [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
+    if [[ -n "$shared_boundless_requestor_secret_arn_override" || -n "$shared_boundless_requestor_secret_arn_dr_override" ]]; then
+      [[ -n "$shared_boundless_requestor_secret_arn_override" ]] || die "--shared-boundless-requestor-secret-arn-dr requires --shared-boundless-requestor-secret-arn"
+      [[ -n "$shared_boundless_requestor_secret_arn_dr_override" ]] || die "--shared-boundless-requestor-secret-arn requires --shared-boundless-requestor-secret-arn-dr"
+    fi
   fi
   if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--runner-ami-id must look like an AMI id (ami-...)"
@@ -2245,6 +2265,8 @@ command_run() {
   [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
   local boundless_requestor_secret_arn=""
   local boundless_requestor_secret_arn_dr=""
+  local boundless_requestor_secret_created="false"
+  local boundless_requestor_secret_dr_created="false"
 
   cleanup_terraform_dir="$terraform_dir"
   cleanup_aws_profile="$aws_profile"
@@ -2270,7 +2292,10 @@ command_run() {
     secret_name_prefix="${secret_name_prefix#-}"
     secret_name_prefix="${secret_name_prefix%-}"
     [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
-    if [[ -n "$existing_boundless_requestor_secret_arn" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_boundless_requestor_secret_arn"; then
+    if [[ -n "$shared_boundless_requestor_secret_arn_override" ]]; then
+      boundless_requestor_secret_arn="$shared_boundless_requestor_secret_arn_override"
+      log "using provided boundless requestor secret arn: $boundless_requestor_secret_arn"
+    elif [[ -n "$existing_boundless_requestor_secret_arn" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_boundless_requestor_secret_arn"; then
       boundless_requestor_secret_arn="$existing_boundless_requestor_secret_arn"
       log "reusing boundless requestor secret: $boundless_requestor_secret_arn"
     else
@@ -2284,10 +2309,16 @@ command_run() {
           "$boundless_requestor_key_hex"
       )"
       [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
+      boundless_requestor_secret_created="true"
     fi
-    cleanup_primary_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
+    if [[ "$boundless_requestor_secret_created" == "true" ]]; then
+      cleanup_primary_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
+    fi
 
-    if [[ -n "$existing_boundless_requestor_secret_arn_dr" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_boundless_requestor_secret_arn_dr"; then
+    if [[ -n "$shared_boundless_requestor_secret_arn_dr_override" ]]; then
+      boundless_requestor_secret_arn_dr="$shared_boundless_requestor_secret_arn_dr_override"
+      log "using provided dr boundless requestor secret arn: $boundless_requestor_secret_arn_dr"
+    elif [[ -n "$existing_boundless_requestor_secret_arn_dr" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_boundless_requestor_secret_arn_dr"; then
       boundless_requestor_secret_arn_dr="$existing_boundless_requestor_secret_arn_dr"
       log "reusing dr boundless requestor secret: $boundless_requestor_secret_arn_dr"
     else
@@ -2301,8 +2332,11 @@ command_run() {
           "$boundless_requestor_key_hex"
       )"
       [[ -n "$boundless_requestor_secret_arn_dr" && "$boundless_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr boundless requestor secret"
+      boundless_requestor_secret_dr_created="true"
     fi
-    cleanup_dr_boundless_requestor_secret_arn="$boundless_requestor_secret_arn_dr"
+    if [[ "$boundless_requestor_secret_dr_created" == "true" ]]; then
+      cleanup_dr_boundless_requestor_secret_arn="$boundless_requestor_secret_arn_dr"
+    fi
   fi
 
   local provision_shared_services_json

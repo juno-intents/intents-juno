@@ -179,6 +179,14 @@ jobs:
             echo "BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX secret is required"
             exit 1
           fi
+          if [[ -n "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN }}" && -z "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "BOUNDLESS_REQUESTOR_SECRET_ARN_DR secret is required when BOUNDLESS_REQUESTOR_SECRET_ARN is set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN }}" && -n "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "BOUNDLESS_REQUESTOR_SECRET_ARN secret is required when BOUNDLESS_REQUESTOR_SECRET_ARN_DR is set"
+            exit 1
+          fi
           if [[ -z "${{ secrets.JUNO_RPC_USER }}" ]]; then
             echo "JUNO_RPC_USER secret is required"
             exit 1
@@ -256,6 +264,10 @@ jobs:
 
           ARGS+=(--operator-ami-id "${{ steps.resolve_operator_ami.outputs.operator_ami_id }}")
           ARGS+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
+          if [[ -n "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN }}" ]]; then
+            ARGS+=(--shared-boundless-requestor-secret-arn "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN }}")
+            ARGS+=(--shared-boundless-requestor-secret-arn-dr "${{ secrets.BOUNDLESS_REQUESTOR_SECRET_ARN_DR }}")
+          fi
 
           E2E_ARGS=(
             --base-rpc-url "${{ inputs.base_rpc_url }}"
