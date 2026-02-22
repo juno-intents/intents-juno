@@ -616,21 +616,47 @@ validate_shared_services_dr_readiness() {
   [[ "$dr_az_count" =~ ^[0-9]+$ ]] || die "failed to resolve DR AZ count in region: $aws_dr_region"
   (( dr_az_count >= 2 )) || die "DR readiness check failed: region $aws_dr_region must have at least 2 available AZs"
 
-  env "${AWS_ENV_ARGS[@]}" aws rds describe-db-engine-versions \
-    --region "$aws_dr_region" \
-    --engine aurora-postgresql \
-    --default-only \
-    --max-records 20 >/dev/null
+  run_optional_dr_readiness_probe \
+    "rds:DescribeDBEngineVersions" \
+    env "${AWS_ENV_ARGS[@]}" aws rds describe-db-engine-versions \
+      --region "$aws_dr_region" \
+      --engine aurora-postgresql \
+      --default-only \
+      --max-records 20
 
-  env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
-    --region "$aws_dr_region" \
-    --max-results 1 >/dev/null
+  run_optional_dr_readiness_probe \
+    "kafka:ListClustersV2" \
+    env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
+      --region "$aws_dr_region" \
+      --max-results 1
 
-  env "${AWS_ENV_ARGS[@]}" aws ecs list-clusters \
-    --region "$aws_dr_region" \
-    --max-items 1 >/dev/null
+  run_optional_dr_readiness_probe \
+    "ecs:ListClusters" \
+    env "${AWS_ENV_ARGS[@]}" aws ecs list-clusters \
+      --region "$aws_dr_region" \
+      --max-items 1
 
   log "dr readiness checks passed (primary=$aws_region dr=$aws_dr_region available_azs=$dr_az_count)"
+}
+
+run_optional_dr_readiness_probe() {
+  local probe_name="$1"
+  shift
+
+  local out
+  if out="$("$@" 2>&1)"; then
+    return 0
+  fi
+
+  local lowered
+  lowered="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
+  if [[ "$lowered" == *"accessdenied"* || "$lowered" == *"unauthorizedoperation"* || "$lowered" == *"not authorized"* ]]; then
+    log "warning: skipping dr readiness probe due to IAM permission limits (probe=$probe_name)"
+    return 0
+  fi
+
+  printf '%s\n' "$out" >&2
+  die "dr readiness probe failed: $probe_name"
 }
 
 ami_exists_in_region() {
