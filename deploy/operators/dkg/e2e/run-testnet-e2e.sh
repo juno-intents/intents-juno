@@ -2174,6 +2174,17 @@ command_run() {
     (( witness_endpoint_healthy_count >= witness_quorum_threshold )) || \
       die "failed to build healthy witness endpoint pool with quorum: healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold configured=$witness_endpoint_pool_size"
 
+    local witness_timeout_slice_seconds
+    witness_timeout_slice_seconds="$boundless_witness_metadata_timeout_seconds"
+    if (( witness_endpoint_healthy_count > 1 )); then
+      witness_timeout_slice_seconds=$((boundless_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))
+    fi
+    (( witness_timeout_slice_seconds >= 120 )) || witness_timeout_slice_seconds=120
+    if (( witness_timeout_slice_seconds > boundless_witness_metadata_timeout_seconds )); then
+      witness_timeout_slice_seconds="$boundless_witness_metadata_timeout_seconds"
+    fi
+    log "witness timeout slice seconds=$witness_timeout_slice_seconds total_timeout_seconds=$boundless_witness_metadata_timeout_seconds healthy_endpoints=$witness_endpoint_healthy_count"
+
     local witness_metadata_generated="false"
     local witness_metadata_source_scan_url=""
     local witness_metadata_source_rpc_url=""
@@ -2206,7 +2217,7 @@ command_run() {
         --wallet-id "$witness_wallet_id_attempt"
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
-        --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
+        --timeout-seconds "$witness_timeout_slice_seconds"
         --output "$witness_metadata_attempt_json"
       )
       if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
@@ -2302,7 +2313,7 @@ command_run() {
       witness_extract_last_error=""
       witness_extract_wait_logged="false"
       witness_extract_sleep_seconds=5
-      witness_extract_deadline_epoch=$(( $(date +%s) + boundless_witness_metadata_timeout_seconds ))
+      witness_extract_deadline_epoch=$(( $(date +%s) + witness_timeout_slice_seconds ))
       witness_extract_error_file="$witness_quorum_dir/deposit-${witness_operator_safe_label}.extract.err"
 
       witness_extract_attempt=0

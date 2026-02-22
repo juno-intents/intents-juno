@@ -83,10 +83,23 @@ test_operator_signer_fallback_exists_for_bins_without_sign_digest() {
   assert_contains "$script_text" "no operator signatures were produced" "fallback signer emits explicit no-signatures error"
 }
 
+test_witness_pool_uses_per_endpoint_timeout_slices() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "local witness_timeout_slice_seconds" "witness timeout slice variable exists"
+  assert_contains "$script_text" "witness_timeout_slice_seconds=\$((boundless_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))" "witness timeout slice divides total timeout by healthy endpoint count"
+  assert_contains "$script_text" "(( witness_timeout_slice_seconds >= 120 )) || witness_timeout_slice_seconds=120" "witness timeout slice has a floor for endpoint churn resilience"
+  assert_contains "$script_text" "if (( witness_timeout_slice_seconds > boundless_witness_metadata_timeout_seconds )); then" "witness timeout slice is capped by global metadata timeout"
+  assert_contains "$script_text" "--timeout-seconds \"\$witness_timeout_slice_seconds\"" "witness metadata generation uses per-endpoint timeout slice"
+  assert_contains "$script_text" "witness_extract_deadline_epoch=\$(( \$(date +%s) + witness_timeout_slice_seconds ))" "witness extraction wait loop uses per-endpoint timeout slice"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_operator_signer_fallback_exists_for_bins_without_sign_digest
+  test_witness_pool_uses_per_endpoint_timeout_slices
 }
 
 main "$@"
