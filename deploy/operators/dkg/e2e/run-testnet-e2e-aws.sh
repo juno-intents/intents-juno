@@ -2879,30 +2879,45 @@ command_run() {
   if [[ -n "$forwarded_boundless_deposit_owallet_ivk_hex" ]]; then
     local normalized_forwarded_boundless_deposit_owallet_ivk_hex
     normalized_forwarded_boundless_deposit_owallet_ivk_hex="$(normalize_hex_prefixed_value "$forwarded_boundless_deposit_owallet_ivk_hex" || true)"
-    [[ "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" =~ ^0x[0-9a-f]{128}$ ]] || \
-      die "provided --boundless-deposit-owallet-ivk-hex is invalid"
-    if [[ "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" != "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX" ]]; then
-      die "provided --boundless-deposit-owallet-ivk-hex does not match distributed dkg ufvk-derived value"
+    if [[ ! "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" =~ ^0x[0-9a-f]{128}$ ]]; then
+      log "warning: ignoring invalid forwarded --boundless-deposit-owallet-ivk-hex; using distributed dkg ufvk-derived value"
+    elif [[ "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" != "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX" ]]; then
+      log "warning: overriding forwarded --boundless-deposit-owallet-ivk-hex with distributed dkg ufvk-derived value"
     fi
-  else
-    log "defaulting --boundless-deposit-owallet-ivk-hex from distributed dkg completion report ufvk"
-    remote_args+=("--boundless-deposit-owallet-ivk-hex" "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX")
   fi
 
   if [[ -n "$forwarded_boundless_withdraw_owallet_ovk_hex" ]]; then
     local normalized_forwarded_boundless_withdraw_owallet_ovk_hex
     normalized_forwarded_boundless_withdraw_owallet_ovk_hex="$(normalize_hex_prefixed_value "$forwarded_boundless_withdraw_owallet_ovk_hex" || true)"
-    [[ "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" =~ ^0x[0-9a-f]{64}$ ]] || \
-      die "provided --boundless-withdraw-owallet-ovk-hex is invalid"
-    if [[ "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" != "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX" ]]; then
-      die "provided --boundless-withdraw-owallet-ovk-hex does not match distributed dkg ufvk-derived value"
+    if [[ ! "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" =~ ^0x[0-9a-f]{64}$ ]]; then
+      log "warning: ignoring invalid forwarded --boundless-withdraw-owallet-ovk-hex; using distributed dkg ufvk-derived value"
+    elif [[ "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" != "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX" ]]; then
+      log "warning: overriding forwarded --boundless-withdraw-owallet-ovk-hex with distributed dkg ufvk-derived value"
     fi
-  else
-    log "defaulting --boundless-withdraw-owallet-ovk-hex from distributed dkg completion report ufvk"
-    remote_args+=("--boundless-withdraw-owallet-ovk-hex" "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX")
   fi
 
-  remote_args+=("${e2e_args[@]}")
+  log "using distributed dkg ufvk-derived owallet key material for boundless guest witness inputs"
+  remote_args+=(
+    "--boundless-deposit-owallet-ivk-hex" "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX"
+    "--boundless-withdraw-owallet-ovk-hex" "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX"
+  )
+
+  local -a sanitized_e2e_args=()
+  local e2e_idx=0
+  while (( e2e_idx < ${#e2e_args[@]} )); do
+    case "${e2e_args[$e2e_idx]}" in
+      --boundless-deposit-owallet-ivk-hex|--boundless-withdraw-owallet-ovk-hex)
+        (( e2e_idx + 1 < ${#e2e_args[@]} )) || die "forwarded argument missing value: ${e2e_args[$e2e_idx]}"
+        e2e_idx=$((e2e_idx + 2))
+        ;;
+      *)
+        sanitized_e2e_args+=("${e2e_args[$e2e_idx]}")
+        e2e_idx=$((e2e_idx + 1))
+        ;;
+    esac
+  done
+
+  remote_args+=("${sanitized_e2e_args[@]}")
   if ! forwarded_arg_value "--boundless-input-s3-bucket" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "defaulting --boundless-input-s3-bucket to terraform dkg bucket output"
     remote_args+=("--boundless-input-s3-bucket" "$dkg_s3_bucket")

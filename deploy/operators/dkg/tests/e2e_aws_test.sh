@@ -1093,10 +1093,12 @@ test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk() {
   assert_contains "$wrapper_script_text" "derive_owallet_keys_from_ufvk()" "aws wrapper defines ufvk->owallet key derivation helper"
   assert_contains "$wrapper_script_text" "deploy/operators/dkg/e2e/ufvk-derive-keys/Cargo.toml" "aws wrapper uses tracked ufvk derivation helper manifest"
   assert_contains "$wrapper_script_text" "distributed dkg completion report produced invalid owallet key derivation output" "aws wrapper fails on malformed ufvk derivation output"
-  assert_contains "$wrapper_script_text" "provided --boundless-deposit-owallet-ivk-hex does not match distributed dkg ufvk-derived value" "aws wrapper rejects deposit ivk mismatch against distributed dkg ufvk"
-  assert_contains "$wrapper_script_text" "provided --boundless-withdraw-owallet-ovk-hex does not match distributed dkg ufvk-derived value" "aws wrapper rejects withdraw ovk mismatch against distributed dkg ufvk"
-  assert_contains "$wrapper_script_text" "defaulting --boundless-deposit-owallet-ivk-hex from distributed dkg completion report ufvk" "aws wrapper auto-fills deposit ivk when not forwarded"
-  assert_contains "$wrapper_script_text" "defaulting --boundless-withdraw-owallet-ovk-hex from distributed dkg completion report ufvk" "aws wrapper auto-fills withdraw ovk when not forwarded"
+  assert_contains "$wrapper_script_text" "warning: overriding forwarded --boundless-deposit-owallet-ivk-hex with distributed dkg ufvk-derived value" "aws wrapper overrides stale forwarded deposit ivk with distributed dkg ufvk"
+  assert_contains "$wrapper_script_text" "warning: overriding forwarded --boundless-withdraw-owallet-ovk-hex with distributed dkg ufvk-derived value" "aws wrapper overrides stale forwarded withdraw ovk with distributed dkg ufvk"
+  assert_contains "$wrapper_script_text" "using distributed dkg ufvk-derived owallet key material for boundless guest witness inputs" "aws wrapper always injects distributed dkg-derived owallet keys"
+  assert_contains "$wrapper_script_text" 'remote_args+=("${sanitized_e2e_args[@]}")' "aws wrapper strips forwarded owallet keys before appending forwarded args"
+  assert_not_contains "$wrapper_script_text" "provided --boundless-deposit-owallet-ivk-hex does not match distributed dkg ufvk-derived value" "aws wrapper no longer fails on stale forwarded deposit ivk"
+  assert_not_contains "$wrapper_script_text" "provided --boundless-withdraw-owallet-ovk-hex does not match distributed dkg ufvk-derived value" "aws wrapper no longer fails on stale forwarded withdraw ovk"
 }
 
 main() {
