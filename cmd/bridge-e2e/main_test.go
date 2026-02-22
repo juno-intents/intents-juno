@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"testing"
@@ -1952,6 +1953,34 @@ func TestBuildBoundlessSubmitFileRequestYAML_UsesURLInputAndGroth16Selector(t *t
 	}
 	if !strings.Contains(raw, "maxPrice: 50000000000000") {
 		t.Fatalf("expected maxPrice in yaml: %s", raw)
+	}
+}
+
+func TestBuildBoundlessSubmitFileArgs_GuestWitnessAddsNoPreflight(t *testing.T) {
+	t.Parallel()
+
+	cfg := boundlessConfig{
+		InputMode:          boundlessInputModeGuestWitnessV1,
+		RPCURL:             "https://base-sepolia.drpc.org",
+		MarketAddress:      common.HexToAddress("0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"),
+		VerifierRouterAddr: common.HexToAddress("0x00000000000000000000000000000000000000a1"),
+		SetVerifierAddr:    common.HexToAddress("0x00000000000000000000000000000000000000b2"),
+	}
+
+	got := buildBoundlessSubmitFileArgs(cfg, "abcd", "/tmp/request.yaml")
+	want := []string{
+		"requestor", "submit-file",
+		"/tmp/request.yaml",
+		"--wait",
+		"--no-preflight",
+		"--requestor-rpc-url", cfg.RPCURL,
+		"--requestor-private-key", "abcd",
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("buildBoundlessSubmitFileArgs() mismatch:\n got: %#v\nwant: %#v", got, want)
 	}
 }
 

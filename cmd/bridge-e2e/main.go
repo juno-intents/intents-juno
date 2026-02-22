@@ -2176,16 +2176,7 @@ func requestBoundlessProofOnce(
 	if err := os.WriteFile(reqPath, requestYAML, 0o600); err != nil {
 		return nil, "", fmt.Errorf("write boundless request file for %s: %w", pipeline, err)
 	}
-	args := []string{
-		"requestor", "submit-file",
-		reqPath,
-		"--wait",
-		"--requestor-rpc-url", cfg.RPCURL,
-		"--requestor-private-key", privateKey,
-		"--boundless-market-address", cfg.MarketAddress.Hex(),
-		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-	}
+	args := buildBoundlessSubmitFileArgs(cfg, privateKey, reqPath)
 
 	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
 	cmd.Env = buildBoundlessCommandEnv()
@@ -2216,6 +2207,25 @@ func requestBoundlessProofOnce(
 	}
 
 	return seal, requestID, nil
+}
+
+func buildBoundlessSubmitFileArgs(cfg boundlessConfig, privateKey string, reqPath string) []string {
+	args := []string{
+		"requestor", "submit-file",
+		reqPath,
+		"--wait",
+	}
+	if cfg.InputMode == boundlessInputModeGuestWitnessV1 {
+		args = append(args, "--no-preflight")
+	}
+	args = append(args,
+		"--requestor-rpc-url", cfg.RPCURL,
+		"--requestor-private-key", privateKey,
+		"--boundless-market-address", cfg.MarketAddress.Hex(),
+		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
+		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
+	)
+	return args
 }
 
 func buildBoundlessSubmitFileRequestYAML(
