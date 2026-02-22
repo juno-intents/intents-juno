@@ -82,8 +82,9 @@ on:
         required: true
         type: string
       boundless_input_s3_bucket:
-        description: "S3 bucket for oversized Boundless private inputs"
-        required: true
+        description: "Optional S3 bucket for oversized Boundless private inputs (defaults to terraform DKG bucket when empty)"
+        required: false
+        default: ""
         type: string
       boundless_min_price_wei:
         description: "Boundless min price in wei"
@@ -267,7 +268,6 @@ jobs:
             --boundless-input-mode "guest-witness-v1"
             --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
             --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
-            --boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}"
             --boundless-deposit-owallet-ivk-hex "${{ inputs.boundless_deposit_owallet_ivk_hex }}"
             --boundless-withdraw-owallet-ovk-hex "${{ inputs.boundless_withdraw_owallet_ovk_hex }}"
             --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
@@ -278,6 +278,10 @@ jobs:
             --boundless-lock-timeout-seconds "${{ inputs.boundless_lock_timeout_seconds }}"
             --boundless-timeout-seconds "${{ inputs.boundless_timeout_seconds }}"
           )
+
+          if [[ -n "${{ inputs.boundless_input_s3_bucket }}" ]]; then
+            E2E_ARGS+=(--boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}")
+          fi
 
           ARGS+=(-- "${E2E_ARGS[@]}")
 
