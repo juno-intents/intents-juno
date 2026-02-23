@@ -144,7 +144,7 @@ redact_dkg_summary_json() {
 }
 
 json_array_from_args() {
-  jq -n --args -- "$@" '$ARGS.positional'
+  jq -n '$ARGS.positional' --args -- "$@"
 }
 
 resolve_aws_region() {

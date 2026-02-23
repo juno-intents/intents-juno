@@ -187,10 +187,28 @@ test_direct_cli_witness_extraction_retries_note_visibility() {
 }
 
 test_json_array_from_args_separates_jq_options_from_cli_flags() {
-  local script_text
-  script_text="$(cat "$TARGET_SCRIPT")"
+  local function_body output
+  function_body="$(
+    awk '
+      /^json_array_from_args\(\)/ { in_fn = 1 }
+      in_fn { print }
+      in_fn && /^}/ { exit }
+    ' "$TARGET_SCRIPT"
+  )"
+  [[ -n "$function_body" ]] || {
+    printf 'failed to extract json_array_from_args from %s\n' "$TARGET_SCRIPT" >&2
+    exit 1
+  }
 
-  assert_contains "$script_text" 'jq -n --args -- "$@" '\''$ARGS.positional'\''' "json_array_from_args passes args after jq option delimiter"
+  output="$(
+    (
+      eval "$function_body"
+      json_array_from_args "/usr/local/bin/proof-requestor" "--postgres-dsn" "postgres://example"
+    )
+  )"
+  assert_contains "$output" '"/usr/local/bin/proof-requestor"' "json array includes absolute binary path as positional value"
+  assert_contains "$output" '"--postgres-dsn"' "json array preserves cli flag arguments"
+  assert_contains "$output" '"postgres://example"' "json array preserves cli flag values"
 }
 
 main() {
