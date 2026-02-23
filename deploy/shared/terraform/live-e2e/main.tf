@@ -199,6 +199,57 @@ data "aws_iam_policy_document" "live_e2e_inline" {
       aws_kms_key.dkg.arn
     ]
   }
+
+  dynamic "statement" {
+    for_each = var.provision_shared_services ? [1] : []
+    content {
+      sid    = "AllowSharedECSServiceRollout"
+      effect = "Allow"
+      actions = [
+        "ecs:DescribeClusters",
+        "ecs:DescribeServices",
+        "ecs:DescribeTaskDefinition",
+        "ecs:RegisterTaskDefinition",
+        "ecs:UpdateService"
+      ]
+      resources = ["*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.provision_shared_services ? [1] : []
+    content {
+      sid    = "AllowPassSharedECSTaskExecutionRole"
+      effect = "Allow"
+      actions = [
+        "iam:PassRole"
+      ]
+      resources = [
+        aws_iam_role.ecs_task_execution[0].arn
+      ]
+
+      condition {
+        test     = "StringEquals"
+        variable = "iam:PassedToService"
+        values   = ["ecs-tasks.amazonaws.com"]
+      }
+    }
+  }
+
+  dynamic "statement" {
+    for_each = var.provision_shared_services ? [1] : []
+    content {
+      sid    = "AllowSharedECSLogTail"
+      effect = "Allow"
+      actions = [
+        "logs:DescribeLogGroups",
+        "logs:DescribeLogStreams",
+        "logs:FilterLogEvents",
+        "logs:GetLogEvents"
+      ]
+      resources = ["*"]
+    }
+  }
 }
 
 resource "aws_iam_role_policy" "live_e2e_inline" {
