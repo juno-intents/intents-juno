@@ -147,6 +147,7 @@ test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" "direct-cli-generated-witness-metadata.json" "direct-cli scenario writes dedicated witness metadata"
+  assert_contains "$script_text" 'direct_cli_generated_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"' "direct-cli scenario reuses indexed witness wallet id to avoid cold-scan lag"
   assert_contains "$script_text" "direct_cli_generated_deposit_txid" "direct-cli scenario extracts deposit txid from dedicated metadata"
   assert_contains "$script_text" "direct_cli_generated_withdraw_txid" "direct-cli scenario extracts withdraw txid from dedicated metadata"
   assert_contains "$script_text" "direct-cli-deposit.witness.bin" "direct-cli scenario extracts a dedicated deposit witness item"

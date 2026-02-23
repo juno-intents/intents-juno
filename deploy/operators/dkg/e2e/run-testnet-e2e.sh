@@ -2944,7 +2944,7 @@ command_run() {
     direct_cli_generated_withdraw_batch_id_no_prefix="${direct_cli_generated_withdraw_batch_id#0x}"
 
     direct_cli_generated_witness_metadata_json="$workdir/reports/witness/direct-cli-generated-witness-metadata.json"
-    direct_cli_generated_witness_wallet_id="${withdraw_coordinator_juno_wallet_id}-direct-cli"
+    direct_cli_generated_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"
     local -a direct_cli_witness_metadata_args=(
       run
       --juno-rpc-url "$boundless_witness_juno_rpc_url"
