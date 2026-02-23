@@ -98,9 +98,9 @@ test_witness_pool_uses_per_endpoint_timeout_slices() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" "local witness_timeout_slice_seconds" "witness timeout slice variable exists"
-  assert_contains "$script_text" "witness_timeout_slice_seconds=\$((boundless_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))" "witness timeout slice divides total timeout by healthy endpoint count"
+  assert_contains "$script_text" "witness_timeout_slice_seconds=\$((sp1_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))" "witness timeout slice divides total timeout by healthy endpoint count"
   assert_contains "$script_text" "(( witness_timeout_slice_seconds >= 300 )) || witness_timeout_slice_seconds=300" "witness timeout slice has a floor for endpoint churn resilience"
-  assert_contains "$script_text" "if (( witness_timeout_slice_seconds > boundless_witness_metadata_timeout_seconds )); then" "witness timeout slice is capped by global metadata timeout"
+  assert_contains "$script_text" "if (( witness_timeout_slice_seconds > sp1_witness_metadata_timeout_seconds )); then" "witness timeout slice is capped by global metadata timeout"
   assert_contains "$script_text" "--timeout-seconds \"\$witness_timeout_slice_seconds\"" "witness metadata generation uses per-endpoint timeout slice"
   assert_contains "$script_text" "witness_extract_deadline_epoch=\$(( \$(date +%s) + witness_timeout_slice_seconds ))" "witness extraction wait loop uses per-endpoint timeout slice"
 }
@@ -109,11 +109,11 @@ test_witness_generation_reuses_distributed_dkg_recipient_identity() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" "--boundless-witness-recipient-ua" "run-testnet-e2e supports explicit witness recipient UA input"
-  assert_contains "$script_text" "--boundless-witness-recipient-ufvk" "run-testnet-e2e supports explicit witness recipient UFVK input"
-  assert_contains "$script_text" "--boundless-witness-recipient-ua and --boundless-witness-recipient-ufvk are required for guest witness extraction mode" "guest witness extraction enforces distributed DKG recipient identity inputs"
-  assert_contains "$script_text" "--recipient-ua \"\$boundless_witness_recipient_ua\"" "witness metadata generator receives distributed DKG recipient UA"
-  assert_contains "$script_text" "--recipient-ufvk \"\$boundless_witness_recipient_ufvk\"" "witness metadata generator receives distributed DKG UFVK"
+  assert_contains "$script_text" "--sp1-witness-recipient-ua" "run-testnet-e2e supports explicit witness recipient UA input"
+  assert_contains "$script_text" "--sp1-witness-recipient-ufvk" "run-testnet-e2e supports explicit witness recipient UFVK input"
+  assert_contains "$script_text" "--sp1-witness-recipient-ua and --sp1-witness-recipient-ufvk are required for guest witness extraction mode" "guest witness extraction enforces distributed DKG recipient identity inputs"
+  assert_contains "$script_text" "--recipient-ua \"\$sp1_witness_recipient_ua\"" "witness metadata generator receives distributed DKG recipient UA"
+  assert_contains "$script_text" "--recipient-ufvk \"\$sp1_witness_recipient_ufvk\"" "witness metadata generator receives distributed DKG UFVK"
   assert_contains "$script_text" "generated witness metadata recipient_ua mismatch" "run-testnet-e2e validates generated witness recipient against distributed DKG recipient"
   assert_contains "$script_text" "generated witness metadata ufvk mismatch against distributed DKG value" "run-testnet-e2e validates generated witness UFVK against distributed DKG UFVK"
 }
@@ -164,8 +164,8 @@ test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
   assert_contains "$script_text" "direct_cli_generated_withdraw_txid" "direct-cli scenario extracts withdraw txid from dedicated metadata"
   assert_contains "$script_text" "direct-cli-deposit.witness.bin" "direct-cli scenario extracts a dedicated deposit witness item"
   assert_contains "$script_text" '--wallet-id "$direct_cli_generated_witness_wallet_id"' "direct-cli withdraw extraction uses dedicated direct-cli witness wallet id"
-  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$direct_cli_deposit_witness_file")' "direct-cli bridge run uses dedicated deposit witness"
-  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")' "direct-cli bridge run uses dedicated withdraw witness"
+  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--sp1-deposit-witness-item-file" "$direct_cli_deposit_witness_file")' "direct-cli bridge run uses dedicated deposit witness"
+  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--sp1-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")' "direct-cli bridge run uses dedicated withdraw witness"
   assert_contains "$script_text" '"--deposit-final-orchard-root" "$direct_cli_deposit_final_orchard_root"' "direct-cli bridge run overrides deposit orchard root from dedicated witness extraction"
   assert_contains "$script_text" '"--withdraw-final-orchard-root" "$direct_cli_withdraw_final_orchard_root"' "direct-cli bridge run overrides withdraw orchard root from dedicated witness extraction"
 }
@@ -174,12 +174,12 @@ test_direct_cli_user_proof_uses_queue_submission_mode() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'direct_cli_proof_submission_mode="$boundless_proof_submission_mode"' "direct-cli user proof scenario reuses configured proof submission mode"
-  assert_contains "$script_text" '"--boundless-proof-submission-mode" "$direct_cli_proof_submission_mode"' "direct-cli user proof scenario forwards explicit proof submission mode"
-  assert_contains "$script_text" '"--boundless-proof-queue-brokers" "$shared_kafka_brokers"' "direct-cli user proof scenario forwards shared proof queue brokers"
-  assert_contains "$script_text" '"--boundless-proof-request-topic" "$proof_request_topic"' "direct-cli user proof scenario forwards proof request topic"
-  assert_contains "$script_text" '"--boundless-proof-result-topic" "$proof_result_topic"' "direct-cli user proof scenario forwards proof result topic"
-  assert_contains "$script_text" '"--boundless-proof-failure-topic" "$proof_failure_topic"' "direct-cli user proof scenario forwards proof failure topic"
+  assert_contains "$script_text" 'direct_cli_proof_submission_mode="$sp1_proof_submission_mode"' "direct-cli user proof scenario reuses configured proof submission mode"
+  assert_contains "$script_text" '"--sp1-proof-submission-mode" "$direct_cli_proof_submission_mode"' "direct-cli user proof scenario forwards explicit proof submission mode"
+  assert_contains "$script_text" '"--sp1-proof-queue-brokers" "$shared_kafka_brokers"' "direct-cli user proof scenario forwards shared proof queue brokers"
+  assert_contains "$script_text" '"--sp1-proof-request-topic" "$proof_request_topic"' "direct-cli user proof scenario forwards proof request topic"
+  assert_contains "$script_text" '"--sp1-proof-result-topic" "$proof_result_topic"' "direct-cli user proof scenario forwards proof result topic"
+  assert_contains "$script_text" '"--sp1-proof-failure-topic" "$proof_failure_topic"' "direct-cli user proof scenario forwards proof failure topic"
   assert_contains "$script_text" '[[ "$direct_cli_user_proof_submission_mode" == "$direct_cli_proof_submission_mode" ]] || return 1' "direct-cli user proof summary validates expected submission mode"
 }
 

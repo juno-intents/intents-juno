@@ -7,4 +7,4 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
 cd "$REPO_ROOT"
-go run ./cmd/boundless-auction-calc "$@"
+go run ./cmd/sp1-auction-calc "$@"

@@ -15,12 +15,11 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/prooffunder"
 	"github.com/juno-intents/intents-juno/internal/queue"
-	"github.com/juno-intents/intents-juno/internal/secrets"
+	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
 )
 
 func main() {
@@ -31,40 +30,33 @@ func main() {
 		leaseName   = flag.String("lease-name", "proof-funder", "lease name for active/passive funder")
 		leaseTTL    = flag.Duration("lease-ttl", 15*time.Second, "lease TTL")
 
-		ownerAddress      = flag.String("owner-address", "", "centralized funder owner address (required)")
-		ownerKeySecretARN = flag.String("owner-key-secret-arn", "", "secret reference for centralized funder private key (required)")
-		ownerKeyEnv       = flag.String("owner-key-env", "PROOF_FUNDER_KEY", "env var name used when --secrets-driver=env")
-		secretsDriver     = flag.String("secrets-driver", "aws", "secrets driver: aws|env")
-
-		requestorAddress = flag.String("requestor-address", "", "shared requestor address to fund (required)")
+		requestorAddress = flag.String("sp1-requestor-address", "", "shared SP1 requestor address to check (required)")
 		checkInterval    = flag.Duration("check-interval", 30*time.Second, "requestor balance check interval")
 
-		minBalanceWei      = flag.String("min-balance-wei", "50000000000000000", "minimum requestor balance before topup")
-		targetBalanceWei   = flag.String("target-balance-wei", "200000000000000000", "target requestor balance after topup")
+		minBalanceWei      = flag.String("min-balance-wei", "50000000000000000", "minimum requestor balance threshold")
 		criticalBalanceWei = flag.String("critical-balance-wei", "10000000000000000", "critical low-balance alert threshold")
-		maxTopUpPerTxWei   = flag.String("max-topup-per-tx-wei", "200000000000000000", "maximum topup per transaction")
 
 		alertTopic = flag.String("alert-topic", "ops.alerts.v1", "critical alert topic")
 
 		queueDriver  = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 
-		boundlessBin          = flag.String("boundless-bin", "", "boundless submit/funding binary path (required)")
-		boundlessMaxRespBytes = flag.Int("boundless-max-response-bytes", 1<<20, "max response bytes from boundless binary")
+		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
+		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter")
 	)
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if *ownerID == "" || *ownerAddress == "" || *ownerKeySecretARN == "" || *requestorAddress == "" || *boundlessBin == "" {
-		fmt.Fprintln(os.Stderr, "error: --owner-id, --owner-address, --owner-key-secret-arn, --requestor-address, and --boundless-bin are required")
+	if *ownerID == "" || *requestorAddress == "" || *sp1Bin == "" {
+		fmt.Fprintln(os.Stderr, "error: --owner-id, --sp1-requestor-address, and --sp1-bin are required")
 		os.Exit(2)
 	}
-	if *leaseTTL <= 0 || *checkInterval <= 0 || *boundlessMaxRespBytes <= 0 {
-		fmt.Fprintln(os.Stderr, "error: --lease-ttl, --check-interval, and --boundless-max-response-bytes must be > 0")
+	if *leaseTTL <= 0 || *checkInterval <= 0 || *sp1MaxRespBytes <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --lease-ttl, --check-interval, and --sp1-max-response-bytes must be > 0")
 		os.Exit(2)
 	}
-	if !common.IsHexAddress(*ownerAddress) || !common.IsHexAddress(*requestorAddress) {
-		fmt.Fprintln(os.Stderr, "error: --owner-address and --requestor-address must be valid hex addresses")
+	if !common.IsHexAddress(*requestorAddress) {
+		fmt.Fprintln(os.Stderr, "error: --sp1-requestor-address must be a valid hex address")
 		os.Exit(2)
 	}
 
@@ -73,39 +65,14 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: --min-balance-wei: %v\n", err)
 		os.Exit(2)
 	}
-	targetBalance, err := parseBigInt(*targetBalanceWei)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: --target-balance-wei: %v\n", err)
-		os.Exit(2)
-	}
 	criticalBalance, err := parseBigInt(*criticalBalanceWei)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: --critical-balance-wei: %v\n", err)
 		os.Exit(2)
 	}
-	maxTopup, err := parseBigInt(*maxTopUpPerTxWei)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: --max-topup-per-tx-wei: %v\n", err)
-		os.Exit(2)
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-
-	secretProvider, err := newSecretProvider(ctx, *secretsDriver)
-	if err != nil {
-		log.Error("init secrets provider", "err", err)
-		os.Exit(2)
-	}
-	secretRef := *ownerKeySecretARN
-	if strings.EqualFold(strings.TrimSpace(*secretsDriver), "env") {
-		secretRef = *ownerKeyEnv
-	}
-	ownerPrivateKey, err := secretProvider.Get(ctx, secretRef)
-	if err != nil {
-		log.Error("load owner private key", "err", err, "ref", secretRef)
-		os.Exit(2)
-	}
 
 	var leaseStore leases.Store
 	switch strings.ToLower(strings.TrimSpace(*leaseDriver)) {
@@ -138,14 +105,12 @@ func main() {
 		os.Exit(2)
 	}
 
-	boundlessClient, err := boundless.NewExecClient(boundless.ExecClientConfig{
-		Binary:           *boundlessBin,
-		MaxResponseBytes: *boundlessMaxRespBytes,
-		OwnerAddress:     common.HexToAddress(*ownerAddress),
-		OwnerPrivateKey:  ownerPrivateKey,
+	sp1Client, err := sp1.NewExecClient(sp1.ExecClientConfig{
+		Binary:           *sp1Bin,
+		MaxResponseBytes: *sp1MaxRespBytes,
 	})
 	if err != nil {
-		log.Error("init boundless exec client", "err", err)
+		log.Error("init sp1 exec client", "err", err)
 		os.Exit(2)
 	}
 
@@ -163,13 +128,10 @@ func main() {
 		LeaseName:          *leaseName,
 		LeaseTTL:           *leaseTTL,
 		CheckInterval:      *checkInterval,
-		OwnerAddress:       common.HexToAddress(*ownerAddress),
 		RequestorAddress:   common.HexToAddress(*requestorAddress),
 		MinBalanceWei:      minBalance,
-		TargetBalanceWei:   targetBalance,
 		CriticalBalanceWei: criticalBalance,
-		MaxTopUpPerTxWei:   maxTopup,
-	}, *ownerID, leaseStore, boundlessClient, &queueAlerter{
+	}, *ownerID, leaseStore, sp1Client, &queueAlerter{
 		topic:    *alertTopic,
 		producer: alertProducer,
 		log:      log,
@@ -184,12 +146,9 @@ func main() {
 		"owner_id", *ownerID,
 		"lease_name", *leaseName,
 		"check_interval", checkInterval.String(),
-		"owner_address", *ownerAddress,
 		"requestor_address", *requestorAddress,
 		"min_balance_wei", minBalance.String(),
-		"target_balance_wei", targetBalance.String(),
 		"critical_balance_wei", criticalBalance.String(),
-		"max_topup_per_tx_wei", maxTopup.String(),
 		"alert_topic", *alertTopic,
 	)
 
@@ -250,15 +209,4 @@ func parseBigInt(v string) (*big.Int, error) {
 		return nil, fmt.Errorf("must be > 0")
 	}
 	return out, nil
-}
-
-func newSecretProvider(ctx context.Context, driver string) (secrets.Provider, error) {
-	switch strings.ToLower(strings.TrimSpace(driver)) {
-	case "aws":
-		return secrets.NewAWS(ctx)
-	case "env":
-		return secrets.NewEnv(), nil
-	default:
-		return nil, fmt.Errorf("unsupported secrets driver %q", driver)
-	}
 }

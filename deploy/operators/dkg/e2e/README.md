@@ -66,7 +66,7 @@ GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
 - Funding keys:
   - `BASE_FUNDER_PRIVATE_KEY_HEX`
   - `JUNO_FUNDER_PRIVATE_KEY_HEX`
-  - `BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX`
+  - `SP1_REQUESTOR_PRIVATE_KEY_HEX`
 
 Local invocation example:
 
@@ -75,27 +75,27 @@ Local invocation example:
   --aws-region us-east-1 \
   --base-funder-key-file ./tmp/funders/base-funder.key \
   --juno-funder-key-file ./tmp/funders/juno-funder.key \
-  --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
+  --sp1-requestor-key-file ./tmp/funders/sp1-requestor-mainnet.key \
   -- \
   --base-rpc-url https://base-sepolia.drpc.org \
   --base-chain-id 84532 \
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
-  --boundless-deposit-program-url https://.../deposit-guest.elf \
-  --boundless-withdraw-program-url https://.../withdraw-guest.elf
+  --sp1-deposit-program-url https://.../deposit-guest.elf \
+  --sp1-withdraw-program-url https://.../withdraw-guest.elf
 ```
 
-## Boundless Mode
+## SP1 Mode
 
 - The e2e runs in strict proof mode only.
-- `run-testnet-e2e.sh` always uses `--boundless-auto`.
-- `--boundless-input-mode` is locked to `guest-witness-v1`.
+- `run-testnet-e2e.sh` always uses `--sp1-auto`.
+- `--sp1-input-mode` is locked to `guest-witness-v1`.
 - Guest witness mode requires:
-  - `--boundless-deposit-owallet-ivk-hex`
-  - `--boundless-withdraw-owallet-ovk-hex`
-  - `--boundless-witness-juno-scan-url`
-  - `--boundless-witness-juno-rpc-url`
+  - `--sp1-deposit-owallet-ivk-hex`
+  - `--sp1-withdraw-owallet-ovk-hex`
+  - `--sp1-witness-juno-scan-url`
+  - `--sp1-witness-juno-rpc-url`
   - `JUNO_FUNDER_PRIVATE_KEY_HEX` env var
 - Witness tx generation + extraction are run-owned:
   - `generate-juno-witness-metadata.sh` creates the Juno deposit/withdraw txs during e2e.
@@ -106,8 +106,8 @@ Local invocation example:
 
 Pricing policy and calculator:
 
-- See `deploy/shared/runbooks/boundless-auction-pricing.md`.
-- Run `deploy/shared/runbooks/calc-boundless-auction.sh --cycle-count <cycles>` to compute a baseline profile.
+- See `deploy/shared/runbooks/sp1-auction-pricing.md`.
+- Run `deploy/shared/runbooks/calc-sp1-auction.sh --cycle-count <cycles>` to compute a baseline profile.
 
 ## Quick Start
 
@@ -124,12 +124,12 @@ export JUNO_FUNDER_PRIVATE_KEY_HEX="$(tr -d '\r\n' < ./tmp/funders/juno-funder.k
   --bridge-verifier-address 0xVerifierRouterAddress \
   --bridge-deposit-image-id 0x... \
   --bridge-withdraw-image-id 0x... \
-  --boundless-deposit-owallet-ivk-hex <64-byte-hex> \
-  --boundless-withdraw-owallet-ovk-hex <32-byte-hex> \
-  --boundless-witness-juno-scan-url https://juno-scan.example \
-  --boundless-witness-juno-rpc-url https://junocashd-rpc.example \
-  --boundless-requestor-key-file ./tmp/funders/boundless-requestor-mainnet.key \
-  --boundless-deposit-program-url https://.../deposit-guest.elf \
-  --boundless-withdraw-program-url https://.../withdraw-guest.elf \
+  --sp1-deposit-owallet-ivk-hex <64-byte-hex> \
+  --sp1-withdraw-owallet-ovk-hex <32-byte-hex> \
+  --sp1-witness-juno-scan-url https://juno-scan.example \
+  --sp1-witness-juno-rpc-url https://junocashd-rpc.example \
+  --sp1-requestor-key-file ./tmp/funders/sp1-requestor-mainnet.key \
+  --sp1-deposit-program-url https://.../deposit-guest.elf \
+  --sp1-withdraw-program-url https://.../withdraw-guest.elf \
   --force
 ```

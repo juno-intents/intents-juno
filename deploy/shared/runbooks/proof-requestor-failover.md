@@ -35,7 +35,7 @@ This runbook covers failover of the shared `proof-requestor` and `proof-funder` 
    - `proof.fulfillments.v1` messages are emitted.
    - `proof.failures.v1` contains only expected retryables.
    - request-id sequence continues without resets (`proof_request_ids` table).
-   - topups continue from the centralized funder key.
+   - balance alerts continue from the centralized funder monitor.
 
 ## Post-Failover Checks
 
@@ -52,4 +52,3 @@ This runbook covers failover of the shared `proof-requestor` and `proof-funder` 
 2. Restore Aurora writer in primary (or fail back global DB writer).
 3. Repoint primary configs to healthy Kafka/Aurora endpoints.
 4. Scale primary requestor/funder back up.
-

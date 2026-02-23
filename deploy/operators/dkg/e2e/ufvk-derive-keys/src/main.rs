@@ -142,7 +142,7 @@ fn main() -> Result<()> {
     let ivk_bytes = ivk_external.to_bytes();
     let ovk_bytes: [u8; 32] = *ovk_external.as_ref();
 
-    println!("BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX=0x{}", hex::encode(ivk_bytes));
-    println!("BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX=0x{}", hex::encode(ovk_bytes));
+    println!("SP1_DEPOSIT_OWALLET_IVK_HEX=0x{}", hex::encode(ivk_bytes));
+    println!("SP1_WITHDRAW_OWALLET_OVK_HEX=0x{}", hex::encode(ovk_bytes));
     Ok(())
 }

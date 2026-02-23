@@ -90,8 +90,6 @@ jobs:
               bridge_withdraw_image_id: $withdraw_vkey,
               bridge_deposit_program_vkey: $deposit_vkey,
               bridge_withdraw_program_vkey: $withdraw_vkey,
-              boundless_deposit_program_url: $deposit_program_url,
-              boundless_withdraw_program_url: $withdraw_program_url,
               sp1_deposit_program_url: $deposit_program_url,
               sp1_withdraw_program_url: $withdraw_program_url,
               assets: {
@@ -106,8 +104,6 @@ jobs:
             echo "BRIDGE_WITHDRAW_IMAGE_ID=${withdraw_vkey}"
             echo "BRIDGE_DEPOSIT_PROGRAM_VKEY=${deposit_vkey}"
             echo "BRIDGE_WITHDRAW_PROGRAM_VKEY=${withdraw_vkey}"
-            echo "BOUNDLESS_DEPOSIT_PROGRAM_URL=${deposit_program_url}"
-            echo "BOUNDLESS_WITHDRAW_PROGRAM_URL=${withdraw_program_url}"
             echo "SP1_DEPOSIT_PROGRAM_URL=${deposit_program_url}"
             echo "SP1_WITHDRAW_PROGRAM_URL=${withdraw_program_url}"
           } > .ci/out/bridge-guest-release.env

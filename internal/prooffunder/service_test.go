@@ -3,6 +3,7 @@ package prooffunder
 import (
 	"context"
 	"math/big"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,97 +12,28 @@ import (
 )
 
 type fakeFundingClient struct {
-	balance    *big.Int
-	topupCalls int
-	lastTopup  *big.Int
+	balance *big.Int
 }
 
 func (c *fakeFundingClient) RequestorBalanceWei(_ context.Context, _ common.Address) (*big.Int, error) {
 	return new(big.Int).Set(c.balance), nil
 }
 
-func (c *fakeFundingClient) TopUpRequestor(_ context.Context, _ common.Address, amountWei *big.Int) (string, error) {
-	c.topupCalls++
-	c.lastTopup = new(big.Int).Set(amountWei)
-	c.balance = new(big.Int).Add(c.balance, amountWei)
-	return "0xtopup", nil
-}
-
-func TestComputeTopUpAmount(t *testing.T) {
-	t.Parallel()
-
-	cases := []struct {
-		name   string
-		bal    string
-		min    string
-		target string
-		max    string
-		want   string
-	}{
-		{
-			name:   "no topup above min",
-			bal:    "60",
-			min:    "50",
-			target: "500",
-			max:    "1000",
-			want:   "0",
-		},
-		{
-			name:   "topup to target below min",
-			bal:    "10",
-			min:    "50",
-			target: "500",
-			max:    "1000",
-			want:   "490",
-		},
-		{
-			name:   "topup capped by max per tx",
-			bal:    "10",
-			min:    "50",
-			target: "500",
-			max:    "120",
-			want:   "120",
-		},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			got, shouldTopUp := ComputeTopUpAmount(
-				mustBig(tc.bal),
-				mustBig(tc.min),
-				mustBig(tc.target),
-				mustBig(tc.max),
-			)
-			if !shouldTopUp && tc.want != "0" {
-				t.Fatalf("shouldTopUp=false but want %s", tc.want)
-			}
-			if got.Cmp(mustBig(tc.want)) != 0 {
-				t.Fatalf("amount: got %s want %s", got.String(), tc.want)
-			}
-		})
-	}
-}
-
-func TestService_LeaseAllowsSingleActiveTopupLoop(t *testing.T) {
+func TestService_LeaseAllowsSingleActiveCheckLoop(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 11, 11, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
 
 	leaseStore := leases.NewMemoryStore(nowFn)
-	client := &fakeFundingClient{balance: big.NewInt(10)}
+	client := &fakeFundingClient{balance: big.NewInt(60)}
 	cfg := Config{
 		LeaseName:          "proof-funder",
 		LeaseTTL:           15 * time.Second,
 		CheckInterval:      1 * time.Second,
-		OwnerAddress:       common.HexToAddress("0x000000000000000000000000000000000000beef"),
 		RequestorAddress:   common.HexToAddress("0x000000000000000000000000000000000000cafe"),
 		MinBalanceWei:      big.NewInt(50),
-		TargetBalanceWei:   big.NewInt(200),
 		CriticalBalanceWei: big.NewInt(20),
-		MaxTopUpPerTxWei:   big.NewInt(100),
 	}
 
 	a, err := New(cfg, "funder-a", leaseStore, client, nil)
@@ -119,49 +51,33 @@ func TestService_LeaseAllowsSingleActiveTopupLoop(t *testing.T) {
 	if err := b.Tick(context.Background()); err != nil {
 		t.Fatalf("b.Tick: %v", err)
 	}
-	if got, want := client.topupCalls, 1; got != want {
-		t.Fatalf("topup calls: got %d want %d", got, want)
-	}
-	if got, want := client.lastTopup.String(), "100"; got != want {
-		t.Fatalf("topup amount: got %s want %s", got, want)
-	}
 }
 
-func TestService_Tick_NoTopUpWhenBalanceAboveMin(t *testing.T) {
+func TestService_Tick_InsufficientBalanceReturnsRefillAmount(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 11, 12, 0, 0, 0, time.UTC)
 	nowFn := func() time.Time { return now }
 
 	leaseStore := leases.NewMemoryStore(nowFn)
-	client := &fakeFundingClient{balance: big.NewInt(75)}
+	client := &fakeFundingClient{balance: big.NewInt(17)}
 	svc, err := New(Config{
 		LeaseName:          "proof-funder",
 		LeaseTTL:           15 * time.Second,
 		CheckInterval:      time.Second,
-		OwnerAddress:       common.HexToAddress("0x000000000000000000000000000000000000beef"),
 		RequestorAddress:   common.HexToAddress("0x000000000000000000000000000000000000cafe"),
 		MinBalanceWei:      big.NewInt(50),
-		TargetBalanceWei:   big.NewInt(200),
 		CriticalBalanceWei: big.NewInt(20),
-		MaxTopUpPerTxWei:   big.NewInt(100),
 	}, "funder-a", leaseStore, client, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := svc.Tick(context.Background()); err != nil {
-		t.Fatalf("Tick: %v", err)
+	err = svc.Tick(context.Background())
+	if err == nil {
+		t.Fatalf("expected insufficient balance error")
 	}
-	if client.topupCalls != 0 {
-		t.Fatalf("expected no topup, got %d calls", client.topupCalls)
+	if !strings.Contains(err.Error(), "refill_wei=33") {
+		t.Fatalf("expected refill hint, got: %v", err)
 	}
-}
-
-func mustBig(v string) *big.Int {
-	out, ok := new(big.Int).SetString(v, 10)
-	if !ok {
-		panic("invalid big int: " + v)
-	}
-	return out
 }

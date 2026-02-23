@@ -6,12 +6,11 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
-	"sync/atomic"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
 )
 
 type Alerter interface {
@@ -23,27 +22,22 @@ type Config struct {
 	LeaseTTL      time.Duration
 	CheckInterval time.Duration
 
-	OwnerAddress     common.Address
 	RequestorAddress common.Address
 
 	MinBalanceWei      *big.Int
-	TargetBalanceWei   *big.Int
 	CriticalBalanceWei *big.Int
-	MaxTopUpPerTxWei   *big.Int
 }
 
 type Service struct {
 	cfg     Config
 	ownerID string
 	leases  leases.Store
-	funding boundless.FundingClient
+	funding sp1.FundingClient
 	alerter Alerter
 	log     *slog.Logger
-
-	topupCount atomic.Uint64
 }
 
-func New(cfg Config, ownerID string, leaseStore leases.Store, funding boundless.FundingClient, alerter Alerter) (*Service, error) {
+func New(cfg Config, ownerID string, leaseStore leases.Store, funding sp1.FundingClient, alerter Alerter) (*Service, error) {
 	if leaseStore == nil || funding == nil {
 		return nil, fmt.Errorf("prooffunder: nil dependency")
 	}
@@ -56,14 +50,14 @@ func New(cfg Config, ownerID string, leaseStore leases.Store, funding boundless.
 	if cfg.LeaseName == "" {
 		cfg.LeaseName = "proof-funder"
 	}
-	if cfg.OwnerAddress == (common.Address{}) || cfg.RequestorAddress == (common.Address{}) {
-		return nil, fmt.Errorf("prooffunder: owner/requestor addresses required")
+	if cfg.RequestorAddress == (common.Address{}) {
+		return nil, fmt.Errorf("prooffunder: requestor address required")
 	}
-	if !isPositive(cfg.MinBalanceWei) || !isPositive(cfg.TargetBalanceWei) || !isPositive(cfg.CriticalBalanceWei) || !isPositive(cfg.MaxTopUpPerTxWei) {
+	if !isPositive(cfg.MinBalanceWei) || !isPositive(cfg.CriticalBalanceWei) {
 		return nil, fmt.Errorf("prooffunder: balances must be positive")
 	}
-	if cfg.TargetBalanceWei.Cmp(cfg.MinBalanceWei) < 0 {
-		return nil, fmt.Errorf("prooffunder: target balance must be >= min balance")
+	if cfg.CriticalBalanceWei.Cmp(cfg.MinBalanceWei) > 0 {
+		return nil, fmt.Errorf("prooffunder: critical balance must be <= min balance")
 	}
 	log := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	return &Service{
@@ -86,26 +80,6 @@ func (s *Service) WithLogger(log *slog.Logger) *Service {
 	return s
 }
 
-func ComputeTopUpAmount(balanceWei, minBalanceWei, targetBalanceWei, maxTopUpPerTxWei *big.Int) (*big.Int, bool) {
-	if balanceWei == nil || minBalanceWei == nil || targetBalanceWei == nil || maxTopUpPerTxWei == nil {
-		return big.NewInt(0), false
-	}
-	if balanceWei.Cmp(minBalanceWei) >= 0 {
-		return big.NewInt(0), false
-	}
-	amount := new(big.Int).Sub(targetBalanceWei, balanceWei)
-	if amount.Sign() <= 0 {
-		return big.NewInt(0), false
-	}
-	if amount.Cmp(maxTopUpPerTxWei) > 0 {
-		amount = new(big.Int).Set(maxTopUpPerTxWei)
-	}
-	if amount.Sign() <= 0 {
-		return big.NewInt(0), false
-	}
-	return amount, true
-}
-
 func (s *Service) Tick(ctx context.Context) error {
 	if s == nil || s.leases == nil || s.funding == nil {
 		return fmt.Errorf("prooffunder: nil service")
@@ -125,7 +99,6 @@ func (s *Service) Tick(ctx context.Context) error {
 	s.log.Info("proof-funder metrics",
 		"requestor_address", s.cfg.RequestorAddress,
 		"requestor_balance_wei", balance.String(),
-		"topup_count", s.topupCount.Load(),
 	)
 
 	if balance.Cmp(s.cfg.CriticalBalanceWei) < 0 {
@@ -139,17 +112,15 @@ func (s *Service) Tick(ctx context.Context) error {
 		}
 	}
 
-	topupAmount, shouldTopUp := ComputeTopUpAmount(balance, s.cfg.MinBalanceWei, s.cfg.TargetBalanceWei, s.cfg.MaxTopUpPerTxWei)
-	if !shouldTopUp {
-		return nil
+	if balance.Cmp(s.cfg.MinBalanceWei) < 0 {
+		required := new(big.Int).Sub(s.cfg.MinBalanceWei, balance)
+		return fmt.Errorf(
+			"prooffunder: insufficient requestor balance: have=%s min=%s refill_wei=%s",
+			balance.String(),
+			s.cfg.MinBalanceWei.String(),
+			required.String(),
+		)
 	}
-
-	txHash, err := s.funding.TopUpRequestor(ctx, s.cfg.RequestorAddress, topupAmount)
-	if err != nil {
-		return err
-	}
-	s.topupCount.Add(1)
-	s.log.Info("requestor topup submitted", "requestor", s.cfg.RequestorAddress, "amount_wei", topupAmount.String(), "tx_hash", txHash)
 	return nil
 }
 

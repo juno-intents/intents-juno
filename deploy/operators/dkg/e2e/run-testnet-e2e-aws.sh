@@ -15,17 +15,17 @@ cleanup_aws_profile=""
 cleanup_primary_state_file=""
 cleanup_primary_tfvars_file=""
 cleanup_primary_aws_region=""
-cleanup_primary_boundless_requestor_secret_arn=""
+cleanup_primary_sp1_requestor_secret_arn=""
 cleanup_dr_state_file=""
 cleanup_dr_tfvars_file=""
 cleanup_dr_aws_region=""
-cleanup_dr_boundless_requestor_secret_arn=""
+cleanup_dr_sp1_requestor_secret_arn=""
 AWS_ENV_ARGS=()
 SHARED_PROOF_SERVICES_IMAGE=""
-DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX=""
-DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX=""
+DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX=""
+DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX=""
 DISTRIBUTED_COMPLETION_UFVK=""
-DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA=""
+DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA=""
 
 usage() {
   cat <<'EOF'
@@ -76,10 +76,10 @@ run options:
   --juno-rpc-user-file <path>          file with junocashd RPC username for witness extraction (required)
   --juno-rpc-pass-file <path>          file with junocashd RPC password for witness extraction (required)
   --juno-scan-bearer-token-file <path> optional file with juno-scan bearer token for witness extraction
-  --boundless-requestor-key-file <p>   required file with Boundless requestor private key hex
-  --shared-boundless-requestor-secret-arn <arn>
+  --sp1-requestor-key-file <p>   required file with SP1 requestor private key hex
+  --shared-sp1-requestor-secret-arn <arn>
                                        optional pre-existing primary-region secret ARN for shared proof services
-  --shared-boundless-requestor-secret-arn-dr <arn>
+  --shared-sp1-requestor-secret-arn-dr <arn>
                                        optional pre-existing DR-region secret ARN for shared proof services
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
                                        requires forwarded shared args after '--':
@@ -174,16 +174,16 @@ EOF
   )"
   [[ -n "$derive_output" ]] || return 1
 
-  derived_deposit_ivk="$(awk -F= '/^BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX=/{print $2; exit}' <<<"$derive_output")"
-  derived_withdraw_ovk="$(awk -F= '/^BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX=/{print $2; exit}' <<<"$derive_output")"
+  derived_deposit_ivk="$(awk -F= '/^SP1_DEPOSIT_OWALLET_IVK_HEX=/{print $2; exit}' <<<"$derive_output")"
+  derived_withdraw_ovk="$(awk -F= '/^SP1_WITHDRAW_OWALLET_OVK_HEX=/{print $2; exit}' <<<"$derive_output")"
 
   derived_deposit_ivk="$(normalize_hex_prefixed_value "$derived_deposit_ivk" || true)"
   derived_withdraw_ovk="$(normalize_hex_prefixed_value "$derived_withdraw_ovk" || true)"
   [[ "$derived_deposit_ivk" =~ ^0x[0-9a-f]{128}$ ]] || return 1
   [[ "$derived_withdraw_ovk" =~ ^0x[0-9a-f]{64}$ ]] || return 1
 
-  DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX="$derived_deposit_ivk"
-  DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX="$derived_withdraw_ovk"
+  DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX="$derived_deposit_ivk"
+  DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX="$derived_withdraw_ovk"
   return 0
 }
 
@@ -246,25 +246,25 @@ aws_env_args() {
   fi
 }
 
-create_boundless_requestor_secret() {
+create_sp1_requestor_secret() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_name="$3"
   local secret_value="$4"
 
-  [[ -n "$secret_name" ]] || die "boundless requestor secret name is required"
-  [[ -n "$secret_value" ]] || die "boundless requestor secret value is required"
+  [[ -n "$secret_name" ]] || die "sp1 requestor secret name is required"
+  [[ -n "$secret_value" ]] || die "sp1 requestor secret value is required"
 
   aws_env_args "$aws_profile" "$aws_region"
   env "${AWS_ENV_ARGS[@]}" aws secretsmanager create-secret \
     --name "$secret_name" \
-    --description "boundless requestor key for intents-juno live e2e" \
+    --description "sp1 requestor key for intents-juno live e2e" \
     --secret-string "$secret_value" \
     --query 'ARN' \
     --output text
 }
 
-delete_boundless_requestor_secret() {
+delete_sp1_requestor_secret() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_id="$3"
@@ -277,7 +277,7 @@ delete_boundless_requestor_secret() {
     --force-delete-without-recovery >/dev/null
 }
 
-boundless_requestor_secret_exists() {
+sp1_requestor_secret_exists() {
   local aws_profile="$1"
   local aws_region="$2"
   local secret_id="$3"
@@ -389,16 +389,16 @@ cleanup_trap() {
     fi
   fi
 
-  if [[ -n "$cleanup_dr_boundless_requestor_secret_arn" ]]; then
-    log "cleanup trap: deleting dr boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_boundless_requestor_secret_arn"; then
+  if [[ -n "$cleanup_dr_sp1_requestor_secret_arn" ]]; then
+    log "cleanup trap: deleting dr sp1 requestor secret"
+    if ! delete_sp1_requestor_secret "$cleanup_aws_profile" "$cleanup_dr_aws_region" "$cleanup_dr_sp1_requestor_secret_arn"; then
       log "cleanup trap dr secret delete failed (manual cleanup may be required)"
     fi
   fi
 
-  if [[ -n "$cleanup_primary_boundless_requestor_secret_arn" ]]; then
-    log "cleanup trap: deleting primary boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_boundless_requestor_secret_arn"; then
+  if [[ -n "$cleanup_primary_sp1_requestor_secret_arn" ]]; then
+    log "cleanup trap: deleting primary sp1 requestor secret"
+    if ! delete_sp1_requestor_secret "$cleanup_aws_profile" "$cleanup_primary_aws_region" "$cleanup_primary_sp1_requestor_secret_arn"; then
       log "cleanup trap primary secret delete failed (manual cleanup may be required)"
     fi
   fi
@@ -799,7 +799,7 @@ git submodule update --init --recursive
 run_with_retry cargo +1.91.1 build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
 mkdir -p "\$HOME/.local/bin"
 install -m 0755 zk/target/release/sp1-prover-adapter "\$HOME/.local/bin/sp1-prover-adapter"
-ln -sf "\$HOME/.local/bin/sp1-prover-adapter" "\$HOME/.local/bin/boundless"
+ln -sf "\$HOME/.local/bin/sp1-prover-adapter" "\$HOME/.local/bin/sp1"
 mkdir -p .ci/secrets
 chmod 700 .ci/secrets
 EOF
@@ -1197,7 +1197,7 @@ EOF
   )"
   [[ -n "$completion_juno_shielded_address" ]] || \
     die "distributed dkg completion report missing juno_shielded_address: $completion_report"
-  DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA="$completion_juno_shielded_address"
+  DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA="$completion_juno_shielded_address"
   if ! derive_owallet_keys_from_ufvk "$ssh_private_key" "$ssh_user" "$runner_public_ip" "$remote_repo" "$completion_ufvk"; then
     die "distributed dkg completion report produced invalid owallet key derivation output"
   fi
@@ -1645,13 +1645,13 @@ command_cleanup() {
     dr_region_for_cleanup="$(jq -r '.aws_region // empty' "$dr_tfvars_file")"
   fi
 
-  local boundless_requestor_secret_arn=""
-  local boundless_requestor_secret_arn_dr=""
+  local sp1_requestor_secret_arn=""
+  local sp1_requestor_secret_arn_dr=""
   if [[ -f "$tfvars_file" ]]; then
-    boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+    sp1_requestor_secret_arn="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$tfvars_file")"
   fi
   if [[ -f "$dr_tfvars_file" ]]; then
-    boundless_requestor_secret_arn_dr="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$dr_tfvars_file")"
+    sp1_requestor_secret_arn_dr="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$dr_tfvars_file")"
   fi
 
   if [[ -f "$dr_tfvars_file" ]]; then
@@ -1668,17 +1668,17 @@ command_cleanup() {
     fi
   fi
 
-  if [[ -n "$boundless_requestor_secret_arn_dr" ]]; then
-    log "cleanup: deleting dr boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$aws_profile" "$dr_region_for_cleanup" "$boundless_requestor_secret_arn_dr"; then
-      log "cleanup: dr boundless requestor secret delete failed or secret already removed"
+  if [[ -n "$sp1_requestor_secret_arn_dr" ]]; then
+    log "cleanup: deleting dr sp1 requestor secret"
+    if ! delete_sp1_requestor_secret "$aws_profile" "$dr_region_for_cleanup" "$sp1_requestor_secret_arn_dr"; then
+      log "cleanup: dr sp1 requestor secret delete failed or secret already removed"
     fi
   fi
 
-  if [[ -n "$boundless_requestor_secret_arn" ]]; then
-    log "cleanup: deleting primary boundless requestor secret"
-    if ! delete_boundless_requestor_secret "$aws_profile" "$primary_region_for_cleanup" "$boundless_requestor_secret_arn"; then
-      log "cleanup: primary boundless requestor secret delete failed or secret already removed"
+  if [[ -n "$sp1_requestor_secret_arn" ]]; then
+    log "cleanup: deleting primary sp1 requestor secret"
+    if ! delete_sp1_requestor_secret "$aws_profile" "$primary_region_for_cleanup" "$sp1_requestor_secret_arn"; then
+      log "cleanup: primary sp1 requestor secret delete failed or secret already removed"
     fi
   fi
 }
@@ -1717,9 +1717,9 @@ command_run() {
   local juno_rpc_user_file=""
   local juno_rpc_pass_file=""
   local juno_scan_bearer_token_file=""
-  local boundless_requestor_key_file=""
-  local shared_boundless_requestor_secret_arn_override=""
-  local shared_boundless_requestor_secret_arn_dr_override=""
+  local sp1_requestor_key_file=""
+  local shared_sp1_requestor_secret_arn_override=""
+  local shared_sp1_requestor_secret_arn_dr_override=""
   local with_shared_services="true"
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
@@ -1883,19 +1883,19 @@ command_run() {
         juno_scan_bearer_token_file="$2"
         shift 2
         ;;
-      --boundless-requestor-key-file)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
-        boundless_requestor_key_file="$2"
+      --sp1-requestor-key-file)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-requestor-key-file"
+        sp1_requestor_key_file="$2"
         shift 2
         ;;
-      --shared-boundless-requestor-secret-arn)
-        [[ $# -ge 2 ]] || die "missing value for --shared-boundless-requestor-secret-arn"
-        shared_boundless_requestor_secret_arn_override="$2"
+      --shared-sp1-requestor-secret-arn)
+        [[ $# -ge 2 ]] || die "missing value for --shared-sp1-requestor-secret-arn"
+        shared_sp1_requestor_secret_arn_override="$2"
         shift 2
         ;;
-      --shared-boundless-requestor-secret-arn-dr)
-        [[ $# -ge 2 ]] || die "missing value for --shared-boundless-requestor-secret-arn-dr"
-        shared_boundless_requestor_secret_arn_dr_override="$2"
+      --shared-sp1-requestor-secret-arn-dr)
+        [[ $# -ge 2 ]] || die "missing value for --shared-sp1-requestor-secret-arn-dr"
+        shared_sp1_requestor_secret_arn_dr_override="$2"
         shift 2
         ;;
       --without-shared-services)
@@ -1995,9 +1995,9 @@ command_run() {
     fi
     [[ -n "$aws_dr_region" ]] || die "--aws-dr-region is required when shared services are enabled"
     [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
-    if [[ -n "$shared_boundless_requestor_secret_arn_override" || -n "$shared_boundless_requestor_secret_arn_dr_override" ]]; then
-      [[ -n "$shared_boundless_requestor_secret_arn_override" ]] || die "--shared-boundless-requestor-secret-arn-dr requires --shared-boundless-requestor-secret-arn"
-      [[ -n "$shared_boundless_requestor_secret_arn_dr_override" ]] || die "--shared-boundless-requestor-secret-arn requires --shared-boundless-requestor-secret-arn-dr"
+    if [[ -n "$shared_sp1_requestor_secret_arn_override" || -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
+      [[ -n "$shared_sp1_requestor_secret_arn_override" ]] || die "--shared-sp1-requestor-secret-arn-dr requires --shared-sp1-requestor-secret-arn"
+      [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]] || die "--shared-sp1-requestor-secret-arn requires --shared-sp1-requestor-secret-arn-dr"
     fi
   fi
   if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
@@ -2009,8 +2009,8 @@ command_run() {
   if [[ -n "$shared_ami_id" && ! "$shared_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--shared-ami-id must look like an AMI id (ami-...)"
   fi
-  [[ -n "$boundless_requestor_key_file" ]] || die "--boundless-requestor-key-file is required"
-  [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
+  [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
+  [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
 
   ensure_base_dependencies
   ensure_local_command terraform
@@ -2139,17 +2139,17 @@ command_run() {
 
   local existing_deployment_id=""
   local existing_shared_postgres_password=""
-  local existing_boundless_requestor_secret_arn=""
+  local existing_sp1_requestor_secret_arn=""
   local existing_dr_deployment_id=""
-  local existing_boundless_requestor_secret_arn_dr=""
+  local existing_sp1_requestor_secret_arn_dr=""
   if [[ -f "$tfvars_file" ]]; then
     existing_deployment_id="$(jq -r '.deployment_id // empty' "$tfvars_file")"
     existing_shared_postgres_password="$(jq -r '.shared_postgres_password // empty' "$tfvars_file")"
-    existing_boundless_requestor_secret_arn="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$tfvars_file")"
+    existing_sp1_requestor_secret_arn="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$tfvars_file")"
   fi
   if [[ "$with_shared_services" == "true" && -f "$dr_tfvars_file" ]]; then
     existing_dr_deployment_id="$(jq -r '.deployment_id // empty' "$dr_tfvars_file")"
-    existing_boundless_requestor_secret_arn_dr="$(jq -r '.shared_boundless_requestor_secret_arn // empty' "$dr_tfvars_file")"
+    existing_sp1_requestor_secret_arn_dr="$(jq -r '.shared_sp1_requestor_secret_arn // empty' "$dr_tfvars_file")"
   fi
 
   local deployment_id
@@ -2175,24 +2175,24 @@ command_run() {
   else
     shared_postgres_password="$(openssl rand -hex 16)"
   fi
-  local boundless_requestor_key_hex
-  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
-  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
-  local boundless_requestor_secret_arn=""
-  local boundless_requestor_secret_arn_dr=""
-  local boundless_requestor_secret_created="false"
-  local boundless_requestor_secret_dr_created="false"
+  local sp1_requestor_key_hex
+  sp1_requestor_key_hex="$(trimmed_file_value "$sp1_requestor_key_file")"
+  [[ -n "$sp1_requestor_key_hex" ]] || die "sp1 requestor key file is empty: $sp1_requestor_key_file"
+  local sp1_requestor_secret_arn=""
+  local sp1_requestor_secret_arn_dr=""
+  local sp1_requestor_secret_created="false"
+  local sp1_requestor_secret_dr_created="false"
 
   cleanup_terraform_dir="$terraform_dir"
   cleanup_aws_profile="$aws_profile"
   cleanup_primary_state_file="$state_file"
   cleanup_primary_tfvars_file="$tfvars_file"
   cleanup_primary_aws_region="$aws_region"
-  cleanup_primary_boundless_requestor_secret_arn=""
+  cleanup_primary_sp1_requestor_secret_arn=""
   cleanup_dr_state_file="$dr_state_file"
   cleanup_dr_tfvars_file="$dr_tfvars_file"
   cleanup_dr_aws_region="$aws_dr_region"
-  cleanup_dr_boundless_requestor_secret_arn=""
+  cleanup_dr_sp1_requestor_secret_arn=""
   cleanup_enabled="true"
   if [[ "$keep_infra" == "true" ]]; then
     cleanup_enabled="false"
@@ -2201,56 +2201,56 @@ command_run() {
   trap cleanup_trap EXIT
 
   if [[ "$with_shared_services" == "true" ]]; then
-    local secret_name_prefix boundless_requestor_secret_name
-    local boundless_requestor_secret_name_dr
+    local secret_name_prefix sp1_requestor_secret_name
+    local sp1_requestor_secret_name_dr
     secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
     secret_name_prefix="${secret_name_prefix#-}"
     secret_name_prefix="${secret_name_prefix%-}"
     [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
-    if [[ -n "$shared_boundless_requestor_secret_arn_override" ]]; then
-      boundless_requestor_secret_arn="$shared_boundless_requestor_secret_arn_override"
-      log "using provided boundless requestor secret arn: $boundless_requestor_secret_arn"
-    elif [[ -n "$existing_boundless_requestor_secret_arn" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_boundless_requestor_secret_arn"; then
-      boundless_requestor_secret_arn="$existing_boundless_requestor_secret_arn"
-      log "reusing boundless requestor secret: $boundless_requestor_secret_arn"
+    if [[ -n "$shared_sp1_requestor_secret_arn_override" ]]; then
+      sp1_requestor_secret_arn="$shared_sp1_requestor_secret_arn_override"
+      log "using provided sp1 requestor secret arn: $sp1_requestor_secret_arn"
+    elif [[ -n "$existing_sp1_requestor_secret_arn" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_sp1_requestor_secret_arn"; then
+      sp1_requestor_secret_arn="$existing_sp1_requestor_secret_arn"
+      log "reusing sp1 requestor secret: $sp1_requestor_secret_arn"
     else
-      boundless_requestor_secret_name="${secret_name_prefix}-${deployment_id}-boundless-requestor-key"
-      log "creating boundless requestor secret"
-      boundless_requestor_secret_arn="$(
-        create_boundless_requestor_secret \
+      sp1_requestor_secret_name="${secret_name_prefix}-${deployment_id}-sp1-requestor-key"
+      log "creating sp1 requestor secret"
+      sp1_requestor_secret_arn="$(
+        create_sp1_requestor_secret \
           "$aws_profile" \
           "$aws_region" \
-          "$boundless_requestor_secret_name" \
-          "$boundless_requestor_key_hex"
+          "$sp1_requestor_secret_name" \
+          "$sp1_requestor_key_hex"
       )"
-      [[ -n "$boundless_requestor_secret_arn" && "$boundless_requestor_secret_arn" != "None" ]] || die "failed to create boundless requestor secret"
-      boundless_requestor_secret_created="true"
+      [[ -n "$sp1_requestor_secret_arn" && "$sp1_requestor_secret_arn" != "None" ]] || die "failed to create sp1 requestor secret"
+      sp1_requestor_secret_created="true"
     fi
-    if [[ "$boundless_requestor_secret_created" == "true" ]]; then
-      cleanup_primary_boundless_requestor_secret_arn="$boundless_requestor_secret_arn"
+    if [[ "$sp1_requestor_secret_created" == "true" ]]; then
+      cleanup_primary_sp1_requestor_secret_arn="$sp1_requestor_secret_arn"
     fi
 
-    if [[ -n "$shared_boundless_requestor_secret_arn_dr_override" ]]; then
-      boundless_requestor_secret_arn_dr="$shared_boundless_requestor_secret_arn_dr_override"
-      log "using provided dr boundless requestor secret arn: $boundless_requestor_secret_arn_dr"
-    elif [[ -n "$existing_boundless_requestor_secret_arn_dr" ]] && boundless_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_boundless_requestor_secret_arn_dr"; then
-      boundless_requestor_secret_arn_dr="$existing_boundless_requestor_secret_arn_dr"
-      log "reusing dr boundless requestor secret: $boundless_requestor_secret_arn_dr"
+    if [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
+      sp1_requestor_secret_arn_dr="$shared_sp1_requestor_secret_arn_dr_override"
+      log "using provided dr sp1 requestor secret arn: $sp1_requestor_secret_arn_dr"
+    elif [[ -n "$existing_sp1_requestor_secret_arn_dr" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_sp1_requestor_secret_arn_dr"; then
+      sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
+      log "reusing dr sp1 requestor secret: $sp1_requestor_secret_arn_dr"
     else
-      boundless_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-boundless-requestor-key"
-      log "creating dr boundless requestor secret"
-      boundless_requestor_secret_arn_dr="$(
-        create_boundless_requestor_secret \
+      sp1_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-sp1-requestor-key"
+      log "creating dr sp1 requestor secret"
+      sp1_requestor_secret_arn_dr="$(
+        create_sp1_requestor_secret \
           "$aws_profile" \
           "$aws_dr_region" \
-          "$boundless_requestor_secret_name_dr" \
-          "$boundless_requestor_key_hex"
+          "$sp1_requestor_secret_name_dr" \
+          "$sp1_requestor_key_hex"
       )"
-      [[ -n "$boundless_requestor_secret_arn_dr" && "$boundless_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr boundless requestor secret"
-      boundless_requestor_secret_dr_created="true"
+      [[ -n "$sp1_requestor_secret_arn_dr" && "$sp1_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr sp1 requestor secret"
+      sp1_requestor_secret_dr_created="true"
     fi
-    if [[ "$boundless_requestor_secret_dr_created" == "true" ]]; then
-      cleanup_dr_boundless_requestor_secret_arn="$boundless_requestor_secret_arn_dr"
+    if [[ "$sp1_requestor_secret_dr_created" == "true" ]]; then
+      cleanup_dr_sp1_requestor_secret_arn="$sp1_requestor_secret_arn_dr"
     fi
   fi
 
@@ -2280,7 +2280,7 @@ command_run() {
     --arg shared_postgres_user "$shared_postgres_user" \
     --arg shared_postgres_password "$shared_postgres_password" \
     --arg shared_postgres_db "$shared_postgres_db" \
-    --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn" \
+    --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
     --argjson runner_associate_public_ip_address "$runner_associate_public_ip_address" \
@@ -2306,7 +2306,7 @@ command_run() {
       shared_postgres_user: $shared_postgres_user,
       shared_postgres_password: $shared_postgres_password,
       shared_postgres_db: $shared_postgres_db,
-      shared_boundless_requestor_secret_arn: $shared_boundless_requestor_secret_arn,
+      shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
       shared_postgres_port: $shared_postgres_port,
       shared_kafka_port: $shared_kafka_port,
       runner_associate_public_ip_address: $runner_associate_public_ip_address,
@@ -2324,13 +2324,13 @@ command_run() {
     jq \
       --arg aws_region "$aws_dr_region" \
       --arg deployment_id "$dr_deployment_id" \
-      --arg shared_boundless_requestor_secret_arn "$boundless_requestor_secret_arn_dr" \
+      --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn_dr" \
       --arg runner_ami_id "$dr_runner_ami_id" \
       --arg operator_ami_id "$dr_operator_ami_id" \
       --arg shared_ami_id "$dr_shared_ami_id" \
       '.aws_region = $aws_region
       | .deployment_id = $deployment_id
-      | .shared_boundless_requestor_secret_arn = $shared_boundless_requestor_secret_arn
+      | .shared_sp1_requestor_secret_arn = $shared_sp1_requestor_secret_arn
       | .runner_ami_id = $runner_ami_id
       | .operator_ami_id = $operator_ami_id
       | .shared_ami_id = $shared_ami_id' \
@@ -2662,13 +2662,13 @@ command_run() {
       "$remote_repo/.ci/secrets/juno-scan-bearer.txt"
   fi
 
-  if [[ -n "$boundless_requestor_key_file" ]]; then
+  if [[ -n "$sp1_requestor_key_file" ]]; then
     copy_remote_secret_file \
       "$ssh_key_private" \
       "$runner_ssh_user" \
       "$runner_public_ip" \
-      "$boundless_requestor_key_file" \
-      "$remote_repo/.ci/secrets/boundless-requestor.key"
+      "$sp1_requestor_key_file" \
+      "$remote_repo/.ci/secrets/sp1-requestor.key"
   fi
 
   copy_remote_secret_file \
@@ -2732,8 +2732,8 @@ command_run() {
     --output "$remote_workdir/reports/testnet-e2e-summary.json"
     --force
   )
-  if [[ -n "$boundless_requestor_key_file" ]]; then
-    remote_args+=(--boundless-requestor-key-file ".ci/secrets/boundless-requestor.key")
+  if [[ -n "$sp1_requestor_key_file" ]]; then
+    remote_args+=(--sp1-requestor-key-file ".ci/secrets/sp1-requestor.key")
   fi
   if [[ -n "$aws_dr_region" ]]; then
     remote_args+=("--aws-dr-region" "$aws_dr_region")
@@ -2781,63 +2781,63 @@ command_run() {
     die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --withdraw-coordinator-runtime-mode)"
   fi
 
-  [[ "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX" =~ ^0x[0-9a-f]{128}$ ]] || \
+  [[ "$DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX" =~ ^0x[0-9a-f]{128}$ ]] || \
     die "distributed dkg completion report produced invalid owallet key derivation output"
-  [[ "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX" =~ ^0x[0-9a-f]{64}$ ]] || \
+  [[ "$DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX" =~ ^0x[0-9a-f]{64}$ ]] || \
     die "distributed dkg completion report produced invalid owallet key derivation output"
 
-  local forwarded_boundless_deposit_owallet_ivk_hex=""
-  local forwarded_boundless_withdraw_owallet_ovk_hex=""
-  local forwarded_boundless_witness_recipient_ua=""
-  local forwarded_boundless_witness_recipient_ufvk=""
-  forwarded_boundless_deposit_owallet_ivk_hex="$(forwarded_arg_value "--boundless-deposit-owallet-ivk-hex" "${e2e_args[@]}" || true)"
-  forwarded_boundless_withdraw_owallet_ovk_hex="$(forwarded_arg_value "--boundless-withdraw-owallet-ovk-hex" "${e2e_args[@]}" || true)"
-  forwarded_boundless_witness_recipient_ua="$(forwarded_arg_value "--boundless-witness-recipient-ua" "${e2e_args[@]}" || true)"
-  forwarded_boundless_witness_recipient_ufvk="$(forwarded_arg_value "--boundless-witness-recipient-ufvk" "${e2e_args[@]}" || true)"
+  local forwarded_sp1_deposit_owallet_ivk_hex=""
+  local forwarded_sp1_withdraw_owallet_ovk_hex=""
+  local forwarded_sp1_witness_recipient_ua=""
+  local forwarded_sp1_witness_recipient_ufvk=""
+  forwarded_sp1_deposit_owallet_ivk_hex="$(forwarded_arg_value "--sp1-deposit-owallet-ivk-hex" "${e2e_args[@]}" || true)"
+  forwarded_sp1_withdraw_owallet_ovk_hex="$(forwarded_arg_value "--sp1-withdraw-owallet-ovk-hex" "${e2e_args[@]}" || true)"
+  forwarded_sp1_witness_recipient_ua="$(forwarded_arg_value "--sp1-witness-recipient-ua" "${e2e_args[@]}" || true)"
+  forwarded_sp1_witness_recipient_ufvk="$(forwarded_arg_value "--sp1-witness-recipient-ufvk" "${e2e_args[@]}" || true)"
 
-  if [[ -n "$forwarded_boundless_deposit_owallet_ivk_hex" ]]; then
-    local normalized_forwarded_boundless_deposit_owallet_ivk_hex
-    normalized_forwarded_boundless_deposit_owallet_ivk_hex="$(normalize_hex_prefixed_value "$forwarded_boundless_deposit_owallet_ivk_hex" || true)"
-    if [[ ! "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" =~ ^0x[0-9a-f]{128}$ ]]; then
-      log "warning: ignoring invalid forwarded --boundless-deposit-owallet-ivk-hex; using distributed dkg ufvk-derived value"
-    elif [[ "$normalized_forwarded_boundless_deposit_owallet_ivk_hex" != "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX" ]]; then
-      log "warning: overriding forwarded --boundless-deposit-owallet-ivk-hex with distributed dkg ufvk-derived value"
-    fi
-  fi
-
-  if [[ -n "$forwarded_boundless_withdraw_owallet_ovk_hex" ]]; then
-    local normalized_forwarded_boundless_withdraw_owallet_ovk_hex
-    normalized_forwarded_boundless_withdraw_owallet_ovk_hex="$(normalize_hex_prefixed_value "$forwarded_boundless_withdraw_owallet_ovk_hex" || true)"
-    if [[ ! "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" =~ ^0x[0-9a-f]{64}$ ]]; then
-      log "warning: ignoring invalid forwarded --boundless-withdraw-owallet-ovk-hex; using distributed dkg ufvk-derived value"
-    elif [[ "$normalized_forwarded_boundless_withdraw_owallet_ovk_hex" != "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX" ]]; then
-      log "warning: overriding forwarded --boundless-withdraw-owallet-ovk-hex with distributed dkg ufvk-derived value"
-    fi
-  fi
-  if [[ -n "$forwarded_boundless_witness_recipient_ua" ]]; then
-    if [[ "$forwarded_boundless_witness_recipient_ua" != "$DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA" ]]; then
-      log "warning: overriding forwarded --boundless-witness-recipient-ua with distributed dkg completion juno_shielded_address"
-    fi
-  fi
-  if [[ -n "$forwarded_boundless_witness_recipient_ufvk" ]]; then
-    if [[ "$forwarded_boundless_witness_recipient_ufvk" != "$DISTRIBUTED_COMPLETION_UFVK" ]]; then
-      log "warning: overriding forwarded --boundless-witness-recipient-ufvk with distributed dkg completion ufvk"
+  if [[ -n "$forwarded_sp1_deposit_owallet_ivk_hex" ]]; then
+    local normalized_forwarded_sp1_deposit_owallet_ivk_hex
+    normalized_forwarded_sp1_deposit_owallet_ivk_hex="$(normalize_hex_prefixed_value "$forwarded_sp1_deposit_owallet_ivk_hex" || true)"
+    if [[ ! "$normalized_forwarded_sp1_deposit_owallet_ivk_hex" =~ ^0x[0-9a-f]{128}$ ]]; then
+      log "warning: ignoring invalid forwarded --sp1-deposit-owallet-ivk-hex; using distributed dkg ufvk-derived value"
+    elif [[ "$normalized_forwarded_sp1_deposit_owallet_ivk_hex" != "$DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX" ]]; then
+      log "warning: overriding forwarded --sp1-deposit-owallet-ivk-hex with distributed dkg ufvk-derived value"
     fi
   fi
 
-  log "using distributed dkg ufvk-derived owallet key material for boundless guest witness inputs"
+  if [[ -n "$forwarded_sp1_withdraw_owallet_ovk_hex" ]]; then
+    local normalized_forwarded_sp1_withdraw_owallet_ovk_hex
+    normalized_forwarded_sp1_withdraw_owallet_ovk_hex="$(normalize_hex_prefixed_value "$forwarded_sp1_withdraw_owallet_ovk_hex" || true)"
+    if [[ ! "$normalized_forwarded_sp1_withdraw_owallet_ovk_hex" =~ ^0x[0-9a-f]{64}$ ]]; then
+      log "warning: ignoring invalid forwarded --sp1-withdraw-owallet-ovk-hex; using distributed dkg ufvk-derived value"
+    elif [[ "$normalized_forwarded_sp1_withdraw_owallet_ovk_hex" != "$DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX" ]]; then
+      log "warning: overriding forwarded --sp1-withdraw-owallet-ovk-hex with distributed dkg ufvk-derived value"
+    fi
+  fi
+  if [[ -n "$forwarded_sp1_witness_recipient_ua" ]]; then
+    if [[ "$forwarded_sp1_witness_recipient_ua" != "$DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA" ]]; then
+      log "warning: overriding forwarded --sp1-witness-recipient-ua with distributed dkg completion juno_shielded_address"
+    fi
+  fi
+  if [[ -n "$forwarded_sp1_witness_recipient_ufvk" ]]; then
+    if [[ "$forwarded_sp1_witness_recipient_ufvk" != "$DISTRIBUTED_COMPLETION_UFVK" ]]; then
+      log "warning: overriding forwarded --sp1-witness-recipient-ufvk with distributed dkg completion ufvk"
+    fi
+  fi
+
+  log "using distributed dkg ufvk-derived owallet key material for sp1 guest witness inputs"
   remote_args+=(
-    "--boundless-deposit-owallet-ivk-hex" "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX"
-    "--boundless-withdraw-owallet-ovk-hex" "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX"
-    "--boundless-witness-recipient-ua" "$DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA"
-    "--boundless-witness-recipient-ufvk" "$DISTRIBUTED_COMPLETION_UFVK"
+    "--sp1-deposit-owallet-ivk-hex" "$DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX"
+    "--sp1-withdraw-owallet-ovk-hex" "$DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX"
+    "--sp1-witness-recipient-ua" "$DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA"
+    "--sp1-witness-recipient-ufvk" "$DISTRIBUTED_COMPLETION_UFVK"
   )
 
   local -a sanitized_e2e_args=()
   local e2e_idx=0
   while (( e2e_idx < ${#e2e_args[@]} )); do
     case "${e2e_args[$e2e_idx]}" in
-      --boundless-deposit-owallet-ivk-hex|--boundless-withdraw-owallet-ovk-hex|--boundless-witness-recipient-ua|--boundless-witness-recipient-ufvk)
+      --sp1-deposit-owallet-ivk-hex|--sp1-withdraw-owallet-ovk-hex|--sp1-witness-recipient-ua|--sp1-witness-recipient-ufvk)
         (( e2e_idx + 1 < ${#e2e_args[@]} )) || die "forwarded argument missing value: ${e2e_args[$e2e_idx]}"
         e2e_idx=$((e2e_idx + 2))
         ;;
@@ -2849,27 +2849,27 @@ command_run() {
   done
 
   remote_args+=("${sanitized_e2e_args[@]}")
-  if ! forwarded_arg_value "--boundless-input-s3-bucket" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "defaulting --boundless-input-s3-bucket to terraform dkg bucket output"
-    remote_args+=("--boundless-input-s3-bucket" "$dkg_s3_bucket")
+  if ! forwarded_arg_value "--sp1-input-s3-bucket" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "defaulting --sp1-input-s3-bucket to terraform dkg bucket output"
+    remote_args+=("--sp1-input-s3-bucket" "$dkg_s3_bucket")
   fi
-  if forwarded_arg_value "--boundless-witness-juno-scan-url" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-juno-scan-url with stack-derived witness tunnel endpoint"
+  if forwarded_arg_value "--sp1-witness-juno-scan-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-juno-scan-url with stack-derived witness tunnel endpoint"
   fi
-  if forwarded_arg_value "--boundless-witness-juno-rpc-url" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-juno-rpc-url with stack-derived witness tunnel endpoint"
+  if forwarded_arg_value "--sp1-witness-juno-rpc-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-juno-rpc-url with stack-derived witness tunnel endpoint"
   fi
-  if forwarded_arg_value "--boundless-witness-juno-scan-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-juno-scan-urls with stack-derived witness tunnel endpoint pool"
+  if forwarded_arg_value "--sp1-witness-juno-scan-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-juno-scan-urls with stack-derived witness tunnel endpoint pool"
   fi
-  if forwarded_arg_value "--boundless-witness-juno-rpc-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-juno-rpc-urls with stack-derived witness tunnel endpoint pool"
+  if forwarded_arg_value "--sp1-witness-juno-rpc-urls" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-juno-rpc-urls with stack-derived witness tunnel endpoint pool"
   fi
-  if forwarded_arg_value "--boundless-witness-operator-labels" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-operator-labels with stack-derived witness operator labels"
+  if forwarded_arg_value "--sp1-witness-operator-labels" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-operator-labels with stack-derived witness operator labels"
   fi
-  if forwarded_arg_value "--boundless-witness-quorum-threshold" "${e2e_args[@]}" >/dev/null 2>&1; then
-    log "overriding forwarded --boundless-witness-quorum-threshold with stack-derived witness quorum threshold"
+  if forwarded_arg_value "--sp1-witness-quorum-threshold" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --sp1-witness-quorum-threshold with stack-derived witness quorum threshold"
   fi
   if forwarded_arg_value "--withdraw-coordinator-tss-url" "${e2e_args[@]}" >/dev/null 2>&1; then
     log "overriding forwarded --withdraw-coordinator-tss-url with stack-derived witness tunnel endpoint"
@@ -2878,12 +2878,12 @@ command_run() {
     log "overriding forwarded --withdraw-coordinator-tss-server-ca-file with stack-derived witness CA"
   fi
   remote_args+=(
-    "--boundless-witness-juno-scan-url" "$witness_juno_scan_url"
-    "--boundless-witness-juno-rpc-url" "$witness_juno_rpc_url"
-    "--boundless-witness-juno-scan-urls" "$witness_juno_scan_urls_csv"
-    "--boundless-witness-juno-rpc-urls" "$witness_juno_rpc_urls_csv"
-    "--boundless-witness-operator-labels" "$witness_operator_labels_csv"
-    "--boundless-witness-quorum-threshold" "$witness_quorum_threshold"
+    "--sp1-witness-juno-scan-url" "$witness_juno_scan_url"
+    "--sp1-witness-juno-rpc-url" "$witness_juno_rpc_url"
+    "--sp1-witness-juno-scan-urls" "$witness_juno_scan_urls_csv"
+    "--sp1-witness-juno-rpc-urls" "$witness_juno_rpc_urls_csv"
+    "--sp1-witness-operator-labels" "$witness_operator_labels_csv"
+    "--sp1-witness-quorum-threshold" "$witness_quorum_threshold"
     "--withdraw-coordinator-tss-url" "$witness_tss_url"
     "--withdraw-coordinator-tss-server-ca-file" ".ci/secrets/witness-tss-ca.pem"
   )

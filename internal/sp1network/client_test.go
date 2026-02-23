@@ -1,4 +1,4 @@
-package boundless
+package sp1network
 
 import (
 	"errors"
@@ -14,7 +14,7 @@ func TestParseBackend(t *testing.T) {
 		want    Backend
 		wantErr bool
 	}{
-		{name: "boundless", in: "boundless", want: BackendBoundless},
+		{name: "sp1network", in: "sp1network", want: BackendSP1Network},
 		{name: "self", in: "self", want: BackendSelf},
 		{name: "trim and lower", in: "  SeLf\t", want: BackendSelf},
 		{name: "missing", in: "", wantErr: true},
@@ -54,7 +54,7 @@ func TestNew(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "defaults to boundless",
+			name: "defaults to sp1network",
 			cfg: Config{
 				ProverBin:        "fake-prover",
 				MaxResponseBytes: 1024,
@@ -80,7 +80,7 @@ func TestNew(t *testing.T) {
 		{
 			name: "missing prover binary",
 			cfg: Config{
-				Backend:          BackendBoundless.String(),
+				Backend:          BackendSP1Network.String(),
 				MaxResponseBytes: 1024,
 			},
 			wantErr: true,
@@ -88,7 +88,7 @@ func TestNew(t *testing.T) {
 		{
 			name: "invalid response limit",
 			cfg: Config{
-				Backend:          BackendBoundless.String(),
+				Backend:          BackendSP1Network.String(),
 				ProverBin:        "fake-prover",
 				MaxResponseBytes: 0,
 			},

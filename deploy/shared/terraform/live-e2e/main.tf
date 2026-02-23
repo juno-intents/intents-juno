@@ -580,7 +580,7 @@ resource "aws_ecr_repository" "proof_services" {
 
 locals {
   shared_proof_service_image            = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
-  shared_boundless_requestor_secret_arn = trimspace(var.shared_boundless_requestor_secret_arn)
+  shared_sp1_requestor_secret_arn = trimspace(var.shared_sp1_requestor_secret_arn)
 }
 
 resource "aws_cloudwatch_log_group" "proof_requestor" {
@@ -634,7 +634,7 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       secrets = [
         {
           name      = "PROOF_REQUESTOR_KEY"
-          valueFrom = local.shared_boundless_requestor_secret_arn
+          valueFrom = local.shared_sp1_requestor_secret_arn
         }
       ]
       logConfiguration = {
@@ -654,8 +654,8 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       error_message = "shared proof service image must not be empty."
     }
     precondition {
-      condition     = local.shared_boundless_requestor_secret_arn != ""
-      error_message = "shared_boundless_requestor_secret_arn must be set when provision_shared_services=true."
+      condition     = local.shared_sp1_requestor_secret_arn != ""
+      error_message = "shared_sp1_requestor_secret_arn must be set when provision_shared_services=true."
     }
   }
 
@@ -687,7 +687,7 @@ resource "aws_ecs_task_definition" "proof_funder" {
       secrets = [
         {
           name      = "PROOF_FUNDER_KEY"
-          valueFrom = local.shared_boundless_requestor_secret_arn
+          valueFrom = local.shared_sp1_requestor_secret_arn
         }
       ]
       logConfiguration = {
@@ -707,8 +707,8 @@ resource "aws_ecs_task_definition" "proof_funder" {
       error_message = "shared proof service image must not be empty."
     }
     precondition {
-      condition     = local.shared_boundless_requestor_secret_arn != ""
-      error_message = "shared_boundless_requestor_secret_arn must be set when provision_shared_services=true."
+      condition     = local.shared_sp1_requestor_secret_arn != ""
+      error_message = "shared_sp1_requestor_secret_arn must be set when provision_shared_services=true."
     }
   }
 

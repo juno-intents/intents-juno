@@ -60,7 +60,7 @@ func TestQueueClient_RequestProofFulfillment(t *testing.T) {
 	jobID := common.HexToHash("0x5a6a8f35ea6fbce9ebc657de70e77bb9b7f2030569f9c6fbf46ba783f913be98")
 	consumer.msgCh <- queue.Message{
 		Topic: "proof.fulfillments.v1",
-		Value: []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99","journal":"0x0102","metadata":{"provider":"boundless"}}`),
+		Value: []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99","journal":"0x0102","metadata":{"provider":"sp1"}}`),
 	}
 
 	res, err := client.RequestProof(context.Background(), Request{

@@ -9,9 +9,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
 )
 
 func TestWorker_E2E_FulfillmentDeterministic(t *testing.T) {
@@ -19,21 +19,12 @@ func TestWorker_E2E_FulfillmentDeterministic(t *testing.T) {
 
 	now := time.Date(2026, 2, 11, 14, 0, 0, 0, time.UTC)
 	store := proof.NewMemoryStore(func() time.Time { return now })
-	submitter := &stubSubmitter{
-		offchainResp: boundless.SubmitResponse{
-			RequestID:      1,
-			SubmissionPath: "offchain",
-			Seal:           []byte{0x99},
-		},
-	}
+	submitter := &stubProver{seal: []byte{0x99}}
 	svc, err := New(Config{
-		Owner:                      "requestor-e2e",
-		ChainID:                    8453,
-		RequestTimeout:             5 * time.Second,
-		CallbackIdempotencyTTL:     72 * time.Hour,
-		SubmissionMode:             boundless.SubmissionModeOffchainPrimaryOnchainFallback,
-		OnchainFallbackEnabled:     true,
-		OnchainFallbackFundingMode: boundless.FundingModeMinMaxBalance,
+		Owner:                  "requestor-e2e",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
 	}, store, submitter, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -109,16 +100,13 @@ func TestWorker_E2E_FailurePublished(t *testing.T) {
 
 	now := time.Date(2026, 2, 11, 14, 30, 0, 0, time.UTC)
 	store := proof.NewMemoryStore(func() time.Time { return now })
-	submitter := &stubSubmitter{offchainErr: &boundless.SubmitError{Code: "upstream_timeout", Retryable: true, Cause: context.DeadlineExceeded}}
+	submitter := &stubProver{err: sp1.NewRetryableError("upstream_timeout", context.DeadlineExceeded)}
 
 	svc, err := New(Config{
-		Owner:                      "requestor-e2e",
-		ChainID:                    8453,
-		RequestTimeout:             5 * time.Second,
-		CallbackIdempotencyTTL:     72 * time.Hour,
-		SubmissionMode:             boundless.SubmissionModeOffchainPrimaryOnchainFallback,
-		OnchainFallbackEnabled:     false,
-		OnchainFallbackFundingMode: boundless.FundingModeMinMaxBalance,
+		Owner:                  "requestor-e2e",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
 	}, store, submitter, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)

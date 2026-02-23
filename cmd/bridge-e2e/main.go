@@ -93,10 +93,10 @@ type config struct {
 	JunoExecutionTxHash         string
 	OutputPath                  string
 	RunTimeout                  time.Duration
-	Boundless                   boundlessConfig
+	SP1                   sp1Config
 }
 
-type boundlessConfig struct {
+type sp1Config struct {
 	Auto bool
 
 	Bin                     string
@@ -117,18 +117,10 @@ type boundlessConfig struct {
 	InputS3Region           string
 	InputS3PresignTTL       time.Duration
 
-	MinPriceWei    *big.Int
-	MaxPriceWei    *big.Int
-	MaxPriceCapWei *big.Int
-	LockStakeWei   *big.Int
-
-	MaxPriceBumpMultiplier uint64
-	MaxPriceBumpRetries    uint64
-
-	BiddingDelaySeconds uint64
-	RampUpPeriodSeconds uint64
-	LockTimeoutSeconds  uint64
-	TimeoutSeconds      uint64
+	MaxPricePerPGU   uint64
+	MinAuctionPeriod uint64
+	AuctionTimeout   time.Duration
+	RequestTimeout   time.Duration
 
 	RequestorAddress common.Address
 
@@ -143,7 +135,7 @@ type boundlessConfig struct {
 	ProofDeadline       time.Duration
 }
 
-type boundlessWaitResult struct {
+type sp1WaitResult struct {
 	RequestIDHex string
 	JournalHex   string
 	SealHex      string
@@ -153,25 +145,22 @@ const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
 
-	defaultBoundlessMinPriceWei            = "0"
-	defaultBoundlessMaxPriceWei            = "50000000000000"
-	defaultBoundlessMaxPriceCapWei         = "250000000000000"
-	defaultBoundlessMaxPriceBumpMultiplier = 2
-	defaultBoundlessMaxPriceBumpRetries    = 3
-	defaultBoundlessLockStakeWei           = "20000000000000000000"
-	defaultBoundlessMarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-	defaultBoundlessRouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
-	defaultBoundlessSetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-	defaultBoundlessInputS3Prefix          = "bridge-e2e/boundless-input"
-	defaultBoundlessInputS3PresignTTL      = 2 * time.Hour
-	defaultBoundlessProofAttemptGrace      = 2 * time.Minute
-	boundlessGroth16SelectorHex            = "73c457ba"
+	defaultSP1MaxPricePerPGU         = uint64(50000000000000)
+	defaultSP1MinAuctionPeriod       = uint64(85)
+	defaultSP1AuctionTimeout         = 625 * time.Second
+	defaultSP1RequestTimeout         = 1500 * time.Second
+	defaultSP1MarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+	defaultSP1RouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
+	defaultSP1SetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+	defaultSP1InputS3Prefix          = "bridge-e2e/sp1-input"
+	defaultSP1InputS3PresignTTL      = 2 * time.Hour
+	defaultSP1ProofAttemptGrace      = 2 * time.Minute
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 
-	boundlessInputModeGuestWitnessV1  = "guest-witness-v1"
-	boundlessProofSubmissionDirectCLI = "direct-cli"
-	boundlessProofSubmissionQueue     = "queue"
+	sp1InputModeGuestWitnessV1  = "guest-witness-v1"
+	sp1ProofSubmissionDirectCLI = "direct-cli"
+	sp1ProofSubmissionQueue     = "queue"
 	defaultProofRequestTopic          = "proof.requests.v1"
 	defaultProofResultTopic           = "proof.fulfillments.v1"
 	defaultProofFailureTopic          = "proof.failures.v1"
@@ -189,7 +178,7 @@ const (
 	withdrawalFinalizedPollInterval   = 2 * time.Second
 	postFinalizeInvariantWaitTimeout  = 60 * time.Second
 	postFinalizeInvariantPollInterval = 2 * time.Second
-	boundlessMarketBalanceOfABIJSON   = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
+	sp1MarketBalanceOfABIJSON   = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 
 	depositWitnessLeafIndexOffset = 0
 	depositWitnessAuthPathOffset  = depositWitnessLeafIndexOffset + 4
@@ -269,7 +258,7 @@ type report struct {
 		DepositSealBytes  int    `json:"deposit_seal_bytes"`
 		WithdrawSealBytes int    `json:"withdraw_seal_bytes"`
 
-		Boundless struct {
+		SP1 struct {
 			Enabled                bool   `json:"enabled"`
 			SubmissionMode         string `json:"submission_mode,omitempty"`
 			RPCURL                 string `json:"rpc_url,omitempty"`
@@ -279,17 +268,11 @@ type report struct {
 			SetVerifier            string `json:"set_verifier_address,omitempty"`
 			DepositRequestID       string `json:"deposit_request_id,omitempty"`
 			WithdrawRequestID      string `json:"withdraw_request_id,omitempty"`
-			MinPriceWei            string `json:"min_price_wei,omitempty"`
-			MaxPriceWei            string `json:"max_price_wei,omitempty"`
-			MaxPriceCapWei         string `json:"max_price_cap_wei,omitempty"`
-			LockStakeWei           string `json:"lock_stake_wei,omitempty"`
-			MaxPriceBumpMultiplier uint64 `json:"max_price_bump_multiplier,omitempty"`
-			MaxPriceBumpRetries    uint64 `json:"max_price_bump_retries,omitempty"`
-			BiddingDelaySec        uint64 `json:"bidding_delay_seconds,omitempty"`
-			RampUpPeriodSec        uint64 `json:"ramp_up_period_seconds,omitempty"`
-			LockTimeoutSec         uint64 `json:"lock_timeout_seconds,omitempty"`
-			TimeoutSec             uint64 `json:"timeout_seconds,omitempty"`
-		} `json:"boundless,omitempty"`
+			MaxPricePerPGU         uint64 `json:"max_price_per_pgu,omitempty"`
+			MinAuctionPeriodSec    uint64 `json:"min_auction_period_seconds,omitempty"`
+			AuctionTimeoutSec      uint64 `json:"auction_timeout_seconds,omitempty"`
+			RequestTimeoutSec      uint64 `json:"request_timeout_seconds,omitempty"`
+		} `json:"sp1,omitempty"`
 	} `json:"proof"`
 
 	Invariants struct {
@@ -461,20 +444,16 @@ func parseArgs(args []string) (config, error) {
 	var withdrawCheckpointBlockHashHex string
 	var depositFinalOrchardRootHex string
 	var withdrawFinalOrchardRootHex string
-	var boundlessRequestorKeyFile string
-	var boundlessRequestorKeyHex string
-	var boundlessDepositOWalletIVKHex string
-	var boundlessWithdrawOWalletOVKHex string
-	var boundlessDepositWitnessItemFiles stringListFlag
-	var boundlessWithdrawWitnessItemFiles stringListFlag
-	var boundlessMinPriceWei string
-	var boundlessMaxPriceWei string
-	var boundlessMaxPriceCapWei string
-	var boundlessLockStakeWei string
-	var boundlessInputS3Bucket string
-	var boundlessInputS3Prefix string
-	var boundlessInputS3Region string
-	var boundlessProofQueueBrokers string
+	var sp1RequestorKeyFile string
+	var sp1RequestorKeyHex string
+	var sp1DepositOWalletIVKHex string
+	var sp1WithdrawOWalletOVKHex string
+	var sp1DepositWitnessItemFiles stringListFlag
+	var sp1WithdrawWitnessItemFiles stringListFlag
+	var sp1InputS3Bucket string
+	var sp1InputS3Prefix string
+	var sp1InputS3Region string
+	var sp1ProofQueueBrokers string
 	var existingWJunoAddressHex string
 	var existingOperatorRegAddressHex string
 	var existingFeeDistributorHex string
@@ -521,47 +500,41 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&existingFeeDistributorHex, "existing-fee-distributor-address", "", "reuse predeployed FeeDistributor contract address (requires all --existing-*-address flags)")
 	fs.StringVar(&existingBridgeAddressHex, "existing-bridge-address", "", "reuse predeployed Bridge contract address (requires all --existing-*-address flags)")
 
-	fs.BoolVar(&cfg.Boundless.Auto, "boundless-auto", false, "automatically submit/wait proofs via Boundless and use returned seals")
-	fs.StringVar(&cfg.Boundless.Bin, "boundless-bin", "boundless", "Boundless CLI binary path used by --boundless-auto")
-	fs.StringVar(&cfg.Boundless.RPCURL, "boundless-rpc-url", "https://mainnet.base.org", "Boundless submission RPC URL")
-	fs.StringVar(&cfg.Boundless.InputMode, "boundless-input-mode", boundlessInputModeGuestWitnessV1, "Boundless input mode (required): guest-witness-v1")
-	var boundlessMarketAddressHex string
-	var boundlessVerifierRouterHex string
-	var boundlessSetVerifierHex string
-	fs.StringVar(&boundlessMarketAddressHex, "boundless-market-address", defaultBoundlessMarketAddr, "Boundless market contract address")
-	fs.StringVar(&boundlessVerifierRouterHex, "boundless-verifier-router-address", defaultBoundlessRouterAddr, "Boundless verifier router contract address")
-	fs.StringVar(&boundlessSetVerifierHex, "boundless-set-verifier-address", defaultBoundlessSetVerAddr, "Boundless set verifier contract address")
-	fs.StringVar(&boundlessRequestorKeyFile, "boundless-requestor-key-file", "", "file containing requestor private key hex for Boundless")
-	fs.StringVar(&boundlessRequestorKeyHex, "boundless-requestor-key-hex", "", "requestor private key hex for Boundless")
-	fs.StringVar(&boundlessDepositOWalletIVKHex, "boundless-deposit-owallet-ivk-hex", "", "64-byte oWallet IVK hex for guest-witness-v1 deposit input mode")
-	fs.StringVar(&boundlessWithdrawOWalletOVKHex, "boundless-withdraw-owallet-ovk-hex", "", "32-byte oWallet OVK hex for guest-witness-v1 withdraw input mode")
-	fs.Var(&boundlessDepositWitnessItemFiles, "boundless-deposit-witness-item-file", "deposit guest witness item file path (repeat for guest-witness-v1)")
-	fs.Var(&boundlessWithdrawWitnessItemFiles, "boundless-withdraw-witness-item-file", "withdraw guest witness item file path (repeat for guest-witness-v1)")
-	fs.StringVar(&cfg.Boundless.DepositProgramURL, "boundless-deposit-program-url", "", "deposit guest program URL for Boundless proof requests")
-	fs.StringVar(&cfg.Boundless.WithdrawProgramURL, "boundless-withdraw-program-url", "", "withdraw guest program URL for Boundless proof requests")
-	fs.StringVar(&boundlessInputS3Bucket, "boundless-input-s3-bucket", "", "S3 bucket used for oversized boundless private inputs (>2048 bytes)")
-	fs.StringVar(&boundlessInputS3Prefix, "boundless-input-s3-prefix", defaultBoundlessInputS3Prefix, "S3 key prefix used for oversized boundless private inputs")
-	fs.StringVar(&boundlessInputS3Region, "boundless-input-s3-region", "", "optional AWS region override for boundless oversized input uploads")
-	fs.DurationVar(&cfg.Boundless.InputS3PresignTTL, "boundless-input-s3-presign-ttl", defaultBoundlessInputS3PresignTTL, "presigned URL TTL for oversized boundless private inputs")
-	fs.StringVar(&boundlessMinPriceWei, "boundless-min-price-wei", defaultBoundlessMinPriceWei, "Boundless min price in wei")
-	fs.StringVar(&boundlessMaxPriceWei, "boundless-max-price-wei", defaultBoundlessMaxPriceWei, "Boundless max price in wei")
-	fs.StringVar(&boundlessMaxPriceCapWei, "boundless-max-price-cap-wei", defaultBoundlessMaxPriceCapWei, "Boundless max price cap in wei for retry bumps")
-	fs.StringVar(&boundlessLockStakeWei, "boundless-lock-stake-wei", defaultBoundlessLockStakeWei, "Boundless lock stake amount in wei")
-	fs.Uint64Var(&cfg.Boundless.MaxPriceBumpMultiplier, "boundless-max-price-bump-multiplier", defaultBoundlessMaxPriceBumpMultiplier, "multiplier applied to max price after lock failures")
-	fs.Uint64Var(&cfg.Boundless.MaxPriceBumpRetries, "boundless-max-price-bump-retries", defaultBoundlessMaxPriceBumpRetries, "number of lock-failure retries with max price bumps")
-	fs.Uint64Var(&cfg.Boundless.BiddingDelaySeconds, "boundless-bidding-delay-seconds", 85, "seconds after submission before bidding starts")
-	fs.Uint64Var(&cfg.Boundless.RampUpPeriodSeconds, "boundless-ramp-up-period-seconds", 170, "auction ramp-up period in seconds")
-	fs.Uint64Var(&cfg.Boundless.LockTimeoutSeconds, "boundless-lock-timeout-seconds", 625, "auction lock timeout in seconds")
-	fs.Uint64Var(&cfg.Boundless.TimeoutSeconds, "boundless-timeout-seconds", 1500, "auction timeout in seconds")
-	fs.StringVar(&cfg.Boundless.ProofSubmissionMode, "boundless-proof-submission-mode", boundlessProofSubmissionDirectCLI, "proof submission mode: direct-cli|queue")
-	fs.StringVar(&boundlessProofQueueBrokers, "boundless-proof-queue-brokers", "", "comma-separated Kafka brokers used by centralized proof-requestor")
-	fs.StringVar(&cfg.Boundless.ProofRequestTopic, "boundless-proof-request-topic", defaultProofRequestTopic, "Kafka proof request topic")
-	fs.StringVar(&cfg.Boundless.ProofResultTopic, "boundless-proof-result-topic", defaultProofResultTopic, "Kafka proof fulfillment topic")
-	fs.StringVar(&cfg.Boundless.ProofFailureTopic, "boundless-proof-failure-topic", defaultProofFailureTopic, "Kafka proof failure topic")
-	fs.StringVar(&cfg.Boundless.ProofConsumerGroup, "boundless-proof-consumer-group", "", "Kafka consumer group used by bridge-e2e for proof results/failures")
-	fs.IntVar(&cfg.Boundless.ProofQueueMaxBytes, "boundless-proof-queue-max-bytes", defaultProofQueueMaxBytes, "max Kafka message size for proof queue consumer")
-	fs.DurationVar(&cfg.Boundless.ProofAckTimeout, "boundless-proof-ack-timeout", defaultProofAckTimeout, "proof queue ack timeout")
-	fs.DurationVar(&cfg.Boundless.ProofDeadline, "boundless-proof-deadline", defaultProofDeadline, "default deadline passed to centralized proof-requestor")
+	fs.BoolVar(&cfg.SP1.Auto, "sp1-auto", false, "automatically submit/wait proofs via SP1 and use returned seals")
+	fs.StringVar(&cfg.SP1.Bin, "sp1-bin", "sp1", "SP1 CLI binary path used by --sp1-auto")
+	fs.StringVar(&cfg.SP1.RPCURL, "sp1-rpc-url", "https://mainnet.base.org", "SP1 submission RPC URL")
+	fs.StringVar(&cfg.SP1.InputMode, "sp1-input-mode", sp1InputModeGuestWitnessV1, "SP1 input mode (required): guest-witness-v1")
+	var sp1MarketAddressHex string
+	var sp1VerifierRouterHex string
+	var sp1SetVerifierHex string
+	fs.StringVar(&sp1MarketAddressHex, "sp1-market-address", defaultSP1MarketAddr, "SP1 market contract address")
+	fs.StringVar(&sp1VerifierRouterHex, "sp1-verifier-router-address", defaultSP1RouterAddr, "SP1 verifier router contract address")
+	fs.StringVar(&sp1SetVerifierHex, "sp1-set-verifier-address", defaultSP1SetVerAddr, "SP1 set verifier contract address")
+	fs.StringVar(&sp1RequestorKeyFile, "sp1-requestor-key-file", "", "file containing requestor private key hex for SP1")
+	fs.StringVar(&sp1RequestorKeyHex, "sp1-requestor-key-hex", "", "requestor private key hex for SP1")
+	fs.StringVar(&sp1DepositOWalletIVKHex, "sp1-deposit-owallet-ivk-hex", "", "64-byte oWallet IVK hex for guest-witness-v1 deposit input mode")
+	fs.StringVar(&sp1WithdrawOWalletOVKHex, "sp1-withdraw-owallet-ovk-hex", "", "32-byte oWallet OVK hex for guest-witness-v1 withdraw input mode")
+	fs.Var(&sp1DepositWitnessItemFiles, "sp1-deposit-witness-item-file", "deposit guest witness item file path (repeat for guest-witness-v1)")
+	fs.Var(&sp1WithdrawWitnessItemFiles, "sp1-withdraw-witness-item-file", "withdraw guest witness item file path (repeat for guest-witness-v1)")
+	fs.StringVar(&cfg.SP1.DepositProgramURL, "sp1-deposit-program-url", "", "deposit guest program URL for SP1 proof requests")
+	fs.StringVar(&cfg.SP1.WithdrawProgramURL, "sp1-withdraw-program-url", "", "withdraw guest program URL for SP1 proof requests")
+	fs.StringVar(&sp1InputS3Bucket, "sp1-input-s3-bucket", "", "S3 bucket used for oversized sp1 private inputs (>2048 bytes)")
+	fs.StringVar(&sp1InputS3Prefix, "sp1-input-s3-prefix", defaultSP1InputS3Prefix, "S3 key prefix used for oversized sp1 private inputs")
+	fs.StringVar(&sp1InputS3Region, "sp1-input-s3-region", "", "optional AWS region override for sp1 oversized input uploads")
+	fs.DurationVar(&cfg.SP1.InputS3PresignTTL, "sp1-input-s3-presign-ttl", defaultSP1InputS3PresignTTL, "presigned URL TTL for oversized sp1 private inputs")
+	fs.Uint64Var(&cfg.SP1.MaxPricePerPGU, "sp1-max-price-per-pgu", defaultSP1MaxPricePerPGU, "SP1 max price per PGU (wei)")
+	fs.Uint64Var(&cfg.SP1.MinAuctionPeriod, "sp1-min-auction-period", defaultSP1MinAuctionPeriod, "SP1 minimum auction period in seconds")
+	fs.DurationVar(&cfg.SP1.AuctionTimeout, "sp1-auction-timeout", defaultSP1AuctionTimeout, "SP1 auction timeout duration")
+	fs.DurationVar(&cfg.SP1.RequestTimeout, "sp1-request-timeout", defaultSP1RequestTimeout, "SP1 request timeout duration")
+	fs.StringVar(&cfg.SP1.ProofSubmissionMode, "sp1-proof-submission-mode", sp1ProofSubmissionDirectCLI, "proof submission mode: direct-cli|queue")
+	fs.StringVar(&sp1ProofQueueBrokers, "sp1-proof-queue-brokers", "", "comma-separated Kafka brokers used by centralized proof-requestor")
+	fs.StringVar(&cfg.SP1.ProofRequestTopic, "sp1-proof-request-topic", defaultProofRequestTopic, "Kafka proof request topic")
+	fs.StringVar(&cfg.SP1.ProofResultTopic, "sp1-proof-result-topic", defaultProofResultTopic, "Kafka proof fulfillment topic")
+	fs.StringVar(&cfg.SP1.ProofFailureTopic, "sp1-proof-failure-topic", defaultProofFailureTopic, "Kafka proof failure topic")
+	fs.StringVar(&cfg.SP1.ProofConsumerGroup, "sp1-proof-consumer-group", "", "Kafka consumer group used by bridge-e2e for proof results/failures")
+	fs.IntVar(&cfg.SP1.ProofQueueMaxBytes, "sp1-proof-queue-max-bytes", defaultProofQueueMaxBytes, "max Kafka message size for proof queue consumer")
+	fs.DurationVar(&cfg.SP1.ProofAckTimeout, "sp1-proof-ack-timeout", defaultProofAckTimeout, "proof queue ack timeout")
+	fs.DurationVar(&cfg.SP1.ProofDeadline, "sp1-proof-deadline", defaultProofDeadline, "default deadline passed to centralized proof-requestor")
 
 	if err := fs.Parse(filteredArgs); err != nil {
 		return cfg, err
@@ -704,181 +677,155 @@ func parseArgs(args []string) (config, error) {
 		return cfg, err
 	}
 
-	if boundlessRequestorKeyFile != "" && boundlessRequestorKeyHex != "" {
-		return cfg, errors.New("use only one of --boundless-requestor-key-file or --boundless-requestor-key-hex")
+	if sp1RequestorKeyFile != "" && sp1RequestorKeyHex != "" {
+		return cfg, errors.New("use only one of --sp1-requestor-key-file or --sp1-requestor-key-hex")
 	}
-	if boundlessRequestorKeyFile != "" {
-		keyBytes, err := os.ReadFile(boundlessRequestorKeyFile)
+	if sp1RequestorKeyFile != "" {
+		keyBytes, err := os.ReadFile(sp1RequestorKeyFile)
 		if err != nil {
-			return cfg, fmt.Errorf("read boundless requestor key file: %w", err)
+			return cfg, fmt.Errorf("read sp1 requestor key file: %w", err)
 		}
-		boundlessRequestorKeyHex = strings.TrimSpace(string(keyBytes))
+		sp1RequestorKeyHex = strings.TrimSpace(string(keyBytes))
 	}
-	cfg.Boundless.InputMode, err = parseBoundlessInputMode(cfg.Boundless.InputMode)
+	cfg.SP1.InputMode, err = parseSP1InputMode(cfg.SP1.InputMode)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.Boundless.ProofSubmissionMode, err = parseBoundlessProofSubmissionMode(cfg.Boundless.ProofSubmissionMode)
+	cfg.SP1.ProofSubmissionMode, err = parseSP1ProofSubmissionMode(cfg.SP1.ProofSubmissionMode)
 	if err != nil {
 		return cfg, err
 	}
-	cfg.Boundless.ProofQueueBrokers = queue.SplitCommaList(boundlessProofQueueBrokers)
-	if !common.IsHexAddress(boundlessMarketAddressHex) {
-		return cfg, errors.New("--boundless-market-address must be a valid hex address")
+	cfg.SP1.ProofQueueBrokers = queue.SplitCommaList(sp1ProofQueueBrokers)
+	if !common.IsHexAddress(sp1MarketAddressHex) {
+		return cfg, errors.New("--sp1-market-address must be a valid hex address")
 	}
-	cfg.Boundless.MarketAddress = common.HexToAddress(boundlessMarketAddressHex)
-	if !common.IsHexAddress(boundlessVerifierRouterHex) {
-		return cfg, errors.New("--boundless-verifier-router-address must be a valid hex address")
+	cfg.SP1.MarketAddress = common.HexToAddress(sp1MarketAddressHex)
+	if !common.IsHexAddress(sp1VerifierRouterHex) {
+		return cfg, errors.New("--sp1-verifier-router-address must be a valid hex address")
 	}
-	cfg.Boundless.VerifierRouterAddr = common.HexToAddress(boundlessVerifierRouterHex)
-	if !common.IsHexAddress(boundlessSetVerifierHex) {
-		return cfg, errors.New("--boundless-set-verifier-address must be a valid hex address")
+	cfg.SP1.VerifierRouterAddr = common.HexToAddress(sp1VerifierRouterHex)
+	if !common.IsHexAddress(sp1SetVerifierHex) {
+		return cfg, errors.New("--sp1-set-verifier-address must be a valid hex address")
 	}
-	cfg.Boundless.SetVerifierAddr = common.HexToAddress(boundlessSetVerifierHex)
-	cfg.Boundless.RequestorKeyHex = strings.TrimSpace(boundlessRequestorKeyHex)
-	if cfg.Boundless.RequestorKeyHex != "" {
-		boundlessKey, err := parsePrivateKeyHex(cfg.Boundless.RequestorKeyHex)
+	cfg.SP1.SetVerifierAddr = common.HexToAddress(sp1SetVerifierHex)
+	cfg.SP1.RequestorKeyHex = strings.TrimSpace(sp1RequestorKeyHex)
+	if cfg.SP1.RequestorKeyHex != "" {
+		sp1Key, err := parsePrivateKeyHex(cfg.SP1.RequestorKeyHex)
 		if err != nil {
-			return cfg, fmt.Errorf("parse --boundless-requestor-key-*: %w", err)
+			return cfg, fmt.Errorf("parse --sp1-requestor-key-*: %w", err)
 		}
-		cfg.Boundless.RequestorAddress = crypto.PubkeyToAddress(boundlessKey.PublicKey)
+		cfg.SP1.RequestorAddress = crypto.PubkeyToAddress(sp1Key.PublicKey)
 	}
-	cfg.Boundless.InputS3Bucket = strings.TrimSpace(boundlessInputS3Bucket)
-	cfg.Boundless.InputS3Prefix = strings.Trim(strings.TrimSpace(boundlessInputS3Prefix), "/")
-	cfg.Boundless.InputS3Region = strings.TrimSpace(boundlessInputS3Region)
-	if cfg.Boundless.InputS3Prefix == "" {
-		cfg.Boundless.InputS3Prefix = defaultBoundlessInputS3Prefix
+	cfg.SP1.InputS3Bucket = strings.TrimSpace(sp1InputS3Bucket)
+	cfg.SP1.InputS3Prefix = strings.Trim(strings.TrimSpace(sp1InputS3Prefix), "/")
+	cfg.SP1.InputS3Region = strings.TrimSpace(sp1InputS3Region)
+	if cfg.SP1.InputS3Prefix == "" {
+		cfg.SP1.InputS3Prefix = defaultSP1InputS3Prefix
 	}
-	if cfg.Boundless.InputS3PresignTTL <= 0 {
-		return cfg, errors.New("--boundless-input-s3-presign-ttl must be > 0")
+	if cfg.SP1.InputS3PresignTTL <= 0 {
+		return cfg, errors.New("--sp1-input-s3-presign-ttl must be > 0")
 	}
-
-	cfg.Boundless.MinPriceWei, err = parseUint256Flag("--boundless-min-price-wei", boundlessMinPriceWei)
-	if err != nil {
-		return cfg, err
+	if cfg.SP1.MaxPricePerPGU == 0 {
+		return cfg, errors.New("--sp1-max-price-per-pgu must be > 0")
 	}
-	cfg.Boundless.MaxPriceWei, err = parseUint256Flag("--boundless-max-price-wei", boundlessMaxPriceWei)
-	if err != nil {
-		return cfg, err
+	if cfg.SP1.MinAuctionPeriod == 0 {
+		return cfg, errors.New("--sp1-min-auction-period must be > 0")
 	}
-	cfg.Boundless.MaxPriceCapWei, err = parseUint256Flag("--boundless-max-price-cap-wei", boundlessMaxPriceCapWei)
-	if err != nil {
-		return cfg, err
+	if cfg.SP1.AuctionTimeout <= 0 {
+		return cfg, errors.New("--sp1-auction-timeout must be > 0")
 	}
-	cfg.Boundless.LockStakeWei, err = parseUint256Flag("--boundless-lock-stake-wei", boundlessLockStakeWei)
-	if err != nil {
-		return cfg, err
+	if cfg.SP1.RequestTimeout <= 0 {
+		return cfg, errors.New("--sp1-request-timeout must be > 0")
 	}
-	if cfg.Boundless.MinPriceWei.Cmp(cfg.Boundless.MaxPriceWei) > 0 {
-		return cfg, errors.New("--boundless-min-price-wei must be <= --boundless-max-price-wei")
+	if cfg.SP1.ProofQueueMaxBytes <= 0 {
+		return cfg, errors.New("--sp1-proof-queue-max-bytes must be > 0")
 	}
-	if cfg.Boundless.MaxPriceWei.Cmp(cfg.Boundless.MaxPriceCapWei) > 0 {
-		return cfg, errors.New("--boundless-max-price-cap-wei must be >= --boundless-max-price-wei")
+	if cfg.SP1.ProofAckTimeout <= 0 {
+		return cfg, errors.New("--sp1-proof-ack-timeout must be > 0")
 	}
-	if cfg.Boundless.MaxPriceBumpRetries > 0 && cfg.Boundless.MaxPriceBumpMultiplier < 2 {
-		return cfg, errors.New("--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0")
+	if cfg.SP1.ProofDeadline <= 0 {
+		return cfg, errors.New("--sp1-proof-deadline must be > 0")
 	}
-	if cfg.Boundless.RampUpPeriodSeconds == 0 {
-		return cfg, errors.New("--boundless-ramp-up-period-seconds must be > 0")
-	}
-	if cfg.Boundless.LockTimeoutSeconds == 0 {
-		return cfg, errors.New("--boundless-lock-timeout-seconds must be > 0")
-	}
-	if cfg.Boundless.TimeoutSeconds == 0 {
-		return cfg, errors.New("--boundless-timeout-seconds must be > 0")
-	}
-	if cfg.Boundless.LockTimeoutSeconds > cfg.Boundless.TimeoutSeconds {
-		return cfg, errors.New("--boundless-lock-timeout-seconds must be <= --boundless-timeout-seconds")
-	}
-	if cfg.Boundless.ProofQueueMaxBytes <= 0 {
-		return cfg, errors.New("--boundless-proof-queue-max-bytes must be > 0")
-	}
-	if cfg.Boundless.ProofAckTimeout <= 0 {
-		return cfg, errors.New("--boundless-proof-ack-timeout must be > 0")
-	}
-	if cfg.Boundless.ProofDeadline <= 0 {
-		return cfg, errors.New("--boundless-proof-deadline must be > 0")
-	}
-	if cfg.Boundless.ProofSubmissionMode == boundlessProofSubmissionQueue {
-		if len(cfg.Boundless.ProofQueueBrokers) == 0 {
-			return cfg, errors.New("--boundless-proof-queue-brokers is required when --boundless-proof-submission-mode=queue")
+	if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionQueue {
+		if len(cfg.SP1.ProofQueueBrokers) == 0 {
+			return cfg, errors.New("--sp1-proof-queue-brokers is required when --sp1-proof-submission-mode=queue")
 		}
-		if strings.TrimSpace(cfg.Boundless.ProofRequestTopic) == "" {
-			return cfg, errors.New("--boundless-proof-request-topic is required when --boundless-proof-submission-mode=queue")
+		if strings.TrimSpace(cfg.SP1.ProofRequestTopic) == "" {
+			return cfg, errors.New("--sp1-proof-request-topic is required when --sp1-proof-submission-mode=queue")
 		}
-		if strings.TrimSpace(cfg.Boundless.ProofResultTopic) == "" {
-			return cfg, errors.New("--boundless-proof-result-topic is required when --boundless-proof-submission-mode=queue")
+		if strings.TrimSpace(cfg.SP1.ProofResultTopic) == "" {
+			return cfg, errors.New("--sp1-proof-result-topic is required when --sp1-proof-submission-mode=queue")
 		}
-		if strings.TrimSpace(cfg.Boundless.ProofFailureTopic) == "" {
-			return cfg, errors.New("--boundless-proof-failure-topic is required when --boundless-proof-submission-mode=queue")
+		if strings.TrimSpace(cfg.SP1.ProofFailureTopic) == "" {
+			return cfg, errors.New("--sp1-proof-failure-topic is required when --sp1-proof-submission-mode=queue")
 		}
 	}
 	if !cfg.VerifierSet {
 		return cfg, errors.New("--verifier-address is required")
 	}
-	if !cfg.Boundless.Auto {
-		return cfg, errors.New("--boundless-auto is required")
+	if !cfg.SP1.Auto {
+		return cfg, errors.New("--sp1-auto is required")
 	}
-	if strings.TrimSpace(cfg.Boundless.Bin) == "" {
-		return cfg, errors.New("--boundless-bin is required when --boundless-auto is set")
+	if strings.TrimSpace(cfg.SP1.Bin) == "" {
+		return cfg, errors.New("--sp1-bin is required when --sp1-auto is set")
 	}
-	if strings.TrimSpace(cfg.Boundless.RPCURL) == "" {
-		return cfg, errors.New("--boundless-rpc-url is required when --boundless-auto is set")
+	if strings.TrimSpace(cfg.SP1.RPCURL) == "" {
+		return cfg, errors.New("--sp1-rpc-url is required when --sp1-auto is set")
 	}
-	if cfg.Boundless.ProofSubmissionMode == boundlessProofSubmissionDirectCLI &&
-		strings.TrimSpace(cfg.Boundless.RequestorKeyHex) == "" {
-		return cfg, errors.New("--boundless-requestor-key-file or --boundless-requestor-key-hex is required when --boundless-auto is set")
+	if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionDirectCLI &&
+		strings.TrimSpace(cfg.SP1.RequestorKeyHex) == "" {
+		return cfg, errors.New("--sp1-requestor-key-file or --sp1-requestor-key-hex is required when --sp1-auto is set")
 	}
-	if strings.TrimSpace(cfg.Boundless.DepositProgramURL) == "" {
-		return cfg, errors.New("--boundless-deposit-program-url is required when --boundless-auto is set")
+	if strings.TrimSpace(cfg.SP1.DepositProgramURL) == "" {
+		return cfg, errors.New("--sp1-deposit-program-url is required when --sp1-auto is set")
 	}
-	if strings.TrimSpace(cfg.Boundless.WithdrawProgramURL) == "" {
-		return cfg, errors.New("--boundless-withdraw-program-url is required when --boundless-auto is set")
+	if strings.TrimSpace(cfg.SP1.WithdrawProgramURL) == "" {
+		return cfg, errors.New("--sp1-withdraw-program-url is required when --sp1-auto is set")
 	}
-	if cfg.Boundless.InputS3Bucket == "" {
-		return cfg, errors.New("--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1")
+	if cfg.SP1.InputS3Bucket == "" {
+		return cfg, errors.New("--sp1-input-s3-bucket is required when --sp1-input-mode guest-witness-v1")
 	}
-	manualIVKSet := strings.TrimSpace(boundlessDepositOWalletIVKHex) != ""
-	manualOVKSet := strings.TrimSpace(boundlessWithdrawOWalletOVKHex) != ""
-	manualDepositItemsSet := len(boundlessDepositWitnessItemFiles) > 0
-	manualWithdrawItemsSet := len(boundlessWithdrawWitnessItemFiles) > 0
+	manualIVKSet := strings.TrimSpace(sp1DepositOWalletIVKHex) != ""
+	manualOVKSet := strings.TrimSpace(sp1WithdrawOWalletOVKHex) != ""
+	manualDepositItemsSet := len(sp1DepositWitnessItemFiles) > 0
+	manualWithdrawItemsSet := len(sp1WithdrawWitnessItemFiles) > 0
 	manualAny := manualIVKSet || manualOVKSet || manualDepositItemsSet || manualWithdrawItemsSet
 	manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
 
 	if manualAny && !manualAll {
-		return cfg, errors.New("all guest witness manual inputs must be set together: --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, --boundless-withdraw-witness-item-file")
+		return cfg, errors.New("all guest witness manual inputs must be set together: --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, --sp1-withdraw-witness-item-file")
 	}
 	if !manualAll && !cfg.DeployOnly {
-		return cfg, errors.New("guest witness auto generation is disabled; provide --boundless-deposit-owallet-ivk-hex, --boundless-withdraw-owallet-ovk-hex, --boundless-deposit-witness-item-file, and --boundless-withdraw-witness-item-file")
+		return cfg, errors.New("guest witness auto generation is disabled; provide --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, and --sp1-withdraw-witness-item-file")
 	}
 	if manualAll {
-		cfg.Boundless.DepositOWalletIVKBytes, err = parseHexFixedLength(
-			"--boundless-deposit-owallet-ivk-hex",
-			boundlessDepositOWalletIVKHex,
+		cfg.SP1.DepositOWalletIVKBytes, err = parseHexFixedLength(
+			"--sp1-deposit-owallet-ivk-hex",
+			sp1DepositOWalletIVKHex,
 			64,
 		)
 		if err != nil {
 			return cfg, err
 		}
-		cfg.Boundless.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
-			"--boundless-withdraw-owallet-ovk-hex",
-			boundlessWithdrawOWalletOVKHex,
+		cfg.SP1.WithdrawOWalletOVKBytes, err = parseHexFixedLength(
+			"--sp1-withdraw-owallet-ovk-hex",
+			sp1WithdrawOWalletOVKHex,
 			32,
 		)
 		if err != nil {
 			return cfg, err
 		}
-		cfg.Boundless.DepositWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-deposit-witness-item-file",
-			boundlessDepositWitnessItemFiles,
+		cfg.SP1.DepositWitnessItems, err = readWitnessItemsFromFiles(
+			"--sp1-deposit-witness-item-file",
+			sp1DepositWitnessItemFiles,
 			proverinput.DepositWitnessItemLen,
 		)
 		if err != nil {
 			return cfg, err
 		}
-		cfg.Boundless.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
-			"--boundless-withdraw-witness-item-file",
-			boundlessWithdrawWitnessItemFiles,
+		cfg.SP1.WithdrawWitnessItems, err = readWitnessItemsFromFiles(
+			"--sp1-withdraw-witness-item-file",
+			sp1WithdrawWitnessItemFiles,
 			proverinput.WithdrawWitnessItemLen,
 		)
 		if err != nil {
@@ -955,25 +902,25 @@ func consumeOperatorKeyFileFlags(args []string) ([]string, []string, error) {
 	return remaining, keyFiles, nil
 }
 
-func parseBoundlessInputMode(raw string) (string, error) {
+func parseSP1InputMode(raw string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	switch mode {
-	case "", boundlessInputModeGuestWitnessV1:
-		return boundlessInputModeGuestWitnessV1, nil
+	case "", sp1InputModeGuestWitnessV1:
+		return sp1InputModeGuestWitnessV1, nil
 	default:
-		return "", errors.New("--boundless-input-mode must be guest-witness-v1")
+		return "", errors.New("--sp1-input-mode must be guest-witness-v1")
 	}
 }
 
-func parseBoundlessProofSubmissionMode(raw string) (string, error) {
+func parseSP1ProofSubmissionMode(raw string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(raw))
 	switch mode {
-	case "", boundlessProofSubmissionDirectCLI:
-		return boundlessProofSubmissionDirectCLI, nil
-	case boundlessProofSubmissionQueue:
-		return boundlessProofSubmissionQueue, nil
+	case "", sp1ProofSubmissionDirectCLI:
+		return sp1ProofSubmissionDirectCLI, nil
+	case sp1ProofSubmissionQueue:
+		return sp1ProofSubmissionQueue, nil
 	default:
-		return "", errors.New("--boundless-proof-submission-mode must be one of: direct-cli, queue")
+		return "", errors.New("--sp1-proof-submission-mode must be one of: direct-cli, queue")
 	}
 }
 
@@ -1351,13 +1298,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 		rep.Proof.DepositImageID = cfg.DepositImageID.Hex()
 		rep.Proof.WithdrawImageID = cfg.WithdrawImageID.Hex()
-		rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
-		rep.Proof.Boundless.SubmissionMode = cfg.Boundless.ProofSubmissionMode
-		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
-		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
-		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
-		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
-		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
+		rep.Proof.SP1.Enabled = cfg.SP1.Auto
+		rep.Proof.SP1.SubmissionMode = cfg.SP1.ProofSubmissionMode
+		rep.Proof.SP1.RPCURL = cfg.SP1.RPCURL
+		rep.Proof.SP1.InputMode = cfg.SP1.InputMode
+		rep.Proof.SP1.MarketAddress = cfg.SP1.MarketAddress.Hex()
+		rep.Proof.SP1.VerifierRouter = cfg.SP1.VerifierRouterAddr.Hex()
+		rep.Proof.SP1.SetVerifier = cfg.SP1.SetVerifierAddr.Hex()
 		for _, op := range operatorAddrs {
 			rep.Operators = append(rep.Operators, op.Hex())
 		}
@@ -1387,17 +1334,17 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge balance before: %w", err)
 	}
-	if len(cfg.Boundless.DepositWitnessItems) == 0 {
+	if len(cfg.SP1.DepositWitnessItems) == 0 {
 		return nil, errors.New("missing deposit witness items")
 	}
-	if len(cfg.Boundless.WithdrawWitnessItems) == 0 {
+	if len(cfg.SP1.WithdrawWitnessItems) == 0 {
 		return nil, errors.New("missing withdraw witness items")
 	}
-	depositID, err := deriveDepositIDFromWitnessItem(cfg.Boundless.DepositWitnessItems[0])
+	depositID, err := deriveDepositIDFromWitnessItem(cfg.SP1.DepositWitnessItems[0])
 	if err != nil {
 		return nil, fmt.Errorf("derive deposit id from witness: %w", err)
 	}
-	withdrawWitnessIdentity, err := parseWithdrawWitnessIdentity(cfg.Boundless.WithdrawWitnessItems[0])
+	withdrawWitnessIdentity, err := parseWithdrawWitnessIdentity(cfg.SP1.WithdrawWitnessItems[0])
 	if err != nil {
 		return nil, fmt.Errorf("parse withdraw witness identity: %w", err)
 	}
@@ -1471,16 +1418,16 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit private input: %w", err)
 	}
-	if len(cfg.Boundless.DepositWitnessItems) != len(mintItems) {
+	if len(cfg.SP1.DepositWitnessItems) != len(mintItems) {
 		return nil, fmt.Errorf(
 			"deposit witness item count mismatch: got=%d want=%d",
-			len(cfg.Boundless.DepositWitnessItems),
+			len(cfg.SP1.DepositWitnessItems),
 			len(mintItems),
 		)
 	}
 	var ivk [64]byte
-	copy(ivk[:], cfg.Boundless.DepositOWalletIVKBytes)
-	depositBoundlessInput, err := proverinput.EncodeDepositGuestPrivateInput(cpDeposit, ivk, cfg.Boundless.DepositWitnessItems)
+	copy(ivk[:], cfg.SP1.DepositOWalletIVKBytes)
+	depositSP1Input, err := proverinput.EncodeDepositGuestPrivateInput(cpDeposit, ivk, cfg.SP1.DepositWitnessItems)
 	if err != nil {
 		return nil, fmt.Errorf("encode deposit guest private input: %w", err)
 	}
@@ -1504,15 +1451,15 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		withdrawRequestID    string
 	)
 
-	logProgress("requesting boundless deposit proof")
-	cfg.DepositSeal, depositRequestID, err = requestBoundlessProof(
+	logProgress("requesting sp1 deposit proof")
+	cfg.DepositSeal, depositRequestID, err = requestSP1Proof(
 		ctx,
-		cfg.Boundless,
+		cfg.SP1,
 		"deposit",
 		depositID,
-		cfg.Boundless.DepositProgramURL,
+		cfg.SP1.DepositProgramURL,
 		depositImageID,
-		depositBoundlessInput,
+		depositSP1Input,
 		depositJournal,
 	)
 	if err != nil {
@@ -1619,16 +1566,16 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw private input: %w", err)
 	}
-	if len(cfg.Boundless.WithdrawWitnessItems) != len(finalizeItems) {
+	if len(cfg.SP1.WithdrawWitnessItems) != len(finalizeItems) {
 		return nil, fmt.Errorf(
 			"withdraw witness item count mismatch: got=%d want=%d",
-			len(cfg.Boundless.WithdrawWitnessItems),
+			len(cfg.SP1.WithdrawWitnessItems),
 			len(finalizeItems),
 		)
 	}
 	var ovk [32]byte
-	copy(ovk[:], cfg.Boundless.WithdrawOWalletOVKBytes)
-	withdrawBoundlessInput, err := proverinput.EncodeWithdrawGuestPrivateInput(cpWithdraw, ovk, cfg.Boundless.WithdrawWitnessItems)
+	copy(ovk[:], cfg.SP1.WithdrawOWalletOVKBytes)
+	withdrawSP1Input, err := proverinput.EncodeWithdrawGuestPrivateInput(cpWithdraw, ovk, cfg.SP1.WithdrawWitnessItems)
 	if err != nil {
 		return nil, fmt.Errorf("encode withdraw guest private input: %w", err)
 	}
@@ -1672,15 +1619,15 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		}
 	}
 
-	logProgress("requesting boundless withdraw proof")
-	cfg.WithdrawSeal, withdrawRequestID, err = requestBoundlessProof(
+	logProgress("requesting sp1 withdraw proof")
+	cfg.WithdrawSeal, withdrawRequestID, err = requestSP1Proof(
 		ctx,
-		cfg.Boundless,
+		cfg.SP1,
 		"withdraw",
 		withdrawalID,
-		cfg.Boundless.WithdrawProgramURL,
+		cfg.SP1.WithdrawProgramURL,
 		withdrawImageID,
-		withdrawBoundlessInput,
+		withdrawSP1Input,
 		withdrawJournal,
 	)
 	if err != nil {
@@ -1870,26 +1817,20 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Proof.WithdrawImageID = withdrawImageID.Hex()
 	rep.Proof.DepositSealBytes = len(cfg.DepositSeal)
 	rep.Proof.WithdrawSealBytes = len(cfg.WithdrawSeal)
-	rep.Proof.Boundless.Enabled = cfg.Boundless.Auto
-	if cfg.Boundless.Auto {
-		rep.Proof.Boundless.SubmissionMode = cfg.Boundless.ProofSubmissionMode
-		rep.Proof.Boundless.RPCURL = cfg.Boundless.RPCURL
-		rep.Proof.Boundless.InputMode = cfg.Boundless.InputMode
-		rep.Proof.Boundless.MarketAddress = cfg.Boundless.MarketAddress.Hex()
-		rep.Proof.Boundless.VerifierRouter = cfg.Boundless.VerifierRouterAddr.Hex()
-		rep.Proof.Boundless.SetVerifier = cfg.Boundless.SetVerifierAddr.Hex()
-		rep.Proof.Boundless.DepositRequestID = depositRequestID
-		rep.Proof.Boundless.WithdrawRequestID = withdrawRequestID
-		rep.Proof.Boundless.MinPriceWei = cfg.Boundless.MinPriceWei.String()
-		rep.Proof.Boundless.MaxPriceWei = cfg.Boundless.MaxPriceWei.String()
-		rep.Proof.Boundless.MaxPriceCapWei = cfg.Boundless.MaxPriceCapWei.String()
-		rep.Proof.Boundless.LockStakeWei = cfg.Boundless.LockStakeWei.String()
-		rep.Proof.Boundless.MaxPriceBumpMultiplier = cfg.Boundless.MaxPriceBumpMultiplier
-		rep.Proof.Boundless.MaxPriceBumpRetries = cfg.Boundless.MaxPriceBumpRetries
-		rep.Proof.Boundless.BiddingDelaySec = cfg.Boundless.BiddingDelaySeconds
-		rep.Proof.Boundless.RampUpPeriodSec = cfg.Boundless.RampUpPeriodSeconds
-		rep.Proof.Boundless.LockTimeoutSec = cfg.Boundless.LockTimeoutSeconds
-		rep.Proof.Boundless.TimeoutSec = cfg.Boundless.TimeoutSeconds
+	rep.Proof.SP1.Enabled = cfg.SP1.Auto
+	if cfg.SP1.Auto {
+		rep.Proof.SP1.SubmissionMode = cfg.SP1.ProofSubmissionMode
+		rep.Proof.SP1.RPCURL = cfg.SP1.RPCURL
+		rep.Proof.SP1.InputMode = cfg.SP1.InputMode
+		rep.Proof.SP1.MarketAddress = cfg.SP1.MarketAddress.Hex()
+		rep.Proof.SP1.VerifierRouter = cfg.SP1.VerifierRouterAddr.Hex()
+		rep.Proof.SP1.SetVerifier = cfg.SP1.SetVerifierAddr.Hex()
+		rep.Proof.SP1.DepositRequestID = depositRequestID
+		rep.Proof.SP1.WithdrawRequestID = withdrawRequestID
+		rep.Proof.SP1.MaxPricePerPGU = cfg.SP1.MaxPricePerPGU
+		rep.Proof.SP1.MinAuctionPeriodSec = cfg.SP1.MinAuctionPeriod
+		rep.Proof.SP1.AuctionTimeoutSec = uint64(cfg.SP1.AuctionTimeout.Seconds())
+		rep.Proof.SP1.RequestTimeoutSec = uint64(cfg.SP1.RequestTimeout.Seconds())
 	}
 
 	rep.Invariants.Registry.OperatorCount = registryOperatorCount
@@ -1935,9 +1876,9 @@ func junoExecutionProofFromInputTxHash(junoExecutionTxHash string) (string, stri
 	return junoExecutionTxHash, junoProofSourceInputExecutionTx
 }
 
-func requestBoundlessProof(
+func requestSP1Proof(
 	ctx context.Context,
-	cfg boundlessConfig,
+	cfg sp1Config,
 	pipeline string,
 	batchID common.Hash,
 	programURL string,
@@ -1945,81 +1886,23 @@ func requestBoundlessProof(
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
-	if cfg.ProofSubmissionMode == boundlessProofSubmissionQueue {
-		return requestBoundlessProofViaQueue(ctx, cfg, pipeline, batchID, imageID, privateInput, expectedJournal)
+	if cfg.ProofSubmissionMode == sp1ProofSubmissionQueue {
+		return requestSP1ProofViaQueue(ctx, cfg, pipeline, batchID, imageID, privateInput, expectedJournal)
 	}
-
-	maxPriceWei := new(big.Int).Set(cfg.MaxPriceWei)
-	totalAttempts := cfg.MaxPriceBumpRetries + 1
-
-	for attempt := uint64(1); ; attempt++ {
-		attemptCfg := cfg
-		attemptCfg.MaxPriceWei = new(big.Int).Set(maxPriceWei)
-
-		if bal, err := readBoundlessMarketBalance(ctx, attemptCfg); err != nil {
-			logProgress("boundless %s attempt=%d/%d market balance probe failed: %v", pipeline, attempt, totalAttempts, err)
-		} else {
-			shortfall := boundlessFundingShortfallWei(attemptCfg.MaxPriceWei, bal)
-			if shortfall.Sign() == 0 {
-				logProgress(
-					"boundless %s attempt=%d/%d market_balance_wei=%s max_price_wei=%s shortfall_wei=0 (cli funding mode may still send value=max_price)",
-					pipeline,
-					attempt,
-					totalAttempts,
-					bal.String(),
-					attemptCfg.MaxPriceWei.String(),
-				)
-			} else {
-				logProgress(
-					"boundless %s attempt=%d/%d market_balance_wei=%s max_price_wei=%s shortfall_wei=%s",
-					pipeline,
-					attempt,
-					totalAttempts,
-					bal.String(),
-					attemptCfg.MaxPriceWei.String(),
-					shortfall.String(),
-				)
-			}
-		}
-
-		seal, requestID, err := requestBoundlessProofOnce(
-			ctx,
-			attemptCfg,
-			pipeline,
-			programURL,
-			imageID,
-			privateInput,
-			expectedJournal,
-		)
-		if err == nil {
-			return seal, requestID, nil
-		}
-		if !isRetriableBoundlessLockFailure(err.Error()) {
-			return nil, "", err
-		}
-		if attempt >= totalAttempts {
-			return nil, "", err
-		}
-
-		nextMaxPriceWei, ok := nextBoundlessMaxPriceWei(maxPriceWei, cfg.MaxPriceBumpMultiplier, cfg.MaxPriceCapWei)
-		if !ok {
-			return nil, "", fmt.Errorf("%w (max price bump exhausted at %s wei)", err, maxPriceWei.String())
-		}
-		logProgress(
-			"boundless %s lock failure attempt=%d/%d bumping max_price_wei=%s -> %s",
-			pipeline,
-			attempt,
-			totalAttempts,
-			maxPriceWei.String(),
-			nextMaxPriceWei.String(),
-		)
-		maxPriceWei = nextMaxPriceWei
-	}
+	return requestSP1ProofOnce(
+		ctx,
+		cfg,
+		pipeline,
+		programURL,
+		imageID,
+		privateInput,
+		expectedJournal,
+	)
 }
 
-func requestBoundlessProofViaQueue(
+func requestSP1ProofViaQueue(
 	ctx context.Context,
-	cfg boundlessConfig,
+	cfg sp1Config,
 	pipeline string,
 	batchID common.Hash,
 	imageID common.Hash,
@@ -2075,7 +1958,7 @@ func requestBoundlessProofViaQueue(
 
 	jobID := idempotency.ProofJobIDV1(pipeline, batchID, imageID, expectedJournal, privateInput)
 	logProgress(
-		"boundless %s mode=queue request_topic=%s result_topic=%s failure_topic=%s group=%s job_id=%s",
+		"sp1 %s mode=queue request_topic=%s result_topic=%s failure_topic=%s group=%s job_id=%s",
 		pipeline,
 		cfg.ProofRequestTopic,
 		cfg.ProofResultTopic,
@@ -2092,7 +1975,7 @@ func requestBoundlessProofViaQueue(
 		Deadline:     time.Now().UTC().Add(cfg.ProofDeadline),
 	})
 	if err != nil {
-		return nil, "", fmt.Errorf("boundless queue proof request failed for %s: %w", pipeline, err)
+		return nil, "", fmt.Errorf("sp1 queue proof request failed for %s: %w", pipeline, err)
 	}
 	if err := validateQueueProofFulfillment(pipeline, expectedJournal, result); err != nil {
 		return nil, "", err
@@ -2103,13 +1986,13 @@ func requestBoundlessProofViaQueue(
 
 func validateQueueProofFulfillment(pipeline string, expectedJournal []byte, result proofclient.Result) error {
 	if len(result.Seal) == 0 {
-		return fmt.Errorf("boundless queue proof returned empty seal for %s", pipeline)
+		return fmt.Errorf("sp1 queue proof returned empty seal for %s", pipeline)
 	}
 	if len(result.Journal) == 0 {
-		return fmt.Errorf("boundless queue proof returned empty journal for %s", pipeline)
+		return fmt.Errorf("sp1 queue proof returned empty journal for %s", pipeline)
 	}
 	if !bytes.Equal(result.Journal, expectedJournal) {
-		return fmt.Errorf("boundless queue proof journal mismatch for %s", pipeline)
+		return fmt.Errorf("sp1 queue proof journal mismatch for %s", pipeline)
 	}
 	return nil
 }
@@ -2135,9 +2018,9 @@ func extractQueueProofRequestID(metadata map[string]string) string {
 	return ""
 }
 
-func requestBoundlessProofOnce(
+func requestSP1ProofOnce(
 	ctx context.Context,
-	cfg boundlessConfig,
+	cfg sp1Config,
 	pipeline string,
 	_ string,
 	imageID common.Hash,
@@ -2152,319 +2035,41 @@ func requestBoundlessProofOnce(
 	if err != nil {
 		return nil, "", fmt.Errorf("init prover adapter for %s: %w", pipeline, err)
 	}
-	logProgress("boundless %s cmd=%s mode=sp1-local", pipeline, cfg.Bin)
+	if cfg.RequestorKeyHex != "" {
+		if err := os.Setenv("NETWORK_PRIVATE_KEY", cfg.RequestorKeyHex); err != nil {
+			return nil, "", fmt.Errorf("set NETWORK_PRIVATE_KEY for %s: %w", pipeline, err)
+		}
+	}
+	if err := os.Setenv("SP1_NETWORK_RPC_URL", cfg.RPCURL); err != nil {
+		return nil, "", fmt.Errorf("set SP1_NETWORK_RPC_URL for %s: %w", pipeline, err)
+	}
+	if err := os.Setenv("SP1_MAX_PRICE_PER_PGU", strconv.FormatUint(cfg.MaxPricePerPGU, 10)); err != nil {
+		return nil, "", fmt.Errorf("set SP1_MAX_PRICE_PER_PGU for %s: %w", pipeline, err)
+	}
+	if err := os.Setenv("SP1_MIN_AUCTION_PERIOD", strconv.FormatUint(cfg.MinAuctionPeriod, 10)); err != nil {
+		return nil, "", fmt.Errorf("set SP1_MIN_AUCTION_PERIOD for %s: %w", pipeline, err)
+	}
+	if err := os.Setenv("SP1_AUCTION_TIMEOUT_SECONDS", strconv.FormatInt(int64(cfg.AuctionTimeout.Seconds()), 10)); err != nil {
+		return nil, "", fmt.Errorf("set SP1_AUCTION_TIMEOUT_SECONDS for %s: %w", pipeline, err)
+	}
+	if err := os.Setenv("SP1_REQUEST_TIMEOUT_SECONDS", strconv.FormatInt(int64(cfg.RequestTimeout.Seconds()), 10)); err != nil {
+		return nil, "", fmt.Errorf("set SP1_REQUEST_TIMEOUT_SECONDS for %s: %w", pipeline, err)
+	}
+	logProgress(
+		"sp1 %s cmd=%s mode=sp1-network-mainnet max_price_per_pgu=%d min_auction_period=%d auction_timeout=%s request_timeout=%s",
+		pipeline,
+		cfg.Bin,
+		cfg.MaxPricePerPGU,
+		cfg.MinAuctionPeriod,
+		cfg.AuctionTimeout.String(),
+		cfg.RequestTimeout.String(),
+	)
 	seal, err := prover.Prove(ctx, imageID, expectedJournal, privateInput)
 	if err != nil {
 		return nil, "", fmt.Errorf("sp1 prove failed for %s: %w", pipeline, err)
 	}
-	requestID := fmt.Sprintf("sp1-local-%d", time.Now().UTC().UnixNano())
+	requestID := fmt.Sprintf("sp1-network-%d", time.Now().UTC().UnixNano())
 	return seal, requestID, nil
-}
-
-func buildBoundlessSubmitFileArgs(cfg boundlessConfig, privateKey string, reqPath string) []string {
-	args := []string{
-		"requestor", "submit-file",
-		reqPath,
-		"--wait",
-	}
-	if cfg.InputMode == boundlessInputModeGuestWitnessV1 {
-		args = append(args, "--no-preflight")
-	}
-	args = append(args,
-		"--requestor-rpc-url", cfg.RPCURL,
-		"--requestor-private-key", privateKey,
-		"--boundless-market-address", cfg.MarketAddress.Hex(),
-		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-	)
-	return args
-}
-
-func buildBoundlessSubmitFileRequestYAML(
-	cfg boundlessConfig,
-	programURL string,
-	inputURL string,
-	imageID common.Hash,
-	expectedJournal []byte,
-	biddingStart int64,
-) ([]byte, error) {
-	if strings.TrimSpace(programURL) == "" {
-		return nil, errors.New("program URL is required")
-	}
-	if strings.TrimSpace(inputURL) == "" {
-		return nil, errors.New("input URL is required")
-	}
-	if imageID == (common.Hash{}) {
-		return nil, errors.New("image ID is required")
-	}
-	if len(expectedJournal) == 0 {
-		return nil, errors.New("expected journal is required")
-	}
-	if cfg.MinPriceWei == nil || cfg.MaxPriceWei == nil || cfg.LockStakeWei == nil {
-		return nil, errors.New("boundless offer prices are required")
-	}
-
-	predicateHex := strings.TrimPrefix(imageID.Hex(), "0x") + hex.EncodeToString(expectedJournal)
-	inputURLHex := hex.EncodeToString([]byte(inputURL))
-	yaml := fmt.Sprintf(
-		`id: 0
-requirements:
-  predicate:
-    predicateType: PrefixMatch
-    data: %q
-  callback:
-    addr: "0x0000000000000000000000000000000000000000"
-    gasLimit: 0
-  selector: %q
-imageUrl: %q
-input:
-  inputType: Url
-  data: %q
-offer:
-  minPrice: %s
-  maxPrice: %s
-  lockCollateral: %s
-  rampUpStart: %d
-  rampUpPeriod: %d
-  lockTimeout: %d
-  timeout: %d
-`,
-		predicateHex,
-		boundlessGroth16SelectorHex,
-		programURL,
-		inputURLHex,
-		cfg.MinPriceWei.String(),
-		cfg.MaxPriceWei.String(),
-		cfg.LockStakeWei.String(),
-		biddingStart,
-		cfg.RampUpPeriodSeconds,
-		cfg.LockTimeoutSeconds,
-		cfg.TimeoutSeconds,
-	)
-	return []byte(yaml), nil
-}
-
-func uploadBoundlessInputToS3(
-	ctx context.Context,
-	cfg boundlessConfig,
-	pipeline string,
-	privateInput []byte,
-) (string, error) {
-	if strings.TrimSpace(cfg.InputS3Bucket) == "" {
-		return "", errors.New("boundless input S3 bucket is required")
-	}
-
-	loadOpts := []func(*awsconfig.LoadOptions) error{}
-	if cfg.InputS3Region != "" {
-		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.InputS3Region))
-	}
-	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
-	if err != nil {
-		return "", fmt.Errorf("load AWS config for boundless oversized input upload: %w", err)
-	}
-	s3Client := awss3.NewFromConfig(awsCfg)
-
-	digest := sha256.Sum256(privateInput)
-	ts := time.Now().UTC().Format("20060102T150405Z")
-	keyPrefix := strings.Trim(cfg.InputS3Prefix, "/")
-	if keyPrefix == "" {
-		keyPrefix = defaultBoundlessInputS3Prefix
-	}
-	key := fmt.Sprintf("%s/%s-%s-%x.bin", keyPrefix, pipeline, ts, digest[:8])
-
-	_, err = s3Client.PutObject(ctx, &awss3.PutObjectInput{
-		Bucket:      aws.String(cfg.InputS3Bucket),
-		Key:         aws.String(key),
-		Body:        bytes.NewReader(privateInput),
-		ContentType: aws.String("application/octet-stream"),
-	})
-	if err != nil {
-		return "", fmt.Errorf("upload boundless oversized input to s3 bucket=%s key=%s: %w", cfg.InputS3Bucket, key, err)
-	}
-
-	presignTTL := cfg.InputS3PresignTTL
-	if presignTTL <= 0 {
-		presignTTL = defaultBoundlessInputS3PresignTTL
-	}
-	presigner := awss3.NewPresignClient(s3Client)
-	req, err := presigner.PresignGetObject(
-		ctx,
-		&awss3.GetObjectInput{
-			Bucket: aws.String(cfg.InputS3Bucket),
-			Key:    aws.String(key),
-		},
-		func(options *awss3.PresignOptions) {
-			options.Expires = presignTTL
-		},
-	)
-	if err != nil {
-		return "", fmt.Errorf("presign boundless oversized input url bucket=%s key=%s: %w", cfg.InputS3Bucket, key, err)
-	}
-
-	logProgress(
-		"boundless %s oversized input uploaded bytes=%d bucket=%s key=%s presign_ttl=%s",
-		pipeline,
-		len(privateInput),
-		cfg.InputS3Bucket,
-		key,
-		presignTTL.String(),
-	)
-	return req.URL, nil
-}
-
-func waitForBoundlessProof(
-	ctx context.Context,
-	cfg boundlessConfig,
-	privateKey string,
-	pipeline string,
-	requestID string,
-	expectedJournal []byte,
-) ([]byte, error) {
-	args := []string{
-		"requestor", "get-proof",
-		"--requestor-rpc-url", cfg.RPCURL,
-		"--requestor-private-key", privateKey,
-		"--boundless-market-address", cfg.MarketAddress.Hex(),
-		"--verifier-router-address", cfg.VerifierRouterAddr.Hex(),
-		"--set-verifier-address", cfg.SetVerifierAddr.Hex(),
-		requestID,
-	}
-
-	for attempt := 1; ; attempt++ {
-		cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-		cmd.Env = buildBoundlessCommandEnv()
-		out, err := cmd.CombinedOutput()
-		if err == nil {
-			seal, _, parseErr := parseBoundlessProofOutput(out, pipeline, expectedJournal)
-			if parseErr != nil {
-				return nil, fmt.Errorf("parse boundless get-proof output for %s: %w", pipeline, parseErr)
-			}
-			return seal, nil
-		}
-
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		if ctx.Err() != nil {
-			return nil, fmt.Errorf("boundless get-proof timeout for %s request_id=%s: %s", pipeline, requestID, msg)
-		}
-		if !isRetriableBoundlessGetProofError(msg) {
-			return nil, fmt.Errorf("boundless get-proof failed for %s request_id=%s: %s", pipeline, requestID, msg)
-		}
-
-		logProgress("boundless get-proof retry pipeline=%s request_id=%s attempt=%d", pipeline, requestID, attempt)
-		timer := time.NewTimer(10 * time.Second)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return nil, fmt.Errorf("boundless get-proof timeout for %s request_id=%s: %w", pipeline, requestID, ctx.Err())
-		case <-timer.C:
-		}
-	}
-}
-
-func boundlessProofAttemptTimeout(cfg boundlessConfig) time.Duration {
-	timeout := time.Duration(cfg.BiddingDelaySeconds+cfg.TimeoutSeconds) * time.Second
-	if timeout <= 0 {
-		return defaultProofDeadline
-	}
-	return timeout + defaultBoundlessProofAttemptGrace
-}
-
-func parseBoundlessProofOutput(output []byte, pipeline string, expectedJournal []byte) ([]byte, string, error) {
-	parsed, err := parseBoundlessWaitOutput(output)
-	if err != nil {
-		return nil, "", fmt.Errorf("parse boundless output for %s: %w", pipeline, err)
-	}
-
-	journal, err := parseHexBytesFlag("boundless journal", parsed.JournalHex)
-	if err != nil {
-		return nil, "", fmt.Errorf("decode boundless journal for %s: %w", pipeline, err)
-	}
-	if !bytes.Equal(journal, expectedJournal) {
-		return nil, "", fmt.Errorf("boundless journal mismatch for %s", pipeline)
-	}
-
-	seal, err := parseHexBytesFlag("boundless seal", parsed.SealHex)
-	if err != nil {
-		return nil, "", fmt.Errorf("decode boundless seal for %s: %w", pipeline, err)
-	}
-	if len(seal) == 0 {
-		return nil, "", fmt.Errorf("boundless returned empty seal for %s", pipeline)
-	}
-
-	return seal, parsed.RequestIDHex, nil
-}
-
-func readBoundlessMarketBalance(ctx context.Context, cfg boundlessConfig) (*big.Int, error) {
-	if cfg.RequestorAddress == (common.Address{}) {
-		return nil, errors.New("boundless requestor address is required for market balance checks")
-	}
-	client, err := ethclient.DialContext(ctx, cfg.RPCURL)
-	if err != nil {
-		return nil, fmt.Errorf("dial boundless rpc: %w", err)
-	}
-	defer client.Close()
-
-	boundlessMarketABI, err := abi.JSON(strings.NewReader(boundlessMarketBalanceOfABIJSON))
-	if err != nil {
-		return nil, fmt.Errorf("parse boundless market abi: %w", err)
-	}
-	market := bind.NewBoundContract(cfg.MarketAddress, boundlessMarketABI, client, client, client)
-	balance, err := callBalanceOf(ctx, market, cfg.RequestorAddress)
-	if err != nil {
-		return nil, fmt.Errorf("boundless market balanceOf: %w", err)
-	}
-	return balance, nil
-}
-
-func boundlessFundingShortfallWei(maxPriceWei, marketBalanceWei *big.Int) *big.Int {
-	maxPrice := big.NewInt(0)
-	if maxPriceWei != nil {
-		maxPrice = new(big.Int).Set(maxPriceWei)
-	}
-	if maxPrice.Sign() <= 0 {
-		return big.NewInt(0)
-	}
-	balance := big.NewInt(0)
-	if marketBalanceWei != nil {
-		balance = new(big.Int).Set(marketBalanceWei)
-	}
-	if balance.Cmp(maxPrice) >= 0 {
-		return big.NewInt(0)
-	}
-	return new(big.Int).Sub(maxPrice, balance)
-}
-
-func nextBoundlessMaxPriceWei(current *big.Int, multiplier uint64, cap *big.Int) (*big.Int, bool) {
-	currentPrice := big.NewInt(0)
-	if current != nil {
-		currentPrice = new(big.Int).Set(current)
-	}
-	if multiplier < 2 || currentPrice.Sign() <= 0 {
-		return currentPrice, false
-	}
-	nextPrice := new(big.Int).Mul(currentPrice, new(big.Int).SetUint64(multiplier))
-	if cap != nil && cap.Sign() > 0 && nextPrice.Cmp(cap) > 0 {
-		nextPrice = new(big.Int).Set(cap)
-	}
-	if nextPrice.Cmp(currentPrice) <= 0 {
-		return nextPrice, false
-	}
-	return nextPrice, true
-}
-
-func buildBoundlessCommandEnv() []string {
-	env := os.Environ()
-	pathValue := os.Getenv("PATH")
-	if home := strings.TrimSpace(os.Getenv("HOME")); home != "" {
-		pathValue = prependPathEntries(pathValue,
-			filepath.Join(home, ".cargo", "bin"),
-			filepath.Join(home, ".risc0", "bin"),
-		)
-	}
-	return upsertEnvVar(env, "PATH", pathValue)
 }
 
 func prependPathEntries(pathValue string, entries ...string) string {
@@ -2501,7 +2106,32 @@ func upsertEnvVar(env []string, key, value string) []string {
 	return append(env, prefix+value)
 }
 
-func isRetriableBoundlessGetProofError(msg string) bool {
+func sp1ProofAttemptTimeout(cfg sp1Config) time.Duration {
+	if cfg.RequestTimeout <= 0 {
+		return defaultProofDeadline
+	}
+	return cfg.RequestTimeout + defaultSP1ProofAttemptGrace
+}
+
+func nextSP1MaxPriceWei(current *big.Int, multiplier uint64, cap *big.Int) (*big.Int, bool) {
+	currentPrice := big.NewInt(0)
+	if current != nil {
+		currentPrice = new(big.Int).Set(current)
+	}
+	if multiplier < 2 || currentPrice.Sign() <= 0 {
+		return currentPrice, false
+	}
+	nextPrice := new(big.Int).Mul(currentPrice, new(big.Int).SetUint64(multiplier))
+	if cap != nil && cap.Sign() > 0 && nextPrice.Cmp(cap) > 0 {
+		nextPrice = new(big.Int).Set(cap)
+	}
+	if nextPrice.Cmp(currentPrice) <= 0 {
+		return nextPrice, false
+	}
+	return nextPrice, true
+}
+
+func isRetriableSP1GetProofError(msg string) bool {
 	lowered := strings.ToLower(msg)
 	return strings.Contains(lowered, "request timed out") ||
 		strings.Contains(lowered, "query_fulfilled_event") ||
@@ -2513,7 +2143,7 @@ func isRetriableBoundlessGetProofError(msg string) bool {
 		strings.Contains(lowered, "rate limit")
 }
 
-func isRetriableBoundlessLockFailure(msg string) bool {
+func isRetriableSP1LockFailure(msg string) bool {
 	lowered := strings.ToLower(msg)
 	return strings.Contains(lowered, "request timed out") ||
 		strings.Contains(lowered, "not fulfilled") ||
@@ -2525,14 +2155,14 @@ func isRetriableBoundlessLockFailure(msg string) bool {
 }
 
 var (
-	boundlessRequestIDRegex   = regexp.MustCompile(`(?:Assigned Request ID:|Request ID:|Submitted request)\s*(0x[0-9a-fA-F]+)`)
-	boundlessLegacyProofRegex = regexp.MustCompile(`Journal:\s*\"(0x[0-9a-fA-F]*)\"\s*-\s*Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
-	boundlessFulfillmentRegex = regexp.MustCompile(`(?s)Fulfillment Data:\s*(\{.*?\})\s*Seal:`)
-	boundlessSealOnlyRegex    = regexp.MustCompile(`Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
+	sp1RequestIDRegex   = regexp.MustCompile(`(?:Assigned Request ID:|Request ID:|Submitted request)\s*(0x[0-9a-fA-F]+)`)
+	sp1LegacyProofRegex = regexp.MustCompile(`Journal:\s*\"(0x[0-9a-fA-F]*)\"\s*-\s*Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
+	sp1FulfillmentRegex = regexp.MustCompile(`(?s)Fulfillment Data:\s*(\{.*?\})\s*Seal:`)
+	sp1SealOnlyRegex    = regexp.MustCompile(`Seal:\s*\"(0x[0-9a-fA-F]+)\"`)
 )
 
-func extractBoundlessRequestID(output []byte) string {
-	matches := boundlessRequestIDRegex.FindAllStringSubmatch(string(output), -1)
+func extractSP1RequestID(output []byte) string {
+	matches := sp1RequestIDRegex.FindAllStringSubmatch(string(output), -1)
 	if len(matches) == 0 {
 		return ""
 	}
@@ -2543,67 +2173,160 @@ func extractBoundlessRequestID(output []byte) string {
 	return strings.ToLower(strings.TrimSpace(last[1]))
 }
 
-func parseBoundlessWaitOutput(output []byte) (boundlessWaitResult, error) {
+func parseSP1WaitOutput(output []byte) (sp1WaitResult, error) {
 	raw := string(output)
 
-	requestMatches := boundlessRequestIDRegex.FindAllStringSubmatch(raw, -1)
+	requestMatches := sp1RequestIDRegex.FindAllStringSubmatch(raw, -1)
 	if len(requestMatches) == 0 || len(requestMatches[len(requestMatches)-1]) < 2 {
-		return boundlessWaitResult{}, errors.New("boundless output missing request id")
+		return sp1WaitResult{}, errors.New("sp1 output missing request id")
 	}
 	requestID := strings.ToLower(strings.TrimSpace(requestMatches[len(requestMatches)-1][1]))
 
-	if legacyMatches := boundlessLegacyProofRegex.FindAllStringSubmatch(raw, -1); len(legacyMatches) > 0 {
+	if legacyMatches := sp1LegacyProofRegex.FindAllStringSubmatch(raw, -1); len(legacyMatches) > 0 {
 		last := legacyMatches[len(legacyMatches)-1]
 		journalHex := strings.ToLower(strings.TrimSpace(last[1]))
 		sealHex := strings.ToLower(strings.TrimSpace(last[2]))
 		if sealHex == "" {
-			return boundlessWaitResult{}, errors.New("boundless output missing seal")
+			return sp1WaitResult{}, errors.New("sp1 output missing seal")
 		}
-		return boundlessWaitResult{
+		return sp1WaitResult{
 			RequestIDHex: requestID,
 			JournalHex:   journalHex,
 			SealHex:      sealHex,
 		}, nil
 	}
 
-	fulfillmentMatch := boundlessFulfillmentRegex.FindStringSubmatch(raw)
+	fulfillmentMatch := sp1FulfillmentRegex.FindStringSubmatch(raw)
 	if len(fulfillmentMatch) < 2 {
-		return boundlessWaitResult{}, errors.New("boundless output missing journal/seal")
+		return sp1WaitResult{}, errors.New("sp1 output missing journal/seal")
 	}
 
 	var fulfillment struct {
 		ImageIDAndJournal []json.RawMessage `json:"ImageIdAndJournal"`
 	}
 	if err := json.Unmarshal([]byte(fulfillmentMatch[1]), &fulfillment); err != nil {
-		return boundlessWaitResult{}, fmt.Errorf("decode fulfillment data: %w", err)
+		return sp1WaitResult{}, fmt.Errorf("decode fulfillment data: %w", err)
 	}
 	if len(fulfillment.ImageIDAndJournal) < 2 {
-		return boundlessWaitResult{}, errors.New("boundless output missing journal/seal")
+		return sp1WaitResult{}, errors.New("sp1 output missing journal/seal")
 	}
 
 	var journalHex string
 	if err := json.Unmarshal(fulfillment.ImageIDAndJournal[1], &journalHex); err != nil {
-		return boundlessWaitResult{}, fmt.Errorf("decode fulfillment journal: %w", err)
+		return sp1WaitResult{}, fmt.Errorf("decode fulfillment journal: %w", err)
 	}
 	journalHex = strings.ToLower(strings.TrimSpace(journalHex))
 	if journalHex == "" {
-		return boundlessWaitResult{}, errors.New("boundless output missing journal")
+		return sp1WaitResult{}, errors.New("sp1 output missing journal")
 	}
 
-	sealMatch := boundlessSealOnlyRegex.FindStringSubmatch(raw)
+	sealMatch := sp1SealOnlyRegex.FindStringSubmatch(raw)
 	if len(sealMatch) < 2 {
-		return boundlessWaitResult{}, errors.New("boundless output missing seal")
+		return sp1WaitResult{}, errors.New("sp1 output missing seal")
 	}
 	sealHex := strings.ToLower(strings.TrimSpace(sealMatch[1]))
 	if sealHex == "" {
-		return boundlessWaitResult{}, errors.New("boundless output missing seal")
+		return sp1WaitResult{}, errors.New("sp1 output missing seal")
 	}
 
-	return boundlessWaitResult{
+	return sp1WaitResult{
 		RequestIDHex: requestID,
 		JournalHex:   journalHex,
 		SealHex:      sealHex,
 	}, nil
+}
+
+func parseSP1ProofOutput(output []byte, pipeline string, expectedJournal []byte) ([]byte, string, error) {
+	parsed, err := parseSP1WaitOutput(output)
+	if err != nil {
+		return nil, "", fmt.Errorf("parse sp1 output for %s: %w", pipeline, err)
+	}
+
+	journal, err := parseHexBytesFlag("sp1 journal", parsed.JournalHex)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode sp1 journal for %s: %w", pipeline, err)
+	}
+	if !bytes.Equal(journal, expectedJournal) {
+		return nil, "", fmt.Errorf("sp1 journal mismatch for %s", pipeline)
+	}
+
+	seal, err := parseHexBytesFlag("sp1 seal", parsed.SealHex)
+	if err != nil {
+		return nil, "", fmt.Errorf("decode sp1 seal for %s: %w", pipeline, err)
+	}
+	if len(seal) == 0 {
+		return nil, "", fmt.Errorf("sp1 returned empty seal for %s", pipeline)
+	}
+
+	return seal, parsed.RequestIDHex, nil
+}
+
+func uploadSP1InputToS3(
+	ctx context.Context,
+	cfg sp1Config,
+	pipeline string,
+	privateInput []byte,
+) (string, error) {
+	if strings.TrimSpace(cfg.InputS3Bucket) == "" {
+		return "", errors.New("sp1 input S3 bucket is required")
+	}
+
+	loadOpts := []func(*awsconfig.LoadOptions) error{}
+	if cfg.InputS3Region != "" {
+		loadOpts = append(loadOpts, awsconfig.WithRegion(cfg.InputS3Region))
+	}
+	awsCfg, err := awsconfig.LoadDefaultConfig(ctx, loadOpts...)
+	if err != nil {
+		return "", fmt.Errorf("load AWS config for sp1 oversized input upload: %w", err)
+	}
+	s3Client := awss3.NewFromConfig(awsCfg)
+
+	digest := sha256.Sum256(privateInput)
+	ts := time.Now().UTC().Format("20060102T150405Z")
+	keyPrefix := strings.Trim(cfg.InputS3Prefix, "/")
+	if keyPrefix == "" {
+		keyPrefix = defaultSP1InputS3Prefix
+	}
+	key := fmt.Sprintf("%s/%s-%s-%x.bin", keyPrefix, pipeline, ts, digest[:8])
+
+	_, err = s3Client.PutObject(ctx, &awss3.PutObjectInput{
+		Bucket:      aws.String(cfg.InputS3Bucket),
+		Key:         aws.String(key),
+		Body:        bytes.NewReader(privateInput),
+		ContentType: aws.String("application/octet-stream"),
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload sp1 oversized input to s3 bucket=%s key=%s: %w", cfg.InputS3Bucket, key, err)
+	}
+
+	presignTTL := cfg.InputS3PresignTTL
+	if presignTTL <= 0 {
+		presignTTL = defaultSP1InputS3PresignTTL
+	}
+	presigner := awss3.NewPresignClient(s3Client)
+	req, err := presigner.PresignGetObject(
+		ctx,
+		&awss3.GetObjectInput{
+			Bucket: aws.String(cfg.InputS3Bucket),
+			Key:    aws.String(key),
+		},
+		func(options *awss3.PresignOptions) {
+			options.Expires = presignTTL
+		},
+	)
+	if err != nil {
+		return "", fmt.Errorf("presign sp1 oversized input url bucket=%s key=%s: %w", cfg.InputS3Bucket, key, err)
+	}
+
+	logProgress(
+		"sp1 %s oversized input uploaded bytes=%d bucket=%s key=%s presign_ttl=%s",
+		pipeline,
+		len(privateInput),
+		cfg.InputS3Bucket,
+		key,
+		presignTTL.String(),
+	)
+	return req.URL, nil
 }
 
 func parsePrivateKeyHex(raw string) (*ecdsa.PrivateKey, error) {

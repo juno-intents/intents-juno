@@ -36,7 +36,6 @@ COPY --from=go-builder /out/proof-requestor /usr/local/bin/proof-requestor
 COPY --from=go-builder /out/proof-funder /usr/local/bin/proof-funder
 COPY --from=sp1-builder /out/sp1-prover-adapter /usr/local/bin/sp1-prover-adapter
 
-RUN ln -sf /usr/local/bin/sp1-prover-adapter /usr/local/bin/boundless && \
-  chmod +x /usr/local/bin/proof-requestor /usr/local/bin/proof-funder /usr/local/bin/sp1-prover-adapter /usr/local/bin/boundless
+RUN chmod +x /usr/local/bin/proof-requestor /usr/local/bin/proof-funder /usr/local/bin/sp1-prover-adapter
 
 CMD ["/usr/local/bin/proof-requestor", "--help"]

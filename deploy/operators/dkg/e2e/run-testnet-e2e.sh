@@ -38,59 +38,53 @@ Options:
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
                                    (default: prefer dkg-admin when it supports sign-digest; else auto-generate e2e signer shim)
-  --boundless-bin <path>           proof backend binary implementing prover request protocols
+  --sp1-bin <path>           proof backend binary implementing prover request protocols
                                    (default: sp1-prover-adapter)
-  --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
-  --boundless-market-address <addr> boundless market contract address
+  --sp1-rpc-url <url>        sp1 market RPC URL (default: https://mainnet.base.org)
+  --sp1-market-address <addr> sp1 market contract address
                                    (default: 0xFd152dADc5183870710FE54f939Eae3aB9F0fE82)
-  --boundless-verifier-router-address <addr> boundless verifier router address
+  --sp1-verifier-router-address <addr> sp1 verifier router address
                                    (default: 0x0b144e07a0826182b6b59788c34b32bfa86fb711)
-  --boundless-set-verifier-address <addr> boundless set verifier address
+  --sp1-set-verifier-address <addr> sp1 set verifier address
                                    (default: 0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104)
-  --boundless-input-mode <mode>     boundless input mode (guest-witness-v1 only, default: guest-witness-v1)
-  --boundless-deposit-owallet-ivk-hex <hex>  64-byte oWallet IVK hex (required for guest-witness-v1)
-  --boundless-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
-  --boundless-witness-juno-scan-url <url> juno-scan URL for witness extraction (required, guest-witness-v1)
-  --boundless-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (required, guest-witness-v1)
-  --boundless-witness-juno-scan-urls <csv> optional comma-separated juno-scan URL pool for witness extraction failover
-  --boundless-witness-juno-rpc-urls <csv> optional comma-separated junocashd RPC URL pool for witness extraction failover
-  --boundless-witness-operator-labels <csv> optional comma-separated labels aligned with witness endpoint pools
-  --boundless-witness-quorum-threshold <n> witness endpoint quorum threshold (default: 3)
-  --boundless-witness-juno-scan-bearer-token-env <name> env var for optional juno-scan bearer token
+  --sp1-input-mode <mode>     sp1 input mode (guest-witness-v1 only, default: guest-witness-v1)
+  --sp1-deposit-owallet-ivk-hex <hex>  64-byte oWallet IVK hex (required for guest-witness-v1)
+  --sp1-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
+  --sp1-witness-juno-scan-url <url> juno-scan URL for witness extraction (required, guest-witness-v1)
+  --sp1-witness-juno-rpc-url <url> junocashd RPC URL for witness extraction (required, guest-witness-v1)
+  --sp1-witness-juno-scan-urls <csv> optional comma-separated juno-scan URL pool for witness extraction failover
+  --sp1-witness-juno-rpc-urls <csv> optional comma-separated junocashd RPC URL pool for witness extraction failover
+  --sp1-witness-operator-labels <csv> optional comma-separated labels aligned with witness endpoint pools
+  --sp1-witness-quorum-threshold <n> witness endpoint quorum threshold (default: 3)
+  --sp1-witness-juno-scan-bearer-token-env <name> env var for optional juno-scan bearer token
                                    (default: JUNO_SCAN_BEARER_TOKEN)
-  --boundless-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
-  --boundless-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
-  --boundless-witness-recipient-ua <address> distributed DKG recipient unified/shielded address used for witness tx generation
-  --boundless-witness-recipient-ufvk <ufvk> distributed DKG UFVK used for witness wallet registration/extraction
-  --boundless-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
-  --boundless-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
+  --sp1-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
+  --sp1-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
+  --sp1-witness-recipient-ua <address> distributed DKG recipient unified/shielded address used for witness tx generation
+  --sp1-witness-recipient-ufvk <ufvk> distributed DKG UFVK used for witness wallet registration/extraction
+  --sp1-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
+  --sp1-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
   --withdraw-coordinator-tss-url <url> optional tss-host URL override for withdraw coordinator
                                    (defaults to derived https://<witness-rpc-host>:9443)
   --withdraw-coordinator-tss-server-ca-file <path> required tss-host server CA PEM for withdraw coordinator TLS
   --withdraw-blob-bucket <name>   S3 bucket for withdraw coordinator/finalizer durable blob artifacts
-                                   (default: --boundless-input-s3-bucket)
+                                   (default: --sp1-input-s3-bucket)
   --withdraw-blob-prefix <prefix> S3 prefix for withdraw coordinator/finalizer durable blob artifacts
                                    (default: withdraw-live)
-  --boundless-requestor-key-file <path> requestor key file for boundless (required)
-  --boundless-deposit-program-url <url> deposit guest program URL for boundless (required)
-  --boundless-withdraw-program-url <url> withdraw guest program URL for boundless (required)
-  --boundless-input-s3-bucket <name> S3 bucket used for oversized boundless inputs
+  --sp1-requestor-key-file <path> requestor key file for sp1 (required)
+  --sp1-deposit-program-url <url> deposit guest program URL for sp1 (required)
+  --sp1-withdraw-program-url <url> withdraw guest program URL for sp1 (required)
+  --sp1-input-s3-bucket <name> S3 bucket used for oversized sp1 inputs
                                    (required for guest-witness-v1 / >2048-byte inputs)
-  --boundless-input-s3-prefix <prefix> S3 key prefix for oversized boundless inputs
-                                   (default: bridge-e2e/boundless-input)
-  --boundless-input-s3-region <region> optional AWS region override for oversized input uploads
-  --boundless-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
+  --sp1-input-s3-prefix <prefix> S3 key prefix for oversized sp1 inputs
+                                   (default: bridge-e2e/sp1-input)
+  --sp1-input-s3-region <region> optional AWS region override for oversized input uploads
+  --sp1-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
                                    (default: 2h)
-  --boundless-min-price-wei <wei>  auction min price (default: 0)
-  --boundless-max-price-wei <wei>  auction max price (default: 50000000000000)
-  --boundless-max-price-cap-wei <wei> max auction price cap used by retry bumps (default: 250000000000000)
-  --boundless-max-price-bump-multiplier <n> max price bump multiplier on lock failures (default: 2)
-  --boundless-max-price-bump-retries <n> max price bump retries on lock failures (default: 3)
-  --boundless-lock-stake-wei <wei> auction lock stake (default: 20000000000000000000)
-  --boundless-bidding-delay-seconds <s> auction bidding delay (default: 85)
-  --boundless-ramp-up-period-seconds <s> auction ramp period (default: 170)
-  --boundless-lock-timeout-seconds <s> auction lock timeout (default: 625)
-  --boundless-timeout-seconds <s> auction timeout (default: 1500)
+  --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 50000000000000)
+  --sp1-min-auction-period <s> SP1 minimum auction period in seconds (default: 85)
+  --sp1-auction-timeout <duration> SP1 auction timeout (default: 625s)
+  --sp1-request-timeout <duration> SP1 request timeout (default: 1500s)
   --shared-postgres-dsn <dsn>       shared Postgres DSN (required; proof-requestor/proof-funder store + lease backend)
   --shared-kafka-brokers <list>     shared Kafka brokers CSV (required; centralized proof request/fulfillment topics)
   --shared-ipfs-api-url <url>       shared IPFS API URL (required; operator checkpoint package pin/fetch verification)
@@ -121,7 +115,7 @@ This script orchestrates:
   3) Operator-service checkpoint publication (checkpoint-signer + checkpoint-aggregator on operator hosts)
   4) Shared infra validation (Postgres + Kafka + run-bound checkpoint package pin/fetch via IPFS)
   5) Centralized proof-requestor/proof-funder startup on shared topics
-  6) Base testnet deploy bootstrap via cmd/bridge-e2e --deploy-only, then relayer-driven bridge flow
+  6) Base testnet contract bootstrap + relayer-driven bridge flow
      via cmd/base-relayer + cmd/deposit-relayer + cmd/withdraw-coordinator + cmd/withdraw-finalizer
 EOF
 }
@@ -1391,52 +1385,46 @@ command_run() {
   local bridge_proof_inputs_output=""
   local bridge_run_timeout=""
   local bridge_operator_signer_bin=""
-  local boundless_auto="true"
-  local boundless_proof_submission_mode="queue"
-  local boundless_bin="sp1-prover-adapter"
-  local boundless_rpc_url="https://mainnet.base.org"
-  local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-  local boundless_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
-  local boundless_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
-  local boundless_input_mode="guest-witness-v1"
-  local boundless_deposit_owallet_ivk_hex=""
-  local boundless_withdraw_owallet_ovk_hex=""
-  local -a boundless_deposit_witness_item_files=()
-  local -a boundless_withdraw_witness_item_files=()
-  local boundless_witness_juno_scan_url=""
-  local boundless_witness_juno_rpc_url=""
-  local boundless_witness_juno_scan_urls_csv=""
-  local boundless_witness_juno_rpc_urls_csv=""
-  local boundless_witness_operator_labels_csv=""
-  local boundless_witness_quorum_threshold="3"
-  local boundless_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
-  local boundless_witness_juno_rpc_user_env="JUNO_RPC_USER"
-  local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
-  local boundless_witness_recipient_ua=""
-  local boundless_witness_recipient_ufvk=""
-  local boundless_witness_wallet_id=""
-  local boundless_witness_metadata_timeout_seconds="900"
+  local sp1_auto="true"
+  local sp1_proof_submission_mode="queue"
+  local sp1_bin="sp1-prover-adapter"
+  local sp1_rpc_url="https://mainnet.base.org"
+  local sp1_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+  local sp1_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
+  local sp1_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+  local sp1_input_mode="guest-witness-v1"
+  local sp1_deposit_owallet_ivk_hex=""
+  local sp1_withdraw_owallet_ovk_hex=""
+  local -a sp1_deposit_witness_item_files=()
+  local -a sp1_withdraw_witness_item_files=()
+  local sp1_witness_juno_scan_url=""
+  local sp1_witness_juno_rpc_url=""
+  local sp1_witness_juno_scan_urls_csv=""
+  local sp1_witness_juno_rpc_urls_csv=""
+  local sp1_witness_operator_labels_csv=""
+  local sp1_witness_quorum_threshold="3"
+  local sp1_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
+  local sp1_witness_juno_rpc_user_env="JUNO_RPC_USER"
+  local sp1_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
+  local sp1_witness_recipient_ua=""
+  local sp1_witness_recipient_ufvk=""
+  local sp1_witness_wallet_id=""
+  local sp1_witness_metadata_timeout_seconds="900"
   local withdraw_coordinator_tss_url=""
   local withdraw_coordinator_tss_server_ca_file=""
   local withdraw_blob_bucket=""
   local withdraw_blob_prefix="withdraw-live"
-  local boundless_requestor_key_file=""
-  local boundless_deposit_program_url=""
-  local boundless_withdraw_program_url=""
-  local boundless_input_s3_bucket=""
-  local boundless_input_s3_prefix="bridge-e2e/boundless-input"
-  local boundless_input_s3_region=""
-  local boundless_input_s3_presign_ttl="2h"
-  local boundless_min_price_wei="0"
-  local boundless_max_price_wei="50000000000000"
-  local boundless_max_price_cap_wei="250000000000000"
-  local boundless_max_price_bump_multiplier="2"
-  local boundless_max_price_bump_retries="3"
-  local boundless_lock_stake_wei="20000000000000000000"
-  local boundless_bidding_delay_seconds="85"
-  local boundless_ramp_up_period_seconds="170"
-  local boundless_lock_timeout_seconds="625"
-  local boundless_timeout_seconds="1500"
+  local sp1_requestor_key_file=""
+  local sp1_deposit_program_url=""
+  local sp1_withdraw_program_url=""
+  local sp1_input_s3_bucket=""
+  local sp1_input_s3_prefix="bridge-e2e/sp1-input"
+  local sp1_input_s3_region=""
+  local sp1_input_s3_presign_ttl="2h"
+  local sp1_max_price_per_pgu="50000000000000"
+  local sp1_min_auction_period="85"
+  local sp1_auction_timeout="625s"
+  local sp1_request_timeout="1500s"
   local shared_postgres_dsn=""
   local shared_kafka_brokers=""
   local shared_ipfs_api_url=""
@@ -1567,109 +1555,109 @@ command_run() {
         bridge_operator_signer_bin="$2"
         shift 2
         ;;
-      --boundless-bin)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-bin"
-        boundless_bin="$2"
+      --sp1-bin)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-bin"
+        sp1_bin="$2"
         shift 2
         ;;
-      --boundless-rpc-url)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-rpc-url"
-        boundless_rpc_url="$2"
+      --sp1-rpc-url)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-rpc-url"
+        sp1_rpc_url="$2"
         shift 2
         ;;
-      --boundless-market-address)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-market-address"
-        boundless_market_address="$2"
+      --sp1-market-address)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-market-address"
+        sp1_market_address="$2"
         shift 2
         ;;
-      --boundless-verifier-router-address)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-verifier-router-address"
-        boundless_verifier_router_address="$2"
+      --sp1-verifier-router-address)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-verifier-router-address"
+        sp1_verifier_router_address="$2"
         shift 2
         ;;
-      --boundless-set-verifier-address)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-set-verifier-address"
-        boundless_set_verifier_address="$2"
+      --sp1-set-verifier-address)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-set-verifier-address"
+        sp1_set_verifier_address="$2"
         shift 2
         ;;
-      --boundless-input-mode)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-mode"
-        boundless_input_mode="$2"
+      --sp1-input-mode)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-input-mode"
+        sp1_input_mode="$2"
         shift 2
         ;;
-      --boundless-deposit-owallet-ivk-hex)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-owallet-ivk-hex"
-        boundless_deposit_owallet_ivk_hex="$2"
+      --sp1-deposit-owallet-ivk-hex)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-deposit-owallet-ivk-hex"
+        sp1_deposit_owallet_ivk_hex="$2"
         shift 2
         ;;
-      --boundless-withdraw-owallet-ovk-hex)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-owallet-ovk-hex"
-        boundless_withdraw_owallet_ovk_hex="$2"
+      --sp1-withdraw-owallet-ovk-hex)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-withdraw-owallet-ovk-hex"
+        sp1_withdraw_owallet_ovk_hex="$2"
         shift 2
         ;;
-      --boundless-witness-juno-scan-url)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-url"
-        boundless_witness_juno_scan_url="$2"
+      --sp1-witness-juno-scan-url)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-scan-url"
+        sp1_witness_juno_scan_url="$2"
         shift 2
         ;;
-      --boundless-witness-juno-rpc-url)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-url"
-        boundless_witness_juno_rpc_url="$2"
+      --sp1-witness-juno-rpc-url)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-rpc-url"
+        sp1_witness_juno_rpc_url="$2"
         shift 2
         ;;
-      --boundless-witness-juno-scan-urls)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-urls"
-        boundless_witness_juno_scan_urls_csv="$2"
+      --sp1-witness-juno-scan-urls)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-scan-urls"
+        sp1_witness_juno_scan_urls_csv="$2"
         shift 2
         ;;
-      --boundless-witness-juno-rpc-urls)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-urls"
-        boundless_witness_juno_rpc_urls_csv="$2"
+      --sp1-witness-juno-rpc-urls)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-rpc-urls"
+        sp1_witness_juno_rpc_urls_csv="$2"
         shift 2
         ;;
-      --boundless-witness-operator-labels)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-operator-labels"
-        boundless_witness_operator_labels_csv="$2"
+      --sp1-witness-operator-labels)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-operator-labels"
+        sp1_witness_operator_labels_csv="$2"
         shift 2
         ;;
-      --boundless-witness-quorum-threshold)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-quorum-threshold"
-        boundless_witness_quorum_threshold="$2"
+      --sp1-witness-quorum-threshold)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-quorum-threshold"
+        sp1_witness_quorum_threshold="$2"
         shift 2
         ;;
-      --boundless-witness-juno-scan-bearer-token-env)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-scan-bearer-token-env"
-        boundless_witness_juno_scan_bearer_token_env="$2"
+      --sp1-witness-juno-scan-bearer-token-env)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-scan-bearer-token-env"
+        sp1_witness_juno_scan_bearer_token_env="$2"
         shift 2
         ;;
-      --boundless-witness-juno-rpc-user-env)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-user-env"
-        boundless_witness_juno_rpc_user_env="$2"
+      --sp1-witness-juno-rpc-user-env)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-rpc-user-env"
+        sp1_witness_juno_rpc_user_env="$2"
         shift 2
         ;;
-      --boundless-witness-juno-rpc-pass-env)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-pass-env"
-        boundless_witness_juno_rpc_pass_env="$2"
+      --sp1-witness-juno-rpc-pass-env)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-juno-rpc-pass-env"
+        sp1_witness_juno_rpc_pass_env="$2"
         shift 2
         ;;
-      --boundless-witness-recipient-ua)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-recipient-ua"
-        boundless_witness_recipient_ua="$2"
+      --sp1-witness-recipient-ua)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-recipient-ua"
+        sp1_witness_recipient_ua="$2"
         shift 2
         ;;
-      --boundless-witness-recipient-ufvk)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-recipient-ufvk"
-        boundless_witness_recipient_ufvk="$2"
+      --sp1-witness-recipient-ufvk)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-recipient-ufvk"
+        sp1_witness_recipient_ufvk="$2"
         shift 2
         ;;
-      --boundless-witness-wallet-id)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-wallet-id"
-        boundless_witness_wallet_id="$2"
+      --sp1-witness-wallet-id)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-wallet-id"
+        sp1_witness_wallet_id="$2"
         shift 2
         ;;
-      --boundless-witness-metadata-timeout-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-metadata-timeout-seconds"
-        boundless_witness_metadata_timeout_seconds="$2"
+      --sp1-witness-metadata-timeout-seconds)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-witness-metadata-timeout-seconds"
+        sp1_witness_metadata_timeout_seconds="$2"
         shift 2
         ;;
       --withdraw-coordinator-tss-url)
@@ -1696,89 +1684,59 @@ command_run() {
         [[ $# -ge 2 ]] || die "missing value for $1"
         die "withdraw coordinator mock runtime is forbidden in live e2e (full mode only)"
         ;;
-      --boundless-requestor-key-file)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-requestor-key-file"
-        boundless_requestor_key_file="$2"
+      --sp1-requestor-key-file)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-requestor-key-file"
+        sp1_requestor_key_file="$2"
         shift 2
         ;;
-      --boundless-deposit-program-url)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-deposit-program-url"
-        boundless_deposit_program_url="$2"
+      --sp1-deposit-program-url)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-deposit-program-url"
+        sp1_deposit_program_url="$2"
         shift 2
         ;;
-      --boundless-withdraw-program-url)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-withdraw-program-url"
-        boundless_withdraw_program_url="$2"
+      --sp1-withdraw-program-url)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-withdraw-program-url"
+        sp1_withdraw_program_url="$2"
         shift 2
         ;;
-      --boundless-input-s3-bucket)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-bucket"
-        boundless_input_s3_bucket="$2"
+      --sp1-input-s3-bucket)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-input-s3-bucket"
+        sp1_input_s3_bucket="$2"
         shift 2
         ;;
-      --boundless-input-s3-prefix)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-prefix"
-        boundless_input_s3_prefix="$2"
+      --sp1-input-s3-prefix)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-input-s3-prefix"
+        sp1_input_s3_prefix="$2"
         shift 2
         ;;
-      --boundless-input-s3-region)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-region"
-        boundless_input_s3_region="$2"
+      --sp1-input-s3-region)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-input-s3-region"
+        sp1_input_s3_region="$2"
         shift 2
         ;;
-      --boundless-input-s3-presign-ttl)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-input-s3-presign-ttl"
-        boundless_input_s3_presign_ttl="$2"
+      --sp1-input-s3-presign-ttl)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-input-s3-presign-ttl"
+        sp1_input_s3_presign_ttl="$2"
         shift 2
         ;;
-      --boundless-min-price-wei)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-min-price-wei"
-        boundless_min_price_wei="$2"
+      --sp1-max-price-per-pgu)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-max-price-per-pgu"
+        sp1_max_price_per_pgu="$2"
         shift 2
         ;;
-      --boundless-max-price-wei)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-wei"
-        boundless_max_price_wei="$2"
+      --sp1-min-auction-period)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-min-auction-period"
+        sp1_min_auction_period="$2"
         shift 2
         ;;
-      --boundless-max-price-cap-wei)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-cap-wei"
-        boundless_max_price_cap_wei="$2"
+      --sp1-auction-timeout)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-auction-timeout"
+        sp1_auction_timeout="$2"
         shift 2
         ;;
-      --boundless-max-price-bump-multiplier)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-bump-multiplier"
-        boundless_max_price_bump_multiplier="$2"
-        shift 2
-        ;;
-      --boundless-max-price-bump-retries)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-max-price-bump-retries"
-        boundless_max_price_bump_retries="$2"
-        shift 2
-        ;;
-      --boundless-lock-stake-wei)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-lock-stake-wei"
-        boundless_lock_stake_wei="$2"
-        shift 2
-        ;;
-      --boundless-bidding-delay-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-bidding-delay-seconds"
-        boundless_bidding_delay_seconds="$2"
-        shift 2
-        ;;
-      --boundless-ramp-up-period-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-ramp-up-period-seconds"
-        boundless_ramp_up_period_seconds="$2"
-        shift 2
-        ;;
-      --boundless-lock-timeout-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-lock-timeout-seconds"
-        boundless_lock_timeout_seconds="$2"
-        shift 2
-        ;;
-      --boundless-timeout-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --boundless-timeout-seconds"
-        boundless_timeout_seconds="$2"
+      --sp1-request-timeout)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-request-timeout"
+        sp1_request_timeout="$2"
         shift 2
         ;;
       --shared-postgres-dsn)
@@ -1883,16 +1841,10 @@ command_run() {
   [[ "$threshold" =~ ^[0-9]+$ ]] || die "--threshold must be numeric"
   [[ "$base_port" =~ ^[0-9]+$ ]] || die "--base-port must be numeric"
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
-  [[ "$boundless_min_price_wei" =~ ^[0-9]+$ ]] || die "--boundless-min-price-wei must be numeric"
-  [[ "$boundless_max_price_wei" =~ ^[0-9]+$ ]] || die "--boundless-max-price-wei must be numeric"
-  [[ "$boundless_max_price_cap_wei" =~ ^[0-9]+$ ]] || die "--boundless-max-price-cap-wei must be numeric"
-  [[ "$boundless_max_price_bump_multiplier" =~ ^[0-9]+$ ]] || die "--boundless-max-price-bump-multiplier must be numeric"
-  [[ "$boundless_max_price_bump_retries" =~ ^[0-9]+$ ]] || die "--boundless-max-price-bump-retries must be numeric"
-  [[ "$boundless_lock_stake_wei" =~ ^[0-9]+$ ]] || die "--boundless-lock-stake-wei must be numeric"
-  [[ "$boundless_bidding_delay_seconds" =~ ^[0-9]+$ ]] || die "--boundless-bidding-delay-seconds must be numeric"
-  [[ "$boundless_ramp_up_period_seconds" =~ ^[0-9]+$ ]] || die "--boundless-ramp-up-period-seconds must be numeric"
-  [[ "$boundless_lock_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-lock-timeout-seconds must be numeric"
-  [[ "$boundless_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-timeout-seconds must be numeric"
+  [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "--sp1-max-price-per-pgu must be numeric"
+  [[ "$sp1_min_auction_period" =~ ^[0-9]+$ ]] || die "--sp1-min-auction-period must be numeric"
+  [[ "$sp1_auction_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-auction-timeout must be seconds with s suffix (example: 625s)"
+  [[ "$sp1_request_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-request-timeout must be seconds with s suffix (example: 1500s)"
   [[ "$refund_after_expiry_window_seconds" =~ ^[0-9]+$ ]] || die "--refund-after-expiry-window-seconds must be numeric"
   (( refund_after_expiry_window_seconds > 0 )) || die "--refund-after-expiry-window-seconds must be > 0"
   case "$relayer_runtime_mode" in
@@ -1901,12 +1853,8 @@ command_run() {
   esac
   [[ -z "$bridge_deposit_checkpoint_height" || "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-deposit-checkpoint-height must be numeric"
   [[ -z "$bridge_withdraw_checkpoint_height" || "$bridge_withdraw_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-withdraw-checkpoint-height must be numeric"
-  (( boundless_max_price_cap_wei >= boundless_max_price_wei )) || die "--boundless-max-price-cap-wei must be >= --boundless-max-price-wei"
-  if [[ "$boundless_input_mode" != "guest-witness-v1" ]]; then
-    die "--boundless-input-mode must be guest-witness-v1"
-  fi
-  if (( boundless_max_price_bump_retries > 0 && boundless_max_price_bump_multiplier < 2 )); then
-    die "--boundless-max-price-bump-multiplier must be >= 2 when --boundless-max-price-bump-retries > 0"
+  if [[ "$sp1_input_mode" != "guest-witness-v1" ]]; then
+    die "--sp1-input-mode must be guest-witness-v1"
   fi
   local -a relayer_runtime_operator_hosts=()
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
@@ -1926,46 +1874,46 @@ command_run() {
     bridge_run_timeout="90m"
   fi
 
-  [[ -n "$boundless_requestor_key_file" ]] || die "--boundless-requestor-key-file is required"
-  [[ -f "$boundless_requestor_key_file" ]] || die "boundless requestor key file not found: $boundless_requestor_key_file"
-  [[ -n "$boundless_deposit_program_url" ]] || die "--boundless-deposit-program-url is required"
-  [[ -n "$boundless_withdraw_program_url" ]] || die "--boundless-withdraw-program-url is required"
-  [[ -n "$boundless_input_s3_prefix" ]] || die "--boundless-input-s3-prefix must not be empty"
-  [[ -n "$boundless_input_s3_presign_ttl" ]] || die "--boundless-input-s3-presign-ttl must not be empty"
+  [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
+  [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
+  [[ -n "$sp1_deposit_program_url" ]] || die "--sp1-deposit-program-url is required"
+  [[ -n "$sp1_withdraw_program_url" ]] || die "--sp1-withdraw-program-url is required"
+  [[ -n "$sp1_input_s3_prefix" ]] || die "--sp1-input-s3-prefix must not be empty"
+  [[ -n "$sp1_input_s3_presign_ttl" ]] || die "--sp1-input-s3-presign-ttl must not be empty"
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
   local guest_witness_extract_mode="true"
-  [[ -n "$boundless_input_s3_bucket" ]] || die "--boundless-input-s3-bucket is required when --boundless-input-mode guest-witness-v1"
+  [[ -n "$sp1_input_s3_bucket" ]] || die "--sp1-input-s3-bucket is required when --sp1-input-mode guest-witness-v1"
   if [[ -z "$withdraw_blob_bucket" ]]; then
-    withdraw_blob_bucket="$boundless_input_s3_bucket"
+    withdraw_blob_bucket="$sp1_input_s3_bucket"
   fi
   [[ -n "$withdraw_blob_bucket" ]] || die "--withdraw-blob-bucket must not be empty"
   [[ -n "$withdraw_blob_prefix" ]] || die "--withdraw-blob-prefix must not be empty"
-  [[ -n "$boundless_deposit_owallet_ivk_hex" ]] || die "--boundless-deposit-owallet-ivk-hex is required when --boundless-input-mode guest-witness-v1"
-  [[ -n "$boundless_withdraw_owallet_ovk_hex" ]] || die "--boundless-withdraw-owallet-ovk-hex is required when --boundless-input-mode guest-witness-v1"
-  [[ "$boundless_witness_metadata_timeout_seconds" =~ ^[0-9]+$ ]] || die "--boundless-witness-metadata-timeout-seconds must be numeric"
-  (( boundless_witness_metadata_timeout_seconds > 0 )) || die "--boundless-witness-metadata-timeout-seconds must be > 0"
-  [[ "$boundless_witness_quorum_threshold" =~ ^[0-9]+$ ]] || die "--boundless-witness-quorum-threshold must be numeric"
-  (( boundless_witness_quorum_threshold > 0 )) || die "--boundless-witness-quorum-threshold must be > 0"
-  if [[ -z "$boundless_witness_juno_scan_urls_csv" ]]; then
-    boundless_witness_juno_scan_urls_csv="$boundless_witness_juno_scan_url"
+  [[ -n "$sp1_deposit_owallet_ivk_hex" ]] || die "--sp1-deposit-owallet-ivk-hex is required when --sp1-input-mode guest-witness-v1"
+  [[ -n "$sp1_withdraw_owallet_ovk_hex" ]] || die "--sp1-withdraw-owallet-ovk-hex is required when --sp1-input-mode guest-witness-v1"
+  [[ "$sp1_witness_metadata_timeout_seconds" =~ ^[0-9]+$ ]] || die "--sp1-witness-metadata-timeout-seconds must be numeric"
+  (( sp1_witness_metadata_timeout_seconds > 0 )) || die "--sp1-witness-metadata-timeout-seconds must be > 0"
+  [[ "$sp1_witness_quorum_threshold" =~ ^[0-9]+$ ]] || die "--sp1-witness-quorum-threshold must be numeric"
+  (( sp1_witness_quorum_threshold > 0 )) || die "--sp1-witness-quorum-threshold must be > 0"
+  if [[ -z "$sp1_witness_juno_scan_urls_csv" ]]; then
+    sp1_witness_juno_scan_urls_csv="$sp1_witness_juno_scan_url"
   fi
-  if [[ -z "$boundless_witness_juno_rpc_urls_csv" ]]; then
-    boundless_witness_juno_rpc_urls_csv="$boundless_witness_juno_rpc_url"
+  if [[ -z "$sp1_witness_juno_rpc_urls_csv" ]]; then
+    sp1_witness_juno_rpc_urls_csv="$sp1_witness_juno_rpc_url"
   fi
-  [[ -n "$boundless_witness_juno_scan_urls_csv" ]] || die "one of --boundless-witness-juno-scan-url or --boundless-witness-juno-scan-urls is required when guest witness extraction is enabled"
-  [[ -n "$boundless_witness_juno_rpc_urls_csv" ]] || die "one of --boundless-witness-juno-rpc-url or --boundless-witness-juno-rpc-urls is required when guest witness extraction is enabled"
-  if [[ -z "$boundless_witness_juno_scan_url" ]]; then
-    boundless_witness_juno_scan_url="$(trim "${boundless_witness_juno_scan_urls_csv%%,*}")"
+  [[ -n "$sp1_witness_juno_scan_urls_csv" ]] || die "one of --sp1-witness-juno-scan-url or --sp1-witness-juno-scan-urls is required when guest witness extraction is enabled"
+  [[ -n "$sp1_witness_juno_rpc_urls_csv" ]] || die "one of --sp1-witness-juno-rpc-url or --sp1-witness-juno-rpc-urls is required when guest witness extraction is enabled"
+  if [[ -z "$sp1_witness_juno_scan_url" ]]; then
+    sp1_witness_juno_scan_url="$(trim "${sp1_witness_juno_scan_urls_csv%%,*}")"
   fi
-  if [[ -z "$boundless_witness_juno_rpc_url" ]]; then
-    boundless_witness_juno_rpc_url="$(trim "${boundless_witness_juno_rpc_urls_csv%%,*}")"
+  if [[ -z "$sp1_witness_juno_rpc_url" ]]; then
+    sp1_witness_juno_rpc_url="$(trim "${sp1_witness_juno_rpc_urls_csv%%,*}")"
   fi
-  [[ -n "$boundless_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
-  [[ -n "$boundless_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
-  if [[ -z "$boundless_witness_recipient_ua" || -z "$boundless_witness_recipient_ufvk" ]]; then
-    die "--boundless-witness-recipient-ua and --boundless-witness-recipient-ufvk are required for guest witness extraction mode"
+  [[ -n "$sp1_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
+  [[ -n "$sp1_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
+  if [[ -z "$sp1_witness_recipient_ua" || -z "$sp1_witness_recipient_ufvk" ]]; then
+    die "--sp1-witness-recipient-ua and --sp1-witness-recipient-ufvk are required for guest witness extraction mode"
   fi
   if [[ -z "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" && -z "${JUNO_FUNDER_SEED_PHRASE:-}" && -z "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
     die "one of JUNO_FUNDER_PRIVATE_KEY_HEX, JUNO_FUNDER_SEED_PHRASE, or JUNO_FUNDER_SOURCE_ADDRESS is required for run-generated witness metadata"
@@ -1974,7 +1922,7 @@ command_run() {
     die "WITHDRAW_COORDINATOR_RUNTIME_MODE must be full; mock runtime is forbidden"
   fi
   if [[ -n "$bridge_deposit_final_orchard_root" || -n "$bridge_withdraw_final_orchard_root" || -n "$bridge_deposit_checkpoint_height" || -n "$bridge_deposit_checkpoint_block_hash" || -n "$bridge_withdraw_checkpoint_height" || -n "$bridge_withdraw_checkpoint_block_hash" ]]; then
-    die "manual bridge checkpoint/orchard root overrides are not supported when --boundless-input-mode guest-witness-v1"
+    die "manual bridge checkpoint/orchard root overrides are not supported when --sp1-input-mode guest-witness-v1"
   fi
 
   if [[ -z "$output_path" ]]; then
@@ -2003,7 +1951,7 @@ command_run() {
 
   ensure_base_dependencies
   ensure_command go
-  if [[ "$boundless_bin" == "sp1-prover-adapter" ]] && ! command -v "$boundless_bin" >/dev/null 2>&1; then
+  if [[ "$sp1_bin" == "sp1-prover-adapter" ]] && ! command -v "$sp1_bin" >/dev/null 2>&1; then
     local local_sp1_adapter_bin="$workdir/bin/sp1-prover-adapter"
     log "sp1-prover-adapter not found on PATH; building local adapter binary"
     ensure_command cargo
@@ -2014,9 +1962,9 @@ command_run() {
     ensure_dir "$(dirname "$local_sp1_adapter_bin")"
     cp "$REPO_ROOT/zk/target/release/sp1-prover-adapter" "$local_sp1_adapter_bin"
     chmod +x "$local_sp1_adapter_bin"
-    boundless_bin="$local_sp1_adapter_bin"
+    sp1_bin="$local_sp1_adapter_bin"
   fi
-  ensure_command "$boundless_bin"
+  ensure_command "$sp1_bin"
   ensure_command openssl
   ensure_command cast
   if [[ "$shared_ecs_enabled" == "true" ]]; then
@@ -2024,12 +1972,12 @@ command_run() {
   fi
 
   local bridge_recipient_address=""
-  local boundless_requestor_key_hex
-  boundless_requestor_key_hex="$(trimmed_file_value "$boundless_requestor_key_file")"
-  [[ -n "$boundless_requestor_key_hex" ]] || die "boundless requestor key file is empty: $boundless_requestor_key_file"
-  local boundless_requestor_address
-  boundless_requestor_address="$(cast wallet address --private-key "$boundless_requestor_key_hex" 2>/dev/null || true)"
-  [[ -n "$boundless_requestor_address" ]] || die "failed to derive boundless requestor address from key file: $boundless_requestor_key_file"
+  local sp1_requestor_key_hex
+  sp1_requestor_key_hex="$(trimmed_file_value "$sp1_requestor_key_file")"
+  [[ -n "$sp1_requestor_key_hex" ]] || die "sp1 requestor key file is empty: $sp1_requestor_key_file"
+  local sp1_requestor_address
+  sp1_requestor_address="$(cast wallet address --private-key "$sp1_requestor_key_hex" 2>/dev/null || true)"
+  [[ -n "$sp1_requestor_address" ]] || die "failed to derive sp1 requestor address from key file: $sp1_requestor_key_file"
   ensure_dir "$(dirname "$output_path")"
 
   if [[ -d "$workdir" ]]; then
@@ -2183,20 +2131,20 @@ command_run() {
   local -a witness_quorum_operator_labels=()
   local -a witness_failed_operator_labels=()
 
-  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
+  if [[ "$sp1_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
     ensure_dir "$workdir/reports/witness"
     local witness_metadata_json witness_wallet_id
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
-    witness_wallet_id="$boundless_witness_wallet_id"
+    witness_wallet_id="$sp1_witness_wallet_id"
     if [[ -z "$witness_wallet_id" ]]; then
       witness_wallet_id="testnet-e2e-${proof_topic_seed}"
     fi
 
     local juno_rpc_user_var juno_rpc_pass_var juno_scan_bearer_token_var
     local juno_rpc_user juno_rpc_pass juno_scan_bearer_token
-    juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
-    juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
-    juno_scan_bearer_token_var="$boundless_witness_juno_scan_bearer_token_env"
+    juno_rpc_user_var="$sp1_witness_juno_rpc_user_env"
+    juno_rpc_pass_var="$sp1_witness_juno_rpc_pass_env"
+    juno_scan_bearer_token_var="$sp1_witness_juno_scan_bearer_token_env"
     juno_rpc_user="${!juno_rpc_user_var:-}"
     juno_rpc_pass="${!juno_rpc_pass_var:-}"
     juno_scan_bearer_token="${!juno_scan_bearer_token_var:-}"
@@ -2216,11 +2164,11 @@ command_run() {
       die "failed to predict bridge deployment address for witness planning"
     predicted_witness_recipient_raw_address_hex="$(
       cd "$REPO_ROOT"
-      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh decode-orchard-raw --address "$boundless_witness_recipient_ua"
+      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh decode-orchard-raw --address "$sp1_witness_recipient_ua"
     )"
     predicted_witness_recipient_raw_address_hex="$(trim "$predicted_witness_recipient_raw_address_hex")"
     [[ "$predicted_witness_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
-      die "failed to decode recipient raw address for witness memo planning: ua=$boundless_witness_recipient_ua"
+      die "failed to decode recipient raw address for witness memo planning: ua=$sp1_witness_recipient_ua"
     predicted_witness_withdrawal_id="$(
       "$SCRIPT_DIR/compute-bridge-withdrawal-id.sh" run \
         --base-chain-id "$base_chain_id" \
@@ -2238,7 +2186,7 @@ command_run() {
       die "failed to compute predicted withdraw batch id for witness memo planning"
 
     local witness_quorum_threshold
-    witness_quorum_threshold="$boundless_witness_quorum_threshold"
+    witness_quorum_threshold="$sp1_witness_quorum_threshold"
 
     local -a witness_scan_urls_raw=()
     local -a witness_rpc_urls_raw=()
@@ -2248,26 +2196,26 @@ command_run() {
     local -a witness_operator_labels=()
     local witness_entry
 
-    IFS=',' read -r -a witness_scan_urls_raw <<<"$boundless_witness_juno_scan_urls_csv"
+    IFS=',' read -r -a witness_scan_urls_raw <<<"$sp1_witness_juno_scan_urls_csv"
     for witness_entry in "${witness_scan_urls_raw[@]}"; do
       witness_entry="$(trim "$witness_entry")"
       [[ -n "$witness_entry" ]] || continue
       witness_scan_urls+=("$witness_entry")
     done
 
-    IFS=',' read -r -a witness_rpc_urls_raw <<<"$boundless_witness_juno_rpc_urls_csv"
+    IFS=',' read -r -a witness_rpc_urls_raw <<<"$sp1_witness_juno_rpc_urls_csv"
     for witness_entry in "${witness_rpc_urls_raw[@]}"; do
       witness_entry="$(trim "$witness_entry")"
       [[ -n "$witness_entry" ]] || continue
       witness_rpc_urls+=("$witness_entry")
     done
 
-    (( ${#witness_scan_urls[@]} > 0 )) || die "witness endpoint pool is empty: --boundless-witness-juno-scan-urls"
+    (( ${#witness_scan_urls[@]} > 0 )) || die "witness endpoint pool is empty: --sp1-witness-juno-scan-urls"
     (( ${#witness_scan_urls[@]} == ${#witness_rpc_urls[@]} )) || \
       die "witness endpoint pool mismatch: scan_urls=${#witness_scan_urls[@]} rpc_urls=${#witness_rpc_urls[@]}"
 
-    if [[ -n "$boundless_witness_operator_labels_csv" ]]; then
-      IFS=',' read -r -a witness_operator_labels_raw <<<"$boundless_witness_operator_labels_csv"
+    if [[ -n "$sp1_witness_operator_labels_csv" ]]; then
+      IFS=',' read -r -a witness_operator_labels_raw <<<"$sp1_witness_operator_labels_csv"
       for witness_entry in "${witness_operator_labels_raw[@]}"; do
         witness_entry="$(trim "$witness_entry")"
         [[ -n "$witness_entry" ]] || continue
@@ -2312,15 +2260,15 @@ command_run() {
       die "failed to build healthy witness endpoint pool with quorum: healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold configured=$witness_endpoint_pool_size"
 
     local witness_timeout_slice_seconds
-    witness_timeout_slice_seconds="$boundless_witness_metadata_timeout_seconds"
+    witness_timeout_slice_seconds="$sp1_witness_metadata_timeout_seconds"
     if (( witness_endpoint_healthy_count > 1 )); then
-      witness_timeout_slice_seconds=$((boundless_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))
+      witness_timeout_slice_seconds=$((sp1_witness_metadata_timeout_seconds / witness_endpoint_healthy_count))
     fi
     (( witness_timeout_slice_seconds >= 300 )) || witness_timeout_slice_seconds=300
-    if (( witness_timeout_slice_seconds > boundless_witness_metadata_timeout_seconds )); then
-      witness_timeout_slice_seconds="$boundless_witness_metadata_timeout_seconds"
+    if (( witness_timeout_slice_seconds > sp1_witness_metadata_timeout_seconds )); then
+      witness_timeout_slice_seconds="$sp1_witness_metadata_timeout_seconds"
     fi
-    log "witness timeout slice seconds=$witness_timeout_slice_seconds total_timeout_seconds=$boundless_witness_metadata_timeout_seconds healthy_endpoints=$witness_endpoint_healthy_count"
+    log "witness timeout slice seconds=$witness_timeout_slice_seconds total_timeout_seconds=$sp1_witness_metadata_timeout_seconds healthy_endpoints=$witness_endpoint_healthy_count"
 
     local witness_metadata_generated="false"
     local witness_metadata_source_scan_url=""
@@ -2352,8 +2300,8 @@ command_run() {
         --juno-scan-url "$witness_scan_url"
         --pre-upsert-scan-urls "$witness_metadata_pre_upsert_scan_urls_csv"
         --wallet-id "$witness_wallet_id_attempt"
-        --recipient-ua "$boundless_witness_recipient_ua"
-        --recipient-ufvk "$boundless_witness_recipient_ufvk"
+        --recipient-ua "$sp1_witness_recipient_ua"
+        --recipient-ufvk "$sp1_witness_recipient_ufvk"
         --base-chain-id "$base_chain_id"
         --bridge-address "$predicted_witness_bridge_address"
         --base-recipient-address "$bridge_recipient_address"
@@ -2393,8 +2341,8 @@ command_run() {
 
     [[ "$witness_metadata_generated" == "true" ]] || \
       die "failed to generate witness metadata from healthy witness endpoint pool"
-    boundless_witness_juno_scan_url="$witness_metadata_source_scan_url"
-    boundless_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
+    sp1_witness_juno_scan_url="$witness_metadata_source_scan_url"
+    sp1_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
 
     local generated_wallet_id generated_recipient_ua generated_deposit_txid generated_deposit_action_index
     local generated_recipient_raw_address_hex generated_ufvk
@@ -2414,9 +2362,9 @@ command_run() {
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
-    [[ "$(lower "$generated_recipient_ua")" == "$(lower "$boundless_witness_recipient_ua")" ]] || \
-      die "generated witness metadata recipient_ua mismatch: generated=$generated_recipient_ua expected=$boundless_witness_recipient_ua"
-    [[ "$(lower "$generated_ufvk")" == "$(lower "$boundless_witness_recipient_ufvk")" ]] || \
+    [[ "$(lower "$generated_recipient_ua")" == "$(lower "$sp1_witness_recipient_ua")" ]] || \
+      die "generated witness metadata recipient_ua mismatch: generated=$generated_recipient_ua expected=$sp1_witness_recipient_ua"
+    [[ "$(lower "$generated_ufvk")" == "$(lower "$sp1_witness_recipient_ufvk")" ]] || \
       die "generated witness metadata ufvk mismatch against distributed DKG value"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
@@ -2427,7 +2375,7 @@ command_run() {
     generated_deposit_action_indexes+=("$generated_deposit_action_index")
     mapfile -t generated_deposit_action_indexes_rpc < <(
       witness_rpc_action_index_candidates \
-        "$boundless_witness_juno_rpc_url" \
+        "$sp1_witness_juno_rpc_url" \
         "$juno_rpc_user" \
         "$juno_rpc_pass" \
         "$generated_deposit_txid" || true
@@ -2514,10 +2462,10 @@ command_run() {
             go run ./cmd/juno-witness-extract deposit \
               --juno-scan-url "$witness_scan_url" \
               --wallet-id "$generated_wallet_id" \
-              --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+              --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
               --juno-rpc-url "$witness_rpc_url" \
-              --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-              --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+              --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+              --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
               --txid "$generated_deposit_txid" \
               --action-index "$witness_action_index_candidate" \
               --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json" 2>"$witness_extract_error_file"
@@ -2623,8 +2571,8 @@ command_run() {
     cp "${witness_success_deposit_witness[0]}" "$deposit_witness_auto_file"
     cp "${witness_success_deposit_json[0]}" "$deposit_witness_auto_json"
 
-    boundless_deposit_witness_item_files=("$deposit_witness_auto_file")
-    boundless_withdraw_witness_item_files=()
+    sp1_deposit_witness_item_files=("$deposit_witness_auto_file")
+    sp1_withdraw_witness_item_files=()
 
     bridge_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$deposit_witness_auto_json")"
     bridge_deposit_checkpoint_height="$(jq -r '.anchor_height // empty' "$deposit_witness_auto_json")"
@@ -2635,7 +2583,7 @@ command_run() {
   fi
 
   if [[ -z "$withdraw_coordinator_tss_url" ]]; then
-    withdraw_coordinator_tss_url="$(derive_tss_url_from_juno_rpc_url "$boundless_witness_juno_rpc_url" || true)"
+    withdraw_coordinator_tss_url="$(derive_tss_url_from_juno_rpc_url "$sp1_witness_juno_rpc_url" || true)"
   fi
   if [[ -z "$withdraw_coordinator_tss_server_ca_file" ]]; then
     local default_tss_runtime_dir
@@ -2659,15 +2607,15 @@ command_run() {
   local withdraw_coordinator_juno_rpc_user_var withdraw_coordinator_juno_rpc_pass_var
   local withdraw_coordinator_juno_rpc_user_value withdraw_coordinator_juno_rpc_pass_value
   local withdraw_finalizer_juno_scan_bearer_value=""
-  withdraw_coordinator_juno_rpc_user_var="$boundless_witness_juno_rpc_user_env"
-  withdraw_coordinator_juno_rpc_pass_var="$boundless_witness_juno_rpc_pass_env"
+  withdraw_coordinator_juno_rpc_user_var="$sp1_witness_juno_rpc_user_env"
+  withdraw_coordinator_juno_rpc_pass_var="$sp1_witness_juno_rpc_pass_env"
   [[ -n "${!withdraw_coordinator_juno_rpc_user_var:-}" ]] || \
     die "missing env var for withdraw coordinator Juno RPC user: $withdraw_coordinator_juno_rpc_user_var"
   [[ -n "${!withdraw_coordinator_juno_rpc_pass_var:-}" ]] || \
     die "missing env var for withdraw coordinator Juno RPC pass: $withdraw_coordinator_juno_rpc_pass_var"
   withdraw_coordinator_juno_rpc_user_value="${!withdraw_coordinator_juno_rpc_user_var}"
   withdraw_coordinator_juno_rpc_pass_value="${!withdraw_coordinator_juno_rpc_pass_var}"
-  withdraw_finalizer_juno_scan_bearer_value="${!boundless_witness_juno_scan_bearer_token_env:-}"
+  withdraw_finalizer_juno_scan_bearer_value="${!sp1_witness_juno_scan_bearer_token_env:-}"
 
   if [[ -z "$bridge_withdraw_final_orchard_root" ]]; then
     bridge_withdraw_final_orchard_root="$bridge_deposit_final_orchard_root"
@@ -2719,8 +2667,8 @@ command_run() {
   [[ -f "$bridge_deployer_key_file" ]] || die "bridge deployer key file not found: $bridge_deployer_key_file"
 
   local -a bridge_args=()
-  export SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url"
-  export SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url"
+  export SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url"
+  export SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url"
   export SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id"
   export SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id"
   bridge_args+=(
@@ -2732,7 +2680,7 @@ command_run() {
     "--threshold" "$threshold"
     "--contracts-out" "$contracts_out"
     "--recipient" "$bridge_recipient_address"
-    "--boundless-auto"
+    "--sp1-auto"
     "--run-timeout" "$bridge_run_timeout"
     "--output" "$bridge_summary"
   )
@@ -2752,44 +2700,38 @@ command_run() {
     bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
   fi
   bridge_args+=(
-    "--boundless-bin" "$boundless_bin"
-    "--boundless-rpc-url" "$boundless_rpc_url"
-    "--boundless-proof-submission-mode" "$boundless_proof_submission_mode"
-    "--boundless-proof-queue-brokers" "$shared_kafka_brokers"
-    "--boundless-proof-request-topic" "$proof_request_topic"
-    "--boundless-proof-result-topic" "$proof_result_topic"
-    "--boundless-proof-failure-topic" "$proof_failure_topic"
-    "--boundless-proof-consumer-group" "$proof_bridge_consumer_group"
-    "--boundless-market-address" "$boundless_market_address"
-    "--boundless-verifier-router-address" "$boundless_verifier_router_address"
-    "--boundless-set-verifier-address" "$boundless_set_verifier_address"
-    "--boundless-input-mode" "$boundless_input_mode"
-    "--boundless-deposit-program-url" "$boundless_deposit_program_url"
-    "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
-    "--boundless-input-s3-bucket" "$boundless_input_s3_bucket"
-    "--boundless-input-s3-prefix" "$boundless_input_s3_prefix"
-    "--boundless-input-s3-region" "$boundless_input_s3_region"
-    "--boundless-input-s3-presign-ttl" "$boundless_input_s3_presign_ttl"
-    "--boundless-min-price-wei" "$boundless_min_price_wei"
-    "--boundless-max-price-wei" "$boundless_max_price_wei"
-    "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
-    "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
-    "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
-    "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
-    "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
-    "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
-    "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
-    "--boundless-timeout-seconds" "$boundless_timeout_seconds"
+    "--sp1-bin" "$sp1_bin"
+    "--sp1-rpc-url" "$sp1_rpc_url"
+    "--sp1-proof-submission-mode" "$sp1_proof_submission_mode"
+    "--sp1-proof-queue-brokers" "$shared_kafka_brokers"
+    "--sp1-proof-request-topic" "$proof_request_topic"
+    "--sp1-proof-result-topic" "$proof_result_topic"
+    "--sp1-proof-failure-topic" "$proof_failure_topic"
+    "--sp1-proof-consumer-group" "$proof_bridge_consumer_group"
+    "--sp1-market-address" "$sp1_market_address"
+    "--sp1-verifier-router-address" "$sp1_verifier_router_address"
+    "--sp1-set-verifier-address" "$sp1_set_verifier_address"
+    "--sp1-input-mode" "$sp1_input_mode"
+    "--sp1-deposit-program-url" "$sp1_deposit_program_url"
+    "--sp1-withdraw-program-url" "$sp1_withdraw_program_url"
+    "--sp1-input-s3-bucket" "$sp1_input_s3_bucket"
+    "--sp1-input-s3-prefix" "$sp1_input_s3_prefix"
+    "--sp1-input-s3-region" "$sp1_input_s3_region"
+    "--sp1-input-s3-presign-ttl" "$sp1_input_s3_presign_ttl"
+    "--sp1-max-price-per-pgu" "$sp1_max_price_per_pgu"
+    "--sp1-min-auction-period" "$sp1_min_auction_period"
+    "--sp1-auction-timeout" "$sp1_auction_timeout"
+    "--sp1-request-timeout" "$sp1_request_timeout"
   )
   bridge_args+=(
-    "--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex"
-    "--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex"
+    "--sp1-deposit-owallet-ivk-hex" "$sp1_deposit_owallet_ivk_hex"
+    "--sp1-withdraw-owallet-ovk-hex" "$sp1_withdraw_owallet_ovk_hex"
   )
-  for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-    bridge_args+=("--boundless-deposit-witness-item-file" "$witness_file")
+  for witness_file in "${sp1_deposit_witness_item_files[@]}"; do
+    bridge_args+=("--sp1-deposit-witness-item-file" "$witness_file")
   done
-  for witness_file in "${boundless_withdraw_witness_item_files[@]}"; do
-    bridge_args+=("--boundless-withdraw-witness-item-file" "$witness_file")
+  for witness_file in "${sp1_withdraw_witness_item_files[@]}"; do
+    bridge_args+=("--sp1-withdraw-witness-item-file" "$witness_file")
   done
 
   local operator_id operator_endpoint
@@ -2842,10 +2784,10 @@ command_run() {
     local direct_cli_deposit_final_orchard_root direct_cli_deposit_anchor_height direct_cli_deposit_anchor_hash
     local direct_cli_withdraw_final_orchard_root direct_cli_withdraw_anchor_height direct_cli_withdraw_anchor_hash
     local direct_cli_withdraw_amount="10000"
-    local direct_cli_proof_submission_mode="$boundless_proof_submission_mode"
+    local direct_cli_proof_submission_mode="$sp1_proof_submission_mode"
     local direct_cli_proof_bridge_consumer_group="${proof_bridge_consumer_group}-direct-cli"
     local direct_cli_status
-    local direct_cli_requestor_key_file="$boundless_requestor_key_file"
+    local direct_cli_requestor_key_file="$sp1_requestor_key_file"
     local witness_file
     local operator_id operator_endpoint
     local -a direct_cli_bridge_base_args=()
@@ -2865,7 +2807,7 @@ command_run() {
       "--threshold" "$threshold"
       "--contracts-out" "$contracts_out"
       "--recipient" "$bridge_recipient_address"
-      "--boundless-auto"
+      "--sp1-auto"
       "--run-timeout" "$bridge_run_timeout"
       "--verifier-address" "$bridge_verifier_address"
       "--deposit-image-id" "$bridge_deposit_image_id"
@@ -2876,35 +2818,29 @@ command_run() {
       "--deposit-checkpoint-block-hash" "$bridge_deposit_checkpoint_block_hash"
       "--withdraw-checkpoint-height" "$bridge_withdraw_checkpoint_height"
       "--withdraw-checkpoint-block-hash" "$bridge_withdraw_checkpoint_block_hash"
-      "--boundless-bin" "$boundless_bin"
-      "--boundless-rpc-url" "$boundless_rpc_url"
-      "--boundless-proof-submission-mode" "$direct_cli_proof_submission_mode"
-      "--boundless-proof-queue-brokers" "$shared_kafka_brokers"
-      "--boundless-proof-request-topic" "$proof_request_topic"
-      "--boundless-proof-result-topic" "$proof_result_topic"
-      "--boundless-proof-failure-topic" "$proof_failure_topic"
-      "--boundless-proof-consumer-group" "$direct_cli_proof_bridge_consumer_group"
-      "--boundless-market-address" "$boundless_market_address"
-      "--boundless-verifier-router-address" "$boundless_verifier_router_address"
-      "--boundless-set-verifier-address" "$boundless_set_verifier_address"
-      "--boundless-input-mode" "$boundless_input_mode"
-      "--boundless-deposit-program-url" "$boundless_deposit_program_url"
-      "--boundless-withdraw-program-url" "$boundless_withdraw_program_url"
-      "--boundless-input-s3-bucket" "$boundless_input_s3_bucket"
-      "--boundless-input-s3-prefix" "$boundless_input_s3_prefix"
-      "--boundless-input-s3-region" "$boundless_input_s3_region"
-      "--boundless-input-s3-presign-ttl" "$boundless_input_s3_presign_ttl"
-      "--boundless-min-price-wei" "$boundless_min_price_wei"
-      "--boundless-max-price-wei" "$boundless_max_price_wei"
-      "--boundless-max-price-cap-wei" "$boundless_max_price_cap_wei"
-      "--boundless-max-price-bump-multiplier" "$boundless_max_price_bump_multiplier"
-      "--boundless-max-price-bump-retries" "$boundless_max_price_bump_retries"
-      "--boundless-lock-stake-wei" "$boundless_lock_stake_wei"
-      "--boundless-bidding-delay-seconds" "$boundless_bidding_delay_seconds"
-      "--boundless-ramp-up-period-seconds" "$boundless_ramp_up_period_seconds"
-      "--boundless-lock-timeout-seconds" "$boundless_lock_timeout_seconds"
-      "--boundless-timeout-seconds" "$boundless_timeout_seconds"
-      "--boundless-requestor-key-file" "$direct_cli_requestor_key_file"
+      "--sp1-bin" "$sp1_bin"
+      "--sp1-rpc-url" "$sp1_rpc_url"
+      "--sp1-proof-submission-mode" "$direct_cli_proof_submission_mode"
+      "--sp1-proof-queue-brokers" "$shared_kafka_brokers"
+      "--sp1-proof-request-topic" "$proof_request_topic"
+      "--sp1-proof-result-topic" "$proof_result_topic"
+      "--sp1-proof-failure-topic" "$proof_failure_topic"
+      "--sp1-proof-consumer-group" "$direct_cli_proof_bridge_consumer_group"
+      "--sp1-market-address" "$sp1_market_address"
+      "--sp1-verifier-router-address" "$sp1_verifier_router_address"
+      "--sp1-set-verifier-address" "$sp1_set_verifier_address"
+      "--sp1-input-mode" "$sp1_input_mode"
+      "--sp1-deposit-program-url" "$sp1_deposit_program_url"
+      "--sp1-withdraw-program-url" "$sp1_withdraw_program_url"
+      "--sp1-input-s3-bucket" "$sp1_input_s3_bucket"
+      "--sp1-input-s3-prefix" "$sp1_input_s3_prefix"
+      "--sp1-input-s3-region" "$sp1_input_s3_region"
+      "--sp1-input-s3-presign-ttl" "$sp1_input_s3_presign_ttl"
+      "--sp1-max-price-per-pgu" "$sp1_max_price_per_pgu"
+      "--sp1-min-auction-period" "$sp1_min_auction_period"
+      "--sp1-auction-timeout" "$sp1_auction_timeout"
+      "--sp1-request-timeout" "$sp1_request_timeout"
+      "--sp1-requestor-key-file" "$direct_cli_requestor_key_file"
     )
     while IFS=$'\t' read -r operator_id operator_endpoint; do
       [[ -n "$operator_id" ]] || continue
@@ -2973,13 +2909,13 @@ command_run() {
     direct_cli_generated_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"
     local -a direct_cli_witness_metadata_args=(
       run
-      --juno-rpc-url "$boundless_witness_juno_rpc_url"
+      --juno-rpc-url "$sp1_witness_juno_rpc_url"
       --juno-rpc-user "$juno_rpc_user"
       --juno-rpc-pass "$juno_rpc_pass"
-      --juno-scan-url "$boundless_witness_juno_scan_url"
+      --juno-scan-url "$sp1_witness_juno_scan_url"
       --wallet-id "$direct_cli_generated_witness_wallet_id"
-      --recipient-ua "$boundless_witness_recipient_ua"
-      --recipient-ufvk "$boundless_witness_recipient_ufvk"
+      --recipient-ua "$sp1_witness_recipient_ua"
+      --recipient-ufvk "$sp1_witness_recipient_ufvk"
       --base-chain-id "$base_chain_id"
       --bridge-address "$direct_cli_deployed_bridge_address"
       --base-recipient-address "$bridge_recipient_address"
@@ -2988,7 +2924,7 @@ command_run() {
       --skip-action-index-lookup
       --deposit-amount-zat "100000"
       --withdraw-amount-zat "$direct_cli_withdraw_amount"
-      --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
+      --timeout-seconds "$sp1_witness_metadata_timeout_seconds"
       --output "$direct_cli_generated_witness_metadata_json"
     )
     if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
@@ -3026,7 +2962,7 @@ command_run() {
     fi
     mapfile -t direct_cli_deposit_action_indexes_rpc < <(
       witness_rpc_action_index_candidates \
-        "$boundless_witness_juno_rpc_url" \
+        "$sp1_witness_juno_rpc_url" \
         "$juno_rpc_user" \
         "$juno_rpc_pass" \
         "$direct_cli_generated_deposit_txid" || true
@@ -3079,12 +3015,12 @@ command_run() {
         if (
           cd "$REPO_ROOT"
           "${direct_cli_deposit_extract_cmd[@]}" deposit \
-            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --juno-scan-url "$sp1_witness_juno_scan_url" \
             --wallet-id "$direct_cli_generated_witness_wallet_id" \
-            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
             --txid "$direct_cli_generated_deposit_txid" \
             --action-index "$direct_cli_action_candidate" \
             --output-witness-item-file "$direct_cli_deposit_witness_file" \
@@ -3136,7 +3072,7 @@ command_run() {
     fi
     mapfile -t direct_cli_withdraw_action_indexes_rpc < <(
       witness_rpc_action_index_candidates \
-        "$boundless_witness_juno_rpc_url" \
+        "$sp1_witness_juno_rpc_url" \
         "$juno_rpc_user" \
         "$juno_rpc_pass" \
         "$direct_cli_withdraw_txid" || true
@@ -3189,12 +3125,12 @@ command_run() {
         if (
           cd "$REPO_ROOT"
           "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
-            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --juno-scan-url "$sp1_witness_juno_scan_url" \
             --wallet-id "$direct_cli_generated_witness_wallet_id" \
-            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
             --txid "$direct_cli_withdraw_txid" \
             --action-index "$direct_cli_action_candidate" \
             --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
@@ -3256,10 +3192,10 @@ command_run() {
       "--withdraw-checkpoint-height" "$direct_cli_withdraw_anchor_height"
       "--withdraw-checkpoint-block-hash" "$direct_cli_withdraw_anchor_hash"
     )
-    direct_cli_bridge_run_args+=("--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex")
-    direct_cli_bridge_run_args+=("--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex")
-    direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$direct_cli_deposit_witness_file")
-    direct_cli_bridge_run_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
+    direct_cli_bridge_run_args+=("--sp1-deposit-owallet-ivk-hex" "$sp1_deposit_owallet_ivk_hex")
+    direct_cli_bridge_run_args+=("--sp1-withdraw-owallet-ovk-hex" "$sp1_withdraw_owallet_ovk_hex")
+    direct_cli_bridge_run_args+=("--sp1-deposit-witness-item-file" "$direct_cli_deposit_witness_file")
+    direct_cli_bridge_run_args+=("--sp1-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
 
     set +e
     (
@@ -3273,9 +3209,9 @@ command_run() {
       return 1
     fi
 
-    direct_cli_user_proof_submission_mode="$(jq -r '.proof.boundless.submission_mode // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
-    direct_cli_user_proof_deposit_request_id="$(jq -r '.proof.boundless.deposit_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
-    direct_cli_user_proof_withdraw_request_id="$(jq -r '.proof.boundless.withdraw_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    direct_cli_user_proof_submission_mode="$(jq -r '.proof.sp1.submission_mode // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    direct_cli_user_proof_deposit_request_id="$(jq -r '.proof.sp1.deposit_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
+    direct_cli_user_proof_withdraw_request_id="$(jq -r '.proof.sp1.withdraw_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
     [[ "$direct_cli_user_proof_submission_mode" == "$direct_cli_proof_submission_mode" ]] || return 1
     [[ -n "$direct_cli_user_proof_deposit_request_id" ]] || return 1
     [[ -n "$direct_cli_user_proof_withdraw_request_id" ]] || return 1
@@ -3307,39 +3243,32 @@ command_run() {
       "--postgres-dsn" "$shared_postgres_dsn"
       "--store-driver" "postgres"
       "--owner" "$proof_requestor_owner"
-      "--requestor-address" "$boundless_requestor_address"
-      "--requestor-key-secret-arn" "unused"
-      "--requestor-key-env" "PROOF_REQUESTOR_KEY"
+      "--sp1-requestor-address" "$sp1_requestor_address"
+      "--sp1-requestor-key-secret-arn" "PROOF_REQUESTOR_KEY"
+      "--sp1-requestor-key-env" "PROOF_REQUESTOR_KEY"
       "--secrets-driver" "env"
       "--chain-id" "$base_chain_id"
-      "--submission-mode" "offchain_primary_onchain_fallback"
-      "--order-stream-url" "$boundless_rpc_url"
-      "--boundless-market-address" "$boundless_market_address"
       "--input-topic" "$proof_request_topic"
       "--result-topic" "$proof_result_topic"
       "--failure-topic" "$proof_failure_topic"
       "--max-inflight-requests" "32"
-      "--request-timeout" "${boundless_timeout_seconds}s"
+      "--request-timeout" "$sp1_request_timeout"
       "--queue-driver" "kafka"
       "--queue-brokers" "$shared_kafka_brokers"
       "--queue-group" "$proof_requestor_group"
-      "--boundless-bin" "/usr/local/bin/boundless"
-      "--onchain-max-price-per-proof-wei" "$boundless_max_price_cap_wei"
-      "--onchain-max-stake-per-proof-wei" "$boundless_lock_stake_wei"
+      "--sp1-bin" "/usr/local/bin/sp1"
     )
     local -a proof_funder_ecs_command=(
       "/usr/local/bin/proof-funder"
       "--postgres-dsn" "$shared_postgres_dsn"
       "--lease-driver" "postgres"
       "--owner-id" "$proof_funder_owner"
-      "--owner-address" "$boundless_requestor_address"
-      "--owner-key-secret-arn" "unused"
-      "--owner-key-env" "PROOF_FUNDER_KEY"
-      "--secrets-driver" "env"
-      "--requestor-address" "$boundless_requestor_address"
+      "--sp1-requestor-address" "$sp1_requestor_address"
+      "--min-balance-wei" "$((sp1_max_price_per_pgu * 3))"
+      "--critical-balance-wei" "$sp1_max_price_per_pgu"
       "--queue-driver" "kafka"
       "--queue-brokers" "$shared_kafka_brokers"
-      "--boundless-bin" "/usr/local/bin/boundless"
+      "--sp1-bin" "/usr/local/bin/sp1"
     )
     local proof_requestor_ecs_command_json
     local proof_funder_ecs_command_json
@@ -3348,22 +3277,34 @@ command_run() {
     proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
     proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
     proof_requestor_ecs_environment_json="$(jq -n \
-      --arg deposit_program_url "$boundless_deposit_program_url" \
-      --arg withdraw_program_url "$boundless_withdraw_program_url" \
+      --arg sp1_network_rpc_url "$sp1_rpc_url" \
+      --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+      --arg sp1_min_auction_period "$sp1_min_auction_period" \
+      --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
+      --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
+      --arg deposit_program_url "$sp1_deposit_program_url" \
+      --arg withdraw_program_url "$sp1_withdraw_program_url" \
       --arg deposit_vkey "$bridge_deposit_image_id" \
       --arg withdraw_vkey "$bridge_withdraw_image_id" \
       '[
+        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
+        {name:"SP1_MAX_PRICE_PER_PGU", value:$sp1_max_price_per_pgu},
+        {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
+        {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
+        {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
         {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
       ]')"
     proof_funder_ecs_environment_json="$(jq -n \
-      --arg deposit_program_url "$boundless_deposit_program_url" \
-      --arg withdraw_program_url "$boundless_withdraw_program_url" \
+      --arg sp1_network_rpc_url "$sp1_rpc_url" \
+      --arg deposit_program_url "$sp1_deposit_program_url" \
+      --arg withdraw_program_url "$sp1_withdraw_program_url" \
       --arg deposit_vkey "$bridge_deposit_image_id" \
       --arg withdraw_vkey "$bridge_withdraw_image_id" \
       '[
+        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
@@ -3393,57 +3334,56 @@ command_run() {
 
     (
       cd "$REPO_ROOT"
-      PROOF_REQUESTOR_KEY="$boundless_requestor_key_hex" \
-      SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url" \
-      SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url" \
+      PROOF_REQUESTOR_KEY="$sp1_requestor_key_hex" \
+      SP1_MAX_PRICE_PER_PGU="$sp1_max_price_per_pgu" \
+      SP1_MIN_AUCTION_PERIOD="$sp1_min_auction_period" \
+      SP1_AUCTION_TIMEOUT_SECONDS="${sp1_auction_timeout%s}" \
+      SP1_REQUEST_TIMEOUT_SECONDS="${sp1_request_timeout%s}" \
+      SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
+      SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url" \
+      SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url" \
       SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
       SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
       "$proof_requestor_bin" \
         --postgres-dsn "$shared_postgres_dsn" \
         --store-driver postgres \
         --owner "$proof_requestor_owner" \
-        --requestor-address "$boundless_requestor_address" \
-        --requestor-key-secret-arn "unused" \
-        --requestor-key-env "PROOF_REQUESTOR_KEY" \
+        --sp1-requestor-address "$sp1_requestor_address" \
+        --sp1-requestor-key-secret-arn "PROOF_REQUESTOR_KEY" \
+        --sp1-requestor-key-env "PROOF_REQUESTOR_KEY" \
         --secrets-driver env \
         --chain-id "$base_chain_id" \
-        --submission-mode offchain_primary_onchain_fallback \
-        --order-stream-url "$boundless_rpc_url" \
-        --boundless-market-address "$boundless_market_address" \
         --input-topic "$proof_request_topic" \
         --result-topic "$proof_result_topic" \
         --failure-topic "$proof_failure_topic" \
         --max-inflight-requests 32 \
-        --request-timeout "${boundless_timeout_seconds}s" \
+        --request-timeout "$sp1_request_timeout" \
         --queue-driver kafka \
         --queue-brokers "$shared_kafka_brokers" \
         --queue-group "$proof_requestor_group" \
-        --boundless-bin "$boundless_bin" \
-        --onchain-max-price-per-proof-wei "$boundless_max_price_cap_wei" \
-        --onchain-max-stake-per-proof-wei "$boundless_lock_stake_wei" \
+        --sp1-bin "$sp1_bin" \
         >"$proof_requestor_log" 2>&1
     ) &
     proof_requestor_pid="$!"
 
     (
       cd "$REPO_ROOT"
-      PROOF_FUNDER_KEY="$boundless_requestor_key_hex" \
-      SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url" \
-      SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url" \
+      PROOF_FUNDER_KEY="$sp1_requestor_key_hex" \
+      SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
+      SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url" \
+      SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url" \
       SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
       SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
       "$proof_funder_bin" \
         --postgres-dsn "$shared_postgres_dsn" \
         --lease-driver postgres \
         --owner-id "$proof_funder_owner" \
-        --owner-address "$boundless_requestor_address" \
-        --owner-key-secret-arn "unused" \
-        --owner-key-env "PROOF_FUNDER_KEY" \
-        --secrets-driver env \
-        --requestor-address "$boundless_requestor_address" \
+        --sp1-requestor-address "$sp1_requestor_address" \
+        --min-balance-wei "$((sp1_max_price_per_pgu * 3))" \
+        --critical-balance-wei "$sp1_max_price_per_pgu" \
         --queue-driver kafka \
         --queue-brokers "$shared_kafka_brokers" \
-        --boundless-bin "$boundless_bin" \
+        --sp1-bin "$sp1_bin" \
         >"$proof_funder_log" 2>&1
     ) &
     proof_funder_pid="$!"
@@ -3712,9 +3652,9 @@ command_run() {
   local withdraw_finalizer_host=""
   local distributed_withdraw_coordinator_tss_server_ca_file="$withdraw_coordinator_tss_server_ca_file"
   local distributed_withdraw_coordinator_tss_url="$withdraw_coordinator_tss_url"
-  local distributed_withdraw_coordinator_juno_rpc_url="$boundless_witness_juno_rpc_url"
-  local distributed_withdraw_finalizer_juno_scan_url="$boundless_witness_juno_scan_url"
-  local distributed_withdraw_finalizer_juno_rpc_url="$boundless_witness_juno_rpc_url"
+  local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
+  local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
+  local distributed_withdraw_finalizer_juno_rpc_url="$sp1_witness_juno_rpc_url"
 
   operator_down_ssh_user="$(id -un 2>/dev/null || true)"
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
@@ -3815,7 +3755,7 @@ command_run() {
           --operators "$checkpoint_operators_csv" \
           --operator-threshold "$threshold" \
           --deposit-image-id "$bridge_deposit_image_id" \
-          --owallet-ivk "$boundless_deposit_owallet_ivk_hex" \
+          --owallet-ivk "$sp1_deposit_owallet_ivk_hex" \
           --base-relayer-url "$base_relayer_url" \
           --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
           --proof-driver queue \
@@ -3837,8 +3777,8 @@ command_run() {
           "$withdraw_coordinator_log" \
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-          "$boundless_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
-          "$boundless_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
+          "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
+          "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
           /usr/local/bin/withdraw-coordinator \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
@@ -3847,8 +3787,8 @@ command_run() {
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
           --juno-rpc-url "$distributed_withdraw_coordinator_juno_rpc_url" \
-          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
           --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-change-address "$withdraw_coordinator_juno_change_address" \
           --tss-url "$distributed_withdraw_coordinator_tss_url" \
@@ -3867,11 +3807,11 @@ command_run() {
       local -a withdraw_finalizer_remote_env=(
         env
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token"
-        "$boundless_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
-        "$boundless_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
+        "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
+        "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
       )
       if [[ -n "$withdraw_finalizer_juno_scan_bearer_value" ]]; then
-        withdraw_finalizer_remote_env+=("$boundless_witness_juno_scan_bearer_token_env=$withdraw_finalizer_juno_scan_bearer_value")
+        withdraw_finalizer_remote_env+=("$sp1_witness_juno_scan_bearer_token_env=$withdraw_finalizer_juno_scan_bearer_value")
       fi
       withdraw_finalizer_pid="$(
         start_remote_relayer_service \
@@ -3887,14 +3827,14 @@ command_run() {
           --operators "$checkpoint_operators_csv" \
           --operator-threshold "$threshold" \
           --withdraw-image-id "$bridge_withdraw_image_id" \
-          --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
+          --owallet-ovk "$sp1_withdraw_owallet_ovk_hex" \
           --withdraw-witness-extractor-enabled \
           --juno-scan-url "$distributed_withdraw_finalizer_juno_scan_url" \
           --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
-          --juno-scan-bearer-env "$boundless_witness_juno_scan_bearer_token_env" \
+          --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \
           --juno-rpc-url "$distributed_withdraw_finalizer_juno_rpc_url" \
-          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
           --base-relayer-url "$base_relayer_url" \
           --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
           --proof-driver queue \
@@ -3922,7 +3862,7 @@ command_run() {
             --operators "$checkpoint_operators_csv" \
             --operator-threshold "$threshold" \
             --deposit-image-id "$bridge_deposit_image_id" \
-            --owallet-ivk "$boundless_deposit_owallet_ivk_hex" \
+            --owallet-ivk "$sp1_deposit_owallet_ivk_hex" \
             --base-relayer-url "$base_relayer_url" \
             --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
             --proof-driver queue \
@@ -3948,9 +3888,9 @@ command_run() {
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
-          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+          --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
           --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-change-address "$withdraw_coordinator_juno_change_address" \
           --tss-url "$withdraw_coordinator_tss_url" \
@@ -3978,14 +3918,14 @@ command_run() {
             --operators "$checkpoint_operators_csv" \
             --operator-threshold "$threshold" \
             --withdraw-image-id "$bridge_withdraw_image_id" \
-            --owallet-ovk "$boundless_withdraw_owallet_ovk_hex" \
+            --owallet-ovk "$sp1_withdraw_owallet_ovk_hex" \
             --withdraw-witness-extractor-enabled \
-            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --juno-scan-url "$sp1_witness_juno_scan_url" \
             --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
-            --juno-scan-bearer-env "$boundless_witness_juno_scan_bearer_token_env" \
-            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
             --base-relayer-url "$base_relayer_url" \
             --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
             --proof-driver queue \
@@ -4019,7 +3959,7 @@ command_run() {
 
   if (( relayer_status == 0 )); then
     local deposit_witness_file
-    deposit_witness_file="${boundless_deposit_witness_item_files[0]:-}"
+    deposit_witness_file="${sp1_deposit_witness_item_files[0]:-}"
     [[ -n "$deposit_witness_file" ]] || relayer_status=1
     [[ -f "$deposit_witness_file" ]] || relayer_status=1
 
@@ -4679,20 +4619,20 @@ command_run() {
     printf '%s\n' "$dkg_report_public_json" >"$dkg_summary"
   fi
 
-  local boundless_deposit_ivk_configured="false"
-  local boundless_withdraw_ovk_configured="false"
-  local boundless_deposit_witness_item_count boundless_withdraw_witness_item_count
+  local sp1_deposit_ivk_configured="false"
+  local sp1_withdraw_ovk_configured="false"
+  local sp1_deposit_witness_item_count sp1_withdraw_witness_item_count
   local guest_witness_auto_generate="true"
   local guest_witness_extract_from_chain="false"
-  if [[ -n "$boundless_deposit_owallet_ivk_hex" ]]; then
-    boundless_deposit_ivk_configured="true"
+  if [[ -n "$sp1_deposit_owallet_ivk_hex" ]]; then
+    sp1_deposit_ivk_configured="true"
   fi
-  if [[ -n "$boundless_withdraw_owallet_ovk_hex" ]]; then
-    boundless_withdraw_ovk_configured="true"
+  if [[ -n "$sp1_withdraw_owallet_ovk_hex" ]]; then
+    sp1_withdraw_ovk_configured="true"
   fi
-  boundless_deposit_witness_item_count="${#boundless_deposit_witness_item_files[@]}"
-  boundless_withdraw_witness_item_count="${#boundless_withdraw_witness_item_files[@]}"
-  if [[ "$boundless_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
+  sp1_deposit_witness_item_count="${#sp1_deposit_witness_item_files[@]}"
+  sp1_withdraw_witness_item_count="${#sp1_withdraw_witness_item_files[@]}"
+  if [[ "$sp1_input_mode" == "guest-witness-v1" && "$guest_witness_extract_mode" == "true" ]]; then
     guest_witness_extract_from_chain="true"
   fi
 
@@ -4875,19 +4815,19 @@ command_run() {
     --arg bridge_withdraw_checkpoint_block_hash "$bridge_withdraw_checkpoint_block_hash" \
     --arg bridge_proof_inputs_output "$bridge_proof_inputs_output" \
     --arg bridge_run_timeout "$bridge_run_timeout" \
-    --arg boundless_auto "$boundless_auto" \
-    --arg boundless_proof_submission_mode "$boundless_proof_submission_mode" \
-    --arg boundless_bin "$boundless_bin" \
-    --arg boundless_rpc_url "$boundless_rpc_url" \
-    --arg boundless_requestor_address "$boundless_requestor_address" \
-    --arg boundless_input_mode "$boundless_input_mode" \
-    --arg boundless_deposit_ivk_configured "$boundless_deposit_ivk_configured" \
-    --arg boundless_withdraw_ovk_configured "$boundless_withdraw_ovk_configured" \
+    --arg sp1_auto "$sp1_auto" \
+    --arg sp1_proof_submission_mode "$sp1_proof_submission_mode" \
+    --arg sp1_bin "$sp1_bin" \
+    --arg sp1_rpc_url "$sp1_rpc_url" \
+    --arg sp1_requestor_address "$sp1_requestor_address" \
+    --arg sp1_input_mode "$sp1_input_mode" \
+    --arg sp1_deposit_ivk_configured "$sp1_deposit_ivk_configured" \
+    --arg sp1_withdraw_ovk_configured "$sp1_withdraw_ovk_configured" \
     --arg guest_witness_auto_generate "$guest_witness_auto_generate" \
     --arg guest_witness_extract_from_chain "$guest_witness_extract_from_chain" \
-    --argjson boundless_deposit_witness_item_count "$boundless_deposit_witness_item_count" \
-    --argjson boundless_withdraw_witness_item_count "$boundless_withdraw_witness_item_count" \
-    --argjson boundless_witness_quorum_threshold "$boundless_witness_quorum_threshold" \
+    --argjson sp1_deposit_witness_item_count "$sp1_deposit_witness_item_count" \
+    --argjson sp1_withdraw_witness_item_count "$sp1_withdraw_witness_item_count" \
+    --argjson sp1_witness_quorum_threshold "$sp1_witness_quorum_threshold" \
     --argjson witness_endpoint_pool_size "$witness_endpoint_pool_size" \
     --argjson witness_endpoint_healthy_count "$witness_endpoint_healthy_count" \
     --arg witness_metadata_source_operator "$witness_metadata_source_operator" \
@@ -4897,22 +4837,16 @@ command_run() {
     --argjson witness_failed_operator_labels "$witness_failed_operator_labels_json" \
     --argjson witness_quorum_validated_count "$witness_quorum_validated_count" \
     --arg witness_quorum_validated "$witness_quorum_validated" \
-    --arg boundless_deposit_program_url "$boundless_deposit_program_url" \
-    --arg boundless_withdraw_program_url "$boundless_withdraw_program_url" \
-    --arg boundless_input_s3_bucket "$boundless_input_s3_bucket" \
-    --arg boundless_input_s3_prefix "$boundless_input_s3_prefix" \
-    --arg boundless_input_s3_region "$boundless_input_s3_region" \
-    --arg boundless_input_s3_presign_ttl "$boundless_input_s3_presign_ttl" \
-    --arg boundless_min_price_wei "$boundless_min_price_wei" \
-    --arg boundless_max_price_wei "$boundless_max_price_wei" \
-    --arg boundless_max_price_cap_wei "$boundless_max_price_cap_wei" \
-    --arg boundless_max_price_bump_multiplier "$boundless_max_price_bump_multiplier" \
-    --arg boundless_max_price_bump_retries "$boundless_max_price_bump_retries" \
-    --arg boundless_lock_stake_wei "$boundless_lock_stake_wei" \
-    --arg boundless_bidding_delay_seconds "$boundless_bidding_delay_seconds" \
-    --arg boundless_ramp_up_period_seconds "$boundless_ramp_up_period_seconds" \
-    --arg boundless_lock_timeout_seconds "$boundless_lock_timeout_seconds" \
-    --arg boundless_timeout_seconds "$boundless_timeout_seconds" \
+    --arg sp1_deposit_program_url "$sp1_deposit_program_url" \
+    --arg sp1_withdraw_program_url "$sp1_withdraw_program_url" \
+    --arg sp1_input_s3_bucket "$sp1_input_s3_bucket" \
+    --arg sp1_input_s3_prefix "$sp1_input_s3_prefix" \
+    --arg sp1_input_s3_region "$sp1_input_s3_region" \
+    --arg sp1_input_s3_presign_ttl "$sp1_input_s3_presign_ttl" \
+    --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+    --arg sp1_min_auction_period "$sp1_min_auction_period" \
+    --arg sp1_auction_timeout "$sp1_auction_timeout" \
+    --arg sp1_request_timeout "$sp1_request_timeout" \
     --arg withdraw_blob_bucket "$withdraw_blob_bucket" \
     --arg withdraw_blob_prefix "$withdraw_blob_prefix" \
     --arg bridge_recipient_address "$bridge_recipient_address" \
@@ -4971,22 +4905,22 @@ command_run() {
         recipient_address: $bridge_recipient_address,
         run_timeout: $bridge_run_timeout,
         proof_inputs_output: $bridge_proof_inputs_output,
-        boundless: {
-          auto: ($boundless_auto == "true"),
-          submission_mode: (if $boundless_proof_submission_mode == "" then null else $boundless_proof_submission_mode end),
-          bin: $boundless_bin,
-          rpc_url: $boundless_rpc_url,
-          requestor_address: (if $boundless_requestor_address == "" then null else $boundless_requestor_address end),
-          input_mode: $boundless_input_mode,
+        sp1: {
+          auto: ($sp1_auto == "true"),
+          submission_mode: (if $sp1_proof_submission_mode == "" then null else $sp1_proof_submission_mode end),
+          bin: $sp1_bin,
+          rpc_url: $sp1_rpc_url,
+          requestor_address: (if $sp1_requestor_address == "" then null else $sp1_requestor_address end),
+          input_mode: $sp1_input_mode,
           guest_witness: {
-            enabled: ($boundless_input_mode == "guest-witness-v1"),
+            enabled: ($sp1_input_mode == "guest-witness-v1"),
             auto_generate: ($guest_witness_auto_generate == "true"),
             extract_from_chain: ($guest_witness_extract_from_chain == "true"),
-            deposit_owallet_ivk_configured: ($boundless_deposit_ivk_configured == "true"),
-            withdraw_owallet_ovk_configured: ($boundless_withdraw_ovk_configured == "true"),
-            deposit_witness_item_count: $boundless_deposit_witness_item_count,
-            withdraw_witness_item_count: $boundless_withdraw_witness_item_count,
-            endpoint_quorum_threshold: $boundless_witness_quorum_threshold,
+            deposit_owallet_ivk_configured: ($sp1_deposit_ivk_configured == "true"),
+            withdraw_owallet_ovk_configured: ($sp1_withdraw_ovk_configured == "true"),
+            deposit_witness_item_count: $sp1_deposit_witness_item_count,
+            withdraw_witness_item_count: $sp1_withdraw_witness_item_count,
+            endpoint_quorum_threshold: $sp1_witness_quorum_threshold,
             endpoint_pool_size: $witness_endpoint_pool_size,
             endpoint_healthy_count: $witness_endpoint_healthy_count,
             metadata_source_operator: (if $witness_metadata_source_operator == "" then null else $witness_metadata_source_operator end),
@@ -4997,22 +4931,16 @@ command_run() {
             quorum_validated_count: $witness_quorum_validated_count,
             quorum_validated: ($witness_quorum_validated == "true")
           },
-          deposit_program_url: (if $boundless_deposit_program_url == "" then null else $boundless_deposit_program_url end),
-          withdraw_program_url: (if $boundless_withdraw_program_url == "" then null else $boundless_withdraw_program_url end),
-          input_s3_bucket: (if $boundless_input_s3_bucket == "" then null else $boundless_input_s3_bucket end),
-          input_s3_prefix: (if $boundless_input_s3_prefix == "" then null else $boundless_input_s3_prefix end),
-          input_s3_region: (if $boundless_input_s3_region == "" then null else $boundless_input_s3_region end),
-          input_s3_presign_ttl: (if $boundless_input_s3_presign_ttl == "" then null else $boundless_input_s3_presign_ttl end),
-          min_price_wei: $boundless_min_price_wei,
-          max_price_wei: $boundless_max_price_wei,
-          max_price_cap_wei: $boundless_max_price_cap_wei,
-          max_price_bump_multiplier: $boundless_max_price_bump_multiplier,
-          max_price_bump_retries: $boundless_max_price_bump_retries,
-          lock_stake_wei: $boundless_lock_stake_wei,
-          bidding_delay_seconds: $boundless_bidding_delay_seconds,
-          ramp_up_period_seconds: $boundless_ramp_up_period_seconds,
-          lock_timeout_seconds: $boundless_lock_timeout_seconds,
-          timeout_seconds: $boundless_timeout_seconds
+          deposit_program_url: (if $sp1_deposit_program_url == "" then null else $sp1_deposit_program_url end),
+          withdraw_program_url: (if $sp1_withdraw_program_url == "" then null else $sp1_withdraw_program_url end),
+          input_s3_bucket: (if $sp1_input_s3_bucket == "" then null else $sp1_input_s3_bucket end),
+          input_s3_prefix: (if $sp1_input_s3_prefix == "" then null else $sp1_input_s3_prefix end),
+          input_s3_region: (if $sp1_input_s3_region == "" then null else $sp1_input_s3_region end),
+          input_s3_presign_ttl: (if $sp1_input_s3_presign_ttl == "" then null else $sp1_input_s3_presign_ttl end),
+          max_price_per_pgu: $sp1_max_price_per_pgu,
+          min_auction_period: $sp1_min_auction_period,
+          auction_timeout: $sp1_auction_timeout,
+          request_timeout: $sp1_request_timeout
         },
         withdraw_blob: {
           bucket: (if $withdraw_blob_bucket == "" then null else $withdraw_blob_bucket end),

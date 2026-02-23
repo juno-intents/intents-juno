@@ -50,7 +50,7 @@ func run(args []string) error {
 		maxPerGCycleWei string
 	)
 
-	fs := flag.NewFlagSet("boundless-auction-calc", flag.ContinueOnError)
+	fs := flag.NewFlagSet("sp1-auction-calc", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.Uint64Var(&chainID, "chain-id", 8453, "chain id (8453 base mainnet, 84532 base sepolia, 11155111 eth sepolia)")
 	fs.Uint64Var(&cycleCount, "cycle-count", 0, "proof cycle count")
@@ -89,7 +89,7 @@ func run(args []string) error {
 	}
 
 	res := output{
-		Version:                      "boundless.auction.profile.v1",
+		Version:                      "sp1.auction.profile.v1",
 		ChainID:                      chainID,
 		CycleCount:                   profile.CycleCount,
 		ExecutorHz:                   executorHz,

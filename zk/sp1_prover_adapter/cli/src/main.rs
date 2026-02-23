@@ -2,8 +2,10 @@ use anyhow::{anyhow, bail, Context, Result};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sp1_sdk::network::signer::NetworkSigner;
+use sp1_sdk::network::NetworkMode;
 use sp1_sdk::prelude::*;
-use sp1_sdk::ProverClient;
+use sp1_sdk::{NetworkProver, ProveRequest, ProverClient};
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
@@ -11,13 +13,8 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-const VERSION_BOUNDLESS_SUBMIT_OFFCHAIN: &str = "boundless.submit.offchain.v1";
-const VERSION_BOUNDLESS_SUBMIT_ONCHAIN: &str = "boundless.submit.onchain.v1";
-const VERSION_BOUNDLESS_SUBMIT_RESPONSE: &str = "boundless.submit.response.v1";
-const VERSION_BOUNDLESS_BALANCE_REQUEST: &str = "boundless.balance.request.v1";
-const VERSION_BOUNDLESS_BALANCE_RESPONSE: &str = "boundless.balance.response.v1";
-const VERSION_BOUNDLESS_TOPUP_REQUEST: &str = "boundless.topup.request.v1";
-const VERSION_BOUNDLESS_TOPUP_RESPONSE: &str = "boundless.topup.response.v1";
+const VERSION_SP1_BALANCE_REQUEST: &str = "sp1.balance.request.v1";
+const VERSION_SP1_BALANCE_RESPONSE: &str = "sp1.balance.response.v1";
 const VERSION_PROVER_REQUEST: &str = "prover.request.v1";
 const VERSION_PROVER_RESPONSE: &str = "prover.response.v1";
 
@@ -28,33 +25,12 @@ enum PipelineKind {
 }
 
 impl PipelineKind {
-    fn from_name(raw: &str) -> Result<Self> {
-        let value = raw.trim().to_ascii_lowercase();
-        match value.as_str() {
-            "deposit" => Ok(Self::Deposit),
-            "withdraw" => Ok(Self::Withdraw),
-            _ => bail!("unsupported pipeline: {raw}"),
-        }
-    }
-
     fn name(self) -> &'static str {
         match self {
             Self::Deposit => "deposit",
             Self::Withdraw => "withdraw",
         }
     }
-}
-
-#[derive(Deserialize)]
-struct BoundlessSubmitRequest {
-    #[allow(dead_code)]
-    version: String,
-    #[serde(default)]
-    request_id: u64,
-    pipeline: String,
-    image_id: String,
-    journal: String,
-    private_input: String,
 }
 
 #[derive(Deserialize)]
@@ -68,43 +44,20 @@ struct ProverRequest {
     private_input: String,
 }
 
-#[derive(Serialize)]
-struct BoundlessSubmitResponse {
-    version: &'static str,
-    request_id: u64,
-    submission_path: String,
-    seal: String,
-    metadata: BoundlessMetadata,
-    tx_hash: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    error: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    error_code: String,
-    retryable: bool,
-}
-
-#[derive(Serialize)]
-struct BoundlessMetadata {
-    provider: String,
-    proof_type: String,
-    pipeline: String,
-    program_source: String,
+#[derive(Deserialize)]
+struct BalanceRequest {
+    #[allow(dead_code)]
+    version: String,
+    #[allow(dead_code)]
+    requestor_address: Option<String>,
 }
 
 #[derive(Serialize)]
 struct BalanceResponse {
     version: &'static str,
     balance_wei: String,
-}
-
-#[derive(Serialize)]
-struct TopupResponse {
-    version: &'static str,
-    tx_hash: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     error: String,
-    #[serde(skip_serializing_if = "String::is_empty")]
-    error_code: String,
 }
 
 #[derive(Serialize)]
@@ -144,111 +97,35 @@ async fn run() -> Result<()> {
         .ok_or_else(|| anyhow!("request missing version"))?;
 
     match version {
-        VERSION_BOUNDLESS_SUBMIT_OFFCHAIN | VERSION_BOUNDLESS_SUBMIT_ONCHAIN => {
-            let req: BoundlessSubmitRequest =
-                serde_json::from_value(value).context("decode boundless submit request")?;
-            handle_boundless_submit(req).await
-        }
-        VERSION_BOUNDLESS_BALANCE_REQUEST => handle_balance_request(),
-        VERSION_BOUNDLESS_TOPUP_REQUEST => handle_topup_request(),
         VERSION_PROVER_REQUEST => {
             let req: ProverRequest =
                 serde_json::from_value(value).context("decode prover request")?;
             handle_prover_request(req).await
         }
+        VERSION_SP1_BALANCE_REQUEST => {
+            let req: BalanceRequest =
+                serde_json::from_value(value).context("decode balance request")?;
+            handle_balance_request(req).await
+        }
         other => bail!("unsupported request version: {other}"),
     }
 }
 
-async fn handle_boundless_submit(req: BoundlessSubmitRequest) -> Result<()> {
-    let request_id = req.request_id;
-    let pipeline = match PipelineKind::from_name(&req.pipeline) {
-        Ok(p) => p,
-        Err(err) => {
-            let resp = BoundlessSubmitResponse {
-                version: VERSION_BOUNDLESS_SUBMIT_RESPONSE,
-                request_id,
-                submission_path: String::new(),
-                seal: String::new(),
-                metadata: BoundlessMetadata {
-                    provider: "sp1".to_owned(),
-                    proof_type: "groth16".to_owned(),
-                    pipeline: req.pipeline,
-                    program_source: String::new(),
-                },
-                tx_hash: String::new(),
-                error: err.to_string(),
-                error_code: "sp1_invalid_pipeline".to_owned(),
-                retryable: false,
-            };
-            return write_json(&resp);
-        }
+async fn handle_balance_request(_req: BalanceRequest) -> Result<()> {
+    let prover = build_network_prover().await?;
+    let response = match prover.get_balance().await {
+        Ok(balance) => BalanceResponse {
+            version: VERSION_SP1_BALANCE_RESPONSE,
+            balance_wei: balance.to_string(),
+            error: String::new(),
+        },
+        Err(err) => BalanceResponse {
+            version: VERSION_SP1_BALANCE_RESPONSE,
+            balance_wei: "0".to_owned(),
+            error: err.to_string(),
+        },
     };
-
-    let image_id = normalize_hex_32(&req.image_id)?;
-    let journal = decode_hex_bytes(&req.journal).context("decode submit journal")?;
-    let private_input = decode_hex_bytes(&req.private_input).context("decode submit private_input")?;
-
-    match prove_once(pipeline, &image_id, journal.as_slice(), private_input).await {
-        Ok((seal, program_source)) => {
-            let resp = BoundlessSubmitResponse {
-                version: VERSION_BOUNDLESS_SUBMIT_RESPONSE,
-                request_id,
-                submission_path: "sp1-groth16-local".to_owned(),
-                seal: encode_hex(&seal),
-                metadata: BoundlessMetadata {
-                    provider: "sp1".to_owned(),
-                    proof_type: "groth16".to_owned(),
-                    pipeline: pipeline.name().to_owned(),
-                    program_source,
-                },
-                tx_hash: String::new(),
-                error: String::new(),
-                error_code: String::new(),
-                retryable: false,
-            };
-            write_json(&resp)
-        }
-        Err(err) => {
-            let resp = BoundlessSubmitResponse {
-                version: VERSION_BOUNDLESS_SUBMIT_RESPONSE,
-                request_id,
-                submission_path: String::new(),
-                seal: String::new(),
-                metadata: BoundlessMetadata {
-                    provider: "sp1".to_owned(),
-                    proof_type: "groth16".to_owned(),
-                    pipeline: pipeline.name().to_owned(),
-                    program_source: String::new(),
-                },
-                tx_hash: String::new(),
-                error: err.to_string(),
-                error_code: "sp1_prove_failed".to_owned(),
-                retryable: true,
-            };
-            write_json(&resp)
-        }
-    }
-}
-
-fn handle_balance_request() -> Result<()> {
-    // Keep compatibility with existing proof-funder loops; local SP1 proving doesn't require
-    // maintaining market balances, so return a high synthetic value.
-    let resp = BalanceResponse {
-        version: VERSION_BOUNDLESS_BALANCE_RESPONSE,
-        balance_wei: "1000000000000000000000000000000".to_owned(),
-    };
-    write_json(&resp)
-}
-
-fn handle_topup_request() -> Result<()> {
-    let resp = TopupResponse {
-        version: VERSION_BOUNDLESS_TOPUP_RESPONSE,
-        tx_hash: "0x0000000000000000000000000000000000000000000000000000000000000000".to_owned(),
-        error: String::new(),
-        error_code: String::new(),
-    };
-    write_json(&resp)
+    write_json(&response)
 }
 
 async fn handle_prover_request(req: ProverRequest) -> Result<()> {
@@ -291,9 +168,12 @@ async fn prove_once(
     private_input: Vec<u8>,
 ) -> Result<(Vec<u8>, String)> {
     let (elf_bytes, program_source) = load_program_elf(pipeline).await?;
+    let prover = build_network_prover().await?;
 
-    let client = ProverClient::from_env().await;
-    let proving_key = client.setup(elf_bytes.into()).await.context("sp1 setup failed")?;
+    let proving_key = prover
+        .setup(elf_bytes.into())
+        .await
+        .context("sp1 setup failed")?;
     let actual_vkey = normalize_hex_32(&proving_key.verifying_key().bytes32())?;
     if actual_vkey != expected_image_id {
         bail!("program vkey mismatch: got={actual_vkey} expected={expected_image_id}");
@@ -302,11 +182,24 @@ async fn prove_once(
     let mut stdin = SP1Stdin::new();
     stdin.write_vec(private_input);
 
-    let proof = client
+    let mut req = prover
         .prove(&proving_key, stdin)
         .groth16()
-        .await
-        .context("sp1 groth16 prove failed")?;
+        .min_auction_period(read_u64_env("SP1_MIN_AUCTION_PERIOD", 1)?)
+        .auction_timeout(Duration::from_secs(read_u64_env(
+            "SP1_AUCTION_TIMEOUT_SECONDS",
+            300,
+        )?))
+        .timeout(Duration::from_secs(read_u64_env(
+            "SP1_REQUEST_TIMEOUT_SECONDS",
+            1800,
+        )?));
+
+    if let Some(max_price_per_pgu) = read_optional_u64_env("SP1_MAX_PRICE_PER_PGU")? {
+        req = req.max_price_per_pgu(max_price_per_pgu);
+    }
+
+    let proof = req.await.context("sp1 network groth16 prove failed")?;
 
     let public_values = proof.public_values.to_vec();
     if public_values != expected_journal {
@@ -318,6 +211,58 @@ async fn prove_once(
     }
 
     Ok((proof.bytes(), program_source))
+}
+
+async fn build_network_prover() -> Result<NetworkProver> {
+    let private_key = read_required_private_key()?;
+    let signer = NetworkSigner::local(&private_key).context("invalid NETWORK_PRIVATE_KEY")?;
+
+    let mut builder = ProverClient::builder()
+        .network_for(NetworkMode::Mainnet)
+        .signer(signer);
+
+    if let Some(rpc_url) = read_env_nonempty("SP1_NETWORK_RPC_URL")
+        .or_else(|| read_env_nonempty("NETWORK_RPC_URL"))
+    {
+        builder = builder.rpc_url(&rpc_url);
+    }
+
+    Ok(builder.build().await)
+}
+
+fn read_required_private_key() -> Result<String> {
+    if let Some(value) = read_env_nonempty("NETWORK_PRIVATE_KEY") {
+        return Ok(value);
+    }
+    if let Some(value) = read_env_nonempty("SP1_NETWORK_PRIVATE_KEY") {
+        return Ok(value);
+    }
+    bail!("NETWORK_PRIVATE_KEY is required")
+}
+
+fn read_env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|v| v.trim().to_owned())
+        .filter(|v| !v.is_empty())
+}
+
+fn read_u64_env(name: &str, default_value: u64) -> Result<u64> {
+    let Some(raw) = read_env_nonempty(name) else {
+        return Ok(default_value);
+    };
+    raw.parse::<u64>()
+        .with_context(|| format!("{name} must be an unsigned integer"))
+}
+
+fn read_optional_u64_env(name: &str) -> Result<Option<u64>> {
+    let Some(raw) = read_env_nonempty(name) else {
+        return Ok(None);
+    };
+    let value = raw
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be an unsigned integer"))?;
+    Ok(Some(value))
 }
 
 async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
@@ -369,36 +314,20 @@ fn pipeline_env_path(pipeline: PipelineKind) -> Result<Option<PathBuf>> {
 }
 
 fn pipeline_env_url(pipeline: PipelineKind) -> Result<String> {
-    let (primary, compat) = match pipeline {
-        PipelineKind::Deposit => ("SP1_DEPOSIT_PROGRAM_URL", "BOUNDLESS_DEPOSIT_PROGRAM_URL"),
-        PipelineKind::Withdraw => ("SP1_WITHDRAW_PROGRAM_URL", "BOUNDLESS_WITHDRAW_PROGRAM_URL"),
+    let env_name = match pipeline {
+        PipelineKind::Deposit => "SP1_DEPOSIT_PROGRAM_URL",
+        PipelineKind::Withdraw => "SP1_WITHDRAW_PROGRAM_URL",
     };
-    let primary_val = std::env::var(primary).unwrap_or_default();
-    let compat_val = std::env::var(compat).unwrap_or_default();
-    let raw = if !primary_val.trim().is_empty() {
-        primary_val
-    } else {
-        compat_val
-    };
-    let url = raw.trim();
-    if url.is_empty() {
-        bail!("{primary} (or {compat}) is required");
-    }
-    Ok(url.to_owned())
+    let url = read_env_nonempty(env_name).ok_or_else(|| anyhow!("{env_name} is required"))?;
+    Ok(url)
 }
 
 fn read_pipeline_vkey(pipeline: PipelineKind) -> Result<String> {
-    let (primary, compat) = match pipeline {
-        PipelineKind::Deposit => ("SP1_DEPOSIT_PROGRAM_VKEY", "BRIDGE_DEPOSIT_IMAGE_ID"),
-        PipelineKind::Withdraw => ("SP1_WITHDRAW_PROGRAM_VKEY", "BRIDGE_WITHDRAW_IMAGE_ID"),
+    let env_name = match pipeline {
+        PipelineKind::Deposit => "SP1_DEPOSIT_PROGRAM_VKEY",
+        PipelineKind::Withdraw => "SP1_WITHDRAW_PROGRAM_VKEY",
     };
-    let primary_val = std::env::var(primary).unwrap_or_default();
-    let compat_val = std::env::var(compat).unwrap_or_default();
-    let raw = if !primary_val.trim().is_empty() {
-        primary_val
-    } else {
-        compat_val
-    };
+    let raw = read_env_nonempty(env_name).ok_or_else(|| anyhow!("{env_name} is required"))?;
     normalize_hex_32(&raw)
 }
 
@@ -484,4 +413,5 @@ mod tests {
         assert_eq!(deposit_a, deposit_b);
         assert_ne!(deposit_a, withdraw);
     }
+
 }

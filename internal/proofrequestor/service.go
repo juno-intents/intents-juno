@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/big"
 	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/boundless"
 	"github.com/juno-intents/intents-juno/internal/proof"
+	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
 )
 
 type Status string
@@ -27,20 +26,6 @@ type Config struct {
 	ChainID                uint64
 	RequestTimeout         time.Duration
 	CallbackIdempotencyTTL time.Duration
-
-	RequestorAddress    common.Address
-	RequestorPrivateKey string
-	OrderStreamURL      string
-	MarketAddress       common.Address
-
-	SubmissionMode string
-
-	OnchainFallbackEnabled     bool
-	OnchainFallbackFundingMode string
-	OnchainMinBalanceWei       *big.Int
-	OnchainTargetBalanceWei    *big.Int
-	OnchainMaxPricePerProofWei *big.Int
-	OnchainMaxStakePerProofWei *big.Int
 }
 
 type Outcome struct {
@@ -62,13 +47,13 @@ type Outcome struct {
 type Service struct {
 	cfg Config
 
-	store     proof.Store
-	submitter boundless.Submitter
-	log       *slog.Logger
+	store  proof.Store
+	prover sp1.Client
+	log    *slog.Logger
 }
 
-func New(cfg Config, store proof.Store, submitter boundless.Submitter, log *slog.Logger) (*Service, error) {
-	if store == nil || submitter == nil {
+func New(cfg Config, store proof.Store, prover sp1.Client, log *slog.Logger) (*Service, error) {
+	if store == nil || prover == nil {
 		return nil, fmt.Errorf("%w: nil dependency", proof.ErrInvalidConfig)
 	}
 	if strings.TrimSpace(cfg.Owner) == "" {
@@ -80,22 +65,14 @@ func New(cfg Config, store proof.Store, submitter boundless.Submitter, log *slog
 	if cfg.RequestTimeout <= 0 || cfg.CallbackIdempotencyTTL <= 0 {
 		return nil, fmt.Errorf("%w: timeouts must be > 0", proof.ErrInvalidConfig)
 	}
-	if strings.TrimSpace(cfg.SubmissionMode) == "" {
-		cfg.SubmissionMode = boundless.SubmissionModeOffchainPrimaryOnchainFallback
-	}
-	if cfg.OnchainFallbackEnabled {
-		if err := boundless.ValidateFundingMode(cfg.OnchainFallbackFundingMode); err != nil {
-			return nil, err
-		}
-	}
 	if log == nil {
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 	return &Service{
-		cfg:       cfg,
-		store:     store,
-		submitter: submitter,
-		log:       log,
+		cfg:    cfg,
+		store:  store,
+		prover: prover,
+		log:    log,
 	}, nil
 }
 
@@ -132,59 +109,19 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 		return out, nil
 	}
 
-	baseReq := boundless.SubmitRequest{
-		RequestID:           rec.RequestID,
-		ChainID:             s.cfg.ChainID,
-		RequestorAddress:    s.cfg.RequestorAddress,
-		RequestorPrivateKey: s.cfg.RequestorPrivateKey,
-		OrderStreamURL:      s.cfg.OrderStreamURL,
-		MarketAddress:       s.cfg.MarketAddress,
-		JobID:               job.JobID,
-		Pipeline:            job.Pipeline,
-		ImageID:             job.ImageID,
-		Journal:             append([]byte(nil), job.Journal...),
-		PrivateInput:        append([]byte(nil), job.PrivateInput...),
-		Deadline:            job.Deadline,
-		Priority:            job.Priority,
-	}
-
 	runCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
 	defer cancel()
 
-	resp, err := s.submitter.SubmitOffchain(runCtx, baseReq)
+	seal, err := s.prover.Prove(
+		runCtx,
+		job.ImageID,
+		append([]byte(nil), job.Journal...),
+		append([]byte(nil), job.PrivateInput...),
+	)
 	if err == nil {
-		return s.markFulfilled(ctx, job.JobID, rec.RequestID, resp, false)
+		return s.markFulfilled(ctx, job.JobID, rec.RequestID, seal)
 	}
-	s.log.Warn("offchain submission failed; evaluating fallback", "job_id", job.JobID, "request_id", rec.RequestID, "err", err)
-
-	if s.cfg.SubmissionMode == boundless.SubmissionModeOffchainPrimaryOnchainFallback && s.cfg.OnchainFallbackEnabled {
-		onReq := boundless.OnchainSubmitRequest{
-			SubmitRequest:       baseReq,
-			FundingMode:         s.cfg.OnchainFallbackFundingMode,
-			MinBalanceWei:       cloneBigInt(s.cfg.OnchainMinBalanceWei),
-			TargetBalanceWei:    cloneBigInt(s.cfg.OnchainTargetBalanceWei),
-			MaxPricePerProofWei: cloneBigInt(s.cfg.OnchainMaxPricePerProofWei),
-			MaxStakePerProofWei: cloneBigInt(s.cfg.OnchainMaxStakePerProofWei),
-		}
-		onResp, onErr := s.submitter.SubmitOnchain(runCtx, onReq)
-		if onErr == nil {
-			return s.markFulfilled(ctx, job.JobID, rec.RequestID, onResp, true)
-		}
-		code, retryable, message := boundless.ClassifySubmitError(onErr)
-		if _, markErr := s.store.MarkFailed(ctx, job.JobID, s.cfg.Owner, rec.RequestID, code, message, retryable); markErr != nil {
-			return Outcome{}, markErr
-		}
-		return Outcome{
-			Status:       StatusFailed,
-			JobID:        job.JobID.Hex(),
-			RequestID:    rec.RequestID,
-			Retryable:    retryable,
-			ErrorCode:    code,
-			ErrorMessage: message,
-		}, nil
-	}
-
-	code, retryable, message := boundless.ClassifySubmitError(err)
+	code, retryable, message := sp1.ClassifyProveError(err)
 	if _, markErr := s.store.MarkFailed(ctx, job.JobID, s.cfg.Owner, rec.RequestID, code, message, retryable); markErr != nil {
 		return Outcome{}, markErr
 	}
@@ -198,16 +135,20 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 	}, nil
 }
 
-func (s *Service) markFulfilled(ctx context.Context, jobID common.Hash, requestID uint64, resp boundless.SubmitResponse, fallback bool) (Outcome, error) {
-	submissionPath := strings.TrimSpace(resp.SubmissionPath)
-	if submissionPath == "" {
-		if fallback {
-			submissionPath = "onchain"
-		} else {
-			submissionPath = "offchain"
-		}
+func (s *Service) markFulfilled(ctx context.Context, jobID common.Hash, requestID uint64, seal []byte) (Outcome, error) {
+	metadata := map[string]string{
+		"provider":   "sp1",
+		"proof_type": "groth16",
 	}
-	rec, err := s.store.MarkFulfilled(ctx, jobID, s.cfg.Owner, requestID, resp.Seal, resp.Metadata, submissionPath)
+	rec, err := s.store.MarkFulfilled(
+		ctx,
+		jobID,
+		s.cfg.Owner,
+		requestID,
+		append([]byte(nil), seal...),
+		metadata,
+		sp1.DefaultSubmissionPath,
+	)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -216,7 +157,7 @@ func (s *Service) markFulfilled(ctx context.Context, jobID common.Hash, requestI
 		JobID:          jobID.Hex(),
 		RequestID:      rec.RequestID,
 		SubmissionPath: rec.SubmissionPath,
-		FallbackUsed:   fallback,
+		FallbackUsed:   false,
 		Seal:           append([]byte(nil), rec.Seal...),
 		Metadata:       cloneMetadata(rec.Metadata),
 	}, nil
@@ -231,11 +172,4 @@ func cloneMetadata(in map[string]string) map[string]string {
 		out[k] = v
 	}
 	return out
-}
-
-func cloneBigInt(v *big.Int) *big.Int {
-	if v == nil {
-		return nil
-	}
-	return new(big.Int).Set(v)
 }

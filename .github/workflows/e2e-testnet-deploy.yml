@@ -35,88 +35,58 @@ on:
         required: true
         default: "90m"
         type: string
-      boundless_rpc_url:
-        description: "Boundless submission RPC URL"
+      sp1_rpc_url:
+        description: "SP1 submission RPC URL"
         required: true
         default: "https://mainnet.base.org"
         type: string
-      boundless_deposit_program_url:
-        description: "Deposit guest program URL for Boundless"
+      sp1_deposit_program_url:
+        description: "Deposit guest program URL for SP1"
         required: true
         type: string
-      boundless_withdraw_program_url:
-        description: "Withdraw guest program URL for Boundless"
+      sp1_withdraw_program_url:
+        description: "Withdraw guest program URL for SP1"
         required: true
         type: string
-      boundless_input_s3_bucket:
-        description: "S3 bucket for oversized Boundless guest inputs"
+      sp1_input_s3_bucket:
+        description: "S3 bucket for oversized SP1 guest inputs"
         required: true
         type: string
-      boundless_deposit_owallet_ivk_hex:
+      sp1_deposit_owallet_ivk_hex:
         description: "64-byte oWallet IVK hex for deposit witness extraction"
         required: true
         type: string
-      boundless_withdraw_owallet_ovk_hex:
+      sp1_withdraw_owallet_ovk_hex:
         description: "32-byte oWallet OVK hex for withdraw witness extraction"
         required: true
         type: string
-      boundless_witness_juno_scan_url:
+      sp1_witness_juno_scan_url:
         description: "juno-scan URL used for run-generated witness extraction"
         required: true
         type: string
-      boundless_witness_juno_rpc_url:
+      sp1_witness_juno_rpc_url:
         description: "junocashd RPC URL used for run-generated witness extraction"
         required: true
         type: string
-      boundless_min_price_wei:
-        description: "Boundless min price in wei"
-        required: true
-        default: "0"
-        type: string
-      boundless_max_price_wei:
-        description: "Boundless max price in wei"
+      sp1_max_price_per_pgu:
+        description: "SP1 max price per PGU in wei"
         required: true
         default: "50000000000000"
         type: string
-      boundless_max_price_cap_wei:
-        description: "Boundless max price cap in wei used by retry bumps"
-        required: true
-        default: "250000000000000"
-        type: string
-      boundless_max_price_bump_multiplier:
-        description: "Boundless max price bump multiplier for lock-failure retries"
-        required: true
-        default: "2"
-        type: string
-      boundless_max_price_bump_retries:
-        description: "Boundless max price bump retries for lock-failure retries"
-        required: true
-        default: "3"
-        type: string
-      boundless_lock_stake_wei:
-        description: "Boundless lock stake in wei"
-        required: true
-        default: "20000000000000000000"
-        type: string
-      boundless_bidding_delay_seconds:
-        description: "Boundless bidding delay in seconds"
+      sp1_min_auction_period:
+        description: "SP1 minimum auction period in seconds"
         required: true
         default: "85"
         type: string
-      boundless_ramp_up_period_seconds:
-        description: "Boundless ramp-up period in seconds"
+      sp1_auction_timeout:
+        description: "SP1 auction timeout duration (seconds with s suffix)"
         required: true
-        default: "170"
+        default: "625s"
         type: string
-      boundless_lock_timeout_seconds:
-        description: "Boundless lock timeout in seconds"
+      sp1_request_timeout:
+        description: "SP1 request timeout duration (seconds with s suffix)"
         required: true
-        default: "625"
-        type: string
-      boundless_timeout_seconds:
-        description: "Boundless timeout in seconds"
-        required: true
-        default: "1500"
+        default: "1500s"
         type: string
 
 permissions:
@@ -154,7 +124,7 @@ jobs:
           cargo build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
           mkdir -p "$HOME/.local/bin"
           install -m 0755 zk/target/release/sp1-prover-adapter "$HOME/.local/bin/sp1-prover-adapter"
-          ln -sf "$HOME/.local/bin/sp1-prover-adapter" "$HOME/.local/bin/boundless"
+          ln -sf "$HOME/.local/bin/sp1-prover-adapter" "$HOME/.local/bin/sp1"
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate required secrets
@@ -169,8 +139,8 @@ jobs:
             echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
             exit 1
           fi
-          if [[ -z "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
-            echo "BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX secret is required"
+          if [[ -z "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
+            echo "SP1_REQUESTOR_PRIVATE_KEY_HEX secret is required"
             exit 1
           fi
           if [[ -z "${{ secrets.JUNO_RPC_USER }}" ]]; then
@@ -191,8 +161,42 @@ jobs:
           chmod 0600 .ci/secrets/base-funder.key
           printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
           chmod 0600 .ci/secrets/juno-funder.key
-          printf '%s\n' "${{ secrets.BOUNDLESS_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/boundless-requestor.key
-          chmod 0600 .ci/secrets/boundless-requestor.key
+          printf '%s\n' "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/sp1-requestor.key
+          chmod 0600 .ci/secrets/sp1-requestor.key
+
+      - name: Preflight SP1 Credit Guardrail
+        shell: bash
+        run: |
+          set -euo pipefail
+          requestor_key_hex="$(tr -d '\r\n' < .ci/secrets/sp1-requestor.key)"
+          requestor_address="$(cast wallet address --private-key "$requestor_key_hex")"
+          export NETWORK_PRIVATE_KEY="$requestor_key_hex"
+          export SP1_NETWORK_RPC_URL="${{ inputs.sp1_rpc_url }}"
+          balance_json="$(printf '{"version":"sp1.balance.request.v1","requestor_address":"%s"}\n' "$requestor_address" | sp1-prover-adapter)"
+          balance_wei="$(jq -er '.balance_wei' <<<"$balance_json")"
+          [[ "$balance_wei" =~ ^[0-9]+$ ]] || {
+            echo "invalid SP1 balance_wei response: $balance_wei"
+            exit 1
+          }
+
+          max_price_per_pgu="${{ inputs.sp1_max_price_per_pgu }}"
+          [[ "$max_price_per_pgu" =~ ^[0-9]+$ ]] || {
+            echo "sp1_max_price_per_pgu must be numeric"
+            exit 1
+          }
+          projected_max_cost_wei=$((max_price_per_pgu * 2))
+          projected_with_overhead_wei=$(((projected_max_cost_wei * 120 + 99) / 100))
+          required_buffer_wei=$((projected_with_overhead_wei * 3))
+
+          if (( balance_wei < required_buffer_wei )); then
+            refill_wei=$((required_buffer_wei - balance_wei))
+            echo "SP1 requestor balance below required guardrail."
+            echo "requestor_address=$requestor_address"
+            echo "balance_wei=$balance_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+            exit 1
+          fi
+
+          echo "SP1 credit preflight passed: requestor_address=$requestor_address balance_wei=$balance_wei required_wei=$required_buffer_wei"
 
       - name: Start Shared Infra (Postgres + Kafka + IPFS)
         shell: bash
@@ -297,26 +301,20 @@ jobs:
             --bridge-verifier-address "${{ inputs.bridge_verifier_address }}"
             --bridge-deposit-image-id "${{ inputs.bridge_deposit_image_id }}"
             --bridge-withdraw-image-id "${{ inputs.bridge_withdraw_image_id }}"
-            --boundless-requestor-key-file ".ci/secrets/boundless-requestor.key"
-            --boundless-rpc-url "${{ inputs.boundless_rpc_url }}"
-            --boundless-input-mode "guest-witness-v1"
-            --boundless-deposit-program-url "${{ inputs.boundless_deposit_program_url }}"
-            --boundless-withdraw-program-url "${{ inputs.boundless_withdraw_program_url }}"
-            --boundless-input-s3-bucket "${{ inputs.boundless_input_s3_bucket }}"
-            --boundless-deposit-owallet-ivk-hex "${{ inputs.boundless_deposit_owallet_ivk_hex }}"
-            --boundless-withdraw-owallet-ovk-hex "${{ inputs.boundless_withdraw_owallet_ovk_hex }}"
-            --boundless-witness-juno-scan-url "${{ inputs.boundless_witness_juno_scan_url }}"
-            --boundless-witness-juno-rpc-url "${{ inputs.boundless_witness_juno_rpc_url }}"
-            --boundless-min-price-wei "${{ inputs.boundless_min_price_wei }}"
-            --boundless-max-price-wei "${{ inputs.boundless_max_price_wei }}"
-            --boundless-max-price-cap-wei "${{ inputs.boundless_max_price_cap_wei }}"
-            --boundless-max-price-bump-multiplier "${{ inputs.boundless_max_price_bump_multiplier }}"
-            --boundless-max-price-bump-retries "${{ inputs.boundless_max_price_bump_retries }}"
-            --boundless-lock-stake-wei "${{ inputs.boundless_lock_stake_wei }}"
-            --boundless-bidding-delay-seconds "${{ inputs.boundless_bidding_delay_seconds }}"
-            --boundless-ramp-up-period-seconds "${{ inputs.boundless_ramp_up_period_seconds }}"
-            --boundless-lock-timeout-seconds "${{ inputs.boundless_lock_timeout_seconds }}"
-            --boundless-timeout-seconds "${{ inputs.boundless_timeout_seconds }}"
+            --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
+            --sp1-rpc-url "${{ inputs.sp1_rpc_url }}"
+            --sp1-input-mode "guest-witness-v1"
+            --sp1-deposit-program-url "${{ inputs.sp1_deposit_program_url }}"
+            --sp1-withdraw-program-url "${{ inputs.sp1_withdraw_program_url }}"
+            --sp1-input-s3-bucket "${{ inputs.sp1_input_s3_bucket }}"
+            --sp1-deposit-owallet-ivk-hex "${{ inputs.sp1_deposit_owallet_ivk_hex }}"
+            --sp1-withdraw-owallet-ovk-hex "${{ inputs.sp1_withdraw_owallet_ovk_hex }}"
+            --sp1-witness-juno-scan-url "${{ inputs.sp1_witness_juno_scan_url }}"
+            --sp1-witness-juno-rpc-url "${{ inputs.sp1_witness_juno_rpc_url }}"
+            --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
+            --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
+            --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"
             --output "$E2E_WORKDIR/reports/testnet-e2e-summary.json"
             --force
           )

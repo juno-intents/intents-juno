@@ -1,4 +1,4 @@
-package boundless
+package sp1network
 
 import (
 	"context"
@@ -10,13 +10,13 @@ import (
 	"github.com/juno-intents/intents-juno/internal/proverexec"
 )
 
-var ErrInvalidConfig = errors.New("boundless: invalid config")
+var ErrInvalidConfig = errors.New("sp1network: invalid config")
 
 type Backend string
 
 const (
-	// BackendBoundless routes proofs through the Boundless-facing prover adapter.
-	BackendBoundless Backend = "boundless"
+	// BackendSP1Network routes proofs through the SP1-network-facing prover adapter.
+	BackendSP1Network Backend = "sp1network"
 	// BackendSelf routes proofs through a self-hosted prover adapter.
 	BackendSelf Backend = "self"
 )
@@ -30,7 +30,7 @@ type Client interface {
 }
 
 type Config struct {
-	// Backend selects the prover backend. Empty defaults to boundless.
+	// Backend selects the prover backend. Empty defaults to sp1network.
 	Backend string
 
 	// ProverBin is the command binary implementing prover.request.v1/prover.response.v1.
@@ -43,17 +43,17 @@ type Config struct {
 func ParseBackend(v string) (Backend, error) {
 	s := strings.ToLower(strings.TrimSpace(v))
 	switch s {
-	case BackendBoundless.String():
-		return BackendBoundless, nil
+	case BackendSP1Network.String():
+		return BackendSP1Network, nil
 	case BackendSelf.String():
 		return BackendSelf, nil
 	default:
-		return "", fmt.Errorf("%w: unsupported prover backend %q (supported: %q, %q)", ErrInvalidConfig, v, BackendBoundless, BackendSelf)
+		return "", fmt.Errorf("%w: unsupported prover backend %q (supported: %q, %q)", ErrInvalidConfig, v, BackendSP1Network, BackendSelf)
 	}
 }
 
 func New(cfg Config) (Client, error) {
-	backend := BackendBoundless
+	backend := BackendSP1Network
 	if strings.TrimSpace(cfg.Backend) != "" {
 		parsed, err := ParseBackend(cfg.Backend)
 		if err != nil {
@@ -63,8 +63,8 @@ func New(cfg Config) (Client, error) {
 	}
 
 	switch backend {
-	case BackendBoundless:
-		return newBoundlessClient(cfg)
+	case BackendSP1Network:
+		return newSP1NetworkClient(cfg)
 	case BackendSelf:
 		return newSelfClient(cfg)
 	default:
@@ -72,10 +72,10 @@ func New(cfg Config) (Client, error) {
 	}
 }
 
-func newBoundlessClient(cfg Config) (Client, error) {
+func newSP1NetworkClient(cfg Config) (Client, error) {
 	client, err := proverexec.New(cfg.ProverBin, cfg.MaxResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("%w: boundless backend: %w", ErrInvalidConfig, err)
+		return nil, fmt.Errorf("%w: sp1network backend: %w", ErrInvalidConfig, err)
 	}
 	return client, nil
 }

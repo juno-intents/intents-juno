@@ -257,8 +257,8 @@ variable "shared_proof_service_image" {
   default     = ""
 }
 
-variable "shared_boundless_requestor_secret_arn" {
-  description = "Secrets Manager ARN containing the Boundless requestor private key used by shared proof-requestor/proof-funder ECS services."
+variable "shared_sp1_requestor_secret_arn" {
+  description = "Secrets Manager ARN containing the SP1 requestor private key used by shared proof-requestor/proof-funder ECS services."
   type        = string
   default     = ""
 }
