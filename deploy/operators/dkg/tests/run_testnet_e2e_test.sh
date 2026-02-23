@@ -118,6 +118,8 @@ test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   assert_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation skips pre-index action lookup to avoid long scan stalls"
   assert_contains "$script_text" "using action-index candidates for deposit extraction" "deposit extraction logs candidate action-index set"
   assert_contains "$script_text" "direct-cli withdraw extraction action-index candidates" "direct-cli withdraw extraction logs candidate action-index set"
+  assert_contains "$script_text" 'witness_fingerprint="${generated_deposit_txid}|${deposit_witness_hex}|${deposit_final_root}"' "quorum witness fingerprint ignores anchor drift across scanners"
+  assert_contains "$script_text" "witness quorum anchor divergence detected across operators (using first successful anchor)" "quorum checker reports anchor drift without hard-failing identical witness/root"
 }
 
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {

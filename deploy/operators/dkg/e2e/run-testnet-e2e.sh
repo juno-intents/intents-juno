@@ -2469,6 +2469,7 @@ command_run() {
     ensure_dir "$witness_quorum_dir"
     local -a witness_success_labels=()
     local -a witness_success_fingerprints=()
+    local -a witness_success_anchor_fingerprints=()
     local -a witness_success_deposit_json=()
     local -a witness_success_deposit_witness=()
 
@@ -2569,9 +2570,10 @@ command_run() {
       [[ -n "$deposit_final_root" ]] || die "deposit witness output missing final_orchard_root: $deposit_candidate_json"
 
       local witness_fingerprint
-      witness_fingerprint="${deposit_witness_hex}|${deposit_anchor_height}|${deposit_anchor_hash}|${deposit_final_root}"
+      witness_fingerprint="${generated_deposit_txid}|${deposit_witness_hex}|${deposit_final_root}"
       witness_success_labels+=("$witness_operator_label")
       witness_success_fingerprints+=("$witness_fingerprint")
+      witness_success_anchor_fingerprints+=("${deposit_anchor_height}|${deposit_anchor_hash}|${deposit_final_root}")
       witness_success_deposit_json+=("$deposit_candidate_json")
       witness_success_deposit_witness+=("$deposit_candidate_witness")
       log "witness extraction succeeded for operator=$witness_operator_label"
@@ -2598,6 +2600,23 @@ command_run() {
     done
     if (( ${#witness_unique_fingerprints[@]} != 1 )); then
       die "witness quorum consistency mismatch across operators: operators=$(IFS=,; printf '%s' "${witness_success_labels[*]}")"
+    fi
+    local -a witness_unique_anchor_fingerprints=()
+    local witness_anchor_fingerprint witness_existing_anchor_fingerprint witness_known_anchor_fingerprint
+    for witness_anchor_fingerprint in "${witness_success_anchor_fingerprints[@]}"; do
+      witness_known_anchor_fingerprint="false"
+      for witness_existing_anchor_fingerprint in "${witness_unique_anchor_fingerprints[@]}"; do
+        if [[ "$witness_existing_anchor_fingerprint" == "$witness_anchor_fingerprint" ]]; then
+          witness_known_anchor_fingerprint="true"
+          break
+        fi
+      done
+      if [[ "$witness_known_anchor_fingerprint" != "true" ]]; then
+        witness_unique_anchor_fingerprints+=("$witness_anchor_fingerprint")
+      fi
+    done
+    if (( ${#witness_unique_anchor_fingerprints[@]} > 1 )); then
+      log "witness quorum anchor divergence detected across operators (using first successful anchor)"
     fi
     witness_quorum_validated="true"
 
