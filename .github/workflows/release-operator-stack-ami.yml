@@ -208,6 +208,7 @@ jobs:
           notes="Operator stack AMI release for ${region}
 
           AMI: ${ami_id}
+          Juno network: testnet
           Synced blockstamp: height=${block_height} hash=${block_hash}
           Repo commit: ${GITHUB_SHA}"
 

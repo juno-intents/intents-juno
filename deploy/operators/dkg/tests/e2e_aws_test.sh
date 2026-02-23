@@ -858,6 +858,7 @@ test_operator_stack_ami_release_workflow_exists() {
   assert_contains "$workflow_text" "operator-ami-manifest.json" "operator stack ami workflow publishes manifest"
   assert_contains "$workflow_text" 'ami_id="$(jq -r --arg region' "operator stack ami workflow derives ami id from manifest instead of log output"
   assert_not_contains "$workflow_text" 'ami_id="$(tr -d '\''\r\n'\'' < .ci/out/operator-ami-id.txt)"' "operator stack ami workflow no longer parses ami id from mixed log output file"
+  assert_contains "$workflow_text" "Juno network: testnet" "operator stack ami workflow release notes explicitly state juno testnet scope"
   assert_contains "$workflow_text" "gh release" "operator stack ami workflow creates/updates release"
 }
 
