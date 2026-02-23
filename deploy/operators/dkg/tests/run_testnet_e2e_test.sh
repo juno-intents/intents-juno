@@ -118,6 +118,14 @@ test_witness_generation_reuses_distributed_dkg_recipient_identity() {
   assert_contains "$script_text" "generated witness metadata ufvk mismatch against distributed DKG value" "run-testnet-e2e validates generated witness UFVK against distributed DKG UFVK"
 }
 
+test_witness_metadata_failover_reuses_single_wallet_id() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'witness_wallet_id_attempt="$witness_wallet_id"' "witness metadata failover reuses a single wallet id across endpoint attempts"
+  assert_not_contains "$script_text" 'witness_wallet_id_attempt="${witness_wallet_id}-${witness_operator_safe_label}"' "witness metadata failover must not fork wallet ids per endpoint"
+}
+
 test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -237,6 +245,7 @@ main() {
   test_operator_signer_fallback_exists_for_bins_without_sign_digest
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_reuses_distributed_dkg_recipient_identity
+  test_witness_metadata_failover_reuses_single_wallet_id
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_bridge_address_prediction_parses_cast_labeled_output

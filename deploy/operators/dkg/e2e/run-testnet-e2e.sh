@@ -2286,11 +2286,9 @@ command_run() {
       witness_operator_safe_label="${witness_operator_safe_label%_}"
       [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
       witness_metadata_attempt_json="$workdir/reports/witness/generated-witness-metadata-${witness_operator_safe_label}.json"
-      if (( witness_idx == 0 )); then
-        witness_wallet_id_attempt="$witness_wallet_id"
-      else
-        witness_wallet_id_attempt="${witness_wallet_id}-${witness_operator_safe_label}"
-      fi
+      # Keep a single wallet id across failover attempts for the same UFVK.
+      # Some scan backends index UFVK notes against the first wallet id only.
+      witness_wallet_id_attempt="$witness_wallet_id"
 
       local -a witness_metadata_args=(
         run
