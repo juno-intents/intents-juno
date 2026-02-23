@@ -157,6 +157,19 @@ test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
   assert_contains "$script_text" '"--withdraw-final-orchard-root" "$direct_cli_withdraw_final_orchard_root"' "direct-cli bridge run overrides withdraw orchard root from dedicated witness extraction"
 }
 
+test_direct_cli_witness_extraction_retries_note_visibility() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "direct_cli_deposit_extract_deadline_epoch" "direct-cli deposit extraction has a retry deadline"
+  assert_contains "$script_text" "direct-cli waiting for deposit note visibility" "direct-cli deposit extraction logs note-visibility wait state"
+  assert_contains "$script_text" "direct_cli_deposit_extract_error_file" "direct-cli deposit extraction captures extraction errors for retry classification"
+  assert_contains "$script_text" "direct_cli_withdraw_extract_deadline_epoch" "direct-cli withdraw extraction has a retry deadline"
+  assert_contains "$script_text" "direct-cli waiting for withdraw note visibility" "direct-cli withdraw extraction logs note-visibility wait state"
+  assert_contains "$script_text" "direct_cli_withdraw_extract_error_file" "direct-cli withdraw extraction captures extraction errors for retry classification"
+  assert_contains "$script_text" "for direct_cli_action_candidate in 0 1 2 3; do" "direct-cli extraction appends default action-index candidates for resilience"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -167,6 +180,7 @@ main() {
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
+  test_direct_cli_witness_extraction_retries_note_visibility
 }
 
 main "$@"

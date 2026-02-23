@@ -2811,6 +2811,14 @@ command_run() {
     local direct_cli_deposit_witness_file direct_cli_deposit_witness_json
     local direct_cli_deposit_action_index_used=""
     local direct_cli_deposit_extract_ok="false"
+    local direct_cli_deposit_extract_deadline_epoch direct_cli_deposit_extract_wait_logged
+    local direct_cli_deposit_extract_sleep_seconds direct_cli_deposit_extract_error_file
+    local direct_cli_deposit_last_error
+    local direct_cli_withdraw_extract_ok="false"
+    local direct_cli_withdraw_action_index_used=""
+    local direct_cli_withdraw_extract_deadline_epoch direct_cli_withdraw_extract_wait_logged
+    local direct_cli_withdraw_extract_sleep_seconds direct_cli_withdraw_extract_error_file
+    local direct_cli_withdraw_last_error
     local direct_cli_bridge_summary direct_cli_bridge_log
     local direct_cli_deposit_final_orchard_root direct_cli_deposit_anchor_height direct_cli_deposit_anchor_hash
     local direct_cli_withdraw_final_orchard_root direct_cli_withdraw_anchor_height direct_cli_withdraw_anchor_hash
@@ -3011,6 +3019,19 @@ command_run() {
         direct_cli_deposit_action_indexes+=("$direct_cli_action_candidate")
       fi
     done
+    for direct_cli_action_candidate in 0 1 2 3; do
+      local known_direct_cli_deposit_default="false"
+      local existing_direct_cli_deposit_default
+      for existing_direct_cli_deposit_default in "${direct_cli_deposit_action_indexes[@]}"; do
+        if [[ "$existing_direct_cli_deposit_default" == "$direct_cli_action_candidate" ]]; then
+          known_direct_cli_deposit_default="true"
+          break
+        fi
+      done
+      if [[ "$known_direct_cli_deposit_default" != "true" ]]; then
+        direct_cli_deposit_action_indexes+=("$direct_cli_action_candidate")
+      fi
+    done
     if (( ${#direct_cli_deposit_action_indexes[@]} == 0 )); then
       direct_cli_deposit_action_indexes=(0 1 2 3)
     fi
@@ -3019,27 +3040,58 @@ command_run() {
     direct_cli_deposit_witness_file="$workdir/reports/witness/direct-cli-deposit.witness.bin"
     direct_cli_deposit_witness_json="$workdir/reports/witness/direct-cli-deposit.json"
     local -a direct_cli_deposit_extract_cmd=(go run ./cmd/juno-witness-extract)
-    for direct_cli_action_candidate in "${direct_cli_deposit_action_indexes[@]}"; do
-      if (
-        cd "$REPO_ROOT"
-        "${direct_cli_deposit_extract_cmd[@]}" deposit \
-          --juno-scan-url "$boundless_witness_juno_scan_url" \
-          --wallet-id "$direct_cli_generated_witness_wallet_id" \
-          --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-          --txid "$direct_cli_generated_deposit_txid" \
-          --action-index "$direct_cli_action_candidate" \
-          --output-witness-item-file "$direct_cli_deposit_witness_file" \
-          >"$direct_cli_deposit_witness_json"
-      ); then
-        direct_cli_deposit_extract_ok="true"
-        direct_cli_deposit_action_index_used="$direct_cli_action_candidate"
+    direct_cli_deposit_extract_deadline_epoch=$(( $(date +%s) + witness_timeout_slice_seconds ))
+    direct_cli_deposit_extract_sleep_seconds=5
+    direct_cli_deposit_extract_wait_logged="false"
+    direct_cli_deposit_extract_error_file="$workdir/reports/witness/direct-cli-deposit.extract.err"
+    direct_cli_deposit_last_error=""
+    while true; do
+      local direct_cli_deposit_note_pending="false"
+      direct_cli_deposit_extract_ok="false"
+      for direct_cli_action_candidate in "${direct_cli_deposit_action_indexes[@]}"; do
+        rm -f "$direct_cli_deposit_witness_json"
+        if (
+          cd "$REPO_ROOT"
+          "${direct_cli_deposit_extract_cmd[@]}" deposit \
+            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --wallet-id "$direct_cli_generated_witness_wallet_id" \
+            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --txid "$direct_cli_generated_deposit_txid" \
+            --action-index "$direct_cli_action_candidate" \
+            --output-witness-item-file "$direct_cli_deposit_witness_file" \
+            >"$direct_cli_deposit_witness_json" 2>"$direct_cli_deposit_extract_error_file"
+        ); then
+          direct_cli_deposit_extract_ok="true"
+          direct_cli_deposit_action_index_used="$direct_cli_action_candidate"
+          rm -f "$direct_cli_deposit_extract_error_file"
+          break
+        fi
+        direct_cli_deposit_last_error="$(tail -n 1 "$direct_cli_deposit_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+        if grep -qi "note not found" "$direct_cli_deposit_extract_error_file"; then
+          direct_cli_deposit_note_pending="true"
+        fi
+      done
+      if [[ "$direct_cli_deposit_extract_ok" == "true" ]]; then
         break
       fi
+      if [[ "$direct_cli_deposit_note_pending" == "true" && "$direct_cli_deposit_extract_wait_logged" != "true" ]]; then
+        log "direct-cli waiting for deposit note visibility wallet=$direct_cli_generated_witness_wallet_id txid=$direct_cli_generated_deposit_txid action_index_candidates=$(IFS=,; printf '%s' "${direct_cli_deposit_action_indexes[*]}")"
+        direct_cli_deposit_extract_wait_logged="true"
+      fi
+      if (( $(date +%s) >= direct_cli_deposit_extract_deadline_epoch )); then
+        break
+      fi
+      sleep "$direct_cli_deposit_extract_sleep_seconds"
     done
     if [[ "$direct_cli_deposit_extract_ok" != "true" ]]; then
+      if [[ -n "$direct_cli_deposit_last_error" ]]; then
+        log "direct-cli deposit witness extraction failed last_error=$direct_cli_deposit_last_error"
+      else
+        log "direct-cli deposit witness extraction failed"
+      fi
       return 1
     fi
     log "direct-cli deposit witness extraction selected action-index=$direct_cli_deposit_action_index_used"
@@ -3077,6 +3129,19 @@ command_run() {
         direct_cli_withdraw_action_indexes+=("$direct_cli_action_candidate")
       fi
     done
+    for direct_cli_action_candidate in 0 1 2 3; do
+      local known_direct_cli_withdraw_default="false"
+      local existing_direct_cli_withdraw_default
+      for existing_direct_cli_withdraw_default in "${direct_cli_withdraw_action_indexes[@]}"; do
+        if [[ "$existing_direct_cli_withdraw_default" == "$direct_cli_action_candidate" ]]; then
+          known_direct_cli_withdraw_default="true"
+          break
+        fi
+      done
+      if [[ "$known_direct_cli_withdraw_default" != "true" ]]; then
+        direct_cli_withdraw_action_indexes+=("$direct_cli_action_candidate")
+      fi
+    done
     if (( ${#direct_cli_withdraw_action_indexes[@]} == 0 )); then
       direct_cli_withdraw_action_indexes=(0 1 2 3)
     fi
@@ -3085,31 +3150,60 @@ command_run() {
     direct_cli_withdraw_witness_file="$workdir/reports/witness/direct-cli-withdraw.witness.bin"
     direct_cli_withdraw_witness_json="$workdir/reports/witness/direct-cli-withdraw.json"
     local -a direct_cli_withdraw_extract_cmd=(go run ./cmd/juno-witness-extract)
-    local direct_cli_withdraw_extract_ok="false"
-    local direct_cli_withdraw_action_index_used=""
-    for direct_cli_action_candidate in "${direct_cli_withdraw_action_indexes[@]}"; do
-      if (
-        cd "$REPO_ROOT"
-        "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
-          --juno-scan-url "$boundless_witness_juno_scan_url" \
-          --wallet-id "$direct_cli_generated_witness_wallet_id" \
-          --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-          --txid "$direct_cli_withdraw_txid" \
-          --action-index "$direct_cli_action_candidate" \
-          --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
-          --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
-          --output-witness-item-file "$direct_cli_withdraw_witness_file" \
-          >"$direct_cli_withdraw_witness_json"
-      ); then
-        direct_cli_withdraw_extract_ok="true"
-        direct_cli_withdraw_action_index_used="$direct_cli_action_candidate"
+    direct_cli_withdraw_extract_deadline_epoch=$(( $(date +%s) + witness_timeout_slice_seconds ))
+    direct_cli_withdraw_extract_sleep_seconds=5
+    direct_cli_withdraw_extract_wait_logged="false"
+    direct_cli_withdraw_extract_error_file="$workdir/reports/witness/direct-cli-withdraw.extract.err"
+    direct_cli_withdraw_last_error=""
+    while true; do
+      local direct_cli_withdraw_note_pending="false"
+      direct_cli_withdraw_extract_ok="false"
+      for direct_cli_action_candidate in "${direct_cli_withdraw_action_indexes[@]}"; do
+        rm -f "$direct_cli_withdraw_witness_json"
+        if (
+          cd "$REPO_ROOT"
+          "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
+            --juno-scan-url "$boundless_witness_juno_scan_url" \
+            --wallet-id "$direct_cli_generated_witness_wallet_id" \
+            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+            --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+            --txid "$direct_cli_withdraw_txid" \
+            --action-index "$direct_cli_action_candidate" \
+            --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
+            --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
+            --output-witness-item-file "$direct_cli_withdraw_witness_file" \
+            >"$direct_cli_withdraw_witness_json" 2>"$direct_cli_withdraw_extract_error_file"
+        ); then
+          direct_cli_withdraw_extract_ok="true"
+          direct_cli_withdraw_action_index_used="$direct_cli_action_candidate"
+          rm -f "$direct_cli_withdraw_extract_error_file"
+          break
+        fi
+        direct_cli_withdraw_last_error="$(tail -n 1 "$direct_cli_withdraw_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+        if grep -qi "note not found" "$direct_cli_withdraw_extract_error_file"; then
+          direct_cli_withdraw_note_pending="true"
+        fi
+      done
+      if [[ "$direct_cli_withdraw_extract_ok" == "true" ]]; then
         break
       fi
+      if [[ "$direct_cli_withdraw_note_pending" == "true" && "$direct_cli_withdraw_extract_wait_logged" != "true" ]]; then
+        log "direct-cli waiting for withdraw note visibility wallet=$direct_cli_generated_witness_wallet_id txid=$direct_cli_withdraw_txid action_index_candidates=$(IFS=,; printf '%s' "${direct_cli_withdraw_action_indexes[*]}")"
+        direct_cli_withdraw_extract_wait_logged="true"
+      fi
+      if (( $(date +%s) >= direct_cli_withdraw_extract_deadline_epoch )); then
+        break
+      fi
+      sleep "$direct_cli_withdraw_extract_sleep_seconds"
     done
     if [[ "$direct_cli_withdraw_extract_ok" != "true" ]]; then
+      if [[ -n "$direct_cli_withdraw_last_error" ]]; then
+        log "direct-cli withdraw witness extraction failed last_error=$direct_cli_withdraw_last_error"
+      else
+        log "direct-cli withdraw witness extraction failed"
+      fi
       return 1
     fi
     log "direct-cli withdraw witness extraction selected action-index=$direct_cli_withdraw_action_index_used"
