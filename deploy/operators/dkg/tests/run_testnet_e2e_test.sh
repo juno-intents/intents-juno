@@ -186,6 +186,13 @@ test_direct_cli_witness_extraction_retries_note_visibility() {
   assert_contains "$script_text" "for direct_cli_action_candidate in 0 1 2 3; do" "direct-cli extraction appends default action-index candidates for resilience"
 }
 
+test_json_array_from_args_separates_jq_options_from_cli_flags() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'jq -n --args -- "$@" '\''$ARGS.positional'\''' "json_array_from_args passes args after jq option delimiter"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -198,6 +205,7 @@ main() {
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode
   test_direct_cli_witness_extraction_retries_note_visibility
+  test_json_array_from_args_separates_jq_options_from_cli_flags
 }
 
 main "$@"
