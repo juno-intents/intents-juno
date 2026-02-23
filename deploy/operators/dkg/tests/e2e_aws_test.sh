@@ -1122,6 +1122,17 @@ test_aws_wrapper_supports_proof_stage_resume_without_dkg_or_redeploy() {
   assert_contains "$wrapper_script_text" '"--existing-bridge-summary-path" ".ci/secrets/reuse-bridge-summary.json"' "aws wrapper forwards bridge summary reuse path to remote e2e script"
 }
 
+test_terraform_grants_ecs_task_execution_secret_access() {
+  local tf_text
+  tf_text="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/main.tf")"
+
+  assert_contains "$tf_text" 'data "aws_iam_policy_document" "ecs_task_execution_secrets"' "terraform defines ecs task execution secret access policy"
+  assert_contains "$tf_text" "secretsmanager:GetSecretValue" "terraform grants ecs task execution role secret value read access"
+  assert_contains "$tf_text" "secretsmanager:DescribeSecret" "terraform grants ecs task execution role secret metadata read access"
+  assert_contains "$tf_text" 'resource "aws_iam_role_policy" "ecs_task_execution_secrets"' "terraform attaches ecs task execution secret policy"
+  assert_contains "$tf_text" "local.shared_sp1_requestor_secret_arn" "terraform scopes ecs task execution secret policy to configured requestor secret arn"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -1156,6 +1167,7 @@ main() {
   test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset
   test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk
   test_aws_wrapper_supports_proof_stage_resume_without_dkg_or_redeploy
+  test_terraform_grants_ecs_task_execution_secret_access
 }
 
 main "$@"

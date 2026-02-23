@@ -583,6 +583,27 @@ locals {
   shared_sp1_requestor_secret_arn = trimspace(var.shared_sp1_requestor_secret_arn)
 }
 
+data "aws_iam_policy_document" "ecs_task_execution_secrets" {
+  count = var.provision_shared_services && local.shared_sp1_requestor_secret_arn != "" ? 1 : 0
+
+  statement {
+    sid = "AllowProofRequestorSecretRead"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = [local.shared_sp1_requestor_secret_arn]
+  }
+}
+
+resource "aws_iam_role_policy" "ecs_task_execution_secrets" {
+  count = var.provision_shared_services && local.shared_sp1_requestor_secret_arn != "" ? 1 : 0
+
+  name   = "${local.resource_name}-ecs-task-exec-secrets"
+  role   = aws_iam_role.ecs_task_execution[0].id
+  policy = data.aws_iam_policy_document.ecs_task_execution_secrets[0].json
+}
+
 resource "aws_cloudwatch_log_group" "proof_requestor" {
   count = var.provision_shared_services ? 1 : 0
 
