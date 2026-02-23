@@ -44,7 +44,7 @@ on:
         default: "1000000000000000"
         type: string
       bridge_verifier_address:
-        description: "Verifier router address"
+        description: "SP1 verifier gateway address"
         required: true
         type: string
       bridge_deposit_image_id:
@@ -137,6 +137,9 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: hashicorp/setup-terraform@v3
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
       - name: Configure AWS Credentials (OIDC Role)
         if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}

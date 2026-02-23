@@ -6,26 +6,28 @@ import {Test} from "forge-std/Test.sol";
 import {Bridge} from "../src/Bridge.sol";
 import {FeeDistributor} from "../src/FeeDistributor.sol";
 import {OperatorRegistry} from "../src/OperatorRegistry.sol";
-import {IRiscZeroVerifierRouter} from "../src/interfaces/IRiscZeroVerifierRouter.sol";
+import {ISP1Verifier} from "../src/interfaces/ISP1Verifier.sol";
 import {WJuno} from "../src/WJuno.sol";
 
-contract MockVerifierRouter is IRiscZeroVerifierRouter {
+contract MockVerifierRouter is ISP1Verifier {
     bool public ok = true;
-    bytes32 public expectedImageId;
-    bytes32 public expectedJournalDigest;
+    bytes32 public expectedProgramVKey;
+    bytes32 public expectedPublicValuesHash;
 
     error VerifyFailed();
 
-    function setExpected(bytes32 imageId, bytes32 journalDigest, bool ok_) external {
-        expectedImageId = imageId;
-        expectedJournalDigest = journalDigest;
+    function setExpected(bytes32 programVKey, bytes calldata publicValues, bool ok_) external {
+        expectedProgramVKey = programVKey;
+        expectedPublicValuesHash = keccak256(publicValues);
         ok = ok_;
     }
 
-    function verify(bytes calldata, bytes32 imageId, bytes32 journalDigest) external view {
+    function verifyProof(bytes32 programVKey, bytes calldata publicValues, bytes calldata) external view {
         if (!ok) revert VerifyFailed();
-        if (expectedImageId != bytes32(0) && expectedImageId != imageId) revert VerifyFailed();
-        if (expectedJournalDigest != bytes32(0) && expectedJournalDigest != journalDigest) revert VerifyFailed();
+        if (expectedProgramVKey != bytes32(0) && expectedProgramVKey != programVKey) revert VerifyFailed();
+        if (expectedPublicValuesHash != bytes32(0) && expectedPublicValuesHash != keccak256(publicValues)) {
+            revert VerifyFailed();
+        }
     }
 }
 
@@ -98,7 +100,7 @@ contract BridgeTest is Test {
             items: items
         });
         bytes memory journal = abi.encode(dj);
-        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -180,7 +182,7 @@ contract BridgeTest is Test {
         });
         bytes memory journal = abi.encode(wj);
 
-        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -236,7 +238,7 @@ contract BridgeTest is Test {
         });
         bytes memory journal = abi.encode(wj);
 
-        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -347,7 +349,7 @@ contract BridgeTest is Test {
             items: items
         });
         bytes memory journal = abi.encode(dj);
-        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(2));
 
@@ -368,7 +370,7 @@ contract BridgeTest is Test {
             items: items
         });
         bytes memory journal = abi.encode(dj);
-        verifier.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -404,7 +406,7 @@ contract BridgeTest is Test {
             items: items
         });
         bytes memory journal = abi.encode(wj);
-        verifier.setExpected(WITHDRAW_IMAGE_ID, sha256(journal), true);
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
 
         bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
@@ -449,7 +451,7 @@ contract BridgeTest is Test {
             items: items
         });
         bytes memory journal = abi.encode(dj);
-        v.setExpected(DEPOSIT_IMAGE_ID, sha256(journal), true);
+        v.setExpected(DEPOSIT_IMAGE_ID, journal, true);
 
         vm.expectRevert(Bridge.OperatorThresholdUnset.selector);
         b.mintBatch(cp, new bytes[](0), hex"01", journal);

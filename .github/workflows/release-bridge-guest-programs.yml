@@ -18,7 +18,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install RISC0 Toolchain
+      - name: Install SP1 Toolchain
         shell: bash
         run: |
           set -euo pipefail
@@ -27,18 +27,14 @@ jobs:
           rustup default 1.91.1
           rustc --version
 
-          cargo install --locked cargo-risczero --version 3.0.5 --force
+          curl -L https://sp1up.succinct.xyz | bash
+          echo "$HOME/.sp1/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.sp1/bin:$PATH"
+          sp1up
+          cargo prove install-toolchain
 
-          if ! command -v rzup >/dev/null 2>&1; then
-            curl -sSfL https://risczero.com/install | bash
-          fi
-          export PATH="$HOME/.risc0/bin:$PATH"
-          rzup install
-
-          command -v r0vm >/dev/null 2>&1
-          command -v rzup >/dev/null 2>&1
-          cargo risczero --version
-          r0vm --version
+          command -v cargo >/dev/null 2>&1
+          cargo prove --version
 
       - name: Build Guests And Generate Profiles
         shell: bash
@@ -46,28 +42,26 @@ jobs:
           set -euo pipefail
           mkdir -p .ci/out
 
-          cargo risczero build --manifest-path zk/deposit_guest/guest/Cargo.toml | tee .ci/out/deposit-build.log
-          cargo risczero build --manifest-path zk/withdraw_guest/guest/Cargo.toml | tee .ci/out/withdraw-build.log
+          pushd zk >/dev/null
+          cargo prove build -p deposit-guest -p withdraw-guest --output-directory ../.ci/out | tee ../.ci/out/build.log
+          popd >/dev/null
 
-          deposit_image_id="$(grep -Eo 'ImageID: [0-9a-f]{64}' .ci/out/deposit-build.log | awk '{print $2}' | tail -n 1)"
-          withdraw_image_id="$(grep -Eo 'ImageID: [0-9a-f]{64}' .ci/out/withdraw-build.log | awk '{print $2}' | tail -n 1)"
-          [[ -n "$deposit_image_id" ]] || { echo "failed to parse deposit image id"; exit 1; }
-          [[ -n "$withdraw_image_id" ]] || { echo "failed to parse withdraw image id"; exit 1; }
-
-          deposit_elf="zk/target/riscv32im-risc0-zkvm-elf/docker/deposit-guest.bin"
-          withdraw_elf="zk/target/riscv32im-risc0-zkvm-elf/docker/withdraw-guest.bin"
+          deposit_elf=".ci/out/deposit-guest"
+          withdraw_elf=".ci/out/withdraw-guest"
           [[ -f "$deposit_elf" ]] || { echo "missing deposit guest output: $deposit_elf"; exit 1; }
           [[ -f "$withdraw_elf" ]] || { echo "missing withdraw guest output: $withdraw_elf"; exit 1; }
 
-          deposit_image_id_verify="$(r0vm --id --elf "$deposit_elf" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
-          withdraw_image_id_verify="$(r0vm --id --elf "$withdraw_elf" | tr -d '\r\n' | tr '[:upper:]' '[:lower:]')"
-          [[ "$deposit_image_id" == "$deposit_image_id_verify" ]] || { echo "deposit image id mismatch: $deposit_image_id != $deposit_image_id_verify"; exit 1; }
-          [[ "$withdraw_image_id" == "$withdraw_image_id_verify" ]] || { echo "withdraw image id mismatch: $withdraw_image_id != $withdraw_image_id_verify"; exit 1; }
+          pushd zk >/dev/null
+          deposit_vkey="$(cargo prove vkey --elf ../${deposit_elf} | grep -Eo '0x[0-9a-fA-F]{64}' | tail -n 1 | tr '[:upper:]' '[:lower:]')"
+          withdraw_vkey="$(cargo prove vkey --elf ../${withdraw_elf} | grep -Eo '0x[0-9a-fA-F]{64}' | tail -n 1 | tr '[:upper:]' '[:lower:]')"
+          popd >/dev/null
+          [[ -n "$deposit_vkey" ]] || { echo "failed to parse deposit vkey"; exit 1; }
+          [[ -n "$withdraw_vkey" ]] || { echo "failed to parse withdraw vkey"; exit 1; }
 
           tag="${{ inputs.release_tag }}"
           repo="${GITHUB_REPOSITORY}"
-          deposit_asset="deposit-guest-${deposit_image_id}.elf"
-          withdraw_asset="withdraw-guest-${withdraw_image_id}.elf"
+          deposit_asset="deposit-guest-${deposit_vkey#0x}.elf"
+          withdraw_asset="withdraw-guest-${withdraw_vkey#0x}.elf"
           deposit_program_url="https://github.com/${repo}/releases/download/${tag}/${deposit_asset}"
           withdraw_program_url="https://github.com/${repo}/releases/download/${tag}/${withdraw_asset}"
 
@@ -81,8 +75,8 @@ jobs:
             --arg tag "$tag" \
             --arg repo "$repo" \
             --arg commit "$GITHUB_SHA" \
-            --arg deposit_image_id "0x${deposit_image_id}" \
-            --arg withdraw_image_id "0x${withdraw_image_id}" \
+            --arg deposit_vkey "$deposit_vkey" \
+            --arg withdraw_vkey "$withdraw_vkey" \
             --arg deposit_asset "$deposit_asset" \
             --arg withdraw_asset "$withdraw_asset" \
             --arg deposit_program_url "$deposit_program_url" \
@@ -92,10 +86,14 @@ jobs:
               release_tag: $tag,
               repository: $repo,
               commit: $commit,
-              bridge_deposit_image_id: $deposit_image_id,
-              bridge_withdraw_image_id: $withdraw_image_id,
+              bridge_deposit_image_id: $deposit_vkey,
+              bridge_withdraw_image_id: $withdraw_vkey,
+              bridge_deposit_program_vkey: $deposit_vkey,
+              bridge_withdraw_program_vkey: $withdraw_vkey,
               boundless_deposit_program_url: $deposit_program_url,
               boundless_withdraw_program_url: $withdraw_program_url,
+              sp1_deposit_program_url: $deposit_program_url,
+              sp1_withdraw_program_url: $withdraw_program_url,
               assets: {
                 deposit_guest_elf: $deposit_asset,
                 withdraw_guest_elf: $withdraw_asset
@@ -104,10 +102,14 @@ jobs:
           sha256sum .ci/out/bridge-guest-profiles.json > .ci/out/bridge-guest-profiles.json.sha256
 
           {
-            echo "BRIDGE_DEPOSIT_IMAGE_ID=0x${deposit_image_id}"
-            echo "BRIDGE_WITHDRAW_IMAGE_ID=0x${withdraw_image_id}"
+            echo "BRIDGE_DEPOSIT_IMAGE_ID=${deposit_vkey}"
+            echo "BRIDGE_WITHDRAW_IMAGE_ID=${withdraw_vkey}"
+            echo "BRIDGE_DEPOSIT_PROGRAM_VKEY=${deposit_vkey}"
+            echo "BRIDGE_WITHDRAW_PROGRAM_VKEY=${withdraw_vkey}"
             echo "BOUNDLESS_DEPOSIT_PROGRAM_URL=${deposit_program_url}"
             echo "BOUNDLESS_WITHDRAW_PROGRAM_URL=${withdraw_program_url}"
+            echo "SP1_DEPOSIT_PROGRAM_URL=${deposit_program_url}"
+            echo "SP1_WITHDRAW_PROGRAM_URL=${withdraw_program_url}"
           } > .ci/out/bridge-guest-release.env
           sha256sum .ci/out/bridge-guest-release.env > .ci/out/bridge-guest-release.env.sha256
 
@@ -125,7 +127,7 @@ jobs:
           Includes:
           - Deposit guest ELF + checksum
           - Withdraw guest ELF + checksum
-          - Release profile JSON + env file (image IDs + Boundless program URLs)
+          - Release profile JSON + env file (SP1 program vkeys + program URLs)
           EOF
           )"
 
@@ -153,8 +155,7 @@ jobs:
         with:
           name: bridge-guest-release
           path: |
-            .ci/out/deposit-build.log
-            .ci/out/withdraw-build.log
+            .ci/out/build.log
             .ci/out/deposit-guest-*.elf
             .ci/out/deposit-guest-*.elf.sha256
             .ci/out/withdraw-guest-*.elf

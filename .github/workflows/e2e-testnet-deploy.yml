@@ -19,7 +19,7 @@ on:
         default: "1000000000000000"
         type: string
       bridge_verifier_address:
-        description: "Verifier router address"
+        description: "SP1 verifier gateway address"
         required: true
         type: string
       bridge_deposit_image_id:
@@ -140,17 +140,22 @@ jobs:
       - name: Setup Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Install Boundless CLI
+      - name: Install SP1 Adapter Build Deps
         shell: bash
         run: |
           set -euo pipefail
-          cargo install boundless-cli --version 1.2.0
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler clang libclang-dev pkg-config libssl-dev
 
-      - name: Install RISC Zero Tooling
+      - name: Build SP1 Prover Adapter
         shell: bash
         run: |
           set -euo pipefail
-          cargo install --locked risc0-r0vm --version 3.0.5
+          cargo build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 zk/target/release/sp1-prover-adapter "$HOME/.local/bin/sp1-prover-adapter"
+          ln -sf "$HOME/.local/bin/sp1-prover-adapter" "$HOME/.local/bin/boundless"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
       - name: Validate required secrets
         shell: bash

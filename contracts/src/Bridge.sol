@@ -12,7 +12,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 
 import {FeeDistributor} from "./FeeDistributor.sol";
 import {OperatorRegistry} from "./OperatorRegistry.sol";
-import {IRiscZeroVerifierRouter} from "./interfaces/IRiscZeroVerifierRouter.sol";
+import {ISP1Verifier} from "./interfaces/ISP1Verifier.sol";
 import {WJuno} from "./WJuno.sol";
 
 /// @notice Base-side bridge for minting/burning wJUNO using operator-quorum checkpoints and zk proofs.
@@ -105,7 +105,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     WJuno public immutable wjuno;
     FeeDistributor public immutable feeDistributor;
     OperatorRegistry public immutable operatorRegistry;
-    IRiscZeroVerifierRouter public verifier;
+    ISP1Verifier public verifier;
 
     bytes32 public depositImageId;
     bytes32 public withdrawImageId;
@@ -148,7 +148,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         WJuno wjuno_,
         FeeDistributor feeDistributor_,
         OperatorRegistry operatorRegistry_,
-        IRiscZeroVerifierRouter verifier_,
+        ISP1Verifier verifier_,
         bytes32 depositImageId_,
         bytes32 withdrawImageId_,
         uint96 feeBps_,
@@ -202,7 +202,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit ParamsUpdated(newFeeBps, newRelayerTipBps, newRefundWindowSeconds, newMaxExpiryExtensionSeconds);
     }
 
-    function setVerifier(IRiscZeroVerifierRouter newVerifier) external onlyOwner {
+    function setVerifier(ISP1Verifier newVerifier) external onlyOwner {
         if (address(newVerifier) == address(0)) revert ZeroAddress();
         verifier = newVerifier;
         emit VerifierUpdated(address(newVerifier));
@@ -472,8 +472,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     function _verifySeal(bytes calldata seal, bytes32 imageId, bytes calldata journal) internal view {
-        bytes32 journalDigest = sha256(journal);
-        try verifier.verify(seal, imageId, journalDigest) {} catch {
+        try verifier.verifyProof(imageId, journal, seal) {} catch {
             revert InvalidProof();
         }
     }

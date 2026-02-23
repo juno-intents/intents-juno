@@ -754,40 +754,13 @@ run_apt_with_retry() {
   return 1
 }
 
-dump_boundless_failure_context() {
-  local install_dir
-  local generated_file
-
-  install_dir="\$(ls -dt /tmp/cargo-install* 2>/dev/null | head -n1 || true)"
-  if [[ -z "\$install_dir" ]]; then
-    echo "boundless diagnostics: no /tmp/cargo-install* directory found"
-    return 0
-  fi
-
-  generated_file="\$(find "\$install_dir" -type f -name 'boundless_market_generated.rs' | head -n1 || true)"
-  if [[ -n "\$generated_file" && -f "\$generated_file" ]]; then
-    echo "boundless diagnostics: generated file: \$generated_file"
-    if command -v rg >/dev/null 2>&1; then
-      rg -n "alloy::sol!|enum|library|interface" "\$generated_file" | tail -n 40 || true
-    fi
-    echo "boundless diagnostics: generated file tail"
-    tail -n 80 "\$generated_file" || true
-  else
-    echo "boundless diagnostics: generated file not found under \$install_dir"
-  fi
-}
-
 run_with_retry() {
   local attempt
   for attempt in \$(seq 1 3); do
     if "\$@"; then
       return 0
     fi
-    if [[ "\$*" == *"cargo +1.91.1 install"* && "\$*" == *"boundless-cli"* ]]; then
-      dump_boundless_failure_context || true
-    fi
     if [[ \$attempt -lt 3 ]]; then
-      rm -rf /tmp/cargo-install* || true
       sleep 5
     fi
   done
@@ -795,87 +768,22 @@ run_with_retry() {
 }
 
 run_apt_with_retry update -y
-run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar
+run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar protobuf-compiler clang libclang-dev
 
 if [[ ! -d "\$HOME/.cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
 fi
 
-export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$HOME/.risc0/bin:\$PATH"
+export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$HOME/.local/bin:\$PATH"
 if ! command -v foundryup >/dev/null 2>&1; then
   curl -L https://foundry.paradigm.xyz | bash
 fi
 foundryup
 
-# Keep this pinned to the release branch documented for mainnet requestors.
 run_with_retry rustup toolchain install 1.91.1 --profile minimal
 run_with_retry rustup default 1.91.1
 rustc --version
-boundless_cli_target_version="1.2.0"
-boundless_ref_tag="v1.2.1"
-boundless_release_branch="release-1.2"
-boundless_source_dir="/tmp/boundless-cli-release-1.2"
-boundless_version_output=""
-if command -v boundless >/dev/null 2>&1; then
-  boundless_version_output="\$(boundless --version 2>/dev/null || true)"
-fi
-prepare_boundless_release_source() {
-  local boundless_market_build_rs
-
-  if [[ -d "\$boundless_source_dir/.git" ]]; then
-    git -C "\$boundless_source_dir" fetch --depth 1 origin "\$boundless_release_branch"
-    git -C "\$boundless_source_dir" checkout --force FETCH_HEAD
-  else
-    git clone --depth 1 --branch "\$boundless_release_branch" https://github.com/boundless-xyz/boundless "\$boundless_source_dir"
-  fi
-
-  boundless_market_build_rs="\$boundless_source_dir/crates/boundless-market/build.rs"
-  if [[ ! -f "\$boundless_market_build_rs" ]]; then
-    echo "boundless-market build script missing: \$boundless_market_build_rs" >&2
-    return 1
-  fi
-
-  if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
-    perl -0pi -e 's/\{combined_sol_contents\}/\{combined_sol_contents\}\n            enum __BOUNDLESS_DUMMY__ {{ __BOUNDLESS_DUMMY_VALUE__ }}/s' "\$boundless_market_build_rs"
-  fi
-  if ! grep -q "__BOUNDLESS_DUMMY__" "\$boundless_market_build_rs"; then
-    echo "failed to patch boundless market build script: \$boundless_market_build_rs" >&2
-    return 1
-  fi
-}
-install_boundless_cli() {
-  if run_with_retry cargo +1.91.1 install boundless-cli --version "\$boundless_cli_target_version" --locked --force; then
-    return 0
-  fi
-  echo "boundless-cli \$boundless_cli_target_version is unavailable on crates.io; falling back to git tag \$boundless_ref_tag"
-  if run_with_retry cargo +1.91.1 install boundless-cli --git https://github.com/boundless-xyz/boundless --tag "\$boundless_ref_tag" --locked --force; then
-    return 0
-  fi
-  echo "boundless-cli \$boundless_cli_target_version install from git tag failed; falling back to branch \$boundless_release_branch with parser workaround"
-  prepare_boundless_release_source
-  run_with_retry cargo +1.91.1 install --path "\$boundless_source_dir/crates/boundless-cli" --locked --force
-}
-if [[ "\$boundless_version_output" == *"boundless-cli \$boundless_cli_target_version"* ]]; then
-  echo "boundless-cli already installed at target version; skipping reinstall"
-else
-  install_boundless_cli
-fi
-boundless --version
-
-if ! command -v rzup >/dev/null 2>&1; then
-  echo "installing rzup for risc0 toolchain"
-  run_with_retry bash -lc "curl -sSfL https://risczero.com/install | bash"
-fi
-if ! command -v rzup >/dev/null 2>&1; then
-  echo "rzup not found after install attempt" >&2
-  exit 1
-fi
-run_with_retry rzup install
-if ! command -v r0vm >/dev/null 2>&1; then
-  echo "r0vm not found after rzup install" >&2
-  exit 1
-fi
-r0vm --version
+cargo --version
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
@@ -886,6 +794,10 @@ git reset --hard
 git clean -fd
 git checkout ${repo_commit}
 git submodule update --init --recursive
+run_with_retry cargo +1.91.1 build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
+mkdir -p "\$HOME/.local/bin"
+install -m 0755 zk/target/release/sp1-prover-adapter "\$HOME/.local/bin/sp1-prover-adapter"
+ln -sf "\$HOME/.local/bin/sp1-prover-adapter" "\$HOME/.local/bin/boundless"
 mkdir -p .ci/secrets
 chmod 700 .ci/secrets
 EOF
@@ -2969,7 +2881,7 @@ command_run() {
   if ! remote_run_script=$(cat <<EOF
 set -euo pipefail
 cd "$remote_repo"
-export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$PATH"
+export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$HOME/.local/bin:\$PATH"
 export JUNO_DKG_NETWORK_MODE="vpc-private"
 if [[ -f .ci/secrets/juno-funder.key ]]; then
   export JUNO_FUNDER_PRIVATE_KEY_HEX="\$(tr -d '\r\n' < .ci/secrets/juno-funder.key)"

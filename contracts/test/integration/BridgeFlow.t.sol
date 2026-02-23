@@ -6,11 +6,11 @@ import {Test} from "forge-std/Test.sol";
 import {Bridge} from "../../src/Bridge.sol";
 import {FeeDistributor} from "../../src/FeeDistributor.sol";
 import {OperatorRegistry} from "../../src/OperatorRegistry.sol";
-import {IRiscZeroVerifierRouter} from "../../src/interfaces/IRiscZeroVerifierRouter.sol";
+import {ISP1Verifier} from "../../src/interfaces/ISP1Verifier.sol";
 import {WJuno} from "../../src/WJuno.sol";
 
-contract AlwaysOkVerifier is IRiscZeroVerifierRouter {
-    function verify(bytes calldata, bytes32, bytes32) external pure {}
+contract AlwaysOkVerifier is ISP1Verifier {
+    function verifyProof(bytes32, bytes calldata, bytes calldata) external pure {}
 }
 
 contract BridgeFlowIntegrationTest is Test {

@@ -36,6 +36,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
+	"github.com/juno-intents/intents-juno/internal/proverexec"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -2138,74 +2139,25 @@ func requestBoundlessProofOnce(
 	ctx context.Context,
 	cfg boundlessConfig,
 	pipeline string,
-	programURL string,
+	_ string,
 	imageID common.Hash,
 	privateInput []byte,
 	expectedJournal []byte,
 ) ([]byte, string, error) {
-	privateKey := strings.TrimPrefix(strings.TrimSpace(cfg.RequestorKeyHex), "0x")
-	biddingStart := time.Now().UTC().Unix() + int64(cfg.BiddingDelaySeconds)
-
-	if strings.TrimSpace(cfg.InputS3Bucket) == "" {
-		return nil, "", errors.New("--boundless-input-s3-bucket is required for guest-witness-v1 submissions")
+	maxResponseBytes := cfg.ProofQueueMaxBytes
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = defaultProofQueueMaxBytes
 	}
-	inputURL, err := uploadBoundlessInputToS3(ctx, cfg, pipeline, privateInput)
+	prover, err := proverexec.New(cfg.Bin, maxResponseBytes)
 	if err != nil {
-		return nil, "", err
+		return nil, "", fmt.Errorf("init prover adapter for %s: %w", pipeline, err)
 	}
-	requestYAML, err := buildBoundlessSubmitFileRequestYAML(
-		cfg,
-		programURL,
-		inputURL,
-		imageID,
-		expectedJournal,
-		biddingStart,
-	)
+	logProgress("boundless %s cmd=%s mode=sp1-local", pipeline, cfg.Bin)
+	seal, err := prover.Prove(ctx, imageID, expectedJournal, privateInput)
 	if err != nil {
-		return nil, "", fmt.Errorf("build boundless submit-file request for %s: %w", pipeline, err)
+		return nil, "", fmt.Errorf("sp1 prove failed for %s: %w", pipeline, err)
 	}
-	reqFile, err := os.CreateTemp("", "bridge-e2e-"+pipeline+"-request-*.yaml")
-	if err != nil {
-		return nil, "", fmt.Errorf("create boundless request file for %s: %w", pipeline, err)
-	}
-	reqPath := reqFile.Name()
-	defer os.Remove(reqPath)
-	if err := reqFile.Close(); err != nil {
-		return nil, "", fmt.Errorf("close boundless request file for %s: %w", pipeline, err)
-	}
-	if err := os.WriteFile(reqPath, requestYAML, 0o600); err != nil {
-		return nil, "", fmt.Errorf("write boundless request file for %s: %w", pipeline, err)
-	}
-	args := buildBoundlessSubmitFileArgs(cfg, privateKey, reqPath)
-
-	cmd := exec.CommandContext(ctx, cfg.Bin, args...)
-	cmd.Env = buildBoundlessCommandEnv()
-	logProgress("boundless %s cmd=%s mode=submit-file", pipeline, cfg.Bin)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		msg := strings.TrimSpace(string(out))
-		if msg == "" {
-			msg = err.Error()
-		}
-		requestID := extractBoundlessRequestID(out)
-		if requestID != "" {
-			logProgress("boundless %s submit returned error after request_id=%s; attempting get-proof fallback", pipeline, requestID)
-			attemptCtx, cancel := context.WithTimeout(ctx, boundlessProofAttemptTimeout(cfg))
-			seal, fallbackErr := waitForBoundlessProof(attemptCtx, cfg, privateKey, pipeline, requestID, expectedJournal)
-			cancel()
-			if fallbackErr == nil {
-				return seal, requestID, nil
-			}
-			msg += " (fallback get-proof failed: " + fallbackErr.Error() + ")"
-		}
-		return nil, "", fmt.Errorf("boundless submit-file failed for %s: %s", pipeline, msg)
-	}
-
-	seal, requestID, err := parseBoundlessProofOutput(out, pipeline, expectedJournal)
-	if err != nil {
-		return nil, "", err
-	}
-
+	requestID := fmt.Sprintf("sp1-local-%d", time.Now().UTC().UnixNano())
 	return seal, requestID, nil
 }
 

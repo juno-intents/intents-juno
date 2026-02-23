@@ -38,7 +38,8 @@ Options:
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
                                    (default: prefer dkg-admin when it supports sign-digest; else auto-generate e2e signer shim)
-  --boundless-bin <path>           boundless binary (default: boundless)
+  --boundless-bin <path>           proof backend binary implementing prover request protocols
+                                   (default: sp1-prover-adapter)
   --boundless-rpc-url <url>        boundless market RPC URL (default: https://mainnet.base.org)
   --boundless-market-address <addr> boundless market contract address
                                    (default: 0xFd152dADc5183870710FE54f939Eae3aB9F0fE82)
@@ -156,6 +157,7 @@ ecs_register_service_task_definition() {
   local service_name="$3"
   local container_name="$4"
   local command_json="$5"
+  local environment_json="${6:-[]}"
 
   local service_json task_definition_arn task_definition_json register_input
   service_json="$(
@@ -177,6 +179,7 @@ ecs_register_service_task_definition() {
     jq \
       --arg container_name "$container_name" \
       --argjson command "$command_json" \
+      --argjson environment "$environment_json" \
       '
         .taskDefinition
         | .containerDefinitions = (
@@ -184,6 +187,7 @@ ecs_register_service_task_definition() {
             | map(
                 if .name == $container_name then
                   .command = $command
+                  | .environment = $environment
                 else
                   .
                 end
@@ -243,6 +247,8 @@ rollout_shared_proof_services_ecs() {
   local proof_funder_service_name="$4"
   local proof_requestor_command_json="$5"
   local proof_funder_command_json="$6"
+  local proof_requestor_environment_json="${7:-[]}"
+  local proof_funder_environment_json="${8:-[]}"
 
   local requestor_task_definition_arn funder_task_definition_arn
   requestor_task_definition_arn="$(
@@ -251,7 +257,8 @@ rollout_shared_proof_services_ecs() {
       "$cluster_arn" \
       "$proof_requestor_service_name" \
       "proof-requestor" \
-      "$proof_requestor_command_json"
+      "$proof_requestor_command_json" \
+      "$proof_requestor_environment_json"
   )"
   [[ -n "$requestor_task_definition_arn" ]] || die "failed to register proof-requestor task definition revision"
 
@@ -261,7 +268,8 @@ rollout_shared_proof_services_ecs() {
       "$cluster_arn" \
       "$proof_funder_service_name" \
       "proof-funder" \
-      "$proof_funder_command_json"
+      "$proof_funder_command_json" \
+      "$proof_funder_environment_json"
   )"
   [[ -n "$funder_task_definition_arn" ]] || die "failed to register proof-funder task definition revision"
 
@@ -1313,7 +1321,7 @@ command_run() {
   local bridge_operator_signer_bin=""
   local boundless_auto="true"
   local boundless_proof_submission_mode="queue"
-  local boundless_bin="boundless"
+  local boundless_bin="sp1-prover-adapter"
   local boundless_rpc_url="https://mainnet.base.org"
   local boundless_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
   local boundless_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
@@ -1908,12 +1916,20 @@ command_run() {
 
   ensure_base_dependencies
   ensure_command go
-  ensure_command "$boundless_bin"
-  local boundless_version
-  boundless_version="$("$boundless_bin" --version 2>/dev/null || true)"
-  if [[ "$boundless_version" == boundless-cli\ 0.* ]]; then
-    die "boundless-auto requires boundless-cli v1.x+; installed version is '$boundless_version'"
+  if [[ "$boundless_bin" == "sp1-prover-adapter" ]] && ! command -v "$boundless_bin" >/dev/null 2>&1; then
+    local local_sp1_adapter_bin="$workdir/bin/sp1-prover-adapter"
+    log "sp1-prover-adapter not found on PATH; building local adapter binary"
+    ensure_command cargo
+    (
+      cd "$REPO_ROOT/zk"
+      cargo build --release --manifest-path sp1_prover_adapter/cli/Cargo.toml
+    )
+    ensure_dir "$(dirname "$local_sp1_adapter_bin")"
+    cp "$REPO_ROOT/zk/target/release/sp1-prover-adapter" "$local_sp1_adapter_bin"
+    chmod +x "$local_sp1_adapter_bin"
+    boundless_bin="$local_sp1_adapter_bin"
   fi
+  ensure_command "$boundless_bin"
   ensure_command openssl
   ensure_command cast
   if [[ "$shared_ecs_enabled" == "true" ]]; then
@@ -2503,6 +2519,10 @@ command_run() {
   [[ -f "$bridge_deployer_key_file" ]] || die "bridge deployer key file not found: $bridge_deployer_key_file"
 
   local -a bridge_args=()
+  export SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url"
+  export SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url"
+  export SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id"
+  export SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id"
   bridge_args+=(
     "--rpc-url" "$base_rpc_url"
     "--chain-id" "$base_chain_id"
@@ -2845,8 +2865,36 @@ command_run() {
     )
     local proof_requestor_ecs_command_json
     local proof_funder_ecs_command_json
+    local proof_requestor_ecs_environment_json
+    local proof_funder_ecs_environment_json
     proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
     proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
+    proof_requestor_ecs_environment_json="$(jq -n \
+      --arg requestor_key "$boundless_requestor_key_hex" \
+      --arg deposit_program_url "$boundless_deposit_program_url" \
+      --arg withdraw_program_url "$boundless_withdraw_program_url" \
+      --arg deposit_vkey "$bridge_deposit_image_id" \
+      --arg withdraw_vkey "$bridge_withdraw_image_id" \
+      '[
+        {name:"PROOF_REQUESTOR_KEY", value:$requestor_key},
+        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
+        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
+        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
+        {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
+      ]')"
+    proof_funder_ecs_environment_json="$(jq -n \
+      --arg funder_key "$boundless_requestor_key_hex" \
+      --arg deposit_program_url "$boundless_deposit_program_url" \
+      --arg withdraw_program_url "$boundless_withdraw_program_url" \
+      --arg deposit_vkey "$bridge_deposit_image_id" \
+      --arg withdraw_vkey "$bridge_withdraw_image_id" \
+      '[
+        {name:"PROOF_FUNDER_KEY", value:$funder_key},
+        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
+        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
+        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
+        {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
+      ]')"
 
     log "rolling out shared ECS proof-requestor/proof-funder services"
     rollout_shared_proof_services_ecs \
@@ -2855,7 +2903,9 @@ command_run() {
       "$shared_proof_requestor_service_name" \
       "$shared_proof_funder_service_name" \
       "$proof_requestor_ecs_command_json" \
-      "$proof_funder_ecs_command_json"
+      "$proof_funder_ecs_command_json" \
+      "$proof_requestor_ecs_environment_json" \
+      "$proof_funder_ecs_environment_json"
     shared_ecs_started="true"
   else
     local proof_requestor_bin="$workdir/bin/proof-requestor"
@@ -2869,7 +2919,12 @@ command_run() {
 
     (
       cd "$REPO_ROOT"
-      PROOF_REQUESTOR_KEY="$boundless_requestor_key_hex" "$proof_requestor_bin" \
+      PROOF_REQUESTOR_KEY="$boundless_requestor_key_hex" \
+      SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url" \
+      SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url" \
+      SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
+      SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
+      "$proof_requestor_bin" \
         --postgres-dsn "$shared_postgres_dsn" \
         --store-driver postgres \
         --owner "$proof_requestor_owner" \
@@ -2898,7 +2953,12 @@ command_run() {
 
     (
       cd "$REPO_ROOT"
-      PROOF_FUNDER_KEY="$boundless_requestor_key_hex" "$proof_funder_bin" \
+      PROOF_FUNDER_KEY="$boundless_requestor_key_hex" \
+      SP1_DEPOSIT_PROGRAM_URL="$boundless_deposit_program_url" \
+      SP1_WITHDRAW_PROGRAM_URL="$boundless_withdraw_program_url" \
+      SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
+      SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
+      "$proof_funder_bin" \
         --postgres-dsn "$shared_postgres_dsn" \
         --lease-driver postgres \
         --owner-id "$proof_funder_owner" \

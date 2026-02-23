@@ -6,6 +6,7 @@ members = [
   "deposit_guest/guest",
   "withdraw_guest/core",
   "withdraw_guest/guest",
+  "sp1_prover_adapter/cli",
   "witness_fixture/cli",
 ]
 
