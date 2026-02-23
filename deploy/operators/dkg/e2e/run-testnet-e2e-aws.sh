@@ -1530,14 +1530,7 @@ if ! sudo systemctl is-active --quiet tss-host.service; then
   exit 1
 fi
 
-sudo systemctl restart checkpoint-signer.service checkpoint-aggregator.service
-for svc in checkpoint-signer.service checkpoint-aggregator.service; do
-  if ! sudo systemctl is-active --quiet "\$svc"; then
-    echo "operator checkpoint service failed after hydrated config: \$svc" >&2
-    sudo systemctl status "\$svc" --no-pager || true
-    exit 1
-  fi
-done
+echo "checkpoint-signer/checkpoint-aggregator restart deferred until bridge config is staged by remote e2e"
 EOF
 )"
 
