@@ -2575,6 +2575,23 @@ command_run() {
         if [[ "$witness_extract_ok" == "true" ]]; then
           break
         fi
+        if [[ "$witness_candidate_note_pending" == "true" ]]; then
+          local witness_indexed_wallet_id
+          witness_indexed_wallet_id="$(
+            witness_scan_find_wallet_for_txid \
+              "$witness_scan_url" \
+              "$juno_scan_bearer_token" \
+              "$generated_deposit_txid" \
+              "$generated_wallet_id" || true
+          )"
+          if [[ -n "$witness_indexed_wallet_id" && "$witness_indexed_wallet_id" != "$generated_wallet_id" ]]; then
+            log "switching witness wallet id during extraction generated_wallet_id=$generated_wallet_id indexed_wallet_id=$witness_indexed_wallet_id txid=$generated_deposit_txid operator=$witness_operator_label"
+            generated_wallet_id="$witness_indexed_wallet_id"
+            withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
+            witness_extract_wait_logged="false"
+            continue
+          fi
+        fi
         if [[ "$witness_candidate_note_pending" == "true" && "$witness_extract_wait_logged" != "true" ]]; then
           log "waiting for note visibility on operator=$witness_operator_label wallet=$generated_wallet_id txid=$generated_deposit_txid action_index_candidates=$(IFS=,; printf '%s' "${generated_deposit_action_indexes[*]}")"
           witness_extract_wait_logged="true"

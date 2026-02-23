@@ -134,6 +134,8 @@ test_witness_extraction_reuses_existing_indexed_wallet_id() {
   assert_contains "$script_text" '"${scan_url%/}/v1/wallets"' "indexed wallet fallback queries scan wallet inventory"
   assert_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000"' "indexed wallet fallback scans wallet notes for tx visibility"
   assert_contains "$script_text" "reusing indexed witness wallet id for tx visibility" "run-testnet-e2e logs indexed wallet id fallback when generated wallet id has no note visibility"
+  assert_contains "$script_text" "switching witness wallet id during extraction" "run-testnet-e2e can switch to an already-indexed wallet id mid-extraction when note visibility stalls"
+  assert_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$generated_wallet_id"' "wallet-id fallback updates withdraw coordinator wallet id for downstream witness extraction"
 }
 
 test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
