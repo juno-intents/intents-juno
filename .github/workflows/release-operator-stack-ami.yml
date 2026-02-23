@@ -197,8 +197,12 @@ jobs:
           set -euo pipefail
           tag="${{ inputs.release_tag }}"
 
-          ami_id="$(tr -d '\r\n' < .ci/out/operator-ami-id.txt)"
           region="${{ inputs.aws_region }}"
+          ami_id="$(jq -r --arg region "$region" '.regions[$region].ami_id // empty' .ci/out/operator-ami-manifest.json)"
+          if [[ -z "$ami_id" ]]; then
+            echo "failed to resolve AMI id from operator-ami-manifest.json for region=$region"
+            exit 1
+          fi
           block_height="$(jq -r '.junocashd.synced_block_height' .ci/out/operator-ami-manifest.json)"
           block_hash="$(jq -r '.junocashd.synced_block_hash' .ci/out/operator-ami-manifest.json)"
           notes="Operator stack AMI release for ${region}
