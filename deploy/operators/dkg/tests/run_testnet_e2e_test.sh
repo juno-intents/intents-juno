@@ -160,6 +160,19 @@ test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
   assert_contains "$script_text" '"--withdraw-final-orchard-root" "$direct_cli_withdraw_final_orchard_root"' "direct-cli bridge run overrides withdraw orchard root from dedicated witness extraction"
 }
 
+test_direct_cli_user_proof_uses_queue_submission_mode() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'direct_cli_proof_submission_mode="$boundless_proof_submission_mode"' "direct-cli user proof scenario reuses configured proof submission mode"
+  assert_contains "$script_text" '"--boundless-proof-submission-mode" "$direct_cli_proof_submission_mode"' "direct-cli user proof scenario forwards explicit proof submission mode"
+  assert_contains "$script_text" '"--boundless-proof-queue-brokers" "$shared_kafka_brokers"' "direct-cli user proof scenario forwards shared proof queue brokers"
+  assert_contains "$script_text" '"--boundless-proof-request-topic" "$proof_request_topic"' "direct-cli user proof scenario forwards proof request topic"
+  assert_contains "$script_text" '"--boundless-proof-result-topic" "$proof_result_topic"' "direct-cli user proof scenario forwards proof result topic"
+  assert_contains "$script_text" '"--boundless-proof-failure-topic" "$proof_failure_topic"' "direct-cli user proof scenario forwards proof failure topic"
+  assert_contains "$script_text" '[[ "$direct_cli_user_proof_submission_mode" == "$direct_cli_proof_submission_mode" ]] || return 1' "direct-cli user proof summary validates expected submission mode"
+}
+
 test_direct_cli_witness_extraction_retries_note_visibility() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -183,6 +196,7 @@ main() {
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
+  test_direct_cli_user_proof_uses_queue_submission_mode
   test_direct_cli_witness_extraction_retries_note_visibility
 }
 

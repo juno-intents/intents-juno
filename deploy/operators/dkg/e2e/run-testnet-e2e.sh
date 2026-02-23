@@ -2842,6 +2842,8 @@ command_run() {
     local direct_cli_deposit_final_orchard_root direct_cli_deposit_anchor_height direct_cli_deposit_anchor_hash
     local direct_cli_withdraw_final_orchard_root direct_cli_withdraw_anchor_height direct_cli_withdraw_anchor_hash
     local direct_cli_withdraw_amount="10000"
+    local direct_cli_proof_submission_mode="$boundless_proof_submission_mode"
+    local direct_cli_proof_bridge_consumer_group="${proof_bridge_consumer_group}-direct-cli"
     local direct_cli_status
     local direct_cli_requestor_key_file="$boundless_requestor_key_file"
     local witness_file
@@ -2876,7 +2878,12 @@ command_run() {
       "--withdraw-checkpoint-block-hash" "$bridge_withdraw_checkpoint_block_hash"
       "--boundless-bin" "$boundless_bin"
       "--boundless-rpc-url" "$boundless_rpc_url"
-      "--boundless-proof-submission-mode" "direct-cli"
+      "--boundless-proof-submission-mode" "$direct_cli_proof_submission_mode"
+      "--boundless-proof-queue-brokers" "$shared_kafka_brokers"
+      "--boundless-proof-request-topic" "$proof_request_topic"
+      "--boundless-proof-result-topic" "$proof_result_topic"
+      "--boundless-proof-failure-topic" "$proof_failure_topic"
+      "--boundless-proof-consumer-group" "$direct_cli_proof_bridge_consumer_group"
       "--boundless-market-address" "$boundless_market_address"
       "--boundless-verifier-router-address" "$boundless_verifier_router_address"
       "--boundless-set-verifier-address" "$boundless_set_verifier_address"
@@ -3269,7 +3276,7 @@ command_run() {
     direct_cli_user_proof_submission_mode="$(jq -r '.proof.boundless.submission_mode // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
     direct_cli_user_proof_deposit_request_id="$(jq -r '.proof.boundless.deposit_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
     direct_cli_user_proof_withdraw_request_id="$(jq -r '.proof.boundless.withdraw_request_id // empty' "$direct_cli_bridge_summary" 2>/dev/null || true)"
-    [[ "$direct_cli_user_proof_submission_mode" == "direct-cli" ]] || return 1
+    [[ "$direct_cli_user_proof_submission_mode" == "$direct_cli_proof_submission_mode" ]] || return 1
     [[ -n "$direct_cli_user_proof_deposit_request_id" ]] || return 1
     [[ -n "$direct_cli_user_proof_withdraw_request_id" ]] || return 1
 
@@ -3278,12 +3285,6 @@ command_run() {
     direct_cli_user_proof_log="$direct_cli_bridge_log"
     return 0
   }
-
-  direct_cli_user_proof_status="running"
-  if ! run_direct_cli_user_proof_scenario; then
-    direct_cli_user_proof_status="failed"
-    die "direct-cli user proof scenario failed"
-  fi
 
   local proof_requestor_log="$workdir/reports/proof-requestor.log"
   local proof_funder_log="$workdir/reports/proof-funder.log"
@@ -3464,6 +3465,28 @@ command_run() {
       wait "$proof_requestor_pid" >/dev/null 2>&1 || true
       die "proof-funder did not stay running"
     fi
+  fi
+
+  direct_cli_user_proof_status="running"
+  if ! run_direct_cli_user_proof_scenario; then
+    direct_cli_user_proof_status="failed"
+    if [[ "$shared_ecs_enabled" == "true" ]]; then
+      log "direct-cli user proof scenario failed; showing shared ECS proof service logs"
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
+    else
+      log "direct-cli user proof scenario failed; showing proof-requestor and proof-funder logs"
+      tail -n 200 "$proof_requestor_log" >&2 || true
+      tail -n 200 "$proof_funder_log" >&2 || true
+      kill "$proof_requestor_pid" >/dev/null 2>&1 || true
+      kill "$proof_funder_pid" >/dev/null 2>&1 || true
+      wait "$proof_requestor_pid" >/dev/null 2>&1 || true
+      wait "$proof_funder_pid" >/dev/null 2>&1 || true
+    fi
+    die "direct-cli user proof scenario failed"
   fi
 
   local bridge_status=0
