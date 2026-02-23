@@ -487,6 +487,7 @@ wait_for_ssh() {
   local ssh_private_key="$1"
   local ssh_user="$2"
   local ssh_host="$3"
+  local ssh_proxy_jump="${4:-}"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -498,6 +499,9 @@ wait_for_ssh() {
     -o ServerAliveCountMax=6
     -o TCPKeepAlive=yes
   )
+  if [[ -n "$ssh_proxy_jump" ]]; then
+    ssh_opts+=(-o "ProxyJump=${ssh_proxy_jump}")
+  fi
 
   local attempt
   for attempt in $(seq 1 90); do
@@ -543,6 +547,7 @@ remote_prepare_operator_host() {
   local ssh_user="$2"
   local ssh_host="$3"
   local repo_commit="$4"
+  local ssh_proxy_jump="${5:-}"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -552,11 +557,14 @@ remote_prepare_operator_host() {
     -o ServerAliveCountMax=6
     -o TCPKeepAlive=yes
   )
+  if [[ -n "$ssh_proxy_jump" ]]; then
+    ssh_opts+=(-o "ProxyJump=${ssh_proxy_jump}")
+  fi
 
   local remote_script
   remote_script="$(build_remote_operator_prepare_script "$repo_commit")"
 
-  wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host"
+  wait_for_ssh "$ssh_private_key" "$ssh_user" "$ssh_host" "$ssh_proxy_jump"
   run_with_retry "remote operator host bootstrap" 3 15 \
     ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_script")"
 }
@@ -1034,13 +1042,28 @@ run_distributed_dkg_backup_restore() {
   (( ${#operator_public_ips[@]} == operator_count )) || die "operator public ip count mismatch: expected=$operator_count got=${#operator_public_ips[@]}"
   (( ${#operator_private_ips[@]} == operator_count )) || die "operator private ip count mismatch: expected=$operator_count got=${#operator_private_ips[@]}"
 
+  local operator_proxy_jump
+  operator_proxy_jump="$ssh_user@$runner_public_ip"
+
+  local -a operator_ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+    -o "ProxyJump=$operator_proxy_jump"
+  )
+
   local idx op_index op_public_ip op_private_ip op_port
   for ((idx = 0; idx < operator_count; idx++)); do
     op_index=$((idx + 1))
     op_public_ip="${operator_public_ips[$idx]}"
-    log "preparing operator host op${op_index} at ${op_public_ip}"
-    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_public_ip"
-    remote_prepare_operator_host "$ssh_private_key" "$ssh_user" "$op_public_ip" "$repo_commit"
+    op_private_ip="${operator_private_ips[$idx]}"
+    op_private_ip="${operator_private_ips[$idx]}"
+    log "preparing operator host op${op_index} via runner bastion ${runner_public_ip} -> ${op_private_ip} (public=${op_public_ip})"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_private_ip" "$operator_proxy_jump"
+    remote_prepare_operator_host "$ssh_private_key" "$ssh_user" "$op_private_ip" "$repo_commit" "$operator_proxy_jump"
   done
 
   local private_ip_joined
@@ -1120,6 +1143,7 @@ EOF
   for ((idx = 0; idx < operator_count; idx++)); do
     op_index=$((idx + 1))
     op_public_ip="${operator_public_ips[$idx]}"
+    op_private_ip="${operator_private_ips[$idx]}"
     op_port=$((operator_base_port + op_index - 1))
 
     local bundle_local bundle_remote operator_root_remote
@@ -1130,11 +1154,11 @@ EOF
     wait_for_ssh "$ssh_private_key" "$ssh_user" "$runner_public_ip"
     run_with_retry "copying distributed bundle op${op_index} from runner" 3 5 \
       scp "${ssh_opts[@]}" "$ssh_user@$runner_public_ip:$bundle_remote" "$bundle_local"
-    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_public_ip"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_private_ip" "$operator_proxy_jump"
     run_with_retry "staging distributed bundle op${op_index} directory" 3 5 \
-      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "mkdir -p $(printf '%q' "$operator_root_remote")"
+      ssh "${operator_ssh_opts[@]}" "$ssh_user@$op_private_ip" "mkdir -p $(printf '%q' "$operator_root_remote")"
     run_with_retry "copying distributed bundle op${op_index} to operator" 3 5 \
-      scp "${ssh_opts[@]}" "$bundle_local" "$ssh_user@$op_public_ip:$bundle_remote"
+      scp "${operator_ssh_opts[@]}" "$bundle_local" "$ssh_user@$op_private_ip:$bundle_remote"
 
     local start_operator_script
     start_operator_script="$(cat <<EOF
@@ -1156,10 +1180,10 @@ deploy/operators/dkg/operator.sh run \
 EOF
 )"
 
-    log "starting operator daemon op${op_index} on ${op_public_ip}:${op_port}"
-    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_public_ip"
+    log "starting operator daemon op${op_index} on ${op_private_ip}:${op_port} (public=${op_public_ip})"
+    wait_for_ssh "$ssh_private_key" "$ssh_user" "$op_private_ip" "$operator_proxy_jump"
     run_with_retry "starting operator daemon op${op_index}" 3 10 \
-      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$start_operator_script")"
+      ssh "${operator_ssh_opts[@]}" "$ssh_user@$op_private_ip" "bash -lc $(printf '%q' "$start_operator_script")"
   done
 
   local coordinator_workdir completion_report
@@ -1288,8 +1312,8 @@ deploy/operators/dkg/operator.sh status --workdir "\$runtime_dir" >"\$op_root/st
 EOF
 )"
 
-    log "running backup/restore verification on operator host op${op_index}"
-    ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$backup_restore_script")"
+    log "running backup/restore verification on operator host op${op_index} via runner bastion ${runner_public_ip} -> ${op_private_ip} (public=${op_public_ip})"
+    ssh "${operator_ssh_opts[@]}" "$ssh_user@$op_private_ip" "bash -lc $(printf '%q' "$backup_restore_script")"
   done
 
   local operators_json
@@ -1308,7 +1332,7 @@ EOF
     [[ -n "$operator_id" ]] || die "missing operator id for op${op_index}"
 
     status_json="$(
-      ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" \
+      ssh "${operator_ssh_opts[@]}" "$ssh_user@$op_private_ip" \
         "cat $(printf '%q' "$remote_workdir/dkg-distributed/operators/op${op_index}/status.json")"
     )"
     if [[ "$(printf '%s' "$status_json" | jq -r '.running')" != "true" ]]; then
@@ -1537,8 +1561,9 @@ EOF
   for ((idx = 0; idx < operator_count; idx++)); do
     op_index=$((idx + 1))
     op_public_ip="${operator_public_ips[$idx]}"
-    log "staging hydrator config and restarting operator stack services on op${op_index}"
-    ssh "${ssh_opts[@]}" "$ssh_user@$op_public_ip" "bash -lc $(printf '%q' "$configure_operator_stack_services_script")"
+    op_private_ip="${operator_private_ips[$idx]}"
+    log "staging hydrator config and restarting operator stack services on op${op_index} via runner bastion ${runner_public_ip} -> ${op_private_ip} (public=${op_public_ip})"
+    ssh "${operator_ssh_opts[@]}" "$ssh_user@$op_private_ip" "bash -lc $(printf '%q' "$configure_operator_stack_services_script")"
   done
 
   ensure_dir "$(dirname "$dkg_summary_local_path")"
@@ -2683,7 +2708,8 @@ command_run() {
   scp -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    "$runner_ssh_user@${operator_public_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
+    -o "ProxyJump=$runner_ssh_user@$runner_public_ip" \
+    "$runner_ssh_user@${operator_private_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
     "$witness_tss_ca_local_path"
   copy_remote_secret_file \
     "$ssh_key_private" \
