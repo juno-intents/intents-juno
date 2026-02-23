@@ -510,6 +510,71 @@ witness_scan_upsert_wallet() {
   fi
 }
 
+witness_scan_find_wallet_for_txid() {
+  local scan_url="$1"
+  local scan_bearer_token="$2"
+  local txid_raw="$3"
+  local preferred_wallet_id="${4:-}"
+  local txid wallets_response wallet_id encoded_wallet_id notes_response match_count
+  local -a headers=()
+  local -a wallet_candidates=()
+  local wallet_candidate
+
+  txid="$(lower "$(trim "$txid_raw")")"
+  txid="${txid#0x}"
+  [[ "$txid" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  if [[ -n "$scan_bearer_token" ]]; then
+    headers+=(--header "Authorization: Bearer $scan_bearer_token")
+  fi
+
+  wallets_response="$(
+    curl -fsS \
+      --max-time 10 \
+      "${headers[@]}" \
+      "${scan_url%/}/v1/wallets" 2>/dev/null || true
+  )"
+  [[ -n "$wallets_response" ]] || return 1
+
+  if [[ -n "$preferred_wallet_id" ]]; then
+    wallet_candidates+=("$preferred_wallet_id")
+  fi
+  while IFS= read -r wallet_candidate; do
+    [[ -n "$wallet_candidate" ]] || continue
+    wallet_candidates+=("$wallet_candidate")
+  done < <(jq -r '.wallets[]?.wallet_id // empty' <<<"$wallets_response" 2>/dev/null || true)
+
+  (( ${#wallet_candidates[@]} > 0 )) || return 1
+
+  local -A seen_wallet_ids=()
+  for wallet_id in "${wallet_candidates[@]}"; do
+    [[ -n "$wallet_id" ]] || continue
+    if [[ -n "${seen_wallet_ids[$wallet_id]+x}" ]]; then
+      continue
+    fi
+    seen_wallet_ids["$wallet_id"]=1
+
+    encoded_wallet_id="$(jq -rn --arg value "$wallet_id" '$value|@uri' 2>/dev/null || true)"
+    [[ -n "$encoded_wallet_id" ]] || continue
+    notes_response="$(
+      curl -fsS \
+        --max-time 20 \
+        "${headers[@]}" \
+        "${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000" 2>/dev/null || true
+    )"
+    [[ -n "$notes_response" ]] || continue
+
+    match_count="$(jq -r --arg tx "$txid" '[.notes[]? | select((.txid // "" | ascii_downcase) == ($tx | ascii_downcase))] | length' <<<"$notes_response" 2>/dev/null || echo 0)"
+    [[ "$match_count" =~ ^[0-9]+$ ]] || match_count=0
+    if (( match_count > 0 )); then
+      printf '%s' "$wallet_id"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 witness_rpc_action_index_candidates() {
   local rpc_url="$1"
   local rpc_user="$2"
@@ -2380,6 +2445,19 @@ command_run() {
       die "generated witness metadata recipient_ua mismatch: generated=$generated_recipient_ua expected=$sp1_witness_recipient_ua"
     [[ "$(lower "$generated_ufvk")" == "$(lower "$sp1_witness_recipient_ufvk")" ]] || \
       die "generated witness metadata ufvk mismatch against distributed DKG value"
+
+    local indexed_wallet_id
+    indexed_wallet_id="$(
+      witness_scan_find_wallet_for_txid \
+        "$sp1_witness_juno_scan_url" \
+        "$juno_scan_bearer_token" \
+        "$generated_deposit_txid" \
+        "$generated_wallet_id" || true
+    )"
+    if [[ -n "$indexed_wallet_id" && "$indexed_wallet_id" != "$generated_wallet_id" ]]; then
+      log "reusing indexed witness wallet id for tx visibility generated_wallet_id=$generated_wallet_id indexed_wallet_id=$indexed_wallet_id txid=$generated_deposit_txid"
+      generated_wallet_id="$indexed_wallet_id"
+    fi
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
 

@@ -126,6 +126,16 @@ test_witness_metadata_failover_reuses_single_wallet_id() {
   assert_not_contains "$script_text" 'witness_wallet_id_attempt="${witness_wallet_id}-${witness_operator_safe_label}"' "witness metadata failover must not fork wallet ids per endpoint"
 }
 
+test_witness_extraction_reuses_existing_indexed_wallet_id() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "witness_scan_find_wallet_for_txid()" "run-testnet-e2e defines helper to locate existing indexed wallet ids by txid"
+  assert_contains "$script_text" '"${scan_url%/}/v1/wallets"' "indexed wallet fallback queries scan wallet inventory"
+  assert_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000"' "indexed wallet fallback scans wallet notes for tx visibility"
+  assert_contains "$script_text" "reusing indexed witness wallet id for tx visibility" "run-testnet-e2e logs indexed wallet id fallback when generated wallet id has no note visibility"
+}
+
 test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -269,6 +279,7 @@ main() {
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_metadata_failover_reuses_single_wallet_id
+  test_witness_extraction_reuses_existing_indexed_wallet_id
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_bridge_address_prediction_parses_cast_labeled_output
