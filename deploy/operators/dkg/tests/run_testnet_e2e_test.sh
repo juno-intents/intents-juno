@@ -108,12 +108,56 @@ test_witness_generation_reuses_distributed_dkg_recipient_identity() {
   assert_contains "$script_text" "generated witness metadata ufvk mismatch against distributed DKG value" "run-testnet-e2e validates generated witness UFVK against distributed DKG UFVK"
 }
 
+test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "witness_rpc_action_index_candidates()" "run-testnet-e2e defines witness action-index candidate derivation helper"
+  assert_contains "$script_text" "method:\"getrawtransaction\"" "action-index candidate derivation uses getrawtransaction RPC"
+  assert_contains "$script_text" ".result.orchard.actions" "action-index candidate derivation inspects orchard action list"
+  assert_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation skips pre-index action lookup to avoid long scan stalls"
+  assert_contains "$script_text" "using action-index candidates for deposit extraction" "deposit extraction logs candidate action-index set"
+  assert_contains "$script_text" "direct-cli withdraw extraction action-index candidates" "direct-cli withdraw extraction logs candidate action-index set"
+}
+
+test_witness_generation_binds_memos_to_predicted_bridge_domain() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "predicted_witness_bridge_nonce" "run-testnet-e2e computes the deployer nonce for bridge-domain witness planning"
+  assert_contains "$script_text" "predicted_witness_bridge_address" "run-testnet-e2e computes the predicted bridge address for witness memo domain separation"
+  assert_contains "$script_text" "predicted_witness_withdrawal_id" "run-testnet-e2e computes predicted withdrawal id for witness memo binding"
+  assert_contains "$script_text" "predicted_witness_withdraw_batch_id" "run-testnet-e2e computes predicted withdraw batch id for witness memo binding"
+  assert_contains "$script_text" '--base-chain-id "$base_chain_id"' "run-testnet-e2e passes base chain id into witness metadata generation"
+  assert_contains "$script_text" '--bridge-address "$predicted_witness_bridge_address"' "run-testnet-e2e passes predicted bridge address into witness metadata generation"
+  assert_contains "$script_text" '--withdrawal-id-hex "$predicted_witness_withdrawal_id"' "run-testnet-e2e passes predicted withdrawal id into witness metadata generation"
+  assert_contains "$script_text" '--withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"' "run-testnet-e2e passes predicted withdrawal batch id into witness metadata generation"
+}
+
+test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "direct-cli-generated-witness-metadata.json" "direct-cli scenario writes dedicated witness metadata"
+  assert_contains "$script_text" "direct_cli_generated_deposit_txid" "direct-cli scenario extracts deposit txid from dedicated metadata"
+  assert_contains "$script_text" "direct_cli_generated_withdraw_txid" "direct-cli scenario extracts withdraw txid from dedicated metadata"
+  assert_contains "$script_text" "direct-cli-deposit.witness.bin" "direct-cli scenario extracts a dedicated deposit witness item"
+  assert_contains "$script_text" '--wallet-id "$direct_cli_generated_witness_wallet_id"' "direct-cli withdraw extraction uses dedicated direct-cli witness wallet id"
+  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$direct_cli_deposit_witness_file")' "direct-cli bridge run uses dedicated deposit witness"
+  assert_contains "$script_text" 'direct_cli_bridge_run_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")' "direct-cli bridge run uses dedicated withdraw witness"
+  assert_contains "$script_text" '"--deposit-final-orchard-root" "$direct_cli_deposit_final_orchard_root"' "direct-cli bridge run overrides deposit orchard root from dedicated witness extraction"
+  assert_contains "$script_text" '"--withdraw-final-orchard-root" "$direct_cli_withdraw_final_orchard_root"' "direct-cli bridge run overrides withdraw orchard root from dedicated witness extraction"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_operator_signer_fallback_exists_for_bins_without_sign_digest
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_reuses_distributed_dkg_recipient_identity
+  test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
+  test_witness_generation_binds_memos_to_predicted_bridge_domain
+  test_direct_cli_user_proof_uses_bridge_specific_witness_generation
 }
 
 main "$@"

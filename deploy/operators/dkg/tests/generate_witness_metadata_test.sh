@@ -129,6 +129,57 @@ test_witness_generation_serializes_orchard_spends() {
   fi
 }
 
+test_witness_generation_requires_bridge_domain_memo_inputs() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--base-chain-id"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to require --base-chain-id for memo domain separation\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"--bridge-address"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to require --bridge-address for memo domain separation\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"--withdrawal-id-hex"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to require --withdrawal-id-hex for withdrawal memo binding\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"--withdraw-batch-id-hex"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to require --withdraw-batch-id-hex for withdrawal memo binding\n' >&2
+    exit 1
+  fi
+}
+
+test_witness_generation_submits_explicit_hex_memos() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"memo: \$memo_hex"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to include memo hex payload in z_sendmany outputs\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'deposit_txid="$(submit_and_confirm_witness_tx'*" \"\$deposit_memo_hex\""* ]]; then
+    printf 'expected deposit witness tx submission to pass generated deposit memo hex\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'withdraw_txid="$(submit_and_confirm_witness_tx'*" \"\$withdraw_memo_hex\""* ]]; then
+    printf 'expected withdraw witness tx submission to pass generated withdrawal memo hex\n' >&2
+    exit 1
+  fi
+}
+
+test_script_supports_skipping_preindex_action_lookup() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--skip-action-index-lookup"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --skip-action-index-lookup for fast witness tx generation\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"skip_action_index_lookup"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to parse skip_action_index_lookup toggle\n' >&2
+    exit 1
+  fi
+}
+
 test_scan_note_lookup_uses_paginated_notes_api() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -199,6 +250,9 @@ main() {
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_status_poll_targets_specific_opid_and_fails_fast_when_missing
   test_witness_generation_serializes_orchard_spends
+  test_witness_generation_requires_bridge_domain_memo_inputs
+  test_witness_generation_submits_explicit_hex_memos
+  test_script_supports_skipping_preindex_action_lookup
   test_scan_note_lookup_uses_paginated_notes_api
   test_scan_note_lookup_fails_fast_on_repeated_http_errors
   test_rpc_calls_fail_fast_on_repeated_transport_errors

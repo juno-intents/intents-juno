@@ -514,6 +514,39 @@ witness_scan_upsert_wallet() {
   fi
 }
 
+witness_rpc_action_index_candidates() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local txid_raw="$4"
+  local txid payload resp rpc_error action_count idx
+
+  txid="$(lower "$(trim "$txid_raw")")"
+  txid="${txid#0x}"
+  [[ "$txid" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  payload="$(jq -cn --arg txid "$txid" '{jsonrpc:"1.0",id:"witness-action-index",method:"getrawtransaction",params:[$txid,1]}')"
+  resp="$(
+    curl -fsS \
+      --user "$rpc_user:$rpc_pass" \
+      --header "content-type: application/json" \
+      --data-binary "$payload" \
+      "$rpc_url" || true
+  )"
+  [[ -n "$resp" ]] || return 1
+
+  rpc_error="$(jq -r '.error.message // empty' <<<"$resp" 2>/dev/null || true)"
+  [[ -z "$rpc_error" ]] || return 1
+
+  action_count="$(jq -r '.result.orchard.actions | if type == "array" then length else 0 end' <<<"$resp" 2>/dev/null || true)"
+  [[ "$action_count" =~ ^[0-9]+$ ]] || return 1
+  (( action_count > 0 )) || return 1
+
+  for ((idx = 0; idx < action_count; idx++)); do
+    printf '%s\n' "$idx"
+  done
+}
+
 wait_for_log_pattern() {
   local log_path="$1"
   local pattern="$2"
@@ -931,6 +964,41 @@ normalize_hex_prefixed() {
     return 1
   fi
   printf '0x%s' "$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')"
+}
+
+predict_bridge_address_for_start_nonce() {
+  local deployer_address="$1"
+  local deployer_start_nonce="$2"
+  local bridge_deploy_nonce
+  local predicted
+
+  [[ "$deployer_start_nonce" =~ ^[0-9]+$ ]] || return 1
+  bridge_deploy_nonce=$((deployer_start_nonce + 3))
+  predicted="$(cast compute-address --nonce "$bridge_deploy_nonce" "$deployer_address" 2>/dev/null || true)"
+  predicted="$(normalize_hex_prefixed "$predicted" || true)"
+  [[ "$predicted" =~ ^0x[0-9a-f]{40}$ ]] || return 1
+  printf '%s' "$predicted"
+}
+
+compute_single_withdraw_batch_id() {
+  local withdrawal_id_hex="$1"
+  local withdrawal_id_norm ids_hash domain_tag batch_id
+
+  withdrawal_id_norm="$(normalize_hex_prefixed "$withdrawal_id_hex" || true)"
+  [[ "$withdrawal_id_norm" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+  ids_hash="$(cast keccak "$withdrawal_id_norm" 2>/dev/null || true)"
+  ids_hash="$(normalize_hex_prefixed "$ids_hash" || true)"
+  [[ "$ids_hash" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+  domain_tag="$(cast from-utf8 WJUNO_WITHDRAW_BATCH_V1 2>/dev/null || true)"
+  domain_tag="$(normalize_hex_prefixed "$domain_tag" || true)"
+  [[ "$domain_tag" =~ ^0x[0-9a-f]+$ ]] || return 1
+
+  batch_id="$(cast keccak "$(cast concat-hex "$domain_tag" "$ids_hash")" 2>/dev/null || true)"
+  batch_id="$(normalize_hex_prefixed "$batch_id" || true)"
+  [[ "$batch_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$batch_id"
 }
 
 cast_contract_call_json() {
@@ -2133,6 +2201,40 @@ command_run() {
     [[ -n "$juno_rpc_user" ]] || die "missing Juno RPC user env var: $juno_rpc_user_var"
     [[ -n "$juno_rpc_pass" ]] || die "missing Juno RPC pass env var: $juno_rpc_pass_var"
 
+    ensure_command cast
+    local predicted_witness_bridge_nonce predicted_witness_bridge_address
+    local predicted_witness_recipient_raw_address_hex
+    local predicted_witness_withdrawal_id predicted_witness_withdraw_batch_id
+    predicted_witness_bridge_nonce="$(cast nonce --rpc-url "$base_rpc_url" "$bridge_deployer_address" 2>/dev/null || true)"
+    predicted_witness_bridge_nonce="$(trim "$predicted_witness_bridge_nonce")"
+    [[ "$predicted_witness_bridge_nonce" =~ ^[0-9]+$ ]] || \
+      die "failed to query bridge deployer nonce for witness planning: deployer=$bridge_deployer_address nonce=$predicted_witness_bridge_nonce"
+    predicted_witness_bridge_address="$(predict_bridge_address_for_start_nonce "$bridge_deployer_address" "$predicted_witness_bridge_nonce" || true)"
+    [[ "$predicted_witness_bridge_address" =~ ^0x[0-9a-f]{40}$ ]] || \
+      die "failed to predict bridge deployment address for witness planning"
+    predicted_witness_recipient_raw_address_hex="$(
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh decode-orchard-raw --address "$boundless_witness_recipient_ua"
+    )"
+    predicted_witness_recipient_raw_address_hex="$(trim "$predicted_witness_recipient_raw_address_hex")"
+    [[ "$predicted_witness_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
+      die "failed to decode recipient raw address for witness memo planning: ua=$boundless_witness_recipient_ua"
+    predicted_witness_withdrawal_id="$(
+      "$SCRIPT_DIR/compute-bridge-withdrawal-id.sh" run \
+        --base-chain-id "$base_chain_id" \
+        --bridge-address "$predicted_witness_bridge_address" \
+        --requester-address "$bridge_deployer_address" \
+        --recipient-raw-address-hex "0x$predicted_witness_recipient_raw_address_hex" \
+        --amount-zat "10000" \
+        --withdraw-nonce "1"
+    )"
+    predicted_witness_withdrawal_id="$(normalize_hex_prefixed "$predicted_witness_withdrawal_id" || true)"
+    [[ "$predicted_witness_withdrawal_id" =~ ^0x[0-9a-f]{64}$ ]] || \
+      die "failed to compute predicted withdrawal id for witness memo planning"
+    predicted_witness_withdraw_batch_id="$(compute_single_withdraw_batch_id "$predicted_witness_withdrawal_id" || true)"
+    [[ "$predicted_witness_withdraw_batch_id" =~ ^0x[0-9a-f]{64}$ ]] || \
+      die "failed to compute predicted withdraw batch id for witness memo planning"
+
     local witness_quorum_threshold
     witness_quorum_threshold="$boundless_witness_quorum_threshold"
 
@@ -2250,6 +2352,12 @@ command_run() {
         --wallet-id "$witness_wallet_id_attempt"
         --recipient-ua "$boundless_witness_recipient_ua"
         --recipient-ufvk "$boundless_witness_recipient_ufvk"
+        --base-chain-id "$base_chain_id"
+        --bridge-address "$predicted_witness_bridge_address"
+        --base-recipient-address "$bridge_recipient_address"
+        --withdrawal-id-hex "$predicted_witness_withdrawal_id"
+        --withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"
+        --skip-action-index-lookup
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
         --timeout-seconds "$witness_timeout_slice_seconds"
@@ -2298,7 +2406,9 @@ command_run() {
     [[ -n "$generated_wallet_id" ]] || die "generated witness metadata missing wallet_id: $witness_metadata_json"
     [[ -n "$generated_recipient_ua" ]] || die "generated witness metadata missing recipient_ua: $witness_metadata_json"
     [[ -n "$generated_deposit_txid" ]] || die "generated witness metadata missing deposit_txid: $witness_metadata_json"
-    [[ "$generated_deposit_action_index" =~ ^[0-9]+$ ]] || die "generated witness metadata deposit_action_index is invalid: $generated_deposit_action_index"
+    if [[ ! "$generated_deposit_action_index" =~ ^[0-9]+$ ]]; then
+      generated_deposit_action_index="0"
+    fi
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
@@ -2308,6 +2418,36 @@ command_run() {
       die "generated witness metadata ufvk mismatch against distributed DKG value"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
+
+    local -a generated_deposit_action_indexes=()
+    local -a generated_deposit_action_indexes_rpc=()
+    local deposit_action_candidate
+    generated_deposit_action_indexes+=("$generated_deposit_action_index")
+    mapfile -t generated_deposit_action_indexes_rpc < <(
+      witness_rpc_action_index_candidates \
+        "$boundless_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$generated_deposit_txid" || true
+    )
+    for deposit_action_candidate in "${generated_deposit_action_indexes_rpc[@]}"; do
+      [[ "$deposit_action_candidate" =~ ^[0-9]+$ ]] || continue
+      local known_candidate="false"
+      local existing_candidate
+      for existing_candidate in "${generated_deposit_action_indexes[@]}"; do
+        if [[ "$existing_candidate" == "$deposit_action_candidate" ]]; then
+          known_candidate="true"
+          break
+        fi
+      done
+      if [[ "$known_candidate" != "true" ]]; then
+        generated_deposit_action_indexes+=("$deposit_action_candidate")
+      fi
+    done
+    if (( ${#generated_deposit_action_indexes[@]} == 0 )); then
+      generated_deposit_action_indexes=(0 1 2 3)
+    fi
+    log "using action-index candidates for deposit extraction: $(IFS=,; printf '%s' "${generated_deposit_action_indexes[*]}")"
 
     local deposit_witness_auto_file="$workdir/reports/witness/deposit.witness.bin"
     local deposit_witness_auto_json="$workdir/reports/witness/deposit-witness.json"
@@ -2337,6 +2477,7 @@ command_run() {
       local witness_extract_attempt witness_extract_ok
       local witness_extract_deadline_epoch witness_extract_error_file witness_extract_last_error
       local witness_extract_wait_logged witness_extract_sleep_seconds
+      local witness_selected_action_index
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_idx]}"
@@ -2354,34 +2495,46 @@ command_run() {
       witness_extract_sleep_seconds=5
       witness_extract_deadline_epoch=$(( $(date +%s) + witness_timeout_slice_seconds ))
       witness_extract_error_file="$witness_quorum_dir/deposit-${witness_operator_safe_label}.extract.err"
+      witness_selected_action_index=""
 
       witness_extract_attempt=0
       while true; do
+        local witness_candidate_note_pending
+        local witness_action_index_candidate
         witness_extract_attempt=$((witness_extract_attempt + 1))
-        rm -f "$deposit_candidate_json"
-        if (
-          cd "$REPO_ROOT"
-          go run ./cmd/juno-witness-extract deposit \
-            --juno-scan-url "$witness_scan_url" \
-            --wallet-id "$generated_wallet_id" \
-            --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-            --juno-rpc-url "$witness_rpc_url" \
-            --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-            --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-            --txid "$generated_deposit_txid" \
-            --action-index "$generated_deposit_action_index" \
-            --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json" 2>"$witness_extract_error_file"
-        ); then
-          witness_extract_ok="true"
-          rm -f "$witness_extract_error_file"
+        witness_candidate_note_pending="false"
+        witness_extract_ok="false"
+        for witness_action_index_candidate in "${generated_deposit_action_indexes[@]}"; do
+          rm -f "$deposit_candidate_json"
+          if (
+            cd "$REPO_ROOT"
+            go run ./cmd/juno-witness-extract deposit \
+              --juno-scan-url "$witness_scan_url" \
+              --wallet-id "$generated_wallet_id" \
+              --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+              --juno-rpc-url "$witness_rpc_url" \
+              --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+              --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+              --txid "$generated_deposit_txid" \
+              --action-index "$witness_action_index_candidate" \
+              --output-witness-item-file "$deposit_candidate_witness" >"$deposit_candidate_json" 2>"$witness_extract_error_file"
+          ); then
+            witness_extract_ok="true"
+            witness_selected_action_index="$witness_action_index_candidate"
+            rm -f "$witness_extract_error_file"
+            break
+          fi
+          witness_extract_last_error="$(tail -n 1 "$witness_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+          if grep -qi "note not found" "$witness_extract_error_file"; then
+            witness_candidate_note_pending="true"
+          fi
+        done
+        if [[ "$witness_extract_ok" == "true" ]]; then
           break
         fi
-        witness_extract_last_error="$(tail -n 1 "$witness_extract_error_file" 2>/dev/null | tr -d '\r\n')"
-        if grep -qi "note not found" "$witness_extract_error_file"; then
-          if [[ "$witness_extract_wait_logged" != "true" ]]; then
-            log "waiting for note visibility on operator=$witness_operator_label wallet=$generated_wallet_id txid=$generated_deposit_txid action_index=$generated_deposit_action_index"
-            witness_extract_wait_logged="true"
-          fi
+        if [[ "$witness_candidate_note_pending" == "true" && "$witness_extract_wait_logged" != "true" ]]; then
+          log "waiting for note visibility on operator=$witness_operator_label wallet=$generated_wallet_id txid=$generated_deposit_txid action_index_candidates=$(IFS=,; printf '%s' "${generated_deposit_action_indexes[*]}")"
+          witness_extract_wait_logged="true"
         fi
         if (( $(date +%s) >= witness_extract_deadline_epoch )); then
           break
@@ -2397,6 +2550,9 @@ command_run() {
           log "witness extraction failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
         fi
         continue
+      fi
+      if [[ -n "$witness_selected_action_index" ]]; then
+        generated_deposit_action_index="$witness_selected_action_index"
       fi
 
       local deposit_witness_hex deposit_anchor_height deposit_anchor_hash deposit_final_root
@@ -2631,14 +2787,31 @@ command_run() {
   local direct_cli_user_proof_withdraw_request_id=""
 
   run_direct_cli_user_proof_scenario() {
-    local witness_metadata_json direct_cli_withdraw_txid direct_cli_withdraw_action_index
+    local witness_metadata_json direct_cli_generated_witness_metadata_json
+    local direct_cli_generated_deposit_txid direct_cli_generated_withdraw_txid
+    local direct_cli_generated_deposit_action_index direct_cli_generated_withdraw_action_index
+    local direct_cli_generated_recipient_raw_hex
+    local direct_cli_generated_witness_wallet_id
+    local direct_cli_generated_withdrawal_id direct_cli_generated_withdraw_batch_id
+    local direct_cli_generated_withdrawal_id_no_prefix direct_cli_generated_withdraw_batch_id_no_prefix
+    local direct_cli_witness_source_recipient_raw_hex
+    local direct_cli_withdraw_txid direct_cli_withdraw_action_index
+    local -a direct_cli_withdraw_action_indexes=()
+    local -a direct_cli_withdraw_action_indexes_rpc=()
+    local -a direct_cli_deposit_action_indexes=()
+    local -a direct_cli_deposit_action_indexes_rpc=()
     local direct_cli_recipient_raw_hex direct_cli_recipient_raw_hex_prefixed
     local direct_cli_bridge_deploy_summary direct_cli_bridge_deploy_log
     local direct_cli_deployed_wjuno_address direct_cli_deployed_operator_registry_address
     local direct_cli_deployed_fee_distributor_address direct_cli_deployed_bridge_address
     local direct_cli_domain_tag direct_cli_recipient_hash direct_cli_predicted_withdrawal_id
     local direct_cli_withdraw_witness_file direct_cli_withdraw_witness_json
+    local direct_cli_deposit_witness_file direct_cli_deposit_witness_json
+    local direct_cli_deposit_action_index_used=""
+    local direct_cli_deposit_extract_ok="false"
     local direct_cli_bridge_summary direct_cli_bridge_log
+    local direct_cli_deposit_final_orchard_root direct_cli_deposit_anchor_height direct_cli_deposit_anchor_hash
+    local direct_cli_withdraw_final_orchard_root direct_cli_withdraw_anchor_height direct_cli_withdraw_anchor_hash
     local direct_cli_withdraw_amount="10000"
     local direct_cli_status
     local direct_cli_requestor_key_file="$boundless_requestor_key_file"
@@ -2649,15 +2822,9 @@ command_run() {
     local -a direct_cli_bridge_run_args=()
 
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
-    direct_cli_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$witness_metadata_json" 2>/dev/null || true)"
-    direct_cli_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$witness_metadata_json" 2>/dev/null || true)"
-    direct_cli_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
-    direct_cli_recipient_raw_hex_prefixed="$(normalize_hex_prefixed "$direct_cli_recipient_raw_hex" || true)"
-    [[ -n "$direct_cli_withdraw_txid" ]] || return 1
-    [[ "$direct_cli_withdraw_action_index" =~ ^[0-9]+$ ]] || return 1
+    direct_cli_witness_source_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_recipient_raw_hex_prefixed="$(normalize_hex_prefixed "$direct_cli_witness_source_recipient_raw_hex" || true)"
     [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
-
-    (( ${#boundless_deposit_witness_item_files[@]} > 0 )) || return 1
 
     direct_cli_bridge_base_args+=(
       "--rpc-url" "$base_rpc_url"
@@ -2761,27 +2928,195 @@ command_run() {
     direct_cli_predicted_withdrawal_id="$(normalize_hex_prefixed "$direct_cli_predicted_withdrawal_id" || true)"
     [[ "$direct_cli_predicted_withdrawal_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
 
+    direct_cli_generated_withdraw_batch_id="$(compute_single_withdraw_batch_id "$direct_cli_predicted_withdrawal_id" || true)"
+    [[ "$direct_cli_generated_withdraw_batch_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+    direct_cli_generated_withdrawal_id_no_prefix="${direct_cli_predicted_withdrawal_id#0x}"
+    direct_cli_generated_withdraw_batch_id_no_prefix="${direct_cli_generated_withdraw_batch_id#0x}"
+
+    direct_cli_generated_witness_metadata_json="$workdir/reports/witness/direct-cli-generated-witness-metadata.json"
+    direct_cli_generated_witness_wallet_id="${withdraw_coordinator_juno_wallet_id}-direct-cli"
+    local -a direct_cli_witness_metadata_args=(
+      run
+      --juno-rpc-url "$boundless_witness_juno_rpc_url"
+      --juno-rpc-user "$juno_rpc_user"
+      --juno-rpc-pass "$juno_rpc_pass"
+      --juno-scan-url "$boundless_witness_juno_scan_url"
+      --wallet-id "$direct_cli_generated_witness_wallet_id"
+      --recipient-ua "$boundless_witness_recipient_ua"
+      --recipient-ufvk "$boundless_witness_recipient_ufvk"
+      --base-chain-id "$base_chain_id"
+      --bridge-address "$direct_cli_deployed_bridge_address"
+      --base-recipient-address "$bridge_recipient_address"
+      --withdrawal-id-hex "$direct_cli_generated_withdrawal_id_no_prefix"
+      --withdraw-batch-id-hex "$direct_cli_generated_withdraw_batch_id_no_prefix"
+      --skip-action-index-lookup
+      --deposit-amount-zat "100000"
+      --withdraw-amount-zat "$direct_cli_withdraw_amount"
+      --timeout-seconds "$boundless_witness_metadata_timeout_seconds"
+      --output "$direct_cli_generated_witness_metadata_json"
+    )
+    if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
+      direct_cli_witness_metadata_args+=("--funder-source-address" "${JUNO_FUNDER_SOURCE_ADDRESS}")
+    elif [[ -n "${JUNO_FUNDER_SEED_PHRASE:-}" ]]; then
+      direct_cli_witness_metadata_args+=("--funder-seed-phrase" "${JUNO_FUNDER_SEED_PHRASE}")
+    else
+      direct_cli_witness_metadata_args+=("--funder-private-key-hex" "${JUNO_FUNDER_PRIVATE_KEY_HEX}")
+    fi
+    if [[ -n "$juno_scan_bearer_token" ]]; then
+      direct_cli_witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
+    fi
+    if (
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${direct_cli_witness_metadata_args[@]}" >/dev/null
+    ); then
+      :
+    else
+      return 1
+    fi
+
+    direct_cli_generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$direct_cli_generated_witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_generated_withdraw_txid="$(jq -r '.withdraw_txid // empty' "$direct_cli_generated_witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$direct_cli_generated_witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_generated_withdraw_action_index="$(jq -r '.withdraw_action_index // empty' "$direct_cli_generated_witness_metadata_json" 2>/dev/null || true)"
+    direct_cli_generated_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$direct_cli_generated_witness_metadata_json" 2>/dev/null || true)"
+    [[ -n "$direct_cli_generated_deposit_txid" ]] || return 1
+    [[ -n "$direct_cli_generated_withdraw_txid" ]] || return 1
+    direct_cli_recipient_raw_hex="$direct_cli_generated_recipient_raw_hex"
+    direct_cli_recipient_raw_hex_prefixed="$(normalize_hex_prefixed "$direct_cli_recipient_raw_hex" || true)"
+    [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
+
+    if [[ "$direct_cli_generated_deposit_action_index" =~ ^[0-9]+$ ]]; then
+      direct_cli_deposit_action_indexes+=("$direct_cli_generated_deposit_action_index")
+    fi
+    mapfile -t direct_cli_deposit_action_indexes_rpc < <(
+      witness_rpc_action_index_candidates \
+        "$boundless_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$direct_cli_generated_deposit_txid" || true
+    )
+    for direct_cli_action_candidate in "${direct_cli_deposit_action_indexes_rpc[@]}"; do
+      [[ "$direct_cli_action_candidate" =~ ^[0-9]+$ ]] || continue
+      local known_direct_cli_deposit_candidate="false"
+      local existing_direct_cli_deposit_candidate
+      for existing_direct_cli_deposit_candidate in "${direct_cli_deposit_action_indexes[@]}"; do
+        if [[ "$existing_direct_cli_deposit_candidate" == "$direct_cli_action_candidate" ]]; then
+          known_direct_cli_deposit_candidate="true"
+          break
+        fi
+      done
+      if [[ "$known_direct_cli_deposit_candidate" != "true" ]]; then
+        direct_cli_deposit_action_indexes+=("$direct_cli_action_candidate")
+      fi
+    done
+    if (( ${#direct_cli_deposit_action_indexes[@]} == 0 )); then
+      direct_cli_deposit_action_indexes=(0 1 2 3)
+    fi
+    log "direct-cli deposit extraction action-index candidates: $(IFS=,; printf '%s' "${direct_cli_deposit_action_indexes[*]}")"
+
+    direct_cli_deposit_witness_file="$workdir/reports/witness/direct-cli-deposit.witness.bin"
+    direct_cli_deposit_witness_json="$workdir/reports/witness/direct-cli-deposit.json"
+    local -a direct_cli_deposit_extract_cmd=(go run ./cmd/juno-witness-extract)
+    for direct_cli_action_candidate in "${direct_cli_deposit_action_indexes[@]}"; do
+      if (
+        cd "$REPO_ROOT"
+        "${direct_cli_deposit_extract_cmd[@]}" deposit \
+          --juno-scan-url "$boundless_witness_juno_scan_url" \
+          --wallet-id "$direct_cli_generated_witness_wallet_id" \
+          --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --txid "$direct_cli_generated_deposit_txid" \
+          --action-index "$direct_cli_action_candidate" \
+          --output-witness-item-file "$direct_cli_deposit_witness_file" \
+          >"$direct_cli_deposit_witness_json"
+      ); then
+        direct_cli_deposit_extract_ok="true"
+        direct_cli_deposit_action_index_used="$direct_cli_action_candidate"
+        break
+      fi
+    done
+    if [[ "$direct_cli_deposit_extract_ok" != "true" ]]; then
+      return 1
+    fi
+    log "direct-cli deposit witness extraction selected action-index=$direct_cli_deposit_action_index_used"
+
+    direct_cli_deposit_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$direct_cli_deposit_witness_json" 2>/dev/null || true)"
+    direct_cli_deposit_anchor_height="$(jq -r '.anchor_height // empty' "$direct_cli_deposit_witness_json" 2>/dev/null || true)"
+    direct_cli_deposit_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$direct_cli_deposit_witness_json" 2>/dev/null || true)"
+    [[ "$direct_cli_deposit_final_orchard_root" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+    [[ "$direct_cli_deposit_anchor_height" =~ ^[0-9]+$ ]] || return 1
+    [[ "$direct_cli_deposit_anchor_hash" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+
+    direct_cli_withdraw_txid="$direct_cli_generated_withdraw_txid"
+    direct_cli_withdraw_action_index="$direct_cli_generated_withdraw_action_index"
+    if [[ "$direct_cli_withdraw_action_index" =~ ^[0-9]+$ ]]; then
+      direct_cli_withdraw_action_indexes+=("$direct_cli_withdraw_action_index")
+    fi
+    mapfile -t direct_cli_withdraw_action_indexes_rpc < <(
+      witness_rpc_action_index_candidates \
+        "$boundless_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$direct_cli_withdraw_txid" || true
+    )
+    for direct_cli_action_candidate in "${direct_cli_withdraw_action_indexes_rpc[@]}"; do
+      [[ "$direct_cli_action_candidate" =~ ^[0-9]+$ ]] || continue
+      local known_direct_cli_candidate="false"
+      local existing_direct_cli_candidate
+      for existing_direct_cli_candidate in "${direct_cli_withdraw_action_indexes[@]}"; do
+        if [[ "$existing_direct_cli_candidate" == "$direct_cli_action_candidate" ]]; then
+          known_direct_cli_candidate="true"
+          break
+        fi
+      done
+      if [[ "$known_direct_cli_candidate" != "true" ]]; then
+        direct_cli_withdraw_action_indexes+=("$direct_cli_action_candidate")
+      fi
+    done
+    if (( ${#direct_cli_withdraw_action_indexes[@]} == 0 )); then
+      direct_cli_withdraw_action_indexes=(0 1 2 3)
+    fi
+    log "direct-cli withdraw extraction action-index candidates: $(IFS=,; printf '%s' "${direct_cli_withdraw_action_indexes[*]}")"
+
     direct_cli_withdraw_witness_file="$workdir/reports/witness/direct-cli-withdraw.witness.bin"
     direct_cli_withdraw_witness_json="$workdir/reports/witness/direct-cli-withdraw.json"
     local -a direct_cli_withdraw_extract_cmd=(go run ./cmd/juno-witness-extract)
-    if ! (
-      cd "$REPO_ROOT"
-      "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
-        --juno-scan-url "$boundless_witness_juno_scan_url" \
-        --wallet-id "$withdraw_coordinator_juno_wallet_id" \
-        --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
-        --juno-rpc-url "$boundless_witness_juno_rpc_url" \
-        --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
-        --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
-        --txid "$direct_cli_withdraw_txid" \
-        --action-index "$direct_cli_withdraw_action_index" \
-        --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
-        --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
-        --output-witness-item-file "$direct_cli_withdraw_witness_file" \
-        >"$direct_cli_withdraw_witness_json"
-    ); then
+    local direct_cli_withdraw_extract_ok="false"
+    local direct_cli_withdraw_action_index_used=""
+    for direct_cli_action_candidate in "${direct_cli_withdraw_action_indexes[@]}"; do
+      if (
+        cd "$REPO_ROOT"
+        "${direct_cli_withdraw_extract_cmd[@]}" withdraw \
+          --juno-scan-url "$boundless_witness_juno_scan_url" \
+          --wallet-id "$direct_cli_generated_witness_wallet_id" \
+          --juno-scan-bearer-token-env "$boundless_witness_juno_scan_bearer_token_env" \
+          --juno-rpc-url "$boundless_witness_juno_rpc_url" \
+          --juno-rpc-user-env "$boundless_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$boundless_witness_juno_rpc_pass_env" \
+          --txid "$direct_cli_withdraw_txid" \
+          --action-index "$direct_cli_action_candidate" \
+          --withdrawal-id-hex "$direct_cli_predicted_withdrawal_id" \
+          --recipient-raw-address-hex "$direct_cli_recipient_raw_hex" \
+          --output-witness-item-file "$direct_cli_withdraw_witness_file" \
+          >"$direct_cli_withdraw_witness_json"
+      ); then
+        direct_cli_withdraw_extract_ok="true"
+        direct_cli_withdraw_action_index_used="$direct_cli_action_candidate"
+        break
+      fi
+    done
+    if [[ "$direct_cli_withdraw_extract_ok" != "true" ]]; then
       return 1
     fi
+    log "direct-cli withdraw witness extraction selected action-index=$direct_cli_withdraw_action_index_used"
+    direct_cli_withdraw_final_orchard_root="$(jq -r '.final_orchard_root // empty' "$direct_cli_withdraw_witness_json" 2>/dev/null || true)"
+    direct_cli_withdraw_anchor_height="$(jq -r '.anchor_height // empty' "$direct_cli_withdraw_witness_json" 2>/dev/null || true)"
+    direct_cli_withdraw_anchor_hash="$(jq -r '.anchor_block_hash // empty' "$direct_cli_withdraw_witness_json" 2>/dev/null || true)"
+    [[ "$direct_cli_withdraw_final_orchard_root" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
+    [[ "$direct_cli_withdraw_anchor_height" =~ ^[0-9]+$ ]] || return 1
+    [[ "$direct_cli_withdraw_anchor_hash" =~ ^0x[0-9a-fA-F]{64}$ ]] || return 1
 
     direct_cli_bridge_summary="$workdir/reports/direct-cli-user-proof-summary.json"
     direct_cli_bridge_log="$workdir/reports/direct-cli-user-proof.log"
@@ -2792,12 +3127,16 @@ command_run() {
       "--existing-operator-registry-address" "$direct_cli_deployed_operator_registry_address"
       "--existing-fee-distributor-address" "$direct_cli_deployed_fee_distributor_address"
       "--existing-bridge-address" "$direct_cli_deployed_bridge_address"
+      "--deposit-final-orchard-root" "$direct_cli_deposit_final_orchard_root"
+      "--withdraw-final-orchard-root" "$direct_cli_withdraw_final_orchard_root"
+      "--deposit-checkpoint-height" "$direct_cli_deposit_anchor_height"
+      "--deposit-checkpoint-block-hash" "$direct_cli_deposit_anchor_hash"
+      "--withdraw-checkpoint-height" "$direct_cli_withdraw_anchor_height"
+      "--withdraw-checkpoint-block-hash" "$direct_cli_withdraw_anchor_hash"
     )
     direct_cli_bridge_run_args+=("--boundless-deposit-owallet-ivk-hex" "$boundless_deposit_owallet_ivk_hex")
     direct_cli_bridge_run_args+=("--boundless-withdraw-owallet-ovk-hex" "$boundless_withdraw_owallet_ovk_hex")
-    for witness_file in "${boundless_deposit_witness_item_files[@]}"; do
-      direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$witness_file")
-    done
+    direct_cli_bridge_run_args+=("--boundless-deposit-witness-item-file" "$direct_cli_deposit_witness_file")
     direct_cli_bridge_run_args+=("--boundless-withdraw-witness-item-file" "$direct_cli_withdraw_witness_file")
 
     set +e

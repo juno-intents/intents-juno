@@ -31,6 +31,12 @@ Options:
   --wallet-id <id>                   optional juno-scan wallet id (default: generated run id)
   --recipient-ua <address>           optional fixed recipient unified/shielded address (requires --recipient-ufvk)
   --recipient-ufvk <ufvk>            optional fixed recipient UFVK (requires --recipient-ua)
+  --base-chain-id <id>               required Base chain id for witness memo domain separation
+  --bridge-address <addr>            required bridge contract address for witness memo domain separation
+  --base-recipient-address <addr>    required Base recipient address for deposit witness memo
+  --withdrawal-id-hex <hex>          required bytes32 withdrawal id for withdrawal witness memo
+  --withdraw-batch-id-hex <hex>      required bytes32 batch id for withdrawal witness memo
+  --skip-action-index-lookup         skip pre-index action lookup in juno-scan and emit placeholder action indexes
   --deposit-amount-zat <n>           deposit witness tx amount in zatoshis (default: 100000)
   --withdraw-amount-zat <n>          withdraw witness tx amount in zatoshis (default: 10000)
   --timeout-seconds <n>              overall timeout seconds (default: 900)
@@ -56,6 +62,60 @@ zat_to_decimal() {
   whole=$((zat / 100000000))
   frac=$((zat % 100000000))
   printf '%d.%08d' "$whole" "$frac"
+}
+
+normalize_hex_0x_address() {
+  local raw="$1"
+  raw="$(trim "$raw")"
+  [[ "$raw" =~ ^0x[0-9a-fA-F]{40}$ ]] || return 1
+  printf '%s' "$(lower "$raw")"
+}
+
+normalize_fixed_hex() {
+  local raw="$1"
+  local want_bytes="$2"
+  raw="$(trim "$raw")"
+  raw="${raw#0x}"
+  raw="${raw#0X}"
+  raw="$(lower "$raw")"
+  local want_chars=$((want_bytes * 2))
+  [[ "$raw" =~ ^[0-9a-f]+$ ]] || return 1
+  [[ "${#raw}" -eq "$want_chars" ]] || return 1
+  printf '%s' "$raw"
+}
+
+encode_deposit_memo_hex() {
+  local base_chain_id="$1"
+  local bridge_address="$2"
+  local base_recipient_address="$3"
+  local nonce="$4"
+  local flags="${5:-0}"
+  (
+    cd "$REPO_ROOT"
+    go run ./cmd/juno-memo deposit \
+      --base-chain-id "$base_chain_id" \
+      --bridge-address "$bridge_address" \
+      --recipient "$base_recipient_address" \
+      --nonce "$nonce" \
+      --flags "$flags"
+  )
+}
+
+encode_withdraw_memo_hex() {
+  local base_chain_id="$1"
+  local bridge_address="$2"
+  local withdrawal_id_hex="$3"
+  local batch_id_hex="$4"
+  local flags="${5:-0}"
+  (
+    cd "$REPO_ROOT"
+    go run ./cmd/juno-memo withdraw \
+      --base-chain-id "$base_chain_id" \
+      --bridge-address "$bridge_address" \
+      --withdrawal-id "0x$withdrawal_id_hex" \
+      --batch-id "0x$batch_id_hex" \
+      --flags "$flags"
+  )
 }
 
 normalize_mnemonic_seed_phrase() {
@@ -467,6 +527,7 @@ submit_and_confirm_witness_tx() {
   local recipient_ua="$5"
   local amount_dec="$6"
   local deadline_epoch="$7"
+  local memo_hex="$8"
 
   local opid txid
   opid="$({
@@ -475,7 +536,7 @@ submit_and_confirm_witness_tx() {
       "$rpc_user" \
       "$rpc_pass" \
       "z_sendmany" \
-      "$(jq -cn --arg from "$from_address" --arg to "$recipient_ua" --arg amt "$amount_dec" '[ $from, [ { address: $to, amount: ($amt | tonumber) } ], 1 ]')" \
+      "$(jq -cn --arg from "$from_address" --arg to "$recipient_ua" --arg amt "$amount_dec" --arg memo_hex "$memo_hex" '[ $from, [ { address: $to, amount: ($amt | tonumber), memo: $memo_hex } ], 1 ]')" \
       | jq -r '.'
   })"
   [[ -n "$opid" && "$opid" != "null" ]] || die "failed to submit witness tx"
@@ -706,6 +767,12 @@ command_run() {
   local wallet_id=""
   local recipient_ua=""
   local recipient_ufvk=""
+  local base_chain_id=""
+  local bridge_address=""
+  local base_recipient_address=""
+  local withdrawal_id_hex=""
+  local withdraw_batch_id_hex=""
+  local skip_action_index_lookup="false"
   local deposit_amount_zat="100000"
   local withdraw_amount_zat="10000"
   local timeout_seconds="900"
@@ -778,6 +845,35 @@ command_run() {
         recipient_ufvk="$2"
         shift 2
         ;;
+      --base-chain-id)
+        [[ $# -ge 2 ]] || die "missing value for --base-chain-id"
+        base_chain_id="$2"
+        shift 2
+        ;;
+      --bridge-address)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-address"
+        bridge_address="$2"
+        shift 2
+        ;;
+      --base-recipient-address)
+        [[ $# -ge 2 ]] || die "missing value for --base-recipient-address"
+        base_recipient_address="$2"
+        shift 2
+        ;;
+      --withdrawal-id-hex)
+        [[ $# -ge 2 ]] || die "missing value for --withdrawal-id-hex"
+        withdrawal_id_hex="$2"
+        shift 2
+        ;;
+      --withdraw-batch-id-hex)
+        [[ $# -ge 2 ]] || die "missing value for --withdraw-batch-id-hex"
+        withdraw_batch_id_hex="$2"
+        shift 2
+        ;;
+      --skip-action-index-lookup)
+        skip_action_index_lookup="true"
+        shift
+        ;;
       --deposit-amount-zat)
         [[ $# -ge 2 ]] || die "missing value for --deposit-amount-zat"
         deposit_amount_zat="$2"
@@ -812,6 +908,11 @@ command_run() {
   [[ -n "$juno_rpc_user" ]] || die "--juno-rpc-user is required"
   [[ -n "$juno_rpc_pass" ]] || die "--juno-rpc-pass is required"
   [[ -n "$juno_scan_url" ]] || die "--juno-scan-url is required"
+  [[ -n "$base_chain_id" ]] || die "--base-chain-id is required"
+  [[ -n "$bridge_address" ]] || die "--bridge-address is required"
+  [[ -n "$base_recipient_address" ]] || die "--base-recipient-address is required"
+  [[ -n "$withdrawal_id_hex" ]] || die "--withdrawal-id-hex is required"
+  [[ -n "$withdraw_batch_id_hex" ]] || die "--withdraw-batch-id-hex is required"
   if [[ -z "$funder_wif" && -z "$funder_private_key_hex" && -z "$funder_seed_phrase" && -z "$funder_source_address" ]]; then
     die "one of --funder-wif, --funder-private-key-hex, --funder-seed-phrase, or --funder-source-address is required"
   fi
@@ -825,14 +926,26 @@ command_run() {
   if [[ -n "$funder_seed_phrase" ]]; then
     funder_seed_phrase="$(normalize_mnemonic_seed_phrase "$funder_seed_phrase")"
   fi
+  [[ "$base_chain_id" =~ ^[0-9]+$ ]] || die "--base-chain-id must be numeric"
+  (( base_chain_id > 0 )) || die "--base-chain-id must be > 0"
+  (( base_chain_id <= 4294967295 )) || die "--base-chain-id must fit uint32"
   [[ "$deposit_amount_zat" =~ ^[0-9]+$ ]] || die "--deposit-amount-zat must be numeric"
   [[ "$withdraw_amount_zat" =~ ^[0-9]+$ ]] || die "--withdraw-amount-zat must be numeric"
   [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "--timeout-seconds must be numeric"
+  bridge_address="$(normalize_hex_0x_address "$bridge_address" || true)"
+  [[ -n "$bridge_address" ]] || die "--bridge-address must be a 20-byte hex address"
+  base_recipient_address="$(normalize_hex_0x_address "$base_recipient_address" || true)"
+  [[ -n "$base_recipient_address" ]] || die "--base-recipient-address must be a 20-byte hex address"
+  withdrawal_id_hex="$(normalize_fixed_hex "$withdrawal_id_hex" 32 || true)"
+  [[ -n "$withdrawal_id_hex" ]] || die "--withdrawal-id-hex must be 32-byte hex"
+  withdraw_batch_id_hex="$(normalize_fixed_hex "$withdraw_batch_id_hex" 32 || true)"
+  [[ -n "$withdraw_batch_id_hex" ]] || die "--withdraw-batch-id-hex must be 32-byte hex"
   (( timeout_seconds > 0 )) || die "--timeout-seconds must be > 0"
 
   ensure_base_dependencies
   ensure_command jq
   ensure_command curl
+  ensure_command go
   ensure_command python3
 
   if [[ -z "$wallet_id" ]]; then
@@ -937,13 +1050,27 @@ command_run() {
   deposit_amount_dec="$(zat_to_decimal "$deposit_amount_zat")"
   withdraw_amount_dec="$(zat_to_decimal "$withdraw_amount_zat")"
 
+  local deposit_memo_hex withdraw_memo_hex
+  deposit_memo_hex="$(encode_deposit_memo_hex "$base_chain_id" "$bridge_address" "$base_recipient_address" "1" "0")"
+  deposit_memo_hex="$(normalize_fixed_hex "$deposit_memo_hex" 512 || true)"
+  [[ -n "$deposit_memo_hex" ]] || die "failed to encode deposit witness memo"
+  withdraw_memo_hex="$(encode_withdraw_memo_hex "$base_chain_id" "$bridge_address" "$withdrawal_id_hex" "$withdraw_batch_id_hex" "0")"
+  withdraw_memo_hex="$(normalize_fixed_hex "$withdraw_memo_hex" 512 || true)"
+  [[ -n "$withdraw_memo_hex" ]] || die "failed to encode withdraw witness memo"
+
   local deposit_txid withdraw_txid
-  deposit_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$deposit_amount_dec" "$deadline_epoch")"
-  withdraw_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$withdraw_amount_dec" "$deadline_epoch")"
+  deposit_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$deposit_amount_dec" "$deadline_epoch" "$deposit_memo_hex")"
+  withdraw_txid="$(submit_and_confirm_witness_tx "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$funder_from_address" "$recipient_ua" "$withdraw_amount_dec" "$deadline_epoch" "$withdraw_memo_hex")"
 
   local deposit_action_index withdraw_action_index
-  deposit_action_index="$(scan_find_action_index "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$deposit_txid" "$deadline_epoch")"
-  withdraw_action_index="$(scan_find_action_index "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$withdraw_txid" "$deadline_epoch")"
+  if [[ "$skip_action_index_lookup" == "true" ]]; then
+    # Action index is derived later from tx Orchard actions during witness extraction.
+    deposit_action_index="0"
+    withdraw_action_index="0"
+  else
+    deposit_action_index="$(scan_find_action_index "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$deposit_txid" "$deadline_epoch")"
+    withdraw_action_index="$(scan_find_action_index "$juno_scan_url" "$juno_scan_bearer_token" "$wallet_id" "$withdraw_txid" "$deadline_epoch")"
+  fi
 
   local out_json
   out_json="$({
@@ -963,6 +1090,7 @@ command_run() {
       --argjson withdraw_action_index "$withdraw_action_index" \
       --argjson deposit_amount_zat "$deposit_amount_zat" \
       --argjson withdraw_amount_zat "$withdraw_amount_zat" \
+      --arg action_index_lookup_mode "$skip_action_index_lookup" \
       '{
         generated_at: $generated_at,
         wallet_id: $wallet_id,
@@ -978,7 +1106,8 @@ command_run() {
         deposit_txid: $deposit_txid,
         deposit_action_index: $deposit_action_index,
         withdraw_txid: $withdraw_txid,
-        withdraw_action_index: $withdraw_action_index
+        withdraw_action_index: $withdraw_action_index,
+        action_index_lookup_skipped: ($action_index_lookup_mode == "true")
       }'
   })"
 
