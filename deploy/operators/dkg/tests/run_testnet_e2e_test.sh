@@ -95,11 +95,25 @@ test_witness_pool_uses_per_endpoint_timeout_slices() {
   assert_contains "$script_text" "witness_extract_deadline_epoch=\$(( \$(date +%s) + witness_timeout_slice_seconds ))" "witness extraction wait loop uses per-endpoint timeout slice"
 }
 
+test_witness_generation_reuses_distributed_dkg_recipient_identity() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "--boundless-witness-recipient-ua" "run-testnet-e2e supports explicit witness recipient UA input"
+  assert_contains "$script_text" "--boundless-witness-recipient-ufvk" "run-testnet-e2e supports explicit witness recipient UFVK input"
+  assert_contains "$script_text" "--boundless-witness-recipient-ua and --boundless-witness-recipient-ufvk are required for guest witness extraction mode" "guest witness extraction enforces distributed DKG recipient identity inputs"
+  assert_contains "$script_text" "--recipient-ua \"\$boundless_witness_recipient_ua\"" "witness metadata generator receives distributed DKG recipient UA"
+  assert_contains "$script_text" "--recipient-ufvk \"\$boundless_witness_recipient_ufvk\"" "witness metadata generator receives distributed DKG UFVK"
+  assert_contains "$script_text" "generated witness metadata recipient_ua mismatch" "run-testnet-e2e validates generated witness recipient against distributed DKG recipient"
+  assert_contains "$script_text" "generated witness metadata ufvk mismatch against distributed DKG value" "run-testnet-e2e validates generated witness UFVK against distributed DKG UFVK"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_operator_signer_fallback_exists_for_bins_without_sign_digest
   test_witness_pool_uses_per_endpoint_timeout_slices
+  test_witness_generation_reuses_distributed_dkg_recipient_identity
 }
 
 main "$@"

@@ -65,6 +65,23 @@ test_script_supports_pre_upsert_scan_urls_argument() {
   fi
 }
 
+test_script_supports_explicit_recipient_and_ufvk_inputs() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"--recipient-ua"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --recipient-ua for distributed DKG recipient reuse\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"--recipient-ufvk"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to support --recipient-ufvk for distributed DKG witness wallet upsert\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"--recipient-ua and --recipient-ufvk must be provided together"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to require --recipient-ua/--recipient-ufvk together\n' >&2
+    exit 1
+  fi
+}
+
 test_seed_phrase_normalization_handles_wrapped_seed_files() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -178,6 +195,7 @@ main() {
   test_script_supports_seed_phrase_funder_argument
   test_script_supports_explicit_funder_source_address_argument
   test_script_supports_pre_upsert_scan_urls_argument
+  test_script_supports_explicit_recipient_and_ufvk_inputs
   test_seed_phrase_normalization_handles_wrapped_seed_files
   test_operation_status_poll_targets_specific_opid_and_fails_fast_when_missing
   test_witness_generation_serializes_orchard_spends

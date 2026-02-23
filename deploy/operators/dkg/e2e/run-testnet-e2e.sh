@@ -60,6 +60,8 @@ Options:
                                    (default: JUNO_SCAN_BEARER_TOKEN)
   --boundless-witness-juno-rpc-user-env <name> env var for junocashd RPC username (default: JUNO_RPC_USER)
   --boundless-witness-juno-rpc-pass-env <name> env var for junocashd RPC password (default: JUNO_RPC_PASS)
+  --boundless-witness-recipient-ua <address> distributed DKG recipient unified/shielded address used for witness tx generation
+  --boundless-witness-recipient-ufvk <ufvk> distributed DKG UFVK used for witness wallet registration/extraction
   --boundless-witness-wallet-id <id> optional juno-scan wallet id override used for run-generated witness txs
   --boundless-witness-metadata-timeout-seconds <n> timeout for run-generated witness tx metadata (default: 900)
   --withdraw-coordinator-tss-url <url> optional tss-host URL override for withdraw coordinator
@@ -1340,6 +1342,8 @@ command_run() {
   local boundless_witness_juno_scan_bearer_token_env="JUNO_SCAN_BEARER_TOKEN"
   local boundless_witness_juno_rpc_user_env="JUNO_RPC_USER"
   local boundless_witness_juno_rpc_pass_env="JUNO_RPC_PASS"
+  local boundless_witness_recipient_ua=""
+  local boundless_witness_recipient_ufvk=""
   local boundless_witness_wallet_id=""
   local boundless_witness_metadata_timeout_seconds="900"
   local withdraw_coordinator_tss_url=""
@@ -1576,6 +1580,16 @@ command_run() {
       --boundless-witness-juno-rpc-pass-env)
         [[ $# -ge 2 ]] || die "missing value for --boundless-witness-juno-rpc-pass-env"
         boundless_witness_juno_rpc_pass_env="$2"
+        shift 2
+        ;;
+      --boundless-witness-recipient-ua)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-recipient-ua"
+        boundless_witness_recipient_ua="$2"
+        shift 2
+        ;;
+      --boundless-witness-recipient-ufvk)
+        [[ $# -ge 2 ]] || die "missing value for --boundless-witness-recipient-ufvk"
+        boundless_witness_recipient_ufvk="$2"
         shift 2
         ;;
       --boundless-witness-wallet-id)
@@ -1880,6 +1894,9 @@ command_run() {
   fi
   [[ -n "$boundless_witness_juno_scan_url" ]] || die "failed to resolve witness juno-scan URL from configured endpoint pool"
   [[ -n "$boundless_witness_juno_rpc_url" ]] || die "failed to resolve witness junocashd RPC URL from configured endpoint pool"
+  if [[ -z "$boundless_witness_recipient_ua" || -z "$boundless_witness_recipient_ufvk" ]]; then
+    die "--boundless-witness-recipient-ua and --boundless-witness-recipient-ufvk are required for guest witness extraction mode"
+  fi
   if [[ -z "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" && -z "${JUNO_FUNDER_SEED_PHRASE:-}" && -z "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]]; then
     die "one of JUNO_FUNDER_PRIVATE_KEY_HEX, JUNO_FUNDER_SEED_PHRASE, or JUNO_FUNDER_SOURCE_ADDRESS is required for run-generated witness metadata"
   fi
@@ -2231,6 +2248,8 @@ command_run() {
         --juno-scan-url "$witness_scan_url"
         --pre-upsert-scan-urls "$witness_metadata_pre_upsert_scan_urls_csv"
         --wallet-id "$witness_wallet_id_attempt"
+        --recipient-ua "$boundless_witness_recipient_ua"
+        --recipient-ufvk "$boundless_witness_recipient_ufvk"
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
         --timeout-seconds "$witness_timeout_slice_seconds"
@@ -2283,6 +2302,10 @@ command_run() {
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
+    [[ "$(lower "$generated_recipient_ua")" == "$(lower "$boundless_witness_recipient_ua")" ]] || \
+      die "generated witness metadata recipient_ua mismatch: generated=$generated_recipient_ua expected=$boundless_witness_recipient_ua"
+    [[ "$(lower "$generated_ufvk")" == "$(lower "$boundless_witness_recipient_ufvk")" ]] || \
+      die "generated witness metadata ufvk mismatch against distributed DKG value"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
 

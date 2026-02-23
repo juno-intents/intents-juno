@@ -29,6 +29,8 @@ Options:
   --funder-seed-phrase <seed>        optional 24-word seed phrase used to select/recover funded unified account
   --funder-source-address <address>  optional explicit funded source address already available on the RPC wallet
   --wallet-id <id>                   optional juno-scan wallet id (default: generated run id)
+  --recipient-ua <address>           optional fixed recipient unified/shielded address (requires --recipient-ufvk)
+  --recipient-ufvk <ufvk>            optional fixed recipient UFVK (requires --recipient-ua)
   --deposit-amount-zat <n>           deposit witness tx amount in zatoshis (default: 100000)
   --withdraw-amount-zat <n>          withdraw witness tx amount in zatoshis (default: 10000)
   --timeout-seconds <n>              overall timeout seconds (default: 900)
@@ -702,6 +704,8 @@ command_run() {
   local funder_seed_phrase=""
   local funder_source_address=""
   local wallet_id=""
+  local recipient_ua=""
+  local recipient_ufvk=""
   local deposit_amount_zat="100000"
   local withdraw_amount_zat="10000"
   local timeout_seconds="900"
@@ -764,6 +768,16 @@ command_run() {
         wallet_id="$2"
         shift 2
         ;;
+      --recipient-ua)
+        [[ $# -ge 2 ]] || die "missing value for --recipient-ua"
+        recipient_ua="$2"
+        shift 2
+        ;;
+      --recipient-ufvk)
+        [[ $# -ge 2 ]] || die "missing value for --recipient-ufvk"
+        recipient_ufvk="$2"
+        shift 2
+        ;;
       --deposit-amount-zat)
         [[ $# -ge 2 ]] || die "missing value for --deposit-amount-zat"
         deposit_amount_zat="$2"
@@ -802,6 +816,12 @@ command_run() {
     die "one of --funder-wif, --funder-private-key-hex, --funder-seed-phrase, or --funder-source-address is required"
   fi
   funder_source_address="$(trim "$funder_source_address")"
+  recipient_ua="$(trim "$recipient_ua")"
+  recipient_ufvk="$(trim "$recipient_ufvk")"
+  if [[ -n "$recipient_ua" || -n "$recipient_ufvk" ]]; then
+    [[ -n "$recipient_ua" && -n "$recipient_ufvk" ]] || \
+      die "--recipient-ua and --recipient-ufvk must be provided together"
+  fi
   if [[ -n "$funder_seed_phrase" ]]; then
     funder_seed_phrase="$(normalize_mnemonic_seed_phrase "$funder_seed_phrase")"
   fi
@@ -823,17 +843,21 @@ command_run() {
   now="$(date +%s)"
   deadline_epoch=$((now + timeout_seconds))
 
-  local account_json account_id address_json recipient_ua ufvk receivers_json recipient_orchard_receiver recipient_raw_address_hex
-  account_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_getnewaccount" '[]')"
-  account_id="$(jq -r '.account // empty' <<<"$account_json")"
-  [[ "$account_id" =~ ^[0-9]+$ ]] || die "failed to create juno account"
+  local account_json account_id address_json ufvk receivers_json recipient_orchard_receiver recipient_raw_address_hex
+  if [[ -z "$recipient_ua" ]]; then
+    account_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_getnewaccount" '[]')"
+    account_id="$(jq -r '.account // empty' <<<"$account_json")"
+    [[ "$account_id" =~ ^[0-9]+$ ]] || die "failed to create juno account"
 
-  address_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_getaddressforaccount" "$(jq -cn --argjson account "$account_id" '[ $account ]')")"
-  recipient_ua="$(jq -r '.address // empty' <<<"$address_json")"
-  [[ -n "$recipient_ua" ]] || die "failed to derive recipient unified address"
+    address_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_getaddressforaccount" "$(jq -cn --argjson account "$account_id" '[ $account ]')")"
+    recipient_ua="$(jq -r '.address // empty' <<<"$address_json")"
+    [[ -n "$recipient_ua" ]] || die "failed to derive recipient unified address"
 
-  ufvk="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_exportviewingkey" "$(jq -cn --arg ua "$recipient_ua" '[ $ua ]')" | jq -r '.')"
-  [[ -n "$ufvk" && "$ufvk" != "null" ]] || die "failed to export viewing key for recipient unified address"
+    ufvk="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_exportviewingkey" "$(jq -cn --arg ua "$recipient_ua" '[ $ua ]')" | jq -r '.')"
+    [[ -n "$ufvk" && "$ufvk" != "null" ]] || die "failed to export viewing key for recipient unified address"
+  else
+    ufvk="$recipient_ufvk"
+  fi
 
   receivers_json="$(juno_rpc_result "$juno_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "z_listunifiedreceivers" "$(jq -cn --arg ua "$recipient_ua" '[ $ua ]')")"
   recipient_orchard_receiver="$(jq -r '.orchard // empty' <<<"$receivers_json")"

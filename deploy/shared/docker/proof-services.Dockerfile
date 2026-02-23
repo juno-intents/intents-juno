@@ -17,7 +17,7 @@ ENV CARGO_PROFILE_RELEASE_STRIP=symbols
 ENV RUSTFLAGS="-C debuginfo=0"
 
 RUN apt-get update -y && \
-  apt-get install -y --no-install-recommends ca-certificates clang libclang-dev protobuf-compiler pkg-config libssl-dev && \
+  apt-get install -y --no-install-recommends ca-certificates clang libclang-dev protobuf-compiler libprotobuf-dev pkg-config libssl-dev && \
   rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

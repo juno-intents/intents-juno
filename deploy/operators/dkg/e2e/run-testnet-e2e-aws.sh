@@ -24,6 +24,8 @@ AWS_ENV_ARGS=()
 SHARED_PROOF_SERVICES_IMAGE=""
 DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX=""
 DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX=""
+DISTRIBUTED_COMPLETION_UFVK=""
+DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA=""
 
 usage() {
   cat <<'EOF'
@@ -768,7 +770,7 @@ run_with_retry() {
 }
 
 run_apt_with_retry update -y
-run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar protobuf-compiler clang libclang-dev
+run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar protobuf-compiler libprotobuf-dev clang libclang-dev
 
 if [[ ! -d "\$HOME/.cargo" ]]; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
@@ -1182,12 +1184,20 @@ EOF
 )"
   log "running distributed dkg ceremony from runner coordinator"
   ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" "bash -lc $(printf '%q' "$runner_execute_ceremony_script")"
-  local completion_ufvk
+  local completion_ufvk completion_juno_shielded_address
   completion_ufvk="$(
     ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
       "jq -r '.ufvk // empty' $(printf '%q' "$completion_report")"
   )"
   [[ -n "$completion_ufvk" ]] || die "distributed dkg completion report missing ufvk: $completion_report"
+  DISTRIBUTED_COMPLETION_UFVK="$completion_ufvk"
+  completion_juno_shielded_address="$(
+    ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
+      "jq -r '.juno_shielded_address // empty' $(printf '%q' "$completion_report")"
+  )"
+  [[ -n "$completion_juno_shielded_address" ]] || \
+    die "distributed dkg completion report missing juno_shielded_address: $completion_report"
+  DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA="$completion_juno_shielded_address"
   if ! derive_owallet_keys_from_ufvk "$ssh_private_key" "$ssh_user" "$runner_public_ip" "$remote_repo" "$completion_ufvk"; then
     die "distributed dkg completion report produced invalid owallet key derivation output"
   fi
@@ -2785,8 +2795,12 @@ command_run() {
 
   local forwarded_boundless_deposit_owallet_ivk_hex=""
   local forwarded_boundless_withdraw_owallet_ovk_hex=""
+  local forwarded_boundless_witness_recipient_ua=""
+  local forwarded_boundless_witness_recipient_ufvk=""
   forwarded_boundless_deposit_owallet_ivk_hex="$(forwarded_arg_value "--boundless-deposit-owallet-ivk-hex" "${e2e_args[@]}" || true)"
   forwarded_boundless_withdraw_owallet_ovk_hex="$(forwarded_arg_value "--boundless-withdraw-owallet-ovk-hex" "${e2e_args[@]}" || true)"
+  forwarded_boundless_witness_recipient_ua="$(forwarded_arg_value "--boundless-witness-recipient-ua" "${e2e_args[@]}" || true)"
+  forwarded_boundless_witness_recipient_ufvk="$(forwarded_arg_value "--boundless-witness-recipient-ufvk" "${e2e_args[@]}" || true)"
 
   if [[ -n "$forwarded_boundless_deposit_owallet_ivk_hex" ]]; then
     local normalized_forwarded_boundless_deposit_owallet_ivk_hex
@@ -2807,18 +2821,30 @@ command_run() {
       log "warning: overriding forwarded --boundless-withdraw-owallet-ovk-hex with distributed dkg ufvk-derived value"
     fi
   fi
+  if [[ -n "$forwarded_boundless_witness_recipient_ua" ]]; then
+    if [[ "$forwarded_boundless_witness_recipient_ua" != "$DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA" ]]; then
+      log "warning: overriding forwarded --boundless-witness-recipient-ua with distributed dkg completion juno_shielded_address"
+    fi
+  fi
+  if [[ -n "$forwarded_boundless_witness_recipient_ufvk" ]]; then
+    if [[ "$forwarded_boundless_witness_recipient_ufvk" != "$DISTRIBUTED_COMPLETION_UFVK" ]]; then
+      log "warning: overriding forwarded --boundless-witness-recipient-ufvk with distributed dkg completion ufvk"
+    fi
+  fi
 
   log "using distributed dkg ufvk-derived owallet key material for boundless guest witness inputs"
   remote_args+=(
     "--boundless-deposit-owallet-ivk-hex" "$DISTRIBUTED_BOUNDLESS_DEPOSIT_OWALLET_IVK_HEX"
     "--boundless-withdraw-owallet-ovk-hex" "$DISTRIBUTED_BOUNDLESS_WITHDRAW_OWALLET_OVK_HEX"
+    "--boundless-witness-recipient-ua" "$DISTRIBUTED_BOUNDLESS_WITNESS_RECIPIENT_UA"
+    "--boundless-witness-recipient-ufvk" "$DISTRIBUTED_COMPLETION_UFVK"
   )
 
   local -a sanitized_e2e_args=()
   local e2e_idx=0
   while (( e2e_idx < ${#e2e_args[@]} )); do
     case "${e2e_args[$e2e_idx]}" in
-      --boundless-deposit-owallet-ivk-hex|--boundless-withdraw-owallet-ovk-hex)
+      --boundless-deposit-owallet-ivk-hex|--boundless-withdraw-owallet-ovk-hex|--boundless-witness-recipient-ua|--boundless-witness-recipient-ufvk)
         (( e2e_idx + 1 < ${#e2e_args[@]} )) || die "forwarded argument missing value: ${e2e_args[$e2e_idx]}"
         e2e_idx=$((e2e_idx + 2))
         ;;
