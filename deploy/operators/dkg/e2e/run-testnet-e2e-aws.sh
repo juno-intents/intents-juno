@@ -1233,6 +1233,7 @@ EOF
   for ((idx = 0; idx < operator_count; idx++)); do
     op_index=$((idx + 1))
     op_public_ip="${operator_public_ips[$idx]}"
+    op_private_ip="${operator_private_ips[$idx]}"
 
     local operator_work_root
     operator_work_root="$remote_workdir/dkg-distributed/operators/op${op_index}"
