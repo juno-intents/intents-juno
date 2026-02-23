@@ -155,9 +155,26 @@ build_remote_bootstrap_script() {
   local tss_signer_runtime_mode="$6"
 
   local script
-  script="$(cat <<'REMOTE_SCRIPT'
+script="$(cat <<'REMOTE_SCRIPT'
 #!/usr/bin/env bash
 set -euo pipefail
+
+report_bootstrap_error() {
+  local exit_code="$1"
+  local line_no="$2"
+  local cmd="$3"
+
+  trap - ERR
+  set +e
+  echo "bootstrap failed at line ${line_no} (exit=${exit_code}): ${cmd}" >&2
+  for svc in junocashd.service juno-scan.service; do
+    sudo systemctl status "$svc" --no-pager -l || true
+    sudo journalctl -u "$svc" --no-pager -n 200 || true
+  done
+  exit "$exit_code"
+}
+
+trap 'report_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
 
@@ -170,6 +187,28 @@ run_with_retry() {
     sleep 5
   done
   return 1
+}
+
+wait_for_service_active() {
+  local svc="$1"
+  local deadline now
+  deadline=\$(( \$(date +%s) + 180 ))
+
+  while true; do
+    if sudo systemctl is-active --quiet "\$svc"; then
+      return 0
+    fi
+
+    now=\$(date +%s)
+    if (( now >= deadline )); then
+      echo "service failed to become active: \$svc" >&2
+      sudo systemctl status "\$svc" --no-pager -l || true
+      sudo journalctl -u "\$svc" --no-pager -n 200 || true
+      return 1
+    fi
+
+    sleep 2
+  done
 }
 
 install_junocash() {
@@ -1640,7 +1679,7 @@ wait_for_sync_and_record_blockstamp() {
     progress="\$(jq -r '.verificationprogress // 0' <<<"\$info")"
 
     if [[ "\$blocks" =~ ^[0-9]+$ ]] && [[ "\$headers" =~ ^[0-9]+$ ]]; then
-      if (( blocks + 1 >= headers )) && awk -v p="\$progress" 'BEGIN { exit (p >= 0.999 ? 0 : 1) }'; then
+      if (( headers > 0 && blocks + 1 >= headers )) && awk -v p="\$progress" 'BEGIN { exit (p >= 0.999 ? 0 : 1) }'; then
         block_hash="\$(/usr/local/bin/junocash-cli "\${rpc_args[@]}" getbestblockhash)"
         cat > "\$HOME/.junocash-blockstamp" <<STAMP
 \${blocks}
@@ -1728,7 +1767,7 @@ sudo systemctl restart junocashd.service juno-scan.service
 wait_for_sync_and_record_blockstamp
 
 for svc in junocashd.service juno-scan.service; do
-  sudo systemctl is-active --quiet "\$svc"
+  wait_for_service_active "\$svc"
 done
 
 write_bootstrap_metadata
