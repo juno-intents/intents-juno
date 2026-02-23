@@ -865,9 +865,12 @@ test_operator_stack_ami_release_workflow_supports_explicit_network_inputs() {
 
   assert_contains "$workflow_text" "aws_vpc_id:" "operator stack ami workflow exposes optional vpc input"
   assert_contains "$workflow_text" "aws_subnet_id:" "operator stack ami workflow exposes optional subnet input"
+  assert_contains "$workflow_text" "source_ami_id:" "operator stack ami workflow exposes optional source ami override input"
   assert_contains "$workflow_text" "Resolve Builder Network" "operator stack ami workflow resolves builder network defaults when unset"
+  assert_contains "$workflow_text" "Resolve Source AMI" "operator stack ami workflow resolves reusable source ami defaults when unset"
   assert_contains "$workflow_text" "--vpc-id" "operator stack ami workflow forwards resolved vpc id"
   assert_contains "$workflow_text" "--subnet-id" "operator stack ami workflow forwards resolved subnet id"
+  assert_contains "$workflow_text" "--source-ami-id" "operator stack ami workflow forwards resolved source ami id when available"
 }
 
 test_long_running_aws_workflows_request_extended_oidc_session() {

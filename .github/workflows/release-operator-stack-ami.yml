@@ -28,6 +28,11 @@ on:
         required: false
         default: ""
         type: string
+      source_ami_id:
+        description: "Optional source AMI id for incremental sync (defaults to latest released operator-stack-ami-latest AMI for region when available)"
+        required: false
+        default: ""
+        type: string
       sync_timeout_seconds:
         description: "Max seconds to wait for junocashd sync"
         required: true
@@ -130,11 +135,44 @@ jobs:
           echo "vpc_id=$resolved_vpc_id" >> "$GITHUB_OUTPUT"
           echo "subnet_id=$resolved_subnet_id" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve Source AMI
+        id: resolve_source_ami
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolved_source_ami_id="${{ inputs.source_ami_id }}"
+          if [[ -z "$resolved_source_ami_id" ]]; then
+            tmpdir="$(mktemp -d)"
+            if gh release download "operator-stack-ami-latest" \
+              --repo "${{ github.repository }}" \
+              --pattern "operator-ami-manifest.json" \
+              --dir "$tmpdir" \
+              --clobber >/dev/null 2>&1; then
+              resolved_source_ami_id="$(jq -r --arg region "${{ inputs.aws_region }}" '.regions[$region].ami_id // empty' "$tmpdir/operator-ami-manifest.json")"
+            fi
+            rm -rf "$tmpdir"
+          fi
+
+          if [[ -n "$resolved_source_ami_id" ]]; then
+            echo "Resolved source AMI: $resolved_source_ami_id"
+            echo "source_ami_id=$resolved_source_ami_id" >> "$GITHUB_OUTPUT"
+          else
+            echo "No source AMI resolved; build will start from latest Ubuntu base image"
+          fi
+
       - name: Build Operator Stack AMI
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p .ci/out
+
+          source_ami_args=()
+          if [[ -n "${{ steps.resolve_source_ami.outputs.source_ami_id }}" ]]; then
+            source_ami_args=(--source-ami-id "${{ steps.resolve_source_ami.outputs.source_ami_id }}")
+          fi
 
           ./deploy/shared/runbooks/build-operator-stack-ami.sh create \
             --aws-region "${{ inputs.aws_region }}" \
@@ -144,6 +182,7 @@ jobs:
             --subnet-id "${{ steps.resolve_network.outputs.subnet_id }}" \
             --repo-commit "${GITHUB_SHA}" \
             --sync-timeout-seconds "${{ inputs.sync_timeout_seconds }}" \
+            "${source_ami_args[@]}" \
             --manifest-out ".ci/out/operator-ami-manifest.json" \
             --metadata-out ".ci/out/operator-stack-bootstrap.json" | tee ".ci/out/operator-ami-id.txt"
 
