@@ -134,6 +134,14 @@ test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   assert_contains "$script_text" '--withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"' "run-testnet-e2e passes predicted withdrawal batch id into witness metadata generation"
 }
 
+test_bridge_address_prediction_parses_cast_labeled_output() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "cast compute-address --nonce" "bridge address prediction uses cast compute-address"
+  assert_contains "$script_text" "grep -Eo '0x[0-9a-fA-F]{40}'" "bridge address prediction extracts hex address from cast labeled output"
+}
+
 test_direct_cli_user_proof_uses_bridge_specific_witness_generation() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -157,6 +165,7 @@ main() {
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_generation_binds_memos_to_predicted_bridge_domain
+  test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
 }
 

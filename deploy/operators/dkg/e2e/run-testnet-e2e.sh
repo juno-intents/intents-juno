@@ -975,6 +975,8 @@ predict_bridge_address_for_start_nonce() {
   [[ "$deployer_start_nonce" =~ ^[0-9]+$ ]] || return 1
   bridge_deploy_nonce=$((deployer_start_nonce + 3))
   predicted="$(cast compute-address --nonce "$bridge_deploy_nonce" "$deployer_address" 2>/dev/null || true)"
+  # cast 1.5+ prints "Computed Address: <addr>", while older versions print only the address.
+  predicted="$(printf '%s\n' "$predicted" | grep -Eo '0x[0-9a-fA-F]{40}' | tail -n1 || true)"
   predicted="$(normalize_hex_prefixed "$predicted" || true)"
   [[ "$predicted" =~ ^0x[0-9a-f]{40}$ ]] || return 1
   printf '%s' "$predicted"
