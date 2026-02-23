@@ -16,6 +16,16 @@ assert_contains() {
   fi
 }
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: unexpected=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 assert_order() {
   local haystack="$1"
   local first="$2"
@@ -211,6 +221,16 @@ test_json_array_from_args_separates_jq_options_from_cli_flags() {
   assert_contains "$output" '"postgres://example"' "json array preserves cli flag values"
 }
 
+test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_not_contains "$script_text" '{name:"PROOF_REQUESTOR_KEY", value:$requestor_key}' "shared ecs env list does not duplicate secret-backed PROOF_REQUESTOR_KEY"
+  assert_not_contains "$script_text" '{name:"PROOF_FUNDER_KEY", value:$funder_key}' "shared ecs env list does not duplicate secret-backed PROOF_FUNDER_KEY"
+  assert_contains "$script_text" '{name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url}' "shared ecs env list still includes deposit program URL"
+  assert_contains "$script_text" '{name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url}' "shared ecs env list still includes withdraw program URL"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -224,6 +244,7 @@ main() {
   test_direct_cli_user_proof_uses_queue_submission_mode
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
+  test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
 }
 
 main "$@"

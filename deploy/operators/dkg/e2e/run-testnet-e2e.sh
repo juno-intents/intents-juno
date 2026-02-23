@@ -3348,26 +3348,22 @@ command_run() {
     proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
     proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
     proof_requestor_ecs_environment_json="$(jq -n \
-      --arg requestor_key "$boundless_requestor_key_hex" \
       --arg deposit_program_url "$boundless_deposit_program_url" \
       --arg withdraw_program_url "$boundless_withdraw_program_url" \
       --arg deposit_vkey "$bridge_deposit_image_id" \
       --arg withdraw_vkey "$bridge_withdraw_image_id" \
       '[
-        {name:"PROOF_REQUESTOR_KEY", value:$requestor_key},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
         {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
       ]')"
     proof_funder_ecs_environment_json="$(jq -n \
-      --arg funder_key "$boundless_requestor_key_hex" \
       --arg deposit_program_url "$boundless_deposit_program_url" \
       --arg withdraw_program_url "$boundless_withdraw_program_url" \
       --arg deposit_vkey "$bridge_deposit_image_id" \
       --arg withdraw_vkey "$bridge_withdraw_image_id" \
       '[
-        {name:"PROOF_FUNDER_KEY", value:$funder_key},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
