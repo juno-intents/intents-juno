@@ -500,7 +500,9 @@ wait_for_ssh() {
     -o TCPKeepAlive=yes
   )
   if [[ -n "$ssh_proxy_jump" ]]; then
-    ssh_opts+=(-o "ProxyJump=${ssh_proxy_jump}")
+    ssh_opts+=(
+      -o "ProxyCommand=ssh -i $ssh_private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $ssh_proxy_jump"
+    )
   fi
 
   local attempt
@@ -558,7 +560,9 @@ remote_prepare_operator_host() {
     -o TCPKeepAlive=yes
   )
   if [[ -n "$ssh_proxy_jump" ]]; then
-    ssh_opts+=(-o "ProxyJump=${ssh_proxy_jump}")
+    ssh_opts+=(
+      -o "ProxyCommand=ssh -i $ssh_private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $ssh_proxy_jump"
+    )
   fi
 
   local remote_script
@@ -1052,7 +1056,7 @@ run_distributed_dkg_backup_restore() {
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=6
     -o TCPKeepAlive=yes
-    -o "ProxyJump=$operator_proxy_jump"
+    -o "ProxyCommand=ssh -i $ssh_private_key -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $operator_proxy_jump"
   )
 
   local idx op_index op_public_ip op_private_ip op_port
@@ -2708,7 +2712,7 @@ command_run() {
   scp -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null \
-    -o "ProxyJump=$runner_ssh_user@$runner_public_ip" \
+    -o "ProxyCommand=ssh -i $ssh_key_private -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $runner_ssh_user@$runner_public_ip" \
     "$runner_ssh_user@${operator_private_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
     "$witness_tss_ca_local_path"
   copy_remote_secret_file \
