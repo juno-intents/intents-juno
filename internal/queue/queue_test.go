@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
+	"io"
 	"strings"
 	"testing"
 	"time"
@@ -193,6 +194,42 @@ func TestQueueKafkaTLSEnabled(t *testing.T) {
 			t.Setenv(envKafkaTLS, tc.value)
 			if got := queueKafkaTLSEnabled(); got != tc.want {
 				t.Fatalf("queueKafkaTLSEnabled(%q) = %t, want %t", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestShouldStopKafkaConsumerOnFetchError(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "context canceled",
+			err:  context.Canceled,
+			want: true,
+		},
+		{
+			name: "io eof",
+			err:  io.EOF,
+			want: false,
+		},
+		{
+			name: "generic error",
+			err:  io.ErrClosedPipe,
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldStopKafkaConsumerOnFetchError(tc.err); got != tc.want {
+				t.Fatalf("shouldStopKafkaConsumerOnFetchError(%v) = %t, want %t", tc.err, got, tc.want)
 			}
 		})
 	}

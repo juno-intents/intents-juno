@@ -24,6 +24,8 @@ Options:
   --threshold <n>                  DKG threshold (default: 3)
   --base-port <port>               first operator grpc port (default: 18443)
   --dkg-summary-path <path>        optional precomputed DKG summary (skip local DKG flow)
+  --existing-bridge-summary-path <path>
+                                   optional existing bridge summary JSON (skip deploy bootstrap and reuse deployed contracts)
   --base-operator-fund-wei <wei>   optional pre-fund per operator (default: 1000000000000000)
   --bridge-verifier-address <addr> required verifier router address for proof verification
   --bridge-deposit-image-id <hex>  required deposit image ID (bytes32 hex)
@@ -1372,6 +1374,7 @@ command_run() {
   local threshold=3
   local base_port=18443
   local dkg_summary_path=""
+  local existing_bridge_summary_path=""
   local base_operator_fund_wei="1000000000000000"
   local bridge_verifier_address=""
   local bridge_deposit_image_id=""
@@ -1488,6 +1491,11 @@ command_run() {
       --dkg-summary-path)
         [[ $# -ge 2 ]] || die "missing value for --dkg-summary-path"
         dkg_summary_path="$2"
+        shift 2
+        ;;
+      --existing-bridge-summary-path)
+        [[ $# -ge 2 ]] || die "missing value for --existing-bridge-summary-path"
+        existing_bridge_summary_path="$2"
         shift 2
         ;;
       --base-operator-fund-wei)
@@ -1874,6 +1882,11 @@ command_run() {
     bridge_run_timeout="90m"
   fi
 
+  if [[ -n "$existing_bridge_summary_path" ]]; then
+    [[ -f "$existing_bridge_summary_path" ]] || \
+      die "existing bridge summary file not found: $existing_bridge_summary_path"
+  fi
+
   [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
   [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
   [[ -n "$sp1_deposit_program_url" ]] || die "--sp1-deposit-program-url is required"
@@ -2009,6 +2022,9 @@ command_run() {
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
   local shared_summary="$shared_output"
+  if [[ -n "$existing_bridge_summary_path" ]]; then
+    bridge_summary="$existing_bridge_summary_path"
+  fi
 
   local bridge_juno_execution_tx_hash=""
 
@@ -3254,7 +3270,7 @@ command_run() {
       "--queue-driver" "kafka"
       "--queue-brokers" "$shared_kafka_brokers"
       "--queue-group" "$proof_requestor_group"
-      "--sp1-bin" "/usr/local/bin/sp1"
+      "--sp1-bin" "/usr/local/bin/sp1-prover-adapter"
     )
     local -a proof_funder_ecs_command=(
       "/usr/local/bin/proof-funder"
@@ -3266,7 +3282,7 @@ command_run() {
       "--critical-balance-wei" "$sp1_max_price_per_pgu"
       "--queue-driver" "kafka"
       "--queue-brokers" "$shared_kafka_brokers"
-      "--sp1-bin" "/usr/local/bin/sp1"
+      "--sp1-bin" "/usr/local/bin/sp1-prover-adapter"
     )
     local proof_requestor_ecs_command_json
     local proof_funder_ecs_command_json
@@ -3424,27 +3440,31 @@ command_run() {
   fi
 
   local bridge_status=0
-  set +e
-  (
-    cd "$REPO_ROOT"
-    go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
-  )
-  bridge_status="$?"
-  set -e
-  if (( bridge_status != 0 )); then
-    if [[ "$shared_ecs_enabled" == "true" ]]; then
-      log "bridge-e2e deploy bootstrap failed; showing shared ECS proof service logs"
-      dump_shared_proof_services_ecs_logs \
-        "$shared_ecs_region" \
-        "$shared_ecs_cluster_arn" \
-        "$shared_proof_requestor_service_name" \
-        "$shared_proof_funder_service_name"
-    else
-      log "bridge-e2e deploy bootstrap failed; showing proof-requestor and proof-funder logs"
-      tail -n 200 "$proof_requestor_log" >&2 || true
-      tail -n 200 "$proof_funder_log" >&2 || true
+  if [[ -n "$existing_bridge_summary_path" ]]; then
+    log "skipping bridge deploy bootstrap; using existing bridge summary path=$bridge_summary"
+  else
+    set +e
+    (
+      cd "$REPO_ROOT"
+      go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
+    )
+    bridge_status="$?"
+    set -e
+    if (( bridge_status != 0 )); then
+      if [[ "$shared_ecs_enabled" == "true" ]]; then
+        log "bridge-e2e deploy bootstrap failed; showing shared ECS proof service logs"
+        dump_shared_proof_services_ecs_logs \
+          "$shared_ecs_region" \
+          "$shared_ecs_cluster_arn" \
+          "$shared_proof_requestor_service_name" \
+          "$shared_proof_funder_service_name"
+      else
+        log "bridge-e2e deploy bootstrap failed; showing proof-requestor and proof-funder logs"
+        tail -n 200 "$proof_requestor_log" >&2 || true
+        tail -n 200 "$proof_funder_log" >&2 || true
+      fi
+      die "bridge-e2e deploy bootstrap failed while centralized proof services were running"
     fi
-    die "bridge-e2e deploy bootstrap failed while centralized proof services were running"
   fi
 
   local deployed_bridge_address deployed_wjuno_address

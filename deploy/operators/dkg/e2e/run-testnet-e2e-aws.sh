@@ -93,6 +93,9 @@ run options:
   --relayer-runtime-mode <mode>        relayer runtime mode for run-testnet-e2e.sh (runner|distributed, default: distributed)
   --distributed-relayer-runtime        shorthand for --relayer-runtime-mode distributed
   --keep-infra                         do not destroy infra at the end
+  --skip-distributed-dkg               reuse existing runner DKG artifacts; skip distributed DKG ceremony/backup-restore setup
+                                       (requires --keep-infra and an existing runner workdir)
+  --reuse-bridge-summary-path <path>   optional local bridge summary json to stage on runner and reuse for contract deploy skip
 
 cleanup options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
@@ -185,6 +188,53 @@ EOF
   DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX="$derived_deposit_ivk"
   DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX="$derived_withdraw_ovk"
   return 0
+}
+
+load_distributed_identity_from_existing_runner_state() {
+  local ssh_private_key="$1"
+  local ssh_user="$2"
+  local runner_public_ip="$3"
+  local remote_repo="$4"
+  local remote_workdir="$5"
+  local dkg_summary_remote_path="$6"
+
+  local -a ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+  )
+
+  local completion_report completion_ufvk completion_juno_shielded_address
+  completion_report="$(
+    ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
+      "jq -r '.completion_report // empty' $(printf '%q' "$dkg_summary_remote_path")"
+  )"
+  if [[ -z "$completion_report" ]]; then
+    completion_report="$remote_workdir/dkg-distributed/coordinator/reports/test-completiton.json"
+  fi
+
+  completion_ufvk="$(
+    ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
+      "jq -r '.ufvk // empty' $(printf '%q' "$completion_report")"
+  )"
+  [[ -n "$completion_ufvk" ]] || \
+    die "distributed dkg completion report missing ufvk: $completion_report"
+  DISTRIBUTED_COMPLETION_UFVK="$completion_ufvk"
+
+  completion_juno_shielded_address="$(
+    ssh "${ssh_opts[@]}" "$ssh_user@$runner_public_ip" \
+      "jq -r '.juno_shielded_address // empty' $(printf '%q' "$completion_report")"
+  )"
+  [[ -n "$completion_juno_shielded_address" ]] || \
+    die "distributed dkg completion report missing juno_shielded_address: $completion_report"
+  DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA="$completion_juno_shielded_address"
+
+  if ! derive_owallet_keys_from_ufvk "$ssh_private_key" "$ssh_user" "$runner_public_ip" "$remote_repo" "$completion_ufvk"; then
+    die "distributed dkg completion report produced invalid owallet key derivation output"
+  fi
 }
 
 forwarded_arg_value() {
@@ -1759,6 +1809,8 @@ command_run() {
   local relayer_runtime_mode_explicit="false"
   local distributed_relayer_runtime_explicit="false"
   local keep_infra="false"
+  local skip_distributed_dkg="false"
+  local reuse_bridge_summary_path=""
   local -a e2e_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -1968,6 +2020,15 @@ command_run() {
         keep_infra="true"
         shift
         ;;
+      --skip-distributed-dkg)
+        skip_distributed_dkg="true"
+        shift
+        ;;
+      --reuse-bridge-summary-path)
+        [[ $# -ge 2 ]] || die "missing value for --reuse-bridge-summary-path"
+        reuse_bridge_summary_path="$2"
+        shift 2
+        ;;
       --)
         shift
         e2e_args=("$@")
@@ -2041,6 +2102,12 @@ command_run() {
   fi
   [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
   [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
+  if [[ "$skip_distributed_dkg" == "true" && "$keep_infra" != "true" ]]; then
+    die "--skip-distributed-dkg requires --keep-infra"
+  fi
+  if [[ -n "$reuse_bridge_summary_path" && ! -f "$reuse_bridge_summary_path" ]]; then
+    die "bridge summary reuse file not found: $reuse_bridge_summary_path"
+  fi
 
   ensure_base_dependencies
   ensure_local_command terraform
@@ -2575,7 +2642,9 @@ command_run() {
   operator_private_ips_csv="$(IFS=,; printf '%s' "${operator_private_ips[*]}")"
 
   local dkg_summary_remote_path dkg_summary_local_path
-  dkg_summary_remote_path="$remote_workdir/reports/dkg-summary.json"
+  local legacy_dkg_summary_remote_path
+  dkg_summary_remote_path="$remote_workdir/dkg-distributed/reports/dkg-summary-runtime.json"
+  legacy_dkg_summary_remote_path="$remote_workdir/reports/dkg-summary.json"
   dkg_summary_local_path="$artifacts_dir/dkg-summary-distributed.json"
   local shared_postgres_dsn_for_operator=""
   local shared_kafka_brokers_for_operator=""
@@ -2610,30 +2679,77 @@ command_run() {
   [[ -n "$checkpoint_blob_bucket_for_operator" ]] || die "operator stack hydration requires checkpoint blob bucket"
   [[ -n "$checkpoint_blob_prefix_for_operator" ]] || die "operator stack hydration requires checkpoint blob prefix"
 
-  run_distributed_dkg_backup_restore \
-    "$ssh_key_private" \
-    "$runner_ssh_user" \
-    "$runner_public_ip" \
-    "$remote_repo" \
-    "$remote_workdir" \
-    "$repo_commit" \
-    "$operator_instance_count" \
-    "$dkg_threshold" \
-    "$operator_base_port" \
-    "$dkg_release_tag" \
-    "$dkg_summary_remote_path" \
-    "$dkg_summary_local_path" \
-    "$operator_public_ips_csv" \
-    "$operator_private_ips_csv" \
-    "$dkg_kms_key_arn" \
-    "$dkg_s3_bucket" \
-    "$dkg_s3_key_prefix_out" \
-    "$aws_region" \
-    "$shared_postgres_dsn_for_operator" \
-    "$shared_kafka_brokers_for_operator" \
-    "$shared_ipfs_api_url_for_operator" \
-    "$checkpoint_blob_bucket_for_operator" \
-    "$checkpoint_blob_prefix_for_operator"
+  if [[ "$skip_distributed_dkg" == "true" ]]; then
+    log "skipping distributed dkg ceremony and backup/restore setup; reusing existing runner artifacts"
+    local resolved_dkg_summary_remote_path
+    resolved_dkg_summary_remote_path="$dkg_summary_remote_path"
+    if ! ssh -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$runner_ssh_user@$runner_public_ip" \
+      "test -f $(printf '%q' "$resolved_dkg_summary_remote_path")"; then
+      if ssh -i "$ssh_key_private" \
+        -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null \
+        -o ServerAliveInterval=30 \
+        -o ServerAliveCountMax=6 \
+        -o TCPKeepAlive=yes \
+        "$runner_ssh_user@$runner_public_ip" \
+        "test -f $(printf '%q' "$legacy_dkg_summary_remote_path")"; then
+        resolved_dkg_summary_remote_path="$legacy_dkg_summary_remote_path"
+      else
+        die "missing existing distributed dkg summary on runner: $dkg_summary_remote_path"
+      fi
+    fi
+    dkg_summary_remote_path="$resolved_dkg_summary_remote_path"
+
+    load_distributed_identity_from_existing_runner_state \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$remote_repo" \
+      "$remote_workdir" \
+      "$dkg_summary_remote_path"
+
+    ensure_dir "$(dirname "$dkg_summary_local_path")"
+    scp -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$runner_ssh_user@$runner_public_ip:$dkg_summary_remote_path" \
+      "$dkg_summary_local_path"
+    sanitize_dkg_summary_file "$dkg_summary_local_path"
+  else
+    run_distributed_dkg_backup_restore \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$remote_repo" \
+      "$remote_workdir" \
+      "$repo_commit" \
+      "$operator_instance_count" \
+      "$dkg_threshold" \
+      "$operator_base_port" \
+      "$dkg_release_tag" \
+      "$dkg_summary_remote_path" \
+      "$dkg_summary_local_path" \
+      "$operator_public_ips_csv" \
+      "$operator_private_ips_csv" \
+      "$dkg_kms_key_arn" \
+      "$dkg_s3_bucket" \
+      "$dkg_s3_key_prefix_out" \
+      "$aws_region" \
+      "$shared_postgres_dsn_for_operator" \
+      "$shared_kafka_brokers_for_operator" \
+      "$shared_ipfs_api_url_for_operator" \
+      "$checkpoint_blob_bucket_for_operator" \
+      "$checkpoint_blob_prefix_for_operator"
+  fi
 
   copy_remote_secret_file \
     "$ssh_key_private" \
@@ -2701,6 +2817,15 @@ command_run() {
       "$remote_repo/.ci/secrets/sp1-requestor.key"
   fi
 
+  if [[ -n "$reuse_bridge_summary_path" ]]; then
+    copy_remote_secret_file \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$reuse_bridge_summary_path" \
+      "$remote_repo/.ci/secrets/reuse-bridge-summary.json"
+  fi
+
   copy_remote_secret_file \
     "$ssh_key_private" \
     "$runner_ssh_user" \
@@ -2763,6 +2888,27 @@ command_run() {
     --output "$remote_workdir/reports/testnet-e2e-summary.json"
     --force
   )
+  local bridge_summary_reuse_remote_path=""
+  if [[ -n "$reuse_bridge_summary_path" ]]; then
+    bridge_summary_reuse_remote_path=".ci/secrets/reuse-bridge-summary.json"
+    remote_args+=("--existing-bridge-summary-path" ".ci/secrets/reuse-bridge-summary.json")
+  elif [[ "$skip_distributed_dkg" == "true" ]]; then
+    local remote_existing_bridge_summary_candidate
+    remote_existing_bridge_summary_candidate="$remote_workdir/reports/base-bridge-summary.json"
+    if ssh -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$runner_ssh_user@$runner_public_ip" \
+      "test -f $(printf '%q' "$remote_existing_bridge_summary_candidate")"; then
+      bridge_summary_reuse_remote_path="$remote_existing_bridge_summary_candidate"
+      remote_args+=("--existing-bridge-summary-path" "$remote_existing_bridge_summary_candidate")
+    else
+      log "no existing bridge summary found on runner; deploy bootstrap will run in resume mode"
+    fi
+  fi
   if [[ -n "$sp1_requestor_key_file" ]]; then
     remote_args+=(--sp1-requestor-key-file ".ci/secrets/sp1-requestor.key")
   fi
@@ -2810,6 +2956,9 @@ command_run() {
   fi
   if forwarded_arg_value "--withdraw-coordinator-runtime-mode" "${e2e_args[@]}" >/dev/null 2>&1; then
     die "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --withdraw-coordinator-runtime-mode)"
+  fi
+  if [[ -n "$bridge_summary_reuse_remote_path" ]] && forwarded_arg_value "--existing-bridge-summary-path" "${e2e_args[@]}" >/dev/null 2>&1; then
+    log "overriding forwarded --existing-bridge-summary-path with wrapper-managed reuse path"
   fi
 
   [[ "$DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX" =~ ^0x[0-9a-f]{128}$ ]] || \
@@ -2868,7 +3017,7 @@ command_run() {
   local e2e_idx=0
   while (( e2e_idx < ${#e2e_args[@]} )); do
     case "${e2e_args[$e2e_idx]}" in
-      --sp1-deposit-owallet-ivk-hex|--sp1-withdraw-owallet-ovk-hex|--sp1-witness-recipient-ua|--sp1-witness-recipient-ufvk)
+      --sp1-deposit-owallet-ivk-hex|--sp1-withdraw-owallet-ovk-hex|--sp1-witness-recipient-ua|--sp1-witness-recipient-ufvk|--existing-bridge-summary-path)
         (( e2e_idx + 1 < ${#e2e_args[@]} )) || die "forwarded argument missing value: ${e2e_args[$e2e_idx]}"
         e2e_idx=$((e2e_idx + 2))
         ;;

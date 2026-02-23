@@ -1046,6 +1046,7 @@ test_proof_services_dockerfile_limits_cargo_memory() {
   assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" "proof services dockerfile increases release codegen units to lower peak memory"
   assert_contains "$dockerfile_text" "ENV CARGO_PROFILE_RELEASE_STRIP=symbols" "proof services dockerfile strips release symbols to reduce build and artifact size"
   assert_contains "$dockerfile_text" "ENV RUSTFLAGS=\"-C debuginfo=0\"" "proof services dockerfile disables rust debuginfo to lower memory pressure"
+  assert_contains "$dockerfile_text" "ln -sf /usr/local/bin/sp1-prover-adapter /usr/local/bin/sp1" "proof services dockerfile installs sp1 compatibility symlink"
 }
 
 test_root_dockerignore_excludes_local_bloat_from_build_context() {
@@ -1106,6 +1107,21 @@ test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk() {
   assert_not_contains "$wrapper_script_text" "provided --sp1-withdraw-owallet-ovk-hex does not match distributed dkg ufvk-derived value" "aws wrapper no longer fails on stale forwarded withdraw ovk"
 }
 
+test_aws_wrapper_supports_proof_stage_resume_without_dkg_or_redeploy() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "--skip-distributed-dkg" "aws wrapper exposes skip distributed dkg resume flag"
+  assert_contains "$wrapper_script_text" "--reuse-bridge-summary-path" "aws wrapper exposes existing bridge summary resume flag"
+  assert_contains "$wrapper_script_text" 'local skip_distributed_dkg="false"' "aws wrapper initializes distributed dkg resume toggle"
+  assert_contains "$wrapper_script_text" 'local reuse_bridge_summary_path=""' "aws wrapper initializes bridge summary reuse path"
+  assert_contains "$wrapper_script_text" 'if [[ "$skip_distributed_dkg" == "true" ]]; then' "aws wrapper has skip distributed dkg branch"
+  assert_contains "$wrapper_script_text" "skipping distributed dkg ceremony and backup/restore setup; reusing existing runner artifacts" "aws wrapper logs distributed dkg skip path"
+  assert_contains "$wrapper_script_text" 'copy_remote_secret_file \' "aws wrapper copies reuse bridge summary file to runner secrets when configured"
+  assert_contains "$wrapper_script_text" '"$remote_repo/.ci/secrets/reuse-bridge-summary.json"' "aws wrapper stages bridge summary reuse file in runner secrets dir"
+  assert_contains "$wrapper_script_text" '"--existing-bridge-summary-path" ".ci/secrets/reuse-bridge-summary.json"' "aws wrapper forwards bridge summary reuse path to remote e2e script"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -1139,6 +1155,7 @@ main() {
   test_aws_wrapper_reuses_iterative_ssh_keypair
   test_aws_wrapper_auto_resolves_operator_stack_ami_when_unset
   test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk
+  test_aws_wrapper_supports_proof_stage_resume_without_dkg_or_redeploy
 }
 
 main "$@"

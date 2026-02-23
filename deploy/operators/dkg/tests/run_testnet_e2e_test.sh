@@ -191,6 +191,21 @@ test_direct_cli_user_proof_uses_queue_submission_mode() {
   assert_contains "$script_text" '[[ "$direct_cli_user_proof_submission_mode" == "$direct_cli_proof_submission_mode" ]] || return 1' "direct-cli user proof summary validates expected submission mode"
 }
 
+test_existing_bridge_summary_reuses_deployed_contracts() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "--existing-bridge-summary-path" "run-testnet-e2e supports existing bridge summary reuse input"
+  assert_contains "$script_text" "existing_bridge_summary_path" "run-testnet-e2e tracks existing bridge summary path variable"
+  assert_contains "$script_text" 'if [[ -n "$existing_bridge_summary_path" ]]; then' "run-testnet-e2e has conditional branch for existing bridge summary reuse"
+  assert_contains "$script_text" 'log "skipping bridge deploy bootstrap; using existing bridge summary path=$bridge_summary"' "run-testnet-e2e logs deploy bootstrap skip when reusing bridge summary"
+  assert_contains "$script_text" 'go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"' "run-testnet-e2e retains deploy bootstrap path when no reuse summary is provided"
+  assert_order "$script_text" \
+    'if [[ -n "$existing_bridge_summary_path" ]]; then' \
+    'go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"' \
+    "existing bridge summary conditional wraps deploy bootstrap invocation"
+}
+
 test_direct_cli_witness_extraction_retries_note_visibility() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -239,6 +254,14 @@ test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
   assert_contains "$script_text" '{name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url}' "shared ecs env list still includes withdraw program URL"
 }
 
+test_shared_ecs_uses_explicit_sp1_adapter_binary_path() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '"--sp1-bin" "/usr/local/bin/sp1-prover-adapter"' "shared ecs proof services use explicit sp1 adapter binary path"
+  assert_not_contains "$script_text" '"--sp1-bin" "/usr/local/bin/sp1"' "shared ecs proof services no longer rely on /usr/local/bin/sp1 alias"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -251,9 +274,11 @@ main() {
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode
+  test_existing_bridge_summary_reuses_deployed_contracts
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
+  test_shared_ecs_uses_explicit_sp1_adapter_binary_path
 }
 
 main "$@"

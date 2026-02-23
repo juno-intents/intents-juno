@@ -160,6 +160,10 @@ type kafkaConsumer struct {
 	once   sync.Once
 }
 
+func shouldStopKafkaConsumerOnFetchError(err error) bool {
+	return errors.Is(err, context.Canceled)
+}
+
 func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, error) {
 	brokers := normalizeList(cfg.Brokers)
 	topics := normalizeList(cfg.Topics)
@@ -220,7 +224,7 @@ func (c *kafkaConsumer) run(ctx context.Context) {
 	for {
 		km, err := c.reader.FetchMessage(ctx)
 		if err != nil {
-			if errors.Is(err, context.Canceled) || errors.Is(err, io.EOF) {
+			if shouldStopKafkaConsumerOnFetchError(err) {
 				return
 			}
 			select {
