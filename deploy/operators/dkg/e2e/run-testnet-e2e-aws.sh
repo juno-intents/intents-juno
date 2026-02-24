@@ -519,7 +519,7 @@ build_and_push_shared_proof_services_image() {
   log "building shared proof services image: ${repository_url}:${image_tag}"
   if docker buildx version >/dev/null 2>&1; then
     run_with_retry "shared proof services image buildx build/push" 3 15 \
-      run_with_local_timeout 1800 docker buildx build --platform linux/amd64 \
+      run_with_local_timeout 300 docker buildx build --platform linux/amd64 \
         --provenance=false \
         --sbom=false \
         --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
@@ -530,7 +530,7 @@ build_and_push_shared_proof_services_image() {
   else
     log "docker buildx unavailable; falling back to docker build + push"
     run_with_retry "shared proof services image docker build" 3 15 \
-      run_with_local_timeout 1800 docker build \
+      run_with_local_timeout 300 docker build \
         --platform linux/amd64 \
         --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
         --tag "${repository_url}:${image_tag}" \
