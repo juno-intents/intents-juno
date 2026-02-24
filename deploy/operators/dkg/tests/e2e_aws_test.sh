@@ -354,6 +354,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" 'if [[ "$(uname -s)" == "Darwin" ]]; then' "proof services image path detects darwin hosts"
   assert_contains "$wrapper_script_text" "darwin host detected; using docker build + push path for shared proof services image" "proof services image path logs darwin fallback"
   assert_contains "$wrapper_script_text" '${E2E_AWS_FORCE_LEGACY_DOCKER_BUILD:-}' "proof services image path supports explicit legacy docker build override"
+  assert_contains "$wrapper_script_text" "run_with_local_timeout 300 env DOCKER_BUILDKIT=0 docker build" "proof services image fallback path disables buildkit for docker build reliability on darwin hosts"
   assert_contains "$wrapper_script_text" "--provenance=false" "proof services buildx invocation disables provenance attestations for reliable push completion"
   assert_contains "$wrapper_script_text" "--sbom=false" "proof services buildx invocation disables sbom attestations for reliable push completion"
   assert_contains "$wrapper_script_text" "aws ecr describe-images" "proof services image flow checks whether commit tag already exists"

@@ -911,7 +911,7 @@ build_and_push_shared_proof_services_image() {
   else
     log "docker buildx unavailable; falling back to docker build + push"
     run_with_retry "shared proof services image docker build" 3 15 \
-      run_with_local_timeout 300 docker build \
+      run_with_local_timeout 300 env DOCKER_BUILDKIT=0 docker build \
         --platform linux/amd64 \
         --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
         --tag "${repository_url}:${image_tag}" \
