@@ -39,7 +39,7 @@ Options:
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
-                                   (default: prefer dkg-admin when it supports sign-digest; else auto-generate e2e signer shim)
+                                   (default: prefer dkg-admin; sign-digest support is required)
   --sp1-bin <path>           proof backend binary implementing prover request protocols
                                    (default: sp1-prover-adapter)
   --sp1-rpc-url <url>        sp1 prover network RPC URL (default: https://rpc.mainnet.succinct.xyz)
@@ -299,6 +299,101 @@ ecs_service_log_group() {
     <<<"$task_definition_json"
 }
 
+shared_ecs_services_recent_events() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+
+  aws ecs describe-services \
+    --region "$aws_region" \
+    --cluster "$cluster_arn" \
+    --services "$proof_requestor_service_name" "$proof_funder_service_name" \
+    | jq -r '
+      .services[]
+      | .serviceName as $name
+      | (.events // [])[:8][]
+      | "[\($name)] \(.createdAt) \(.message)"
+    ' 2>/dev/null || true
+}
+
+ecs_events_indicate_transient_bootstrap_failure() {
+  local events_text="$1"
+  local lowered
+  lowered="$(lower "$events_text")"
+
+  [[ "$events_text" == *"ResourceInitializationError"* ]] ||
+    [[ "$lowered" == *"resourceinitializationerror"* ]] ||
+    [[ "$lowered" == *"cannotpullcontainererror"* ]] ||
+    [[ "$lowered" == *"unable to retrieve ecr registry auth"* ]] ||
+    [[ "$lowered" == *"dial tcp"* && "$lowered" == *"i/o timeout"* ]] ||
+    [[ "$lowered" == *"context deadline exceeded"* && "$lowered" == *"ecr"* ]]
+}
+
+wait_for_shared_proof_services_ecs_stable() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+  local max_attempts="${5:-6}"
+  local retry_sleep_seconds="${6:-20}"
+
+  local attempt wait_status events_text
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    aws ecs wait services-stable \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --services "$proof_requestor_service_name" "$proof_funder_service_name"
+    wait_status=$?
+    set -e
+    if (( wait_status == 0 )); then
+      return 0
+    fi
+
+    events_text="$(
+      shared_ecs_services_recent_events \
+        "$aws_region" \
+        "$cluster_arn" \
+        "$proof_requestor_service_name" \
+        "$proof_funder_service_name"
+    )"
+    if [[ -n "$events_text" ]]; then
+      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}); recent events:"
+      while IFS= read -r event_line; do
+        [[ -n "$event_line" ]] || continue
+        log "  $event_line"
+      done <<<"$events_text"
+    else
+      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}); recent events unavailable"
+    fi
+
+    if (( attempt >= max_attempts )); then
+      return 1
+    fi
+
+    if ecs_events_indicate_transient_bootstrap_failure "$events_text"; then
+      log "rolling out shared proof services retry deployment after transient startup failure"
+    else
+      log "rolling out shared proof services retry deployment after unstable service wait"
+    fi
+
+    aws ecs update-service \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --service "$proof_requestor_service_name" \
+      --force-new-deployment >/dev/null
+    aws ecs update-service \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --service "$proof_funder_service_name" \
+      --force-new-deployment >/dev/null
+    sleep "$retry_sleep_seconds"
+  done
+
+  return 1
+}
+
 rollout_shared_proof_services_ecs() {
   local aws_region="$1"
   local cluster_arn="$2"
@@ -348,10 +443,18 @@ rollout_shared_proof_services_ecs() {
     --desired-count 1 \
     --force-new-deployment >/dev/null
 
-  aws ecs wait services-stable \
-    --region "$aws_region" \
-    --cluster "$cluster_arn" \
-    --services "$proof_requestor_service_name" "$proof_funder_service_name"
+  if ! wait_for_shared_proof_services_ecs_stable \
+    "$aws_region" \
+    "$cluster_arn" \
+    "$proof_requestor_service_name" \
+    "$proof_funder_service_name"; then
+    dump_shared_proof_services_ecs_logs \
+      "$aws_region" \
+      "$cluster_arn" \
+      "$proof_requestor_service_name" \
+      "$proof_funder_service_name"
+    die "shared ecs services failed to stabilize after retries"
+  fi
 }
 
 scale_shared_proof_services_ecs() {
@@ -472,6 +575,142 @@ juno_rpc_json_call() {
     --header "content-type: application/json" \
     --data-binary "$payload" \
     "$rpc_url"
+}
+
+juno_rpc_result() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local method="$4"
+  local params_json="$5"
+  local response rpc_error
+
+  response="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "$method" "$params_json")"
+  rpc_error="$(jq -r '.error.message // empty' <<<"$response" 2>/dev/null || true)"
+  if [[ -n "$rpc_error" ]]; then
+    die "juno rpc call failed method=$method error=$rpc_error"
+  fi
+  jq -c '.result' <<<"$response"
+}
+
+juno_wait_operation_txid() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local opid="$4"
+  local timeout_seconds="$5"
+  local started_at now params_json op_status op_json status txid err_msg
+
+  started_at="$(date +%s)"
+  params_json="$(jq -cn --arg opid "$opid" '[ [ $opid ] ]')"
+  while true; do
+    now="$(date +%s)"
+    if (( now - started_at >= timeout_seconds )); then
+      die "timed out waiting for Juno operation opid=$opid"
+    fi
+    op_status="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationstatus" "$params_json" || true)"
+    if [[ -z "$op_status" || "$op_status" == "null" ]]; then
+      sleep 2
+      continue
+    fi
+    op_json="$(jq -c '.[0] // empty' <<<"$op_status" 2>/dev/null || true)"
+    if [[ -z "$op_json" || "$op_json" == "null" ]]; then
+      sleep 2
+      continue
+    fi
+    status="$(jq -r '.status // empty' <<<"$op_json")"
+    case "$status" in
+      success)
+        txid="$(jq -r '.result.txid // empty' <<<"$op_json")"
+        [[ -n "$txid" ]] || die "Juno operation succeeded without txid opid=$opid"
+        printf '%s' "$(lower "${txid#0x}")"
+        return 0
+        ;;
+      failed)
+        err_msg="$(jq -r '.error.message // "unknown error"' <<<"$op_json")"
+        die "Juno operation failed opid=$opid error=$err_msg"
+        ;;
+      *)
+        sleep 2
+        ;;
+    esac
+  done
+}
+
+juno_wait_tx_confirmed() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local txid_raw="$4"
+  local timeout_seconds="$5"
+  local txid started_at now params_json view_params_json resp confirmations tx_status
+
+  txid="$(lower "$(trim "$txid_raw")")"
+  txid="${txid#0x}"
+  [[ "$txid" =~ ^[0-9a-f]{64}$ ]] || die "invalid txid for confirmation wait: $txid_raw"
+  started_at="$(date +%s)"
+  params_json="$(jq -cn --arg txid "$txid" '[ $txid, 1 ]')"
+  view_params_json="$(jq -cn --arg txid "$txid" '[ $txid ]')"
+
+  while true; do
+    now="$(date +%s)"
+    if (( now - started_at >= timeout_seconds )); then
+      die "timed out waiting for Juno tx confirmation txid=$txid"
+    fi
+
+    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_viewtransaction" "$view_params_json" || true)"
+    tx_status="$(jq -r '.status // empty' <<<"${resp:-null}" 2>/dev/null || true)"
+    if [[ "$tx_status" == "mined" ]]; then
+      return 0
+    fi
+    confirmations="$(jq -r '.confirmations // 0' <<<"${resp:-null}" 2>/dev/null || echo 0)"
+    if [[ "$confirmations" =~ ^[0-9]+$ ]] && (( confirmations >= 1 )); then
+      return 0
+    fi
+
+    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "getrawtransaction" "$params_json" || true)"
+    confirmations="$(jq -r '.confirmations // 0' <<<"${resp:-null}" 2>/dev/null || echo 0)"
+    if [[ "$confirmations" =~ ^[0-9]+$ ]] && (( confirmations >= 1 )); then
+      return 0
+    fi
+    sleep 2
+  done
+}
+
+submit_juno_shielded_memo_tx() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local from_address="$4"
+  local recipient_ua="$5"
+  local amount_zat="$6"
+  local memo_hex="$7"
+  local timeout_seconds="$8"
+  local amount_decimal opid txid
+
+  [[ "$amount_zat" =~ ^[0-9]+$ ]] || die "invalid Juno amount_zat: $amount_zat"
+  (( amount_zat > 0 )) || die "Juno amount_zat must be > 0"
+  amount_decimal="$(python3 - "$amount_zat" <<'PY'
+import sys
+zat = int(sys.argv[1])
+whole = zat // 100000000
+frac = zat % 100000000
+print(f"{whole}.{frac:08d}")
+PY
+)"
+  opid="$(
+    juno_rpc_result \
+      "$rpc_url" \
+      "$rpc_user" \
+      "$rpc_pass" \
+      "z_sendmany" \
+      "$(jq -cn --arg from "$from_address" --arg to "$recipient_ua" --arg amt "$amount_decimal" --arg memo_hex "$memo_hex" '[ $from, [ { address: $to, amount: ($amt | tonumber), memo: $memo_hex } ], 1 ]')" \
+      | jq -r '.'
+  )"
+  [[ -n "$opid" && "$opid" != "null" ]] || die "failed to submit Juno shielded memo tx"
+  txid="$(juno_wait_operation_txid "$rpc_url" "$rpc_user" "$rpc_pass" "$opid" "$timeout_seconds")"
+  juno_wait_tx_confirmed "$rpc_url" "$rpc_user" "$rpc_pass" "$txid" "$timeout_seconds"
+  printf '%s' "$txid"
 }
 
 juno_rebroadcast_tx() {
@@ -753,131 +992,6 @@ supports_sign_digest_subcommand() {
     return 1
   fi
   [[ "$lowered" == *"sign-digest"* ]]
-}
-
-write_e2e_operator_digest_signer() {
-  local dkg_summary="$1"
-  local out_dir="$2"
-  local map_file bin_path
-  local operator_count
-
-  ensure_command jq
-  ensure_command cast
-  ensure_dir "$out_dir"
-
-  map_file="$out_dir/e2e-operator-digest-signer-map.json"
-  jq -c '
-    [.operators[] | {
-      operator_id: (.operator_id // ""),
-      endpoint: (.endpoint // .grpc_endpoint // ""),
-      key_file: (.operator_key_file // "")
-    }]
-  ' "$dkg_summary" >"$map_file"
-
-  operator_count="$(jq -r 'length' "$map_file")"
-  [[ "$operator_count" =~ ^[0-9]+$ ]] || die "invalid operator signer map generated from dkg summary"
-  (( operator_count > 0 )) || die "operator signer map is empty"
-  if jq -e '.[] | select((.operator_id | test("^0x[0-9a-fA-F]{40}$") | not) or (.key_file | length == 0))' "$map_file" >/dev/null; then
-    die "operator signer map has invalid operator_id/key_file entries"
-  fi
-
-  bin_path="$out_dir/e2e-operator-digest-signer.sh"
-  cat >"$bin_path" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-
-MAP_FILE="$map_file"
-
-json_error() {
-  local code="\$1"
-  local message="\$2"
-  jq -cn --arg code "\$code" --arg message "\$message" \
-    '{version:"v1",status:"err",error:{code:\$code,message:\$message}}'
-}
-
-main() {
-  local command="\${1:-}"
-  local digest=""
-  local json_mode="false"
-  local -a requested_endpoints=()
-  local -a signatures=()
-  local entry endpoint key_file key_hex signature
-  local include_entry
-
-  if [[ "\$command" != "sign-digest" ]]; then
-    json_error "unsupported_command" "expected sign-digest subcommand" >&2
-    return 2
-  fi
-  shift || true
-
-  while [[ \$# -gt 0 ]]; do
-    case "\$1" in
-      --digest)
-        [[ \$# -ge 2 ]] || { json_error "missing_digest" "--digest value is required" >&2; return 2; }
-        digest="\$2"
-        shift 2
-        ;;
-      --json)
-        json_mode="true"
-        shift
-        ;;
-      --operator-endpoint)
-        [[ \$# -ge 2 ]] || { json_error "missing_operator_endpoint" "--operator-endpoint value is required" >&2; return 2; }
-        requested_endpoints+=("\$2")
-        shift 2
-        ;;
-      *)
-        json_error "invalid_argument" "unsupported argument: \$1" >&2
-        return 2
-        ;;
-    esac
-  done
-
-  [[ "\$json_mode" == "true" ]] || { json_error "json_required" "--json flag is required" >&2; return 2; }
-  [[ "\$digest" =~ ^0x[0-9a-fA-F]{64}\$ ]] || { json_error "invalid_digest" "--digest must be 32-byte hex" >&2; return 2; }
-  [[ -f "\$MAP_FILE" ]] || { json_error "missing_map" "operator signer map not found: \$MAP_FILE" >&2; return 1; }
-
-  while IFS= read -r entry; do
-    endpoint="\$(jq -r '.endpoint // empty' <<<"\$entry")"
-    key_file="\$(jq -r '.key_file // empty' <<<"\$entry")"
-    include_entry="true"
-    if (( \${#requested_endpoints[@]} > 0 )); then
-      include_entry="false"
-      for requested_endpoint in "\${requested_endpoints[@]}"; do
-        if [[ "\$requested_endpoint" == "\$endpoint" ]]; then
-          include_entry="true"
-          break
-        fi
-      done
-    fi
-    [[ "\$include_entry" == "true" ]] || continue
-    [[ -f "\$key_file" ]] || continue
-
-    key_hex="\$(tr -d '[:space:]' <"\$key_file" 2>/dev/null || true)"
-    if [[ "\$key_hex" =~ ^[0-9a-fA-F]{64}\$ ]]; then
-      key_hex="0x\$key_hex"
-    fi
-    [[ "\$key_hex" =~ ^0x[0-9a-fA-F]{64}\$ ]] || continue
-    signature="\$(cast wallet sign --no-hash --private-key "\$key_hex" "\$digest" 2>/dev/null || true)"
-    if [[ "\$signature" =~ ^0x[0-9a-fA-F]{130}\$ ]]; then
-      signatures+=("\$signature")
-    fi
-  done < <(jq -c '.[]' "\$MAP_FILE")
-
-  if (( \${#signatures[@]} == 0 )); then
-    json_error "no_signatures" "no operator signatures were produced"
-    return 1
-  fi
-
-  local signatures_json
-  signatures_json="\$(printf '%s\n' "\${signatures[@]}" | jq -Rsc 'split("\n")[:-1]')"
-  jq -cn --argjson signatures "\$signatures_json" '{version:"v1",status:"ok",data:{signatures:\$signatures}}'
-}
-
-main "\$@"
-EOF
-  chmod 0755 "$bin_path"
-  printf '%s' "$bin_path"
 }
 
 run_with_rpc_retry() {
@@ -2542,8 +2656,7 @@ command_run() {
     command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
   fi
   if ! supports_sign_digest_subcommand "$bridge_operator_signer_bin"; then
-    log "bridge operator signer binary does not support sign-digest; using e2e signer shim"
-    bridge_operator_signer_bin="$(write_e2e_operator_digest_signer "$dkg_summary" "$workdir/bin")"
+    die "bridge operator signer binary must support sign-digest: $bridge_operator_signer_bin"
   fi
   if [[ "$bridge_operator_signer_bin" == */* ]]; then
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
@@ -2597,6 +2710,7 @@ command_run() {
   local witness_quorum_validated_count=0
   local witness_quorum_validated="false"
   local witness_metadata_source_operator=""
+  local witness_funder_source_address=""
   local withdraw_coordinator_juno_wallet_id=""
   local withdraw_coordinator_juno_change_address=""
   local -a witness_pool_operator_labels=()
@@ -2816,13 +2930,14 @@ command_run() {
     sp1_witness_juno_rpc_url="$witness_metadata_source_rpc_url"
 
     local generated_wallet_id generated_recipient_ua generated_deposit_txid generated_deposit_action_index
-    local generated_recipient_raw_address_hex generated_ufvk
+    local generated_recipient_raw_address_hex generated_ufvk generated_funder_source_address
     generated_wallet_id="$(jq -r '.wallet_id // empty' "$witness_metadata_json")"
     generated_recipient_ua="$(jq -r '.recipient_ua // empty' "$witness_metadata_json")"
     generated_deposit_txid="$(jq -r '.deposit_txid // empty' "$witness_metadata_json")"
     generated_deposit_action_index="$(jq -r '.deposit_action_index // empty' "$witness_metadata_json")"
     generated_recipient_raw_address_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json")"
     generated_ufvk="$(jq -r '.ufvk // empty' "$witness_metadata_json")"
+    generated_funder_source_address="$(jq -r '.funder_source_address // empty' "$witness_metadata_json")"
 
     [[ -n "$generated_wallet_id" ]] || die "generated witness metadata missing wallet_id: $witness_metadata_json"
     [[ -n "$generated_recipient_ua" ]] || die "generated witness metadata missing recipient_ua: $witness_metadata_json"
@@ -2833,6 +2948,8 @@ command_run() {
     [[ "$generated_recipient_raw_address_hex" =~ ^[0-9a-fA-F]{86}$ ]] || \
       die "generated witness metadata recipient_raw_address_hex must be 43 bytes hex: $generated_recipient_raw_address_hex"
     [[ -n "$generated_ufvk" ]] || die "generated witness metadata missing ufvk: $witness_metadata_json"
+    [[ -n "$generated_funder_source_address" ]] || \
+      die "generated witness metadata missing funder_source_address: $witness_metadata_json"
     [[ "$(lower "$generated_recipient_ua")" == "$(lower "$sp1_witness_recipient_ua")" ]] || \
       die "generated witness metadata recipient_ua mismatch: generated=$generated_recipient_ua expected=$sp1_witness_recipient_ua"
     [[ "$(lower "$generated_ufvk")" == "$(lower "$sp1_witness_recipient_ufvk")" ]] || \
@@ -2850,6 +2967,7 @@ command_run() {
       log "reusing indexed witness wallet id for tx visibility generated_wallet_id=$generated_wallet_id indexed_wallet_id=$indexed_wallet_id txid=$generated_deposit_txid"
       generated_wallet_id="$indexed_wallet_id"
     fi
+    witness_funder_source_address="$generated_funder_source_address"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
     withdraw_coordinator_juno_change_address="$generated_recipient_ua"
 
@@ -4246,12 +4364,17 @@ command_run() {
 
   local run_deposit_id=""
   local run_deposit_amount=""
+  local run_deposit_nonce=""
+  local run_deposit_juno_tx_hash=""
+  local run_deposit_witness_file=""
   local run_withdrawal_id=""
   local run_withdraw_requester=""
   local run_withdraw_amount=""
   local run_withdraw_fee_bps=""
   local run_withdraw_recipient_ua=""
   local run_withdraw_request_expiry=""
+  local bridge_api_deposit_state=""
+  local bridge_api_withdraw_state=""
   local invariant_deposit_used="false"
   local invariant_withdraw_requester=""
   local invariant_withdraw_amount=""
@@ -4292,10 +4415,14 @@ command_run() {
   local deposit_relayer_log="$workdir/reports/deposit-relayer.log"
   local withdraw_coordinator_log="$workdir/reports/withdraw-coordinator.log"
   local withdraw_finalizer_log="$workdir/reports/withdraw-finalizer.log"
+  local bridge_api_log="$workdir/reports/bridge-api.log"
   local base_relayer_pid=""
   local deposit_relayer_pid=""
   local withdraw_coordinator_pid=""
   local withdraw_finalizer_pid=""
+  local bridge_api_pid=""
+  local bridge_api_port="$((base_port + 1250))"
+  local bridge_api_url="http://127.0.0.1:${bridge_api_port}"
   local relayer_status=0
   local base_relayer_host=""
   local deposit_relayer_host=""
@@ -4609,33 +4736,188 @@ command_run() {
   fi
 
   if (( relayer_status == 0 )); then
-    local deposit_witness_file
-    deposit_witness_file="${sp1_deposit_witness_item_files[0]:-}"
-    [[ -n "$deposit_witness_file" ]] || relayer_status=1
-    [[ -f "$deposit_witness_file" ]] || relayer_status=1
-
-    local deposit_event_payload
-    deposit_event_payload="$workdir/reports/deposit-event.json"
     (
       cd "$REPO_ROOT"
-      go run ./cmd/deposit-event \
+      go run ./cmd/bridge-api \
+        --listen "127.0.0.1:${bridge_api_port}" \
+        --postgres-dsn "$shared_postgres_dsn" \
         --base-chain-id "$base_chain_id" \
         --bridge-address "$deployed_bridge_address" \
-        --recipient "$bridge_recipient_address" \
-        --amount "100000" \
-        --witness-item-file "$deposit_witness_file" \
-        --output "$deposit_event_payload"
-      go run ./cmd/queue-publish \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --topic "$deposit_event_topic" \
-        --payload-file "$deposit_event_payload"
-    ) || relayer_status=1
+        --owallet-ua "$withdraw_coordinator_juno_change_address" \
+        --refund-window-seconds "$bridge_refund_window_seconds" \
+        >"$bridge_api_log" 2>&1
+    ) &
+    bridge_api_pid="$!"
+    sleep 3
+    if ! kill -0 "$bridge_api_pid" >/dev/null 2>&1; then
+      relayer_status=1
+    else
+      check_bridge_api_health() {
+        curl -fsS "${bridge_api_url}/healthz" >/dev/null
+      }
+      if ! wait_for_condition 60 2 "bridge-api health" check_bridge_api_health; then
+        relayer_status=1
+      fi
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    local deposit_event_payload run_deposit_memo_json run_deposit_memo_hex
+    local run_deposit_extract_json run_deposit_extract_error_file run_deposit_extract_last_error
+    local run_deposit_amount_zat="100000"
+    local run_deposit_extract_ok="false"
+    local run_deposit_extract_wait_logged="false"
+    local run_deposit_extract_sleep_seconds=5
+    local run_deposit_extract_deadline_epoch
+    local run_deposit_action_index_selected=""
+    local -a run_deposit_action_indexes=()
+    local -a run_deposit_action_indexes_rpc=()
+    local run_deposit_action_candidate
+
+    [[ -n "$witness_funder_source_address" ]] || relayer_status=1
+    [[ -n "$withdraw_coordinator_juno_wallet_id" ]] || relayer_status=1
+    [[ -n "$withdraw_coordinator_juno_change_address" ]] || relayer_status=1
+
+    if (( relayer_status == 0 )); then
+      run_deposit_memo_json="$(curl -fsS "${bridge_api_url}/v1/deposit-memo?baseRecipient=${bridge_recipient_address}" || true)"
+      [[ -n "$run_deposit_memo_json" ]] || relayer_status=1
+      run_deposit_nonce="$(jq -r '.nonce // empty' <<<"$run_deposit_memo_json" 2>/dev/null || true)"
+      run_deposit_memo_hex="$(jq -r '.memoHex // empty' <<<"$run_deposit_memo_json" 2>/dev/null || true)"
+      [[ "$run_deposit_nonce" =~ ^[0-9]+$ ]] || relayer_status=1
+      [[ "$run_deposit_memo_hex" =~ ^[0-9a-fA-F]{1024}$ ]] || relayer_status=1
+    fi
+
+    if (( relayer_status == 0 )); then
+      run_deposit_juno_tx_hash="$(
+        submit_juno_shielded_memo_tx \
+          "$sp1_witness_juno_rpc_url" \
+          "$withdraw_coordinator_juno_rpc_user_value" \
+          "$withdraw_coordinator_juno_rpc_pass_value" \
+          "$witness_funder_source_address" \
+          "$withdraw_coordinator_juno_change_address" \
+          "$run_deposit_amount_zat" \
+          "$run_deposit_memo_hex" \
+          900 || true
+      )"
+      run_deposit_juno_tx_hash="$(normalize_hex_prefixed "$run_deposit_juno_tx_hash" || true)"
+      [[ "$run_deposit_juno_tx_hash" =~ ^0x[0-9a-f]{64}$ ]] || relayer_status=1
+    fi
+
+    if (( relayer_status == 0 )); then
+      run_deposit_action_indexes=("0")
+      mapfile -t run_deposit_action_indexes_rpc < <(
+        witness_rpc_action_index_candidates \
+          "$sp1_witness_juno_rpc_url" \
+          "$withdraw_coordinator_juno_rpc_user_value" \
+          "$withdraw_coordinator_juno_rpc_pass_value" \
+          "$run_deposit_juno_tx_hash" || true
+      )
+      for run_deposit_action_candidate in "${run_deposit_action_indexes_rpc[@]}"; do
+        [[ "$run_deposit_action_candidate" =~ ^[0-9]+$ ]] || continue
+        if [[ ! " ${run_deposit_action_indexes[*]} " =~ " ${run_deposit_action_candidate} " ]]; then
+          run_deposit_action_indexes+=("$run_deposit_action_candidate")
+        fi
+      done
+      for run_deposit_action_candidate in 1 2 3; do
+        if [[ ! " ${run_deposit_action_indexes[*]} " =~ " ${run_deposit_action_candidate} " ]]; then
+          run_deposit_action_indexes+=("$run_deposit_action_candidate")
+        fi
+      done
+      log "run deposit extraction action-index candidates: $(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
+    fi
+
+    if (( relayer_status == 0 )); then
+      run_deposit_witness_file="$workdir/reports/witness/run-deposit.witness.bin"
+      run_deposit_extract_json="$workdir/reports/witness/run-deposit-witness.json"
+      run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
+      run_deposit_extract_deadline_epoch=$(( $(date +%s) + 900 ))
+      while true; do
+        local run_deposit_note_pending="false"
+        run_deposit_extract_ok="false"
+        for run_deposit_action_candidate in "${run_deposit_action_indexes[@]}"; do
+          rm -f "$run_deposit_extract_json"
+          if (
+            cd "$REPO_ROOT"
+            go run ./cmd/juno-witness-extract deposit \
+              --juno-scan-url "$sp1_witness_juno_scan_url" \
+              --wallet-id "$withdraw_coordinator_juno_wallet_id" \
+              --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
+              --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+              --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+              --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
+              --txid "$run_deposit_juno_tx_hash" \
+              --action-index "$run_deposit_action_candidate" \
+              --output-witness-item-file "$run_deposit_witness_file" \
+              >"$run_deposit_extract_json" 2>"$run_deposit_extract_error_file"
+          ); then
+            run_deposit_extract_ok="true"
+            run_deposit_action_index_selected="$run_deposit_action_candidate"
+            rm -f "$run_deposit_extract_error_file"
+            break
+          fi
+          run_deposit_extract_last_error="$(tail -n 1 "$run_deposit_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+          if grep -qi "note not found" "$run_deposit_extract_error_file"; then
+            run_deposit_note_pending="true"
+          fi
+        done
+        if [[ "$run_deposit_extract_ok" == "true" ]]; then
+          break
+        fi
+        if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_extract_wait_logged" != "true" ]]; then
+          log "run deposit witness note pending wallet=$withdraw_coordinator_juno_wallet_id txid=$run_deposit_juno_tx_hash action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
+          run_deposit_extract_wait_logged="true"
+        fi
+        if (( $(date +%s) >= run_deposit_extract_deadline_epoch )); then
+          relayer_status=1
+          break
+        fi
+        sleep "$run_deposit_extract_sleep_seconds"
+      done
+    fi
+
+    deposit_event_payload="$workdir/reports/deposit-event.json"
+    if (( relayer_status == 0 )); then
+      (
+        cd "$REPO_ROOT"
+        go run ./cmd/deposit-event \
+          --base-chain-id "$base_chain_id" \
+          --bridge-address "$deployed_bridge_address" \
+          --recipient "$bridge_recipient_address" \
+          --amount "$run_deposit_amount_zat" \
+          --nonce "$run_deposit_nonce" \
+          --witness-item-file "$run_deposit_witness_file" \
+          --output "$deposit_event_payload"
+        go run ./cmd/queue-publish \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --topic "$deposit_event_topic" \
+          --payload-file "$deposit_event_payload"
+      ) || relayer_status=1
+    fi
     if (( relayer_status == 0 )); then
       run_deposit_id="$(jq -r '.depositId // empty' "$deposit_event_payload" 2>/dev/null || true)"
       run_deposit_amount="$(jq -r '.amount // empty' "$deposit_event_payload" 2>/dev/null || true)"
       [[ "$run_deposit_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
       [[ "$run_deposit_amount" =~ ^[0-9]+$ ]] || relayer_status=1
+      if [[ "$run_deposit_extract_ok" == "true" && -n "$run_deposit_action_index_selected" ]]; then
+        log "run deposit witness extracted action_index=$run_deposit_action_index_selected txid=$run_deposit_juno_tx_hash"
+      fi
+    fi
+
+    if (( relayer_status == 0 )); then
+      wait_bridge_api_deposit_finalized() {
+        local status_json found state
+        status_json="$(curl -fsS "${bridge_api_url}/v1/status/deposit/${run_deposit_id}" || true)"
+        [[ -n "$status_json" ]] || return 1
+        found="$(jq -r '.found // false' <<<"$status_json" 2>/dev/null || true)"
+        state="$(jq -r '.state // empty' <<<"$status_json" 2>/dev/null || true)"
+        bridge_api_deposit_state="$state"
+        [[ "$found" == "true" ]] || return 1
+        [[ "$state" == "finalized" ]]
+      }
+      if ! wait_for_condition 1200 5 "bridge-api deposit status" wait_bridge_api_deposit_finalized; then
+        relayer_status=1
+      fi
     fi
 
     local witness_metadata_json withdraw_recipient_raw_hex withdraw_request_payload
@@ -4676,6 +4958,22 @@ command_run() {
       [[ "$run_withdraw_fee_bps" =~ ^[0-9]+$ ]] || relayer_status=1
       [[ "$run_withdraw_request_expiry" =~ ^[0-9]+$ ]] || relayer_status=1
       [[ "$run_withdraw_recipient_ua" =~ ^0x[0-9a-f]{2,}$ ]] || relayer_status=1
+    fi
+
+    if (( relayer_status == 0 )); then
+      wait_bridge_api_withdraw_finalized() {
+        local status_json found state
+        status_json="$(curl -fsS "${bridge_api_url}/v1/status/withdrawal/${run_withdrawal_id}" || true)"
+        [[ -n "$status_json" ]] || return 1
+        found="$(jq -r '.found // false' <<<"$status_json" 2>/dev/null || true)"
+        state="$(jq -r '.state // empty' <<<"$status_json" 2>/dev/null || true)"
+        bridge_api_withdraw_state="$state"
+        [[ "$found" == "true" ]] || return 1
+        [[ "$state" == "finalized" ]]
+      }
+      if ! wait_for_condition 1800 5 "bridge-api withdrawal status" wait_bridge_api_withdraw_finalized; then
+        relayer_status=1
+      fi
     fi
   fi
 
@@ -5202,6 +5500,7 @@ command_run() {
   stop_remote_relayer_service "$deposit_relayer_pid"
   stop_remote_relayer_service "$withdraw_coordinator_pid"
   stop_remote_relayer_service "$withdraw_finalizer_pid"
+  stop_remote_relayer_service "$bridge_api_pid"
 
   if (( relayer_status != 0 )); then
     log "relayer service orchestration failed; showing service logs"
@@ -5209,6 +5508,7 @@ command_run() {
     tail -n 200 "$deposit_relayer_log" >&2 || true
     tail -n 200 "$withdraw_coordinator_log" >&2 || true
     tail -n 200 "$withdraw_finalizer_log" >&2 || true
+    tail -n 200 "$bridge_api_log" >&2 || true
     bridge_status=1
   else
     bridge_status=0
@@ -5286,6 +5586,8 @@ command_run() {
     jq -n \
       --arg deposit_id "$run_deposit_id" \
       --arg deposit_amount "$run_deposit_amount" \
+      --arg deposit_juno_tx_hash "$run_deposit_juno_tx_hash" \
+      --arg deposit_nonce "$run_deposit_nonce" \
       --arg withdrawal_id "$run_withdrawal_id" \
       --arg withdraw_requester "$run_withdraw_requester" \
       --arg withdraw_amount "$run_withdraw_amount" \
@@ -5314,9 +5616,13 @@ command_run() {
       --arg invariant_bridge_delta_expected "$invariant_bridge_delta_expected" \
       --arg invariant_bridge_delta_actual "$invariant_bridge_delta_actual" \
       --arg invariant_balance_delta_match "$invariant_balance_delta_match" \
+      --arg bridge_api_deposit_state "$bridge_api_deposit_state" \
+      --arg bridge_api_withdraw_state "$bridge_api_withdraw_state" \
       '{
         deposit_id: (if $deposit_id == "" then null else $deposit_id end),
         deposit_amount: (if $deposit_amount == "" then null else ($deposit_amount | tonumber) end),
+        deposit_juno_tx_hash: (if $deposit_juno_tx_hash == "" then null else $deposit_juno_tx_hash end),
+        deposit_nonce: (if $deposit_nonce == "" then null else ($deposit_nonce | tonumber) end),
         withdrawal_id: (if $withdrawal_id == "" then null else $withdrawal_id end),
         withdrawal_request: {
           requester: (if $withdraw_requester == "" then null else $withdraw_requester end),
@@ -5362,6 +5668,10 @@ command_run() {
             },
             match: ($invariant_balance_delta_match == "true")
           }
+        },
+        bridge_api: {
+          deposit_state: (if $bridge_api_deposit_state == "" then null else $bridge_api_deposit_state end),
+          withdrawal_state: (if $bridge_api_withdraw_state == "" then null else $bridge_api_withdraw_state end)
         }
       }'
   )"

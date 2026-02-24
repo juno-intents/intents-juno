@@ -79,18 +79,15 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
-test_operator_signer_fallback_exists_for_bins_without_sign_digest() {
+test_operator_signer_requires_sign_digest_support() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" "supports_sign_digest_subcommand()" "operator signer capability probe helper exists"
-  assert_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer exists"
-  assert_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback log message exists"
-  assert_contains "$script_text" "bridge_operator_signer_bin=\"\$(write_e2e_operator_digest_signer \"\$dkg_summary\" \"\$workdir/bin\")\"" "fallback signer shim is wired into bridge signer selection"
-  assert_contains "$script_text" "cast wallet sign --no-hash --private-key" "fallback signer shim signs raw digests with operator keys"
-  assert_contains "$script_text" 'if [[ "\$key_hex" =~ ^[0-9a-fA-F]{64}\$ ]]; then' "fallback signer shim accepts bare 64-hex private keys"
-  assert_contains "$script_text" 'key_hex="0x\$key_hex"' "fallback signer shim normalizes bare keys to 0x-prefixed form"
-  assert_contains "$script_text" "no operator signatures were produced" "fallback signer emits explicit no-signatures error"
+  assert_not_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer removed"
+  assert_not_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback signer shim log removed"
+  assert_not_contains "$script_text" "cast wallet sign --no-hash --private-key" "runner-side raw digest signer shim removed"
+  assert_contains "$script_text" "bridge operator signer binary must support sign-digest" "sign-digest capability is a hard requirement"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {
@@ -181,6 +178,20 @@ test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   assert_contains "$script_text" '--bridge-address "$predicted_witness_bridge_address"' "run-testnet-e2e passes predicted bridge address into witness metadata generation"
   assert_contains "$script_text" '--withdrawal-id-hex "$predicted_witness_withdrawal_id"' "run-testnet-e2e passes predicted withdrawal id into witness metadata generation"
   assert_contains "$script_text" '--withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"' "run-testnet-e2e passes predicted withdrawal batch id into witness metadata generation"
+}
+
+test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "go run ./cmd/bridge-api" "live bridge flow starts bridge-api service"
+  assert_contains "$script_text" "/v1/deposit-memo?baseRecipient=" "live bridge flow requests deposit memo from bridge-api"
+  assert_contains "$script_text" "z_sendmany" "live bridge flow submits real Juno shielded memo tx"
+  assert_contains "$script_text" "z_getoperationstatus" "live bridge flow waits for Juno z_sendmany operation completion"
+  assert_contains "$script_text" "juno_wait_tx_confirmed" "live bridge flow waits for mined Juno deposit tx"
+  assert_contains "$script_text" "--nonce \"\$run_deposit_nonce\"" "deposit queue payload uses bridge-api nonce from the real deposit memo"
+  assert_contains "$script_text" "/v1/status/deposit/" "live bridge flow checks deposit status through bridge-api"
+  assert_contains "$script_text" "/v1/status/withdrawal/" "live bridge flow checks withdrawal status through bridge-api"
 }
 
 test_bridge_address_prediction_parses_cast_labeled_output() {
@@ -317,6 +328,18 @@ test_shared_ecs_uses_explicit_sp1_adapter_binary_path() {
   assert_not_contains "$script_text" '"--sp1-bin" "/usr/local/bin/sp1"' "shared ecs proof services no longer rely on /usr/local/bin/sp1 alias"
 }
 
+test_shared_ecs_rollout_retries_transient_unstable_services() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "wait_for_shared_proof_services_ecs_stable()" "shared ecs rollout defines explicit stability wait helper"
+  assert_contains "$script_text" "shared ecs services not stable (attempt" "shared ecs rollout logs each unstable attempt"
+  assert_contains "$script_text" "ecs_events_indicate_transient_bootstrap_failure()" "shared ecs rollout classifies transient bootstrap failures"
+  assert_contains "$script_text" "ResourceInitializationError" "shared ecs rollout recognizes ecs resource initialization startup failures"
+  assert_contains "$script_text" "rolling out shared proof services retry deployment after transient startup failure" "shared ecs rollout retries deployment when startup failures are transient"
+  assert_contains "$script_text" "shared ecs services failed to stabilize after retries" "shared ecs rollout fails with explicit stabilization error after retries"
+}
+
 test_stop_after_stage_emits_stage_control_and_stops_cleanly() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -359,7 +382,7 @@ test_sp1_rpc_defaults_and_validation_target_succinct_network() {
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
-  test_operator_signer_fallback_exists_for_bins_without_sign_digest
+  test_operator_signer_requires_sign_digest_support
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_metadata_failover_reuses_single_wallet_id
@@ -367,6 +390,7 @@ main() {
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
   test_witness_generation_binds_memos_to_predicted_bridge_domain
+  test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode
@@ -377,6 +401,7 @@ main() {
   test_workdir_run_lock_prevents_overlapping_runs
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
+  test_shared_ecs_rollout_retries_transient_unstable_services
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
   test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario
   test_sp1_rpc_defaults_and_validation_target_succinct_network
