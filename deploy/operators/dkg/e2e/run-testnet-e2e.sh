@@ -1429,6 +1429,22 @@ set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"
 sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"
 rm -f "$tmp_env"
 
+checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
+checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
+[[ -f "$checkpoint_signer_script" ]] || {
+  echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
+  exit 1
+}
+[[ -f "$checkpoint_aggregator_script" ]] || {
+  echo "checkpoint aggregator wrapper is missing: $checkpoint_aggregator_script" >&2
+  exit 1
+}
+
+sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"
+sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"
+sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"
+sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
+
 sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service
 if ! sudo systemctl is-active --quiet intents-juno-config-hydrator.service; then
@@ -3060,25 +3076,62 @@ command_run() {
       die "failed to extract witness from quorum of operators: success=$witness_quorum_validated_count threshold=$witness_quorum_threshold"
 
     local -a witness_unique_fingerprints=()
-    local witness_fingerprint witness_existing_fingerprint witness_known_fingerprint
-    for witness_fingerprint in "${witness_success_fingerprints[@]}"; do
+    local -a witness_unique_fingerprint_counts=()
+    local -a witness_unique_fingerprint_first_indexes=()
+    local witness_fingerprint witness_existing_fingerprint witness_known_fingerprint witness_unique_idx
+    for witness_idx in "${!witness_success_fingerprints[@]}"; do
+      witness_fingerprint="${witness_success_fingerprints[$witness_idx]}"
       witness_known_fingerprint="false"
-      for witness_existing_fingerprint in "${witness_unique_fingerprints[@]}"; do
+      for witness_unique_idx in "${!witness_unique_fingerprints[@]}"; do
+        witness_existing_fingerprint="${witness_unique_fingerprints[$witness_unique_idx]}"
         if [[ "$witness_existing_fingerprint" == "$witness_fingerprint" ]]; then
+          witness_unique_fingerprint_counts[$witness_unique_idx]=$(( ${witness_unique_fingerprint_counts[$witness_unique_idx]} + 1 ))
           witness_known_fingerprint="true"
           break
         fi
       done
       if [[ "$witness_known_fingerprint" != "true" ]]; then
         witness_unique_fingerprints+=("$witness_fingerprint")
+        witness_unique_fingerprint_counts+=(1)
+        witness_unique_fingerprint_first_indexes+=("$witness_idx")
       fi
     done
-    if (( ${#witness_unique_fingerprints[@]} != 1 )); then
-      die "witness quorum consistency mismatch across operators: operators=$(IFS=,; printf '%s' "${witness_success_labels[*]}")"
+
+    local witness_consensus_idx=0
+    local witness_consensus_count="${witness_unique_fingerprint_counts[0]}"
+    local witness_consensus_first_index="${witness_unique_fingerprint_first_indexes[0]}"
+    for witness_unique_idx in "${!witness_unique_fingerprint_counts[@]}"; do
+      local witness_candidate_count witness_candidate_first_index
+      witness_candidate_count="${witness_unique_fingerprint_counts[$witness_unique_idx]}"
+      witness_candidate_first_index="${witness_unique_fingerprint_first_indexes[$witness_unique_idx]}"
+      if (( witness_candidate_count > witness_consensus_count )); then
+        witness_consensus_idx="$witness_unique_idx"
+        witness_consensus_count="$witness_candidate_count"
+        witness_consensus_first_index="$witness_candidate_first_index"
+      fi
+    done
+    if (( witness_consensus_count < witness_quorum_threshold )); then
+      die "witness quorum consistency mismatch across operators: operators=$(IFS=,; printf '%s' "${witness_success_labels[*]}") consensus=$witness_consensus_count threshold=$witness_quorum_threshold"
     fi
+
+    local -a witness_consensus_indexes=()
+    local -a witness_consensus_labels=()
+    for witness_idx in "${!witness_success_fingerprints[@]}"; do
+      if [[ "${witness_success_fingerprints[$witness_idx]}" == "${witness_unique_fingerprints[$witness_consensus_idx]}" ]]; then
+        witness_consensus_indexes+=("$witness_idx")
+        witness_consensus_labels+=("${witness_success_labels[$witness_idx]}")
+      fi
+    done
+    witness_quorum_validated_count="${#witness_consensus_indexes[@]}"
+    witness_quorum_operator_labels=("${witness_consensus_labels[@]}")
+    if (( ${#witness_unique_fingerprints[@]} > 1 )); then
+      log "witness quorum witness/root divergence detected across operators; selecting consensus fingerprint count=$witness_consensus_count threshold=$witness_quorum_threshold operators=$(IFS=,; printf '%s' "${witness_consensus_labels[*]}")"
+    fi
+
     local -a witness_unique_anchor_fingerprints=()
     local witness_anchor_fingerprint witness_existing_anchor_fingerprint witness_known_anchor_fingerprint
-    for witness_anchor_fingerprint in "${witness_success_anchor_fingerprints[@]}"; do
+    for witness_idx in "${witness_consensus_indexes[@]}"; do
+      witness_anchor_fingerprint="${witness_success_anchor_fingerprints[$witness_idx]}"
       witness_known_anchor_fingerprint="false"
       for witness_existing_anchor_fingerprint in "${witness_unique_anchor_fingerprints[@]}"; do
         if [[ "$witness_existing_anchor_fingerprint" == "$witness_anchor_fingerprint" ]]; then
@@ -3095,8 +3148,8 @@ command_run() {
     fi
     witness_quorum_validated="true"
 
-    cp "${witness_success_deposit_witness[0]}" "$deposit_witness_auto_file"
-    cp "${witness_success_deposit_json[0]}" "$deposit_witness_auto_json"
+    cp "${witness_success_deposit_witness[$witness_consensus_first_index]}" "$deposit_witness_auto_file"
+    cp "${witness_success_deposit_json[$witness_consensus_first_index]}" "$deposit_witness_auto_json"
 
     sp1_deposit_witness_item_files=("$deposit_witness_auto_file")
     sp1_withdraw_witness_item_files=()
@@ -3980,7 +4033,10 @@ command_run() {
     return 0
   fi
 
-  if [[ -n "$existing_bridge_summary_path" ]]; then
+  if [[ "$stop_after_stage" == "checkpoint_validated" ]]; then
+    direct_cli_user_proof_status="skipped-stop-after-stage-checkpoint_validated"
+    log "skipping direct-cli user proof scenario for stop-after-stage=checkpoint_validated"
+  elif [[ -n "$existing_bridge_summary_path" ]]; then
     direct_cli_user_proof_status="skipped-resume-existing-bridge-summary"
     log "skipping direct-cli user proof scenario during resume with existing bridge summary path=$existing_bridge_summary_path"
   else

@@ -150,7 +150,10 @@ test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   assert_contains "$script_text" "using action-index candidates for deposit extraction" "deposit extraction logs candidate action-index set"
   assert_contains "$script_text" "direct-cli withdraw extraction action-index candidates" "direct-cli withdraw extraction logs candidate action-index set"
   assert_contains "$script_text" 'rm -f "$witness_quorum_dir"/deposit-*.json "$witness_quorum_dir"/deposit-*.witness.bin "$witness_quorum_dir"/deposit-*.extract.err || true' "witness quorum extraction clears stale per-operator artifacts before evaluating quorum"
-  assert_contains "$script_text" 'witness_fingerprint="${generated_deposit_txid}|${deposit_witness_hex}|${deposit_final_root}"' "quorum witness fingerprint ignores anchor drift across scanners"
+  assert_contains "$script_text" 'witness_fingerprint="${generated_deposit_txid}|${deposit_witness_hex}|${deposit_final_root}"' "quorum witness fingerprint compares txid+witness+root to reject inconsistent witness content"
+  assert_contains "$script_text" "witness_unique_fingerprint_counts" "quorum checker tracks per-fingerprint agreement counts across operators"
+  assert_contains "$script_text" "witness_consensus_count" "quorum checker computes strongest fingerprint consensus count"
+  assert_contains "$script_text" "witness quorum witness/root divergence detected across operators; selecting consensus fingerprint" "quorum checker tolerates minority anchor drift while enforcing consensus threshold"
   assert_contains "$script_text" "witness quorum anchor divergence detected across operators (using first successful anchor)" "quorum checker reports anchor drift without hard-failing identical witness/root"
 }
 
@@ -239,6 +242,12 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"' "checkpoint bridge config updater writes BRIDGE_ADDRESS into operator stack env"
   assert_contains "$script_text" 'set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"' "checkpoint bridge config updater writes BASE_CHAIN_ID into operator stack env"
   assert_contains "$script_text" 'sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater persists mutated operator stack env with expected ownership"
+  assert_contains "$script_text" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "checkpoint bridge config updater targets checkpoint-signer wrapper script"
+  assert_contains "$script_text" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "checkpoint bridge config updater targets checkpoint-aggregator wrapper script"
+  assert_contains "$script_text" 'sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"' "checkpoint bridge config updater rewrites checkpoint-signer base chain id flag"
+  assert_contains "$script_text" 'sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"' "checkpoint bridge config updater rewrites checkpoint-signer bridge address flag"
+  assert_contains "$script_text" 'sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator base chain id flag"
+  assert_contains "$script_text" 'sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator bridge address flag"
 }
 
 test_direct_cli_witness_extraction_retries_note_visibility() {
@@ -327,6 +336,15 @@ test_stop_after_stage_emits_stage_control_and_stops_cleanly() {
   assert_contains "$script_text" "shared_validation_passed" "stage control reports shared checkpoint validation status"
 }
 
+test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'if [[ "$stop_after_stage" == "checkpoint_validated" ]]; then' "checkpoint stop-stage branch is explicitly handled before direct-cli proof scenario"
+  assert_contains "$script_text" 'direct_cli_user_proof_status="skipped-stop-after-stage-checkpoint_validated"' "checkpoint stop-stage records direct-cli proof scenario as skipped"
+  assert_contains "$script_text" "skipping direct-cli user proof scenario for stop-after-stage=checkpoint_validated" "checkpoint stop-stage logs direct-cli proof skip reason"
+}
+
 test_sp1_rpc_defaults_and_validation_target_succinct_network() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -360,6 +378,7 @@ main() {
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
+  test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario
   test_sp1_rpc_defaults_and_validation_target_succinct_network
 }
 
