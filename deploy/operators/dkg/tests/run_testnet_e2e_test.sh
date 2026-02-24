@@ -195,7 +195,10 @@ test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission() {
   assert_contains "$script_text" "z_sendmany" "live bridge flow submits real Juno shielded memo tx"
   assert_contains "$script_text" "z_getoperationstatus" "live bridge flow waits for Juno z_sendmany operation completion"
   assert_contains "$script_text" "juno_wait_tx_confirmed" "live bridge flow waits for mined Juno deposit tx"
-  assert_contains "$script_text" "--nonce \"\$run_deposit_nonce\"" "deposit queue payload uses bridge-api nonce from the real deposit memo"
+  assert_contains "$script_text" "/v1/deposits/submit" "deposit submit is performed through bridge-api write endpoint"
+  assert_contains "$script_text" "/v1/withdrawals/request" "withdraw request is performed through bridge-api write endpoint"
+  assert_not_contains "$script_text" "go run ./cmd/queue-publish" "runner no longer publishes queue messages directly"
+  assert_not_contains "$script_text" "go run ./cmd/deposit-event" "runner no longer builds deposit queue payload directly"
   assert_contains "$script_text" "/v1/status/deposit/" "live bridge flow checks deposit status through bridge-api"
   assert_contains "$script_text" "/v1/status/withdrawal/" "live bridge flow checks withdrawal status through bridge-api"
 }

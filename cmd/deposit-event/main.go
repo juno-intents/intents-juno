@@ -3,7 +3,6 @@ package main
 import (
 	"crypto/rand"
 	"encoding/binary"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -15,9 +14,7 @@ import (
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/juno-intents/intents-juno/internal/idempotency"
-	"github.com/juno-intents/intents-juno/internal/memo"
-	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/depositevent"
 )
 
 const (
@@ -28,15 +25,7 @@ const (
 	depositWitnessCMXOffset       = depositWitnessActionOffset + 32 + 32
 )
 
-type depositEventPayload struct {
-	Version          string `json:"version"`
-	CM               string `json:"cm"`
-	LeafIndex        uint64 `json:"leafIndex"`
-	Amount           uint64 `json:"amount"`
-	Memo             string `json:"memo"`
-	ProofWitnessItem string `json:"proofWitnessItem"`
-	DepositID        string `json:"depositId"`
-}
+type depositEventPayload = depositevent.Payload
 
 func main() {
 	if err := runMain(os.Args[1:], os.Stdout); err != nil {
@@ -132,42 +121,9 @@ func parseNonce(raw string) (uint64, error) {
 }
 
 func buildDepositEventPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, witnessItem []byte) (depositEventPayload, error) {
-	cm, leafIndex, err := parseDepositWitnessItem(witnessItem)
-	if err != nil {
-		return depositEventPayload{}, err
-	}
-
-	var bridge20 [20]byte
-	copy(bridge20[:], bridge[:])
-	var recipient20 [20]byte
-	copy(recipient20[:], recipient[:])
-
-	memoValue := memo.DepositMemoV1{
-		BaseChainID:   baseChainID,
-		BridgeAddr:    bridge20,
-		BaseRecipient: recipient20,
-		Nonce:         nonce,
-		Flags:         0,
-	}
-	memoBytes := memoValue.Encode()
-	depositID := idempotency.DepositIDV1([32]byte(cm), leafIndex)
-
-	return depositEventPayload{
-		Version:          "deposits.event.v1",
-		CM:               cm.Hex(),
-		LeafIndex:        leafIndex,
-		Amount:           amount,
-		Memo:             "0x" + hex.EncodeToString(memoBytes[:]),
-		ProofWitnessItem: "0x" + hex.EncodeToString(witnessItem),
-		DepositID:        "0x" + hex.EncodeToString(depositID[:]),
-	}, nil
+	return depositevent.BuildPayload(baseChainID, bridge, recipient, amount, nonce, witnessItem)
 }
 
 func parseDepositWitnessItem(item []byte) (common.Hash, uint64, error) {
-	if len(item) != proverinput.DepositWitnessItemLen {
-		return common.Hash{}, 0, fmt.Errorf("witness item len mismatch: got=%d want=%d", len(item), proverinput.DepositWitnessItemLen)
-	}
-	leafIndex := uint64(binary.LittleEndian.Uint32(item[depositWitnessLeafIndexOffset : depositWitnessLeafIndexOffset+4]))
-	cm := common.BytesToHash(item[depositWitnessCMXOffset : depositWitnessCMXOffset+32])
-	return cm, leafIndex, nil
+	return depositevent.ParseWitnessItem(item)
 }

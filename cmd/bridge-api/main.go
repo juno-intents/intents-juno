@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,7 +16,9 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeapi"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
+	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
+	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 func main() {
@@ -36,6 +39,18 @@ func main() {
 
 		memoCacheTTL        = flag.Duration("memo-cache-ttl", 30*time.Second, "TTL for deposit memo response cache")
 		memoCacheMaxEntries = flag.Int("memo-cache-max-entries", 10000, "maximum cached deposit memo responses")
+
+		queueDriver        = flag.String("queue-driver", queue.DriverKafka, "queue driver for submit endpoints (kafka|stdio)")
+		queueBrokers       = flag.String("queue-brokers", "", "queue brokers (comma-separated); empty disables write endpoints")
+		depositEventTopic  = flag.String("deposit-event-topic", "deposits.event.v1", "queue topic for deposit submit events")
+		withdrawEventTopic = flag.String("withdraw-request-topic", "withdrawals.requested.v1", "queue topic for withdrawal request events")
+
+		withdrawRPCURL       = flag.String("withdraw-rpc-url", "", "base rpc URL for withdrawal request endpoint")
+		withdrawChainID      = flag.Uint64("withdraw-chain-id", 0, "base chain ID for withdrawal request endpoint")
+		withdrawOwnerKeyHex  = flag.String("withdraw-owner-key-hex", "", "owner private key hex for withdrawal request endpoint")
+		withdrawOwnerKeyFile = flag.String("withdraw-owner-key-file", "", "owner private key file for withdrawal request endpoint")
+		wjunoAddress         = flag.String("wjuno-address", "", "wJUNO contract address for withdrawal request endpoint")
+		actionTimeout        = flag.Duration("action-timeout", 3*time.Minute, "timeout for submit endpoint actions")
 
 		readHeaderTimeout = flag.Duration("read-header-timeout", 5*time.Second, "http.Server ReadHeaderTimeout")
 		readTimeout       = flag.Duration("read-timeout", 10*time.Second, "http.Server ReadTimeout")
@@ -72,6 +87,14 @@ func main() {
 	}
 	if *memoCacheTTL <= 0 || *memoCacheMaxEntries <= 0 {
 		fmt.Fprintln(os.Stderr, "error: memo cache settings must be > 0")
+		os.Exit(2)
+	}
+	if *actionTimeout <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --action-timeout must be > 0")
+		os.Exit(2)
+	}
+	if strings.TrimSpace(*withdrawOwnerKeyHex) != "" && strings.TrimSpace(*withdrawOwnerKeyFile) != "" {
+		fmt.Fprintln(os.Stderr, "error: use only one of --withdraw-owner-key-hex or --withdraw-owner-key-file")
 		os.Exit(2)
 	}
 
@@ -111,11 +134,59 @@ func main() {
 		os.Exit(2)
 	}
 
+	var actionSvc bridgeapi.ActionService
+	if strings.TrimSpace(*queueBrokers) != "" {
+		withdrawKeyHex := strings.TrimSpace(*withdrawOwnerKeyHex)
+		if strings.TrimSpace(*withdrawOwnerKeyFile) != "" {
+			keyBytes, readErr := os.ReadFile(strings.TrimSpace(*withdrawOwnerKeyFile))
+			if readErr != nil {
+				log.Error("read withdraw owner key file", "err", readErr)
+				os.Exit(2)
+			}
+			withdrawKeyHex = strings.TrimSpace(string(keyBytes))
+		}
+		if strings.TrimSpace(*withdrawRPCURL) == "" || *withdrawChainID == 0 || strings.TrimSpace(withdrawKeyHex) == "" || !common.IsHexAddress(strings.TrimSpace(*wjunoAddress)) {
+			fmt.Fprintln(os.Stderr, "error: write endpoints require --queue-brokers, --withdraw-rpc-url, --withdraw-chain-id, --wjuno-address, and withdraw owner key (--withdraw-owner-key-hex or --withdraw-owner-key-file)")
+			os.Exit(2)
+		}
+		producer, producerErr := queue.NewProducer(queue.ProducerConfig{
+			Driver:  *queueDriver,
+			Brokers: queue.SplitCommaList(*queueBrokers),
+		})
+		if producerErr != nil {
+			log.Error("init queue producer", "err", producerErr)
+			os.Exit(2)
+		}
+		defer producer.Close()
+
+		actionSvc, err = bridgeapi.NewQueueActionService(bridgeapi.QueueActionServiceConfig{
+			BaseChainID:   uint32(*baseChainID),
+			BridgeAddr:    common.HexToAddress(*bridgeAddr),
+			DepositTopic:  *depositEventTopic,
+			WithdrawTopic: *withdrawEventTopic,
+			Producer:      producer,
+			WithdrawCfg: withdrawrequest.Config{
+				RPCURL:       *withdrawRPCURL,
+				ChainID:      *withdrawChainID,
+				OwnerKeyHex:  withdrawKeyHex,
+				WJunoAddress: common.HexToAddress(strings.TrimSpace(*wjunoAddress)),
+				BridgeAddr:   common.HexToAddress(*bridgeAddr),
+				Timeout:      *actionTimeout,
+			},
+		})
+		if err != nil {
+			log.Error("init action service", "err", err)
+			os.Exit(2)
+		}
+		log.Info("bridge-api write endpoints enabled", "queueDriver", *queueDriver, "depositTopic", *depositEventTopic, "withdrawTopic", *withdrawEventTopic)
+	}
+
 	handler, err := bridgeapi.NewHandler(bridgeapi.Config{
 		BaseChainID:             uint32(*baseChainID),
 		BridgeAddress:           common.HexToAddress(*bridgeAddr),
 		OWalletUA:               *oWalletUA,
 		RefundWindowSeconds:     *refundWindowSeconds,
+		ActionService:           actionSvc,
 		RateLimitPerIPPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:          *rateLimitBurst,
 		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,

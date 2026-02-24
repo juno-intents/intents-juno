@@ -20,6 +20,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/memo"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
+	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 var ErrInvalidConfig = errors.New("bridgeapi: invalid config")
@@ -30,6 +31,7 @@ type Config struct {
 	OWalletUA           string
 	RefundWindowSeconds uint64
 	NonceFn             func() (uint64, error)
+	ActionService       ActionService
 
 	RateLimitPerIPPerSecond float64
 	RateLimitBurst          int
@@ -96,6 +98,7 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 		cfg:         cfg,
 		deposits:    deposits,
 		withdrawals: withdrawals,
+		actions:     cfg.ActionService,
 		limiter: newIPRateLimiter(
 			cfg.RateLimitPerIPPerSecond,
 			float64(cfg.RateLimitBurst),
@@ -108,7 +111,9 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /v1/config", h.handleConfig)
 	mux.HandleFunc("GET /v1/deposit-memo", h.handleDepositMemo)
+	mux.HandleFunc("POST /v1/deposits/submit", h.handleDepositSubmit)
 	mux.HandleFunc("GET /v1/status/deposit/{depositId}", h.handleDepositStatus)
+	mux.HandleFunc("POST /v1/withdrawals/request", h.handleWithdrawalRequest)
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Health checks must never be throttled.
@@ -139,6 +144,7 @@ type handler struct {
 
 	deposits    DepositReader
 	withdrawals WithdrawalReader
+	actions     ActionService
 	limiter     *ipRateLimiter
 	memoCache   *memoResponseCache
 }
@@ -223,6 +229,80 @@ func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
 	writeJSONBytes(w, http.StatusOK, body)
 }
 
+type depositSubmitRequestBody struct {
+	BaseRecipient    string `json:"baseRecipient"`
+	Amount           string `json:"amount"`
+	Nonce            string `json:"nonce"`
+	ProofWitnessItem string `json:"proofWitnessItem"`
+}
+
+func (h *handler) handleDepositSubmit(w http.ResponseWriter, r *http.Request) {
+	if h.actions == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "deposit_submit_unavailable",
+		})
+		return
+	}
+
+	body, ok := decodeJSONBody[depositSubmitRequestBody](w, r)
+	if !ok {
+		return
+	}
+	if !common.IsHexAddress(strings.TrimSpace(body.BaseRecipient)) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_base_recipient",
+		})
+		return
+	}
+	amount, err := parseUint64BodyValue(body.Amount)
+	if err != nil || amount == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_amount",
+		})
+		return
+	}
+	nonce, err := parseUint64BodyValue(body.Nonce)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_nonce",
+		})
+		return
+	}
+	witnessItem, err := decodeHexBytes(body.ProofWitnessItem)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_proof_witness_item",
+		})
+		return
+	}
+
+	payload, err := h.actions.SubmitDeposit(r.Context(), DepositSubmitInput{
+		BaseRecipient:    common.HexToAddress(strings.TrimSpace(body.BaseRecipient)),
+		Amount:           amount,
+		Nonce:            nonce,
+		ProofWitnessItem: witnessItem,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"version": "v1",
+			"error":   "submit_failed",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":   "v1",
+		"queued":    true,
+		"depositId": payload.DepositID,
+		"amount":    strconv.FormatUint(payload.Amount, 10),
+		"event":     payload,
+	})
+}
+
 func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := parseHex32(r.PathValue("depositId"))
 	if err != nil {
@@ -263,6 +343,66 @@ func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
 		"amount":        strconv.FormatUint(job.Deposit.Amount, 10),
 		"baseRecipient": "0x" + hex.EncodeToString(job.Deposit.BaseRecipient[:]),
 		"txHash":        txHash,
+	})
+}
+
+type withdrawalRequestBody struct {
+	Amount                 string `json:"amount"`
+	RecipientRawAddressHex string `json:"recipientRawAddressHex"`
+}
+
+func (h *handler) handleWithdrawalRequest(w http.ResponseWriter, r *http.Request) {
+	if h.actions == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "withdraw_request_unavailable",
+		})
+		return
+	}
+
+	body, ok := decodeJSONBody[withdrawalRequestBody](w, r)
+	if !ok {
+		return
+	}
+	amount, err := parseUint64BodyValue(body.Amount)
+	if err != nil || amount == 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_amount",
+		})
+		return
+	}
+	recipientUA, err := withdrawrequest.ParseFixedHex(body.RecipientRawAddressHex, 43)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_recipient_raw_address_hex",
+		})
+		return
+	}
+	payload, err := h.actions.RequestWithdrawal(r.Context(), WithdrawalRequestInput{
+		Amount:      amount,
+		RecipientUA: recipientUA,
+	})
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{
+			"version": "v1",
+			"error":   "request_failed",
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":       "v1",
+		"queued":        true,
+		"withdrawalId":  payload.WithdrawalID,
+		"requester":     payload.Requester,
+		"amount":        strconv.FormatUint(payload.Amount, 10),
+		"recipientUA":   payload.RecipientUA,
+		"expiry":        strconv.FormatUint(payload.Expiry, 10),
+		"feeBps":        payload.FeeBps,
+		"approveTxHash": payload.ApproveTxHash,
+		"requestTxHash": payload.RequestTxHash,
+		"event":         payload,
 	})
 }
 
@@ -349,6 +489,38 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSONBody[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
+	var out T
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&out); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_json",
+		})
+		return out, false
+	}
+	return out, true
+}
+
+func parseUint64BodyValue(raw string) (uint64, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0, errors.New("missing value")
+	}
+	return strconv.ParseUint(raw, 10, 64)
+}
+
+func decodeHexBytes(raw string) ([]byte, error) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "0x")
+	raw = strings.TrimPrefix(raw, "0X")
+	if raw == "" {
+		return nil, errors.New("empty hex value")
+	}
+	return hex.DecodeString(raw)
 }
 
 func writeJSONBytes(w http.ResponseWriter, code int, body []byte) {

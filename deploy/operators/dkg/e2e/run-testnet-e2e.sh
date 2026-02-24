@@ -4684,6 +4684,14 @@ command_run() {
         --postgres-dsn "$shared_postgres_dsn" \
         --base-chain-id "$base_chain_id" \
         --bridge-address "$deployed_bridge_address" \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --deposit-event-topic "$deposit_event_topic" \
+        --withdraw-request-topic "$withdraw_request_topic" \
+        --withdraw-rpc-url "$base_rpc_url" \
+        --withdraw-chain-id "$base_chain_id" \
+        --withdraw-owner-key-file "$bridge_deployer_key_file" \
+        --wjuno-address "$deployed_wjuno_address" \
         --owallet-ua "$withdraw_coordinator_juno_change_address" \
         --refund-window-seconds "$bridge_refund_window_seconds" \
         >"$bridge_api_log" 2>&1
@@ -4818,22 +4826,26 @@ command_run() {
 
     deposit_event_payload="$workdir/reports/deposit-event.json"
     if (( relayer_status == 0 )); then
-      (
-        cd "$REPO_ROOT"
-        go run ./cmd/deposit-event \
-          --base-chain-id "$base_chain_id" \
-          --bridge-address "$deployed_bridge_address" \
-          --recipient "$bridge_recipient_address" \
-          --amount "$run_deposit_amount_zat" \
-          --nonce "$run_deposit_nonce" \
-          --witness-item-file "$run_deposit_witness_file" \
-          --output "$deposit_event_payload"
-        go run ./cmd/queue-publish \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
-          --topic "$deposit_event_topic" \
-          --payload-file "$deposit_event_payload"
-      ) || relayer_status=1
+      local run_deposit_witness_hex run_deposit_submit_body
+      run_deposit_witness_hex="$(od -An -vtx1 "$run_deposit_witness_file" | tr -d '\r\n[:space:]')"
+      [[ -n "$run_deposit_witness_hex" ]] || relayer_status=1
+      if (( relayer_status == 0 )); then
+        run_deposit_submit_body="$(
+          jq -cn \
+            --arg base_recipient "$bridge_recipient_address" \
+            --arg amount "$run_deposit_amount_zat" \
+            --arg nonce "$run_deposit_nonce" \
+            --arg proof_witness_item "0x$run_deposit_witness_hex" \
+            '{baseRecipient:$base_recipient,amount:$amount,nonce:$nonce,proofWitnessItem:$proof_witness_item}'
+        )"
+        if ! curl -fsS \
+          -X POST \
+          -H "Content-Type: application/json" \
+          --data "$run_deposit_submit_body" \
+          "${bridge_api_url}/v1/deposits/submit" >"$deposit_event_payload"; then
+          relayer_status=1
+        fi
+      fi
     fi
     if (( relayer_status == 0 )); then
       run_deposit_id="$(jq -r '.depositId // empty' "$deposit_event_payload" 2>/dev/null || true)"
@@ -4868,23 +4880,22 @@ command_run() {
       relayer_status=1
     fi
     withdraw_request_payload="$workdir/reports/withdraw-request-event.json"
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/withdraw-request \
-        --rpc-url "$base_rpc_url" \
-        --chain-id "$base_chain_id" \
-        --owner-key-file "$bridge_deployer_key_file" \
-        --wjuno-address "$deployed_wjuno_address" \
-        --bridge-address "$deployed_bridge_address" \
-        --amount "10000" \
-        --recipient-raw-address-hex "$withdraw_recipient_raw_hex" \
-        --output "$withdraw_request_payload"
-      go run ./cmd/queue-publish \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --topic "$withdraw_request_topic" \
-        --payload-file "$withdraw_request_payload"
-    ) || relayer_status=1
+    if (( relayer_status == 0 )); then
+      local withdraw_submit_body
+      withdraw_submit_body="$(
+        jq -cn \
+          --arg amount "10000" \
+          --arg recipient_raw_address_hex "$withdraw_recipient_raw_hex" \
+          '{amount:$amount,recipientRawAddressHex:$recipient_raw_address_hex}'
+      )"
+      if ! curl -fsS \
+        -X POST \
+        -H "Content-Type: application/json" \
+        --data "$withdraw_submit_body" \
+        "${bridge_api_url}/v1/withdrawals/request" >"$withdraw_request_payload"; then
+        relayer_status=1
+      fi
+    fi
     if (( relayer_status == 0 )); then
       run_withdrawal_id="$(jq -r '.withdrawalId // empty' "$withdraw_request_payload" 2>/dev/null || true)"
       run_withdraw_requester="$(jq -r '.requester // empty' "$withdraw_request_payload" 2>/dev/null || true)"
