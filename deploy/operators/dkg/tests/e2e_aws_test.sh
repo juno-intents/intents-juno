@@ -68,6 +68,9 @@ test_remote_prepare_script_waits_for_cloud_init_and_retries_apt() {
   assert_contains "$script_text" "ln -sf \"\$HOME/.local/bin/sp1-prover-adapter\" \"\$HOME/.local/bin/sp1\"" "sp1 adapter compatibility symlink"
   assert_contains "$script_text" "cargo --version" "cargo version check"
   assert_contains "$script_text" "rustc --version" "rustc version check"
+  assert_contains "$script_text" "git rev-parse --verify --quiet deadbeef^{commit}" "runner prepare checks requested commit availability before checkout"
+  assert_contains "$script_text" "falling back to origin/main" "runner prepare falls back to origin/main when requested commit is unavailable"
+  assert_contains "$script_text" "git checkout origin/main" "runner prepare fallback checks out origin/main"
 }
 
 test_runner_shared_probe_script_supports_managed_endpoints() {
@@ -106,6 +109,9 @@ test_remote_operator_prepare_script_boots_full_stack_services() {
   assert_contains "$script_text" "startup_services=(" "operator prep separates boot-critical startup services"
   assert_not_contains "$script_text" "startup_services=("$'\n'"  junocashd.service"$'\n'"  juno-scan.service"$'\n'"  checkpoint-signer.service" "operator prep defers checkpoint services until shared config is provisioned"
   assert_contains "$script_text" "systemctl cat \"\$svc\"" "operator prep validates service units exist"
+  assert_contains "$script_text" "git rev-parse --verify --quiet deadbeef^{commit}" "operator prepare checks requested commit availability before checkout"
+  assert_contains "$script_text" "falling back to origin/main" "operator prepare falls back to origin/main when requested commit is unavailable"
+  assert_contains "$script_text" "git checkout origin/main" "operator prepare fallback checks out origin/main when commit is missing"
   assert_contains "$script_text" "sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno" "operator prep normalizes stack config dir permissions for ubuntu services"
   assert_contains "$script_text" "required_stack_access_files=(" "operator prep defines required stack access files"
   assert_contains "$script_text" "/etc/intents-juno/junocashd.conf" "operator prep requires junocashd config file"
@@ -841,6 +847,8 @@ test_non_aws_workflow_wires_shared_ipfs_for_local_e2e() {
   assert_contains "$workflow_text" "E2E_SHARED_IPFS_API_URL=http://127.0.0.1:5001" "non-aws workflow exports shared ipfs api url"
   assert_contains "$workflow_text" "sp1_deposit_owallet_ivk_hex" "non-aws workflow exposes deposit ivk input"
   assert_contains "$workflow_text" "sp1_withdraw_owallet_ovk_hex" "non-aws workflow exposes withdraw ovk input"
+  assert_contains "$workflow_text" 'default: "https://rpc.mainnet.succinct.xyz"' "non-aws workflow defaults sp1 rpc to succinct mainnet network rpc"
+  assert_not_contains "$workflow_text" 'default: "https://mainnet.base.org"' "non-aws workflow no longer defaults sp1 rpc to base chain endpoint"
   assert_contains "$workflow_text" "sp1_witness_juno_scan_url" "non-aws workflow exposes juno-scan witness input"
   assert_contains "$workflow_text" "sp1_witness_juno_rpc_url" "non-aws workflow exposes junocashd witness input"
   assert_not_contains "$workflow_text" "sp1_witness_config_json" "non-aws workflow no longer uses witness config blob"
@@ -1055,6 +1063,8 @@ test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
   assert_contains "$workflow_text" "--operator-ami-id" "aws e2e workflow forwards resolved operator ami id"
   assert_contains "$workflow_text" "sp1_deposit_owallet_ivk_hex" "aws workflow exposes deposit ivk input"
   assert_contains "$workflow_text" "sp1_withdraw_owallet_ovk_hex" "aws workflow exposes withdraw ovk input"
+  assert_contains "$workflow_text" 'default: "https://rpc.mainnet.succinct.xyz"' "aws workflow defaults sp1 rpc to succinct mainnet network rpc"
+  assert_not_contains "$workflow_text" 'default: "https://mainnet.base.org"' "aws workflow no longer defaults sp1 rpc to base chain endpoint"
   assert_not_contains "$workflow_text" "sp1_witness_config_json" "aws workflow no longer uses witness config blob"
   assert_not_contains "$workflow_text" "--sp1-witness-juno-scan-url" "aws workflow does not pass external witness scan endpoint"
   assert_not_contains "$workflow_text" "--sp1-witness-juno-rpc-url" "aws workflow does not pass external witness rpc endpoint"
@@ -1180,6 +1190,12 @@ test_aws_wrapper_preflight_runs_required_checks() {
   assert_contains "$wrapper_script_text" "run_preflight_aws_reachability_probes()" "aws wrapper defines preflight aws reachability probe helper"
   assert_contains "$wrapper_script_text" "run_preflight_script_tests()" "aws wrapper defines preflight script test runner"
   assert_contains "$wrapper_script_text" "validate_sp1_credit_guardrail_preflight()" "aws wrapper defines sp1 credit guardrail preflight helper"
+  assert_contains "$wrapper_script_text" "run_with_local_timeout" "aws wrapper preflight uses bounded local timeout helpers"
+  assert_contains "$wrapper_script_text" "run_with_local_timeout 90 env" "sp1 guardrail balance probe is timeout-bounded"
+  assert_contains "$wrapper_script_text" "sp1 balance probe returned error" "aws wrapper preflight surfaces adapter-reported balance errors"
+  assert_contains "$wrapper_script_text" "must be a Succinct prover network RPC" "aws wrapper preflight rejects base chain rpc endpoints for sp1"
+  assert_not_contains "$wrapper_script_text" "(( balance_wei < required_buffer_wei ))" "aws wrapper preflight avoids shell integer overflow for guardrail comparison"
+  assert_contains "$wrapper_script_text" 'python3 - "$balance_wei" "$required_buffer_wei"' "aws wrapper preflight uses big-int guardrail comparison"
   assert_contains "$wrapper_script_text" "preflight missing required forwarded argument after '--'" "aws wrapper preflight hard-fails on missing required forwarded args"
   assert_contains "$wrapper_script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"' "aws wrapper preflight executes aws identity/reachability probes"
   assert_contains "$wrapper_script_text" "run_preflight_script_tests" "aws wrapper preflight executes shell test suite before run"
@@ -1200,6 +1216,28 @@ test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage() {
   assert_contains "$wrapper_script_text" "failure-signatures.yaml" "aws wrapper uses tracked failure signature catalog"
 }
 
+test_aws_wrapper_uses_portable_mktemp_templates() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_not_contains "$wrapper_script_text" 'mktemp "${TMPDIR:-/tmp}/aws-live-e2e-preflight.XXXXXX.log"' "aws wrapper preflight mktemp template is portable on BSD/GNU"
+  assert_not_contains "$wrapper_script_text" 'mktemp "${TMPDIR:-/tmp}/aws-live-e2e-canary.XXXXXX.log"' "aws wrapper canary mktemp template is portable on BSD/GNU"
+  assert_contains "$wrapper_script_text" 'mktemp "${TMPDIR:-/tmp}/aws-live-e2e-preflight.XXXXXX"' "aws wrapper preflight mktemp template ends with XXXXXX"
+  assert_contains "$wrapper_script_text" 'mktemp "${TMPDIR:-/tmp}/aws-live-e2e-canary.XXXXXX"' "aws wrapper canary mktemp template ends with XXXXXX"
+}
+
+test_aws_wrapper_timeout_fallback_kills_process_groups() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "if have_cmd python3; then" "aws wrapper timeout helper uses python3 fallback before perl alarm fallback"
+  assert_contains "$wrapper_script_text" 'python3 - "$timeout_seconds" "$@" <<'\''PY'\''' "aws wrapper timeout helper forwards command args into python fallback"
+  assert_contains "$wrapper_script_text" "proc = subprocess.Popen(command, preexec_fn=os.setsid)" "aws wrapper timeout helper isolates fallback command in its own process group"
+  assert_contains "$wrapper_script_text" "os.killpg(proc.pid, signal.SIGTERM)" "aws wrapper timeout helper sends SIGTERM to full fallback process group on timeout"
+  assert_contains "$wrapper_script_text" "os.killpg(proc.pid, signal.SIGKILL)" "aws wrapper timeout helper escalates to SIGKILL for stubborn fallback process groups"
+  assert_contains "$wrapper_script_text" "sys.exit(124)" "aws wrapper timeout helper preserves timeout exit code semantics"
+}
+
 test_failure_signature_catalog_exists() {
   local signatures_path signatures_text
   signatures_path="$REPO_ROOT/deploy/operators/dkg/e2e/failure-signatures.yaml"
@@ -1213,6 +1251,7 @@ test_failure_signature_catalog_exists() {
   assert_contains "$signatures_text" "\"class\"" "failure signature catalog entries include failure class"
   assert_contains "$signatures_text" "\"owner\"" "failure signature catalog entries include owning script"
   assert_contains "$signatures_text" "\"suggested_immediate_action\"" "failure signature catalog entries include suggested immediate action"
+  jq -e '.signatures | type == "array"' "$signatures_path" >/dev/null
 }
 
 main() {
@@ -1253,6 +1292,8 @@ main() {
   test_aws_wrapper_exposes_preflight_canary_and_status_json
   test_aws_wrapper_preflight_runs_required_checks
   test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage
+  test_aws_wrapper_uses_portable_mktemp_templates
+  test_aws_wrapper_timeout_fallback_kills_process_groups
   test_failure_signature_catalog_exists
 }
 

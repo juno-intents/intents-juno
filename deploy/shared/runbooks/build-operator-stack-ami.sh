@@ -352,6 +352,8 @@ CFG
   cat > /tmp/operator-stack.env <<ENV
 JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
+JUNO_SCAN_UA_HRP=jtest
+JUNO_SCAN_CONFIRMATIONS=1
 CHECKPOINT_SIGNER_PRIVATE_KEY=\${checkpoint_key}
 OPERATOR_ADDRESS=\${operator_address}
 CHECKPOINT_OPERATORS=\${operator_address}
@@ -728,6 +730,8 @@ exec /usr/local/bin/juno-scan \
   -rpc-pass "\$JUNO_RPC_PASS" \
   -db-driver rocksdb \
   -db-path /var/lib/intents-juno/juno-scan.db \
+  -ua-hrp "${JUNO_SCAN_UA_HRP:-jtest}" \
+  -confirmations "${JUNO_SCAN_CONFIRMATIONS:-1}" \
   -listen 127.0.0.1:8080
 EOF_SCAN
   sudo install -m 0755 /tmp/intents-juno-juno-scan.sh /usr/local/bin/intents-juno-juno-scan.sh

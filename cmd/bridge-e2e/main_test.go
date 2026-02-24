@@ -493,7 +493,7 @@ func TestParseArgs_SP1AutoRequiresRequestorKeyFile(t *testing.T) {
 		"--operator-key-file", "/tmp/op3",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--sp1-withdraw-program-url", "https://example.invalid/withdraw.elf",
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
@@ -553,7 +553,7 @@ func TestParseArgs_SP1AutoValid(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-market-address", "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82",
 		"--sp1-verifier-router-address", "0x0b144e07a0826182b6b59788c34b32bfa86fb711",
@@ -629,7 +629,7 @@ func TestParseArgs_SP1AutoQueueSubmissionModeValidWithoutRequestorKey(t *testing
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-proof-submission-mode", "queue",
 		"--sp1-proof-queue-brokers", "127.0.0.1:9092",
 		"--sp1-proof-request-topic", "proof.requests.v1",
@@ -686,7 +686,7 @@ func TestParseArgs_SP1AutoQueueSubmissionModeRequiresQueueBrokers(t *testing.T) 
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-proof-submission-mode", "queue",
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--sp1-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
@@ -734,7 +734,7 @@ func TestParseArgs_SP1AutoRejectsUnknownProofSubmissionMode(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-proof-submission-mode", "bogus",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -775,7 +775,7 @@ func TestParseArgs_SP1AutoRejectsJournalInputMode(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "journal-bytes-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
@@ -816,7 +816,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeValid(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -869,7 +869,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeRequiresExplicitWitnessInputs(t *testi
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -921,7 +921,7 @@ func TestParseArgs_DeployOnlyAllowsMissingGuestWitnessInputs(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-requestor-key-file", requestor,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
 		"--sp1-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
@@ -963,7 +963,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeRequiresInputS3Bucket(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -974,6 +974,29 @@ func TestParseArgs_SP1AutoGuestWitnessModeRequiresInputS3Bucket(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--sp1-input-s3-bucket") {
 		t.Fatalf("expected missing s3 bucket error, got: %v", err)
+	}
+}
+
+func TestParseArgs_SP1AutoRejectsBaseChainRPCURL(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-key-file", "/tmp/op1",
+		"--operator-key-file", "/tmp/op2",
+		"--operator-key-file", "/tmp/op3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--sp1-auto",
+		"--sp1-bin", "sp1",
+		"--sp1-rpc-url", "https://mainnet.base.org",
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "Succinct prover network RPC") {
+		t.Fatalf("expected sp1 network rpc endpoint class error, got: %v", err)
 	}
 }
 
@@ -1004,7 +1027,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeRequiresDepositFinalOrchardRoot(t *tes
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -1050,7 +1073,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeRequiresDepositCheckpointHeight(t *tes
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -1098,7 +1121,7 @@ func TestParseArgs_CheckpointFieldsDefaultWithdrawToDeposit(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -1157,7 +1180,7 @@ func TestParseArgs_CheckpointFieldsRequireWithdrawPair(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -1199,7 +1222,7 @@ func TestParseArgs_SP1AutoGuestWitnessModeRejectsPartialManualInputs(t *testing.
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-input-mode", "guest-witness-v1",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
@@ -1234,7 +1257,7 @@ func TestParseArgs_SP1AutoRejectsInvalidMarketAddress(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-market-address", "not-an-address",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
@@ -1267,7 +1290,7 @@ func TestParseArgs_SP1AutoRejectsInvalidVerifierRouterAddress(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-verifier-router-address", "bad-address",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
@@ -1300,7 +1323,7 @@ func TestParseArgs_SP1AutoRejectsInvalidSetVerifierAddress(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-set-verifier-address", "bad-address",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
@@ -1333,7 +1356,7 @@ func TestParseArgs_SP1AutoRejectsZeroMaxPricePerPGU(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--sp1-withdraw-program-url", "https://example.invalid/withdraw.elf",
@@ -1366,7 +1389,7 @@ func TestParseArgs_SP1AutoRejectsZeroMinAuctionPeriod(t *testing.T) {
 		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
 		"--sp1-auto",
 		"--sp1-bin", "sp1",
-		"--sp1-rpc-url", "https://mainnet.base.org",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
 		"--sp1-requestor-key-file", requestorKey,
 		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
 		"--sp1-withdraw-program-url", "https://example.invalid/withdraw.elf",
@@ -2156,6 +2179,85 @@ func TestWaitDepositUsedAtBlock_ReturnsLastError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "header not found") {
 		t.Fatalf("expected last error in message, got: %v", err)
+	}
+}
+
+func TestWaitUint64AtLeastAttempts_RetriesUntilMatch(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	got, err := waitUint64AtLeastAttempts(
+		context.Background(),
+		"threshold",
+		3,
+		5,
+		0,
+		func() (uint64, error) {
+			calls++
+			if calls < 3 {
+				return 0, nil
+			}
+			return 3, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitUint64AtLeastAttempts: %v", err)
+	}
+	if got != 3 {
+		t.Fatalf("unexpected value: got=%d want=3", got)
+	}
+	if calls != 3 {
+		t.Fatalf("unexpected calls: got=%d want=3", calls)
+	}
+}
+
+func TestWaitUint64AtLeastAttempts_ReturnsLastValueOnMismatch(t *testing.T) {
+	t.Parallel()
+
+	var calls int
+	got, err := waitUint64AtLeastAttempts(
+		context.Background(),
+		"operatorCount",
+		5,
+		3,
+		0,
+		func() (uint64, error) {
+			calls++
+			return 4, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitUint64AtLeastAttempts: %v", err)
+	}
+	if got != 4 {
+		t.Fatalf("unexpected value: got=%d want=4", got)
+	}
+	if calls != 3 {
+		t.Fatalf("unexpected calls: got=%d want=3", calls)
+	}
+}
+
+func TestWaitUint64AtLeastAttempts_ReturnsLastError(t *testing.T) {
+	t.Parallel()
+
+	got, err := waitUint64AtLeastAttempts(
+		context.Background(),
+		"threshold",
+		3,
+		2,
+		0,
+		func() (uint64, error) {
+			return 0, errors.New("rpc unavailable")
+		},
+	)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if got != 0 {
+		t.Fatalf("unexpected value: got=%d want=0", got)
+	}
+	if !strings.Contains(err.Error(), "rpc unavailable") {
+		t.Fatalf("expected wrapped rpc error, got: %v", err)
 	}
 }
 

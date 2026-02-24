@@ -231,11 +231,23 @@ async fn build_network_prover() -> Result<NetworkProver> {
 }
 
 fn read_required_private_key() -> Result<String> {
-    if let Some(value) = read_env_nonempty("NETWORK_PRIVATE_KEY") {
-        return Ok(value);
-    }
-    if let Some(value) = read_env_nonempty("SP1_NETWORK_PRIVATE_KEY") {
-        return Ok(value);
+    read_required_private_key_from(|name| read_env_nonempty(name))
+}
+
+fn read_required_private_key_from<F>(mut read_env: F) -> Result<String>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    for env_name in [
+        "NETWORK_PRIVATE_KEY",
+        "SP1_NETWORK_PRIVATE_KEY",
+        "PROOF_REQUESTOR_KEY",
+        "PROOF_FUNDER_KEY",
+        "SP1_REQUESTOR_PRIVATE_KEY",
+    ] {
+        if let Some(value) = read_env(env_name) {
+            return Ok(value);
+        }
     }
     bail!("NETWORK_PRIVATE_KEY is required")
 }
@@ -370,6 +382,7 @@ fn write_json<T: Serialize>(value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn normalize_hex_32_accepts_prefixed_and_unprefixed() {
@@ -412,6 +425,33 @@ mod tests {
 
         assert_eq!(deposit_a, deposit_b);
         assert_ne!(deposit_a, withdraw);
+    }
+
+    #[test]
+    fn read_required_private_key_prefers_network_private_key() {
+        let mut envs = HashMap::new();
+        envs.insert("PROOF_FUNDER_KEY", "funder-key".to_owned());
+        envs.insert("NETWORK_PRIVATE_KEY", "network-key".to_owned());
+        let got = read_required_private_key_from(|name| envs.get(name).cloned())
+            .expect("resolve key from env map");
+        assert_eq!(got, "network-key");
+    }
+
+    #[test]
+    fn read_required_private_key_supports_funder_fallback() {
+        let mut envs = HashMap::new();
+        envs.insert("PROOF_FUNDER_KEY", "funder-key".to_owned());
+        let got = read_required_private_key_from(|name| envs.get(name).cloned())
+            .expect("resolve fallback key");
+        assert_eq!(got, "funder-key");
+    }
+
+    #[test]
+    fn read_required_private_key_errors_when_missing() {
+        let envs: HashMap<&str, String> = HashMap::new();
+        let err =
+            read_required_private_key_from(|name| envs.get(name).cloned()).expect_err("missing key");
+        assert!(err.to_string().contains("NETWORK_PRIVATE_KEY is required"));
     }
 
 }

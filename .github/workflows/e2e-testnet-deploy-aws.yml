@@ -63,7 +63,7 @@ on:
       sp1_rpc_url:
         description: "SP1 submission RPC URL"
         required: true
-        default: "https://mainnet.base.org"
+        default: "https://rpc.mainnet.succinct.xyz"
         type: string
       sp1_deposit_program_url:
         description: "Deposit guest program URL for SP1"

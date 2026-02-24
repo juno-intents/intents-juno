@@ -42,13 +42,13 @@ Options:
                                    (default: prefer dkg-admin when it supports sign-digest; else auto-generate e2e signer shim)
   --sp1-bin <path>           proof backend binary implementing prover request protocols
                                    (default: sp1-prover-adapter)
-  --sp1-rpc-url <url>        sp1 market RPC URL (default: https://mainnet.base.org)
+  --sp1-rpc-url <url>        sp1 prover network RPC URL (default: https://rpc.mainnet.succinct.xyz)
   --sp1-market-address <addr> sp1 market contract address
                                    (default: 0xFd152dADc5183870710FE54f939Eae3aB9F0fE82)
   --sp1-verifier-router-address <addr> sp1 verifier router address
-                                   (default: 0x0b144e07a0826182b6b59788c34b32bfa86fb711)
+                                   (default: 0x397A5f7f3dBd538f23DE225B51f532c34448dA9B)
   --sp1-set-verifier-address <addr> sp1 set verifier address
-                                   (default: 0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104)
+                                   (default: 0x397A5f7f3dBd538f23DE225B51f532c34448dA9B)
   --sp1-input-mode <mode>     sp1 input mode (guest-witness-v1 only, default: guest-witness-v1)
   --sp1-deposit-owallet-ivk-hex <hex>  64-byte oWallet IVK hex (required for guest-witness-v1)
   --sp1-withdraw-owallet-ovk-hex <hex> 32-byte oWallet OVK hex (required for guest-witness-v1)
@@ -111,6 +111,8 @@ Options:
                                    (default: 120)
   --output <path>                  summary json output (default: <workdir>/reports/testnet-e2e-summary.json)
   --force                          remove existing workdir before starting
+  --stop-after-stage <stage>      optional stage checkpoint to stop after successful completion
+                                   (witness_ready|shared_services_ready|checkpoint_validated|full; default: full)
 
 Environment:
   JUNO_FUNDER_PRIVATE_KEY_HEX      optional juno funder private key hex used for transparent witness funding.
@@ -1628,10 +1630,10 @@ command_run() {
   local sp1_auto="true"
   local sp1_proof_submission_mode="queue"
   local sp1_bin="sp1-prover-adapter"
-  local sp1_rpc_url="https://mainnet.base.org"
+  local sp1_rpc_url="https://rpc.mainnet.succinct.xyz"
   local sp1_market_address="0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-  local sp1_verifier_router_address="0x0b144e07a0826182b6b59788c34b32bfa86fb711"
-  local sp1_set_verifier_address="0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+  local sp1_verifier_router_address="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+  local sp1_set_verifier_address="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
   local sp1_input_mode="guest-witness-v1"
   local sp1_deposit_owallet_ivk_hex=""
   local sp1_withdraw_owallet_ovk_hex=""
@@ -1685,6 +1687,7 @@ command_run() {
   local refund_after_expiry_window_seconds="120"
   local output_path=""
   local force="false"
+  local stop_after_stage="full"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -2086,6 +2089,11 @@ command_run() {
         force="true"
         shift
         ;;
+      --stop-after-stage)
+        [[ $# -ge 2 ]] || die "missing value for --stop-after-stage"
+        stop_after_stage="$(lower "$2")"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -2158,6 +2166,11 @@ command_run() {
   [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
   [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
   [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
+  local sp1_rpc_url_lc
+  sp1_rpc_url_lc="$(lower "$sp1_rpc_url")"
+  if [[ "$sp1_rpc_url_lc" == *"mainnet.base.org"* || "$sp1_rpc_url_lc" == *"base-sepolia"* ]]; then
+    die "--sp1-rpc-url must be a Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not Base chain RPC: $sp1_rpc_url"
+  fi
   local guest_witness_extract_mode="true"
   [[ -n "$sp1_input_s3_bucket" ]] || die "--sp1-input-s3-bucket is required when --sp1-input-mode guest-witness-v1"
   if [[ -z "$withdraw_blob_bucket" ]]; then
@@ -2171,6 +2184,10 @@ command_run() {
   (( sp1_witness_metadata_timeout_seconds > 0 )) || die "--sp1-witness-metadata-timeout-seconds must be > 0"
   [[ "$sp1_witness_quorum_threshold" =~ ^[0-9]+$ ]] || die "--sp1-witness-quorum-threshold must be numeric"
   (( sp1_witness_quorum_threshold > 0 )) || die "--sp1-witness-quorum-threshold must be > 0"
+  case "$stop_after_stage" in
+    witness_ready|shared_services_ready|checkpoint_validated|full) ;;
+    *) die "--stop-after-stage must be one of: witness_ready, shared_services_ready, checkpoint_validated, full" ;;
+  esac
   if [[ -z "$sp1_witness_juno_scan_urls_csv" ]]; then
     sp1_witness_juno_scan_urls_csv="$sp1_witness_juno_scan_url"
   fi
@@ -2304,6 +2321,153 @@ command_run() {
   fi
 
   local bridge_juno_execution_tx_hash=""
+  local proof_services_mode="not-started"
+  local proof_requestor_log=""
+  local proof_funder_log=""
+  local proof_requestor_pid=""
+  local proof_funder_pid=""
+  local shared_ecs_region=""
+  local shared_ecs_started="false"
+  local stage_witness_ready="false"
+  local stage_shared_services_ready="false"
+  local stage_checkpoint_validated="false"
+  local stage_full="false"
+  local stage_stop_after_stage_reached="false"
+  local stage_shared_services_stable="false"
+  local stage_checkpoint_bridge_config_update_target="0"
+  local stage_checkpoint_bridge_config_update_success="0"
+  local stage_checkpoint_shared_validation_passed="false"
+
+  stop_centralized_proof_services() {
+    if [[ "$shared_ecs_enabled" == "true" ]]; then
+      if [[ "$shared_ecs_started" == "true" ]]; then
+        scale_shared_proof_services_ecs \
+          "$shared_ecs_region" \
+          "$shared_ecs_cluster_arn" \
+          "$shared_proof_requestor_service_name" \
+          "$shared_proof_funder_service_name" \
+          "0" || true
+      fi
+    else
+      if [[ -n "$proof_requestor_pid" ]]; then
+        kill "$proof_requestor_pid" >/dev/null 2>&1 || true
+        wait "$proof_requestor_pid" >/dev/null 2>&1 || true
+      fi
+      if [[ -n "$proof_funder_pid" ]]; then
+        kill "$proof_funder_pid" >/dev/null 2>&1 || true
+        wait "$proof_funder_pid" >/dev/null 2>&1 || true
+      fi
+    fi
+  }
+
+  write_stage_checkpoint_summary() {
+    local completed_stage="$1"
+    local witness_pool_operator_labels_json witness_healthy_operator_labels_json
+    local witness_quorum_operator_labels_json witness_failed_operator_labels_json
+    witness_pool_operator_labels_json="$(json_array_from_args "${witness_pool_operator_labels[@]}")"
+    witness_healthy_operator_labels_json="$(json_array_from_args "${witness_healthy_operator_labels[@]}")"
+    witness_quorum_operator_labels_json="$(json_array_from_args "${witness_quorum_operator_labels[@]}")"
+    witness_failed_operator_labels_json="$(json_array_from_args "${witness_failed_operator_labels[@]}")"
+
+    jq -n \
+      --arg generated_at "$(timestamp_utc)" \
+      --arg workdir "$workdir" \
+      --arg stop_after_stage "$stop_after_stage" \
+      --arg completed_stage "$completed_stage" \
+      --arg stage_witness_ready "$stage_witness_ready" \
+      --arg stage_shared_services_ready "$stage_shared_services_ready" \
+      --arg stage_checkpoint_validated "$stage_checkpoint_validated" \
+      --arg stage_full "$stage_full" \
+      --arg stage_shared_services_stable "$stage_shared_services_stable" \
+      --arg stage_checkpoint_bridge_config_update_target "$stage_checkpoint_bridge_config_update_target" \
+      --arg stage_checkpoint_bridge_config_update_success "$stage_checkpoint_bridge_config_update_success" \
+      --arg stage_checkpoint_shared_validation_passed "$stage_checkpoint_shared_validation_passed" \
+      --arg proof_services_mode "$proof_services_mode" \
+      --arg shared_ecs_enabled "$shared_ecs_enabled" \
+      --arg shared_summary "$shared_summary" \
+      --arg bridge_summary "$bridge_summary" \
+      --argjson witness_quorum_threshold "$sp1_witness_quorum_threshold" \
+      --argjson witness_quorum_validated_count "$witness_quorum_validated_count" \
+      --arg witness_quorum_validated "$witness_quorum_validated" \
+      --argjson witness_pool_operator_labels "$witness_pool_operator_labels_json" \
+      --argjson witness_healthy_operator_labels "$witness_healthy_operator_labels_json" \
+      --argjson witness_quorum_operator_labels "$witness_quorum_operator_labels_json" \
+      --argjson witness_failed_operator_labels "$witness_failed_operator_labels_json" \
+      '{
+        summary_version: 1,
+        generated_at: $generated_at,
+        workdir: $workdir,
+        stage_control: {
+          requested_stop_after_stage: $stop_after_stage,
+          completed_stage: $completed_stage,
+          stopped_early: ($completed_stage != "full"),
+          stages: {
+            witness_ready: ($stage_witness_ready == "true"),
+            shared_services_ready: ($stage_shared_services_ready == "true"),
+            checkpoint_validated: ($stage_checkpoint_validated == "true"),
+            full: ($stage_full == "true")
+          },
+          shared_services: {
+            mode: (if $proof_services_mode == "not-started" then null else $proof_services_mode end),
+            ecs_enabled: ($shared_ecs_enabled == "true"),
+            stable: ($stage_shared_services_stable == "true")
+          },
+          checkpoint_validation: {
+            bridge_config_updates_target: ($stage_checkpoint_bridge_config_update_target | tonumber),
+            bridge_config_updates_succeeded: ($stage_checkpoint_bridge_config_update_success | tonumber),
+            shared_validation_passed: ($stage_checkpoint_shared_validation_passed == "true")
+          }
+        },
+        bridge: {
+          summary_path: (if $bridge_summary == "" then null else $bridge_summary end),
+          sp1: {
+            guest_witness: {
+              endpoint_quorum_threshold: $witness_quorum_threshold,
+              quorum_validated_count: $witness_quorum_validated_count,
+              quorum_validated: ($witness_quorum_validated == "true"),
+              pool_operator_labels: $witness_pool_operator_labels,
+              healthy_operator_labels: $witness_healthy_operator_labels,
+              quorum_operator_labels: $witness_quorum_operator_labels,
+              failed_operator_labels: $witness_failed_operator_labels
+            }
+          }
+        },
+        shared_infra: {
+          summary_path: (if $shared_summary == "" then null else $shared_summary end)
+        }
+      }' >"$output_path"
+  }
+
+  maybe_stop_after_stage() {
+    local completed_stage="$1"
+    case "$completed_stage" in
+      witness_ready)
+        stage_witness_ready="true"
+        ;;
+      shared_services_ready)
+        stage_shared_services_ready="true"
+        ;;
+      checkpoint_validated)
+        stage_checkpoint_validated="true"
+        ;;
+      full)
+        stage_full="true"
+        ;;
+      *)
+        die "unsupported stage checkpoint: $completed_stage"
+        ;;
+    esac
+    if [[ "$stop_after_stage" != "$completed_stage" ]]; then
+      return 0
+    fi
+    if [[ "$completed_stage" == "shared_services_ready" || "$completed_stage" == "checkpoint_validated" ]]; then
+      stop_centralized_proof_services
+    fi
+    stage_stop_after_stage_reached="true"
+    write_stage_checkpoint_summary "$completed_stage"
+    log "stage checkpoint reached; stopping run at stage=$completed_stage summary=$output_path"
+    printf '%s\n' "$output_path"
+  }
 
   (
     cd "$REPO_ROOT/contracts"
@@ -3007,6 +3171,10 @@ command_run() {
     die "--bridge-withdraw-checkpoint-height must be numeric"
   (( bridge_deposit_checkpoint_height > 0 )) || die "--bridge-deposit-checkpoint-height must be > 0"
   (( bridge_withdraw_checkpoint_height > 0 )) || die "--bridge-withdraw-checkpoint-height must be > 0"
+  maybe_stop_after_stage "witness_ready"
+  if [[ "$stage_stop_after_stage_reached" == "true" ]]; then
+    return 0
+  fi
 
   if (( base_operator_fund_wei > 0 )); then
     ensure_command cast
@@ -3625,15 +3793,15 @@ command_run() {
     return 0
   }
 
-  local proof_requestor_log="$workdir/reports/proof-requestor.log"
-  local proof_funder_log="$workdir/reports/proof-funder.log"
-  local proof_services_mode="local-process"
+  proof_requestor_log="$workdir/reports/proof-requestor.log"
+  proof_funder_log="$workdir/reports/proof-funder.log"
+  proof_services_mode="local-process"
   local proof_requestor_owner="testnet-e2e-proof-requestor-${proof_topic_seed}"
   local proof_funder_owner="testnet-e2e-proof-funder-${proof_topic_seed}"
-  local proof_requestor_pid=""
-  local proof_funder_pid=""
-  local shared_ecs_region=""
-  local shared_ecs_started="false"
+  proof_requestor_pid=""
+  proof_funder_pid=""
+  shared_ecs_region=""
+  shared_ecs_started="false"
 
   if [[ "$shared_ecs_enabled" == "true" ]]; then
     proof_services_mode="shared-ecs"
@@ -3806,6 +3974,11 @@ command_run() {
       die "proof-funder did not stay running"
     fi
   fi
+  stage_shared_services_stable="true"
+  maybe_stop_after_stage "shared_services_ready"
+  if [[ "$stage_stop_after_stage_reached" == "true" ]]; then
+    return 0
+  fi
 
   if [[ -n "$existing_bridge_summary_path" ]]; then
     direct_cli_user_proof_status="skipped-resume-existing-bridge-summary"
@@ -3873,6 +4046,8 @@ command_run() {
   if [[ "$shared_enabled" == "true" ]]; then
     local checkpoint_started_at
     checkpoint_started_at="$(timestamp_utc)"
+    stage_checkpoint_bridge_config_update_target="0"
+    stage_checkpoint_bridge_config_update_success="0"
 
     if [[ "$relayer_runtime_mode" == "distributed" ]]; then
       (( ${#relayer_runtime_operator_hosts[@]} > 0 )) || \
@@ -3881,6 +4056,7 @@ command_run() {
         die "shared checkpoint validation requires --relayer-runtime-operator-ssh-user when --relayer-runtime-mode=distributed"
       [[ -f "$relayer_runtime_operator_ssh_key_file" ]] || \
         die "shared checkpoint validation requires readable --relayer-runtime-operator-ssh-key-file when --relayer-runtime-mode=distributed"
+      stage_checkpoint_bridge_config_update_target="${#relayer_runtime_operator_hosts[@]}"
 
       local checkpoint_host
       for checkpoint_host in "${relayer_runtime_operator_hosts[@]}"; do
@@ -3892,6 +4068,7 @@ command_run() {
           "$deployed_bridge_address" \
           "$base_chain_id" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
+        stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
     fi
 
@@ -3915,6 +4092,11 @@ command_run() {
     set -e
     if (( shared_status != 0 )); then
       die "shared infra validation failed (operator-service checkpoint publication)"
+    fi
+    stage_checkpoint_shared_validation_passed="true"
+    maybe_stop_after_stage "checkpoint_validated"
+    if [[ "$stage_stop_after_stage_reached" == "true" ]]; then
+      return 0
     fi
   fi
 
@@ -4986,20 +5168,7 @@ command_run() {
     fi
   fi
 
-  if [[ "$shared_ecs_enabled" == "true" ]]; then
-    if [[ "$shared_ecs_started" == "true" ]]; then
-      scale_shared_proof_services_ecs \
-        "$shared_ecs_region" \
-        "$shared_ecs_cluster_arn" \
-        "$shared_proof_requestor_service_name" \
-        "$shared_proof_funder_service_name" \
-        "0" || true
-    fi
-  else
-    kill "$proof_requestor_pid" "$proof_funder_pid" >/dev/null 2>&1 || true
-    wait "$proof_requestor_pid" >/dev/null 2>&1 || true
-    wait "$proof_funder_pid" >/dev/null 2>&1 || true
-  fi
+  stop_centralized_proof_services
   if (( bridge_status != 0 )); then
     if [[ "$shared_ecs_enabled" == "true" ]]; then
       log "relayer-driven bridge e2e failed; showing shared ECS proof service logs"
@@ -5206,10 +5375,20 @@ command_run() {
         }
       }'
   )"
+  stage_full="true"
 
   jq -n \
     --arg generated_at "$(timestamp_utc)" \
     --arg workdir "$workdir" \
+    --arg stop_after_stage "$stop_after_stage" \
+    --arg stage_witness_ready "$stage_witness_ready" \
+    --arg stage_shared_services_ready "$stage_shared_services_ready" \
+    --arg stage_checkpoint_validated "$stage_checkpoint_validated" \
+    --arg stage_full "$stage_full" \
+    --arg stage_shared_services_stable "$stage_shared_services_stable" \
+    --arg stage_checkpoint_bridge_config_update_target "$stage_checkpoint_bridge_config_update_target" \
+    --arg stage_checkpoint_bridge_config_update_success "$stage_checkpoint_bridge_config_update_success" \
+    --arg stage_checkpoint_shared_validation_passed "$stage_checkpoint_shared_validation_passed" \
     --arg dkg_summary "$dkg_summary" \
     --arg bridge_summary "$bridge_summary" \
     --arg base_rpc_url "$base_rpc_url" \
@@ -5299,6 +5478,26 @@ command_run() {
       summary_version: 1,
       generated_at: $generated_at,
       workdir: $workdir,
+      stage_control: {
+        requested_stop_after_stage: $stop_after_stage,
+        completed_stage: "full",
+        stopped_early: false,
+        stages: {
+          witness_ready: ($stage_witness_ready == "true"),
+          shared_services_ready: ($stage_shared_services_ready == "true"),
+          checkpoint_validated: ($stage_checkpoint_validated == "true"),
+          full: ($stage_full == "true")
+        },
+        shared_services: {
+          mode: (if $proof_services_mode == "not-started" then null else $proof_services_mode end),
+          stable: ($stage_shared_services_stable == "true")
+        },
+        checkpoint_validation: {
+          bridge_config_updates_target: ($stage_checkpoint_bridge_config_update_target | tonumber),
+          bridge_config_updates_succeeded: ($stage_checkpoint_bridge_config_update_success | tonumber),
+          shared_validation_passed: ($stage_checkpoint_shared_validation_passed == "true")
+        }
+      },
       base: {
         rpc_url: $base_rpc_url,
         chain_id: $base_chain_id,

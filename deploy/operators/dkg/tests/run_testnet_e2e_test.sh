@@ -327,6 +327,17 @@ test_stop_after_stage_emits_stage_control_and_stops_cleanly() {
   assert_contains "$script_text" "shared_validation_passed" "stage control reports shared checkpoint validation status"
 }
 
+test_sp1_rpc_defaults_and_validation_target_succinct_network() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local sp1_rpc_url="https://rpc.mainnet.succinct.xyz"' "run-testnet-e2e defaults sp1 rpc to succinct network rpc"
+  assert_not_contains "$script_text" 'local sp1_rpc_url="https://mainnet.base.org"' "run-testnet-e2e no longer defaults sp1 rpc to base chain rpc"
+  assert_contains "$script_text" "must be a Succinct prover network RPC" "run-testnet-e2e validates sp1 rpc endpoint class"
+  assert_contains "$script_text" 'local sp1_verifier_router_address="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"' "run-testnet-e2e defaults sp1 verifier router to canonical base verifier"
+  assert_contains "$script_text" 'local sp1_set_verifier_address="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"' "run-testnet-e2e defaults sp1 set-verifier to canonical base verifier"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -349,6 +360,7 @@ main() {
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
+  test_sp1_rpc_defaults_and_validation_target_succinct_network
 }
 
 main "$@"

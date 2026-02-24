@@ -145,13 +145,13 @@ const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
 
-	defaultSP1MaxPricePerPGU         = uint64(50000000000000)
+	defaultSP1MaxPricePerPGU         = uint64(1000000000000)
 	defaultSP1MinAuctionPeriod       = uint64(85)
 	defaultSP1AuctionTimeout         = 625 * time.Second
 	defaultSP1RequestTimeout         = 1500 * time.Second
 	defaultSP1MarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-	defaultSP1RouterAddr             = "0x0b144e07a0826182b6b59788c34b32bfa86fb711"
-	defaultSP1SetVerAddr             = "0x1Ab08498CfF17b9723ED67143A050c8E8c2e3104"
+	defaultSP1RouterAddr             = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+	defaultSP1SetVerAddr             = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
 	defaultSP1InputS3Prefix          = "bridge-e2e/sp1-input"
 	defaultSP1InputS3PresignTTL      = 2 * time.Hour
 	defaultSP1ProofAttemptGrace      = 2 * time.Minute
@@ -502,7 +502,7 @@ func parseArgs(args []string) (config, error) {
 
 	fs.BoolVar(&cfg.SP1.Auto, "sp1-auto", false, "automatically submit/wait proofs via SP1 and use returned seals")
 	fs.StringVar(&cfg.SP1.Bin, "sp1-bin", "sp1", "SP1 CLI binary path used by --sp1-auto")
-	fs.StringVar(&cfg.SP1.RPCURL, "sp1-rpc-url", "https://mainnet.base.org", "SP1 submission RPC URL")
+	fs.StringVar(&cfg.SP1.RPCURL, "sp1-rpc-url", "https://rpc.mainnet.succinct.xyz", "SP1 prover network RPC URL")
 	fs.StringVar(&cfg.SP1.InputMode, "sp1-input-mode", sp1InputModeGuestWitnessV1, "SP1 input mode (required): guest-witness-v1")
 	var sp1MarketAddressHex string
 	var sp1VerifierRouterHex string
@@ -771,6 +771,9 @@ func parseArgs(args []string) (config, error) {
 	}
 	if strings.TrimSpace(cfg.SP1.RPCURL) == "" {
 		return cfg, errors.New("--sp1-rpc-url is required when --sp1-auto is set")
+	}
+	if looksLikeBaseChainRPCURL(cfg.SP1.RPCURL) {
+		return cfg, fmt.Errorf("--sp1-rpc-url must point to the Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not Base chain RPC: %s", cfg.SP1.RPCURL)
 	}
 	if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionDirectCLI &&
 		strings.TrimSpace(cfg.SP1.RequestorKeyHex) == "" {
@@ -1223,18 +1226,42 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
 	}
 
-	registryOperatorCount, err := callUint64(ctx, reg, "operatorCount")
+	const (
+		registryReadRetries      = 8
+		registryReadRetryBackoff = 500 * time.Millisecond
+	)
+	wantOperatorCount := uint64(len(operatorAddrs))
+	registryOperatorCount, err := waitUint64AtLeastAttempts(
+		ctx,
+		"operatorCount",
+		wantOperatorCount,
+		registryReadRetries,
+		registryReadRetryBackoff,
+		func() (uint64, error) {
+			return callUint64(ctx, reg, "operatorCount")
+		},
+	)
 	if err != nil {
-		return nil, fmt.Errorf("operatorCount: %w", err)
+		return nil, err
 	}
-	if registryOperatorCount != uint64(len(operatorAddrs)) {
-		return nil, fmt.Errorf("operatorCount mismatch: got=%d want=%d", registryOperatorCount, len(operatorAddrs))
+	if registryOperatorCount != wantOperatorCount {
+		return nil, fmt.Errorf("operatorCount mismatch: got=%d want=%d", registryOperatorCount, wantOperatorCount)
 	}
-	registryThreshold, err := callUint64(ctx, reg, "threshold")
+	wantThreshold := uint64(cfg.Threshold)
+	registryThreshold, err := waitUint64AtLeastAttempts(
+		ctx,
+		"threshold",
+		wantThreshold,
+		registryReadRetries,
+		registryReadRetryBackoff,
+		func() (uint64, error) {
+			return callUint64(ctx, reg, "threshold")
+		},
+	)
 	if err != nil {
-		return nil, fmt.Errorf("threshold: %w", err)
+		return nil, err
 	}
-	if registryThreshold != uint64(cfg.Threshold) {
+	if registryThreshold != wantThreshold {
 		return nil, fmt.Errorf("registry threshold mismatch: got=%d want=%d", registryThreshold, cfg.Threshold)
 	}
 	allOperatorsActive := true
@@ -2016,6 +2043,12 @@ func extractQueueProofRequestID(metadata map[string]string) string {
 		return value
 	}
 	return ""
+}
+
+func looksLikeBaseChainRPCURL(raw string) bool {
+	urlLower := strings.ToLower(strings.TrimSpace(raw))
+	return strings.Contains(urlLower, "mainnet.base.org") ||
+		strings.Contains(urlLower, "base-sepolia")
 }
 
 func requestSP1ProofOnce(
@@ -2972,6 +3005,49 @@ func waitDepositUsedAtBlock(ctx context.Context, bridge depositUsedCaller, depos
 		return false, fmt.Errorf("depositUsed check failed after %d attempts: %w", attempts, lastErr)
 	}
 	return false, nil
+}
+
+func waitUint64AtLeastAttempts(
+	ctx context.Context,
+	label string,
+	want uint64,
+	attempts int,
+	interval time.Duration,
+	readFn func() (uint64, error),
+) (uint64, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var (
+		lastVal uint64
+		lastErr error
+	)
+	for i := 0; i < attempts; i++ {
+		val, err := readFn()
+		if err != nil {
+			lastErr = err
+		} else {
+			lastVal = val
+			lastErr = nil
+			if val == want {
+				return val, nil
+			}
+		}
+		if i == attempts-1 || interval <= 0 {
+			continue
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastVal, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if lastErr != nil {
+		return lastVal, fmt.Errorf("%s read failed after %d attempts: %w", label, attempts, lastErr)
+	}
+	return lastVal, nil
 }
 
 func callDepositUsed(ctx context.Context, bridge depositUsedCaller, depositID common.Hash, blockNumber *big.Int) (bool, error) {

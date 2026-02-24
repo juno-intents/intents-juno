@@ -10,18 +10,21 @@ This runbook defines the default SP1 network auction baseline for shared `proof-
 
 ## Runtime Defaults (as configured)
 
-- `sp1-max-price-per-pgu`: `50000000000000`
+- `sp1-max-price-per-pgu`: `1000000000000`
+- `sp1-deposit-pgu-estimate`: `1000000`
+- `sp1-withdraw-pgu-estimate`: `1000000`
+- `sp1-groth16-base-fee-wei`: `200000000000000000` (0.2 PROVE)
 - `sp1-min-auction-period`: `85`
 - `sp1-auction-timeout`: `625s`
 - `sp1-request-timeout`: `1500s`
 
 Credit guardrails:
 
-- `projected_max_cost_wei = sp1_max_price_per_pgu * 2` (deposit + withdraw proofs)
-- `projected_with_overhead_wei = ceil(projected_max_cost_wei * 1.2)`
+- `projected_pair_cost_wei = (2 * sp1_groth16_base_fee_wei) + ((sp1_deposit_pgu_estimate + sp1_withdraw_pgu_estimate) * sp1_max_price_per_pgu)`
+- `projected_with_overhead_wei = ceil(projected_pair_cost_wei * 1.2)`
 - `required_credit_buffer_wei = projected_with_overhead_wei * 3`
-- `proof-funder min-balance-wei = sp1_max_price_per_pgu * 3`
-- `proof-funder critical-balance-wei = sp1_max_price_per_pgu`
+- `proof-funder min-balance-wei = required_credit_buffer_wei`
+- `proof-funder critical-balance-wei = projected_with_overhead_wei`
 
 ## Method
 

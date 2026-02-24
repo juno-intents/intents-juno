@@ -1,0 +1,68 @@
+{
+  "signatures": [
+    {
+      "id": "ecs_services_stable_timeout",
+      "regex": "Waiter ServicesStable failed: Max attempts exceeded",
+      "class": "shared_ecs_rollout_failure",
+      "likely_root_cause": "shared ECS proof-requestor/proof-funder service deployment did not stabilize",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e.sh",
+      "suggested_immediate_action": "inspect ECS service events and task logs; fix service config/image, then rerun canary"
+    },
+    {
+      "id": "bridge_deploy_wait_timeout",
+      "regex": "bridge-e2e: deploy wait mined failed tx=.*context deadline exceeded",
+      "class": "base_rpc_latency_or_timeout",
+      "likely_root_cause": "Base RPC confirmation polling timed out before transaction inclusion was observed",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e.sh",
+      "suggested_immediate_action": "increase deploy wait timeout or use a more reliable Base RPC endpoint"
+    },
+    {
+      "id": "aws_credentials_missing",
+      "regex": "Unable to locate credentials",
+      "class": "aws_authentication_failure",
+      "likely_root_cause": "AWS CLI execution path did not receive expected credentials/profile",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh",
+      "suggested_immediate_action": "verify --aws-profile or OIDC/static credentials for every AWS command path"
+    },
+    {
+      "id": "witness_quorum_failure",
+      "regex": "failed to extract witness from quorum of operators",
+      "class": "witness_extraction_failure",
+      "likely_root_cause": "insufficient healthy operator witness endpoints or inconsistent witness extraction",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e.sh",
+      "suggested_immediate_action": "check operator juno-scan/junocashd sync and witness tunnel health, then rerun canary"
+    },
+    {
+      "id": "checkpoint_validation_failure",
+      "regex": "shared infra validation failed \\(operator-service checkpoint publication\\)",
+      "class": "checkpoint_publication_failure",
+      "likely_root_cause": "operator checkpoint services did not publish valid checkpoint package/signature to shared infra",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e.sh",
+      "suggested_immediate_action": "inspect checkpoint-signer/checkpoint-aggregator logs and shared-infra-e2e output"
+    },
+    {
+      "id": "resume_state_missing",
+      "regex": "missing existing distributed dkg summary on runner",
+      "class": "resume_artifact_missing",
+      "likely_root_cause": "resume-mode run requested without persisted distributed DKG artifacts on runner",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh",
+      "suggested_immediate_action": "rerun full setup or provide correct reused workdir/summary artifact"
+    },
+    {
+      "id": "sp1_credit_guardrail",
+      "regex": "sp1 requestor balance below required guardrail",
+      "class": "sp1_credit_insufficient",
+      "likely_root_cause": "requestor credit balance is below computed safety buffer for projected proofs",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh",
+      "suggested_immediate_action": "refill SP1 requestor credits and rerun preflight"
+    },
+    {
+      "id": "remote_live_run_failed",
+      "regex": "remote live e2e run failed",
+      "class": "remote_run_failure",
+      "likely_root_cause": "remote live execution returned non-zero status",
+      "owner": "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh",
+      "suggested_immediate_action": "inspect runner artifacts/logs and rerun canary before full run"
+    }
+  ]
+}

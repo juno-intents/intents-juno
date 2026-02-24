@@ -38,7 +38,7 @@ on:
       sp1_rpc_url:
         description: "SP1 submission RPC URL"
         required: true
-        default: "https://mainnet.base.org"
+        default: "https://rpc.mainnet.succinct.xyz"
         type: string
       sp1_deposit_program_url:
         description: "Deposit guest program URL for SP1"
@@ -71,7 +71,22 @@ on:
       sp1_max_price_per_pgu:
         description: "SP1 max price per PGU in wei"
         required: true
-        default: "50000000000000"
+        default: "1000000000000"
+        type: string
+      sp1_deposit_pgu_estimate:
+        description: "Projected deposit proof PGU usage for credit guardrails"
+        required: true
+        default: "1000000"
+        type: string
+      sp1_withdraw_pgu_estimate:
+        description: "Projected withdraw proof PGU usage for credit guardrails"
+        required: true
+        default: "1000000"
+        type: string
+      sp1_groth16_base_fee_wei:
+        description: "Projected groth16 base fee per proof in wei"
+        required: true
+        default: "200000000000000000"
         type: string
       sp1_min_auction_period:
         description: "SP1 minimum auction period in seconds"
@@ -180,23 +195,79 @@ jobs:
           }
 
           max_price_per_pgu="${{ inputs.sp1_max_price_per_pgu }}"
+          deposit_pgu_estimate="${{ inputs.sp1_deposit_pgu_estimate }}"
+          withdraw_pgu_estimate="${{ inputs.sp1_withdraw_pgu_estimate }}"
+          groth16_base_fee_wei="${{ inputs.sp1_groth16_base_fee_wei }}"
           [[ "$max_price_per_pgu" =~ ^[0-9]+$ ]] || {
             echo "sp1_max_price_per_pgu must be numeric"
             exit 1
           }
-          projected_max_cost_wei=$((max_price_per_pgu * 2))
-          projected_with_overhead_wei=$(((projected_max_cost_wei * 120 + 99) / 100))
-          required_buffer_wei=$((projected_with_overhead_wei * 3))
-
-          if (( balance_wei < required_buffer_wei )); then
-            refill_wei=$((required_buffer_wei - balance_wei))
-            echo "SP1 requestor balance below required guardrail."
-            echo "requestor_address=$requestor_address"
-            echo "balance_wei=$balance_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+          [[ "$deposit_pgu_estimate" =~ ^[0-9]+$ ]] || {
+            echo "sp1_deposit_pgu_estimate must be numeric"
+            exit 1
+          }
+          [[ "$withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || {
+            echo "sp1_withdraw_pgu_estimate must be numeric"
+            exit 1
+          }
+          [[ "$groth16_base_fee_wei" =~ ^[0-9]+$ ]] || {
+            echo "sp1_groth16_base_fee_wei must be numeric"
+            exit 1
+          }
+          if [[ "$max_price_per_pgu" == "0" || "$deposit_pgu_estimate" == "0" || "$withdraw_pgu_estimate" == "0" || "$groth16_base_fee_wei" == "0" ]]; then
+            echo "sp1 credit guardrail inputs must be > 0"
             exit 1
           fi
 
-          echo "SP1 credit preflight passed: requestor_address=$requestor_address balance_wei=$balance_wei required_wei=$required_buffer_wei"
+          mapfile -t credit_guardrail_calc < <(
+            python3 - "$max_price_per_pgu" "$deposit_pgu_estimate" "$withdraw_pgu_estimate" "$groth16_base_fee_wei" <<'PY'
+            import sys
+
+            max_price_per_pgu = int(sys.argv[1])
+            deposit_pgu_estimate = int(sys.argv[2])
+            withdraw_pgu_estimate = int(sys.argv[3])
+            groth16_base_fee_wei = int(sys.argv[4])
+
+            projected_pair_cost_wei = (groth16_base_fee_wei * 2) + (
+                max_price_per_pgu * (deposit_pgu_estimate + withdraw_pgu_estimate)
+            )
+            projected_with_overhead_wei = ((projected_pair_cost_wei * 120) + 99) // 100
+            required_buffer_wei = projected_with_overhead_wei * 3
+
+            print(projected_pair_cost_wei)
+            print(projected_with_overhead_wei)
+            print(required_buffer_wei)
+          PY
+          )
+          projected_pair_cost_wei="${credit_guardrail_calc[0]}"
+          projected_with_overhead_wei="${credit_guardrail_calc[1]}"
+          required_buffer_wei="${credit_guardrail_calc[2]}"
+
+          mapfile -t guardrail_state < <(
+            python3 - "$balance_wei" "$required_buffer_wei" <<'PY'
+            import sys
+
+            balance = int(sys.argv[1])
+            required = int(sys.argv[2])
+            if balance < required:
+                print("true")
+                print(required - balance)
+            else:
+                print("false")
+                print(0)
+          PY
+          )
+          needs_refill="${guardrail_state[0]}"
+          refill_wei="${guardrail_state[1]}"
+
+          if [[ "$needs_refill" == "true" ]]; then
+            echo "SP1 requestor balance below required guardrail."
+            echo "requestor_address=$requestor_address"
+            echo "balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+            exit 1
+          fi
+
+          echo "SP1 credit preflight passed: requestor_address=$requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei"
 
       - name: Start Shared Infra (Postgres + Kafka + IPFS)
         shell: bash
@@ -312,6 +383,9 @@ jobs:
             --sp1-witness-juno-scan-url "${{ inputs.sp1_witness_juno_scan_url }}"
             --sp1-witness-juno-rpc-url "${{ inputs.sp1_witness_juno_rpc_url }}"
             --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-deposit-pgu-estimate "${{ inputs.sp1_deposit_pgu_estimate }}"
+            --sp1-withdraw-pgu-estimate "${{ inputs.sp1_withdraw_pgu_estimate }}"
+            --sp1-groth16-base-fee-wei "${{ inputs.sp1_groth16_base_fee_wei }}"
             --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
             --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
             --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"

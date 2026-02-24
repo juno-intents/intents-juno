@@ -26,11 +26,14 @@ DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX=""
 DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX=""
 DISTRIBUTED_COMPLETION_UFVK=""
 DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA=""
+FAILURE_SIGNATURES_FILE="$SCRIPT_DIR/failure-signatures.yaml"
 
 usage() {
   cat <<'EOF'
 Usage:
   run-testnet-e2e-aws.sh run [options] -- [run-testnet-e2e.sh args...]
+  run-testnet-e2e-aws.sh preflight [options] -- [run-testnet-e2e.sh args...]
+  run-testnet-e2e-aws.sh canary [options] -- [run-testnet-e2e.sh args...]
   run-testnet-e2e-aws.sh cleanup [options]
 
 Commands:
@@ -40,6 +43,14 @@ Commands:
 
   cleanup:
     Idempotent fallback destroy for previously created infra state in workdir.
+
+  preflight:
+    Runs deterministic hard-block checks only (no provisioning / no remote execution).
+    Executes local script test suite and AWS/SP1 prechecks.
+
+  canary:
+    Runs required resume canary flow (keep-infra + skip-distributed-dkg) and stops
+    remote e2e at checkpoint_validated stage before full bridge flow.
 
 run options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
@@ -96,6 +107,21 @@ run options:
   --skip-distributed-dkg               reuse existing runner DKG artifacts; skip distributed DKG ceremony/backup-restore setup
                                        (requires --keep-infra and an existing runner workdir)
   --reuse-bridge-summary-path <path>   optional local bridge summary json to stage on runner and reuse for contract deploy skip
+  --preflight-only                     internal: run-only command parser/checks and exit before provisioning
+  --status-json <path>                 optional machine-readable status output path
+
+preflight options:
+  same as run options, plus:
+  --status-json <path>                 machine-readable status output path (required in CI)
+
+canary options:
+  same as run options, plus:
+  --status-json <path>                 machine-readable status output path (required in CI)
+  constraints:
+    - forces --keep-infra
+    - forces --skip-distributed-dkg
+    - requires --reuse-bridge-summary-path <path>
+    - forces forwarded local e2e arg: --stop-after-stage checkpoint_validated
 
 cleanup options:
   --workdir <path>                     local workdir (default: <repo>/tmp/aws-live-e2e)
@@ -140,6 +166,40 @@ run_with_local_timeout() {
 
   if have_cmd gtimeout; then
     gtimeout "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  if have_cmd python3; then
+    python3 - "$timeout_seconds" "$@" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+timeout_seconds = int(sys.argv[1])
+command = sys.argv[2:]
+
+if not command:
+    sys.exit(0)
+
+proc = subprocess.Popen(command, preexec_fn=os.setsid)
+try:
+    sys.exit(proc.wait(timeout=timeout_seconds))
+except subprocess.TimeoutExpired:
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.wait()
+    sys.exit(124)
+PY
     return $?
   fi
 
@@ -294,6 +354,317 @@ normalize_bool_arg() {
       die "$flag_name must be true or false"
       ;;
   esac
+}
+
+array_has_value() {
+  local needle="$1"
+  shift || true
+  local candidate
+  for candidate in "$@"; do
+    if [[ "$candidate" == "$needle" ]]; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+strip_flag_with_value() {
+  local flag="$1"
+  shift || true
+  local -a input_args=("$@")
+  local -a output_args=()
+  local idx=0
+  while (( idx < ${#input_args[@]} )); do
+    if [[ "${input_args[$idx]}" == "$flag" ]]; then
+      (( idx + 1 < ${#input_args[@]} )) || die "missing value for $flag"
+      idx=$((idx + 2))
+      continue
+    fi
+    output_args+=("${input_args[$idx]}")
+    idx=$((idx + 1))
+  done
+  printf '%s\0' "${output_args[@]}"
+}
+
+write_status_json() {
+  local status_path="$1"
+  local command_name="$2"
+  local status_value="$3"
+  local message="$4"
+  local summary_path="${5:-}"
+  local log_path="${6:-}"
+  local classification_json="${7:-null}"
+
+  [[ -n "$status_path" ]] || return 0
+  ensure_dir "$(dirname "$status_path")"
+  jq -n \
+    --arg generated_at "$(timestamp_utc)" \
+    --arg command "$command_name" \
+    --arg status "$status_value" \
+    --arg message "$message" \
+    --arg summary_path "$summary_path" \
+    --arg log_path "$log_path" \
+    --argjson classification "$classification_json" \
+    '{
+      generated_at: $generated_at,
+      command: $command,
+      status: $status,
+      message: $message,
+      summary_path: (if $summary_path == "" then null else $summary_path end),
+      log_path: (if $log_path == "" then null else $log_path end),
+      classification: $classification
+    }' >"$status_path"
+}
+
+classify_failure_signature() {
+  local log_path="$1"
+  if [[ ! -f "$FAILURE_SIGNATURES_FILE" || ! -s "$log_path" ]]; then
+    printf 'null'
+    return 0
+  fi
+
+  local id regex class likely_root_cause owner suggested_immediate_action
+  while IFS=$'\t' read -r id regex class likely_root_cause owner suggested_immediate_action; do
+    if grep -E -q -- "$regex" "$log_path"; then
+      jq -n \
+        --arg id "$id" \
+        --arg regex "$regex" \
+        --arg class "$class" \
+        --arg likely_root_cause "$likely_root_cause" \
+        --arg owner "$owner" \
+        --arg suggested_immediate_action "$suggested_immediate_action" \
+        '{
+          id: $id,
+          regex: $regex,
+          class: $class,
+          likely_root_cause: $likely_root_cause,
+          owner: $owner,
+          suggested_immediate_action: $suggested_immediate_action
+        }'
+      return 0
+    fi
+  done < <(
+    jq -r '.signatures[] | [.id, .regex, .class, .likely_root_cause, .owner, .suggested_immediate_action] | @tsv' \
+      "$FAILURE_SIGNATURES_FILE"
+  )
+
+  printf 'null'
+}
+
+print_failure_classification_hint() {
+  local classification_json="${1:-null}"
+  if [[ "$classification_json" == "null" || -z "$classification_json" ]]; then
+    return 0
+  fi
+  local class id owner action
+  class="$(jq -r '.class // empty' <<<"$classification_json")"
+  id="$(jq -r '.id // empty' <<<"$classification_json")"
+  owner="$(jq -r '.owner // empty' <<<"$classification_json")"
+  action="$(jq -r '.suggested_immediate_action // empty' <<<"$classification_json")"
+  log "classified failure signature id=$id class=$class owner=$owner action=$action"
+}
+
+extract_summary_path_from_log() {
+  local log_path="$1"
+  local summary_path
+  summary_path="$(awk -F'summary=' '/summary=/{print $2}' "$log_path" | tail -n 1 | tr -d '\r\n')"
+  if [[ -n "$summary_path" && -f "$summary_path" ]]; then
+    printf '%s' "$summary_path"
+    return 0
+  fi
+  summary_path="$(grep -Eo '/[^[:space:]]*testnet-e2e-summary\.json' "$log_path" | tail -n 1 || true)"
+  if [[ -n "$summary_path" && -f "$summary_path" ]]; then
+    printf '%s' "$summary_path"
+    return 0
+  fi
+  printf ''
+}
+
+validate_canary_summary() {
+  local summary_path="$1"
+  jq -e '
+    .stage_control.completed_stage == "checkpoint_validated"
+    and .stage_control.stages.witness_ready
+    and .stage_control.stages.shared_services_ready
+    and .stage_control.stages.checkpoint_validated
+    and .stage_control.shared_services.stable
+    and .stage_control.checkpoint_validation.shared_validation_passed
+    and (.stage_control.checkpoint_validation.bridge_config_updates_succeeded >= .stage_control.checkpoint_validation.bridge_config_updates_target)
+    and .bridge.sp1.guest_witness.quorum_validated
+  ' "$summary_path" >/dev/null
+}
+
+run_required_aws_probe() {
+  local probe_name="$1"
+  shift
+  local out="" attempt
+  for attempt in $(seq 1 3); do
+    if out="$(run_with_local_timeout 45 "$@" 2>&1)"; then
+      return 0
+    fi
+    if (( attempt < 3 )); then
+      log "aws preflight probe failed (probe=$probe_name attempt $attempt/3); retrying in 5s"
+      sleep 5
+    fi
+  done
+  printf '%s\n' "$out" >&2
+  die "aws preflight probe failed: $probe_name"
+}
+
+run_preflight_aws_reachability_probes() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local with_shared_services="$3"
+
+  aws_env_args "$aws_profile" "$aws_region"
+  run_required_aws_probe \
+    "sts:GetCallerIdentity" \
+    env "${AWS_ENV_ARGS[@]}" aws sts get-caller-identity --region "$aws_region"
+
+  if [[ "$with_shared_services" == "true" ]]; then
+    run_required_aws_probe \
+      "rds:DescribeDBEngineVersions" \
+      env "${AWS_ENV_ARGS[@]}" aws rds describe-db-engine-versions \
+        --region "$aws_region" \
+        --engine aurora-postgresql \
+        --default-only \
+        --max-records 20
+    run_required_aws_probe \
+      "kafka:ListClustersV2" \
+      env "${AWS_ENV_ARGS[@]}" aws kafka list-clusters-v2 \
+        --region "$aws_region" \
+        --max-results 1
+    run_required_aws_probe \
+      "ecs:ListClusters" \
+      env "${AWS_ENV_ARGS[@]}" aws ecs list-clusters \
+        --region "$aws_region" \
+        --max-items 1
+  fi
+}
+
+run_preflight_script_tests() {
+  local -a tests=(
+    "deploy/operators/dkg/tests/generate_witness_metadata_test.sh"
+    "deploy/operators/dkg/tests/run_testnet_e2e_test.sh"
+    "deploy/operators/dkg/tests/e2e_aws_test.sh"
+    "deploy/operators/dkg/tests/e2e_aws_checkpoint_deferral_test.sh"
+    "deploy/operators/dkg/tests/live_e2e_terraform_iam_test.sh"
+  )
+  local test_script
+  for test_script in "${tests[@]}"; do
+    log "preflight test: $test_script"
+    bash "$REPO_ROOT/$test_script"
+  done
+}
+
+resolve_local_sp1_adapter_bin() {
+  if have_cmd sp1-prover-adapter; then
+    printf 'sp1-prover-adapter'
+    return 0
+  fi
+  if [[ -x "$REPO_ROOT/zk/target/release/sp1-prover-adapter" ]]; then
+    printf '%s' "$REPO_ROOT/zk/target/release/sp1-prover-adapter"
+    return 0
+  fi
+  die "sp1-prover-adapter not found (install it or build zk/target/release/sp1-prover-adapter)"
+}
+
+validate_sp1_credit_guardrail_preflight() {
+  local sp1_requestor_key_file="$1"
+  local sp1_rpc_url="$2"
+  local sp1_max_price_per_pgu="$3"
+  local sp1_deposit_pgu_estimate="$4"
+  local sp1_withdraw_pgu_estimate="$5"
+  local sp1_groth16_base_fee_wei="$6"
+
+  [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "forwarded --sp1-max-price-per-pgu must be numeric"
+  [[ "$sp1_deposit_pgu_estimate" =~ ^[0-9]+$ ]] || die "forwarded --sp1-deposit-pgu-estimate must be numeric"
+  [[ "$sp1_withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || die "forwarded --sp1-withdraw-pgu-estimate must be numeric"
+  [[ "$sp1_groth16_base_fee_wei" =~ ^[0-9]+$ ]] || die "forwarded --sp1-groth16-base-fee-wei must be numeric"
+  (( sp1_max_price_per_pgu > 0 )) || die "forwarded --sp1-max-price-per-pgu must be > 0"
+  (( sp1_deposit_pgu_estimate > 0 )) || die "forwarded --sp1-deposit-pgu-estimate must be > 0"
+  (( sp1_withdraw_pgu_estimate > 0 )) || die "forwarded --sp1-withdraw-pgu-estimate must be > 0"
+  (( sp1_groth16_base_fee_wei > 0 )) || die "forwarded --sp1-groth16-base-fee-wei must be > 0"
+  local sp1_rpc_url_lc
+  sp1_rpc_url_lc="$(lower "$sp1_rpc_url")"
+  if [[ "$sp1_rpc_url_lc" == *"mainnet.base.org"* || "$sp1_rpc_url_lc" == *"base-sepolia"* ]]; then
+    die "--sp1-rpc-url must be a Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not a Base chain RPC endpoint: $sp1_rpc_url"
+  fi
+
+  local sp1_requestor_key_hex sp1_requestor_address sp1_adapter_bin balance_json balance_wei
+  sp1_requestor_key_hex="$(trimmed_file_value "$sp1_requestor_key_file")"
+  [[ -n "$sp1_requestor_key_hex" ]] || die "sp1 requestor key file is empty: $sp1_requestor_key_file"
+  sp1_requestor_address="$(cast wallet address --private-key "$sp1_requestor_key_hex" 2>/dev/null || true)"
+  [[ "$sp1_requestor_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
+    die "failed to derive sp1 requestor address from key file: $sp1_requestor_key_file"
+  sp1_adapter_bin="$(resolve_local_sp1_adapter_bin)"
+
+  local balance_request_payload
+  balance_request_payload="$(printf '{"version":"sp1.balance.request.v1","requestor_address":"%s"}\n' "$sp1_requestor_address")"
+  if ! balance_json="$(
+    printf '%s' "$balance_request_payload" | \
+      run_with_local_timeout 90 env \
+        NETWORK_PRIVATE_KEY="$sp1_requestor_key_hex" \
+        SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
+        "$sp1_adapter_bin"
+  )"; then
+    die "sp1 balance probe failed or timed out during preflight"
+  fi
+  local balance_error
+  balance_error="$(jq -r '.error // empty' <<<"$balance_json")"
+  if [[ -n "$balance_error" ]]; then
+    die "sp1 balance probe returned error: $balance_error"
+  fi
+  balance_wei="$(jq -r '.balance_wei // empty' <<<"$balance_json")"
+  [[ "$balance_wei" =~ ^[0-9]+$ ]] || die "invalid sp1 balance response: $balance_json"
+
+  local -a guardrail_values=()
+  mapfile -t guardrail_values < <(
+    python3 - "$sp1_max_price_per_pgu" "$sp1_deposit_pgu_estimate" "$sp1_withdraw_pgu_estimate" "$sp1_groth16_base_fee_wei" <<'PY'
+import sys
+
+max_price_per_pgu = int(sys.argv[1])
+deposit_pgu_estimate = int(sys.argv[2])
+withdraw_pgu_estimate = int(sys.argv[3])
+groth16_base_fee_wei = int(sys.argv[4])
+
+projected_pair_cost_wei = (groth16_base_fee_wei * 2) + (
+    max_price_per_pgu * (deposit_pgu_estimate + withdraw_pgu_estimate)
+)
+projected_with_overhead_wei = ((projected_pair_cost_wei * 120) + 99) // 100
+required_buffer_wei = projected_with_overhead_wei * 3
+
+print(projected_pair_cost_wei)
+print(required_buffer_wei)
+PY
+  )
+  (( ${#guardrail_values[@]} == 2 )) || die "failed to compute sp1 credit guardrail values"
+  local projected_pair_cost_wei required_buffer_wei
+  projected_pair_cost_wei="${guardrail_values[0]}"
+  required_buffer_wei="${guardrail_values[1]}"
+  local -a guardrail_state=()
+  mapfile -t guardrail_state < <(
+    python3 - "$balance_wei" "$required_buffer_wei" <<'PY'
+import sys
+
+balance = int(sys.argv[1])
+required = int(sys.argv[2])
+if balance < required:
+    print("true")
+    print(required - balance)
+else:
+    print("false")
+    print(0)
+PY
+  )
+  (( ${#guardrail_state[@]} == 2 )) || die "failed to evaluate sp1 credit guardrail state"
+  local guardrail_needs_refill refill_wei
+  guardrail_needs_refill="${guardrail_state[0]}"
+  refill_wei="${guardrail_state[1]}"
+  if [[ "$guardrail_needs_refill" == "true" ]]; then
+    die "sp1 requestor balance below required guardrail: requestor_address=$sp1_requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+  fi
+  log "sp1 credit guardrail preflight passed requestor_address=$sp1_requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei"
 }
 
 terraform_env_args() {
@@ -756,17 +1127,24 @@ run_optional_dr_readiness_probe() {
   local probe_name="$1"
   shift
 
-  local out
-  if out="$("$@" 2>&1)"; then
-    return 0
-  fi
+  local out=""
+  local attempt lowered
+  for attempt in $(seq 1 3); do
+    if out="$(run_with_local_timeout 45 "$@" 2>&1)"; then
+      return 0
+    fi
 
-  local lowered
-  lowered="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
-  if [[ "$lowered" == *"accessdenied"* || "$lowered" == *"unauthorizedoperation"* || "$lowered" == *"not authorized"* ]]; then
-    log "warning: skipping dr readiness probe due to IAM permission limits (probe=$probe_name)"
-    return 0
-  fi
+    lowered="$(printf '%s' "$out" | tr '[:upper:]' '[:lower:]')"
+    if [[ "$lowered" == *"accessdenied"* || "$lowered" == *"unauthorizedoperation"* || "$lowered" == *"not authorized"* ]]; then
+      log "warning: skipping dr readiness probe due to IAM permission limits (probe=$probe_name)"
+      return 0
+    fi
+
+    if (( attempt < 3 )); then
+      log "dr readiness probe failed (probe=$probe_name attempt $attempt/3); retrying in 5s"
+      sleep 5
+    fi
+  done
 
   printf '%s\n' "$out" >&2
   die "dr readiness probe failed: $probe_name"
@@ -901,7 +1279,12 @@ cd "\$HOME/intents-juno"
 git fetch --tags origin
 git reset --hard
 git clean -fd
-git checkout ${repo_commit}
+if git rev-parse --verify --quiet ${repo_commit}^{commit} >/dev/null; then
+  git checkout ${repo_commit}
+else
+  echo "warning: repo commit ${repo_commit} unavailable on origin; falling back to origin/main" >&2
+  git checkout origin/main
+fi
 git submodule update --init --recursive
 run_with_retry cargo +1.91.1 build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
 mkdir -p "\$HOME/.local/bin"
@@ -945,7 +1328,12 @@ cd "\$HOME/intents-juno"
 git fetch --tags origin
 git reset --hard
 git clean -fd
-git checkout ${repo_commit}
+if git rev-parse --verify --quiet ${repo_commit}^{commit} >/dev/null; then
+  git checkout ${repo_commit}
+else
+  echo "warning: repo commit ${repo_commit} unavailable on origin; falling back to origin/main" >&2
+  git checkout origin/main
+fi
 git submodule update --init --recursive
 
 required_services=(
@@ -1877,6 +2265,8 @@ command_run() {
   local keep_infra="false"
   local skip_distributed_dkg="false"
   local reuse_bridge_summary_path=""
+  local preflight_only="false"
+  local status_json=""
   local -a e2e_args=()
 
   while [[ $# -gt 0 ]]; do
@@ -2095,6 +2485,15 @@ command_run() {
         reuse_bridge_summary_path="$2"
         shift 2
         ;;
+      --preflight-only)
+        preflight_only="true"
+        shift
+        ;;
+      --status-json)
+        [[ $# -ge 2 ]] || die "missing value for --status-json"
+        status_json="$2"
+        shift 2
+        ;;
       --)
         shift
         e2e_args=("$@")
@@ -2261,6 +2660,83 @@ command_run() {
     validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"
   elif [[ -n "$aws_dr_region" && "$aws_dr_readiness_checks_enabled" == "true" ]]; then
     log "shared services disabled; skipping dr readiness checks for aws-dr-region=$aws_dr_region"
+  fi
+
+  if [[ "$preflight_only" == "true" ]]; then
+    log "running preflight hard-block checks"
+    local required_forwarded_flag
+    local -a required_forwarded_flags=(
+      "--base-rpc-url"
+      "--base-chain-id"
+      "--bridge-verifier-address"
+      "--bridge-deposit-image-id"
+      "--bridge-withdraw-image-id"
+      "--sp1-rpc-url"
+      "--sp1-deposit-program-url"
+      "--sp1-withdraw-program-url"
+      "--sp1-max-price-per-pgu"
+      "--sp1-deposit-pgu-estimate"
+      "--sp1-withdraw-pgu-estimate"
+      "--sp1-groth16-base-fee-wei"
+    )
+    for required_forwarded_flag in "${required_forwarded_flags[@]}"; do
+      forwarded_arg_value "$required_forwarded_flag" "${e2e_args[@]}" >/dev/null 2>&1 || \
+        die "preflight missing required forwarded argument after '--': $required_forwarded_flag"
+    done
+
+    run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"
+
+    if [[ "$skip_distributed_dkg" == "true" ]]; then
+      local resume_tfvars_file resume_state_file
+      resume_tfvars_file="$workdir/infra/terraform.tfvars.json"
+      resume_state_file="$workdir/infra/terraform.tfstate"
+      [[ -f "$resume_tfvars_file" ]] || die "preflight resume validation failed: missing terraform tfvars for --skip-distributed-dkg ($resume_tfvars_file)"
+      [[ -f "$resume_state_file" ]] || die "preflight resume validation failed: missing terraform state for --skip-distributed-dkg ($resume_state_file)"
+    fi
+
+    local preflight_sp1_rpc_url preflight_sp1_max_price_per_pgu preflight_sp1_deposit_pgu_estimate
+    local preflight_sp1_withdraw_pgu_estimate preflight_sp1_groth16_base_fee_wei
+    preflight_sp1_rpc_url="$(forwarded_arg_value "--sp1-rpc-url" "${e2e_args[@]}")"
+    preflight_sp1_max_price_per_pgu="$(forwarded_arg_value "--sp1-max-price-per-pgu" "${e2e_args[@]}")"
+    preflight_sp1_deposit_pgu_estimate="$(forwarded_arg_value "--sp1-deposit-pgu-estimate" "${e2e_args[@]}")"
+    preflight_sp1_withdraw_pgu_estimate="$(forwarded_arg_value "--sp1-withdraw-pgu-estimate" "${e2e_args[@]}")"
+    preflight_sp1_groth16_base_fee_wei="$(forwarded_arg_value "--sp1-groth16-base-fee-wei" "${e2e_args[@]}")"
+    [[ -n "$preflight_sp1_rpc_url" ]] || die "preflight missing forwarded --sp1-rpc-url"
+    validate_sp1_credit_guardrail_preflight \
+      "$sp1_requestor_key_file" \
+      "$preflight_sp1_rpc_url" \
+      "$preflight_sp1_max_price_per_pgu" \
+      "$preflight_sp1_deposit_pgu_estimate" \
+      "$preflight_sp1_withdraw_pgu_estimate" \
+      "$preflight_sp1_groth16_base_fee_wei"
+
+    local -a preflight_remote_args=(
+      run
+      --workdir "/home/ubuntu/testnet-e2e-live"
+      --dkg-summary-path "/home/ubuntu/testnet-e2e-live/dkg-distributed/reports/dkg-summary-runtime.json"
+      --base-funder-key-file ".ci/secrets/base-funder.key"
+      --output "/home/ubuntu/testnet-e2e-live/reports/testnet-e2e-summary.json"
+      --force
+      "${e2e_args[@]}"
+    )
+    local preflight_remote_joined_args
+    preflight_remote_joined_args="$(shell_join "${preflight_remote_args[@]}")"
+    [[ -n "$preflight_remote_joined_args" ]] || die "preflight remote command assembly failed"
+
+    run_preflight_script_tests
+    if [[ -n "$status_json" ]]; then
+      write_status_json \
+        "$status_json" \
+        "preflight" \
+        "passed" \
+        "preflight checks passed" \
+        "" \
+        "" \
+        "null"
+      log "preflight status json written: $status_json"
+    fi
+    log "preflight hard-block checks passed"
+    return 0
   fi
 
   if [[ -z "$ssh_allowed_cidr" ]]; then
@@ -3375,10 +3851,192 @@ EOF
   fi
 }
 
+command_preflight() {
+  shift || true
+
+  local status_json=""
+  local -a run_args=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --status-json)
+        [[ $# -ge 2 ]] || die "missing value for --status-json"
+        status_json="$2"
+        shift 2
+        ;;
+      *)
+        run_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$status_json" ]]; then
+    status_json="$REPO_ROOT/tmp/aws-live-e2e/preflight-status.json"
+  fi
+  ensure_dir "$(dirname "$status_json")"
+  local preflight_log
+  preflight_log="$(mktemp "${TMPDIR:-/tmp}/aws-live-e2e-preflight.XXXXXX")"
+
+  local run_status=0
+  set +e
+  "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \
+    --preflight-only \
+    --status-json "$status_json" \
+    "${run_args[@]}" 2>&1 | tee "$preflight_log"
+  run_status="${PIPESTATUS[0]}"
+  set -e
+
+  if (( run_status != 0 )); then
+    local classification_json
+    classification_json="$(classify_failure_signature "$preflight_log")"
+    print_failure_classification_hint "$classification_json"
+    write_status_json \
+      "$status_json" \
+      "preflight" \
+      "failed" \
+      "preflight checks failed" \
+      "" \
+      "$preflight_log" \
+      "$classification_json"
+    die "preflight failed"
+  fi
+
+  write_status_json \
+    "$status_json" \
+    "preflight" \
+    "passed" \
+    "preflight checks passed" \
+    "" \
+    "$preflight_log" \
+    "null"
+  log "preflight passed status_json=$status_json"
+  printf '%s\n' "$status_json"
+}
+
+command_canary() {
+  shift || true
+
+  local status_json=""
+  local -a wrapper_args=()
+  local -a e2e_args=()
+  local parse_forwarded="false"
+  while [[ $# -gt 0 ]]; do
+    if [[ "$parse_forwarded" == "true" ]]; then
+      e2e_args+=("$1")
+      shift
+      continue
+    fi
+    case "$1" in
+      --status-json)
+        [[ $# -ge 2 ]] || die "missing value for --status-json"
+        status_json="$2"
+        shift 2
+        ;;
+      --)
+        parse_forwarded="true"
+        shift
+        ;;
+      *)
+        wrapper_args+=("$1")
+        shift
+        ;;
+    esac
+  done
+
+  if [[ -z "$status_json" ]]; then
+    status_json="$REPO_ROOT/tmp/aws-live-e2e/canary-status.json"
+  fi
+  ensure_dir "$(dirname "$status_json")"
+  local canary_log
+  canary_log="$(mktemp "${TMPDIR:-/tmp}/aws-live-e2e-canary.XXXXXX")"
+
+  local reuse_bridge_summary_path
+  reuse_bridge_summary_path="$(forwarded_arg_value "--reuse-bridge-summary-path" "${wrapper_args[@]}" || true)"
+  [[ -n "$reuse_bridge_summary_path" ]] || \
+    die "canary requires --reuse-bridge-summary-path (resume economics forbid redeploy)"
+  [[ -f "$reuse_bridge_summary_path" ]] || \
+    die "canary reuse bridge summary file not found: $reuse_bridge_summary_path"
+
+  if ! array_has_value "--keep-infra" "${wrapper_args[@]}"; then
+    wrapper_args+=("--keep-infra")
+  fi
+  if ! array_has_value "--skip-distributed-dkg" "${wrapper_args[@]}"; then
+    wrapper_args+=("--skip-distributed-dkg")
+  fi
+
+  local -a canary_e2e_args=()
+  local e2e_idx=0
+  while (( e2e_idx < ${#e2e_args[@]} )); do
+    case "${e2e_args[$e2e_idx]}" in
+      --stop-after-stage)
+        (( e2e_idx + 1 < ${#e2e_args[@]} )) || die "forwarded argument missing value: --stop-after-stage"
+        e2e_idx=$((e2e_idx + 2))
+        ;;
+      *)
+        canary_e2e_args+=("${e2e_args[$e2e_idx]}")
+        e2e_idx=$((e2e_idx + 1))
+        ;;
+    esac
+  done
+  canary_e2e_args+=("--stop-after-stage" "checkpoint_validated")
+
+  local run_status=0
+  set +e
+  "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \
+    "${wrapper_args[@]}" \
+    -- "${canary_e2e_args[@]}" 2>&1 | tee "$canary_log"
+  run_status="${PIPESTATUS[0]}"
+  set -e
+
+  if (( run_status != 0 )); then
+    local classification_json
+    classification_json="$(classify_failure_signature "$canary_log")"
+    print_failure_classification_hint "$classification_json"
+    write_status_json \
+      "$status_json" \
+      "canary" \
+      "failed" \
+      "canary run failed" \
+      "" \
+      "$canary_log" \
+      "$classification_json"
+    die "canary failed"
+  fi
+
+  local summary_path
+  summary_path="$(extract_summary_path_from_log "$canary_log")"
+  [[ -n "$summary_path" ]] || die "canary succeeded but summary path could not be resolved from log"
+  [[ -f "$summary_path" ]] || die "canary summary file not found: $summary_path"
+  if ! validate_canary_summary "$summary_path"; then
+    write_status_json \
+      "$status_json" \
+      "canary" \
+      "failed" \
+      "canary acceptance criteria failed" \
+      "$summary_path" \
+      "$canary_log" \
+      "null"
+    die "canary acceptance criteria failed"
+  fi
+
+  write_status_json \
+    "$status_json" \
+    "canary" \
+    "passed" \
+    "canary completed at checkpoint_validated" \
+    "$summary_path" \
+    "$canary_log" \
+    "null"
+  log "canary passed status_json=$status_json summary=$summary_path"
+  printf '%s\n' "$status_json"
+}
+
 main() {
   local cmd="${1:-}"
   case "$cmd" in
     run) command_run "$@" ;;
+    preflight) command_preflight "$@" ;;
+    canary) command_canary "$@" ;;
     cleanup) command_cleanup "$@" ;;
     -h|--help|"")
       usage
