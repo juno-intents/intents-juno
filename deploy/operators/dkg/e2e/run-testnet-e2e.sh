@@ -1503,12 +1503,35 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   local ssh_key_file="$3"
   local bridge_address="$4"
   local base_chain_id="$5"
+  local operator_address="$6"
+  local operator_signer_key_hex="$7"
+
+  operator_address="$(normalize_hex_prefixed "$operator_address" || true)"
+  [[ "$operator_address" =~ ^0x[0-9a-f]{40}$ ]] || \
+    die "checkpoint bridge config update requires valid operator address for host=$host"
+  operator_signer_key_hex="$(normalize_hex_prefixed "$operator_signer_key_hex" || true)"
+  [[ "$operator_signer_key_hex" =~ ^0x[0-9a-f]{64}$ ]] || \
+    die "checkpoint bridge config update requires valid operator signer key for host=$host"
 
   local remote_script
   remote_script="$(cat <<'EOF'
 set -euo pipefail
 bridge_address="$1"
 base_chain_id="$2"
+operator_address="$3"
+operator_signer_key_hex="$4"
+
+[[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
+  echo "operator address must be 20-byte hex: $operator_address" >&2
+  exit 1
+}
+[[ "$operator_signer_key_hex" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+  echo "operator signer key must be 32-byte hex" >&2
+  exit 1
+}
+operator_address="${operator_address,,}"
+operator_signer_key_hex="${operator_signer_key_hex,,}"
+checkpoint_signer_lease_name="checkpoint-signer-${operator_address#0x}"
 
 stack_env_file="/etc/intents-juno/operator-stack.env"
 hydrator_env_file="/etc/intents-juno/operator-stack-hydrator.env"
@@ -1589,6 +1612,9 @@ sudo chown "$(id -u):$(id -g)" "$tmp_env"
 chmod 600 "$tmp_env"
 set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"
 set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"
+set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
+set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
+set_env_value "$tmp_env" CHECKPOINT_SIGNER_LEASE_NAME "$checkpoint_signer_lease_name"
 sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"
 rm -f "$tmp_env"
 
@@ -1605,6 +1631,25 @@ checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.
 
 sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"
 sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"
+if grep -qE '^[[:space:]]*--lease-name ' "$checkpoint_signer_script"; then
+  sudo sed -i "s|^  --lease-name .*\\\\$|  --lease-name \"${checkpoint_signer_lease_name}\" \\\\|g" "$checkpoint_signer_script"
+else
+  if ! grep -qE '^  --owner-id .*\\\\$' "$checkpoint_signer_script"; then
+    echo "checkpoint signer wrapper is missing owner-id line: $checkpoint_signer_script" >&2
+    exit 1
+  fi
+  lease_tmp="$(mktemp)"
+  awk -v lease="$checkpoint_signer_lease_name" '
+    {
+      print
+      if ($0 ~ /^  --owner-id .*\\$/) {
+        printf "  --lease-name \"%s\" \\\\\n", lease
+      }
+    }
+  ' "$checkpoint_signer_script" >"$lease_tmp"
+  sudo install -m 0755 "$lease_tmp" "$checkpoint_signer_script"
+  rm -f "$lease_tmp"
+fi
 sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"
 sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
 
@@ -1638,7 +1683,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id")" <<<"$remote_script"
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex")" <<<"$remote_script"
 }
 
 endpoint_host_port() {
@@ -4164,17 +4209,36 @@ command_run() {
         die "shared checkpoint validation requires --relayer-runtime-operator-ssh-user when --relayer-runtime-mode=distributed"
       [[ -f "$relayer_runtime_operator_ssh_key_file" ]] || \
         die "shared checkpoint validation requires readable --relayer-runtime-operator-ssh-key-file when --relayer-runtime-mode=distributed"
+
+      local -a checkpoint_operator_ids=()
+      local -a checkpoint_operator_key_files=()
+      mapfile -t checkpoint_operator_ids < <(jq -r '.operators[].operator_id' "$dkg_summary")
+      mapfile -t checkpoint_operator_key_files < <(jq -r '.operators[].operator_key_file // empty' "$dkg_summary")
+      (( ${#checkpoint_operator_ids[@]} == ${#relayer_runtime_operator_hosts[@]} )) || \
+        die "checkpoint host list length does not match dkg summary operators: hosts=${#relayer_runtime_operator_hosts[@]} operators=${#checkpoint_operator_ids[@]}"
+      (( ${#checkpoint_operator_key_files[@]} == ${#relayer_runtime_operator_hosts[@]} )) || \
+        die "checkpoint key list length does not match dkg summary operators: hosts=${#relayer_runtime_operator_hosts[@]} keys=${#checkpoint_operator_key_files[@]}"
       stage_checkpoint_bridge_config_update_target="${#relayer_runtime_operator_hosts[@]}"
 
-      local checkpoint_host
-      for checkpoint_host in "${relayer_runtime_operator_hosts[@]}"; do
-        log "updating operator checkpoint bridge config host=$checkpoint_host bridge=$deployed_bridge_address"
+      local checkpoint_host checkpoint_operator_id checkpoint_operator_key_file checkpoint_operator_key_hex checkpoint_idx
+      for ((checkpoint_idx = 0; checkpoint_idx < ${#relayer_runtime_operator_hosts[@]}; checkpoint_idx++)); do
+        checkpoint_host="${relayer_runtime_operator_hosts[$checkpoint_idx]}"
+        checkpoint_operator_id="${checkpoint_operator_ids[$checkpoint_idx]}"
+        checkpoint_operator_key_file="${checkpoint_operator_key_files[$checkpoint_idx]}"
+        [[ -n "$checkpoint_operator_id" ]] || \
+          die "checkpoint operator id is missing for host=$checkpoint_host index=$checkpoint_idx"
+        checkpoint_operator_key_hex="$(operator_signer_key_hex_from_file "$checkpoint_operator_key_file" || true)"
+        [[ "$checkpoint_operator_key_hex" =~ ^0x[0-9a-f]{64}$ ]] || \
+          die "checkpoint operator signer key is invalid for host=$checkpoint_host path=$checkpoint_operator_key_file"
+        log "updating operator checkpoint bridge config host=$checkpoint_host operator=$checkpoint_operator_id bridge=$deployed_bridge_address"
         configure_remote_operator_checkpoint_services_for_bridge \
           "$checkpoint_host" \
           "$relayer_runtime_operator_ssh_user" \
           "$relayer_runtime_operator_ssh_key_file" \
           "$deployed_bridge_address" \
-          "$base_chain_id" || \
+          "$base_chain_id" \
+          "$checkpoint_operator_id" \
+          "$checkpoint_operator_key_hex" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
