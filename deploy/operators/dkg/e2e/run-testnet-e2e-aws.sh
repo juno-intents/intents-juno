@@ -496,8 +496,22 @@ build_and_push_shared_proof_services_image() {
   local registry_host
   registry_host="${repository_url%%/*}"
   [[ -n "$registry_host" ]] || die "failed to derive ecr registry host from repository url: $repository_url"
+  local repository_name
+  repository_name="${repository_url#*/}"
+  [[ -n "$repository_name" && "$repository_name" != "$repository_url" ]] || \
+    die "failed to derive ecr repository name from repository url: $repository_url"
 
   aws_env_args "$aws_profile" "$aws_region"
+
+  if env "${AWS_ENV_ARGS[@]}" aws ecr describe-images \
+    --region "$aws_region" \
+    --repository-name "$repository_name" \
+    --image-ids "imageTag=$image_tag" >/dev/null 2>&1; then
+    SHARED_PROOF_SERVICES_IMAGE="${repository_url}:${image_tag}"
+    export SHARED_PROOF_SERVICES_IMAGE
+    log "reusing existing shared proof services image tag: ${repository_url}:${image_tag}"
+    return 0
+  fi
 
   log "logging into ecr registry: $registry_host"
   env "${AWS_ENV_ARGS[@]}" aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null

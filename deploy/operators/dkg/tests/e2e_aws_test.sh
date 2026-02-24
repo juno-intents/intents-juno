@@ -345,6 +345,8 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "proof services image build invocation"
   assert_contains "$wrapper_script_text" "--provenance=false" "proof services buildx invocation disables provenance attestations for reliable push completion"
   assert_contains "$wrapper_script_text" "--sbom=false" "proof services buildx invocation disables sbom attestations for reliable push completion"
+  assert_contains "$wrapper_script_text" "aws ecr describe-images" "proof services image flow checks whether commit tag already exists"
+  assert_contains "$wrapper_script_text" "reusing existing shared proof services image tag:" "proof services image flow logs ecr tag reuse path"
   assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\"" "proof services image reference global initialized"
   assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\${repository_url}:\${image_tag}\"" "proof services image reference global assignment"
   assert_contains "$wrapper_script_text" "shared_proof_services_image=\"\$SHARED_PROOF_SERVICES_IMAGE\"" "proof services image build call reads explicit global output"
