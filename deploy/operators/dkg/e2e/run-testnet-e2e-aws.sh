@@ -21,12 +21,12 @@ cleanup_dr_tfvars_file=""
 cleanup_dr_aws_region=""
 cleanup_dr_sp1_requestor_secret_arn=""
 AWS_ENV_ARGS=()
-SHARED_PROOF_SERVICES_IMAGE=""
 DISTRIBUTED_SP1_DEPOSIT_OWALLET_IVK_HEX=""
 DISTRIBUTED_SP1_WITHDRAW_OWALLET_OVK_HEX=""
 DISTRIBUTED_COMPLETION_UFVK=""
 DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA=""
 FAILURE_SIGNATURES_FILE="$SCRIPT_DIR/failure-signatures.yaml"
+DEFAULT_SHARED_PROOF_SERVICES_IMAGE_RELEASE_TAG="shared-proof-services-image-latest"
 
 usage() {
   cat <<'EOF'
@@ -94,7 +94,11 @@ run options:
                                        optional pre-existing DR-region secret ARN for shared proof services
   --shared-proof-services-image <image>
                                        optional explicit shared proof-services image
-                                       (skips local docker build/push and deploys this image)
+                                       (deploys this image for shared proof-requestor/proof-funder services)
+  --shared-proof-services-image-release-tag <tag>
+                                       release tag used to resolve shared proof-services image when
+                                       --shared-proof-services-image is omitted
+                                       (default: shared-proof-services-image-latest)
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
                                        requires forwarded shared args after '--':
                                          --shared-postgres-dsn
@@ -173,7 +177,7 @@ run_with_local_timeout() {
   fi
 
   if have_cmd python3; then
-    python3 - "$timeout_seconds" "$@" <<'PY'
+    python3 -c '
 import os
 import signal
 import subprocess
@@ -202,7 +206,7 @@ except subprocess.TimeoutExpired:
             pass
         proc.wait()
     sys.exit(124)
-PY
+' "$timeout_seconds" "$@"
     return $?
   fi
 
@@ -853,83 +857,6 @@ cleanup_trap() {
   fi
 }
 
-build_and_push_shared_proof_services_image() {
-  local aws_profile="$1"
-  local aws_region="$2"
-  local repository_url="$3"
-  local repo_commit="$4"
-
-  [[ -n "$aws_region" ]] || die "aws region is required to build/push shared proof services image"
-  [[ -n "$repository_url" ]] || die "shared proof services repository url is required"
-  [[ -n "$repo_commit" ]] || die "repo commit is required for image tagging"
-
-  local image_tag
-  image_tag="$(printf '%s' "$repo_commit" | cut -c1-12)"
-  [[ -n "$image_tag" ]] || die "failed to derive image tag from commit"
-
-  local registry_host
-  registry_host="${repository_url%%/*}"
-  [[ -n "$registry_host" ]] || die "failed to derive ecr registry host from repository url: $repository_url"
-  local repository_name
-  repository_name="${repository_url#*/}"
-  [[ -n "$repository_name" && "$repository_name" != "$repository_url" ]] || \
-    die "failed to derive ecr repository name from repository url: $repository_url"
-
-  aws_env_args "$aws_profile" "$aws_region"
-
-  if env "${AWS_ENV_ARGS[@]}" aws ecr describe-images \
-    --region "$aws_region" \
-    --repository-name "$repository_name" \
-    --image-ids "imageTag=$image_tag" >/dev/null 2>&1; then
-    SHARED_PROOF_SERVICES_IMAGE="${repository_url}:${image_tag}"
-    export SHARED_PROOF_SERVICES_IMAGE
-    log "reusing existing shared proof services image tag: ${repository_url}:${image_tag}"
-    return 0
-  fi
-
-  log "logging into ecr registry: $registry_host"
-  env "${AWS_ENV_ARGS[@]}" aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null
-
-  log "building shared proof services image: ${repository_url}:${image_tag}"
-  local use_buildx="true"
-  if [[ "$(uname -s)" == "Darwin" ]]; then
-    use_buildx="false"
-    log "darwin host detected; using docker build + push path for shared proof services image"
-  fi
-  if [[ "${E2E_AWS_FORCE_LEGACY_DOCKER_BUILD:-}" == "true" ]]; then
-    use_buildx="false"
-    log "E2E_AWS_FORCE_LEGACY_DOCKER_BUILD=true; using docker build + push path for shared proof services image"
-  fi
-
-  if [[ "$use_buildx" == "true" ]] && docker buildx version >/dev/null 2>&1; then
-    run_with_retry "shared proof services image buildx build/push" 3 15 \
-      run_with_local_timeout 300 docker buildx build --platform linux/amd64 \
-        --provenance=false \
-        --sbom=false \
-        --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
-        --tag "${repository_url}:${image_tag}" \
-        --tag "${repository_url}:latest" \
-        --push \
-        "$REPO_ROOT"
-  else
-    log "docker buildx unavailable; falling back to docker build + push"
-    run_with_retry "shared proof services image docker build" 3 15 \
-      run_with_local_timeout 300 env DOCKER_BUILDKIT=0 docker build \
-        --platform linux/amd64 \
-        --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
-        --tag "${repository_url}:${image_tag}" \
-        --tag "${repository_url}:latest" \
-        "$REPO_ROOT"
-    run_with_retry "shared proof services image docker push tag" 3 10 \
-      run_with_local_timeout 600 docker push "${repository_url}:${image_tag}"
-    run_with_retry "shared proof services image docker push latest" 3 10 \
-      run_with_local_timeout 600 docker push "${repository_url}:latest"
-  fi
-
-  SHARED_PROOF_SERVICES_IMAGE="${repository_url}:${image_tag}"
-  export SHARED_PROOF_SERVICES_IMAGE
-}
-
 rollout_shared_proof_services() {
   local aws_profile="$1"
   local aws_region="$2"
@@ -1229,6 +1156,70 @@ resolve_latest_operator_stack_ami() {
 
   log "defaulting --operator-ami-id to latest operator stack AMI: $image_id (name=$image_name created=$image_created_at)"
   printf '%s' "$image_id"
+}
+
+resolve_github_repo_slug() {
+  if [[ -n "${GITHUB_REPOSITORY:-}" ]]; then
+    printf '%s' "$GITHUB_REPOSITORY"
+    return 0
+  fi
+
+  local origin_url
+  origin_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || true)"
+  [[ -n "$origin_url" ]] || return 1
+
+  origin_url="${origin_url%.git}"
+  if [[ "$origin_url" =~ ^git@github\.com:([^/]+/[^/]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$origin_url" =~ ^https://github\.com/([^/]+/[^/]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+  if [[ "$origin_url" =~ ^ssh://git@github\.com/([^/]+/[^/]+)$ ]]; then
+    printf '%s' "${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  return 1
+}
+
+resolve_latest_shared_proof_services_image() {
+  local release_tag="$1"
+  local aws_region="$2"
+
+  [[ -n "$release_tag" ]] || return 1
+  [[ -n "$aws_region" ]] || return 1
+
+  local gh_repo
+  gh_repo="$(resolve_github_repo_slug || true)"
+  [[ -n "$gh_repo" ]] || return 1
+
+  local tmpdir manifest_path
+  tmpdir="$(mktemp -d "${TMPDIR:-/tmp}/shared-proof-services-image.XXXXXX")"
+  manifest_path="$tmpdir/shared-proof-services-image-manifest.json"
+
+  if ! gh release download "$release_tag" \
+    --repo "$gh_repo" \
+    --pattern "shared-proof-services-image-manifest.json" \
+    --output "$manifest_path" >/dev/null 2>&1; then
+    rm -rf "$tmpdir"
+    return 1
+  fi
+
+  local image_uri
+  image_uri="$(
+    jq -r --arg region "$aws_region" '
+      .regions[$region].image_uri
+      // .image_uri
+      // empty
+    ' "$manifest_path"
+  )"
+  rm -rf "$tmpdir"
+
+  [[ -n "$image_uri" ]] || return 1
+  printf '%s' "$image_uri"
 }
 
 build_remote_prepare_script() {
@@ -2268,6 +2259,9 @@ command_run() {
   local shared_sp1_requestor_secret_arn_override=""
   local shared_sp1_requestor_secret_arn_dr_override=""
   local shared_proof_services_image_override=""
+  local shared_proof_services_image_release_tag="$DEFAULT_SHARED_PROOF_SERVICES_IMAGE_RELEASE_TAG"
+  local shared_proof_services_image_release_tag_explicit="false"
+  local shared_proof_services_image_resolved_from_release="false"
   local with_shared_services="true"
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
@@ -2455,6 +2449,12 @@ command_run() {
         shared_proof_services_image_override="$2"
         shift 2
         ;;
+      --shared-proof-services-image-release-tag)
+        [[ $# -ge 2 ]] || die "missing value for --shared-proof-services-image-release-tag"
+        shared_proof_services_image_release_tag="$2"
+        shared_proof_services_image_release_tag_explicit="true"
+        shift 2
+        ;;
       --without-shared-services)
         with_shared_services="false"
         shift
@@ -2578,8 +2578,11 @@ command_run() {
       [[ "$shared_proof_services_image_override" =~ [[:space:]] ]] && die "--shared-proof-services-image must not contain whitespace"
       log "using provided shared proof services image override: $shared_proof_services_image_override"
     fi
+    [[ -n "$shared_proof_services_image_release_tag" ]] || die "--shared-proof-services-image-release-tag must not be empty"
   elif [[ -n "$shared_proof_services_image_override" ]]; then
     die "--shared-proof-services-image requires shared services (omit --without-shared-services)"
+  elif [[ "$shared_proof_services_image_release_tag_explicit" == "true" ]]; then
+    die "--shared-proof-services-image-release-tag requires shared services (omit --without-shared-services)"
   fi
   if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--runner-ami-id must look like an AMI id (ami-...)"
@@ -2607,8 +2610,8 @@ command_run() {
   ensure_local_command git
   ensure_local_command ssh-keygen
   ensure_local_command openssl
-  if [[ "$with_shared_services" == "true" ]]; then
-    ensure_local_command docker
+  if [[ "$with_shared_services" == "true" && -z "$shared_proof_services_image_override" ]]; then
+    ensure_local_command gh
   fi
 
   if [[ -z "$operator_ami_id" ]]; then
@@ -2616,6 +2619,19 @@ command_run() {
     [[ -n "$operator_ami_id" ]] || die "failed to resolve operator stack AMI; pass --operator-ami-id or build one via deploy/shared/runbooks/build-operator-stack-ami.sh"
   fi
   [[ "$operator_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]] || die "--operator-ami-id must look like an AMI id (ami-...)"
+  if [[ "$with_shared_services" == "true" && -z "$shared_proof_services_image_override" ]]; then
+    shared_proof_services_image_override="$(
+      resolve_latest_shared_proof_services_image \
+        "$shared_proof_services_image_release_tag" \
+        "$aws_region" || true
+    )"
+    [[ -n "$shared_proof_services_image_override" ]] || die "failed to resolve shared proof services image from release tag '$shared_proof_services_image_release_tag'; run .github/workflows/release-shared-proof-services-image.yml or pass --shared-proof-services-image"
+    shared_proof_services_image_resolved_from_release="true"
+    log "defaulting --shared-proof-services-image to latest released image: $shared_proof_services_image_override (release_tag=$shared_proof_services_image_release_tag)"
+  fi
+  if [[ "$with_shared_services" == "true" && "$shared_proof_services_image_resolved_from_release" == "true" ]]; then
+    log "using released shared proof services image: $shared_proof_services_image_override"
+  fi
 
   ensure_dir "$workdir"
   workdir="$(cd "$workdir" && pwd)"
@@ -3038,7 +3054,6 @@ command_run() {
   local shared_ecs_cluster_arn=""
   local shared_proof_requestor_service_name=""
   local shared_proof_funder_service_name=""
-  local shared_proof_services_ecr_repository_url=""
   if [[ "$with_shared_services" == "true" ]]; then
     shared_postgres_endpoint="$(
       env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
@@ -3093,15 +3108,6 @@ command_run() {
         -raw shared_proof_funder_service_name
     )"
     [[ -n "$shared_proof_funder_service_name" && "$shared_proof_funder_service_name" != "null" ]] || die "shared services were requested but terraform output shared_proof_funder_service_name is empty"
-
-    shared_proof_services_ecr_repository_url="$(
-      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
-        -chdir="$terraform_dir" \
-        output \
-        -state="$state_file" \
-        -raw shared_proof_services_ecr_repository_url
-    )"
-    [[ -n "$shared_proof_services_ecr_repository_url" && "$shared_proof_services_ecr_repository_url" != "null" ]] || die "shared services were requested but terraform output shared_proof_services_ecr_repository_url is empty"
 
     local shared_postgres_port_out
     shared_postgres_port_out="$(
@@ -3182,21 +3188,6 @@ command_run() {
   local repo_commit
   repo_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   if [[ "$with_shared_services" == "true" ]]; then
-    local shared_proof_services_image
-    if [[ -n "$shared_proof_services_image_override" ]]; then
-      shared_proof_services_image="$shared_proof_services_image_override"
-      log "skipping shared proof services image build because override was provided"
-    else
-      build_and_push_shared_proof_services_image \
-        "$aws_profile" \
-        "$aws_region" \
-        "$shared_proof_services_ecr_repository_url" \
-        "$repo_commit"
-      shared_proof_services_image="$SHARED_PROOF_SERVICES_IMAGE"
-      [[ -n "$shared_proof_services_image" ]] || die "shared proof services image build completed without image reference"
-      log "shared proof services image pushed: $shared_proof_services_image"
-    fi
-
     rollout_shared_proof_services \
       "$aws_profile" \
       "$aws_region" \

@@ -337,7 +337,6 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "-raw shared_ecs_cluster_arn" "shared ecs cluster output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_proof_requestor_service_name" "shared proof requestor output retrieval"
   assert_contains "$wrapper_script_text" "-raw shared_proof_funder_service_name" "shared proof funder output retrieval"
-  assert_contains "$wrapper_script_text" "-raw shared_proof_services_ecr_repository_url" "proof services ecr repository output retrieval"
   assert_contains "$wrapper_script_text" "reusing deployment_id from existing tfvars" "aws wrapper reuses deployment id for iterative reruns"
   assert_contains "$wrapper_script_text" "reusing dr deployment_id from existing tfvars" "aws wrapper reuses dr deployment id for iterative reruns"
   assert_contains "$wrapper_script_text" "sp1_requestor_secret_exists" "aws wrapper can verify preexisting sp1 requestor secret"
@@ -350,26 +349,19 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "if [[ \"\$sp1_requestor_secret_dr_created\" == \"true\" ]]; then" "aws wrapper only schedules dr sp1 secret cleanup when created"
   assert_contains "$wrapper_script_text" "reusing sp1 requestor secret:" "aws wrapper reuses existing primary sp1 requestor secret"
   assert_contains "$wrapper_script_text" "reusing dr sp1 requestor secret:" "aws wrapper reuses existing dr sp1 requestor secret"
-  assert_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "proof services image build invocation"
-  assert_contains "$wrapper_script_text" 'run_with_retry "shared proof services image buildx build/push" 3 15' "proof services image buildx path retries transient registry/build failures"
-  assert_contains "$wrapper_script_text" "run_with_local_timeout 300 docker buildx build --platform linux/amd64" "proof services image buildx path uses a bounded local timeout to prevent indefinite buildx hangs"
-  assert_contains "$wrapper_script_text" 'if [[ "$(uname -s)" == "Darwin" ]]; then' "proof services image path detects darwin hosts"
-  assert_contains "$wrapper_script_text" "darwin host detected; using docker build + push path for shared proof services image" "proof services image path logs darwin fallback"
-  assert_contains "$wrapper_script_text" '${E2E_AWS_FORCE_LEGACY_DOCKER_BUILD:-}' "proof services image path supports explicit legacy docker build override"
-  assert_contains "$wrapper_script_text" "run_with_local_timeout 300 env DOCKER_BUILDKIT=0 docker build" "proof services image fallback path disables buildkit for docker build reliability on darwin hosts"
-  assert_contains "$wrapper_script_text" "--provenance=false" "proof services buildx invocation disables provenance attestations for reliable push completion"
-  assert_contains "$wrapper_script_text" "--sbom=false" "proof services buildx invocation disables sbom attestations for reliable push completion"
-  assert_contains "$wrapper_script_text" "aws ecr describe-images" "proof services image flow checks whether commit tag already exists"
-  assert_contains "$wrapper_script_text" "reusing existing shared proof services image tag:" "proof services image flow logs ecr tag reuse path"
-  assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\"" "proof services image reference global initialized"
-  assert_contains "$wrapper_script_text" "SHARED_PROOF_SERVICES_IMAGE=\"\${repository_url}:\${image_tag}\"" "proof services image reference global assignment"
+  assert_contains "$wrapper_script_text" "resolve_latest_shared_proof_services_image()" "aws wrapper defines shared proof services image release resolver"
+  assert_contains "$wrapper_script_text" "shared-proof-services-image-manifest.json" "aws wrapper expects shared proof services release manifest asset"
+  assert_contains "$wrapper_script_text" "shared-proof-services-image-latest" "aws wrapper defaults to latest shared proof services image release tag"
+  assert_contains "$wrapper_script_text" "defaulting --shared-proof-services-image to latest released image" "aws wrapper logs auto-selected released shared proof services image"
   assert_contains "$wrapper_script_text" "--shared-proof-services-image)" "aws wrapper parses shared proof services image override argument"
+  assert_contains "$wrapper_script_text" "--shared-proof-services-image-release-tag)" "aws wrapper parses shared proof services image release tag argument"
   assert_contains "$wrapper_script_text" "using provided shared proof services image override:" "aws wrapper logs shared proof services image override usage"
-  assert_contains "$wrapper_script_text" "skipping shared proof services image build because override was provided" "aws wrapper skips docker image build when explicit image override is set"
+  assert_contains "$wrapper_script_text" "using released shared proof services image:" "aws wrapper logs selected released shared proof services image"
   assert_contains "$wrapper_script_text" "shared_proof_service_image=\"\$shared_proof_services_image_override\"" "aws wrapper writes explicit shared proof services image override into terraform vars"
-  assert_contains "$wrapper_script_text" "shared_proof_services_image=\"\$SHARED_PROOF_SERVICES_IMAGE\"" "proof services image build call reads explicit global output"
-  assert_not_contains "$wrapper_script_text" 'shared_proof_services_image="$( build_and_push_shared_proof_services_image' "proof services image build no longer masks failure via command substitution"
-  assert_contains "$wrapper_script_text" "aws ecr get-login-password" "proof services ecr login"
+  assert_not_contains "$wrapper_script_text" "build_and_push_shared_proof_services_image()" "aws wrapper no longer performs local docker build/push for shared proof services image"
+  assert_not_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "aws wrapper no longer performs buildx image builds locally"
+  assert_not_contains "$wrapper_script_text" "run_with_local_timeout 300 env DOCKER_BUILDKIT=0 docker build" "aws wrapper no longer performs local docker build fallback"
+  assert_not_contains "$wrapper_script_text" "aws ecr get-login-password" "aws wrapper no longer performs local ecr login for shared proof services image"
   assert_contains "$wrapper_script_text" "copy_remote_secret_file() {" "aws wrapper defines remote secret copy helper"
   assert_contains "$wrapper_script_text" "-o IdentitiesOnly=yes" "aws wrapper forces explicit ssh identity usage to avoid agent stalls"
   assert_contains "$wrapper_script_text" "run_with_local_timeout 45 scp \"\${ssh_opts[@]}\" \"\$local_file\" \"\$ssh_user@\$ssh_host:\$remote_file\"" "remote secret copy uses bounded scp timeout"
@@ -911,6 +903,20 @@ test_operator_stack_ami_release_workflow_exists() {
   assert_contains "$workflow_text" "gh release" "operator stack ami workflow creates/updates release"
 }
 
+test_shared_proof_services_image_release_workflow_exists() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-shared-proof-services-image.yml")"
+
+  assert_contains "$workflow_text" "name: release-shared-proof-services-image" "shared proof services image release workflow name"
+  assert_contains "$workflow_text" "aws_region:" "shared proof services image release workflow region input"
+  assert_contains "$workflow_text" "release_tag:" "shared proof services image release workflow release tag input"
+  assert_contains "$workflow_text" "proof-services.Dockerfile" "shared proof services image release workflow uses proof services dockerfile"
+  assert_contains "$workflow_text" "docker/build-push-action@v5" "shared proof services image release workflow builds/pushes via buildx action"
+  assert_contains "$workflow_text" "shared-proof-services-image-manifest.json" "shared proof services image release workflow publishes image manifest"
+  assert_contains "$workflow_text" "gh release" "shared proof services image release workflow creates/updates release"
+  assert_contains "$workflow_text" "Juno network: testnet" "shared proof services image release notes explicitly state juno testnet scope"
+}
+
 test_operator_stack_ami_release_workflow_supports_explicit_network_inputs() {
   local workflow_text
   workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
@@ -1089,6 +1095,16 @@ test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
   assert_not_contains "$workflow_text" "--sp1-withdraw-witness-txid" "aws workflow no longer forwards external withdraw txid"
 }
 
+test_aws_e2e_workflow_resolves_shared_proof_services_image_from_release() {
+  local workflow_text
+  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
+
+  assert_contains "$workflow_text" "Resolve Shared Proof Services Image" "aws e2e workflow has shared proof services image resolve step"
+  assert_contains "$workflow_text" "shared-proof-services-image-manifest.json" "aws e2e workflow downloads shared proof services image manifest from release"
+  assert_contains "$workflow_text" "shared-proof-services-image-latest" "aws e2e workflow resolves latest shared proof services image release tag"
+  assert_contains "$workflow_text" "--shared-proof-services-image" "aws e2e workflow forwards resolved shared proof services image override to wrapper"
+}
+
 test_proof_services_dockerfile_limits_cargo_memory() {
   local dockerfile_text
   dockerfile_text="$(cat "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile")"
@@ -1248,7 +1264,8 @@ test_aws_wrapper_timeout_fallback_kills_process_groups() {
   wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
 
   assert_contains "$wrapper_script_text" "if have_cmd python3; then" "aws wrapper timeout helper uses python3 fallback before perl alarm fallback"
-  assert_contains "$wrapper_script_text" 'python3 - "$timeout_seconds" "$@" <<'\''PY'\''' "aws wrapper timeout helper forwards command args into python fallback"
+  assert_contains "$wrapper_script_text" "python3 -c '" "aws wrapper timeout helper executes python fallback via -c to preserve piped stdin"
+  assert_not_contains "$wrapper_script_text" 'python3 - "$timeout_seconds" "$@" <<'\''PY'\''' "aws wrapper timeout helper avoids heredoc python mode that consumes piped stdin"
   assert_contains "$wrapper_script_text" "proc = subprocess.Popen(command, preexec_fn=os.setsid)" "aws wrapper timeout helper isolates fallback command in its own process group"
   assert_contains "$wrapper_script_text" "os.killpg(proc.pid, signal.SIGTERM)" "aws wrapper timeout helper sends SIGTERM to full fallback process group on timeout"
   assert_contains "$wrapper_script_text" "os.killpg(proc.pid, signal.SIGKILL)" "aws wrapper timeout helper escalates to SIGKILL for stubborn fallback process groups"
@@ -1293,11 +1310,13 @@ main() {
   test_non_aws_workflow_wires_shared_ipfs_for_local_e2e
   test_aws_workflow_dispatch_input_count_within_limit
   test_operator_stack_ami_release_workflow_exists
+  test_shared_proof_services_image_release_workflow_exists
   test_operator_stack_ami_release_workflow_supports_explicit_network_inputs
   test_long_running_aws_workflows_request_extended_oidc_session
   test_bridge_guest_release_workflow_exists
   test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp
   test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset
+  test_aws_e2e_workflow_resolves_shared_proof_services_image_from_release
   test_proof_services_dockerfile_limits_cargo_memory
   test_root_dockerignore_excludes_local_bloat_from_build_context
   test_aws_wrapper_rechecks_ssh_before_remote_runner_prepare

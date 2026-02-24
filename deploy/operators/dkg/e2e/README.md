@@ -43,6 +43,8 @@ Current behavior:
   - `.github/workflows/e2e-testnet-deploy-aws.yml`
 - Operator AMI release workflow:
   - `.github/workflows/release-operator-stack-ami.yml`
+- Shared proof-services image release workflow:
+  - `.github/workflows/release-shared-proof-services-image.yml`
 
 The AWS workflow is designed for high-fidelity live runs and includes teardown on both success and failure paths:
 
@@ -50,6 +52,7 @@ The AWS workflow is designed for high-fidelity live runs and includes teardown o
 2. `run-testnet-e2e-aws.sh` trap performs destroy on exit.
 3. Workflow fallback step always invokes `run-testnet-e2e-aws.sh cleanup ...` as a second destroy guard.
 4. When `operator_ami_id` input is empty, `.github/workflows/e2e-testnet-deploy-aws.yml` resolves `operator-stack-ami-latest` release metadata and injects `--operator-ami-id` automatically.
+5. Shared proof-services image is resolved from `shared-proof-services-image-latest` release metadata and injected as `--shared-proof-services-image` (or can be overridden explicitly).
 
 To bake and release the full operator AMI (synced `junocashd` + `juno-scan` + checkpoint services + `tss-host`), run:
 
@@ -58,6 +61,7 @@ To bake and release the full operator AMI (synced `junocashd` + `juno-scan` + ch
 The workflow uses:
 
 - `deploy/shared/runbooks/build-operator-stack-ami.sh`
+- `deploy/shared/docker/proof-services.Dockerfile` (built and released by `.github/workflows/release-shared-proof-services-image.yml`)
 
 GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
 

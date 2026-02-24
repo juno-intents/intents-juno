@@ -135,6 +135,7 @@ jobs:
       AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
     outputs:
       operator_ami_id: ${{ steps.resolve_operator_ami.outputs.operator_ami_id }}
+      shared_proof_services_image: ${{ steps.resolve_shared_proof_services_image.outputs.shared_proof_services_image }}
     steps:
       - uses: actions/checkout@v4
 
@@ -358,6 +359,28 @@ jobs:
 
           echo "operator_ami_id=$resolved_operator_ami_id" >> "$GITHUB_OUTPUT"
 
+      - name: Resolve Shared Proof Services Image
+        id: resolve_shared_proof_services_image
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          manifest_path="${RUNNER_TEMP}/shared-proof-services-image-manifest.json"
+          gh release download "shared-proof-services-image-latest" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "shared-proof-services-image-manifest.json" \
+            --output "$manifest_path"
+
+          resolved_shared_proof_services_image="$(jq -er --arg region "${{ inputs.aws_region }}" '.regions[$region].image_uri // .image_uri // empty' "$manifest_path")"
+          if [[ -z "$resolved_shared_proof_services_image" ]]; then
+            echo "shared-proof-services-image-latest manifest does not contain a usable image URI"
+            exit 1
+          fi
+          echo "Resolved shared proof services image from release shared-proof-services-image-latest: $resolved_shared_proof_services_image"
+          echo "shared_proof_services_image=$resolved_shared_proof_services_image" >> "$GITHUB_OUTPUT"
+
       - name: Run AWS Live E2E Preflight
         shell: bash
         run: |
@@ -384,6 +407,7 @@ jobs:
           )
 
           ARGS+=(--operator-ami-id "${{ steps.resolve_operator_ami.outputs.operator_ami_id }}")
+          ARGS+=(--shared-proof-services-image "${{ steps.resolve_shared_proof_services_image.outputs.shared_proof_services_image }}")
           ARGS+=(--sp1-requestor-key-file ".ci/secrets/sp1-requestor.key")
           if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" ]]; then
             ARGS+=(--shared-sp1-requestor-secret-arn "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}")
@@ -570,6 +594,7 @@ jobs:
             --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
             --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
             --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --shared-proof-services-image "${{ needs.preflight.outputs.shared_proof_services_image }}"
             --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
             --keep-infra
           )
@@ -644,6 +669,7 @@ jobs:
             --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
             --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
             --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --shared-proof-services-image "${{ needs.preflight.outputs.shared_proof_services_image }}"
             --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
             --reuse-bridge-summary-path "$summary_path"
             --status-json "$status_json"
@@ -858,6 +884,7 @@ jobs:
             --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
             --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
             --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --shared-proof-services-image "${{ needs.preflight.outputs.shared_proof_services_image }}"
             --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
             --keep-infra
             --skip-distributed-dkg

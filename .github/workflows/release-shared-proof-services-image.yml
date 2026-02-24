@@ -1,0 +1,190 @@
+name: release-shared-proof-services-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region for ECR image publishing"
+        required: true
+        default: "us-east-1"
+        type: string
+      ecr_repository_name:
+        description: "ECR repository name for shared proof-services image"
+        required: true
+        default: "intents-juno-proof-services"
+        type: string
+      release_tag:
+        description: "Release tag to create/update"
+        required: true
+        default: "shared-proof-services-image-latest"
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required AWS Auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" || -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when using static AWS credentials"
+              exit 1
+            fi
+          elif [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            echo "Either AWS_ROLE_TO_ASSUME or static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets are required"
+            exit 1
+          fi
+
+      - name: Ensure ECR Repository
+        id: ensure_ecr
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          region="${{ inputs.aws_region }}"
+          repository_name="${{ inputs.ecr_repository_name }}"
+          account_id="$(aws sts get-caller-identity --query Account --output text)"
+          repository_uri="${account_id}.dkr.ecr.${region}.amazonaws.com/${repository_name}"
+
+          if ! aws ecr describe-repositories --region "$region" --repository-names "$repository_name" >/dev/null 2>&1; then
+            aws ecr create-repository \
+              --region "$region" \
+              --repository-name "$repository_name" \
+              --image-tag-mutability MUTABLE \
+              --image-scanning-configuration scanOnPush=true >/dev/null
+          fi
+
+          echo "repository_uri=$repository_uri" >> "$GITHUB_OUTPUT"
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and Push Shared Proof Services Image
+        id: build_and_push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: deploy/shared/docker/proof-services.Dockerfile
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: |
+            ${{ steps.ensure_ecr.outputs.repository_uri }}:${{ github.sha }}
+            ${{ steps.ensure_ecr.outputs.repository_uri }}:latest
+
+      - name: Build Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+
+          region="${{ inputs.aws_region }}"
+          repository_uri="${{ steps.ensure_ecr.outputs.repository_uri }}"
+          image_tag="${GITHUB_SHA}"
+          image_digest="${{ steps.build_and_push.outputs.digest }}"
+          image_uri="${repository_uri}@${image_digest}"
+          built_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+
+          jq -n \
+            --arg region "$region" \
+            --arg repository_uri "$repository_uri" \
+            --arg image_tag "$image_tag" \
+            --arg image_digest "$image_digest" \
+            --arg image_uri "$image_uri" \
+            --arg image_tag_uri "${repository_uri}:${image_tag}" \
+            --arg image_latest_uri "${repository_uri}:latest" \
+            --arg repo_commit "$GITHUB_SHA" \
+            --arg built_at_utc "$built_at_utc" \
+            '{
+              repo_commit: $repo_commit,
+              built_at_utc: $built_at_utc,
+              image_uri: $image_uri,
+              regions: {
+                ($region): {
+                  repository_uri: $repository_uri,
+                  image_tag: $image_tag,
+                  image_digest: $image_digest,
+                  image_uri: $image_uri,
+                  image_tag_uri: $image_tag_uri,
+                  image_latest_uri: $image_latest_uri
+                }
+              }
+            }' > .ci/out/shared-proof-services-image-manifest.json
+
+          sha256sum .ci/out/shared-proof-services-image-manifest.json > .ci/out/shared-proof-services-image-manifest.json.sha256
+
+      - name: Create or Update Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ inputs.release_tag }}"
+          region="${{ inputs.aws_region }}"
+          image_uri="$(jq -r --arg region "$region" '.regions[$region].image_uri // empty' .ci/out/shared-proof-services-image-manifest.json)"
+          if [[ -z "$image_uri" ]]; then
+            echo "failed to resolve image uri from shared-proof-services-image-manifest.json for region=$region"
+            exit 1
+          fi
+
+          notes="Shared proof services image release for ${region}
+
+          Image: ${image_uri}
+          Juno network: testnet
+          Repo commit: ${GITHUB_SHA}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              .ci/out/shared-proof-services-image-manifest.json \
+              .ci/out/shared-proof-services-image-manifest.json.sha256 \
+              --clobber
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" \
+              .ci/out/shared-proof-services-image-manifest.json \
+              .ci/out/shared-proof-services-image-manifest.json.sha256 \
+              --title "$tag" \
+              --notes "$notes"
+          fi
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-proof-services-image-release
+          path: |
+            .ci/out/shared-proof-services-image-manifest.json
+            .ci/out/shared-proof-services-image-manifest.json.sha256
