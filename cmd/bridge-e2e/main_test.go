@@ -331,6 +331,65 @@ func TestParseArgs_RuntimeSignerValidWithoutOperatorKeys(t *testing.T) {
 	}
 }
 
+func TestParseArgs_DeployOnlyAllowsOperatorAddressesWithoutSigner(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	deployer := filepath.Join(tmp, "deployer.key")
+	requestor := filepath.Join(tmp, "requestor.key")
+	depositWitness := filepath.Join(tmp, "deposit.witness.bin")
+	withdrawWitness := filepath.Join(tmp, "withdraw.witness.bin")
+
+	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write deployer key: %v", err)
+	}
+	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+	if err := os.WriteFile(depositWitness, bytes.Repeat([]byte{0x11}, proverinput.DepositWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write deposit witness: %v", err)
+	}
+	if err := os.WriteFile(withdrawWitness, bytes.Repeat([]byte{0x22}, proverinput.WithdrawWitnessItemLen), 0o600); err != nil {
+		t.Fatalf("write withdraw witness: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deploy-only",
+		"--deployer-key-file", deployer,
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--sp1-auto",
+		"--sp1-requestor-key-file", requestor,
+		"--sp1-deposit-program-url", "https://example.invalid/deposit.elf",
+		"--sp1-withdraw-program-url", "https://example.invalid/withdraw.elf",
+		"--sp1-input-s3-bucket", "test-bucket",
+		"--sp1-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--sp1-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--sp1-deposit-witness-item-file", depositWitness,
+		"--sp1-withdraw-witness-item-file", withdrawWitness,
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.OperatorSignerBin != "" {
+		t.Fatalf("operator signer bin: got %q want empty", cfg.OperatorSignerBin)
+	}
+	if len(cfg.OperatorAddresses) != 3 {
+		t.Fatalf("operator addresses: got %d want 3", len(cfg.OperatorAddresses))
+	}
+	if !cfg.DeployOnly {
+		t.Fatalf("deploy-only: got false want true")
+	}
+}
+
 func TestParseArgs_RuntimeSignerRequiresOperatorAddresses(t *testing.T) {
 	t.Parallel()
 
@@ -405,6 +464,22 @@ func TestRun_RequiresOperatorSignerBin(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "--operator-signer-bin is required") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRun_DeployOnlySkipsOperatorSignerRequirement(t *testing.T) {
+	t.Parallel()
+
+	_, err := run(context.Background(), config{
+		DeployOnly: true,
+		RPCURL:     "http://127.0.0.1:65535",
+		ChainID:    84532,
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if strings.Contains(err.Error(), "--operator-signer-bin is required") {
+		t.Fatalf("deploy-only should not require operator signer: %v", err)
 	}
 }
 

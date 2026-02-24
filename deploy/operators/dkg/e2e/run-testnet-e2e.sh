@@ -2649,31 +2649,34 @@ command_run() {
     )
   fi
 
-  if [[ -z "$bridge_operator_signer_bin" ]]; then
-    local ensured_bridge_operator_signer_bin
-    ensured_bridge_operator_signer_bin="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$workdir/bin")"
-    export PATH="$(dirname "$ensured_bridge_operator_signer_bin"):$PATH"
-    bridge_operator_signer_bin="juno-txsign"
-  fi
-  if [[ "$bridge_operator_signer_bin" == */* ]]; then
-    [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
-  else
-    command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
-  fi
-  if ! supports_sign_digest_subcommand "$bridge_operator_signer_bin"; then
-    die "bridge operator signer binary must support sign-digest: $bridge_operator_signer_bin"
-  fi
-  if [[ "$bridge_operator_signer_bin" == */* ]]; then
-    [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
-  else
-    command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
-  fi
   local bridge_operator_signer_supports_operator_endpoint="false"
-  if supports_operator_endpoint_flag "$bridge_operator_signer_bin"; then
-    bridge_operator_signer_supports_operator_endpoint="true"
-  else
-    log "bridge operator signer does not support --operator-endpoint; using local key material mode"
-  fi
+  local bridge_operator_signer_ready="false"
+  ensure_bridge_operator_signer_ready() {
+    if [[ "$bridge_operator_signer_ready" == "true" ]]; then
+      return 0
+    fi
+    if [[ -z "$bridge_operator_signer_bin" ]]; then
+      local ensured_bridge_operator_signer_bin
+      ensured_bridge_operator_signer_bin="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$workdir/bin")"
+      export PATH="$(dirname "$ensured_bridge_operator_signer_bin"):$PATH"
+      bridge_operator_signer_bin="juno-txsign"
+    fi
+    if [[ "$bridge_operator_signer_bin" == */* ]]; then
+      [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
+    else
+      command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
+    fi
+    if ! supports_sign_digest_subcommand "$bridge_operator_signer_bin"; then
+      die "bridge operator signer binary must support sign-digest: $bridge_operator_signer_bin"
+    fi
+    if supports_operator_endpoint_flag "$bridge_operator_signer_bin"; then
+      bridge_operator_signer_supports_operator_endpoint="true"
+    else
+      bridge_operator_signer_supports_operator_endpoint="false"
+      log "bridge operator signer does not support --operator-endpoint; using local key material mode"
+    fi
+    bridge_operator_signer_ready="true"
+  }
 
   local checkpoint_operators_csv
   checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
@@ -3389,7 +3392,6 @@ command_run() {
     "--chain-id" "$base_chain_id"
     "--deploy-only"
     "--deployer-key-file" "$bridge_deployer_key_file"
-    "--operator-signer-bin" "$bridge_operator_signer_bin"
     "--threshold" "$threshold"
     "--contracts-out" "$contracts_out"
     "--recipient" "$bridge_recipient_address"
@@ -3454,9 +3456,6 @@ command_run() {
     bridge_args+=("--operator-address" "$operator_id")
     if [[ -n "$operator_endpoint" ]]; then
       bridge_operator_endpoints+=("$operator_endpoint")
-      if [[ "$bridge_operator_signer_supports_operator_endpoint" == "true" ]]; then
-        bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
-      fi
     fi
     operator_key_hex="$(operator_signer_key_hex_from_file "$operator_key_file" || true)"
     [[ -n "$operator_key_hex" ]] || \
@@ -3466,9 +3465,6 @@ command_run() {
 
   if (( ${#bridge_operator_key_hexes[@]} < threshold )); then
     die "operator key count is below threshold for bridge signer: keys=${#bridge_operator_key_hexes[@]} threshold=$threshold"
-  fi
-  if [[ "$bridge_operator_signer_supports_operator_endpoint" == "true" ]] && (( ${#bridge_operator_endpoints[@]} < threshold )); then
-    die "operator endpoint count is below threshold for endpoint-aware bridge signer: endpoints=${#bridge_operator_endpoints[@]} threshold=$threshold"
   fi
 
   local bridge_operator_signer_keys_csv
@@ -3528,6 +3524,8 @@ command_run() {
     local -a direct_cli_bridge_base_args=()
     local -a direct_cli_bridge_deploy_args=()
     local -a direct_cli_bridge_run_args=()
+
+    ensure_bridge_operator_signer_ready
 
     witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
     direct_cli_witness_source_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
@@ -4129,7 +4127,7 @@ command_run() {
     set +e
     (
       cd "$REPO_ROOT"
-      env "${bridge_operator_signer_env[@]}" go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
+      go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
     )
     bridge_status="$?"
     set -e
@@ -5465,6 +5463,8 @@ command_run() {
   }
 
   if (( relayer_status == 0 )); then
+    ensure_bridge_operator_signer_ready
+    operator_signer_supports_endpoints="$bridge_operator_signer_supports_operator_endpoint"
     operator_down_1_status="running"
     if run_operator_down_threshold_scenario 1; then
       operator_down_1_status="passed"

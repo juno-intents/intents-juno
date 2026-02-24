@@ -798,10 +798,13 @@ test_local_e2e_uses_operator_deployer_key() {
 
   assert_contains "$e2e_script_text" "bridge_deployer_key_file=\"\$(jq -r '.operators[0].operator_key_file // empty' \"\$dkg_summary\")\"" "bridge deployer key derived from first operator"
   assert_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$bridge_deployer_key_file\"" "bridge deployer key forwarded"
-  assert_contains "$e2e_script_text" "\"--operator-signer-bin\" \"\$bridge_operator_signer_bin\"" "bridge operator signer binary forwarded"
+  assert_contains "$e2e_script_text" "\"--operator-signer-bin\" \"\$bridge_operator_signer_bin\"" "signer binary still used for signer-backed direct-cli scenario"
   assert_contains "$e2e_script_text" "bridge_args+=(\"--operator-address\" \"\$operator_id\")" "bridge operator address forwarded from dkg summary"
-  assert_contains "$e2e_script_text" "bridge_args+=(\"--operator-signer-endpoint\" \"\$operator_endpoint\")" "bridge operator signer endpoint forwarded from dkg summary"
-  assert_contains "$e2e_script_text" ".operators[] | [.operator_id, (.endpoint // .grpc_endpoint // \"\")] | @tsv" "operator endpoints sourced from dkg summary"
+  assert_not_contains "$e2e_script_text" "bridge_args+=(\"--operator-signer-bin\" \"\$bridge_operator_signer_bin\")" "deploy bootstrap no longer forces signer binary"
+  assert_not_contains "$e2e_script_text" "bridge_args+=(\"--operator-signer-endpoint\" \"\$operator_endpoint\")" "deploy bootstrap no longer forwards signer endpoints"
+  assert_not_contains "$e2e_script_text" "env \"\${bridge_operator_signer_env[@]}\" go run ./cmd/bridge-e2e --deploy-only \"\${bridge_args[@]}\"" "deploy bootstrap no longer injects signer env"
+  assert_contains "$e2e_script_text" "go run ./cmd/bridge-e2e --deploy-only \"\${bridge_args[@]}\"" "deploy bootstrap still executes bridge-e2e deploy-only path"
+  assert_contains "$e2e_script_text" ".operators[] | [.operator_id, (.endpoint // .grpc_endpoint // \"\"), (.operator_key_file // \"\")] | @tsv" "operator addresses/endpoints/key files sourced from dkg summary"
   assert_not_contains "$e2e_script_text" "bridge_args+=(\"--operator-key-file\"" "bridge operator key-file signing removed"
   assert_not_contains "$e2e_script_text" "\"--deployer-key-file\" \"\$base_funder_key_file\"" "bridge deployer no longer reuses funder key"
 }

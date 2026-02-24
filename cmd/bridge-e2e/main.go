@@ -93,7 +93,7 @@ type config struct {
 	JunoExecutionTxHash         string
 	OutputPath                  string
 	RunTimeout                  time.Duration
-	SP1                   sp1Config
+	SP1                         sp1Config
 }
 
 type sp1Config struct {
@@ -145,22 +145,22 @@ const (
 	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
 	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
 
-	defaultSP1MaxPricePerPGU         = uint64(1000000000000)
-	defaultSP1MinAuctionPeriod       = uint64(85)
-	defaultSP1AuctionTimeout         = 625 * time.Second
-	defaultSP1RequestTimeout         = 1500 * time.Second
-	defaultSP1MarketAddr             = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
-	defaultSP1RouterAddr             = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
-	defaultSP1SetVerAddr             = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
-	defaultSP1InputS3Prefix          = "bridge-e2e/sp1-input"
-	defaultSP1InputS3PresignTTL      = 2 * time.Hour
-	defaultSP1ProofAttemptGrace      = 2 * time.Minute
-	defaultRetryGasPriceWei                = int64(2_000_000_000)
-	defaultRetryGasTipCapWei               = int64(500_000_000)
+	defaultSP1MaxPricePerPGU    = uint64(1000000000000)
+	defaultSP1MinAuctionPeriod  = uint64(85)
+	defaultSP1AuctionTimeout    = 625 * time.Second
+	defaultSP1RequestTimeout    = 1500 * time.Second
+	defaultSP1MarketAddr        = "0xFd152dADc5183870710FE54f939Eae3aB9F0fE82"
+	defaultSP1RouterAddr        = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+	defaultSP1SetVerAddr        = "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+	defaultSP1InputS3Prefix     = "bridge-e2e/sp1-input"
+	defaultSP1InputS3PresignTTL = 2 * time.Hour
+	defaultSP1ProofAttemptGrace = 2 * time.Minute
+	defaultRetryGasPriceWei     = int64(2_000_000_000)
+	defaultRetryGasTipCapWei    = int64(500_000_000)
 
-	sp1InputModeGuestWitnessV1  = "guest-witness-v1"
-	sp1ProofSubmissionDirectCLI = "direct-cli"
-	sp1ProofSubmissionQueue     = "queue"
+	sp1InputModeGuestWitnessV1        = "guest-witness-v1"
+	sp1ProofSubmissionDirectCLI       = "direct-cli"
+	sp1ProofSubmissionQueue           = "queue"
 	defaultProofRequestTopic          = "proof.requests.v1"
 	defaultProofResultTopic           = "proof.fulfillments.v1"
 	defaultProofFailureTopic          = "proof.failures.v1"
@@ -178,7 +178,7 @@ const (
 	withdrawalFinalizedPollInterval   = 2 * time.Second
 	postFinalizeInvariantWaitTimeout  = 60 * time.Second
 	postFinalizeInvariantPollInterval = 2 * time.Second
-	sp1MarketBalanceOfABIJSON   = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
+	sp1MarketBalanceOfABIJSON         = `[{"inputs":[{"internalType":"address","name":"account","type":"address"}],"name":"balanceOf","outputs":[{"internalType":"uint256","name":"","type":"uint256"}],"stateMutability":"view","type":"function"}]`
 
 	depositWitnessLeafIndexOffset = 0
 	depositWitnessAuthPathOffset  = depositWitnessLeafIndexOffset + 4
@@ -259,19 +259,19 @@ type report struct {
 		WithdrawSealBytes int    `json:"withdraw_seal_bytes"`
 
 		SP1 struct {
-			Enabled                bool   `json:"enabled"`
-			SubmissionMode         string `json:"submission_mode,omitempty"`
-			RPCURL                 string `json:"rpc_url,omitempty"`
-			InputMode              string `json:"input_mode,omitempty"`
-			MarketAddress          string `json:"market_address,omitempty"`
-			VerifierRouter         string `json:"verifier_router_address,omitempty"`
-			SetVerifier            string `json:"set_verifier_address,omitempty"`
-			DepositRequestID       string `json:"deposit_request_id,omitempty"`
-			WithdrawRequestID      string `json:"withdraw_request_id,omitempty"`
-			MaxPricePerPGU         uint64 `json:"max_price_per_pgu,omitempty"`
-			MinAuctionPeriodSec    uint64 `json:"min_auction_period_seconds,omitempty"`
-			AuctionTimeoutSec      uint64 `json:"auction_timeout_seconds,omitempty"`
-			RequestTimeoutSec      uint64 `json:"request_timeout_seconds,omitempty"`
+			Enabled             bool   `json:"enabled"`
+			SubmissionMode      string `json:"submission_mode,omitempty"`
+			RPCURL              string `json:"rpc_url,omitempty"`
+			InputMode           string `json:"input_mode,omitempty"`
+			MarketAddress       string `json:"market_address,omitempty"`
+			VerifierRouter      string `json:"verifier_router_address,omitempty"`
+			SetVerifier         string `json:"set_verifier_address,omitempty"`
+			DepositRequestID    string `json:"deposit_request_id,omitempty"`
+			WithdrawRequestID   string `json:"withdraw_request_id,omitempty"`
+			MaxPricePerPGU      uint64 `json:"max_price_per_pgu,omitempty"`
+			MinAuctionPeriodSec uint64 `json:"min_auction_period_seconds,omitempty"`
+			AuctionTimeoutSec   uint64 `json:"auction_timeout_seconds,omitempty"`
+			RequestTimeoutSec   uint64 `json:"request_timeout_seconds,omitempty"`
 		} `json:"sp1,omitempty"`
 	} `json:"proof"`
 
@@ -601,6 +601,15 @@ func parseArgs(args []string) (config, error) {
 	if cfg.OperatorSignerBin != "" {
 		if len(cfg.OperatorAddresses) < cfg.Threshold {
 			return cfg, fmt.Errorf("need at least %d operator addresses (--operator-address), got %d", cfg.Threshold, len(cfg.OperatorAddresses))
+		}
+	} else if cfg.DeployOnly {
+		if len(cfg.OperatorAddresses) < cfg.Threshold && len(cfg.OperatorKeyFiles) < cfg.Threshold {
+			return cfg, fmt.Errorf(
+				"need at least %d operator addresses (--operator-address) or operator keys (--operator-key-file), got addresses=%d keys=%d",
+				cfg.Threshold,
+				len(cfg.OperatorAddresses),
+				len(cfg.OperatorKeyFiles),
+			)
 		}
 	} else if len(cfg.OperatorKeyFiles) < cfg.Threshold {
 		return cfg, fmt.Errorf("need at least %d operator keys, got %d", cfg.Threshold, len(cfg.OperatorKeyFiles))
@@ -1054,7 +1063,8 @@ func encodeSignaturesHex(sigs [][]byte) []string {
 
 func run(ctx context.Context, cfg config) (*report, error) {
 	cfg.OperatorSignerBin = strings.TrimSpace(cfg.OperatorSignerBin)
-	if cfg.OperatorSignerBin == "" {
+	requireOperatorSigner := !cfg.DeployOnly
+	if requireOperatorSigner && cfg.OperatorSignerBin == "" {
 		return nil, errors.New("--operator-signer-bin is required")
 	}
 
@@ -1089,15 +1099,17 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		digestSigner  operatorDigestSigner
 	)
 	operatorAddrs = append(operatorAddrs, cfg.OperatorAddresses...)
-	signer, err := newExecOperatorDigestSigner(
-		cfg.OperatorSignerBin,
-		cfg.OperatorSignerEndpoints,
-		cfg.OperatorSignerMaxRespBytes,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("configure operator signer: %w", err)
+	if requireOperatorSigner {
+		signer, err := newExecOperatorDigestSigner(
+			cfg.OperatorSignerBin,
+			cfg.OperatorSignerEndpoints,
+			cfg.OperatorSignerMaxRespBytes,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("configure operator signer: %w", err)
+		}
+		digestSigner = signer
 	}
-	digestSigner = signer
 	if len(operatorAddrs) < cfg.Threshold {
 		return nil, fmt.Errorf("operator set smaller than threshold: operators=%d threshold=%d", len(operatorAddrs), cfg.Threshold)
 	}

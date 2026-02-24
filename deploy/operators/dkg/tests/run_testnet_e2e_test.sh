@@ -79,17 +79,21 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
-test_operator_signer_requires_sign_digest_support() {
+test_operator_signer_is_lazy_for_runner_core_flow() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" "supports_sign_digest_subcommand()" "operator signer capability probe helper exists"
+  assert_contains "$script_text" "ensure_bridge_operator_signer_ready()" "operator signer bootstrap is deferred behind an explicit helper"
   assert_contains "$script_text" "ensure_juno_txsign_binary" "operator signer defaults to juno-txsign bootstrap helper"
   assert_contains "$script_text" "bridge_operator_signer_bin=\"juno-txsign\"" "operator signer default prefers juno-txsign command"
   assert_not_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer removed"
   assert_not_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback signer shim log removed"
   assert_not_contains "$script_text" "cast wallet sign --no-hash --private-key" "runner-side raw digest signer shim removed"
-  assert_contains "$script_text" "bridge operator signer binary must support sign-digest" "sign-digest capability is a hard requirement"
+  assert_contains "$script_text" "go run ./cmd/bridge-e2e --deploy-only \"\${bridge_args[@]}\"" "deploy bootstrap invocation remains present"
+  assert_not_contains "$script_text" "env \"\${bridge_operator_signer_env[@]}\" go run ./cmd/bridge-e2e --deploy-only \"\${bridge_args[@]}\"" "deploy bootstrap no longer forces signer env"
+  assert_contains "$script_text" "env \"\${bridge_operator_signer_env[@]}\" go run ./cmd/bridge-e2e \"\${direct_cli_bridge_deploy_args[@]}\"" "direct-cli signer path still uses explicit signer env"
+  assert_contains "$script_text" "bridge operator signer binary must support sign-digest" "sign-digest capability remains enforced when signer-backed scenarios run"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {
@@ -393,7 +397,7 @@ test_sp1_rpc_defaults_and_validation_target_succinct_network() {
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
-  test_operator_signer_requires_sign_digest_support
+  test_operator_signer_is_lazy_for_runner_core_flow
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_metadata_failover_reuses_single_wallet_id
