@@ -1634,15 +1634,26 @@ sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} 
 if grep -qE '^[[:space:]]*--lease-name ' "$checkpoint_signer_script"; then
   sudo sed -i "s|^[[:space:]]*--lease-name .*|  --lease-name \"${checkpoint_signer_lease_name}\" \\\\|g" "$checkpoint_signer_script"
 else
-  if ! grep -qE '^  --owner-id .*\\\\$' "$checkpoint_signer_script"; then
-    echo "checkpoint signer wrapper is missing owner-id line: $checkpoint_signer_script" >&2
-    exit 1
-  fi
   lease_tmp="$(mktemp)"
   awk -v lease="$checkpoint_signer_lease_name" '
+    BEGIN {
+      inserted = 0
+    }
     {
+      if (inserted == 0 && $0 ~ /--owner-id /) {
+        print
+        printf "  --lease-name \"%s\" \\\\\n", lease
+        inserted = 1
+        next
+      }
+      if (inserted == 0 && $0 ~ /--postgres-dsn /) {
+        printf "  --lease-name \"%s\" \\\\\n", lease
+        inserted = 1
+      }
       print
-      if ($0 ~ /^  --owner-id .*\\$/) {
+    }
+    END {
+      if (inserted == 0) {
         printf "  --lease-name \"%s\" \\\\\n", lease
       }
     }
