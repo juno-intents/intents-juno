@@ -280,6 +280,7 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'awk -v lease="$checkpoint_signer_lease_name"' "checkpoint bridge config updater uses awk insertion to preserve signer command continuation"
   assert_contains "$script_text" 'if (inserted == 0 && $0 ~ /--owner-id /)' "checkpoint bridge config updater prefers inserting lease-name after owner-id"
   assert_contains "$script_text" 'if (inserted == 0 && $0 ~ /--postgres-dsn /)' "checkpoint bridge config updater falls back to inserting lease-name before postgres-dsn when owner-id shape is unexpected"
+  assert_contains "$script_text" 'printf "  --lease-name \"%s\" %c\n", lease, 92' "checkpoint bridge config updater writes lease-name with exactly one trailing command-continuation backslash"
   assert_contains "$script_text" 'if (inserted == 0) {' "checkpoint bridge config updater includes a last-resort lease-name insertion guard"
   assert_contains "$script_text" 'sudo install -m 0755 "$lease_tmp" "$checkpoint_signer_script"' "checkpoint bridge config updater atomically writes checkpoint-signer wrapper after lease insertion"
   assert_contains "$script_text" 'sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator base chain id flag"

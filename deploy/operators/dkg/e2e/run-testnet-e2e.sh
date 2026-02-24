@@ -1642,19 +1642,19 @@ else
     {
       if (inserted == 0 && $0 ~ /--owner-id /) {
         print
-        printf "  --lease-name \"%s\" \\\\\n", lease
+        printf "  --lease-name \"%s\" %c\n", lease, 92
         inserted = 1
         next
       }
       if (inserted == 0 && $0 ~ /--postgres-dsn /) {
-        printf "  --lease-name \"%s\" \\\\\n", lease
+        printf "  --lease-name \"%s\" %c\n", lease, 92
         inserted = 1
       }
       print
     }
     END {
       if (inserted == 0) {
-        printf "  --lease-name \"%s\" \\\\\n", lease
+        printf "  --lease-name \"%s\" %c\n", lease, 92
       }
     }
   ' "$checkpoint_signer_script" >"$lease_tmp"
