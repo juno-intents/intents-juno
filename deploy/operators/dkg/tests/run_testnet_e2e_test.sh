@@ -258,6 +258,17 @@ test_json_array_from_args_separates_jq_options_from_cli_flags() {
   assert_contains "$output" '"postgres://example"' "json array preserves cli flag values"
 }
 
+test_workdir_run_lock_prevents_overlapping_runs() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "acquire_workdir_run_lock()" "run-testnet-e2e defines a workdir run lock helper"
+  assert_contains "$script_text" 'local lock_dir="$workdir/.run.lock"' "workdir lock uses a deterministic per-workdir lock path"
+  assert_contains "$script_text" 'die "another run-testnet-e2e.sh process is already active for workdir=$workdir pid=$lock_owner_pid"' "active workdir lock holder causes hard failure"
+  assert_contains "$script_text" "trap release_workdir_run_lock EXIT" "workdir lock registers cleanup trap"
+  assert_contains "$script_text" 'acquire_workdir_run_lock "$workdir"' "command_run acquires lock before executing live flow"
+}
+
 test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -292,6 +303,7 @@ main() {
   test_existing_bridge_summary_reuses_deployed_contracts
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
+  test_workdir_run_lock_prevents_overlapping_runs
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
 }

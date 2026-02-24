@@ -149,6 +149,59 @@ json_array_from_args() {
   jq -n '$ARGS.positional' --args -- "$@"
 }
 
+RUN_WORKDIR_LOCK_DIR=""
+RUN_WORKDIR_LOCK_PID_FILE=""
+
+release_workdir_run_lock() {
+  [[ -n "$RUN_WORKDIR_LOCK_DIR" ]] || return 0
+
+  local lock_owner_pid=""
+  if [[ -n "$RUN_WORKDIR_LOCK_PID_FILE" && -f "$RUN_WORKDIR_LOCK_PID_FILE" ]]; then
+    lock_owner_pid="$(trimmed_file_value "$RUN_WORKDIR_LOCK_PID_FILE")"
+  fi
+
+  if [[ -z "$lock_owner_pid" || "$lock_owner_pid" == "$$" ]]; then
+    rm -rf "$RUN_WORKDIR_LOCK_DIR" >/dev/null 2>&1 || true
+  fi
+
+  RUN_WORKDIR_LOCK_DIR=""
+  RUN_WORKDIR_LOCK_PID_FILE=""
+}
+
+acquire_workdir_run_lock() {
+  local workdir="$1"
+  local lock_dir="$workdir/.run.lock"
+  local lock_pid_file="$lock_dir/pid"
+  local lock_started_at_file="$lock_dir/started_at"
+  local lock_owner_pid=""
+
+  if mkdir "$lock_dir" 2>/dev/null; then
+    printf '%s\n' "$$" >"$lock_pid_file"
+    timestamp_utc >"$lock_started_at_file"
+    RUN_WORKDIR_LOCK_DIR="$lock_dir"
+    RUN_WORKDIR_LOCK_PID_FILE="$lock_pid_file"
+    trap release_workdir_run_lock EXIT
+    return 0
+  fi
+
+  if [[ -f "$lock_pid_file" ]]; then
+    lock_owner_pid="$(trimmed_file_value "$lock_pid_file")"
+  fi
+
+  if [[ "$lock_owner_pid" =~ ^[0-9]+$ ]] && kill -0 "$lock_owner_pid" >/dev/null 2>&1; then
+    die "another run-testnet-e2e.sh process is already active for workdir=$workdir pid=$lock_owner_pid"
+  fi
+
+  log "detected stale workdir run lock; removing stale lock dir=$lock_dir stale_pid=${lock_owner_pid:-unknown}"
+  rm -rf "$lock_dir"
+  mkdir "$lock_dir" || die "failed to acquire workdir run lock: $lock_dir"
+  printf '%s\n' "$$" >"$lock_pid_file"
+  timestamp_utc >"$lock_started_at_file"
+  RUN_WORKDIR_LOCK_DIR="$lock_dir"
+  RUN_WORKDIR_LOCK_PID_FILE="$lock_pid_file"
+  trap release_workdir_run_lock EXIT
+}
+
 resolve_aws_region() {
   local aws_region="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
   [[ -n "$aws_region" ]] || die "AWS_REGION or AWS_DEFAULT_REGION is required for shared ECS proof services"
@@ -2124,6 +2177,7 @@ command_run() {
     fi
   fi
   ensure_dir "$workdir/reports"
+  acquire_workdir_run_lock "$workdir"
 
   local proof_topic_seed
   proof_topic_seed="$(date +%s)-$RANDOM"
