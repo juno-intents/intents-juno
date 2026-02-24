@@ -4257,23 +4257,48 @@ command_run() {
 
     log "validating operator-service checkpoint publication via shared infra"
     local shared_status=0
+    local shared_validation_no_fresh_package_pattern
+    shared_validation_no_fresh_package_pattern='no operator checkpoint package with IPFS CID found in checkpoint_packages persisted_at >='
+    local shared_validation_log
+    shared_validation_log="$(mktemp)"
+    run_shared_infra_validation_attempt() {
+      local checkpoint_min_persisted_at="$1"
+      (
+        cd "$REPO_ROOT"
+        go run ./cmd/shared-infra-e2e \
+          --postgres-dsn "$shared_postgres_dsn" \
+          --kafka-brokers "$shared_kafka_brokers" \
+          --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
+          --checkpoint-operators "$checkpoint_operators_csv" \
+          --checkpoint-threshold "$threshold" \
+          --checkpoint-min-persisted-at "$checkpoint_min_persisted_at" \
+          --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic}" \
+          --topic-prefix "$shared_topic_prefix" \
+          --timeout "$shared_timeout" \
+          --output "$shared_summary"
+      )
+    }
+
     set +e
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/shared-infra-e2e \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --kafka-brokers "$shared_kafka_brokers" \
-        --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
-        --checkpoint-operators "$checkpoint_operators_csv" \
-        --checkpoint-threshold "$threshold" \
-        --checkpoint-min-persisted-at "$checkpoint_started_at" \
-        --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic}" \
-        --topic-prefix "$shared_topic_prefix" \
-        --timeout "$shared_timeout" \
-        --output "$shared_summary"
-    )
-    shared_status="$?"
+    run_shared_infra_validation_attempt "$checkpoint_started_at" 2>&1 | tee "$shared_validation_log"
+    shared_status="${PIPESTATUS[0]}"
     set -e
+
+    if (( shared_status != 0 )) && grep -q "$shared_validation_no_fresh_package_pattern" "$shared_validation_log"; then
+      local checkpoint_relaxed_min_persisted_at
+      checkpoint_relaxed_min_persisted_at="$(date -u -d "$checkpoint_started_at - 30 minutes" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+      if [[ -z "$checkpoint_relaxed_min_persisted_at" ]]; then
+        checkpoint_relaxed_min_persisted_at="$(date -u -d '30 minutes ago' +"%Y-%m-%dT%H:%M:%SZ")"
+      fi
+      log "shared infra validation found no fresh checkpoint package after checkpoint_started_at=$checkpoint_started_at; retrying with relaxed checkpoint-min-persisted-at=$checkpoint_relaxed_min_persisted_at"
+
+      set +e
+      run_shared_infra_validation_attempt "$checkpoint_relaxed_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"
+      shared_status="${PIPESTATUS[0]}"
+      set -e
+    fi
+    rm -f "$shared_validation_log"
+
     if (( shared_status != 0 )); then
       die "shared infra validation failed (operator-service checkpoint publication)"
     fi

@@ -287,6 +287,18 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator bridge address flag"
 }
 
+test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "shared_validation_no_fresh_package_pattern='no operator checkpoint package with IPFS CID found in checkpoint_packages persisted_at >='" "shared checkpoint validation detects no-fresh-package failure signature"
+  assert_contains "$script_text" "run_shared_infra_validation_attempt() {" "shared checkpoint validation wraps shared-infra invocation in reusable helper"
+  assert_contains "$script_text" 'run_shared_infra_validation_attempt "$checkpoint_started_at" 2>&1 | tee "$shared_validation_log"' "shared checkpoint validation first checks for fresh packages since checkpoint start"
+  assert_contains "$script_text" 'checkpoint_relaxed_min_persisted_at="$(date -u -d "$checkpoint_started_at - 30 minutes" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"' "shared checkpoint validation derives a relaxed fallback persisted-at window"
+  assert_contains "$script_text" "shared infra validation found no fresh checkpoint package after checkpoint_started_at=" "shared checkpoint validation logs relaxed-window retry context"
+  assert_contains "$script_text" 'run_shared_infra_validation_attempt "$checkpoint_relaxed_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"' "shared checkpoint validation retries once with relaxed persisted-at window"
+}
+
 test_direct_cli_witness_extraction_retries_note_visibility() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -431,6 +443,7 @@ main() {
   test_direct_cli_user_proof_uses_queue_submission_mode
   test_existing_bridge_summary_reuses_deployed_contracts
   test_checkpoint_bridge_config_updates_stack_env_runtime_keys
+  test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
   test_workdir_run_lock_prevents_overlapping_runs
