@@ -10,6 +10,10 @@ prepare_script_runtime "$SCRIPT_DIR"
 
 JUNO_RPC_TRANSPORT_FAILURES_MAX="${JUNO_RPC_TRANSPORT_FAILURES_MAX:-8}"
 JUNO_RPC_TRANSPORT_FAILURES_CONSECUTIVE=0
+JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS="${JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS:-5}"
+JUNO_RPC_CURL_MAX_TIME_SECONDS="${JUNO_RPC_CURL_MAX_TIME_SECONDS:-20}"
+JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS="${JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS:-5}"
+JUNO_SCAN_CURL_MAX_TIME_SECONDS="${JUNO_SCAN_CURL_MAX_TIME_SECONDS:-20}"
 
 usage() {
   cat <<'USAGE'
@@ -400,6 +404,8 @@ juno_rpc_json_call() {
   })"
   if ! resp="$(
     curl -fsS \
+      --connect-timeout "$JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS" \
+      --max-time "$JUNO_RPC_CURL_MAX_TIME_SECONDS" \
       --user "$rpc_user:$rpc_pass" \
       --header "content-type: application/json" \
       --data-binary "$payload" \
@@ -662,12 +668,16 @@ scan_upsert_wallet() {
   auth_header="$(scan_auth_header "$bearer")"
   if [[ -n "$auth_header" ]]; then
     curl -fsS \
+      --connect-timeout "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS" \
+      --max-time "$JUNO_SCAN_CURL_MAX_TIME_SECONDS" \
       --header "Content-Type: application/json" \
       --header "$auth_header" \
       --data "$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')" \
       "${scan_url%/}/v1/wallets" >/dev/null
   else
     curl -fsS \
+      --connect-timeout "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS" \
+      --max-time "$JUNO_SCAN_CURL_MAX_TIME_SECONDS" \
       --header "Content-Type: application/json" \
       --data "$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')" \
       "${scan_url%/}/v1/wallets" >/dev/null
@@ -704,9 +714,20 @@ scan_find_action_index() {
       fi
 
       if [[ -n "$auth_header" ]]; then
-        body="$(curl -fsS --header "$auth_header" "$url" || true)"
+        body="$(
+          curl -fsS \
+            --connect-timeout "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS" \
+            --max-time "$JUNO_SCAN_CURL_MAX_TIME_SECONDS" \
+            --header "$auth_header" \
+            "$url" || true
+        )"
       else
-        body="$(curl -fsS "$url" || true)"
+        body="$(
+          curl -fsS \
+            --connect-timeout "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS" \
+            --max-time "$JUNO_SCAN_CURL_MAX_TIME_SECONDS" \
+            "$url" || true
+        )"
       fi
       if [[ -z "$body" ]]; then
         scan_http_failures_consecutive=$((scan_http_failures_consecutive + 1))
@@ -947,6 +968,14 @@ command_run() {
   ensure_command curl
   ensure_command go
   ensure_command python3
+  [[ "$JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || die "JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS must be numeric"
+  [[ "$JUNO_RPC_CURL_MAX_TIME_SECONDS" =~ ^[0-9]+$ ]] || die "JUNO_RPC_CURL_MAX_TIME_SECONDS must be numeric"
+  [[ "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS" =~ ^[0-9]+$ ]] || die "JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS must be numeric"
+  [[ "$JUNO_SCAN_CURL_MAX_TIME_SECONDS" =~ ^[0-9]+$ ]] || die "JUNO_SCAN_CURL_MAX_TIME_SECONDS must be numeric"
+  (( JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS > 0 )) || die "JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS must be > 0"
+  (( JUNO_RPC_CURL_MAX_TIME_SECONDS > 0 )) || die "JUNO_RPC_CURL_MAX_TIME_SECONDS must be > 0"
+  (( JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS > 0 )) || die "JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS must be > 0"
+  (( JUNO_SCAN_CURL_MAX_TIME_SECONDS > 0 )) || die "JUNO_SCAN_CURL_MAX_TIME_SECONDS must be > 0"
 
   if [[ -z "$wallet_id" ]]; then
     wallet_id="testnet-e2e-$(date -u +%Y%m%d%H%M%S)-$RANDOM"

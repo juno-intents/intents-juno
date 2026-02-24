@@ -227,6 +227,43 @@ test_rpc_calls_fail_fast_on_repeated_transport_errors() {
   fi
 }
 
+test_rpc_and_scan_curl_calls_set_explicit_timeouts() {
+  local script_text
+  script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *"JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define RPC curl connect timeout env override\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"JUNO_RPC_CURL_MAX_TIME_SECONDS"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define RPC curl max-time env override\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define scan curl connect timeout env override\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *"JUNO_SCAN_CURL_MAX_TIME_SECONDS"* ]]; then
+    printf 'expected generate-juno-witness-metadata.sh to define scan curl max-time env override\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'--connect-timeout "$JUNO_RPC_CURL_CONNECT_TIMEOUT_SECONDS"'* ]]; then
+    printf 'expected RPC curl calls to enforce connect timeout\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'--max-time "$JUNO_RPC_CURL_MAX_TIME_SECONDS"'* ]]; then
+    printf 'expected RPC curl calls to enforce max-time\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'--connect-timeout "$JUNO_SCAN_CURL_CONNECT_TIMEOUT_SECONDS"'* ]]; then
+    printf 'expected scan curl calls to enforce connect timeout\n' >&2
+    exit 1
+  fi
+  if [[ "$script_text" != *'--max-time "$JUNO_SCAN_CURL_MAX_TIME_SECONDS"'* ]]; then
+    printf 'expected scan curl calls to enforce max-time\n' >&2
+    exit 1
+  fi
+}
+
 test_tx_confirmation_uses_numeric_getrawtransaction_verbosity() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
@@ -256,6 +293,7 @@ main() {
   test_scan_note_lookup_uses_paginated_notes_api
   test_scan_note_lookup_fails_fast_on_repeated_http_errors
   test_rpc_calls_fail_fast_on_repeated_transport_errors
+  test_rpc_and_scan_curl_calls_set_explicit_timeouts
   test_tx_confirmation_uses_numeric_getrawtransaction_verbosity
 }
 
