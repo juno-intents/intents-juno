@@ -518,24 +518,28 @@ build_and_push_shared_proof_services_image() {
 
   log "building shared proof services image: ${repository_url}:${image_tag}"
   if docker buildx version >/dev/null 2>&1; then
-    docker buildx build --platform linux/amd64 \
-      --provenance=false \
-      --sbom=false \
-      --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
-      --tag "${repository_url}:${image_tag}" \
-      --tag "${repository_url}:latest" \
-      --push \
-      "$REPO_ROOT"
+    run_with_retry "shared proof services image buildx build/push" 3 15 \
+      docker buildx build --platform linux/amd64 \
+        --provenance=false \
+        --sbom=false \
+        --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
+        --tag "${repository_url}:${image_tag}" \
+        --tag "${repository_url}:latest" \
+        --push \
+        "$REPO_ROOT"
   else
     log "docker buildx unavailable; falling back to docker build + push"
-    docker build \
-      --platform linux/amd64 \
-      --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
-      --tag "${repository_url}:${image_tag}" \
-      --tag "${repository_url}:latest" \
-      "$REPO_ROOT"
-    docker push "${repository_url}:${image_tag}"
-    docker push "${repository_url}:latest"
+    run_with_retry "shared proof services image docker build" 3 15 \
+      docker build \
+        --platform linux/amd64 \
+        --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
+        --tag "${repository_url}:${image_tag}" \
+        --tag "${repository_url}:latest" \
+        "$REPO_ROOT"
+    run_with_retry "shared proof services image docker push tag" 3 10 \
+      docker push "${repository_url}:${image_tag}"
+    run_with_retry "shared proof services image docker push latest" 3 10 \
+      docker push "${repository_url}:latest"
   fi
 
   SHARED_PROOF_SERVICES_IMAGE="${repository_url}:${image_tag}"

@@ -343,6 +343,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "reusing sp1 requestor secret:" "aws wrapper reuses existing primary sp1 requestor secret"
   assert_contains "$wrapper_script_text" "reusing dr sp1 requestor secret:" "aws wrapper reuses existing dr sp1 requestor secret"
   assert_contains "$wrapper_script_text" "docker buildx build --platform linux/amd64" "proof services image build invocation"
+  assert_contains "$wrapper_script_text" 'run_with_retry "shared proof services image buildx build/push" 3 15' "proof services image buildx path retries transient registry/build failures"
   assert_contains "$wrapper_script_text" "--provenance=false" "proof services buildx invocation disables provenance attestations for reliable push completion"
   assert_contains "$wrapper_script_text" "--sbom=false" "proof services buildx invocation disables sbom attestations for reliable push completion"
   assert_contains "$wrapper_script_text" "aws ecr describe-images" "proof services image flow checks whether commit tag already exists"
