@@ -804,11 +804,13 @@ func parseArgs(args []string) (config, error) {
 	manualAny := manualIVKSet || manualOVKSet || manualDepositItemsSet || manualWithdrawItemsSet
 	manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
 
-	if manualAny && !manualAll {
-		return cfg, errors.New("all guest witness manual inputs must be set together: --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, --sp1-withdraw-witness-item-file")
-	}
-	if !manualAll && !cfg.DeployOnly {
-		return cfg, errors.New("guest witness auto generation is disabled; provide --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, and --sp1-withdraw-witness-item-file")
+	if !cfg.DeployOnly {
+		if manualAny && !manualAll {
+			return cfg, errors.New("all guest witness manual inputs must be set together: --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, --sp1-withdraw-witness-item-file")
+		}
+		if !manualAll {
+			return cfg, errors.New("guest witness auto generation is disabled; provide --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, and --sp1-withdraw-witness-item-file")
+		}
 	}
 	if manualAll {
 		cfg.SP1.DepositOWalletIVKBytes, err = parseHexFixedLength(

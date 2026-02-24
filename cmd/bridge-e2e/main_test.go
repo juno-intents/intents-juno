@@ -1019,6 +1019,74 @@ func TestParseArgs_DeployOnlyAllowsMissingGuestWitnessInputs(t *testing.T) {
 	}
 }
 
+func TestParseArgs_DeployOnlyAllowsPartialGuestWitnessManualInputs(t *testing.T) {
+	t.Parallel()
+
+	tmp := t.TempDir()
+	deployer := filepath.Join(tmp, "deployer.key")
+	op1 := filepath.Join(tmp, "op1.key")
+	op2 := filepath.Join(tmp, "op2.key")
+	op3 := filepath.Join(tmp, "op3.key")
+	requestor := filepath.Join(tmp, "requestor.key")
+	if err := os.WriteFile(deployer, []byte("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80\n"), 0o600); err != nil {
+		t.Fatalf("write deployer key: %v", err)
+	}
+	if err := os.WriteFile(op1, []byte("0x59c6995e998f97a5a0044976f6f8f5f2b0f95f4d4e4d7d75e4f3f7c06f2a3d9a\n"), 0o600); err != nil {
+		t.Fatalf("write op1 key: %v", err)
+	}
+	if err := os.WriteFile(op2, []byte("0x8b3a350cf5c34c9194ca3a545d4f0b3f15f65f8f5e89f7e5e301d5e7bc7d3c0d\n"), 0o600); err != nil {
+		t.Fatalf("write op2 key: %v", err)
+	}
+	if err := os.WriteFile(op3, []byte("0x0f4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0\n"), 0o600); err != nil {
+		t.Fatalf("write op3 key: %v", err)
+	}
+	if err := os.WriteFile(requestor, []byte("0x4d64c83f2d2e4f3e96b3b1e9a8d7c6b5a493827161514131211100f0e0d0c0f4\n"), 0o600); err != nil {
+		t.Fatalf("write requestor key: %v", err)
+	}
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deploy-only",
+		"--deployer-key-file", deployer,
+		"--operator-key-file", op1,
+		"--operator-key-file", op2,
+		"--operator-key-file", op3,
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--sp1-auto",
+		"--sp1-bin", "sp1",
+		"--sp1-rpc-url", "https://rpc.mainnet.succinct.xyz",
+		"--sp1-requestor-key-file", requestor,
+		"--sp1-deposit-program-url", "https://example.invalid/deposit-guest.elf",
+		"--sp1-withdraw-program-url", "https://example.invalid/withdraw-guest.elf",
+		"--sp1-input-s3-bucket", "test-bucket",
+		"--sp1-deposit-owallet-ivk-hex", "0x" + strings.Repeat("11", 64),
+		"--sp1-withdraw-owallet-ovk-hex", "0x" + strings.Repeat("22", 32),
+		"--deposit-final-orchard-root", "0x" + strings.Repeat("33", 32),
+		"--deposit-checkpoint-height", "777",
+		"--deposit-checkpoint-block-hash", "0x" + strings.Repeat("44", 32),
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if !cfg.DeployOnly {
+		t.Fatalf("deploy-only: got %v want true", cfg.DeployOnly)
+	}
+	if len(cfg.SP1.DepositOWalletIVKBytes) != 0 {
+		t.Fatalf("deposit ivk bytes: got=%d want=0", len(cfg.SP1.DepositOWalletIVKBytes))
+	}
+	if len(cfg.SP1.WithdrawOWalletOVKBytes) != 0 {
+		t.Fatalf("withdraw ovk bytes: got=%d want=0", len(cfg.SP1.WithdrawOWalletOVKBytes))
+	}
+	if len(cfg.SP1.DepositWitnessItems) != 0 {
+		t.Fatalf("deposit witness items: got=%d want=0", len(cfg.SP1.DepositWitnessItems))
+	}
+	if len(cfg.SP1.WithdrawWitnessItems) != 0 {
+		t.Fatalf("withdraw witness items: got=%d want=0", len(cfg.SP1.WithdrawWitnessItems))
+	}
+}
+
 func TestParseArgs_SP1AutoGuestWitnessModeRequiresInputS3Bucket(t *testing.T) {
 	t.Parallel()
 
