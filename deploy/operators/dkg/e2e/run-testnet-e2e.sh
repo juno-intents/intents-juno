@@ -2453,6 +2453,7 @@ command_run() {
   local proof_failure_topic="${shared_topic_prefix}.proof.failures.${proof_topic_seed}"
   local proof_requestor_group="${shared_topic_prefix}.proof-requestor.${proof_topic_seed}"
   local proof_bridge_consumer_group="${shared_topic_prefix}.bridge-e2e.${proof_topic_seed}"
+  local checkpoint_signature_topic="checkpoints.signatures.v1"
   local checkpoint_package_topic="checkpoints.packages.v1"
   local deposit_event_topic="${shared_topic_prefix}.deposits.events.${proof_topic_seed}"
   local withdraw_request_topic="${shared_topic_prefix}.withdrawals.requested.${proof_topic_seed}"
@@ -4191,6 +4192,7 @@ command_run() {
         --checkpoint-operators "$checkpoint_operators_csv" \
         --checkpoint-threshold "$threshold" \
         --checkpoint-min-persisted-at "$checkpoint_started_at" \
+        --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic}" \
         --topic-prefix "$shared_topic_prefix" \
         --timeout "$shared_timeout" \
         --output "$shared_summary"

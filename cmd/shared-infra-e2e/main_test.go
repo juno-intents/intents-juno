@@ -25,6 +25,7 @@ func TestParseArgs_Valid(t *testing.T) {
 	cfg, err := parseArgs([]string{
 		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
 		"--kafka-brokers", "127.0.0.1:9092,127.0.0.1:9093",
+		"--required-kafka-topics", "checkpoints.signatures.v1,checkpoints.packages.v1",
 		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
 		"--checkpoint-min-persisted-at", "2026-01-02T03:04:05Z",
 		"--checkpoint-operators", "0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222",
@@ -45,6 +46,15 @@ func TestParseArgs_Valid(t *testing.T) {
 	}
 	if cfg.KafkaBrokers[0] != "127.0.0.1:9092" {
 		t.Fatalf("first broker mismatch: %q", cfg.KafkaBrokers[0])
+	}
+	if len(cfg.RequiredKafkaTopics) != 2 {
+		t.Fatalf("required kafka topics: got %d want 2", len(cfg.RequiredKafkaTopics))
+	}
+	if cfg.RequiredKafkaTopics[0] != "checkpoints.signatures.v1" {
+		t.Fatalf("first required topic mismatch: %q", cfg.RequiredKafkaTopics[0])
+	}
+	if cfg.RequiredKafkaTopics[1] != "checkpoints.packages.v1" {
+		t.Fatalf("second required topic mismatch: %q", cfg.RequiredKafkaTopics[1])
 	}
 	if cfg.TopicPrefix != "shared.e2e" {
 		t.Fatalf("topic prefix mismatch: %q", cfg.TopicPrefix)
@@ -154,6 +164,26 @@ func TestParseBrokers_DedupAndTrim(t *testing.T) {
 	}
 	if got[0] != "127.0.0.1:9092" || got[1] != "127.0.0.1:9093" {
 		t.Fatalf("unexpected brokers: %#v", got)
+	}
+}
+
+func TestParseArgs_RequiredKafkaTopicsDedupAndTrim(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+		"--kafka-brokers", "127.0.0.1:9092",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+		"--required-kafka-topics", " checkpoints.signatures.v1,checkpoints.packages.v1,checkpoints.signatures.v1, ",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if len(cfg.RequiredKafkaTopics) != 2 {
+		t.Fatalf("required kafka topics: got %d want 2", len(cfg.RequiredKafkaTopics))
+	}
+	if cfg.RequiredKafkaTopics[0] != "checkpoints.signatures.v1" || cfg.RequiredKafkaTopics[1] != "checkpoints.packages.v1" {
+		t.Fatalf("unexpected required kafka topics: %#v", cfg.RequiredKafkaTopics)
 	}
 }
 

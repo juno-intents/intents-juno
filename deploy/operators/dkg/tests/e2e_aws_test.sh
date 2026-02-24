@@ -546,6 +546,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--checkpoint-min-persisted-at \"\$checkpoint_started_at\"" "shared checkpoint validation is run-bound"
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
   assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint package verification wiring"
+  assert_contains "$e2e_script_text" "--required-kafka-topics \"\${checkpoint_signature_topic},\${checkpoint_package_topic}\"" "shared infra validation ensures checkpoint kafka topics exist"
   assert_contains "$e2e_script_text" "operator-service checkpoint publication" "shared infra validation waits for operator-service checkpoint publication"
   assert_order "$e2e_script_text" "bridge summary missing deployed contracts.bridge address: \$bridge_summary" "go run ./cmd/shared-infra-e2e" "shared infra validation runs after bridge deploy summary is available"
   assert_contains "$e2e_script_text" "ensure_juno_txsign_binary" "local e2e signer resolution installs juno-txsign when missing"

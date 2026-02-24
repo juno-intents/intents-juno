@@ -27,18 +27,19 @@ import (
 )
 
 type config struct {
-	PostgresDSN          string
-	KafkaBrokers         []string
-	CheckpointIPFSAPIURL string
-	CheckpointOperators  []common.Address
-	CheckpointThreshold  int
+	PostgresDSN              string
+	KafkaBrokers             []string
+	RequiredKafkaTopics      []string
+	CheckpointIPFSAPIURL     string
+	CheckpointOperators      []common.Address
+	CheckpointThreshold      int
 	CheckpointMinPersistedAt time.Time
-	TopicPrefix          string
-	Timeout              time.Duration
-	OutputPath           string
-	MaxLineBytes         int
-	KafkaMaxBytes        int
-	AckTimeout           time.Duration
+	TopicPrefix              string
+	Timeout                  time.Duration
+	OutputPath               string
+	MaxLineBytes             int
+	KafkaMaxBytes            int
+	AckTimeout               time.Duration
 }
 
 type report struct {
@@ -186,6 +187,7 @@ func runMain(args []string, stdout io.Writer) error {
 func parseArgs(args []string) (config, error) {
 	var cfg config
 	var brokersRaw string
+	var requiredTopicsRaw string
 	var checkpointOperatorsRaw string
 	var checkpointMinPersistedAtRaw string
 
@@ -194,6 +196,7 @@ func parseArgs(args []string) (config, error) {
 
 	fs.StringVar(&cfg.PostgresDSN, "postgres-dsn", "", "Postgres DSN (required)")
 	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required)")
+	fs.StringVar(&requiredTopicsRaw, "required-kafka-topics", "", "comma-separated Kafka topics to create before validation")
 	fs.StringVar(&cfg.CheckpointIPFSAPIURL, "checkpoint-ipfs-api-url", "", "IPFS API URL for persisted checkpoint package pin/fetch validation (required)")
 	fs.StringVar(&checkpointOperatorsRaw, "checkpoint-operators", "", "comma-separated expected checkpoint signer operator addresses")
 	fs.IntVar(&cfg.CheckpointThreshold, "checkpoint-threshold", 0, "expected minimum checkpoint signer threshold (requires --checkpoint-operators)")
@@ -218,6 +221,7 @@ func parseArgs(args []string) (config, error) {
 	if len(cfg.KafkaBrokers) == 0 {
 		return cfg, errors.New("--kafka-brokers is required")
 	}
+	cfg.RequiredKafkaTopics = parseBrokers(requiredTopicsRaw)
 	cfg.CheckpointIPFSAPIURL = strings.TrimSpace(cfg.CheckpointIPFSAPIURL)
 	if cfg.CheckpointIPFSAPIURL == "" {
 		return cfg, errors.New("--checkpoint-ipfs-api-url is required")
@@ -371,6 +375,12 @@ func checkPostgres(ctx context.Context, cfg config) (postgresReport, error) {
 }
 
 func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
+	for _, requiredTopic := range cfg.RequiredKafkaTopics {
+		if err := ensureKafkaTopic(ctx, cfg.KafkaBrokers, requiredTopic); err != nil {
+			return kafkaReport{}, fmt.Errorf("ensure required topic %s: %w", requiredTopic, err)
+		}
+	}
+
 	topic := fmt.Sprintf("%s.%d", cfg.TopicPrefix, time.Now().UTC().UnixNano())
 	group := fmt.Sprintf("%s.group.%s", cfg.TopicPrefix, uuid.NewString())
 	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.kafka.v1","time":"%s"}`,
