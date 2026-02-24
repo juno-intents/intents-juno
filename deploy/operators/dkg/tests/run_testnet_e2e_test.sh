@@ -308,6 +308,25 @@ test_shared_ecs_uses_explicit_sp1_adapter_binary_path() {
   assert_not_contains "$script_text" '"--sp1-bin" "/usr/local/bin/sp1"' "shared ecs proof services no longer rely on /usr/local/bin/sp1 alias"
 }
 
+test_stop_after_stage_emits_stage_control_and_stops_cleanly() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "write_stage_checkpoint_summary()" "run-testnet-e2e defines stage checkpoint summary helper"
+  assert_contains "$script_text" "maybe_stop_after_stage()" "run-testnet-e2e defines stop-after-stage coordinator helper"
+  assert_contains "$script_text" "stop_centralized_proof_services()" "run-testnet-e2e defines reusable proof service shutdown helper"
+  assert_contains "$script_text" 'maybe_stop_after_stage "witness_ready"' "run-testnet-e2e evaluates witness_ready stage checkpoint"
+  assert_contains "$script_text" 'maybe_stop_after_stage "shared_services_ready"' "run-testnet-e2e evaluates shared_services_ready stage checkpoint"
+  assert_contains "$script_text" 'maybe_stop_after_stage "checkpoint_validated"' "run-testnet-e2e evaluates checkpoint_validated stage checkpoint"
+  assert_contains "$script_text" "stage checkpoint reached; stopping run at stage=" "run-testnet-e2e logs stage checkpoint early-stop decisions"
+  assert_contains "$script_text" "stage_control: {" "run-testnet-e2e summary includes machine-readable stage control block"
+  assert_contains "$script_text" 'requested_stop_after_stage: $stop_after_stage' "stage control captures requested stop stage"
+  assert_contains "$script_text" "completed_stage: \"full\"" "full summary marks completed stage as full"
+  assert_contains "$script_text" "bridge_config_updates_target" "stage control reports checkpoint bridge config update target count"
+  assert_contains "$script_text" "bridge_config_updates_succeeded" "stage control reports checkpoint bridge config update success count"
+  assert_contains "$script_text" "shared_validation_passed" "stage control reports shared checkpoint validation status"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -329,6 +348,7 @@ main() {
   test_workdir_run_lock_prevents_overlapping_runs
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
+  test_stop_after_stage_emits_stage_control_and_stops_cleanly
 }
 
 main "$@"

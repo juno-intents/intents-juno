@@ -89,7 +89,22 @@ on:
       sp1_max_price_per_pgu:
         description: "SP1 max price per PGU in wei"
         required: true
-        default: "50000000000000"
+        default: "1000000000000"
+        type: string
+      sp1_deposit_pgu_estimate:
+        description: "Projected deposit proof PGU usage for credit guardrails"
+        required: true
+        default: "1000000"
+        type: string
+      sp1_withdraw_pgu_estimate:
+        description: "Projected withdraw proof PGU usage for credit guardrails"
+        required: true
+        default: "1000000"
+        type: string
+      sp1_groth16_base_fee_wei:
+        description: "Projected groth16 base fee per proof in wei"
+        required: true
+        default: "200000000000000000"
         type: string
       sp1_min_auction_period:
         description: "SP1 minimum auction period in seconds"
@@ -112,12 +127,14 @@ permissions:
   id-token: write
 
 jobs:
-  run-e2e:
+  preflight:
     runs-on: ubuntu-latest
     env:
       AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
       AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    outputs:
+      operator_ami_id: ${{ steps.resolve_operator_ami.outputs.operator_ami_id }}
     steps:
       - uses: actions/checkout@v4
 
@@ -239,23 +256,79 @@ jobs:
           }
 
           max_price_per_pgu="${{ inputs.sp1_max_price_per_pgu }}"
+          deposit_pgu_estimate="${{ inputs.sp1_deposit_pgu_estimate }}"
+          withdraw_pgu_estimate="${{ inputs.sp1_withdraw_pgu_estimate }}"
+          groth16_base_fee_wei="${{ inputs.sp1_groth16_base_fee_wei }}"
           [[ "$max_price_per_pgu" =~ ^[0-9]+$ ]] || {
             echo "sp1_max_price_per_pgu must be numeric"
             exit 1
           }
-          projected_max_cost_wei=$((max_price_per_pgu * 2))
-          projected_with_overhead_wei=$(((projected_max_cost_wei * 120 + 99) / 100))
-          required_buffer_wei=$((projected_with_overhead_wei * 3))
-
-          if (( balance_wei < required_buffer_wei )); then
-            refill_wei=$((required_buffer_wei - balance_wei))
-            echo "SP1 requestor balance below required guardrail."
-            echo "requestor_address=$requestor_address"
-            echo "balance_wei=$balance_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+          [[ "$deposit_pgu_estimate" =~ ^[0-9]+$ ]] || {
+            echo "sp1_deposit_pgu_estimate must be numeric"
+            exit 1
+          }
+          [[ "$withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || {
+            echo "sp1_withdraw_pgu_estimate must be numeric"
+            exit 1
+          }
+          [[ "$groth16_base_fee_wei" =~ ^[0-9]+$ ]] || {
+            echo "sp1_groth16_base_fee_wei must be numeric"
+            exit 1
+          }
+          if [[ "$max_price_per_pgu" == "0" || "$deposit_pgu_estimate" == "0" || "$withdraw_pgu_estimate" == "0" || "$groth16_base_fee_wei" == "0" ]]; then
+            echo "sp1 credit guardrail inputs must be > 0"
             exit 1
           fi
 
-          echo "SP1 credit preflight passed: requestor_address=$requestor_address balance_wei=$balance_wei required_wei=$required_buffer_wei"
+          mapfile -t credit_guardrail_calc < <(
+            python3 - "$max_price_per_pgu" "$deposit_pgu_estimate" "$withdraw_pgu_estimate" "$groth16_base_fee_wei" <<'PY'
+            import sys
+
+            max_price_per_pgu = int(sys.argv[1])
+            deposit_pgu_estimate = int(sys.argv[2])
+            withdraw_pgu_estimate = int(sys.argv[3])
+            groth16_base_fee_wei = int(sys.argv[4])
+
+            projected_pair_cost_wei = (groth16_base_fee_wei * 2) + (
+                max_price_per_pgu * (deposit_pgu_estimate + withdraw_pgu_estimate)
+            )
+            projected_with_overhead_wei = ((projected_pair_cost_wei * 120) + 99) // 100
+            required_buffer_wei = projected_with_overhead_wei * 3
+
+            print(projected_pair_cost_wei)
+            print(projected_with_overhead_wei)
+            print(required_buffer_wei)
+          PY
+          )
+          projected_pair_cost_wei="${credit_guardrail_calc[0]}"
+          projected_with_overhead_wei="${credit_guardrail_calc[1]}"
+          required_buffer_wei="${credit_guardrail_calc[2]}"
+
+          mapfile -t guardrail_state < <(
+            python3 - "$balance_wei" "$required_buffer_wei" <<'PY'
+            import sys
+
+            balance = int(sys.argv[1])
+            required = int(sys.argv[2])
+            if balance < required:
+                print("true")
+                print(required - balance)
+            else:
+                print("false")
+                print(0)
+          PY
+          )
+          needs_refill="${guardrail_state[0]}"
+          refill_wei="${guardrail_state[1]}"
+
+          if [[ "$needs_refill" == "true" ]]; then
+            echo "SP1 requestor balance below required guardrail."
+            echo "requestor_address=$requestor_address"
+            echo "balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
+            exit 1
+          fi
+
+          echo "SP1 credit preflight passed: requestor_address=$requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei"
 
       - name: Resolve Operator AMI
         id: resolve_operator_ami
@@ -285,14 +358,16 @@ jobs:
 
           echo "operator_ami_id=$resolved_operator_ami_id" >> "$GITHUB_OUTPUT"
 
-      - name: Run AWS Live E2E
+      - name: Run AWS Live E2E Preflight
         shell: bash
         run: |
           set -euo pipefail
           WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
+          status_json="$WORKDIR/preflight-status.json"
+          mkdir -p "$WORKDIR"
 
           ARGS=(
-            run
+            preflight
             --workdir "$WORKDIR"
             --aws-region "${{ inputs.aws_region }}"
             --aws-dr-region "us-west-2"
@@ -305,6 +380,7 @@ jobs:
             --juno-rpc-user-file ".ci/secrets/juno-rpc-user.txt"
             --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
             --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
+            --status-json "$status_json"
           )
 
           ARGS+=(--operator-ami-id "${{ steps.resolve_operator_ami.outputs.operator_ami_id }}")
@@ -329,6 +405,9 @@ jobs:
             --sp1-deposit-owallet-ivk-hex "${{ inputs.sp1_deposit_owallet_ivk_hex }}"
             --sp1-withdraw-owallet-ovk-hex "${{ inputs.sp1_withdraw_owallet_ovk_hex }}"
             --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-deposit-pgu-estimate "${{ inputs.sp1_deposit_pgu_estimate }}"
+            --sp1-withdraw-pgu-estimate "${{ inputs.sp1_withdraw_pgu_estimate }}"
+            --sp1-groth16-base-fee-wei "${{ inputs.sp1_groth16_base_fee_wei }}"
             --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
             --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
             --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"
@@ -338,6 +417,482 @@ jobs:
             E2E_ARGS+=(--sp1-input-s3-bucket "${{ inputs.sp1_input_s3_bucket }}")
           fi
 
+          ARGS+=(-- "${E2E_ARGS[@]}")
+
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh "${ARGS[@]}"
+
+      - name: Upload Preflight Status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-testnet-deploy-aws-preflight-status
+          path: |
+            ${{ runner.temp }}/aws-live-e2e/preflight-status.json
+          if-no-files-found: warn
+
+  canary:
+    needs: preflight
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install SP1 Adapter Build Deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler clang libclang-dev pkg-config libssl-dev
+
+      - name: Build SP1 Prover Adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 zk/target/release/sp1-prover-adapter "$HOME/.local/bin/sp1-prover-adapter"
+          ln -sf "$HOME/.local/bin/sp1-prover-adapter" "$HOME/.local/bin/sp1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" || -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when using static AWS credentials"
+              exit 1
+            fi
+          elif [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            echo "Either AWS_ROLE_TO_ASSUME or static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets are required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BASE_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
+            echo "SP1_REQUESTOR_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" && -z "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "SP1_REQUESTOR_SECRET_ARN_DR secret is required when SP1_REQUESTOR_SECRET_ARN is set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" && -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "SP1_REQUESTOR_SECRET_ARN secret is required when SP1_REQUESTOR_SECRET_ARN_DR is set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_RPC_USER }}" ]]; then
+            echo "JUNO_RPC_USER secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_RPC_PASS }}" ]]; then
+            echo "JUNO_RPC_PASS secret is required"
+            exit 1
+          fi
+
+      - name: Prepare Secret Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/secrets
+          printf '%s\n' "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/base-funder.key
+          printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
+          chmod 0600 .ci/secrets/base-funder.key .ci/secrets/juno-funder.key
+
+          printf '%s\n' "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/sp1-requestor.key
+          chmod 0600 .ci/secrets/sp1-requestor.key
+          printf '%s\n' "${{ secrets.JUNO_RPC_USER }}" > .ci/secrets/juno-rpc-user.txt
+          printf '%s\n' "${{ secrets.JUNO_RPC_PASS }}" > .ci/secrets/juno-rpc-pass.txt
+          printf '%s\n' "${{ secrets.JUNO_SCAN_BEARER_TOKEN }}" > .ci/secrets/juno-scan-bearer.txt
+          chmod 0600 .ci/secrets/juno-rpc-user.txt .ci/secrets/juno-rpc-pass.txt .ci/secrets/juno-scan-bearer.txt
+
+      - name: Bootstrap Resume State (Checkpoint Stage)
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
+          summary_path="$WORKDIR/artifacts/reports/base-bridge-summary.json"
+          mkdir -p "$WORKDIR"
+
+          if [[ -f "$summary_path" ]]; then
+            echo "resume summary already present: $summary_path"
+            exit 0
+          fi
+
+          ARGS=(
+            run
+            --workdir "$WORKDIR"
+            --aws-region "${{ inputs.aws_region }}"
+            --aws-dr-region "us-west-2"
+            --aws-instance-type "${{ inputs.aws_instance_type }}"
+            --operator-instance-count "${{ inputs.operator_instance_count }}"
+            --operator-instance-type "${{ inputs.operator_instance_type }}"
+            --aws-root-volume-gb "200"
+            --base-funder-key-file ".ci/secrets/base-funder.key"
+            --juno-funder-key-file ".ci/secrets/juno-funder.key"
+            --juno-rpc-user-file ".ci/secrets/juno-rpc-user.txt"
+            --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
+            --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
+            --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
+            --keep-infra
+          )
+          if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" ]]; then
+            ARGS+=(--shared-sp1-requestor-secret-arn "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}")
+            ARGS+=(--shared-sp1-requestor-secret-arn-dr "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}")
+          fi
+
+          E2E_ARGS=(
+            --base-rpc-url "${{ inputs.base_rpc_url }}"
+            --base-chain-id "${{ inputs.base_chain_id }}"
+            --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
+            --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
+            --bridge-verifier-address "${{ inputs.bridge_verifier_address }}"
+            --bridge-deposit-image-id "${{ inputs.bridge_deposit_image_id }}"
+            --bridge-withdraw-image-id "${{ inputs.bridge_withdraw_image_id }}"
+            --sp1-rpc-url "${{ inputs.sp1_rpc_url }}"
+            --sp1-input-mode "guest-witness-v1"
+            --sp1-deposit-program-url "${{ inputs.sp1_deposit_program_url }}"
+            --sp1-withdraw-program-url "${{ inputs.sp1_withdraw_program_url }}"
+            --sp1-deposit-owallet-ivk-hex "${{ inputs.sp1_deposit_owallet_ivk_hex }}"
+            --sp1-withdraw-owallet-ovk-hex "${{ inputs.sp1_withdraw_owallet_ovk_hex }}"
+            --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-deposit-pgu-estimate "${{ inputs.sp1_deposit_pgu_estimate }}"
+            --sp1-withdraw-pgu-estimate "${{ inputs.sp1_withdraw_pgu_estimate }}"
+            --sp1-groth16-base-fee-wei "${{ inputs.sp1_groth16_base_fee_wei }}"
+            --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
+            --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
+            --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"
+            --stop-after-stage "checkpoint_validated"
+          )
+          if [[ -n "${{ inputs.sp1_input_s3_bucket }}" ]]; then
+            E2E_ARGS+=(--sp1-input-s3-bucket "${{ inputs.sp1_input_s3_bucket }}")
+          fi
+          ARGS+=(-- "${E2E_ARGS[@]}")
+
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh "${ARGS[@]}"
+
+          [[ -f "$summary_path" ]] || {
+            echo "resume bridge summary missing after bootstrap run: $summary_path"
+            exit 1
+          }
+
+      - name: Run AWS Live E2E Canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
+          status_json="$WORKDIR/canary-status.json"
+          summary_path="$WORKDIR/artifacts/reports/base-bridge-summary.json"
+          [[ -f "$summary_path" ]] || {
+            echo "canary requires resume bridge summary path; missing: $summary_path"
+            exit 1
+          }
+
+          if [[ -d "$WORKDIR/ssh" ]]; then
+            find "$WORKDIR/ssh" -type f -exec chmod 0600 {} +
+          fi
+
+          ARGS=(
+            canary
+            --workdir "$WORKDIR"
+            --aws-region "${{ inputs.aws_region }}"
+            --aws-dr-region "us-west-2"
+            --aws-instance-type "${{ inputs.aws_instance_type }}"
+            --operator-instance-count "${{ inputs.operator_instance_count }}"
+            --operator-instance-type "${{ inputs.operator_instance_type }}"
+            --aws-root-volume-gb "200"
+            --base-funder-key-file ".ci/secrets/base-funder.key"
+            --juno-funder-key-file ".ci/secrets/juno-funder.key"
+            --juno-rpc-user-file ".ci/secrets/juno-rpc-user.txt"
+            --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
+            --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
+            --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
+            --reuse-bridge-summary-path "$summary_path"
+            --status-json "$status_json"
+          )
+          if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" ]]; then
+            ARGS+=(--shared-sp1-requestor-secret-arn "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}")
+            ARGS+=(--shared-sp1-requestor-secret-arn-dr "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}")
+          fi
+
+          E2E_ARGS=(
+            --base-rpc-url "${{ inputs.base_rpc_url }}"
+            --base-chain-id "${{ inputs.base_chain_id }}"
+            --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
+            --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
+            --bridge-verifier-address "${{ inputs.bridge_verifier_address }}"
+            --bridge-deposit-image-id "${{ inputs.bridge_deposit_image_id }}"
+            --bridge-withdraw-image-id "${{ inputs.bridge_withdraw_image_id }}"
+            --sp1-rpc-url "${{ inputs.sp1_rpc_url }}"
+            --sp1-input-mode "guest-witness-v1"
+            --sp1-deposit-program-url "${{ inputs.sp1_deposit_program_url }}"
+            --sp1-withdraw-program-url "${{ inputs.sp1_withdraw_program_url }}"
+            --sp1-deposit-owallet-ivk-hex "${{ inputs.sp1_deposit_owallet_ivk_hex }}"
+            --sp1-withdraw-owallet-ovk-hex "${{ inputs.sp1_withdraw_owallet_ovk_hex }}"
+            --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-deposit-pgu-estimate "${{ inputs.sp1_deposit_pgu_estimate }}"
+            --sp1-withdraw-pgu-estimate "${{ inputs.sp1_withdraw_pgu_estimate }}"
+            --sp1-groth16-base-fee-wei "${{ inputs.sp1_groth16_base_fee_wei }}"
+            --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
+            --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
+            --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"
+          )
+          if [[ -n "${{ inputs.sp1_input_s3_bucket }}" ]]; then
+            E2E_ARGS+=(--sp1-input-s3-bucket "${{ inputs.sp1_input_s3_bucket }}")
+          fi
+          ARGS+=(-- "${E2E_ARGS[@]}")
+
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh "${ARGS[@]}"
+
+      - name: Upload Canary Status
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-testnet-deploy-aws-canary-status
+          path: |
+            ${{ runner.temp }}/aws-live-e2e/canary-status.json
+          if-no-files-found: warn
+
+      - name: Upload Canary Resume State
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-testnet-deploy-aws-resume-state
+          path: |
+            ${{ runner.temp }}/aws-live-e2e/infra
+            ${{ runner.temp }}/aws-live-e2e/ssh
+            ${{ runner.temp }}/aws-live-e2e/artifacts
+          if-no-files-found: error
+
+      - name: Cleanup AWS Infra After Canary Failure
+        if: failure()
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh cleanup \
+            --workdir "${RUNNER_TEMP}/aws-live-e2e" \
+            --aws-region "${{ inputs.aws_region }}"
+
+  full_run:
+    needs: [preflight, canary]
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install SP1 Adapter Build Deps
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y protobuf-compiler clang libclang-dev pkg-config libssl-dev
+
+      - name: Build SP1 Prover Adapter
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
+          mkdir -p "$HOME/.local/bin"
+          install -m 0755 zk/target/release/sp1-prover-adapter "$HOME/.local/bin/sp1-prover-adapter"
+          ln -sf "$HOME/.local/bin/sp1-prover-adapter" "$HOME/.local/bin/sp1"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required Secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" || -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when using static AWS credentials"
+              exit 1
+            fi
+          elif [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            echo "Either AWS_ROLE_TO_ASSUME or static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets are required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "BASE_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" ]]; then
+            echo "JUNO_FUNDER_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" ]]; then
+            echo "SP1_REQUESTOR_PRIVATE_KEY_HEX secret is required"
+            exit 1
+          fi
+          if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" && -z "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "SP1_REQUESTOR_SECRET_ARN_DR secret is required when SP1_REQUESTOR_SECRET_ARN is set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" && -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}" ]]; then
+            echo "SP1_REQUESTOR_SECRET_ARN secret is required when SP1_REQUESTOR_SECRET_ARN_DR is set"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_RPC_USER }}" ]]; then
+            echo "JUNO_RPC_USER secret is required"
+            exit 1
+          fi
+          if [[ -z "${{ secrets.JUNO_RPC_PASS }}" ]]; then
+            echo "JUNO_RPC_PASS secret is required"
+            exit 1
+          fi
+
+      - name: Prepare Secret Files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/secrets
+          printf '%s\n' "${{ secrets.BASE_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/base-funder.key
+          printf '%s\n' "${{ secrets.JUNO_FUNDER_PRIVATE_KEY_HEX }}" > .ci/secrets/juno-funder.key
+          chmod 0600 .ci/secrets/base-funder.key .ci/secrets/juno-funder.key
+
+          printf '%s\n' "${{ secrets.SP1_REQUESTOR_PRIVATE_KEY_HEX }}" > .ci/secrets/sp1-requestor.key
+          chmod 0600 .ci/secrets/sp1-requestor.key
+          printf '%s\n' "${{ secrets.JUNO_RPC_USER }}" > .ci/secrets/juno-rpc-user.txt
+          printf '%s\n' "${{ secrets.JUNO_RPC_PASS }}" > .ci/secrets/juno-rpc-pass.txt
+          printf '%s\n' "${{ secrets.JUNO_SCAN_BEARER_TOKEN }}" > .ci/secrets/juno-scan-bearer.txt
+          chmod 0600 .ci/secrets/juno-rpc-user.txt .ci/secrets/juno-rpc-pass.txt .ci/secrets/juno-scan-bearer.txt
+
+      - name: Download Canary Resume State
+        uses: actions/download-artifact@v4
+        with:
+          name: e2e-testnet-deploy-aws-resume-state
+          path: ${{ runner.temp }}/aws-live-e2e
+
+      - name: Run AWS Live E2E Full Run
+        shell: bash
+        run: |
+          set -euo pipefail
+          WORKDIR="${RUNNER_TEMP}/aws-live-e2e"
+          summary_path="$WORKDIR/artifacts/reports/base-bridge-summary.json"
+          [[ -f "$summary_path" ]] || {
+            echo "resume bridge summary missing: $summary_path"
+            exit 1
+          }
+          if [[ -d "$WORKDIR/ssh" ]]; then
+            find "$WORKDIR/ssh" -type f -exec chmod 0600 {} +
+          fi
+
+          ARGS=(
+            run
+            --workdir "$WORKDIR"
+            --aws-region "${{ inputs.aws_region }}"
+            --aws-dr-region "us-west-2"
+            --aws-instance-type "${{ inputs.aws_instance_type }}"
+            --operator-instance-count "${{ inputs.operator_instance_count }}"
+            --operator-instance-type "${{ inputs.operator_instance_type }}"
+            --aws-root-volume-gb "200"
+            --base-funder-key-file ".ci/secrets/base-funder.key"
+            --juno-funder-key-file ".ci/secrets/juno-funder.key"
+            --juno-rpc-user-file ".ci/secrets/juno-rpc-user.txt"
+            --juno-rpc-pass-file ".ci/secrets/juno-rpc-pass.txt"
+            --juno-scan-bearer-token-file ".ci/secrets/juno-scan-bearer.txt"
+            --operator-ami-id "${{ needs.preflight.outputs.operator_ami_id }}"
+            --sp1-requestor-key-file ".ci/secrets/sp1-requestor.key"
+            --keep-infra
+            --skip-distributed-dkg
+            --reuse-bridge-summary-path "$summary_path"
+          )
+          if [[ -n "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}" ]]; then
+            ARGS+=(--shared-sp1-requestor-secret-arn "${{ secrets.SP1_REQUESTOR_SECRET_ARN }}")
+            ARGS+=(--shared-sp1-requestor-secret-arn-dr "${{ secrets.SP1_REQUESTOR_SECRET_ARN_DR }}")
+          fi
+
+          E2E_ARGS=(
+            --base-rpc-url "${{ inputs.base_rpc_url }}"
+            --base-chain-id "${{ inputs.base_chain_id }}"
+            --base-operator-fund-wei "${{ inputs.base_operator_fund_wei }}"
+            --bridge-run-timeout "${{ inputs.bridge_run_timeout }}"
+            --bridge-verifier-address "${{ inputs.bridge_verifier_address }}"
+            --bridge-deposit-image-id "${{ inputs.bridge_deposit_image_id }}"
+            --bridge-withdraw-image-id "${{ inputs.bridge_withdraw_image_id }}"
+            --sp1-rpc-url "${{ inputs.sp1_rpc_url }}"
+            --sp1-input-mode "guest-witness-v1"
+            --sp1-deposit-program-url "${{ inputs.sp1_deposit_program_url }}"
+            --sp1-withdraw-program-url "${{ inputs.sp1_withdraw_program_url }}"
+            --sp1-deposit-owallet-ivk-hex "${{ inputs.sp1_deposit_owallet_ivk_hex }}"
+            --sp1-withdraw-owallet-ovk-hex "${{ inputs.sp1_withdraw_owallet_ovk_hex }}"
+            --sp1-max-price-per-pgu "${{ inputs.sp1_max_price_per_pgu }}"
+            --sp1-deposit-pgu-estimate "${{ inputs.sp1_deposit_pgu_estimate }}"
+            --sp1-withdraw-pgu-estimate "${{ inputs.sp1_withdraw_pgu_estimate }}"
+            --sp1-groth16-base-fee-wei "${{ inputs.sp1_groth16_base_fee_wei }}"
+            --sp1-min-auction-period "${{ inputs.sp1_min_auction_period }}"
+            --sp1-auction-timeout "${{ inputs.sp1_auction_timeout }}"
+            --sp1-request-timeout "${{ inputs.sp1_request_timeout }}"
+          )
+          if [[ -n "${{ inputs.sp1_input_s3_bucket }}" ]]; then
+            E2E_ARGS+=(--sp1-input-s3-bucket "${{ inputs.sp1_input_s3_bucket }}")
+          fi
           ARGS+=(-- "${E2E_ARGS[@]}")
 
           ./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh "${ARGS[@]}"

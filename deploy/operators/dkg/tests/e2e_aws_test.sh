@@ -455,6 +455,8 @@ test_aws_wrapper_supports_dr_readiness_and_distributed_relayer_runtime() {
   assert_contains "$wrapper_script_text" "--relayer-runtime-mode" "aws wrapper relayer runtime mode option"
   assert_contains "$wrapper_script_text" "validate_shared_services_dr_readiness()" "aws wrapper defines dr readiness validator"
   assert_contains "$wrapper_script_text" "run_optional_dr_readiness_probe()" "aws wrapper defines optional dr readiness probe helper"
+  assert_contains "$wrapper_script_text" 'out="$(run_with_local_timeout 45 "$@" 2>&1)"' "aws wrapper bounds optional dr readiness probes with local timeout"
+  assert_contains "$wrapper_script_text" "dr readiness probe failed (probe=\$probe_name attempt \$attempt/3); retrying in 5s" "aws wrapper retries transient optional dr readiness probe failures"
   assert_contains "$wrapper_script_text" "aws ec2 describe-availability-zones" "aws wrapper checks dr region az availability"
   assert_contains "$wrapper_script_text" "\"rds:DescribeDBEngineVersions\"" "aws wrapper names dr readiness rds probe"
   assert_contains "$wrapper_script_text" "aws rds describe-db-engine-versions" "aws wrapper checks dr region aurora api readiness"
@@ -757,7 +759,10 @@ test_e2e_workflows_exclude_sensitive_artifact_paths() {
   local_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy.yml")"
 
   assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/artifacts' "aws workflow uploads artifact directory"
-  assert_not_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/infra' "aws workflow no longer uploads terraform infra dir"
+  assert_contains "$aws_workflow_text" "e2e-testnet-deploy-aws-resume-state" "aws workflow uploads canary resume-state artifact"
+  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/infra' "aws workflow includes terraform infra state in resume bundle"
+  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/ssh' "aws workflow includes ssh material in resume bundle for full_run handoff"
+  assert_contains "$aws_workflow_text" "Download Canary Resume State" "aws workflow downloads canary resume bundle before full_run"
   assert_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/reports' "local workflow uploads reports"
   assert_not_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/dkg' "local workflow no longer uploads raw dkg directory"
 }
@@ -1154,6 +1159,62 @@ test_terraform_grants_ecs_task_execution_secret_access() {
   assert_contains "$tf_text" "local.shared_sp1_requestor_secret_arn" "terraform scopes ecs task execution secret policy to configured requestor secret arn"
 }
 
+test_aws_wrapper_exposes_preflight_canary_and_status_json() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "run-testnet-e2e-aws.sh preflight" "aws wrapper usage includes preflight command"
+  assert_contains "$wrapper_script_text" "run-testnet-e2e-aws.sh canary" "aws wrapper usage includes canary command"
+  assert_contains "$wrapper_script_text" "--status-json <path>" "aws wrapper usage documents machine-readable status output"
+  assert_contains "$wrapper_script_text" "--preflight-only" "aws wrapper run command supports internal preflight-only mode"
+  assert_contains "$wrapper_script_text" "command_preflight()" "aws wrapper implements preflight command handler"
+  assert_contains "$wrapper_script_text" "command_canary()" "aws wrapper implements canary command handler"
+  assert_contains "$wrapper_script_text" "preflight) command_preflight" "aws wrapper main dispatch includes preflight command"
+  assert_contains "$wrapper_script_text" "canary) command_canary" "aws wrapper main dispatch includes canary command"
+}
+
+test_aws_wrapper_preflight_runs_required_checks() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "run_preflight_aws_reachability_probes()" "aws wrapper defines preflight aws reachability probe helper"
+  assert_contains "$wrapper_script_text" "run_preflight_script_tests()" "aws wrapper defines preflight script test runner"
+  assert_contains "$wrapper_script_text" "validate_sp1_credit_guardrail_preflight()" "aws wrapper defines sp1 credit guardrail preflight helper"
+  assert_contains "$wrapper_script_text" "preflight missing required forwarded argument after '--'" "aws wrapper preflight hard-fails on missing required forwarded args"
+  assert_contains "$wrapper_script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"' "aws wrapper preflight executes aws identity/reachability probes"
+  assert_contains "$wrapper_script_text" "run_preflight_script_tests" "aws wrapper preflight executes shell test suite before run"
+  assert_contains "$wrapper_script_text" "write_status_json" "aws wrapper preflight writes machine-readable status json"
+}
+
+test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "canary requires --reuse-bridge-summary-path" "aws wrapper canary requires bridge summary reuse path"
+  assert_contains "$wrapper_script_text" "if ! array_has_value \"--keep-infra\"" "aws wrapper canary forces keep-infra"
+  assert_contains "$wrapper_script_text" "if ! array_has_value \"--skip-distributed-dkg\"" "aws wrapper canary forces distributed dkg skip"
+  assert_contains "$wrapper_script_text" "canary_e2e_args+=(\"--stop-after-stage\" \"checkpoint_validated\")" "aws wrapper canary forces stop-after-stage checkpoint_validated"
+  assert_contains "$wrapper_script_text" "validate_canary_summary()" "aws wrapper defines canary acceptance validation helper"
+  assert_contains "$wrapper_script_text" "classify_failure_signature()" "aws wrapper defines failure signature classifier helper"
+  assert_contains "$wrapper_script_text" "print_failure_classification_hint" "aws wrapper emits classified failure hints on failure"
+  assert_contains "$wrapper_script_text" "failure-signatures.yaml" "aws wrapper uses tracked failure signature catalog"
+}
+
+test_failure_signature_catalog_exists() {
+  local signatures_path signatures_text
+  signatures_path="$REPO_ROOT/deploy/operators/dkg/e2e/failure-signatures.yaml"
+  [[ -f "$signatures_path" ]] || {
+    printf 'failure signature catalog missing: %s\n' "$signatures_path" >&2
+    exit 1
+  }
+  signatures_text="$(cat "$signatures_path")"
+  assert_contains "$signatures_text" "\"signatures\"" "failure signature catalog defines signatures array"
+  assert_contains "$signatures_text" "\"regex\"" "failure signature catalog entries include regex matcher"
+  assert_contains "$signatures_text" "\"class\"" "failure signature catalog entries include failure class"
+  assert_contains "$signatures_text" "\"owner\"" "failure signature catalog entries include owning script"
+  assert_contains "$signatures_text" "\"suggested_immediate_action\"" "failure signature catalog entries include suggested immediate action"
+}
+
 main() {
   test_remote_prepare_script_waits_for_cloud_init_and_retries_apt
   test_runner_shared_probe_script_supports_managed_endpoints
@@ -1189,6 +1250,10 @@ main() {
   test_aws_wrapper_derives_owallet_keys_from_distributed_ufvk
   test_aws_wrapper_supports_proof_stage_resume_without_dkg_or_redeploy
   test_terraform_grants_ecs_task_execution_secret_access
+  test_aws_wrapper_exposes_preflight_canary_and_status_json
+  test_aws_wrapper_preflight_runs_required_checks
+  test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage
+  test_failure_signature_catalog_exists
 }
 
 main "$@"
