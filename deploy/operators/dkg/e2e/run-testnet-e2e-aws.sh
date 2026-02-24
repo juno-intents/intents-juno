@@ -92,6 +92,9 @@ run options:
                                        optional pre-existing primary-region secret ARN for shared proof services
   --shared-sp1-requestor-secret-arn-dr <arn>
                                        optional pre-existing DR-region secret ARN for shared proof services
+  --shared-proof-services-image <image>
+                                       optional explicit shared proof-services image
+                                       (skips local docker build/push and deploys this image)
   --without-shared-services            skip provisioning managed shared services (Aurora/MSK/ECS/IPFS)
                                        requires forwarded shared args after '--':
                                          --shared-postgres-dsn
@@ -2264,6 +2267,7 @@ command_run() {
   local sp1_requestor_key_file=""
   local shared_sp1_requestor_secret_arn_override=""
   local shared_sp1_requestor_secret_arn_dr_override=""
+  local shared_proof_services_image_override=""
   local with_shared_services="true"
   local shared_postgres_user="postgres"
   local shared_postgres_db="intents_e2e"
@@ -2446,6 +2450,11 @@ command_run() {
         shared_sp1_requestor_secret_arn_dr_override="$2"
         shift 2
         ;;
+      --shared-proof-services-image)
+        [[ $# -ge 2 ]] || die "missing value for --shared-proof-services-image"
+        shared_proof_services_image_override="$2"
+        shift 2
+        ;;
       --without-shared-services)
         with_shared_services="false"
         shift
@@ -2565,6 +2574,12 @@ command_run() {
       [[ -n "$shared_sp1_requestor_secret_arn_override" ]] || die "--shared-sp1-requestor-secret-arn-dr requires --shared-sp1-requestor-secret-arn"
       [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]] || die "--shared-sp1-requestor-secret-arn requires --shared-sp1-requestor-secret-arn-dr"
     fi
+    if [[ -n "$shared_proof_services_image_override" ]]; then
+      [[ "$shared_proof_services_image_override" =~ [[:space:]] ]] && die "--shared-proof-services-image must not contain whitespace"
+      log "using provided shared proof services image override: $shared_proof_services_image_override"
+    fi
+  elif [[ -n "$shared_proof_services_image_override" ]]; then
+    die "--shared-proof-services-image requires shared services (omit --without-shared-services)"
   fi
   if [[ -n "$runner_ami_id" && ! "$runner_ami_id" =~ ^ami-[a-zA-Z0-9]+$ ]]; then
     die "--runner-ami-id must look like an AMI id (ami-...)"
@@ -2909,6 +2924,8 @@ command_run() {
   else
     provision_shared_services_json="false"
   fi
+  local shared_proof_service_image
+  shared_proof_service_image="$shared_proof_services_image_override"
 
   jq -n \
     --arg aws_region "$aws_region" \
@@ -2929,6 +2946,7 @@ command_run() {
     --arg shared_postgres_user "$shared_postgres_user" \
     --arg shared_postgres_password "$shared_postgres_password" \
     --arg shared_postgres_db "$shared_postgres_db" \
+    --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn" \
     --argjson shared_postgres_port "$shared_postgres_port" \
     --argjson shared_kafka_port "$shared_kafka_port" \
@@ -2955,6 +2973,7 @@ command_run() {
       shared_postgres_user: $shared_postgres_user,
       shared_postgres_password: $shared_postgres_password,
       shared_postgres_db: $shared_postgres_db,
+      shared_proof_service_image: $shared_proof_service_image,
       shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
       shared_postgres_port: $shared_postgres_port,
       shared_kafka_port: $shared_kafka_port,
@@ -3164,14 +3183,19 @@ command_run() {
   repo_commit="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   if [[ "$with_shared_services" == "true" ]]; then
     local shared_proof_services_image
-    build_and_push_shared_proof_services_image \
-      "$aws_profile" \
-      "$aws_region" \
-      "$shared_proof_services_ecr_repository_url" \
-      "$repo_commit"
-    shared_proof_services_image="$SHARED_PROOF_SERVICES_IMAGE"
-    [[ -n "$shared_proof_services_image" ]] || die "shared proof services image build completed without image reference"
-    log "shared proof services image pushed: $shared_proof_services_image"
+    if [[ -n "$shared_proof_services_image_override" ]]; then
+      shared_proof_services_image="$shared_proof_services_image_override"
+      log "skipping shared proof services image build because override was provided"
+    else
+      build_and_push_shared_proof_services_image \
+        "$aws_profile" \
+        "$aws_region" \
+        "$shared_proof_services_ecr_repository_url" \
+        "$repo_commit"
+      shared_proof_services_image="$SHARED_PROOF_SERVICES_IMAGE"
+      [[ -n "$shared_proof_services_image" ]] || die "shared proof services image build completed without image reference"
+      log "shared proof services image pushed: $shared_proof_services_image"
+    fi
 
     rollout_shared_proof_services \
       "$aws_profile" \
