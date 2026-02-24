@@ -127,6 +127,31 @@ trimmed_file_value() {
   tr -d '\r\n' <"$path"
 }
 
+run_with_local_timeout() {
+  local timeout_seconds="$1"
+  shift || true
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "timeout seconds must be numeric"
+  (( timeout_seconds > 0 )) || die "timeout seconds must be > 0"
+
+  if have_cmd timeout; then
+    timeout "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  if have_cmd gtimeout; then
+    gtimeout "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  if have_cmd perl; then
+    perl -e 'alarm shift; exec @ARGV' "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  log "warning: local timeout command unavailable; running without timeout: $*"
+  "$@"
+}
+
 shell_join() {
   local out=""
   local arg
@@ -2834,13 +2859,46 @@ command_run() {
     "$remote_repo/.ci/secrets/operator-fleet-ssh.key"
 
   local witness_tss_ca_local_path
+  local witness_tss_ca_remote_source_path=""
+  local -a witness_tss_ca_remote_source_candidates=(
+    "$remote_workdir/dkg-distributed/operators/op1/runtime/bundle/tls/ca.pem"
+    "$remote_workdir/dkg/operators/op1/runtime/bundle/tls/ca.pem"
+  )
+  local witness_tss_ca_candidate_path
+  for witness_tss_ca_candidate_path in "${witness_tss_ca_remote_source_candidates[@]}"; do
+    if ssh -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$runner_ssh_user@$runner_public_ip" \
+      "test -f $(printf '%q' "$witness_tss_ca_candidate_path")"; then
+      witness_tss_ca_remote_source_path="$witness_tss_ca_candidate_path"
+      break
+    fi
+  done
+
   witness_tss_ca_local_path="$(mktemp)"
-  scp -i "$ssh_key_private" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o "ProxyCommand=ssh -i $ssh_key_private -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $runner_ssh_user@$runner_public_ip" \
-    "$runner_ssh_user@${operator_private_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
-    "$witness_tss_ca_local_path"
+  if [[ -n "$witness_tss_ca_remote_source_path" ]]; then
+    log "using runner-local witness tss ca source path=$witness_tss_ca_remote_source_path"
+    run_with_local_timeout 45 scp -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$runner_ssh_user@$runner_public_ip:$witness_tss_ca_remote_source_path" \
+      "$witness_tss_ca_local_path" || die "failed to copy runner-local witness tss ca from $witness_tss_ca_remote_source_path"
+  else
+    log "runner-local witness tss ca path missing; falling back to operator host fetch"
+    run_with_local_timeout 45 scp -i "$ssh_key_private" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o "ProxyCommand=ssh -i $ssh_key_private -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -W %h:%p $runner_ssh_user@$runner_public_ip" \
+      "$runner_ssh_user@${operator_private_ips[0]}:/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" \
+      "$witness_tss_ca_local_path" || die "failed to copy operator witness tss ca via proxy"
+  fi
   copy_remote_secret_file \
     "$ssh_key_private" \
     "$runner_ssh_user" \
