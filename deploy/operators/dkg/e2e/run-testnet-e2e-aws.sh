@@ -505,6 +505,8 @@ build_and_push_shared_proof_services_image() {
   log "building shared proof services image: ${repository_url}:${image_tag}"
   if docker buildx version >/dev/null 2>&1; then
     docker buildx build --platform linux/amd64 \
+      --provenance=false \
+      --sbom=false \
       --file "$REPO_ROOT/deploy/shared/docker/proof-services.Dockerfile" \
       --tag "${repository_url}:${image_tag}" \
       --tag "${repository_url}:latest" \
@@ -1066,13 +1068,34 @@ copy_remote_secret_file() {
     -i "$ssh_private_key"
     -o StrictHostKeyChecking=no
     -o UserKnownHostsFile=/dev/null
+    -o IdentitiesOnly=yes
     -o ServerAliveInterval=30
     -o ServerAliveCountMax=6
     -o TCPKeepAlive=yes
   )
 
-  scp "${ssh_opts[@]}" "$local_file" "$ssh_user@$ssh_host:$remote_file"
-  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "chmod 600 $(printf '%q' "$remote_file")"
+  local attempt
+  for attempt in $(seq 1 6); do
+    if run_with_local_timeout 45 scp "${ssh_opts[@]}" "$local_file" "$ssh_user@$ssh_host:$remote_file"; then
+      break
+    fi
+    if (( attempt == 6 )); then
+      die "failed to copy remote secret after retries: file=$local_file host=$ssh_host remote=$remote_file"
+    fi
+    log "remote secret copy failed attempt=$attempt/6 host=$ssh_host remote=$remote_file; retrying"
+    sleep 2
+  done
+
+  for attempt in $(seq 1 6); do
+    if run_with_local_timeout 20 ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "chmod 600 $(printf '%q' "$remote_file")"; then
+      return 0
+    fi
+    if (( attempt == 6 )); then
+      die "failed to chmod remote secret after retries: host=$ssh_host remote=$remote_file"
+    fi
+    log "remote secret chmod failed attempt=$attempt/6 host=$ssh_host remote=$remote_file; retrying"
+    sleep 2
+  done
 }
 
 run_distributed_dkg_backup_restore() {
@@ -2861,6 +2884,7 @@ command_run() {
   local witness_tss_ca_local_path
   local witness_tss_ca_remote_source_path=""
   local -a witness_tss_ca_remote_source_candidates=(
+    "$remote_repo/.ci/secrets/witness-tss-ca.pem"
     "$remote_workdir/dkg-distributed/operators/op1/runtime/bundle/tls/ca.pem"
     "$remote_workdir/dkg/operators/op1/runtime/bundle/tls/ca.pem"
   )
