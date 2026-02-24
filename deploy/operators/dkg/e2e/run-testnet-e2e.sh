@@ -1365,6 +1365,34 @@ fi
   exit 1
 }
 
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN {
+      updated = 0
+    }
+    index($0, key "=") == 1 {
+      print key "=" value
+      updated = 1
+      next
+    }
+    {
+      print
+    }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" > "$tmp"
+  install -m 0600 "$tmp" "$file"
+  rm -f "$tmp"
+}
+
 tmp_json="$(mktemp)"
 tmp_next="$(mktemp)"
 sudo cp "$config_json_path" "$tmp_json"
@@ -1389,6 +1417,15 @@ jq \
 sudo install -d -m 0750 -o root -g ubuntu "$(dirname "$config_json_path")"
 sudo install -m 0640 -o root -g ubuntu "$tmp_next" "$config_json_path"
 rm -f "$tmp_json" "$tmp_next"
+
+tmp_env="$(mktemp)"
+sudo cp "$stack_env_file" "$tmp_env"
+sudo chown "$(id -u):$(id -g)" "$tmp_env"
+chmod 600 "$tmp_env"
+set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"
+set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"
+sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"
+rm -f "$tmp_env"
 
 sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service

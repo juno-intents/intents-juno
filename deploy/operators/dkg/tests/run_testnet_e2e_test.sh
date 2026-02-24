@@ -232,6 +232,15 @@ test_existing_bridge_summary_reuses_deployed_contracts() {
     "existing bridge summary conditional wraps deploy bootstrap invocation"
 }
 
+test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"' "checkpoint bridge config updater writes BRIDGE_ADDRESS into operator stack env"
+  assert_contains "$script_text" 'set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"' "checkpoint bridge config updater writes BASE_CHAIN_ID into operator stack env"
+  assert_contains "$script_text" 'sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater persists mutated operator stack env with expected ownership"
+}
+
 test_direct_cli_witness_extraction_retries_note_visibility() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -314,6 +323,7 @@ main() {
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode
   test_existing_bridge_summary_reuses_deployed_contracts
+  test_checkpoint_bridge_config_updates_stack_env_runtime_keys
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
   test_workdir_run_lock_prevents_overlapping_runs
