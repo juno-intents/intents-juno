@@ -39,7 +39,7 @@ Options:
   --bridge-proof-inputs-output <path> optional proof inputs bundle output path
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
-                                   (default: prefer dkg-admin; sign-digest support is required)
+                                   (default: prefer juno-txsign; sign-digest support is required)
   --sp1-bin <path>           reserved for optional direct-cli proof chaos scenario
                                    (disabled by default; default: sp1-prover-adapter)
   --sp1-rpc-url <url>        sp1 prover network RPC URL (default: https://rpc.mainnet.succinct.xyz)
@@ -979,11 +979,12 @@ wait_for_log_pattern() {
 
 supports_sign_digest_subcommand() {
   local signer_bin="$1"
-  local output status lowered
+  local probe_digest output status lowered
 
   [[ -n "$signer_bin" ]] || return 1
+  probe_digest="0x$(printf '00%.0s' {1..32})"
   set +e
-  output="$("$signer_bin" sign-digest --help 2>&1)"
+  output="$("$signer_bin" sign-digest --digest "$probe_digest" --json 2>&1)"
   status=$?
   set -e
   if (( status == 0 )); then
@@ -994,7 +995,52 @@ supports_sign_digest_subcommand() {
   if [[ "$lowered" == *"unrecognized subcommand"* ]] || [[ "$lowered" == *"unknown command"* ]]; then
     return 1
   fi
-  [[ "$lowered" == *"sign-digest"* ]]
+  if [[ "$lowered" == *"flag provided but not defined"* && "$lowered" == *"sign-digest"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+supports_operator_endpoint_flag() {
+  local signer_bin="$1"
+  local probe_digest output status lowered
+
+  [[ -n "$signer_bin" ]] || return 1
+  probe_digest="0x$(printf '00%.0s' {1..32})"
+  set +e
+  output="$("$signer_bin" sign-digest --digest "$probe_digest" --json --operator-endpoint "https://127.0.0.1:1" 2>&1)"
+  status=$?
+  set -e
+  if (( status == 0 )); then
+    return 0
+  fi
+
+  lowered="$(lower "$output")"
+  if [[ "$lowered" == *"unrecognized subcommand"* ]] || [[ "$lowered" == *"unknown command"* ]]; then
+    return 1
+  fi
+  if [[ "$lowered" == *"flag provided but not defined"* && "$lowered" == *"operator-endpoint"* ]]; then
+    return 1
+  fi
+  if [[ "$lowered" == *"unknown option"* && "$lowered" == *"operator-endpoint"* ]]; then
+    return 1
+  fi
+  if [[ "$lowered" == *"unrecognized option"* && "$lowered" == *"operator-endpoint"* ]]; then
+    return 1
+  fi
+  return 0
+}
+
+operator_signer_key_hex_from_file() {
+  local key_file="$1"
+  local key_hex
+
+  [[ -n "$key_file" ]] || return 1
+  [[ -f "$key_file" ]] || return 1
+  key_hex="$(trimmed_file_value "$key_file")"
+  key_hex="$(normalize_hex_prefixed "$key_hex" || true)"
+  [[ "$key_hex" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+  printf '%s' "$key_hex"
 }
 
 run_with_rpc_retry() {
@@ -2604,25 +2650,10 @@ command_run() {
   fi
 
   if [[ -z "$bridge_operator_signer_bin" ]]; then
-    local coordinator_workdir_from_summary
-    local -a bridge_operator_signer_candidates=()
-    coordinator_workdir_from_summary="$(jq -r '.coordinator_workdir // .coordinator.workdir // empty' "$dkg_summary")"
-    if [[ -n "$coordinator_workdir_from_summary" ]]; then
-      bridge_operator_signer_candidates+=("$coordinator_workdir_from_summary/bin/dkg-admin")
-    fi
-    bridge_operator_signer_candidates+=(
-      "$workdir/dkg-distributed/coordinator/bin/dkg-admin"
-      "$workdir/dkg/coordinator/bin/dkg-admin"
-    )
-    for bridge_operator_signer_candidate in "${bridge_operator_signer_candidates[@]}"; do
-      if [[ -x "$bridge_operator_signer_candidate" ]]; then
-        bridge_operator_signer_bin="$bridge_operator_signer_candidate"
-        break
-      fi
-    done
-    if [[ -z "$bridge_operator_signer_bin" ]]; then
-      bridge_operator_signer_bin="$(ensure_dkg_binary "dkg-admin" "$JUNO_DKG_VERSION_DEFAULT" "$workdir/bin")"
-    fi
+    local ensured_bridge_operator_signer_bin
+    ensured_bridge_operator_signer_bin="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$workdir/bin")"
+    export PATH="$(dirname "$ensured_bridge_operator_signer_bin"):$PATH"
+    bridge_operator_signer_bin="juno-txsign"
   fi
   if [[ "$bridge_operator_signer_bin" == */* ]]; then
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
@@ -2636,6 +2667,12 @@ command_run() {
     [[ -x "$bridge_operator_signer_bin" ]] || die "bridge operator signer binary is not executable: $bridge_operator_signer_bin"
   else
     command -v "$bridge_operator_signer_bin" >/dev/null 2>&1 || die "bridge operator signer binary not found in PATH: $bridge_operator_signer_bin"
+  fi
+  local bridge_operator_signer_supports_operator_endpoint="false"
+  if supports_operator_endpoint_flag "$bridge_operator_signer_bin"; then
+    bridge_operator_signer_supports_operator_endpoint="true"
+  else
+    log "bridge operator signer does not support --operator-endpoint; using local key material mode"
   fi
 
   local checkpoint_operators_csv
@@ -3409,13 +3446,36 @@ command_run() {
     bridge_args+=("--sp1-withdraw-witness-item-file" "$witness_file")
   done
 
-  local operator_id operator_endpoint
-  while IFS=$'\t' read -r operator_id operator_endpoint; do
+  local operator_id operator_endpoint operator_key_file operator_key_hex
+  local -a bridge_operator_endpoints=()
+  local -a bridge_operator_key_hexes=()
+  while IFS=$'\t' read -r operator_id operator_endpoint operator_key_file; do
     [[ -n "$operator_id" ]] || continue
     bridge_args+=("--operator-address" "$operator_id")
-    [[ -n "$operator_endpoint" ]] || die "dkg summary missing operator endpoint for operator_id=$operator_id"
-    bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
-  done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
+    if [[ -n "$operator_endpoint" ]]; then
+      bridge_operator_endpoints+=("$operator_endpoint")
+      if [[ "$bridge_operator_signer_supports_operator_endpoint" == "true" ]]; then
+        bridge_args+=("--operator-signer-endpoint" "$operator_endpoint")
+      fi
+    fi
+    operator_key_hex="$(operator_signer_key_hex_from_file "$operator_key_file" || true)"
+    [[ -n "$operator_key_hex" ]] || \
+      die "invalid or missing operator key file for operator_id=$operator_id path=$operator_key_file"
+    bridge_operator_key_hexes+=("$operator_key_hex")
+  done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // ""), (.operator_key_file // "")] | @tsv' "$dkg_summary")
+
+  if (( ${#bridge_operator_key_hexes[@]} < threshold )); then
+    die "operator key count is below threshold for bridge signer: keys=${#bridge_operator_key_hexes[@]} threshold=$threshold"
+  fi
+  if [[ "$bridge_operator_signer_supports_operator_endpoint" == "true" ]] && (( ${#bridge_operator_endpoints[@]} < threshold )); then
+    die "operator endpoint count is below threshold for endpoint-aware bridge signer: endpoints=${#bridge_operator_endpoints[@]} threshold=$threshold"
+  fi
+
+  local bridge_operator_signer_keys_csv
+  bridge_operator_signer_keys_csv="$(IFS=,; printf '%s' "${bridge_operator_key_hexes[*]}")"
+  [[ -n "$bridge_operator_signer_keys_csv" ]] || die "failed to derive operator signer key list"
+  local -a bridge_operator_signer_env=()
+  bridge_operator_signer_env=(JUNO_TXSIGN_SIGNER_KEYS="$bridge_operator_signer_keys_csv")
 
   local direct_cli_user_proof_status="not-run"
   local direct_cli_user_proof_summary_path=""
@@ -3519,9 +3579,11 @@ command_run() {
     )
     while IFS=$'\t' read -r operator_id operator_endpoint; do
       [[ -n "$operator_id" ]] || continue
-      [[ -n "$operator_endpoint" ]] || return 1
       direct_cli_bridge_base_args+=("--operator-address" "$operator_id")
-      direct_cli_bridge_base_args+=("--operator-signer-endpoint" "$operator_endpoint")
+      if [[ "$bridge_operator_signer_supports_operator_endpoint" == "true" ]]; then
+        [[ -n "$operator_endpoint" ]] || return 1
+        direct_cli_bridge_base_args+=("--operator-signer-endpoint" "$operator_endpoint")
+      fi
     done < <(jq -r '.operators[] | [.operator_id, (.endpoint // .grpc_endpoint // "")] | @tsv' "$dkg_summary")
 
     direct_cli_bridge_deploy_summary="$workdir/reports/direct-cli-user-proof-deploy-summary.json"
@@ -3534,7 +3596,7 @@ command_run() {
     set +e
     (
       cd "$REPO_ROOT"
-      go run ./cmd/bridge-e2e "${direct_cli_bridge_deploy_args[@]}"
+      env "${bridge_operator_signer_env[@]}" go run ./cmd/bridge-e2e "${direct_cli_bridge_deploy_args[@]}"
     ) >"$direct_cli_bridge_deploy_log" 2>&1
     direct_cli_status="$?"
     set -e
@@ -3915,7 +3977,7 @@ command_run() {
     set +e
     (
       cd "$REPO_ROOT"
-      go run ./cmd/bridge-e2e "${direct_cli_bridge_run_args[@]}"
+      env "${bridge_operator_signer_env[@]}" go run ./cmd/bridge-e2e "${direct_cli_bridge_run_args[@]}"
     ) >"$direct_cli_bridge_log" 2>&1
     direct_cli_status="$?"
     set -e
@@ -4067,7 +4129,7 @@ command_run() {
     set +e
     (
       cd "$REPO_ROOT"
-      go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
+      env "${bridge_operator_signer_env[@]}" go run ./cmd/bridge-e2e --deploy-only "${bridge_args[@]}"
     )
     bridge_status="$?"
     set -e
@@ -4282,6 +4344,9 @@ command_run() {
   local operator_down_ssh_key_path="$REPO_ROOT/.ci/secrets/operator-fleet-ssh.key"
   local operator_down_ssh_user=""
   local -a operator_signer_endpoints=()
+  local -a operator_signer_key_hexes=()
+  local -a operator_signer_active_key_hexes=()
+  local operator_signer_supports_endpoints="$bridge_operator_signer_supports_operator_endpoint"
   local operator_failures_injected=0
 
   local base_relayer_log="$workdir/reports/base-relayer.log"
@@ -4312,9 +4377,14 @@ command_run() {
     operator_down_ssh_user="$relayer_runtime_operator_ssh_user"
     operator_down_ssh_key_path="$relayer_runtime_operator_ssh_key_file"
   fi
-  mapfile -t operator_signer_endpoints < <(jq -r '.operators[] | (.endpoint // .grpc_endpoint // "")' "$dkg_summary")
+  operator_signer_endpoints=("${bridge_operator_endpoints[@]}")
+  operator_signer_key_hexes=("${bridge_operator_key_hexes[@]}")
+  operator_signer_active_key_hexes=("${operator_signer_key_hexes[@]}")
   if (( ${#operator_signer_endpoints[@]} < threshold )); then
     die "operator endpoint count is below threshold for chaos scenarios: endpoints=${#operator_signer_endpoints[@]} threshold=$threshold"
+  fi
+  if (( ${#operator_signer_key_hexes[@]} < threshold )); then
+    die "operator key count is below threshold for chaos scenarios: keys=${#operator_signer_key_hexes[@]} threshold=$threshold"
   fi
 
   local base_relayer_port base_relayer_url base_relayer_auth_token
@@ -5109,9 +5179,11 @@ command_run() {
     local scenario_endpoint scenario_pid
     local scenario_digest scenario_output scenario_status scenario_signature_count
     local operator_signer_probe_bin="$bridge_operator_signer_bin"
+    local endpoint_idx
+    local -a scenario_probe_args=()
+    local -a scenario_signer_env=()
 
     while (( operator_failures_injected < target_down_count )); do
-      local endpoint_idx
       endpoint_idx=$(( ${#operator_signer_endpoints[@]} - operator_failures_injected - 1 ))
       if (( endpoint_idx < 0 )); then
         printf 'insufficient operator endpoints for failure injection: have=%d requested=%d\n' \
@@ -5126,6 +5198,26 @@ command_run() {
       [[ -n "$scenario_pid" ]] || return 1
       operator_failures_injected=$((operator_failures_injected + 1))
 
+      if [[ "$operator_signer_supports_endpoints" != "true" ]]; then
+        local key_idx
+        key_idx="$endpoint_idx"
+        if (( key_idx < 0 || key_idx >= ${#operator_signer_active_key_hexes[@]} )); then
+          printf 'operator signer key index out of range during down-scenario: idx=%s keys=%d\n' \
+            "$key_idx" \
+            "${#operator_signer_active_key_hexes[@]}"
+          return 1
+        fi
+        local -a remaining_operator_keys=()
+        local key_i
+        for key_i in "${!operator_signer_active_key_hexes[@]}"; do
+          if (( key_i == key_idx )); then
+            continue
+          fi
+          remaining_operator_keys+=("${operator_signer_active_key_hexes[$key_i]}")
+        done
+        operator_signer_active_key_hexes=("${remaining_operator_keys[@]}")
+      fi
+
       if (( operator_failures_injected == 1 )); then
         operator_down_1_endpoint="$scenario_endpoint"
       elif (( operator_failures_injected == 2 )); then
@@ -5134,9 +5226,32 @@ command_run() {
       log "injected operator endpoint failure count=$operator_failures_injected endpoint=$scenario_endpoint listener_pid=$scenario_pid"
     done
 
+    if [[ "$operator_signer_supports_endpoints" != "true" ]] && (( ${#operator_signer_active_key_hexes[@]} < threshold )); then
+      printf 'threshold signer probe cannot continue after operator-down injection: keys=%d threshold=%d\n' \
+        "${#operator_signer_active_key_hexes[@]}" \
+        "$threshold"
+      return 1
+    fi
+
     scenario_digest="0x$(openssl rand -hex 32)"
+    scenario_probe_args=("$operator_signer_probe_bin" sign-digest --digest "$scenario_digest" --json)
+    if [[ "$operator_signer_supports_endpoints" == "true" ]]; then
+      for scenario_endpoint in "${operator_signer_endpoints[@]}"; do
+        scenario_probe_args+=("--operator-endpoint" "$scenario_endpoint")
+      done
+    else
+      local scenario_keys_csv
+      scenario_keys_csv="$(IFS=,; printf '%s' "${operator_signer_active_key_hexes[*]}")"
+      [[ -n "$scenario_keys_csv" ]] || return 1
+      scenario_signer_env=(JUNO_TXSIGN_SIGNER_KEYS="$scenario_keys_csv")
+    fi
+
     set +e
-    scenario_output="$("$operator_signer_probe_bin" sign-digest --digest "$scenario_digest" --json 2>&1)"
+    if (( ${#scenario_signer_env[@]} > 0 )); then
+      scenario_output="$(env "${scenario_signer_env[@]}" "${scenario_probe_args[@]}" 2>&1)"
+    else
+      scenario_output="$("${scenario_probe_args[@]}" 2>&1)"
+    fi
     scenario_status=$?
     set -e
     if (( scenario_status != 0 )); then

@@ -84,6 +84,8 @@ test_operator_signer_requires_sign_digest_support() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" "supports_sign_digest_subcommand()" "operator signer capability probe helper exists"
+  assert_contains "$script_text" "ensure_juno_txsign_binary" "operator signer defaults to juno-txsign bootstrap helper"
+  assert_contains "$script_text" "bridge_operator_signer_bin=\"juno-txsign\"" "operator signer default prefers juno-txsign command"
   assert_not_contains "$script_text" "write_e2e_operator_digest_signer()" "fallback signer shim writer removed"
   assert_not_contains "$script_text" "does not support sign-digest; using e2e signer shim" "fallback signer shim log removed"
   assert_not_contains "$script_text" "cast wallet sign --no-hash --private-key" "runner-side raw digest signer shim removed"
