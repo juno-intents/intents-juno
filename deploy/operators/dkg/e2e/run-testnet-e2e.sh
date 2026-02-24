@@ -1632,7 +1632,7 @@ checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.
 sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"
 sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"
 if grep -qE '^[[:space:]]*--lease-name ' "$checkpoint_signer_script"; then
-  sudo sed -i "s|^  --lease-name .*\\\\$|  --lease-name \"${checkpoint_signer_lease_name}\" \\\\|g" "$checkpoint_signer_script"
+  sudo sed -i "s|^[[:space:]]*--lease-name .*|  --lease-name \"${checkpoint_signer_lease_name}\" \\\\|g" "$checkpoint_signer_script"
 else
   if ! grep -qE '^  --owner-id .*\\\\$' "$checkpoint_signer_script"; then
     echo "checkpoint signer wrapper is missing owner-id line: $checkpoint_signer_script" >&2
