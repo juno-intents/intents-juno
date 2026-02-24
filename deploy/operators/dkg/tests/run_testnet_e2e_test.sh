@@ -145,7 +145,7 @@ test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   assert_contains "$script_text" "witness_rpc_action_index_candidates()" "run-testnet-e2e defines witness action-index candidate derivation helper"
   assert_contains "$script_text" "method:\"getrawtransaction\"" "action-index candidate derivation uses getrawtransaction RPC"
   assert_contains "$script_text" ".result.orchard.actions" "action-index candidate derivation inspects orchard action list"
-  assert_not_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation requires action index lookup to validate scan visibility before extraction"
+  assert_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation skips scan action index lookup and delegates action index selection to RPC/quorum extraction"
   assert_contains "$script_text" "for deposit_action_candidate in 0 1 2 3; do" "deposit extraction appends default action-index candidates for scanner/index drift"
   assert_contains "$script_text" "using action-index candidates for deposit extraction" "deposit extraction logs candidate action-index set"
   assert_contains "$script_text" "direct-cli withdraw extraction action-index candidates" "direct-cli withdraw extraction logs candidate action-index set"

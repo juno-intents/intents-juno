@@ -2511,6 +2511,7 @@ command_run() {
         --base-recipient-address "$bridge_recipient_address"
         --withdrawal-id-hex "$predicted_witness_withdrawal_id"
         --withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"
+        --skip-action-index-lookup
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
         --timeout-seconds "$witness_timeout_slice_seconds"
@@ -3168,6 +3169,7 @@ command_run() {
       --base-recipient-address "$bridge_recipient_address"
       --withdrawal-id-hex "$direct_cli_generated_withdrawal_id_no_prefix"
       --withdraw-batch-id-hex "$direct_cli_generated_withdraw_batch_id_no_prefix"
+      --skip-action-index-lookup
       --deposit-amount-zat "100000"
       --withdraw-amount-zat "$direct_cli_withdraw_amount"
       --timeout-seconds "$sp1_witness_metadata_timeout_seconds"
