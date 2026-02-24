@@ -888,7 +888,17 @@ build_and_push_shared_proof_services_image() {
   env "${AWS_ENV_ARGS[@]}" aws ecr get-login-password --region "$aws_region" | docker login --username AWS --password-stdin "$registry_host" >/dev/null
 
   log "building shared proof services image: ${repository_url}:${image_tag}"
-  if docker buildx version >/dev/null 2>&1; then
+  local use_buildx="true"
+  if [[ "$(uname -s)" == "Darwin" ]]; then
+    use_buildx="false"
+    log "darwin host detected; using docker build + push path for shared proof services image"
+  fi
+  if [[ "${E2E_AWS_FORCE_LEGACY_DOCKER_BUILD:-}" == "true" ]]; then
+    use_buildx="false"
+    log "E2E_AWS_FORCE_LEGACY_DOCKER_BUILD=true; using docker build + push path for shared proof services image"
+  fi
+
+  if [[ "$use_buildx" == "true" ]] && docker buildx version >/dev/null 2>&1; then
     run_with_retry "shared proof services image buildx build/push" 3 15 \
       run_with_local_timeout 300 docker buildx build --platform linux/amd64 \
         --provenance=false \
