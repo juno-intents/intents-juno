@@ -83,7 +83,13 @@ Options:
   --sp1-input-s3-region <region> optional AWS region override for oversized input uploads
   --sp1-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
                                    (default: 2h)
-  --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 50000000000000)
+  --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 1000000000000)
+  --sp1-deposit-pgu-estimate <n> projected deposit proof PGU usage for credit guardrails
+                                   (default: 1000000)
+  --sp1-withdraw-pgu-estimate <n> projected withdraw proof PGU usage for credit guardrails
+                                   (default: 1000000)
+  --sp1-groth16-base-fee-wei <wei> projected groth16 base fee per proof in wei
+                                   (default: 200000000000000000)
   --sp1-min-auction-period <s> SP1 minimum auction period in seconds (default: 85)
   --sp1-auction-timeout <duration> SP1 auction timeout (default: 625s)
   --sp1-request-timeout <duration> SP1 request timeout (default: 1500s)
@@ -1004,6 +1010,32 @@ assert_prefund_sender_budget() {
   fi
 }
 
+compute_sp1_credit_guardrail_wei() {
+  local max_price_per_pgu="$1"
+  local deposit_pgu_estimate="$2"
+  local withdraw_pgu_estimate="$3"
+  local groth16_base_fee_wei="$4"
+
+  python3 - "$max_price_per_pgu" "$deposit_pgu_estimate" "$withdraw_pgu_estimate" "$groth16_base_fee_wei" <<'PY'
+import sys
+
+max_price_per_pgu = int(sys.argv[1])
+deposit_pgu_estimate = int(sys.argv[2])
+withdraw_pgu_estimate = int(sys.argv[3])
+groth16_base_fee_wei = int(sys.argv[4])
+
+projected_pair_cost_wei = (groth16_base_fee_wei * 2) + (
+    max_price_per_pgu * (deposit_pgu_estimate + withdraw_pgu_estimate)
+)
+projected_with_overhead_wei = ((projected_pair_cost_wei * 120) + 99) // 100
+required_credit_buffer_wei = projected_with_overhead_wei * 3
+
+print(required_credit_buffer_wei)
+print(projected_with_overhead_wei)
+print(projected_pair_cost_wei)
+PY
+}
+
 derive_tss_url_from_juno_rpc_url() {
   local rpc_url="$1"
   if [[ "$rpc_url" =~ ^https?://([^/:]+)(:[0-9]+)?(/.*)?$ ]]; then
@@ -1489,7 +1521,10 @@ command_run() {
   local sp1_input_s3_prefix="bridge-e2e/sp1-input"
   local sp1_input_s3_region=""
   local sp1_input_s3_presign_ttl="2h"
-  local sp1_max_price_per_pgu="50000000000000"
+  local sp1_max_price_per_pgu="1000000000000"
+  local sp1_deposit_pgu_estimate="1000000"
+  local sp1_withdraw_pgu_estimate="1000000"
+  local sp1_groth16_base_fee_wei="200000000000000000"
   local sp1_min_auction_period="85"
   local sp1_auction_timeout="625s"
   local sp1_request_timeout="1500s"
@@ -1797,6 +1832,21 @@ command_run() {
         sp1_max_price_per_pgu="$2"
         shift 2
         ;;
+      --sp1-deposit-pgu-estimate)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-deposit-pgu-estimate"
+        sp1_deposit_pgu_estimate="$2"
+        shift 2
+        ;;
+      --sp1-withdraw-pgu-estimate)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-withdraw-pgu-estimate"
+        sp1_withdraw_pgu_estimate="$2"
+        shift 2
+        ;;
+      --sp1-groth16-base-fee-wei)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-groth16-base-fee-wei"
+        sp1_groth16_base_fee_wei="$2"
+        shift 2
+        ;;
       --sp1-min-auction-period)
         [[ $# -ge 2 ]] || die "missing value for --sp1-min-auction-period"
         sp1_min_auction_period="$2"
@@ -1915,9 +1965,16 @@ command_run() {
   [[ "$base_port" =~ ^[0-9]+$ ]] || die "--base-port must be numeric"
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
   [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "--sp1-max-price-per-pgu must be numeric"
+  [[ "$sp1_deposit_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-deposit-pgu-estimate must be numeric"
+  [[ "$sp1_withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-withdraw-pgu-estimate must be numeric"
+  [[ "$sp1_groth16_base_fee_wei" =~ ^[0-9]+$ ]] || die "--sp1-groth16-base-fee-wei must be numeric"
   [[ "$sp1_min_auction_period" =~ ^[0-9]+$ ]] || die "--sp1-min-auction-period must be numeric"
   [[ "$sp1_auction_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-auction-timeout must be seconds with s suffix (example: 625s)"
   [[ "$sp1_request_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-request-timeout must be seconds with s suffix (example: 1500s)"
+  (( sp1_max_price_per_pgu > 0 )) || die "--sp1-max-price-per-pgu must be > 0"
+  (( sp1_deposit_pgu_estimate > 0 )) || die "--sp1-deposit-pgu-estimate must be > 0"
+  (( sp1_withdraw_pgu_estimate > 0 )) || die "--sp1-withdraw-pgu-estimate must be > 0"
+  (( sp1_groth16_base_fee_wei > 0 )) || die "--sp1-groth16-base-fee-wei must be > 0"
   [[ "$refund_after_expiry_window_seconds" =~ ^[0-9]+$ ]] || die "--refund-after-expiry-window-seconds must be numeric"
   (( refund_after_expiry_window_seconds > 0 )) || die "--refund-after-expiry-window-seconds must be > 0"
   case "$relayer_runtime_mode" in
@@ -2083,6 +2140,20 @@ command_run() {
   local withdraw_coordinator_group="${shared_topic_prefix}.withdraw-coordinator.${proof_topic_seed}"
   local withdraw_finalizer_group="${shared_topic_prefix}.withdraw-finalizer.${proof_topic_seed}"
   local withdraw_finalizer_proof_group="${shared_topic_prefix}.withdraw-finalizer.proof.${proof_topic_seed}"
+  ensure_command python3
+  local -a sp1_credit_guardrail=()
+  mapfile -t sp1_credit_guardrail < <(
+    compute_sp1_credit_guardrail_wei \
+      "$sp1_max_price_per_pgu" \
+      "$sp1_deposit_pgu_estimate" \
+      "$sp1_withdraw_pgu_estimate" \
+      "$sp1_groth16_base_fee_wei"
+  )
+  (( ${#sp1_credit_guardrail[@]} == 3 )) || die "failed to compute SP1 credit guardrail"
+  local sp1_required_credit_buffer_wei="${sp1_credit_guardrail[0]}"
+  local sp1_critical_credit_threshold_wei="${sp1_credit_guardrail[1]}"
+  local sp1_projected_pair_cost_wei="${sp1_credit_guardrail[2]}"
+  log "sp1 credit guardrail projected_pair_cost_wei=$sp1_projected_pair_cost_wei critical_threshold_wei=$sp1_critical_credit_threshold_wei required_buffer_wei=$sp1_required_credit_buffer_wei"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
@@ -2386,7 +2457,6 @@ command_run() {
         --base-recipient-address "$bridge_recipient_address"
         --withdrawal-id-hex "$predicted_witness_withdrawal_id"
         --withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"
-        --skip-action-index-lookup
         --deposit-amount-zat "100000"
         --withdraw-amount-zat "10000"
         --timeout-seconds "$witness_timeout_slice_seconds"
@@ -2486,6 +2556,19 @@ command_run() {
         generated_deposit_action_indexes+=("$deposit_action_candidate")
       fi
     done
+    for deposit_action_candidate in 0 1 2 3; do
+      local known_candidate="false"
+      local existing_candidate
+      for existing_candidate in "${generated_deposit_action_indexes[@]}"; do
+        if [[ "$existing_candidate" == "$deposit_action_candidate" ]]; then
+          known_candidate="true"
+          break
+        fi
+      done
+      if [[ "$known_candidate" != "true" ]]; then
+        generated_deposit_action_indexes+=("$deposit_action_candidate")
+      fi
+    done
     if (( ${#generated_deposit_action_indexes[@]} == 0 )); then
       generated_deposit_action_indexes=(0 1 2 3)
     fi
@@ -2507,6 +2590,7 @@ command_run() {
     local witness_quorum_dir
     witness_quorum_dir="$workdir/reports/witness/quorum"
     ensure_dir "$witness_quorum_dir"
+    rm -f "$witness_quorum_dir"/deposit-*.json "$witness_quorum_dir"/deposit-*.witness.bin "$witness_quorum_dir"/deposit-*.extract.err || true
     local -a witness_success_labels=()
     local -a witness_success_fingerprints=()
     local -a witness_success_anchor_fingerprints=()
@@ -3030,7 +3114,6 @@ command_run() {
       --base-recipient-address "$bridge_recipient_address"
       --withdrawal-id-hex "$direct_cli_generated_withdrawal_id_no_prefix"
       --withdraw-batch-id-hex "$direct_cli_generated_withdraw_batch_id_no_prefix"
-      --skip-action-index-lookup
       --deposit-amount-zat "100000"
       --withdraw-amount-zat "$direct_cli_withdraw_amount"
       --timeout-seconds "$sp1_witness_metadata_timeout_seconds"
@@ -3373,8 +3456,8 @@ command_run() {
       "--lease-driver" "postgres"
       "--owner-id" "$proof_funder_owner"
       "--sp1-requestor-address" "$sp1_requestor_address"
-      "--min-balance-wei" "$((sp1_max_price_per_pgu * 3))"
-      "--critical-balance-wei" "$sp1_max_price_per_pgu"
+      "--min-balance-wei" "$sp1_required_credit_buffer_wei"
+      "--critical-balance-wei" "$sp1_critical_credit_threshold_wei"
       "--queue-driver" "kafka"
       "--queue-brokers" "$shared_kafka_brokers"
       "--sp1-bin" "/usr/local/bin/sp1-prover-adapter"
@@ -3478,6 +3561,7 @@ command_run() {
     (
       cd "$REPO_ROOT"
       PROOF_FUNDER_KEY="$sp1_requestor_key_hex" \
+      NETWORK_PRIVATE_KEY="$sp1_requestor_key_hex" \
       SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
       SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url" \
       SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url" \
@@ -3488,8 +3572,8 @@ command_run() {
         --lease-driver postgres \
         --owner-id "$proof_funder_owner" \
         --sp1-requestor-address "$sp1_requestor_address" \
-        --min-balance-wei "$((sp1_max_price_per_pgu * 3))" \
-        --critical-balance-wei "$sp1_max_price_per_pgu" \
+        --min-balance-wei "$sp1_required_credit_buffer_wei" \
+        --critical-balance-wei "$sp1_critical_credit_threshold_wei" \
         --queue-driver kafka \
         --queue-brokers "$shared_kafka_brokers" \
         --sp1-bin "$sp1_bin" \
@@ -3512,26 +3596,31 @@ command_run() {
     fi
   fi
 
-  direct_cli_user_proof_status="running"
-  if ! run_direct_cli_user_proof_scenario; then
-    direct_cli_user_proof_status="failed"
-    if [[ "$shared_ecs_enabled" == "true" ]]; then
-      log "direct-cli user proof scenario failed; showing shared ECS proof service logs"
-      dump_shared_proof_services_ecs_logs \
-        "$shared_ecs_region" \
-        "$shared_ecs_cluster_arn" \
-        "$shared_proof_requestor_service_name" \
-        "$shared_proof_funder_service_name"
-    else
-      log "direct-cli user proof scenario failed; showing proof-requestor and proof-funder logs"
-      tail -n 200 "$proof_requestor_log" >&2 || true
-      tail -n 200 "$proof_funder_log" >&2 || true
-      kill "$proof_requestor_pid" >/dev/null 2>&1 || true
-      kill "$proof_funder_pid" >/dev/null 2>&1 || true
-      wait "$proof_requestor_pid" >/dev/null 2>&1 || true
-      wait "$proof_funder_pid" >/dev/null 2>&1 || true
+  if [[ -n "$existing_bridge_summary_path" ]]; then
+    direct_cli_user_proof_status="skipped-resume-existing-bridge-summary"
+    log "skipping direct-cli user proof scenario during resume with existing bridge summary path=$existing_bridge_summary_path"
+  else
+    direct_cli_user_proof_status="running"
+    if ! run_direct_cli_user_proof_scenario; then
+      direct_cli_user_proof_status="failed"
+      if [[ "$shared_ecs_enabled" == "true" ]]; then
+        log "direct-cli user proof scenario failed; showing shared ECS proof service logs"
+        dump_shared_proof_services_ecs_logs \
+          "$shared_ecs_region" \
+          "$shared_ecs_cluster_arn" \
+          "$shared_proof_requestor_service_name" \
+          "$shared_proof_funder_service_name"
+      else
+        log "direct-cli user proof scenario failed; showing proof-requestor and proof-funder logs"
+        tail -n 200 "$proof_requestor_log" >&2 || true
+        tail -n 200 "$proof_funder_log" >&2 || true
+        kill "$proof_requestor_pid" >/dev/null 2>&1 || true
+        kill "$proof_funder_pid" >/dev/null 2>&1 || true
+        wait "$proof_requestor_pid" >/dev/null 2>&1 || true
+        wait "$proof_funder_pid" >/dev/null 2>&1 || true
+      fi
+      die "direct-cli user proof scenario failed"
     fi
-    die "direct-cli user proof scenario failed"
   fi
 
   local bridge_status=0
@@ -4957,6 +5046,12 @@ command_run() {
     --arg sp1_input_s3_region "$sp1_input_s3_region" \
     --arg sp1_input_s3_presign_ttl "$sp1_input_s3_presign_ttl" \
     --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+    --arg sp1_deposit_pgu_estimate "$sp1_deposit_pgu_estimate" \
+    --arg sp1_withdraw_pgu_estimate "$sp1_withdraw_pgu_estimate" \
+    --arg sp1_groth16_base_fee_wei "$sp1_groth16_base_fee_wei" \
+    --arg sp1_projected_pair_cost_wei "$sp1_projected_pair_cost_wei" \
+    --arg sp1_critical_credit_threshold_wei "$sp1_critical_credit_threshold_wei" \
+    --arg sp1_required_credit_buffer_wei "$sp1_required_credit_buffer_wei" \
     --arg sp1_min_auction_period "$sp1_min_auction_period" \
     --arg sp1_auction_timeout "$sp1_auction_timeout" \
     --arg sp1_request_timeout "$sp1_request_timeout" \
@@ -5051,6 +5146,12 @@ command_run() {
           input_s3_region: (if $sp1_input_s3_region == "" then null else $sp1_input_s3_region end),
           input_s3_presign_ttl: (if $sp1_input_s3_presign_ttl == "" then null else $sp1_input_s3_presign_ttl end),
           max_price_per_pgu: $sp1_max_price_per_pgu,
+          deposit_pgu_estimate: $sp1_deposit_pgu_estimate,
+          withdraw_pgu_estimate: $sp1_withdraw_pgu_estimate,
+          groth16_base_fee_wei: $sp1_groth16_base_fee_wei,
+          projected_pair_cost_wei: $sp1_projected_pair_cost_wei,
+          critical_credit_threshold_wei: $sp1_critical_credit_threshold_wei,
+          required_credit_buffer_wei: $sp1_required_credit_buffer_wei,
           min_auction_period: $sp1_min_auction_period,
           auction_timeout: $sp1_auction_timeout,
           request_timeout: $sp1_request_timeout

@@ -145,9 +145,11 @@ test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   assert_contains "$script_text" "witness_rpc_action_index_candidates()" "run-testnet-e2e defines witness action-index candidate derivation helper"
   assert_contains "$script_text" "method:\"getrawtransaction\"" "action-index candidate derivation uses getrawtransaction RPC"
   assert_contains "$script_text" ".result.orchard.actions" "action-index candidate derivation inspects orchard action list"
-  assert_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation skips pre-index action lookup to avoid long scan stalls"
+  assert_not_contains "$script_text" "--skip-action-index-lookup" "witness metadata generation requires action index lookup to validate scan visibility before extraction"
+  assert_contains "$script_text" "for deposit_action_candidate in 0 1 2 3; do" "deposit extraction appends default action-index candidates for scanner/index drift"
   assert_contains "$script_text" "using action-index candidates for deposit extraction" "deposit extraction logs candidate action-index set"
   assert_contains "$script_text" "direct-cli withdraw extraction action-index candidates" "direct-cli withdraw extraction logs candidate action-index set"
+  assert_contains "$script_text" 'rm -f "$witness_quorum_dir"/deposit-*.json "$witness_quorum_dir"/deposit-*.witness.bin "$witness_quorum_dir"/deposit-*.extract.err || true' "witness quorum extraction clears stale per-operator artifacts before evaluating quorum"
   assert_contains "$script_text" 'witness_fingerprint="${generated_deposit_txid}|${deposit_witness_hex}|${deposit_final_root}"' "quorum witness fingerprint ignores anchor drift across scanners"
   assert_contains "$script_text" "witness quorum anchor divergence detected across operators (using first successful anchor)" "quorum checker reports anchor drift without hard-failing identical witness/root"
 }
