@@ -368,6 +368,15 @@ test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario() {
   assert_contains "$script_text" "skipping direct-cli user proof scenario for stop-after-stage=checkpoint_validated" "checkpoint stop-stage logs direct-cli proof skip reason"
 }
 
+test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'if [[ "${JUNO_E2E_ENABLE_DIRECT_CLI_USER_PROOF:-0}" != "1" ]]; then' "direct-cli user proof scenario is opt-in"
+  assert_contains "$script_text" 'direct_cli_user_proof_status="skipped-runner-orchestration-only"' "direct-cli user proof records orchestration-only default skip status"
+  assert_contains "$script_text" "skipping direct-cli user proof scenario; runner SP1 proof submission is disabled" "direct-cli user proof skip reason documents shared-service SP1 ownership"
+}
+
 test_sp1_rpc_defaults_and_validation_target_succinct_network() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -404,6 +413,7 @@ main() {
   test_shared_ecs_rollout_retries_transient_unstable_services
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
   test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario
+  test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only
   test_sp1_rpc_defaults_and_validation_target_succinct_network
 }
 

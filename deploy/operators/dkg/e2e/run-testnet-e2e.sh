@@ -40,8 +40,8 @@ Options:
   --bridge-run-timeout <duration>  bridge-e2e runtime timeout (default: 90m)
   --bridge-operator-signer-bin <path> external operator signer binary for bridge-e2e
                                    (default: prefer dkg-admin; sign-digest support is required)
-  --sp1-bin <path>           proof backend binary implementing prover request protocols
-                                   (default: sp1-prover-adapter)
+  --sp1-bin <path>           reserved for optional direct-cli proof chaos scenario
+                                   (disabled by default; default: sp1-prover-adapter)
   --sp1-rpc-url <url>        sp1 prover network RPC URL (default: https://rpc.mainnet.succinct.xyz)
   --sp1-market-address <addr> sp1 market contract address
                                    (default: 0xFd152dADc5183870710FE54f939Eae3aB9F0fE82)
@@ -102,7 +102,7 @@ Options:
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
   --shared-timeout <duration>       shared infra validation timeout (default: 300s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
-  --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: runner)
+  --relayer-runtime-mode <mode>     relayer runtime mode (runner|distributed, default: distributed)
   --relayer-runtime-operator-hosts <csv> comma-separated operator host list for distributed relayer runtime
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
   --relayer-runtime-operator-ssh-key-file <path> SSH key file for distributed relayer runtime operator hosts
@@ -118,6 +118,9 @@ Environment:
   JUNO_FUNDER_PRIVATE_KEY_HEX      optional juno funder private key hex used for transparent witness funding.
   JUNO_FUNDER_SEED_PHRASE          optional juno funder seed phrase used for orchard/unified witness funding.
   JUNO_FUNDER_SOURCE_ADDRESS       optional explicit funded source address already present in witness RPC wallets.
+  JUNO_E2E_ENABLE_DIRECT_CLI_USER_PROOF
+                                   optional explicit opt-in (set to 1) for runner-side direct-cli user proof chaos scenario.
+                                   Default is disabled to keep runner orchestration-only for SP1 proofs.
 
 This script orchestrates:
   1) DKG ceremony -> backup packages -> restore from backup-only
@@ -1809,7 +1812,7 @@ command_run() {
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="300s"
   local shared_output=""
-  local relayer_runtime_mode="runner"
+  local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
   local relayer_runtime_operator_ssh_user=""
   local relayer_runtime_operator_ssh_key_file=""
@@ -2256,7 +2259,10 @@ command_run() {
   [[ "$refund_after_expiry_window_seconds" =~ ^[0-9]+$ ]] || die "--refund-after-expiry-window-seconds must be numeric"
   (( refund_after_expiry_window_seconds > 0 )) || die "--refund-after-expiry-window-seconds must be > 0"
   case "$relayer_runtime_mode" in
-    runner|distributed) ;;
+    distributed) ;;
+    runner)
+      die "--relayer-runtime-mode=runner is forbidden in live e2e (runner is orchestration-only)"
+      ;;
     *) die "--relayer-runtime-mode must be runner or distributed" ;;
   esac
   [[ -z "$bridge_deposit_checkpoint_height" || "$bridge_deposit_checkpoint_height" =~ ^[0-9]+$ ]] || die "--bridge-deposit-checkpoint-height must be numeric"
@@ -2362,36 +2368,17 @@ command_run() {
   [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (operator checkpoint package pin/fetch verification)"
   [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
   command -v psql >/dev/null 2>&1 || die "psql is required for live withdrawal payout-state checks (install postgresql client)"
-  local shared_ecs_enabled="false"
-  if [[ -n "$shared_ecs_cluster_arn" || -n "$shared_proof_requestor_service_name" || -n "$shared_proof_funder_service_name" ]]; then
-    [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required when shared ECS proof services are enabled"
-    [[ -n "$shared_proof_requestor_service_name" ]] || die "--shared-proof-requestor-service-name is required when shared ECS proof services are enabled"
-    [[ -n "$shared_proof_funder_service_name" ]] || die "--shared-proof-funder-service-name is required when shared ECS proof services are enabled"
-    shared_ecs_enabled="true"
-  fi
+  [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
+  [[ -n "$shared_proof_requestor_service_name" ]] || die "--shared-proof-requestor-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
+  [[ -n "$shared_proof_funder_service_name" ]] || die "--shared-proof-funder-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
+  local shared_ecs_enabled="true"
   local shared_enabled="true"
 
   ensure_base_dependencies
   ensure_command go
-  if [[ "$sp1_bin" == "sp1-prover-adapter" ]] && ! command -v "$sp1_bin" >/dev/null 2>&1; then
-    local local_sp1_adapter_bin="$workdir/bin/sp1-prover-adapter"
-    log "sp1-prover-adapter not found on PATH; building local adapter binary"
-    ensure_command cargo
-    (
-      cd "$REPO_ROOT/zk"
-      cargo build --release --manifest-path sp1_prover_adapter/cli/Cargo.toml
-    )
-    ensure_dir "$(dirname "$local_sp1_adapter_bin")"
-    cp "$REPO_ROOT/zk/target/release/sp1-prover-adapter" "$local_sp1_adapter_bin"
-    chmod +x "$local_sp1_adapter_bin"
-    sp1_bin="$local_sp1_adapter_bin"
-  fi
-  ensure_command "$sp1_bin"
   ensure_command openssl
   ensure_command cast
-  if [[ "$shared_ecs_enabled" == "true" ]]; then
-    ensure_command aws
-  fi
+  ensure_command aws
 
   local bridge_recipient_address=""
   local sp1_requestor_key_hex
@@ -2454,8 +2441,6 @@ command_run() {
   local proof_services_mode="not-started"
   local proof_requestor_log=""
   local proof_funder_log=""
-  local proof_requestor_pid=""
-  local proof_funder_pid=""
   local shared_ecs_region=""
   local shared_ecs_started="false"
   local stage_witness_ready="false"
@@ -2469,24 +2454,13 @@ command_run() {
   local stage_checkpoint_shared_validation_passed="false"
 
   stop_centralized_proof_services() {
-    if [[ "$shared_ecs_enabled" == "true" ]]; then
-      if [[ "$shared_ecs_started" == "true" ]]; then
-        scale_shared_proof_services_ecs \
-          "$shared_ecs_region" \
-          "$shared_ecs_cluster_arn" \
-          "$shared_proof_requestor_service_name" \
-          "$shared_proof_funder_service_name" \
-          "0" || true
-      fi
-    else
-      if [[ -n "$proof_requestor_pid" ]]; then
-        kill "$proof_requestor_pid" >/dev/null 2>&1 || true
-        wait "$proof_requestor_pid" >/dev/null 2>&1 || true
-      fi
-      if [[ -n "$proof_funder_pid" ]]; then
-        kill "$proof_funder_pid" >/dev/null 2>&1 || true
-        wait "$proof_funder_pid" >/dev/null 2>&1 || true
-      fi
+    if [[ "$shared_ecs_started" == "true" ]]; then
+      scale_shared_proof_services_ecs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name" \
+        "0" || true
     fi
   }
 
@@ -3402,7 +3376,6 @@ command_run() {
     bridge_args+=("--juno-execution-tx-hash" "$bridge_juno_execution_tx_hash")
   fi
   bridge_args+=(
-    "--sp1-bin" "$sp1_bin"
     "--sp1-rpc-url" "$sp1_rpc_url"
     "--sp1-proof-submission-mode" "$sp1_proof_submission_mode"
     "--sp1-proof-queue-brokers" "$shared_kafka_brokers"
@@ -3964,21 +3937,15 @@ command_run() {
     return 0
   }
 
-  proof_requestor_log="$workdir/reports/proof-requestor.log"
-  proof_funder_log="$workdir/reports/proof-funder.log"
-  proof_services_mode="local-process"
+  proof_requestor_log=""
+  proof_funder_log=""
+  proof_services_mode="shared-ecs"
   local proof_requestor_owner="testnet-e2e-proof-requestor-${proof_topic_seed}"
   local proof_funder_owner="testnet-e2e-proof-funder-${proof_topic_seed}"
-  proof_requestor_pid=""
-  proof_funder_pid=""
   shared_ecs_region=""
   shared_ecs_started="false"
 
-  if [[ "$shared_ecs_enabled" == "true" ]]; then
-    proof_services_mode="shared-ecs"
-    proof_requestor_log=""
-    proof_funder_log=""
-    shared_ecs_region="$(resolve_aws_region)"
+  shared_ecs_region="$(resolve_aws_region)"
 
     local -a proof_requestor_ecs_command=(
       "/usr/local/bin/proof-requestor"
@@ -4063,95 +4030,17 @@ command_run() {
       "$proof_funder_ecs_command_json" \
       "$proof_requestor_ecs_environment_json" \
       "$proof_funder_ecs_environment_json"
-    shared_ecs_started="true"
-  else
-    local proof_requestor_bin="$workdir/bin/proof-requestor"
-    local proof_funder_bin="$workdir/bin/proof-funder"
-    ensure_dir "$workdir/bin"
-    (
-      cd "$REPO_ROOT"
-      go build -o "$proof_requestor_bin" ./cmd/proof-requestor
-      go build -o "$proof_funder_bin" ./cmd/proof-funder
-    )
-
-    (
-      cd "$REPO_ROOT"
-      PROOF_REQUESTOR_KEY="$sp1_requestor_key_hex" \
-      SP1_MAX_PRICE_PER_PGU="$sp1_max_price_per_pgu" \
-      SP1_MIN_AUCTION_PERIOD="$sp1_min_auction_period" \
-      SP1_AUCTION_TIMEOUT_SECONDS="${sp1_auction_timeout%s}" \
-      SP1_REQUEST_TIMEOUT_SECONDS="${sp1_request_timeout%s}" \
-      SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
-      SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url" \
-      SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url" \
-      SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
-      SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
-      "$proof_requestor_bin" \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --store-driver postgres \
-        --owner "$proof_requestor_owner" \
-        --sp1-requestor-address "$sp1_requestor_address" \
-        --sp1-requestor-key-secret-arn "PROOF_REQUESTOR_KEY" \
-        --sp1-requestor-key-env "PROOF_REQUESTOR_KEY" \
-        --secrets-driver env \
-        --chain-id "$base_chain_id" \
-        --input-topic "$proof_request_topic" \
-        --result-topic "$proof_result_topic" \
-        --failure-topic "$proof_failure_topic" \
-        --max-inflight-requests 32 \
-        --request-timeout "$sp1_request_timeout" \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --queue-group "$proof_requestor_group" \
-        --sp1-bin "$sp1_bin" \
-        >"$proof_requestor_log" 2>&1
-    ) &
-    proof_requestor_pid="$!"
-
-    (
-      cd "$REPO_ROOT"
-      PROOF_FUNDER_KEY="$sp1_requestor_key_hex" \
-      NETWORK_PRIVATE_KEY="$sp1_requestor_key_hex" \
-      SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
-      SP1_DEPOSIT_PROGRAM_URL="$sp1_deposit_program_url" \
-      SP1_WITHDRAW_PROGRAM_URL="$sp1_withdraw_program_url" \
-      SP1_DEPOSIT_PROGRAM_VKEY="$bridge_deposit_image_id" \
-      SP1_WITHDRAW_PROGRAM_VKEY="$bridge_withdraw_image_id" \
-      "$proof_funder_bin" \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --lease-driver postgres \
-        --owner-id "$proof_funder_owner" \
-        --sp1-requestor-address "$sp1_requestor_address" \
-        --min-balance-wei "$sp1_required_credit_buffer_wei" \
-        --critical-balance-wei "$sp1_critical_credit_threshold_wei" \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --sp1-bin "$sp1_bin" \
-        >"$proof_funder_log" 2>&1
-    ) &
-    proof_funder_pid="$!"
-
-    sleep 5
-    if ! kill -0 "$proof_requestor_pid" >/dev/null 2>&1; then
-      log "proof-requestor failed to start; showing log"
-      tail -n 200 "$proof_requestor_log" >&2 || true
-      die "proof-requestor did not stay running"
-    fi
-    if ! kill -0 "$proof_funder_pid" >/dev/null 2>&1; then
-      log "proof-funder failed to start; showing log"
-      tail -n 200 "$proof_funder_log" >&2 || true
-      kill "$proof_requestor_pid" >/dev/null 2>&1 || true
-      wait "$proof_requestor_pid" >/dev/null 2>&1 || true
-      die "proof-funder did not stay running"
-    fi
-  fi
+  shared_ecs_started="true"
   stage_shared_services_stable="true"
   maybe_stop_after_stage "shared_services_ready"
   if [[ "$stage_stop_after_stage_reached" == "true" ]]; then
     return 0
   fi
 
-  if [[ "$stop_after_stage" == "checkpoint_validated" ]]; then
+  if [[ "${JUNO_E2E_ENABLE_DIRECT_CLI_USER_PROOF:-0}" != "1" ]]; then
+    direct_cli_user_proof_status="skipped-runner-orchestration-only"
+    log "skipping direct-cli user proof scenario; runner SP1 proof submission is disabled (shared services own SP1 lifecycle)"
+  elif [[ "$stop_after_stage" == "checkpoint_validated" ]]; then
     direct_cli_user_proof_status="skipped-stop-after-stage-checkpoint_validated"
     log "skipping direct-cli user proof scenario for stop-after-stage=checkpoint_validated"
   elif [[ -n "$existing_bridge_summary_path" ]]; then
@@ -4161,22 +4050,12 @@ command_run() {
     direct_cli_user_proof_status="running"
     if ! run_direct_cli_user_proof_scenario; then
       direct_cli_user_proof_status="failed"
-      if [[ "$shared_ecs_enabled" == "true" ]]; then
-        log "direct-cli user proof scenario failed; showing shared ECS proof service logs"
-        dump_shared_proof_services_ecs_logs \
-          "$shared_ecs_region" \
-          "$shared_ecs_cluster_arn" \
-          "$shared_proof_requestor_service_name" \
-          "$shared_proof_funder_service_name"
-      else
-        log "direct-cli user proof scenario failed; showing proof-requestor and proof-funder logs"
-        tail -n 200 "$proof_requestor_log" >&2 || true
-        tail -n 200 "$proof_funder_log" >&2 || true
-        kill "$proof_requestor_pid" >/dev/null 2>&1 || true
-        kill "$proof_funder_pid" >/dev/null 2>&1 || true
-        wait "$proof_requestor_pid" >/dev/null 2>&1 || true
-        wait "$proof_funder_pid" >/dev/null 2>&1 || true
-      fi
+      log "direct-cli user proof scenario failed; showing shared ECS proof service logs"
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
       die "direct-cli user proof scenario failed"
     fi
   fi
@@ -4193,18 +4072,12 @@ command_run() {
     bridge_status="$?"
     set -e
     if (( bridge_status != 0 )); then
-      if [[ "$shared_ecs_enabled" == "true" ]]; then
-        log "bridge-e2e deploy bootstrap failed; showing shared ECS proof service logs"
-        dump_shared_proof_services_ecs_logs \
-          "$shared_ecs_region" \
-          "$shared_ecs_cluster_arn" \
-          "$shared_proof_requestor_service_name" \
-          "$shared_proof_funder_service_name"
-      else
-        log "bridge-e2e deploy bootstrap failed; showing proof-requestor and proof-funder logs"
-        tail -n 200 "$proof_requestor_log" >&2 || true
-        tail -n 200 "$proof_funder_log" >&2 || true
-      fi
+      log "bridge-e2e deploy bootstrap failed; showing shared ECS proof service logs"
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
       die "bridge-e2e deploy bootstrap failed while centralized proof services were running"
     fi
   fi
@@ -5526,18 +5399,12 @@ command_run() {
 
   stop_centralized_proof_services
   if (( bridge_status != 0 )); then
-    if [[ "$shared_ecs_enabled" == "true" ]]; then
-      log "relayer-driven bridge e2e failed; showing shared ECS proof service logs"
-      dump_shared_proof_services_ecs_logs \
-        "$shared_ecs_region" \
-        "$shared_ecs_cluster_arn" \
-        "$shared_proof_requestor_service_name" \
-        "$shared_proof_funder_service_name"
-    else
-      log "relayer-driven bridge e2e failed; showing proof-requestor and proof-funder logs"
-      tail -n 200 "$proof_requestor_log" >&2 || true
-      tail -n 200 "$proof_funder_log" >&2 || true
-    fi
+    log "relayer-driven bridge e2e failed; showing shared ECS proof service logs"
+    dump_shared_proof_services_ecs_logs \
+      "$shared_ecs_region" \
+      "$shared_ecs_cluster_arn" \
+      "$shared_proof_requestor_service_name" \
+      "$shared_proof_funder_service_name"
     die "relayer-driven bridge e2e failed while centralized proof services were running"
   fi
 
@@ -5775,7 +5642,6 @@ command_run() {
     --arg bridge_run_timeout "$bridge_run_timeout" \
     --arg sp1_auto "$sp1_auto" \
     --arg sp1_proof_submission_mode "$sp1_proof_submission_mode" \
-    --arg sp1_bin "$sp1_bin" \
     --arg sp1_rpc_url "$sp1_rpc_url" \
     --arg sp1_requestor_address "$sp1_requestor_address" \
     --arg sp1_input_mode "$sp1_input_mode" \
@@ -5892,7 +5758,7 @@ command_run() {
         sp1: {
           auto: ($sp1_auto == "true"),
           submission_mode: (if $sp1_proof_submission_mode == "" then null else $sp1_proof_submission_mode end),
-          bin: $sp1_bin,
+          bin: null,
           rpc_url: $sp1_rpc_url,
           requestor_address: (if $sp1_requestor_address == "" then null else $sp1_requestor_address end),
           input_mode: $sp1_input_mode,

@@ -564,18 +564,6 @@ run_preflight_script_tests() {
   done
 }
 
-resolve_local_sp1_adapter_bin() {
-  if have_cmd sp1-prover-adapter; then
-    printf 'sp1-prover-adapter'
-    return 0
-  fi
-  if [[ -x "$REPO_ROOT/zk/target/release/sp1-prover-adapter" ]]; then
-    printf '%s' "$REPO_ROOT/zk/target/release/sp1-prover-adapter"
-    return 0
-  fi
-  die "sp1-prover-adapter not found (install it or build zk/target/release/sp1-prover-adapter)"
-}
-
 validate_sp1_credit_guardrail_preflight() {
   local sp1_requestor_key_file="$1"
   local sp1_rpc_url="$2"
@@ -598,32 +586,12 @@ validate_sp1_credit_guardrail_preflight() {
     die "--sp1-rpc-url must be a Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not a Base chain RPC endpoint: $sp1_rpc_url"
   fi
 
-  local sp1_requestor_key_hex sp1_requestor_address sp1_adapter_bin balance_json balance_wei
+  local sp1_requestor_key_hex sp1_requestor_address
   sp1_requestor_key_hex="$(trimmed_file_value "$sp1_requestor_key_file")"
   [[ -n "$sp1_requestor_key_hex" ]] || die "sp1 requestor key file is empty: $sp1_requestor_key_file"
   sp1_requestor_address="$(cast wallet address --private-key "$sp1_requestor_key_hex" 2>/dev/null || true)"
   [[ "$sp1_requestor_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
     die "failed to derive sp1 requestor address from key file: $sp1_requestor_key_file"
-  sp1_adapter_bin="$(resolve_local_sp1_adapter_bin)"
-
-  local balance_request_payload
-  balance_request_payload="$(printf '{"version":"sp1.balance.request.v1","requestor_address":"%s"}\n' "$sp1_requestor_address")"
-  if ! balance_json="$(
-    printf '%s' "$balance_request_payload" | \
-      run_with_local_timeout 90 env \
-        NETWORK_PRIVATE_KEY="$sp1_requestor_key_hex" \
-        SP1_NETWORK_RPC_URL="$sp1_rpc_url" \
-        "$sp1_adapter_bin"
-  )"; then
-    die "sp1 balance probe failed or timed out during preflight"
-  fi
-  local balance_error
-  balance_error="$(jq -r '.error // empty' <<<"$balance_json")"
-  if [[ -n "$balance_error" ]]; then
-    die "sp1 balance probe returned error: $balance_error"
-  fi
-  balance_wei="$(jq -r '.balance_wei // empty' <<<"$balance_json")"
-  [[ "$balance_wei" =~ ^[0-9]+$ ]] || die "invalid sp1 balance response: $balance_json"
 
   local -a guardrail_values=()
   mapfile -t guardrail_values < <(
@@ -649,29 +617,8 @@ PY
   local projected_pair_cost_wei required_buffer_wei
   projected_pair_cost_wei="${guardrail_values[0]}"
   required_buffer_wei="${guardrail_values[1]}"
-  local -a guardrail_state=()
-  mapfile -t guardrail_state < <(
-    python3 - "$balance_wei" "$required_buffer_wei" <<'PY'
-import sys
-
-balance = int(sys.argv[1])
-required = int(sys.argv[2])
-if balance < required:
-    print("true")
-    print(required - balance)
-else:
-    print("false")
-    print(0)
-PY
-  )
-  (( ${#guardrail_state[@]} == 2 )) || die "failed to evaluate sp1 credit guardrail state"
-  local guardrail_needs_refill refill_wei
-  guardrail_needs_refill="${guardrail_state[0]}"
-  refill_wei="${guardrail_state[1]}"
-  if [[ "$guardrail_needs_refill" == "true" ]]; then
-    die "sp1 requestor balance below required guardrail: requestor_address=$sp1_requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei refill_wei=$refill_wei"
-  fi
-  log "sp1 credit guardrail preflight passed requestor_address=$sp1_requestor_address balance_wei=$balance_wei projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei"
+  log "sp1 credit guardrail preflight computed requestor_address=$sp1_requestor_address projected_pair_cost_wei=$projected_pair_cost_wei required_wei=$required_buffer_wei"
+  log "sp1 requestor balance probe is enforced by shared proof-funder service at runtime (runner performs orchestration-only preflight)"
 }
 
 terraform_env_args() {
@@ -1259,22 +1206,13 @@ run_with_retry() {
 }
 
 run_apt_with_retry update -y
-run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar protobuf-compiler libprotobuf-dev clang libclang-dev
+run_apt_with_retry install -y build-essential pkg-config libssl-dev jq curl git unzip ca-certificates rsync age golang-go tar
 
-if [[ ! -d "\$HOME/.cargo" ]]; then
-  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-fi
-
-export PATH="\$HOME/.cargo/bin:\$HOME/.foundry/bin:\$HOME/.local/bin:\$PATH"
+export PATH="\$HOME/.foundry/bin:\$HOME/.local/bin:\$PATH"
 if ! command -v foundryup >/dev/null 2>&1; then
   curl -L https://foundry.paradigm.xyz | bash
 fi
 foundryup
-
-run_with_retry rustup toolchain install 1.91.1 --profile minimal
-run_with_retry rustup default 1.91.1
-rustc --version
-cargo --version
 
 if [[ ! -d "\$HOME/intents-juno/.git" ]]; then
   git clone https://github.com/juno-intents/intents-juno.git "\$HOME/intents-juno"
@@ -1290,10 +1228,6 @@ else
   git checkout origin/main
 fi
 git submodule update --init --recursive
-run_with_retry cargo +1.91.1 build --release --manifest-path zk/sp1_prover_adapter/cli/Cargo.toml
-mkdir -p "\$HOME/.local/bin"
-install -m 0755 zk/target/release/sp1-prover-adapter "\$HOME/.local/bin/sp1-prover-adapter"
-ln -sf "\$HOME/.local/bin/sp1-prover-adapter" "\$HOME/.local/bin/sp1"
 mkdir -p .ci/secrets
 chmod 700 .ci/secrets
 EOF
