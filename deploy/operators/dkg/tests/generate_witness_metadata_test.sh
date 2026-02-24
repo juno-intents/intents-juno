@@ -264,15 +264,19 @@ test_rpc_and_scan_curl_calls_set_explicit_timeouts() {
   fi
 }
 
-test_tx_confirmation_uses_numeric_getrawtransaction_verbosity() {
+test_tx_confirmation_prefers_wallet_view_and_keeps_getraw_fallback() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
+  if [[ "$script_text" != *'"z_viewtransaction"'* ]]; then
+    printf 'expected juno_wait_tx_confirmed to check z_viewtransaction first for wallet-aware confirmation status\n' >&2
+    exit 1
+  fi
   if [[ "$script_text" != *'params_json="$(jq -cn --arg txid "$txid" '\''[ $txid, 1 ]'\'')"'* ]]; then
-    printf 'expected juno_wait_tx_confirmed to call getrawtransaction with numeric verbosity (1)\n' >&2
+    printf 'expected juno_wait_tx_confirmed to retain getrawtransaction fallback with numeric verbosity (1)\n' >&2
     exit 1
   fi
   if [[ "$script_text" == *'params_json="$(jq -cn --arg txid "$txid" '\''[ $txid, true ]'\'')"'* ]]; then
-    printf 'expected juno_wait_tx_confirmed not to use boolean getrawtransaction verbosity\n' >&2
+    printf 'expected juno_wait_tx_confirmed getrawtransaction fallback not to use boolean verbosity\n' >&2
     exit 1
   fi
 }
@@ -294,7 +298,7 @@ main() {
   test_scan_note_lookup_fails_fast_on_repeated_http_errors
   test_rpc_calls_fail_fast_on_repeated_transport_errors
   test_rpc_and_scan_curl_calls_set_explicit_timeouts
-  test_tx_confirmation_uses_numeric_getrawtransaction_verbosity
+  test_tx_confirmation_prefers_wallet_view_and_keeps_getraw_fallback
 }
 
 main "$@"

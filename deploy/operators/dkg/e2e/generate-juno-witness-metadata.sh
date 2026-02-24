@@ -634,14 +634,28 @@ juno_wait_tx_confirmed() {
   local rpc_pass="$3"
   local txid="$4"
   local deadline_epoch="$5"
-  local params_json resp confirmations now
+  local params_json view_params_json resp confirmations now tx_status
 
   params_json="$(jq -cn --arg txid "$txid" '[ $txid, 1 ]')"
+  view_params_json="$(jq -cn --arg txid "$txid" '[ $txid ]')"
   while true; do
     now="$(date +%s)"
     if (( now >= deadline_epoch )); then
       die "timed out waiting for juno tx confirmation txid=$txid"
     fi
+
+    # z_viewtransaction is wallet-aware and does not depend on global txindex.
+    resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_viewtransaction" "$view_params_json" || true)"
+    tx_status="$(jq -r '.status // empty' <<<"${resp:-null}" 2>/dev/null || true)"
+    if [[ "$tx_status" == "mined" ]]; then
+      return 0
+    fi
+    confirmations="$(jq -r '.confirmations // 0' <<<"${resp:-null}" 2>/dev/null || echo 0)"
+    if [[ "$confirmations" =~ ^[0-9]+$ ]] && (( confirmations >= 1 )); then
+      return 0
+    fi
+
+    # Fallback keeps compatibility when z_viewtransaction data is unavailable.
     resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "getrawtransaction" "$params_json" || true)"
     confirmations="$(jq -r '.confirmations // 0' <<<"${resp:-null}" 2>/dev/null || echo 0)"
     if [[ "$confirmations" =~ ^[0-9]+$ ]] && (( confirmations >= 1 )); then
