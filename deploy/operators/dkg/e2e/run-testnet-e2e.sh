@@ -634,6 +634,56 @@ witness_scan_find_wallet_for_txid() {
   return 1
 }
 
+witness_rpc_tx_height() {
+  local rpc_url="$1"
+  local rpc_user="$2"
+  local rpc_pass="$3"
+  local txid_raw="$4"
+  local txid params_json resp rpc_error height
+
+  txid="$(lower "$(trim "$txid_raw")")"
+  txid="${txid#0x}"
+  [[ "$txid" =~ ^[0-9a-f]{64}$ ]] || return 1
+
+  params_json="$(jq -cn --arg txid "$txid" '[ $txid, 1 ]')"
+  resp="$(juno_rpc_json_call "$rpc_url" "$rpc_user" "$rpc_pass" "getrawtransaction" "$params_json" 2>/dev/null || true)"
+  [[ -n "$resp" ]] || return 1
+
+  rpc_error="$(jq -r '.error.message // empty' <<<"$resp" 2>/dev/null || true)"
+  [[ -z "$rpc_error" ]] || return 1
+
+  height="$(jq -r '.result.height // empty' <<<"$resp" 2>/dev/null || true)"
+  [[ "$height" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$height"
+}
+
+witness_scan_backfill_wallet() {
+  local scan_url="$1"
+  local scan_bearer_token="$2"
+  local wallet_id="$3"
+  local from_height_raw="$4"
+  local from_height encoded_wallet_id payload
+  local -a headers=()
+
+  from_height="$(trim "$from_height_raw")"
+  [[ -n "$wallet_id" ]] || return 1
+  [[ "$from_height" =~ ^[0-9]+$ ]] || return 1
+
+  encoded_wallet_id="$(jq -rn --arg value "$wallet_id" '$value|@uri' 2>/dev/null || true)"
+  [[ -n "$encoded_wallet_id" ]] || return 1
+  if [[ -n "$scan_bearer_token" ]]; then
+    headers+=(--header "Authorization: Bearer $scan_bearer_token")
+  fi
+  payload="$(jq -cn --argjson from_height "$from_height" '{from_height: $from_height, batch_size: 5000}')"
+
+  curl -fsS \
+    --max-time 30 \
+    --header "Content-Type: application/json" \
+    "${headers[@]}" \
+    --data "$payload" \
+    "${scan_url%/}/v1/wallets/${encoded_wallet_id}/backfill" >/dev/null
+}
+
 witness_rpc_action_index_candidates() {
   local rpc_url="$1"
   local rpc_user="$2"
@@ -2642,6 +2692,34 @@ command_run() {
       fi
     done
 
+    local generated_deposit_tx_height witness_backfill_from_height
+    generated_deposit_tx_height="$(
+      witness_rpc_tx_height \
+        "$sp1_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$generated_deposit_txid" || true
+    )"
+    witness_backfill_from_height=""
+    if [[ "$generated_deposit_tx_height" =~ ^[0-9]+$ ]]; then
+      witness_backfill_from_height="$generated_deposit_tx_height"
+      if (( witness_backfill_from_height > 32 )); then
+        witness_backfill_from_height=$((witness_backfill_from_height - 32))
+      else
+        witness_backfill_from_height=0
+      fi
+      for ((witness_upsert_idx = 0; witness_upsert_idx < witness_endpoint_healthy_count; witness_upsert_idx++)); do
+        local witness_scan_url witness_operator_label
+        witness_scan_url="${witness_healthy_scan_urls[$witness_upsert_idx]}"
+        witness_operator_label="${witness_healthy_labels[$witness_upsert_idx]}"
+        if ! witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$witness_backfill_from_height"; then
+          log "witness backfill best-effort failed for operator=$witness_operator_label scan_url=$witness_scan_url wallet=$generated_wallet_id from_height=$witness_backfill_from_height"
+        fi
+      done
+    else
+      log "witness backfill tx height unknown; skipping proactive backfill txid=$generated_deposit_txid"
+    fi
+
     local witness_quorum_dir
     witness_quorum_dir="$workdir/reports/witness/quorum"
     ensure_dir "$witness_quorum_dir"
@@ -3204,6 +3282,46 @@ command_run() {
     direct_cli_recipient_raw_hex="$direct_cli_generated_recipient_raw_hex"
     direct_cli_recipient_raw_hex_prefixed="$(normalize_hex_prefixed "$direct_cli_recipient_raw_hex" || true)"
     [[ "$direct_cli_recipient_raw_hex_prefixed" =~ ^0x[0-9a-f]{86}$ ]] || return 1
+
+    local direct_cli_deposit_tx_height direct_cli_withdraw_tx_height direct_cli_backfill_from_height
+    direct_cli_deposit_tx_height="$(
+      witness_rpc_tx_height \
+        "$sp1_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$direct_cli_generated_deposit_txid" || true
+    )"
+    direct_cli_withdraw_tx_height="$(
+      witness_rpc_tx_height \
+        "$sp1_witness_juno_rpc_url" \
+        "$juno_rpc_user" \
+        "$juno_rpc_pass" \
+        "$direct_cli_generated_withdraw_txid" || true
+    )"
+    direct_cli_backfill_from_height=""
+    if [[ "$direct_cli_deposit_tx_height" =~ ^[0-9]+$ && "$direct_cli_withdraw_tx_height" =~ ^[0-9]+$ ]]; then
+      if (( direct_cli_deposit_tx_height <= direct_cli_withdraw_tx_height )); then
+        direct_cli_backfill_from_height="$direct_cli_deposit_tx_height"
+      else
+        direct_cli_backfill_from_height="$direct_cli_withdraw_tx_height"
+      fi
+    elif [[ "$direct_cli_deposit_tx_height" =~ ^[0-9]+$ ]]; then
+      direct_cli_backfill_from_height="$direct_cli_deposit_tx_height"
+    elif [[ "$direct_cli_withdraw_tx_height" =~ ^[0-9]+$ ]]; then
+      direct_cli_backfill_from_height="$direct_cli_withdraw_tx_height"
+    fi
+    if [[ "$direct_cli_backfill_from_height" =~ ^[0-9]+$ ]]; then
+      if (( direct_cli_backfill_from_height > 32 )); then
+        direct_cli_backfill_from_height=$((direct_cli_backfill_from_height - 32))
+      else
+        direct_cli_backfill_from_height=0
+      fi
+      if ! witness_scan_backfill_wallet "$sp1_witness_juno_scan_url" "$juno_scan_bearer_token" "$direct_cli_generated_witness_wallet_id" "$direct_cli_backfill_from_height"; then
+        log "direct-cli witness backfill best-effort failed scan_url=$sp1_witness_juno_scan_url wallet=$direct_cli_generated_witness_wallet_id from_height=$direct_cli_backfill_from_height"
+      fi
+    else
+      log "direct-cli witness backfill skipped: tx height unavailable deposit_txid=$direct_cli_generated_deposit_txid withdraw_txid=$direct_cli_generated_withdraw_txid"
+    fi
 
     if [[ "$direct_cli_generated_deposit_action_index" =~ ^[0-9]+$ ]]; then
       direct_cli_deposit_action_indexes+=("$direct_cli_generated_deposit_action_index")

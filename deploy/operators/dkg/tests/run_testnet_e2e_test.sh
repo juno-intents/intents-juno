@@ -154,6 +154,18 @@ test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
   assert_contains "$script_text" "witness quorum anchor divergence detected across operators (using first successful anchor)" "quorum checker reports anchor drift without hard-failing identical witness/root"
 }
 
+test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "witness_rpc_tx_height()" "run-testnet-e2e defines helper to derive tx confirmation height for scan backfill windows"
+  assert_contains "$script_text" "witness_scan_backfill_wallet()" "run-testnet-e2e defines helper for scan wallet backfill calls"
+  assert_contains "$script_text" "witness backfill tx height unknown; skipping proactive backfill" "run-testnet-e2e logs when tx height is unavailable for proactive scan backfill"
+  assert_contains "$script_text" 'witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$witness_backfill_from_height"' "run-testnet-e2e proactively backfills each healthy witness scan endpoint before quorum extraction"
+  assert_contains "$script_text" "witness backfill best-effort failed for operator=" "run-testnet-e2e keeps extraction resilient when an endpoint backfill fails"
+  assert_contains "$script_text" "direct-cli witness backfill best-effort failed" "direct-cli witness extraction path also backfills wallet history before note extraction"
+}
+
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -296,6 +308,7 @@ main() {
   test_witness_metadata_failover_reuses_single_wallet_id
   test_witness_extraction_reuses_existing_indexed_wallet_id
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
+  test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
