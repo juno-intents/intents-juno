@@ -4743,6 +4743,11 @@ command_run() {
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   fi
 
+  if (( relayer_status == 0 )); then
+    log "ensuring bridge operator signer for withdraw coordinator relayer flow"
+    ensure_bridge_operator_signer_ready
+  fi
+
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
     base_relayer_pid="$(
       start_remote_relayer_service \

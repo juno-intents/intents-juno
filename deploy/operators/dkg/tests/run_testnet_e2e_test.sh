@@ -132,6 +132,17 @@ test_withdraw_coordinator_includes_extend_signer_response_limit() {
   assert_contains "$script_text" "--extend-signer-max-response-bytes \"1048576\" \\" "withdraw coordinator sets explicit extend signer response byte limit"
 }
 
+test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "ensuring bridge operator signer for withdraw coordinator relayer flow" "relayer flow logs explicit signer bootstrap gate"
+  assert_order "$script_text" \
+    "ensuring bridge operator signer for withdraw coordinator relayer flow" \
+    "--extend-signer-bin \"\$bridge_operator_signer_bin\" \\" \
+    "withdraw coordinator signer bootstrap gate runs before coordinator launch arguments"
+}
+
 test_witness_pool_uses_per_endpoint_timeout_slices() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -516,6 +527,7 @@ main() {
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
   test_operator_signer_is_lazy_for_runner_core_flow
   test_withdraw_coordinator_includes_extend_signer_response_limit
+  test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_pool_retries_endpoint_health_before_quorum_failure
   test_witness_generation_reuses_distributed_dkg_recipient_identity
