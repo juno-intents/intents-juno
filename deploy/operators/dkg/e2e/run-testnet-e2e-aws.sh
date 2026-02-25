@@ -113,6 +113,8 @@ run options:
   --keep-infra                         do not destroy infra at the end
   --skip-distributed-dkg               reuse existing runner DKG artifacts; skip distributed DKG ceremony/backup-restore setup
                                        (requires --keep-infra and an existing runner workdir)
+  --skip-terraform-apply               reuse existing terraform state/outputs without applying changes
+                                       (resume-only; requires --skip-distributed-dkg)
   --reuse-bridge-summary-path <path>   optional local bridge summary json to stage on runner and reuse for contract deploy skip
   --preflight-only                     internal: run-only command parser/checks and exit before provisioning
   --status-json <path>                 optional machine-readable status output path
@@ -127,6 +129,7 @@ canary options:
   constraints:
     - forces --keep-infra
     - forces --skip-distributed-dkg
+    - forces --skip-terraform-apply
     - requires --reuse-bridge-summary-path <path>
     - forces forwarded local e2e arg: --stop-after-stage checkpoint_validated
 
@@ -2215,6 +2218,7 @@ command_run() {
   local distributed_relayer_runtime_explicit="false"
   local keep_infra="false"
   local skip_distributed_dkg="false"
+  local skip_terraform_apply="false"
   local reuse_bridge_summary_path=""
   local preflight_only="false"
   local status_json=""
@@ -2442,6 +2446,10 @@ command_run() {
         skip_distributed_dkg="true"
         shift
         ;;
+      --skip-terraform-apply)
+        skip_terraform_apply="true"
+        shift
+        ;;
       --reuse-bridge-summary-path)
         [[ $# -ge 2 ]] || die "missing value for --reuse-bridge-summary-path"
         reuse_bridge_summary_path="$2"
@@ -2538,6 +2546,9 @@ command_run() {
   fi
   [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
   [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
+  if [[ "$skip_terraform_apply" == "true" && "$skip_distributed_dkg" != "true" ]]; then
+    die "--skip-terraform-apply requires --skip-distributed-dkg"
+  fi
   if [[ "$skip_distributed_dkg" == "true" && "$keep_infra" != "true" ]]; then
     die "--skip-distributed-dkg requires --keep-infra"
   fi
@@ -2670,7 +2681,7 @@ command_run() {
 
     run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"
 
-    if [[ "$skip_distributed_dkg" == "true" ]]; then
+    if [[ "$skip_distributed_dkg" == "true" || "$skip_terraform_apply" == "true" ]]; then
       local resume_tfvars_file resume_state_file
       resume_tfvars_file="$workdir/infra/terraform.tfvars.json"
       resume_state_file="$workdir/infra/terraform.tfstate"
@@ -2760,6 +2771,15 @@ command_run() {
     ensure_dir "$(dirname "$dr_tfvars_file")"
   fi
 
+  if [[ "$skip_terraform_apply" == "true" ]]; then
+    if [[ ! -f "$tfvars_file" || ! -f "$state_file" ]]; then
+      die "--skip-terraform-apply requires existing terraform tfvars and state in workdir infra/"
+    fi
+    if [[ "$with_shared_services" == "true" && (! -f "$dr_tfvars_file" || ! -f "$dr_state_file") ]]; then
+      die "--skip-terraform-apply requires existing dr terraform tfvars and state in workdir infra/dr/"
+    fi
+  fi
+
   local existing_deployment_id=""
   local existing_shared_postgres_password=""
   local existing_sp1_requestor_secret_arn=""
@@ -2777,6 +2797,9 @@ command_run() {
 
   local deployment_id
   local dr_deployment_id=""
+  if [[ "$skip_terraform_apply" == "true" && -z "$existing_deployment_id" ]]; then
+    die "--skip-terraform-apply requires existing deployment_id in terraform.tfvars.json"
+  fi
   if [[ -n "$existing_deployment_id" ]]; then
     deployment_id="$existing_deployment_id"
     log "reusing deployment_id from existing tfvars: $deployment_id"
@@ -2795,6 +2818,8 @@ command_run() {
   local shared_postgres_password
   if [[ -n "$existing_shared_postgres_password" ]]; then
     shared_postgres_password="$existing_shared_postgres_password"
+  elif [[ "$skip_terraform_apply" == "true" ]]; then
+    die "--skip-terraform-apply requires existing shared_postgres_password in terraform.tfvars.json"
   else
     shared_postgres_password="$(openssl rand -hex 16)"
   fi
@@ -2824,56 +2849,73 @@ command_run() {
   trap cleanup_trap EXIT
 
   if [[ "$with_shared_services" == "true" ]]; then
-    local secret_name_prefix sp1_requestor_secret_name
-    local sp1_requestor_secret_name_dr
-    secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
-    secret_name_prefix="${secret_name_prefix#-}"
-    secret_name_prefix="${secret_name_prefix%-}"
-    [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
-    if [[ -n "$shared_sp1_requestor_secret_arn_override" ]]; then
-      sp1_requestor_secret_arn="$shared_sp1_requestor_secret_arn_override"
-      log "using provided sp1 requestor secret arn: $sp1_requestor_secret_arn"
-    elif [[ -n "$existing_sp1_requestor_secret_arn" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_sp1_requestor_secret_arn"; then
-      sp1_requestor_secret_arn="$existing_sp1_requestor_secret_arn"
-      log "reusing sp1 requestor secret: $sp1_requestor_secret_arn"
+    if [[ "$skip_terraform_apply" == "true" ]]; then
+      if [[ -n "$shared_sp1_requestor_secret_arn_override" ]]; then
+        sp1_requestor_secret_arn="$shared_sp1_requestor_secret_arn_override"
+      else
+        sp1_requestor_secret_arn="$existing_sp1_requestor_secret_arn"
+      fi
+      if [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
+        sp1_requestor_secret_arn_dr="$shared_sp1_requestor_secret_arn_dr_override"
+      else
+        sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
+      fi
+      [[ -n "$sp1_requestor_secret_arn" ]] || \
+        die "--skip-terraform-apply requires existing shared_sp1_requestor_secret_arn in terraform.tfvars.json"
+      [[ -n "$sp1_requestor_secret_arn_dr" ]] || \
+        die "--skip-terraform-apply requires existing dr shared_sp1_requestor_secret_arn in terraform.tfvars.json"
     else
-      sp1_requestor_secret_name="${secret_name_prefix}-${deployment_id}-sp1-requestor-key"
-      log "creating sp1 requestor secret"
-      sp1_requestor_secret_arn="$(
-        create_sp1_requestor_secret \
-          "$aws_profile" \
-          "$aws_region" \
-          "$sp1_requestor_secret_name" \
-          "$sp1_requestor_key_hex"
-      )"
-      [[ -n "$sp1_requestor_secret_arn" && "$sp1_requestor_secret_arn" != "None" ]] || die "failed to create sp1 requestor secret"
-      sp1_requestor_secret_created="true"
-    fi
-    if [[ "$sp1_requestor_secret_created" == "true" ]]; then
-      cleanup_primary_sp1_requestor_secret_arn="$sp1_requestor_secret_arn"
-    fi
+      local secret_name_prefix sp1_requestor_secret_name
+      local sp1_requestor_secret_name_dr
+      secret_name_prefix="$(printf '%s' "$aws_name_prefix" | tr -cs '[:alnum:]-' '-')"
+      secret_name_prefix="${secret_name_prefix#-}"
+      secret_name_prefix="${secret_name_prefix%-}"
+      [[ -n "$secret_name_prefix" ]] || secret_name_prefix="juno-live-e2e"
+      if [[ -n "$shared_sp1_requestor_secret_arn_override" ]]; then
+        sp1_requestor_secret_arn="$shared_sp1_requestor_secret_arn_override"
+        log "using provided sp1 requestor secret arn: $sp1_requestor_secret_arn"
+      elif [[ -n "$existing_sp1_requestor_secret_arn" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_region" "$existing_sp1_requestor_secret_arn"; then
+        sp1_requestor_secret_arn="$existing_sp1_requestor_secret_arn"
+        log "reusing sp1 requestor secret: $sp1_requestor_secret_arn"
+      else
+        sp1_requestor_secret_name="${secret_name_prefix}-${deployment_id}-sp1-requestor-key"
+        log "creating sp1 requestor secret"
+        sp1_requestor_secret_arn="$(
+          create_sp1_requestor_secret \
+            "$aws_profile" \
+            "$aws_region" \
+            "$sp1_requestor_secret_name" \
+            "$sp1_requestor_key_hex"
+        )"
+        [[ -n "$sp1_requestor_secret_arn" && "$sp1_requestor_secret_arn" != "None" ]] || die "failed to create sp1 requestor secret"
+        sp1_requestor_secret_created="true"
+      fi
+      if [[ "$sp1_requestor_secret_created" == "true" ]]; then
+        cleanup_primary_sp1_requestor_secret_arn="$sp1_requestor_secret_arn"
+      fi
 
-    if [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
-      sp1_requestor_secret_arn_dr="$shared_sp1_requestor_secret_arn_dr_override"
-      log "using provided dr sp1 requestor secret arn: $sp1_requestor_secret_arn_dr"
-    elif [[ -n "$existing_sp1_requestor_secret_arn_dr" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_sp1_requestor_secret_arn_dr"; then
-      sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
-      log "reusing dr sp1 requestor secret: $sp1_requestor_secret_arn_dr"
-    else
-      sp1_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-sp1-requestor-key"
-      log "creating dr sp1 requestor secret"
-      sp1_requestor_secret_arn_dr="$(
-        create_sp1_requestor_secret \
-          "$aws_profile" \
-          "$aws_dr_region" \
-          "$sp1_requestor_secret_name_dr" \
-          "$sp1_requestor_key_hex"
-      )"
-      [[ -n "$sp1_requestor_secret_arn_dr" && "$sp1_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr sp1 requestor secret"
-      sp1_requestor_secret_dr_created="true"
-    fi
-    if [[ "$sp1_requestor_secret_dr_created" == "true" ]]; then
-      cleanup_dr_sp1_requestor_secret_arn="$sp1_requestor_secret_arn_dr"
+      if [[ -n "$shared_sp1_requestor_secret_arn_dr_override" ]]; then
+        sp1_requestor_secret_arn_dr="$shared_sp1_requestor_secret_arn_dr_override"
+        log "using provided dr sp1 requestor secret arn: $sp1_requestor_secret_arn_dr"
+      elif [[ -n "$existing_sp1_requestor_secret_arn_dr" ]] && sp1_requestor_secret_exists "$aws_profile" "$aws_dr_region" "$existing_sp1_requestor_secret_arn_dr"; then
+        sp1_requestor_secret_arn_dr="$existing_sp1_requestor_secret_arn_dr"
+        log "reusing dr sp1 requestor secret: $sp1_requestor_secret_arn_dr"
+      else
+        sp1_requestor_secret_name_dr="${secret_name_prefix}-${dr_deployment_id}-sp1-requestor-key"
+        log "creating dr sp1 requestor secret"
+        sp1_requestor_secret_arn_dr="$(
+          create_sp1_requestor_secret \
+            "$aws_profile" \
+            "$aws_dr_region" \
+            "$sp1_requestor_secret_name_dr" \
+            "$sp1_requestor_key_hex"
+        )"
+        [[ -n "$sp1_requestor_secret_arn_dr" && "$sp1_requestor_secret_arn_dr" != "None" ]] || die "failed to create dr sp1 requestor secret"
+        sp1_requestor_secret_dr_created="true"
+      fi
+      if [[ "$sp1_requestor_secret_dr_created" == "true" ]]; then
+        cleanup_dr_sp1_requestor_secret_arn="$sp1_requestor_secret_arn_dr"
+      fi
     fi
   fi
 
@@ -2886,89 +2928,93 @@ command_run() {
   local shared_proof_service_image
   shared_proof_service_image="$shared_proof_services_image_override"
 
-  jq -n \
-    --arg aws_region "$aws_region" \
-    --arg deployment_id "$deployment_id" \
-    --arg name_prefix "$aws_name_prefix" \
-    --arg instance_type "$aws_instance_type" \
-    --arg runner_ami_id "$runner_ami_id" \
-    --argjson root_volume_size_gb "$aws_root_volume_gb" \
-    --argjson operator_instance_count "$operator_instance_count" \
-    --arg operator_instance_type "$operator_instance_type" \
-    --arg operator_ami_id "$operator_ami_id" \
-    --argjson operator_root_volume_size_gb "$operator_root_volume_gb" \
-    --arg shared_ami_id "$shared_ami_id" \
-    --argjson operator_base_port "$operator_base_port" \
-    --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
-    --arg ssh_public_key "$(cat "$ssh_key_public")" \
-    --argjson provision_shared_services "$provision_shared_services_json" \
-    --arg shared_postgres_user "$shared_postgres_user" \
-    --arg shared_postgres_password "$shared_postgres_password" \
-    --arg shared_postgres_db "$shared_postgres_db" \
-    --arg shared_proof_service_image "$shared_proof_service_image" \
-    --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn" \
-    --argjson shared_postgres_port "$shared_postgres_port" \
-    --argjson shared_kafka_port "$shared_kafka_port" \
-    --argjson runner_associate_public_ip_address "$runner_associate_public_ip_address" \
-    --argjson operator_associate_public_ip_address "$operator_associate_public_ip_address" \
-    --argjson shared_ecs_assign_public_ip "$shared_ecs_assign_public_ip" \
-    --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
-    '{
-      aws_region: $aws_region,
-      deployment_id: $deployment_id,
-      name_prefix: $name_prefix,
-      instance_type: $instance_type,
-      runner_ami_id: $runner_ami_id,
-      root_volume_size_gb: $root_volume_size_gb,
-      operator_instance_count: $operator_instance_count,
-      operator_instance_type: $operator_instance_type,
-      operator_ami_id: $operator_ami_id,
-      operator_root_volume_size_gb: $operator_root_volume_size_gb,
-      shared_ami_id: $shared_ami_id,
-      operator_base_port: $operator_base_port,
-      allowed_ssh_cidr: $allowed_ssh_cidr,
-      ssh_public_key: $ssh_public_key,
-      provision_shared_services: $provision_shared_services,
-      shared_postgres_user: $shared_postgres_user,
-      shared_postgres_password: $shared_postgres_password,
-      shared_postgres_db: $shared_postgres_db,
-      shared_proof_service_image: $shared_proof_service_image,
-      shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
-      shared_postgres_port: $shared_postgres_port,
-      shared_kafka_port: $shared_kafka_port,
-      runner_associate_public_ip_address: $runner_associate_public_ip_address,
-      operator_associate_public_ip_address: $operator_associate_public_ip_address,
-      shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
-      dkg_s3_key_prefix: $dkg_s3_key_prefix
-    }' >"$tfvars_file"
+  if [[ "$skip_terraform_apply" != "true" ]]; then
+    jq -n \
+      --arg aws_region "$aws_region" \
+      --arg deployment_id "$deployment_id" \
+      --arg name_prefix "$aws_name_prefix" \
+      --arg instance_type "$aws_instance_type" \
+      --arg runner_ami_id "$runner_ami_id" \
+      --argjson root_volume_size_gb "$aws_root_volume_gb" \
+      --argjson operator_instance_count "$operator_instance_count" \
+      --arg operator_instance_type "$operator_instance_type" \
+      --arg operator_ami_id "$operator_ami_id" \
+      --argjson operator_root_volume_size_gb "$operator_root_volume_gb" \
+      --arg shared_ami_id "$shared_ami_id" \
+      --argjson operator_base_port "$operator_base_port" \
+      --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
+      --arg ssh_public_key "$(cat "$ssh_key_public")" \
+      --argjson provision_shared_services "$provision_shared_services_json" \
+      --arg shared_postgres_user "$shared_postgres_user" \
+      --arg shared_postgres_password "$shared_postgres_password" \
+      --arg shared_postgres_db "$shared_postgres_db" \
+      --arg shared_proof_service_image "$shared_proof_service_image" \
+      --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn" \
+      --argjson shared_postgres_port "$shared_postgres_port" \
+      --argjson shared_kafka_port "$shared_kafka_port" \
+      --argjson runner_associate_public_ip_address "$runner_associate_public_ip_address" \
+      --argjson operator_associate_public_ip_address "$operator_associate_public_ip_address" \
+      --argjson shared_ecs_assign_public_ip "$shared_ecs_assign_public_ip" \
+      --arg dkg_s3_key_prefix "$dkg_s3_key_prefix" \
+      '{
+        aws_region: $aws_region,
+        deployment_id: $deployment_id,
+        name_prefix: $name_prefix,
+        instance_type: $instance_type,
+        runner_ami_id: $runner_ami_id,
+        root_volume_size_gb: $root_volume_size_gb,
+        operator_instance_count: $operator_instance_count,
+        operator_instance_type: $operator_instance_type,
+        operator_ami_id: $operator_ami_id,
+        operator_root_volume_size_gb: $operator_root_volume_size_gb,
+        shared_ami_id: $shared_ami_id,
+        operator_base_port: $operator_base_port,
+        allowed_ssh_cidr: $allowed_ssh_cidr,
+        ssh_public_key: $ssh_public_key,
+        provision_shared_services: $provision_shared_services,
+        shared_postgres_user: $shared_postgres_user,
+        shared_postgres_password: $shared_postgres_password,
+        shared_postgres_db: $shared_postgres_db,
+        shared_proof_service_image: $shared_proof_service_image,
+        shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+        shared_postgres_port: $shared_postgres_port,
+        shared_kafka_port: $shared_kafka_port,
+        runner_associate_public_ip_address: $runner_associate_public_ip_address,
+        operator_associate_public_ip_address: $operator_associate_public_ip_address,
+        shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
+        dkg_s3_key_prefix: $dkg_s3_key_prefix
+      }' >"$tfvars_file"
 
-  if [[ "$with_shared_services" == "true" ]]; then
-    local dr_runner_ami_id dr_operator_ami_id dr_shared_ami_id
-    dr_runner_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "runner" "$runner_ami_id")"
-    dr_operator_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "operator" "$operator_ami_id")"
-    dr_shared_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "shared" "$shared_ami_id")"
+    if [[ "$with_shared_services" == "true" ]]; then
+      local dr_runner_ami_id dr_operator_ami_id dr_shared_ami_id
+      dr_runner_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "runner" "$runner_ami_id")"
+      dr_operator_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "operator" "$operator_ami_id")"
+      dr_shared_ami_id="$(resolve_dr_ami_id "$aws_profile" "$aws_dr_region" "shared" "$shared_ami_id")"
 
-    jq \
-      --arg aws_region "$aws_dr_region" \
-      --arg deployment_id "$dr_deployment_id" \
-      --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn_dr" \
-      --arg runner_ami_id "$dr_runner_ami_id" \
-      --arg operator_ami_id "$dr_operator_ami_id" \
-      --arg shared_ami_id "$dr_shared_ami_id" \
-      '.aws_region = $aws_region
-      | .deployment_id = $deployment_id
-      | .shared_sp1_requestor_secret_arn = $shared_sp1_requestor_secret_arn
-      | .runner_ami_id = $runner_ami_id
-      | .operator_ami_id = $operator_ami_id
-      | .shared_ami_id = $shared_ami_id' \
-      "$tfvars_file" >"$dr_tfvars_file"
-  fi
+      jq \
+        --arg aws_region "$aws_dr_region" \
+        --arg deployment_id "$dr_deployment_id" \
+        --arg shared_sp1_requestor_secret_arn "$sp1_requestor_secret_arn_dr" \
+        --arg runner_ami_id "$dr_runner_ami_id" \
+        --arg operator_ami_id "$dr_operator_ami_id" \
+        --arg shared_ami_id "$dr_shared_ami_id" \
+        '.aws_region = $aws_region
+        | .deployment_id = $deployment_id
+        | .shared_sp1_requestor_secret_arn = $shared_sp1_requestor_secret_arn
+        | .runner_ami_id = $runner_ami_id
+        | .operator_ami_id = $operator_ami_id
+        | .shared_ami_id = $shared_ami_id' \
+        "$tfvars_file" >"$dr_tfvars_file"
+    fi
 
-  log "provisioning AWS runner (deployment_id=$deployment_id)"
-  terraform_apply_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
-  if [[ "$with_shared_services" == "true" ]]; then
-    log "provisioning AWS dr stack (deployment_id=$dr_deployment_id)"
-    terraform_apply_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$aws_dr_region"
+    log "provisioning AWS runner (deployment_id=$deployment_id)"
+    terraform_apply_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
+    if [[ "$with_shared_services" == "true" ]]; then
+      log "provisioning AWS dr stack (deployment_id=$dr_deployment_id)"
+      terraform_apply_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$aws_dr_region"
+    fi
+  else
+    log "resume mode: skipping terraform apply; using existing terraform state outputs"
   fi
 
   local runner_public_ip runner_ssh_user
@@ -3675,7 +3721,7 @@ operator_ssh_user="${runner_ssh_user}"
 operator_private_ips=($witness_tunnel_private_ip_joined)
 
 read_operator_stack_rpc_credentials() {
-  local operator_host="$1"
+  local operator_host="\$1"
   ssh \
     -i "\$operator_ssh_key" \
     -o StrictHostKeyChecking=no \
@@ -3976,6 +4022,9 @@ command_canary() {
   fi
   if ! array_has_value "--skip-distributed-dkg" "${wrapper_args[@]}"; then
     wrapper_args+=("--skip-distributed-dkg")
+  fi
+  if ! array_has_value "--skip-terraform-apply" "${wrapper_args[@]}"; then
+    wrapper_args+=("--skip-terraform-apply")
   fi
 
   local -a canary_e2e_args=()

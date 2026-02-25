@@ -42,9 +42,26 @@ data "aws_subnets" "shared_vpc" {
   }
 }
 
+data "aws_subnets" "shared_vpc_private" {
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "map-public-ip-on-launch"
+    values = ["false"]
+  }
+}
+
 locals {
-  vpc_subnets    = sort(data.aws_subnets.shared_vpc.ids)
-  shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (length(local.vpc_subnets) >= 2 ? slice(local.vpc_subnets, 0, 2) : local.vpc_subnets)
+  vpc_subnets         = sort(data.aws_subnets.shared_vpc.ids)
+  private_vpc_subnets = sort(data.aws_subnets.shared_vpc_private.ids)
+  shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (
+    length(local.private_vpc_subnets) >= 2 ? slice(local.private_vpc_subnets, 0, 2) : (
+      length(local.vpc_subnets) >= 2 ? slice(local.vpc_subnets, 0, 2) : local.vpc_subnets
+    )
+  )
 }
 
 data "aws_subnet" "shared" {

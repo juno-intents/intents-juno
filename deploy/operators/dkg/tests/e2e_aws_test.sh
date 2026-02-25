@@ -169,7 +169,11 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$main_tf" "client_broker = \"TLS\"" "msk tls-only client transport"
   assert_not_contains "$main_tf" "TLS_PLAINTEXT" "msk plaintext transport disabled"
   assert_not_contains "$main_tf" "unauthenticated = true" "msk unauthenticated mode disabled"
-  assert_not_contains "$main_tf" "map-public-ip-on-launch" "no hard public-subnet lookup dependency"
+  assert_contains "$main_tf" "data \"aws_subnets\" \"shared_vpc_private\"" "shared terraform discovers private vpc subnets"
+  assert_contains "$main_tf" "name   = \"map-public-ip-on-launch\"" "shared terraform filters private subnets by map-public-ip-on-launch"
+  assert_contains "$main_tf" "values = [\"false\"]" "shared terraform private subnet filter requests non-public subnets"
+  assert_contains "$main_tf" "private_vpc_subnets = sort(data.aws_subnets.shared_vpc_private.ids)" "shared terraform materializes sorted private subnet ids"
+  assert_contains "$main_tf" "length(local.private_vpc_subnets) >= 2 ? slice(local.private_vpc_subnets, 0, 2)" "shared terraform prefers private subnets when deriving shared subnets"
   assert_not_contains "$main_tf" "public.ecr.aws/docker/library/busybox:1.36.1" "busybox placeholder image removed"
   assert_contains "$main_tf" "resource \"aws_autoscaling_group\" \"ipfs\"" "ipfs asg resource"
   assert_contains "$main_tf" "resource \"aws_lb\" \"ipfs\"" "ipfs nlb resource"
@@ -248,6 +252,7 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "--juno-funder-seed-file" "juno funder seed option"
   assert_contains "$wrapper_script_text" "--juno-funder-source-address-file" "juno funder source address option"
   assert_contains "$wrapper_script_text" "--operator-root-volume-gb" "operator root volume option"
+  assert_contains "$wrapper_script_text" 'local operator_host="\$1"' "remote helper preserves positional operator host argument when rendering runner script"
   assert_contains "$wrapper_script_text" "one of --juno-funder-key-file, --juno-funder-seed-file, or --juno-funder-source-address-file is required" "juno funder source requirement"
   assert_contains "$wrapper_script_text" "export JUNO_FUNDER_SEED_PHRASE=\"\\\$(cat .ci/secrets/juno-funder.seed.txt)\"" "aws wrapper preserves multiline seed file content for downstream normalization"
   assert_not_contains "$wrapper_script_text" "export JUNO_FUNDER_SEED_PHRASE=\"\$(tr -d '\\r\\n' < .ci/secrets/juno-funder.seed.txt)\"" "aws wrapper no longer flattens wrapped seed file content"
@@ -1260,11 +1265,25 @@ test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage() {
   assert_contains "$wrapper_script_text" "canary requires --reuse-bridge-summary-path" "aws wrapper canary requires bridge summary reuse path"
   assert_contains "$wrapper_script_text" "if ! array_has_value \"--keep-infra\"" "aws wrapper canary forces keep-infra"
   assert_contains "$wrapper_script_text" "if ! array_has_value \"--skip-distributed-dkg\"" "aws wrapper canary forces distributed dkg skip"
+  assert_contains "$wrapper_script_text" "if ! array_has_value \"--skip-terraform-apply\"" "aws wrapper canary forces terraform apply skip for resume economics"
   assert_contains "$wrapper_script_text" "canary_e2e_args+=(\"--stop-after-stage\" \"checkpoint_validated\")" "aws wrapper canary forces stop-after-stage checkpoint_validated"
   assert_contains "$wrapper_script_text" "validate_canary_summary()" "aws wrapper defines canary acceptance validation helper"
   assert_contains "$wrapper_script_text" "classify_failure_signature()" "aws wrapper defines failure signature classifier helper"
   assert_contains "$wrapper_script_text" "print_failure_classification_hint" "aws wrapper emits classified failure hints on failure"
   assert_contains "$wrapper_script_text" "failure-signatures.yaml" "aws wrapper uses tracked failure signature catalog"
+}
+
+test_aws_wrapper_supports_resume_without_terraform_apply() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" "--skip-terraform-apply" "aws wrapper exposes resume-only terraform apply skip option"
+  assert_contains "$wrapper_script_text" "local skip_terraform_apply=\"false\"" "aws wrapper tracks skip-terraform-apply option state"
+  assert_contains "$wrapper_script_text" "--skip-terraform-apply)" "aws wrapper parses skip-terraform-apply run option"
+  assert_contains "$wrapper_script_text" "--skip-terraform-apply requires --skip-distributed-dkg" "aws wrapper validates skip-terraform-apply requires distributed dkg skip"
+  assert_contains "$wrapper_script_text" "--skip-terraform-apply requires existing terraform tfvars and state in workdir infra/" "aws wrapper validates resume artifacts for skip-terraform-apply"
+  assert_contains "$wrapper_script_text" "resume mode: skipping terraform apply; using existing terraform state outputs" "aws wrapper logs skip-terraform-apply activation"
+  assert_contains "$wrapper_script_text" "if [[ \"\$skip_terraform_apply\" != \"true\" ]]; then" "aws wrapper gates terraform apply behind skip-terraform-apply"
 }
 
 test_aws_wrapper_uses_portable_mktemp_templates() {
@@ -1346,6 +1365,7 @@ main() {
   test_aws_wrapper_exposes_preflight_canary_and_status_json
   test_aws_wrapper_preflight_runs_required_checks
   test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage
+  test_aws_wrapper_supports_resume_without_terraform_apply
   test_aws_wrapper_uses_portable_mktemp_templates
   test_aws_wrapper_timeout_fallback_kills_process_groups
   test_failure_signature_catalog_exists
