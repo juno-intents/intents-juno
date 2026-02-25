@@ -3015,6 +3015,15 @@ command_run() {
     fi
   else
     log "resume mode: skipping terraform apply; using existing terraform state outputs"
+    log "resume mode: initializing terraform plugins for existing state outputs"
+    terraform_env_args "$aws_profile" "$aws_region"
+    run_with_retry "terraform init (region=$aws_region state=$state_file)" 3 5 \
+      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+    if [[ "$with_shared_services" == "true" ]]; then
+      terraform_env_args "$aws_profile" "$aws_dr_region"
+      run_with_retry "terraform init (region=$aws_dr_region state=$dr_state_file)" 3 5 \
+        env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+    fi
   fi
 
   local runner_public_ip runner_ssh_user
