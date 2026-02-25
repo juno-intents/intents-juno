@@ -1092,6 +1092,26 @@ resolve_shared_ipfs_direct_api_url() {
   printf '%s://%s:%s' "$scheme" "$direct_host" "$port"
 }
 
+runner_ipfs_api_reachable() {
+  local ssh_private_key="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local ipfs_api_url="$4"
+  local ipfs_version_url="${ipfs_api_url%/}/api/v0/version"
+
+  local -a ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+  )
+
+  ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" \
+    "bash -lc $(printf '%q' "curl -fsS --max-time 6 -X POST \"$ipfs_version_url\" >/dev/null")"
+}
+
 validate_shared_services_dr_readiness() {
   local aws_profile="$1"
   local aws_region="$2"
@@ -3638,6 +3658,28 @@ command_run() {
   fi
   if [[ "$with_shared_services" == "true" ]]; then
     log "waiting for shared services connectivity from runner"
+    local shared_ipfs_api_direct_url=""
+    if ! runner_ipfs_api_reachable \
+      "$ssh_key_private" \
+      "$runner_ssh_user" \
+      "$runner_public_ip" \
+      "$shared_ipfs_api_url"; then
+      shared_ipfs_api_direct_url="$(
+        resolve_shared_ipfs_direct_api_url \
+          "$aws_profile" \
+          "$aws_region" \
+          "$shared_ipfs_api_url" || true
+      )"
+      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url" ]] && runner_ipfs_api_reachable \
+        "$ssh_key_private" \
+        "$runner_ssh_user" \
+        "$runner_public_ip" \
+        "$shared_ipfs_api_direct_url"; then
+        log "shared IPFS NLB endpoint unreachable from runner; using direct IPFS endpoint=$shared_ipfs_api_direct_url"
+        shared_ipfs_api_url="$shared_ipfs_api_direct_url"
+      fi
+    fi
+
     if ! wait_for_shared_connectivity_from_runner \
       "$ssh_key_private" \
       "$runner_ssh_user" \
@@ -3646,13 +3688,6 @@ command_run() {
       "$shared_postgres_port" \
       "$shared_kafka_bootstrap_brokers" \
       "$shared_ipfs_api_url"; then
-      local shared_ipfs_api_direct_url=""
-      shared_ipfs_api_direct_url="$(
-        resolve_shared_ipfs_direct_api_url \
-          "$aws_profile" \
-          "$aws_region" \
-          "$shared_ipfs_api_url" || true
-      )"
       if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url" ]]; then
         log "shared services connectivity via shared IPFS NLB failed; retrying runner probe with direct IPFS endpoint=$shared_ipfs_api_direct_url"
         wait_for_shared_connectivity_from_runner \
