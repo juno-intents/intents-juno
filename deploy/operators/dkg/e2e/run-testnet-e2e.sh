@@ -4836,6 +4836,7 @@ command_run() {
           --bridge-address "$deployed_bridge_address" \
           --base-relayer-url "$base_relayer_url" \
           --extend-signer-bin "$bridge_operator_signer_bin" \
+          --extend-signer-max-response-bytes "1048576" \
           --expiry-safety-margin "30h" \
           --max-expiry-extension "12h" \
           --blob-driver s3 \
@@ -4938,6 +4939,7 @@ command_run() {
           --bridge-address "$deployed_bridge_address" \
           --base-relayer-url "$base_relayer_url" \
           --extend-signer-bin "$bridge_operator_signer_bin" \
+          --extend-signer-max-response-bytes "1048576" \
           --expiry-safety-margin "30h" \
           --max-expiry-extension "12h" \
           --blob-driver s3 \
