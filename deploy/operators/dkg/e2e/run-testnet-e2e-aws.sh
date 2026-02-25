@@ -3635,15 +3635,17 @@ fi
 if [[ -f .ci/secrets/juno-funder.ua ]]; then
   export JUNO_FUNDER_SOURCE_ADDRESS="\$(tr -d '\r\n' < .ci/secrets/juno-funder.ua)"
 fi
-export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
-export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
+if [[ -f .ci/secrets/juno-rpc-user.txt ]]; then
+  export JUNO_RPC_USER="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-user.txt)"
+fi
+if [[ -f .ci/secrets/juno-rpc-pass.txt ]]; then
+  export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
+fi
 # Live e2e queues target TLS-enabled Kafka brokers in both managed and forwarded shared modes.
 export JUNO_QUEUE_KAFKA_TLS="true"
 if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
   export JUNO_SCAN_BEARER_TOKEN="\$(tr -d '\r\n' < .ci/secrets/juno-scan-bearer.txt)"
 fi
-[[ -n "\${JUNO_RPC_USER:-}" ]] || { echo "JUNO_RPC_USER is required for withdraw coordinator full mode" >&2; exit 1; }
-[[ -n "\${JUNO_RPC_PASS:-}" ]] || { echo "JUNO_RPC_PASS is required for withdraw coordinator full mode" >&2; exit 1; }
 export AWS_REGION="${aws_region}"
 export AWS_DEFAULT_REGION="${aws_region}"
 if [[ -n "${aws_dr_region}" ]]; then
@@ -3671,6 +3673,50 @@ mkdir -p "$remote_workdir/reports"
 operator_ssh_key=".ci/secrets/operator-fleet-ssh.key"
 operator_ssh_user="${runner_ssh_user}"
 operator_private_ips=($witness_tunnel_private_ip_joined)
+
+read_operator_stack_rpc_credentials() {
+  local operator_host="$1"
+  ssh \
+    -i "\$operator_ssh_key" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o IdentitiesOnly=yes \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "\$operator_ssh_user@\$operator_host" \
+    "set -euo pipefail
+stack_env_file=\"/etc/intents-juno/operator-stack.env\"
+[[ -f \"\\\$stack_env_file\" ]] || exit 1
+# shellcheck disable=SC1091
+set -a
+source \"\\\$stack_env_file\"
+set +a
+[[ -n \"\\\${JUNO_RPC_USER:-}\" && -n \"\\\${JUNO_RPC_PASS:-}\" ]] || exit 1
+printf '%s\t%s' \"\\\$JUNO_RPC_USER\" \"\\\$JUNO_RPC_PASS\"" 2>/dev/null
+}
+
+stack_rpc_loaded="false"
+for operator_ssh_host in "\${operator_private_ips[@]}"; do
+  stack_rpc_pair="\$(read_operator_stack_rpc_credentials "\$operator_ssh_host" || true)"
+  if [[ "\$stack_rpc_pair" == *\$'\t'* ]]; then
+    IFS=\$'\t' read -r stack_rpc_user stack_rpc_pass <<<"\$stack_rpc_pair"
+    if [[ -n "\$stack_rpc_user" && -n "\$stack_rpc_pass" ]]; then
+      export JUNO_RPC_USER="\$stack_rpc_user"
+      export JUNO_RPC_PASS="\$stack_rpc_pass"
+      stack_rpc_loaded="true"
+      echo "loaded JUNO_RPC_USER/JUNO_RPC_PASS from operator stack env host=\$operator_ssh_host"
+      break
+    fi
+  fi
+done
+
+if [[ "\$stack_rpc_loaded" != "true" ]]; then
+  echo "using staged JUNO_RPC_USER/JUNO_RPC_PASS secrets (operator stack env unavailable)"
+fi
+[[ -n "\${JUNO_RPC_USER:-}" ]] || { echo "JUNO_RPC_USER is required for withdraw coordinator full mode" >&2; exit 1; }
+[[ -n "\${JUNO_RPC_PASS:-}" ]] || { echo "JUNO_RPC_PASS is required for withdraw coordinator full mode" >&2; exit 1; }
+
 witness_tunnel_scan_base_port="${witness_tunnel_scan_base_port}"
 witness_tunnel_rpc_base_port="${witness_tunnel_rpc_base_port}"
 witness_tunnel_tss_base_port="${witness_tunnel_tss_base_port}"
