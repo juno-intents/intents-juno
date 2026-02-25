@@ -108,6 +108,17 @@ test_witness_pool_uses_per_endpoint_timeout_slices() {
   assert_contains "$script_text" "witness_extract_deadline_epoch=\$(( \$(date +%s) + witness_timeout_slice_seconds ))" "witness extraction wait loop uses per-endpoint timeout slice"
 }
 
+test_witness_pool_retries_endpoint_health_before_quorum_failure() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "local witness_health_retry_timeout_seconds=120" "witness endpoint health retries use an explicit bounded timeout"
+  assert_contains "$script_text" "local witness_health_retry_interval_seconds=3" "witness endpoint health retries use a short fixed retry interval"
+  assert_contains "$script_text" "witness endpoint quorum not met on first pass; retrying endpoint health checks for up to" "witness endpoint health retry is logged when first-pass quorum is not met"
+  assert_contains "$script_text" "witness endpoint became healthy during retry" "witness endpoint health retries log successful recovery transitions"
+  assert_contains "$script_text" "after retry window" "witness endpoint quorum failure message includes retry-window context"
+}
+
 test_witness_generation_reuses_distributed_dkg_recipient_identity() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -431,6 +442,7 @@ main() {
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_operator_signer_is_lazy_for_runner_core_flow
   test_witness_pool_uses_per_endpoint_timeout_slices
+  test_witness_pool_retries_endpoint_health_before_quorum_failure
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_metadata_failover_reuses_single_wallet_id
   test_witness_extraction_reuses_existing_indexed_wallet_id

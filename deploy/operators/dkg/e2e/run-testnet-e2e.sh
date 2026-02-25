@@ -2896,6 +2896,9 @@ command_run() {
     local -a witness_healthy_scan_urls=()
     local -a witness_healthy_rpc_urls=()
     local -a witness_healthy_labels=()
+    local -a witness_endpoint_is_healthy=()
+    local witness_health_retry_timeout_seconds=120
+    local witness_health_retry_interval_seconds=3
     local witness_idx
     for ((witness_idx = 0; witness_idx < witness_endpoint_pool_size; witness_idx++)); do
       local witness_scan_url witness_rpc_url witness_operator_label
@@ -2903,19 +2906,47 @@ command_run() {
       witness_rpc_url="${witness_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_operator_labels[$witness_idx]}"
       if witness_pair_healthcheck "$witness_scan_url" "$witness_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$juno_scan_bearer_token"; then
+        witness_endpoint_is_healthy[$witness_idx]="1"
         witness_healthy_scan_urls+=("$witness_scan_url")
         witness_healthy_rpc_urls+=("$witness_rpc_url")
         witness_healthy_labels+=("$witness_operator_label")
         log "witness endpoint healthy operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
       else
+        witness_endpoint_is_healthy[$witness_idx]="0"
         log "witness endpoint unhealthy operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
       fi
     done
 
     witness_endpoint_healthy_count="${#witness_healthy_scan_urls[@]}"
     witness_healthy_operator_labels=("${witness_healthy_labels[@]}")
+    if (( witness_endpoint_healthy_count < witness_quorum_threshold )); then
+      local witness_health_retry_deadline_epoch witness_now_epoch
+      witness_health_retry_deadline_epoch=$(( $(date +%s) + witness_health_retry_timeout_seconds ))
+      log "witness endpoint quorum not met on first pass; retrying endpoint health checks for up to ${witness_health_retry_timeout_seconds}s (healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold)"
+      while (( witness_endpoint_healthy_count < witness_quorum_threshold )); do
+        witness_now_epoch="$(date +%s)"
+        (( witness_now_epoch < witness_health_retry_deadline_epoch )) || break
+        sleep "$witness_health_retry_interval_seconds"
+        for ((witness_idx = 0; witness_idx < witness_endpoint_pool_size; witness_idx++)); do
+          [[ "${witness_endpoint_is_healthy[$witness_idx]:-0}" == "1" ]] && continue
+          local witness_scan_url witness_rpc_url witness_operator_label
+          witness_scan_url="${witness_scan_urls[$witness_idx]}"
+          witness_rpc_url="${witness_rpc_urls[$witness_idx]}"
+          witness_operator_label="${witness_operator_labels[$witness_idx]}"
+          if witness_pair_healthcheck "$witness_scan_url" "$witness_rpc_url" "$juno_rpc_user" "$juno_rpc_pass" "$juno_scan_bearer_token"; then
+            witness_endpoint_is_healthy[$witness_idx]="1"
+            witness_healthy_scan_urls+=("$witness_scan_url")
+            witness_healthy_rpc_urls+=("$witness_rpc_url")
+            witness_healthy_labels+=("$witness_operator_label")
+            log "witness endpoint became healthy during retry operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
+          fi
+        done
+        witness_endpoint_healthy_count="${#witness_healthy_scan_urls[@]}"
+        witness_healthy_operator_labels=("${witness_healthy_labels[@]}")
+      done
+    fi
     (( witness_endpoint_healthy_count >= witness_quorum_threshold )) || \
-      die "failed to build healthy witness endpoint pool with quorum: healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold configured=$witness_endpoint_pool_size"
+      die "failed to build healthy witness endpoint pool with quorum after retry window=${witness_health_retry_timeout_seconds}s: healthy=$witness_endpoint_healthy_count threshold=$witness_quorum_threshold configured=$witness_endpoint_pool_size"
 
     local witness_timeout_slice_seconds
     witness_timeout_slice_seconds="$sp1_witness_metadata_timeout_seconds"
