@@ -501,21 +501,26 @@ validate_canary_summary() {
   ' "$summary_path" >/dev/null
 }
 
-run_required_aws_probe() {
+run_required_aws_probe_capture() {
   local probe_name="$1"
   shift
   local out="" attempt
   for attempt in $(seq 1 3); do
     if out="$(run_with_local_timeout 45 "$@" 2>&1)"; then
+      printf '%s' "$out"
       return 0
     fi
     if (( attempt < 3 )); then
-      log "aws preflight probe failed (probe=$probe_name attempt $attempt/3); retrying in 5s"
+      log "aws required probe failed (probe=$probe_name attempt $attempt/3); retrying in 5s"
       sleep 5
     fi
   done
   printf '%s\n' "$out" >&2
-  die "aws preflight probe failed: $probe_name"
+  die "aws required probe failed: $probe_name"
+}
+
+run_required_aws_probe() {
+  run_required_aws_probe_capture "$@" >/dev/null
 }
 
 run_preflight_aws_reachability_probes() {
@@ -974,15 +979,19 @@ validate_shared_services_dr_readiness() {
   [[ "$aws_dr_region" != "$aws_region" ]] || die "--aws-dr-region must differ from --aws-region"
 
   aws_env_args "$aws_profile" "$aws_dr_region"
-  env "${AWS_ENV_ARGS[@]}" aws sts get-caller-identity >/dev/null
+  run_required_aws_probe \
+    "dr-sts:GetCallerIdentity" \
+    env "${AWS_ENV_ARGS[@]}" aws sts get-caller-identity --region "$aws_dr_region"
 
   local dr_az_count
   dr_az_count="$(
-    env "${AWS_ENV_ARGS[@]}" aws ec2 describe-availability-zones \
-      --region "$aws_dr_region" \
-      --all-availability-zones \
-      --query 'length(AvailabilityZones[?State==`available` && (OptInStatus==`opt-in-not-required` || OptInStatus==`opted-in`)])' \
-      --output text
+    run_required_aws_probe_capture \
+      "dr-ec2:DescribeAvailabilityZones" \
+      env "${AWS_ENV_ARGS[@]}" aws ec2 describe-availability-zones \
+        --region "$aws_dr_region" \
+        --all-availability-zones \
+        --query 'length(AvailabilityZones[?State==`available` && (OptInStatus==`opt-in-not-required` || OptInStatus==`opted-in`)])' \
+        --output text
   )"
   [[ "$dr_az_count" =~ ^[0-9]+$ ]] || die "failed to resolve DR AZ count in region: $aws_dr_region"
   (( dr_az_count >= 2 )) || die "DR readiness check failed: region $aws_dr_region must have at least 2 available AZs"
