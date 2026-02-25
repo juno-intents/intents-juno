@@ -155,6 +155,17 @@ test_witness_pool_uses_per_endpoint_timeout_slices() {
   assert_contains "$script_text" "witness_extract_deadline_epoch=\$(( \$(date +%s) + witness_timeout_slice_seconds ))" "witness extraction wait loop uses per-endpoint timeout slice"
 }
 
+test_witness_metadata_generation_has_hard_process_timeout_guards() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "run_with_optional_timeout() {" "run-testnet-e2e defines helper for hard subprocess timeouts"
+  assert_contains "$script_text" 'run_with_optional_timeout "$witness_metadata_attempt_timeout_seconds"' "witness metadata generation is wrapped by hard process timeout guard"
+  assert_contains "$script_text" "witness metadata generation timed out for operator=" "witness metadata timeout path is logged with endpoint/operator context"
+  assert_contains "$script_text" 'run_with_optional_timeout "$direct_cli_witness_metadata_timeout_seconds"' "direct-cli witness metadata generation is wrapped by hard process timeout guard"
+  assert_contains "$script_text" "direct-cli witness metadata generation timed out" "direct-cli witness metadata timeout path is logged"
+}
+
 test_witness_pool_retries_endpoint_health_before_quorum_failure() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -545,6 +556,7 @@ main() {
   test_withdraw_coordinator_includes_extend_signer_response_limit
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_witness_pool_uses_per_endpoint_timeout_slices
+  test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure
   test_witness_generation_reuses_distributed_dkg_recipient_identity
   test_witness_metadata_failover_reuses_single_wallet_id

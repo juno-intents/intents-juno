@@ -166,6 +166,24 @@ shell_join() {
   printf '%s' "$joined"
 }
 
+run_with_optional_timeout() {
+  local timeout_seconds="$1"
+  shift || true
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "timeout seconds must be numeric"
+  (( timeout_seconds > 0 )) || die "timeout seconds must be > 0"
+
+  if have_cmd timeout; then
+    timeout --signal=TERM --kill-after=20s "$timeout_seconds" "$@"
+    return $?
+  fi
+  if have_cmd gtimeout; then
+    gtimeout --signal=TERM --kill-after=20s "$timeout_seconds" "$@"
+    return $?
+  fi
+
+  "$@"
+}
+
 RUN_WORKDIR_LOCK_DIR=""
 RUN_WORKDIR_LOCK_PID_FILE=""
 
@@ -3098,6 +3116,9 @@ command_run() {
     fi
     log "witness timeout slice seconds=$witness_timeout_slice_seconds total_timeout_seconds=$sp1_witness_metadata_timeout_seconds healthy_endpoints=$witness_endpoint_healthy_count"
 
+    local witness_metadata_attempt_timeout_seconds
+    witness_metadata_attempt_timeout_seconds=$((witness_timeout_slice_seconds + 90))
+
     local witness_metadata_generated="false"
     local witness_metadata_source_scan_url=""
     local witness_metadata_source_rpc_url=""
@@ -3150,10 +3171,16 @@ command_run() {
         witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
       fi
 
-      if (
+      local witness_metadata_status=0
+      set +e
+      (
         cd "$REPO_ROOT"
-        deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
-      ); then
+        run_with_optional_timeout "$witness_metadata_attempt_timeout_seconds" \
+          deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
+      )
+      witness_metadata_status=$?
+      set -e
+      if (( witness_metadata_status == 0 )); then
         cp "$witness_metadata_attempt_json" "$witness_metadata_json"
         witness_metadata_source_scan_url="$witness_scan_url"
         witness_metadata_source_rpc_url="$witness_rpc_url"
@@ -3162,7 +3189,11 @@ command_run() {
         log "generated witness metadata from operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
         break
       fi
-      log "witness metadata generation failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url; trying next healthy endpoint"
+      if (( witness_metadata_status == 124 )); then
+        log "witness metadata generation timed out for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url timeout_seconds=$witness_metadata_attempt_timeout_seconds; trying next healthy endpoint"
+      else
+        log "witness metadata generation failed for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url; trying next healthy endpoint"
+      fi
     done
 
     [[ "$witness_metadata_generated" == "true" ]] || \
@@ -3899,12 +3930,21 @@ command_run() {
     if [[ -n "$juno_scan_bearer_token" ]]; then
       direct_cli_witness_metadata_args+=("--juno-scan-bearer-token" "$juno_scan_bearer_token")
     fi
-    if (
+    local direct_cli_witness_metadata_timeout_seconds
+    local direct_cli_witness_metadata_status
+    direct_cli_witness_metadata_timeout_seconds=$((sp1_witness_metadata_timeout_seconds + 90))
+    set +e
+    (
       cd "$REPO_ROOT"
-      deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${direct_cli_witness_metadata_args[@]}" >/dev/null
-    ); then
-      :
-    else
+      run_with_optional_timeout "$direct_cli_witness_metadata_timeout_seconds" \
+        deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${direct_cli_witness_metadata_args[@]}" >/dev/null
+    )
+    direct_cli_witness_metadata_status=$?
+    set -e
+    if (( direct_cli_witness_metadata_status != 0 )); then
+      if (( direct_cli_witness_metadata_status == 124 )); then
+        log "direct-cli witness metadata generation timed out timeout_seconds=$direct_cli_witness_metadata_timeout_seconds"
+      fi
       return 1
     fi
 
