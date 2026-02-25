@@ -4436,6 +4436,22 @@ command_run() {
       shared_status="${PIPESTATUS[0]}"
       set -e
     fi
+    if (( shared_status != 0 )) &&
+      [[ "$stop_after_stage" == "checkpoint_validated" ]] &&
+      [[ -n "$existing_bridge_summary_path" ]] &&
+      grep -q "$shared_validation_no_fresh_package_pattern" "$shared_validation_log"; then
+      local checkpoint_canary_min_persisted_at
+      checkpoint_canary_min_persisted_at="$(date -u -d "$checkpoint_started_at - 6 hours" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+      if [[ -z "$checkpoint_canary_min_persisted_at" ]]; then
+        checkpoint_canary_min_persisted_at="$(date -u -d '6 hours ago' +"%Y-%m-%dT%H:%M:%SZ")"
+      fi
+      log "checkpoint-stage canary with existing bridge summary still found no fresh package; retrying with extended checkpoint-min-persisted-at=$checkpoint_canary_min_persisted_at"
+
+      set +e
+      run_shared_infra_validation_attempt "$checkpoint_canary_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"
+      shared_status="${PIPESTATUS[0]}"
+      set -e
+    fi
     rm -f "$shared_validation_log"
 
     if (( shared_status != 0 )); then
