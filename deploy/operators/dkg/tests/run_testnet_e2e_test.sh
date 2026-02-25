@@ -89,6 +89,22 @@ test_remote_relayer_service_preserves_quoted_args_over_ssh() {
   assert_contains "$script_text" '"bash -lc $(printf '\''%q'\'' "$remote_joined_args")"' "remote relayer launcher executes quoted command via remote bash -lc"
 }
 
+test_distributed_relayer_runtime_cleans_stale_processes_before_launch() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "stop_remote_relayer_binaries_on_host() {" "run-testnet-e2e defines stale remote relayer cleanup helper"
+  assert_contains "$script_text" "pkill -f" "stale cleanup uses pkill to stop pre-existing remote relayer binaries"
+  assert_contains "$script_text" "/usr/local/bin/base-relayer" "stale cleanup targets base-relayer binary path"
+  assert_contains "$script_text" "/usr/local/bin/deposit-relayer" "stale cleanup targets deposit-relayer binary path"
+  assert_contains "$script_text" "/usr/local/bin/withdraw-coordinator" "stale cleanup targets withdraw-coordinator binary path"
+  assert_contains "$script_text" "/usr/local/bin/withdraw-finalizer" "stale cleanup targets withdraw-finalizer binary path"
+  assert_contains "$script_text" "/usr/local/bin/bridge-api" "stale cleanup targets bridge-api binary path"
+  assert_contains "$script_text" "distributed relayer runtime enabled; stopping stale remote relayer processes before launch" "distributed relayer mode logs stale-process cleanup phase"
+  assert_contains "$script_text" "for relayer_cleanup_host in" "distributed relayer mode iterates selected hosts for stale-process cleanup"
+  assert_contains "$script_text" "stop_remote_relayer_binaries_on_host \\" "distributed relayer mode invokes stale-process cleanup helper"
+}
+
 test_operator_signer_is_lazy_for_runner_core_flow() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -487,6 +503,7 @@ main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_remote_relayer_service_preserves_quoted_args_over_ssh
+  test_distributed_relayer_runtime_cleans_stale_processes_before_launch
   test_operator_signer_is_lazy_for_runner_core_flow
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_pool_retries_endpoint_health_before_quorum_failure

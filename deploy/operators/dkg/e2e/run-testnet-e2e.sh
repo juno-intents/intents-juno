@@ -155,12 +155,15 @@ json_array_from_args() {
 }
 
 shell_join() {
-  local -a quoted_args=()
+  local joined=""
   local arg
   for arg in "$@"; do
-    quoted_args+=("$(printf '%q' "$arg")")
+    if [[ -n "$joined" ]]; then
+      joined+=" "
+    fi
+    joined+="$(printf '%q' "$arg")"
   done
-  printf '%s' "${quoted_args[*]-}"
+  printf '%s' "$joined"
 }
 
 RUN_WORKDIR_LOCK_DIR=""
@@ -1482,6 +1485,28 @@ start_remote_relayer_service() {
       "bash -lc $(printf '%q' "$remote_joined_args")"
   ) >"$log_path" 2>&1 &
   printf '%s' "$!"
+}
+
+stop_remote_relayer_binaries_on_host() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local remote_cleanup_cmd
+  remote_cleanup_cmd=$'pkill -f \'/usr/local/bin/base-relayer\' >/dev/null 2>&1 || true\n'
+  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/deposit-relayer\' >/dev/null 2>&1 || true\n'
+  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/withdraw-coordinator\' >/dev/null 2>&1 || true\n'
+  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/withdraw-finalizer\' >/dev/null 2>&1 || true\n'
+  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/bridge-api\' >/dev/null 2>&1 || true\n'
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "bash -lc $(printf '%q' "$remote_cleanup_cmd")"
 }
 
 stop_remote_relayer_service() {
@@ -4638,6 +4663,11 @@ command_run() {
   local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
   local distributed_withdraw_finalizer_juno_rpc_url="$sp1_witness_juno_rpc_url"
+  : >"$base_relayer_log"
+  : >"$deposit_relayer_log"
+  : >"$withdraw_coordinator_log"
+  : >"$withdraw_finalizer_log"
+  : >"$bridge_api_log"
 
   operator_down_ssh_user="$(id -un 2>/dev/null || true)"
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
@@ -4679,6 +4709,28 @@ command_run() {
     log "deposit-relayer host=$deposit_relayer_host"
     log "withdraw-coordinator host=$withdraw_coordinator_host"
     log "withdraw-finalizer host=$withdraw_finalizer_host"
+    log "distributed relayer runtime enabled; stopping stale remote relayer processes before launch"
+
+    local -a relayer_cleanup_hosts=()
+    local -A relayer_cleanup_seen=()
+    local relayer_cleanup_host=""
+    for relayer_cleanup_host in "$base_relayer_host" "$deposit_relayer_host" "$withdraw_coordinator_host" "$withdraw_finalizer_host"; do
+      [[ -n "$relayer_cleanup_host" ]] || continue
+      if [[ -n "${relayer_cleanup_seen[$relayer_cleanup_host]:-}" ]]; then
+        continue
+      fi
+      relayer_cleanup_hosts+=("$relayer_cleanup_host")
+      relayer_cleanup_seen["$relayer_cleanup_host"]="1"
+    done
+    for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
+      if ! stop_remote_relayer_binaries_on_host \
+        "$relayer_cleanup_host" \
+        "$relayer_runtime_operator_ssh_user" \
+        "$relayer_runtime_operator_ssh_key_file"; then
+        log "failed to stop stale remote relayer processes host=$relayer_cleanup_host"
+        relayer_status=1
+      fi
+    done
 
     if ! stage_remote_runtime_file \
       "$withdraw_coordinator_tss_server_ca_file" \
