@@ -1506,6 +1506,9 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   local operator_address="$6"
   local operator_signer_key_hex="$7"
   local aws_region="$8"
+  local shared_postgres_dsn="$9"
+  local shared_kafka_brokers="${10}"
+  local shared_ipfs_api_url="${11}"
 
   operator_address="$(normalize_hex_prefixed "$operator_address" || true)"
   [[ "$operator_address" =~ ^0x[0-9a-f]{40}$ ]] || \
@@ -1520,6 +1523,9 @@ configure_remote_operator_checkpoint_services_for_bridge() {
     aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
   fi
   [[ -n "$aws_region" ]] || die "checkpoint bridge config update requires resolvable aws region for host=$host"
+  [[ -n "$shared_postgres_dsn" ]] || die "checkpoint bridge config update requires shared postgres dsn for host=$host"
+  [[ -n "$shared_kafka_brokers" ]] || die "checkpoint bridge config update requires shared kafka brokers for host=$host"
+  [[ -n "$shared_ipfs_api_url" ]] || die "checkpoint bridge config update requires shared ipfs api url for host=$host"
 
   local remote_script
   remote_script="$(cat <<'EOF'
@@ -1529,6 +1535,9 @@ base_chain_id="$2"
 operator_address="$3"
 operator_signer_key_hex="$4"
 aws_region="$5"
+shared_postgres_dsn="$6"
+shared_kafka_brokers="$7"
+shared_ipfs_api_url="$8"
 
 [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
   echo "operator address must be 20-byte hex: $operator_address" >&2
@@ -1662,9 +1671,15 @@ chmod 600 "$tmp_json"
 jq \
   --arg bridge "$bridge_address" \
   --arg chain "$base_chain_id" \
+  --arg shared_postgres_dsn "$shared_postgres_dsn" \
+  --arg shared_kafka_brokers "$shared_kafka_brokers" \
+  --arg shared_ipfs_api_url "$shared_ipfs_api_url" \
   '
   .BRIDGE_ADDRESS = $bridge
   | .BASE_CHAIN_ID = $chain
+  | .CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn
+  | .CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers
+  | .CHECKPOINT_IPFS_API_URL = $shared_ipfs_api_url
   | .JUNO_QUEUE_KAFKA_TLS = (
       if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
         "true"
@@ -1686,6 +1701,10 @@ set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"
 set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"
 set_env_value "$tmp_env" AWS_REGION "$aws_region"
 set_env_value "$tmp_env" AWS_DEFAULT_REGION "$aws_region"
+set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$shared_postgres_dsn"
+set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$shared_kafka_brokers"
+set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$shared_ipfs_api_url"
+set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "true"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_LEASE_NAME "$checkpoint_signer_lease_name"
@@ -1768,7 +1787,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region")" <<<"$remote_script"
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region") $(printf '%q' "$shared_postgres_dsn") $(printf '%q' "$shared_kafka_brokers") $(printf '%q' "$shared_ipfs_api_url")" <<<"$remote_script"
 }
 
 endpoint_host_port() {
@@ -4357,7 +4376,10 @@ command_run() {
           "$base_chain_id" \
           "$checkpoint_operator_id" \
           "$checkpoint_operator_key_hex" \
-          "$checkpoint_runtime_aws_region" || \
+          "$checkpoint_runtime_aws_region" \
+          "$shared_postgres_dsn" \
+          "$shared_kafka_brokers" \
+          "$shared_ipfs_api_url" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
