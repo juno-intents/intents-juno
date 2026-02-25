@@ -27,6 +27,7 @@ DISTRIBUTED_COMPLETION_UFVK=""
 DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA=""
 FAILURE_SIGNATURES_FILE="$SCRIPT_DIR/failure-signatures.yaml"
 DEFAULT_SHARED_PROOF_SERVICES_IMAGE_RELEASE_TAG="shared-proof-services-image-latest"
+DEFAULT_BRIDGE_GUEST_RELEASE_TAG="bridge-guests-latest"
 
 usage() {
   cat <<'EOF'
@@ -78,6 +79,9 @@ run options:
                                         assign public IPv4 addresses on shared ECS tasks (default: false)
   --dkg-s3-key-prefix <prefix>         S3 prefix for KMS-exported key packages (default: dkg/keypackages)
   --dkg-release-tag <tag>              DKG release tag for distributed ceremony (default: v0.1.0)
+  --bridge-guest-release-tag <tag>     release tag used to derive SP1 guest program URLs when
+                                       --sp1-deposit-program-url / --sp1-withdraw-program-url are omitted
+                                       (default: bridge-guests-latest)
   --ssh-allowed-cidr <cidr>            inbound SSH CIDR (default: caller public IP /32)
   --base-funder-key-file <path>        file with Base funder private key hex (required)
   --juno-funder-key-file <path>        optional file with Juno funder private key hex
@@ -1283,6 +1287,32 @@ resolve_github_repo_slug() {
   return 1
 }
 
+build_sp1_guest_program_release_url() {
+  local release_tag="$1"
+  local guest_kind="$2"
+  local image_id="$3"
+
+  [[ -n "$release_tag" ]] || return 1
+  case "$guest_kind" in
+    deposit|withdraw) ;;
+    *) return 1 ;;
+  esac
+
+  local normalized_image_id
+  normalized_image_id="$(normalize_hex_prefixed_value "$image_id" || true)"
+  [[ "$normalized_image_id" =~ ^0x[0-9a-f]{64}$ ]] || return 1
+
+  local gh_repo
+  gh_repo="$(resolve_github_repo_slug || true)"
+  [[ -n "$gh_repo" ]] || return 1
+
+  printf 'https://github.com/%s/releases/download/%s/%s-guest-%s.elf' \
+    "$gh_repo" \
+    "$release_tag" \
+    "$guest_kind" \
+    "${normalized_image_id#0x}"
+}
+
 resolve_latest_shared_proof_services_image() {
   local release_tag="$1"
   local aws_region="$2"
@@ -2338,6 +2368,7 @@ command_run() {
   local shared_ecs_assign_public_ip="false"
   local dkg_s3_key_prefix="dkg/keypackages"
   local dkg_release_tag="${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}"
+  local bridge_guest_release_tag="$DEFAULT_BRIDGE_GUEST_RELEASE_TAG"
   local operator_count_explicit="false"
   local operator_base_port_explicit="false"
   local ssh_allowed_cidr=""
@@ -2481,6 +2512,11 @@ command_run() {
       --dkg-release-tag)
         [[ $# -ge 2 ]] || die "missing value for --dkg-release-tag"
         dkg_release_tag="$2"
+        shift 2
+        ;;
+      --bridge-guest-release-tag)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-guest-release-tag"
+        bridge_guest_release_tag="$2"
         shift 2
         ;;
       --ssh-allowed-cidr)
@@ -2658,6 +2694,7 @@ command_run() {
   [[ -n "$shared_postgres_user" ]] || die "--shared-postgres-user must not be empty"
   [[ -n "$shared_postgres_db" ]] || die "--shared-postgres-db must not be empty"
   [[ -n "$dkg_s3_key_prefix" ]] || die "--dkg-s3-key-prefix must not be empty"
+  [[ -n "$bridge_guest_release_tag" ]] || die "--bridge-guest-release-tag must not be empty"
   case "$relayer_runtime_mode" in
     runner|distributed) ;;
     *) die "--relayer-runtime-mode must be runner or distributed" ;;
@@ -2796,6 +2833,48 @@ command_run() {
   fi
   (( dkg_threshold >= 2 )) || die "distributed dkg threshold must be >= 2"
   (( dkg_threshold <= operator_instance_count )) || die "distributed dkg threshold must be <= operator instance count"
+
+  local resolved_sp1_deposit_program_url=""
+  local resolved_sp1_withdraw_program_url=""
+  local forwarded_bridge_deposit_image_id=""
+  local forwarded_bridge_withdraw_image_id=""
+  if forwarded_arg_value "--sp1-deposit-program-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    resolved_sp1_deposit_program_url="$(forwarded_arg_value "--sp1-deposit-program-url" "${e2e_args[@]}")"
+    [[ -n "$resolved_sp1_deposit_program_url" ]] || die "forwarded --sp1-deposit-program-url must not be empty"
+  else
+    forwarded_bridge_deposit_image_id="$(forwarded_arg_value "--bridge-deposit-image-id" "${e2e_args[@]}" || true)"
+    [[ -n "$forwarded_bridge_deposit_image_id" ]] || \
+      die "--sp1-deposit-program-url is required (or provide --bridge-deposit-image-id for automatic release URL derivation)"
+    resolved_sp1_deposit_program_url="$(
+      build_sp1_guest_program_release_url \
+        "$bridge_guest_release_tag" \
+        "deposit" \
+        "$forwarded_bridge_deposit_image_id" || true
+    )"
+    [[ -n "$resolved_sp1_deposit_program_url" ]] || \
+      die "failed to derive --sp1-deposit-program-url from --bridge-deposit-image-id=$forwarded_bridge_deposit_image_id using release tag '$bridge_guest_release_tag'"
+    log "defaulting --sp1-deposit-program-url to release asset URL derived from --bridge-deposit-image-id: $resolved_sp1_deposit_program_url"
+    e2e_args+=("--sp1-deposit-program-url" "$resolved_sp1_deposit_program_url")
+  fi
+
+  if forwarded_arg_value "--sp1-withdraw-program-url" "${e2e_args[@]}" >/dev/null 2>&1; then
+    resolved_sp1_withdraw_program_url="$(forwarded_arg_value "--sp1-withdraw-program-url" "${e2e_args[@]}")"
+    [[ -n "$resolved_sp1_withdraw_program_url" ]] || die "forwarded --sp1-withdraw-program-url must not be empty"
+  else
+    forwarded_bridge_withdraw_image_id="$(forwarded_arg_value "--bridge-withdraw-image-id" "${e2e_args[@]}" || true)"
+    [[ -n "$forwarded_bridge_withdraw_image_id" ]] || \
+      die "--sp1-withdraw-program-url is required (or provide --bridge-withdraw-image-id for automatic release URL derivation)"
+    resolved_sp1_withdraw_program_url="$(
+      build_sp1_guest_program_release_url \
+        "$bridge_guest_release_tag" \
+        "withdraw" \
+        "$forwarded_bridge_withdraw_image_id" || true
+    )"
+    [[ -n "$resolved_sp1_withdraw_program_url" ]] || \
+      die "failed to derive --sp1-withdraw-program-url from --bridge-withdraw-image-id=$forwarded_bridge_withdraw_image_id using release tag '$bridge_guest_release_tag'"
+    log "defaulting --sp1-withdraw-program-url to release asset URL derived from --bridge-withdraw-image-id: $resolved_sp1_withdraw_program_url"
+    e2e_args+=("--sp1-withdraw-program-url" "$resolved_sp1_withdraw_program_url")
+  fi
 
   if [[ "$with_shared_services" == "true" ]]; then
     log "shared services are enabled; validating dr readiness"
