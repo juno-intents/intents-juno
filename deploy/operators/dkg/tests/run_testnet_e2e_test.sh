@@ -93,6 +93,12 @@ test_distributed_relayer_runtime_cleans_stale_processes_before_launch() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" "stop_local_relayer_binaries() {" "run-testnet-e2e defines local stale relayer cleanup helper"
+  assert_contains "$script_text" '"go run ./cmd/bridge-api"' "local stale cleanup targets prior go-run bridge-api process on runner"
+  assert_contains "$script_text" "free_local_tcp_port() {" "run-testnet-e2e defines local tcp listen-port cleanup helper"
+  assert_contains "$script_text" 'free_local_tcp_port "$bridge_api_port"' "run-testnet-e2e clears stale bridge-api listen port before restart"
+  assert_contains "$script_text" "stopping stale local relayer processes before launch" "run-testnet-e2e logs local stale-process cleanup phase"
+  assert_contains "$script_text" "stop_local_relayer_binaries" "run-testnet-e2e invokes local stale-process cleanup helper before relayer startup"
   assert_contains "$script_text" "stop_remote_relayer_binaries_on_host() {" "run-testnet-e2e defines stale remote relayer cleanup helper"
   assert_contains "$script_text" "pkill -f" "stale cleanup uses pkill to stop pre-existing remote relayer binaries"
   assert_contains "$script_text" "/usr/local/bin/base-relayer" "stale cleanup targets base-relayer binary path"
@@ -100,11 +106,19 @@ test_distributed_relayer_runtime_cleans_stale_processes_before_launch() {
   assert_contains "$script_text" "/usr/local/bin/withdraw-coordinator" "stale cleanup targets withdraw-coordinator binary path"
   assert_contains "$script_text" "/usr/local/bin/withdraw-finalizer" "stale cleanup targets withdraw-finalizer binary path"
   assert_contains "$script_text" "/usr/local/bin/bridge-api" "stale cleanup targets bridge-api binary path"
+  assert_contains "$script_text" "go run ./cmd/base-relayer" "remote stale cleanup targets go-run base-relayer process pattern"
+  assert_contains "$script_text" "go run ./cmd/deposit-relayer" "remote stale cleanup targets go-run deposit-relayer process pattern"
+  assert_contains "$script_text" "go run ./cmd/withdraw-coordinator" "remote stale cleanup targets go-run withdraw-coordinator process pattern"
+  assert_contains "$script_text" "go run ./cmd/withdraw-finalizer" "remote stale cleanup targets go-run withdraw-finalizer process pattern"
+  assert_contains "$script_text" "go run ./cmd/bridge-api" "remote stale cleanup targets go-run bridge-api process pattern"
+  assert_contains "$script_text" "lsof -t -iTCP" "remote stale cleanup force-frees relayer listen ports"
+  assert_contains "$script_text" 'fuser -k \"\${cleanup_port}/tcp\"' "remote stale cleanup uses fuser fallback for occupied ports"
   assert_contains "$script_text" "distributed relayer runtime enabled; stopping stale remote relayer processes before launch" "distributed relayer mode logs stale-process cleanup phase"
   assert_contains "$script_text" "for relayer_cleanup_host in" "distributed relayer mode iterates selected hosts for stale-process cleanup"
   assert_contains "$script_text" "stop_remote_relayer_binaries_on_host \\" "distributed relayer mode invokes stale-process cleanup helper"
   assert_contains "$script_text" "failed to stop stale remote relayer processes host=" "stale cleanup failures are logged explicitly"
-  assert_contains "$script_text" "continuing with launch" "stale cleanup failures are best-effort and do not hard-stop relayer startup"
+  assert_contains "$script_text" "marking relayer launch failed" "stale cleanup failures hard-fail relayer startup"
+  assert_not_contains "$script_text" "continuing with launch" "stale cleanup failures are no longer treated as best-effort"
 }
 
 test_operator_signer_is_lazy_for_runner_core_flow() {
@@ -487,6 +501,13 @@ test_shared_ecs_uses_explicit_sp1_adapter_binary_path() {
   assert_not_contains "$script_text" '"--sp1-bin" "/usr/local/bin/sp1"' "shared ecs proof services no longer rely on /usr/local/bin/sp1 alias"
 }
 
+test_shared_ecs_env_enforces_kafka_tls_for_proof_services() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '{name:"JUNO_QUEUE_KAFKA_TLS", value:"true"}' "shared ecs proof service env forces kafka tls for msk transport"
+}
+
 test_shared_ecs_rollout_retries_transient_unstable_services() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -558,6 +579,13 @@ test_sp1_rpc_defaults_and_validation_target_succinct_network() {
   assert_contains "$script_text" 'local sp1_set_verifier_address="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"' "run-testnet-e2e defaults sp1 set-verifier to canonical base verifier"
 }
 
+test_shared_infra_validation_precreates_bridge_and_proof_topics() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"' "shared infra validation pre-creates proof/deposit/withdraw topics before bridge-api and relayer traffic"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -589,12 +617,14 @@ main() {
   test_workdir_run_lock_prevents_overlapping_runs
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
+  test_shared_ecs_env_enforces_kafka_tls_for_proof_services
   test_shared_ecs_rollout_retries_transient_unstable_services
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
   test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario
   test_checkpoint_stop_stage_with_existing_summary_does_not_require_bridge_proof_inputs
   test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only
   test_sp1_rpc_defaults_and_validation_target_succinct_network
+  test_shared_infra_validation_precreates_bridge_and_proof_topics
 }
 
 main "$@"

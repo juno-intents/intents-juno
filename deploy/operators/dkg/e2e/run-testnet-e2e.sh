@@ -1564,22 +1564,106 @@ stop_remote_relayer_binaries_on_host() {
   local host="$1"
   local ssh_user="$2"
   local ssh_key_file="$3"
-  local remote_cleanup_cmd
-  remote_cleanup_cmd="pkill -f /usr/local/bin/base-relayer >/dev/null 2>&1 || true;"
-  remote_cleanup_cmd+=" pkill -f /usr/local/bin/deposit-relayer >/dev/null 2>&1 || true;"
-  remote_cleanup_cmd+=" pkill -f /usr/local/bin/withdraw-coordinator >/dev/null 2>&1 || true;"
-  remote_cleanup_cmd+=" pkill -f /usr/local/bin/withdraw-finalizer >/dev/null 2>&1 || true;"
-  remote_cleanup_cmd+=" pkill -f /usr/local/bin/bridge-api >/dev/null 2>&1 || true;"
+  shift 3
+  local -a cleanup_ports=("$@")
+  local cleanup_ports_joined=""
+  local remote_cleanup_cmd=""
+  local cleanup_attempt
+  if (( ${#cleanup_ports[@]} > 0 )); then
+    cleanup_ports_joined="$(shell_join "${cleanup_ports[@]}")"
+  fi
 
-  ssh \
-    -i "$ssh_key_file" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=6 \
-    -o TCPKeepAlive=yes \
-    "$ssh_user@$host" \
-    "bash -lc $(printf '%q' "$remote_cleanup_cmd")"
+  remote_cleanup_cmd+="set -euo pipefail;"
+  remote_cleanup_cmd+=" cleanup_patterns=("
+  remote_cleanup_cmd+=" '/usr/local/bin/base-relayer'"
+  remote_cleanup_cmd+=" '/usr/local/bin/deposit-relayer'"
+  remote_cleanup_cmd+=" '/usr/local/bin/withdraw-coordinator'"
+  remote_cleanup_cmd+=" '/usr/local/bin/withdraw-finalizer'"
+  remote_cleanup_cmd+=" '/usr/local/bin/bridge-api'"
+  remote_cleanup_cmd+=" 'go run ./cmd/base-relayer'"
+  remote_cleanup_cmd+=" 'go run ./cmd/deposit-relayer'"
+  remote_cleanup_cmd+=" 'go run ./cmd/withdraw-coordinator'"
+  remote_cleanup_cmd+=" 'go run ./cmd/withdraw-finalizer'"
+  remote_cleanup_cmd+=" 'go run ./cmd/bridge-api'"
+  remote_cleanup_cmd+=" );"
+  remote_cleanup_cmd+=" for cleanup_pattern in \"\${cleanup_patterns[@]}\"; do"
+  remote_cleanup_cmd+=" pkill -f \"\$cleanup_pattern\" >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" done;"
+  remote_cleanup_cmd+=" cleanup_ports=($cleanup_ports_joined);"
+  remote_cleanup_cmd+=" for cleanup_port in \"\${cleanup_ports[@]}\"; do"
+  remote_cleanup_cmd+=" [[ \"\$cleanup_port\" =~ ^[0-9]+$ ]] || continue;"
+  remote_cleanup_cmd+=" if command -v lsof >/dev/null 2>&1; then"
+  remote_cleanup_cmd+=" while IFS= read -r cleanup_pid; do"
+  remote_cleanup_cmd+=" [[ \"\$cleanup_pid\" =~ ^[0-9]+$ ]] || continue;"
+  remote_cleanup_cmd+=" kill \"\$cleanup_pid\" >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" done < <(lsof -t -iTCP:\"\$cleanup_port\" -sTCP:LISTEN 2>/dev/null || true);"
+  remote_cleanup_cmd+=" sleep 1;"
+  remote_cleanup_cmd+=" fi;"
+  remote_cleanup_cmd+=" if command -v fuser >/dev/null 2>&1; then"
+  remote_cleanup_cmd+=" fuser -k \"\${cleanup_port}/tcp\" >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" fi;"
+  remote_cleanup_cmd+=" done"
+
+  for cleanup_attempt in 1 2 3; do
+    if ssh \
+      -i "$ssh_key_file" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$ssh_user@$host" \
+      "bash -lc $(printf '%q' "$remote_cleanup_cmd")"; then
+      return 0
+    fi
+    sleep 2
+  done
+
+  return 1
+}
+
+stop_local_relayer_binaries() {
+  local -a local_cleanup_patterns=(
+    "/usr/local/bin/base-relayer"
+    "/usr/local/bin/deposit-relayer"
+    "/usr/local/bin/withdraw-coordinator"
+    "/usr/local/bin/withdraw-finalizer"
+    "/usr/local/bin/bridge-api"
+    "go run ./cmd/base-relayer"
+    "go run ./cmd/deposit-relayer"
+    "go run ./cmd/withdraw-coordinator"
+    "go run ./cmd/withdraw-finalizer"
+    "go run ./cmd/bridge-api"
+  )
+  local cleanup_pattern
+  for cleanup_pattern in "${local_cleanup_patterns[@]}"; do
+    pkill -f "$cleanup_pattern" >/dev/null 2>&1 || true
+  done
+}
+
+free_local_tcp_port() {
+  local port="$1"
+  [[ "$port" =~ ^[0-9]+$ ]] || return 0
+
+  local -a listen_pids=()
+  local pid=""
+  if command -v lsof >/dev/null 2>&1; then
+    while IFS= read -r pid; do
+      [[ "$pid" =~ ^[0-9]+$ ]] || continue
+      listen_pids+=("$pid")
+    done < <(lsof -t -iTCP:"$port" -sTCP:LISTEN 2>/dev/null || true)
+  fi
+
+  if (( ${#listen_pids[@]} > 0 )); then
+    for pid in "${listen_pids[@]}"; do
+      kill "$pid" >/dev/null 2>&1 || true
+    done
+    sleep 1
+  fi
+
+  if command -v fuser >/dev/null 2>&1; then
+    fuser -k "${port}/tcp" >/dev/null 2>&1 || true
+  fi
 }
 
 stop_remote_relayer_service() {
@@ -4367,38 +4451,40 @@ command_run() {
     local proof_funder_ecs_environment_json
     proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
     proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
-    proof_requestor_ecs_environment_json="$(jq -n \
-      --arg sp1_network_rpc_url "$sp1_rpc_url" \
-      --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
-      --arg sp1_min_auction_period "$sp1_min_auction_period" \
-      --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
-      --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
-      --arg deposit_program_url "$sp1_deposit_program_url" \
-      --arg withdraw_program_url "$sp1_withdraw_program_url" \
-      --arg deposit_vkey "$bridge_deposit_image_id" \
-      --arg withdraw_vkey "$bridge_withdraw_image_id" \
-      '[
-        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
-        {name:"SP1_MAX_PRICE_PER_PGU", value:$sp1_max_price_per_pgu},
-        {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
-        {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
+	    proof_requestor_ecs_environment_json="$(jq -n \
+	      --arg sp1_network_rpc_url "$sp1_rpc_url" \
+	      --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+	      --arg sp1_min_auction_period "$sp1_min_auction_period" \
+	      --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
+	      --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
+	      --arg deposit_program_url "$sp1_deposit_program_url" \
+	      --arg withdraw_program_url "$sp1_withdraw_program_url" \
+	      --arg deposit_vkey "$bridge_deposit_image_id" \
+	      --arg withdraw_vkey "$bridge_withdraw_image_id" \
+	      '[
+	        {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
+	        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
+	        {name:"SP1_MAX_PRICE_PER_PGU", value:$sp1_max_price_per_pgu},
+	        {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
+	        {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
         {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
         {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
       ]')"
-    proof_funder_ecs_environment_json="$(jq -n \
-      --arg sp1_network_rpc_url "$sp1_rpc_url" \
-      --arg deposit_program_url "$sp1_deposit_program_url" \
-      --arg withdraw_program_url "$sp1_withdraw_program_url" \
-      --arg deposit_vkey "$bridge_deposit_image_id" \
-      --arg withdraw_vkey "$bridge_withdraw_image_id" \
-      '[
-        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
-        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
-        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
-        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
+	    proof_funder_ecs_environment_json="$(jq -n \
+	      --arg sp1_network_rpc_url "$sp1_rpc_url" \
+	      --arg deposit_program_url "$sp1_deposit_program_url" \
+	      --arg withdraw_program_url "$sp1_withdraw_program_url" \
+	      --arg deposit_vkey "$bridge_deposit_image_id" \
+	      --arg withdraw_vkey "$bridge_withdraw_image_id" \
+	      '[
+	        {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
+	        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
+	        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
+	        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
+	        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
         {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
       ]')"
 
@@ -4536,19 +4622,19 @@ command_run() {
       local checkpoint_min_persisted_at="$1"
       (
         cd "$REPO_ROOT"
-        go run ./cmd/shared-infra-e2e \
-          --postgres-dsn "$shared_postgres_dsn" \
-          --kafka-brokers "$shared_kafka_brokers" \
-          --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
-          --checkpoint-operators "$checkpoint_operators_csv" \
-          --checkpoint-threshold "$threshold" \
-          --checkpoint-min-persisted-at "$checkpoint_min_persisted_at" \
-          --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic}" \
-          --topic-prefix "$shared_topic_prefix" \
-          --timeout "$shared_timeout" \
-          --output "$shared_summary"
-      )
-    }
+	        go run ./cmd/shared-infra-e2e \
+	          --postgres-dsn "$shared_postgres_dsn" \
+	          --kafka-brokers "$shared_kafka_brokers" \
+	          --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
+	          --checkpoint-operators "$checkpoint_operators_csv" \
+	          --checkpoint-threshold "$threshold" \
+	          --checkpoint-min-persisted-at "$checkpoint_min_persisted_at" \
+	          --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}" \
+	          --topic-prefix "$shared_topic_prefix" \
+	          --timeout "$shared_timeout" \
+	          --output "$shared_summary"
+	      )
+	    }
 
     set +e
     run_shared_infra_validation_attempt "$checkpoint_started_at" 2>&1 | tee "$shared_validation_log"
@@ -4763,6 +4849,9 @@ command_run() {
   : >"$withdraw_coordinator_log"
   : >"$withdraw_finalizer_log"
   : >"$bridge_api_log"
+  log "stopping stale local relayer processes before launch"
+  stop_local_relayer_binaries
+  free_local_tcp_port "$bridge_api_port"
 
   operator_down_ssh_user="$(id -un 2>/dev/null || true)"
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
@@ -4821,18 +4910,23 @@ command_run() {
       if ! stop_remote_relayer_binaries_on_host \
         "$relayer_cleanup_host" \
         "$relayer_runtime_operator_ssh_user" \
-        "$relayer_runtime_operator_ssh_key_file"; then
-        log "failed to stop stale remote relayer processes host=$relayer_cleanup_host; continuing with launch"
+        "$relayer_runtime_operator_ssh_key_file" \
+        "$base_relayer_port" \
+        "$bridge_api_port"; then
+        log "failed to stop stale remote relayer processes host=$relayer_cleanup_host; marking relayer launch failed"
+        relayer_status=1
       fi
     done
 
-    if ! stage_remote_runtime_file \
-      "$withdraw_coordinator_tss_server_ca_file" \
-      "$withdraw_coordinator_host" \
-      "$relayer_runtime_operator_ssh_user" \
-      "$relayer_runtime_operator_ssh_key_file" \
-      "$distributed_withdraw_coordinator_tss_server_ca_file"; then
-      relayer_status=1
+    if (( relayer_status == 0 )); then
+      if ! stage_remote_runtime_file \
+        "$withdraw_coordinator_tss_server_ca_file" \
+        "$withdraw_coordinator_host" \
+        "$relayer_runtime_operator_ssh_user" \
+        "$relayer_runtime_operator_ssh_key_file" \
+        "$distributed_withdraw_coordinator_tss_server_ca_file"; then
+        relayer_status=1
+      fi
     fi
   else
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"

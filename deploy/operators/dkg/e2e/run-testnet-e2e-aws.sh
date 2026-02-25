@@ -3985,6 +3985,26 @@ if ! command -v psql >/dev/null 2>&1; then
 fi
 mkdir -p "$remote_workdir/reports"
 
+stale_run_pid_file="$remote_workdir/.run.lock/pid"
+if [[ -f "\$stale_run_pid_file" ]]; then
+  stale_run_pid="\$(tr -d '\r\n' < "\$stale_run_pid_file" 2>/dev/null || true)"
+  if [[ "\$stale_run_pid" =~ ^[0-9]+$ ]] && kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
+    echo "stopping stale remote run-testnet-e2e process before launch pid=\$stale_run_pid workdir=$remote_workdir"
+    kill -TERM "\$stale_run_pid" >/dev/null 2>&1 || true
+    for attempt in \$(seq 1 20); do
+      if ! kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
+        break
+      fi
+      sleep 1
+    done
+    if kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
+      echo "stale remote run-testnet-e2e process ignored TERM; sending SIGKILL pid=\$stale_run_pid workdir=$remote_workdir"
+      kill -KILL "\$stale_run_pid" >/dev/null 2>&1 || true
+    fi
+  fi
+  rm -rf "$remote_workdir/.run.lock" >/dev/null 2>&1 || true
+fi
+
 operator_ssh_key=".ci/secrets/operator-fleet-ssh.key"
 operator_ssh_user="${runner_ssh_user}"
 operator_private_ips=($witness_tunnel_private_ip_joined)

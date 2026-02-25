@@ -582,7 +582,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "run_shared_infra_validation_attempt \"\$checkpoint_relaxed_min_persisted_at\"" "shared checkpoint validation retries with relaxed persisted-at window when no fresh package exists"
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
   assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint package verification wiring"
-  assert_contains "$e2e_script_text" "--required-kafka-topics \"\${checkpoint_signature_topic},\${checkpoint_package_topic}\"" "shared infra validation ensures checkpoint kafka topics exist"
+  assert_contains "$e2e_script_text" "--required-kafka-topics \"\${checkpoint_signature_topic},\${checkpoint_package_topic},\${proof_request_topic},\${proof_result_topic},\${proof_failure_topic},\${deposit_event_topic},\${withdraw_request_topic}\"" "shared infra validation pre-creates checkpoint/proof/bridge kafka topics"
   assert_contains "$e2e_script_text" "operator-service checkpoint publication" "shared infra validation waits for operator-service checkpoint publication"
   assert_order "$e2e_script_text" "bridge summary missing deployed contracts.bridge address: \$bridge_summary" "go run ./cmd/shared-infra-e2e" "shared infra validation runs after bridge deploy summary is available"
   assert_contains "$e2e_script_text" "ensure_juno_txsign_binary" "local e2e signer resolution installs juno-txsign when missing"
@@ -1330,6 +1330,16 @@ test_aws_wrapper_timeout_fallback_kills_process_groups() {
   assert_contains "$wrapper_script_text" "sys.exit(124)" "aws wrapper timeout helper preserves timeout exit code semantics"
 }
 
+test_aws_wrapper_stops_stale_remote_e2e_processes_before_launch() {
+  local wrapper_script_text
+  wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
+
+  assert_contains "$wrapper_script_text" 'stale_run_pid_file="$remote_workdir/.run.lock/pid"' "aws wrapper checks remote workdir lock pid before launch"
+  assert_contains "$wrapper_script_text" "stopping stale remote run-testnet-e2e process before launch" "aws wrapper logs stale remote e2e process cleanup"
+  assert_contains "$wrapper_script_text" 'kill -TERM "\$stale_run_pid"' "aws wrapper sends TERM to stale remote e2e process"
+  assert_contains "$wrapper_script_text" 'kill -KILL "\$stale_run_pid"' "aws wrapper escalates to KILL when stale remote e2e process ignores TERM"
+}
+
 test_failure_signature_catalog_exists() {
   local signatures_path signatures_text
   signatures_path="$REPO_ROOT/deploy/operators/dkg/e2e/failure-signatures.yaml"
@@ -1389,6 +1399,7 @@ main() {
   test_aws_wrapper_supports_resume_without_terraform_apply
   test_aws_wrapper_uses_portable_mktemp_templates
   test_aws_wrapper_timeout_fallback_kills_process_groups
+  test_aws_wrapper_stops_stale_remote_e2e_processes_before_launch
   test_failure_signature_catalog_exists
 }
 
