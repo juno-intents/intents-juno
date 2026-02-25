@@ -52,6 +52,10 @@ data "aws_subnet" "shared" {
   id       = each.value
 }
 
+locals {
+  shared_subnet_cidrs = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"] # Canonical
@@ -382,6 +386,14 @@ resource "aws_security_group" "ipfs" {
       aws_security_group.runner.id,
       aws_security_group.operator.id
     ]
+  }
+
+  ingress {
+    description = "IPFS API from shared subnets for NLB target health checks"
+    from_port   = var.shared_ipfs_api_port
+    to_port     = var.shared_ipfs_api_port
+    protocol    = "tcp"
+    cidr_blocks = local.shared_subnet_cidrs
   }
 
   egress {

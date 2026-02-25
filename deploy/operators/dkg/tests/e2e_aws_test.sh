@@ -173,6 +173,8 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_not_contains "$main_tf" "public.ecr.aws/docker/library/busybox:1.36.1" "busybox placeholder image removed"
   assert_contains "$main_tf" "resource \"aws_autoscaling_group\" \"ipfs\"" "ipfs asg resource"
   assert_contains "$main_tf" "resource \"aws_lb\" \"ipfs\"" "ipfs nlb resource"
+  assert_contains "$main_tf" "shared_subnet_cidrs" "shared subnet cidr local for ipfs nlb health checks"
+  assert_contains "$main_tf" "IPFS API from shared subnets for NLB target health checks" "ipfs sg allows nlb health checks from shared subnet cidrs"
   assert_contains "$main_tf" "count = var.operator_instance_count" "operator instance count wiring"
   assert_contains "$main_tf" "from_port       = var.operator_base_port" "operator grpc ingress start"
   assert_contains "$main_tf" "to_port         = var.operator_base_port + var.operator_instance_count - 1" "operator grpc ingress range"
