@@ -154,6 +154,15 @@ json_array_from_args() {
   jq -n '$ARGS.positional' --args -- "$@"
 }
 
+shell_join() {
+  local -a quoted_args=()
+  local arg
+  for arg in "$@"; do
+    quoted_args+=("$(printf '%q' "$arg")")
+  done
+  printf '%s' "${quoted_args[*]-}"
+}
+
 RUN_WORKDIR_LOCK_DIR=""
 RUN_WORKDIR_LOCK_PID_FILE=""
 

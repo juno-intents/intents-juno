@@ -83,6 +83,7 @@ test_remote_relayer_service_preserves_quoted_args_over_ssh() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" "shell_join() {" "run-testnet-e2e defines shell_join helper used by remote relayer launcher"
   assert_contains "$script_text" "start_remote_relayer_service() {" "run-testnet-e2e defines remote relayer service launcher helper"
   assert_contains "$script_text" 'remote_joined_args="$(shell_join "$@")"' "remote relayer launcher shell-quotes arguments before ssh handoff"
   assert_contains "$script_text" '"bash -lc $(printf '\''%q'\'' "$remote_joined_args")"' "remote relayer launcher executes quoted command via remote bash -lc"
