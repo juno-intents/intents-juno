@@ -468,39 +468,62 @@ juno_wait_operation_txid() {
   local opid="$4"
   local deadline_epoch="$5"
   local resp status txid err_msg now op_json op_list_params
+  local op_result_resp op_result_json op_result_status
+  local op_missing_warned missing_from_status
   local op_missing_since_epoch op_missing_grace_seconds
   op_list_params="$(jq -cn --arg opid "$opid" '[[ $opid ]]')"
   op_missing_grace_seconds=120
   op_missing_since_epoch="$(date +%s)"
+  op_missing_warned="false"
 
   while true; do
     now="$(date +%s)"
     if (( now >= deadline_epoch )); then
       die "timed out waiting for juno operation result opid=$opid"
     fi
+
+    missing_from_status="false"
     resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationstatus" "$op_list_params" || true)"
     if [[ -z "$resp" || "$resp" == "null" ]]; then
+      missing_from_status="true"
+    elif [[ "$(jq -r 'type' <<<"$resp")" != "array" ]]; then
+      missing_from_status="true"
+    elif [[ "$(jq -r 'length' <<<"$resp")" == "0" ]]; then
+      missing_from_status="true"
+    fi
+
+    if [[ "$missing_from_status" == "true" ]]; then
       if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
-        die "operation missing from wallet queue for too long opid=$opid"
+        op_result_resp="$(juno_rpc_result "$rpc_url" "$rpc_user" "$rpc_pass" "z_getoperationresult" "$op_list_params" || true)"
+        if [[ -n "$op_result_resp" && "$op_result_resp" != "null" && "$(jq -r 'type' <<<"$op_result_resp")" == "array" && "$(jq -r 'length' <<<"$op_result_resp")" != "0" ]]; then
+          op_result_json="$(jq -c '.[0] // empty' <<<"$op_result_resp" 2>/dev/null || true)"
+          if [[ -n "$op_result_json" && "$op_result_json" != "null" ]]; then
+            op_result_status="$(jq -r '.status // empty' <<<"$op_result_json")"
+            case "$op_result_status" in
+              success)
+                txid="$(jq -r '.result.txid // empty' <<<"$op_result_json")"
+                [[ -n "$txid" ]] || die "operation succeeded without txid opid=$opid"
+                trim_txid "$txid"
+                return 0
+                ;;
+              failed)
+                err_msg="$(jq -r '.error.message // "unknown error"' <<<"$op_result_json")"
+                die "operation failed opid=$opid error=$err_msg"
+                ;;
+            esac
+          fi
+        fi
+        if [[ "$op_missing_warned" != "true" ]]; then
+          log "operation temporarily missing from wallet queue; continuing to poll opid=$opid"
+          op_missing_warned="true"
+        fi
       fi
       sleep 2
       continue
     fi
-    if [[ "$(jq -r 'type' <<<"$resp")" != "array" ]]; then
-      if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
-        die "operation missing from wallet queue for too long opid=$opid"
-      fi
-      sleep 2
-      continue
-    fi
-    if [[ "$(jq -r 'length' <<<"$resp")" == "0" ]]; then
-      if (( now - op_missing_since_epoch >= op_missing_grace_seconds )); then
-        die "operation missing from wallet queue for too long opid=$opid"
-      fi
-      sleep 2
-      continue
-    fi
+
     op_missing_since_epoch="$now"
+    op_missing_warned="false"
     op_json="$(jq -c '.[0] // empty' <<<"$resp" 2>/dev/null || true)"
     if [[ -z "$op_json" || "$op_json" == "null" ]]; then
       sleep 2

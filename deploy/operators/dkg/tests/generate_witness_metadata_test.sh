@@ -95,19 +95,23 @@ test_seed_phrase_normalization_handles_wrapped_seed_files() {
   fi
 }
 
-test_operation_status_poll_targets_specific_opid_and_fails_fast_when_missing() {
+test_operation_status_poll_targets_specific_opid_and_uses_result_fallback_when_missing() {
   local script_text
   script_text="$(cat "$GEN_SCRIPT")"
   if [[ "$script_text" != *'"z_getoperationstatus"'* ]]; then
     printf 'expected juno_wait_operation_txid to poll z_getoperationstatus for the specific opid\n' >&2
     exit 1
   fi
+  if [[ "$script_text" != *'"z_getoperationresult"'* ]]; then
+    printf 'expected juno_wait_operation_txid to fallback to z_getoperationresult when status queue entry disappears\n' >&2
+    exit 1
+  fi
   if [[ "$script_text" != *'--arg opid "$opid" '\''[[ $opid ]]'\'''* ]]; then
     printf 'expected juno_wait_operation_txid to call operation status/result with [[opid]] params\n' >&2
     exit 1
   fi
-  if [[ "$script_text" != *"operation missing from wallet queue for too long"* ]]; then
-    printf 'expected juno_wait_operation_txid to fail fast when opid disappears after node restart\n' >&2
+  if [[ "$script_text" != *"operation temporarily missing from wallet queue; continuing to poll"* ]]; then
+    printf 'expected juno_wait_operation_txid to keep polling when opid disappears from status queue temporarily\n' >&2
     exit 1
   fi
 }
@@ -289,7 +293,7 @@ main() {
   test_script_supports_pre_upsert_scan_urls_argument
   test_script_supports_explicit_recipient_and_ufvk_inputs
   test_seed_phrase_normalization_handles_wrapped_seed_files
-  test_operation_status_poll_targets_specific_opid_and_fails_fast_when_missing
+  test_operation_status_poll_targets_specific_opid_and_uses_result_fallback_when_missing
   test_witness_generation_serializes_orchard_spends
   test_witness_generation_requires_bridge_domain_memo_inputs
   test_witness_generation_submits_explicit_hex_memos

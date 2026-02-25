@@ -1505,6 +1505,7 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   local base_chain_id="$5"
   local operator_address="$6"
   local operator_signer_key_hex="$7"
+  local aws_region="$8"
 
   operator_address="$(normalize_hex_prefixed "$operator_address" || true)"
   [[ "$operator_address" =~ ^0x[0-9a-f]{40}$ ]] || \
@@ -1512,6 +1513,13 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   operator_signer_key_hex="$(normalize_hex_prefixed "$operator_signer_key_hex" || true)"
   [[ "$operator_signer_key_hex" =~ ^0x[0-9a-f]{64}$ ]] || \
     die "checkpoint bridge config update requires valid operator signer key for host=$host"
+  if [[ -n "$aws_region" ]]; then
+    aws_region="$(trim "$aws_region")"
+  fi
+  if [[ -z "$aws_region" ]]; then
+    aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
+  fi
+  [[ -n "$aws_region" ]] || die "checkpoint bridge config update requires resolvable aws region for host=$host"
 
   local remote_script
   remote_script="$(cat <<'EOF'
@@ -1520,6 +1528,7 @@ bridge_address="$1"
 base_chain_id="$2"
 operator_address="$3"
 operator_signer_key_hex="$4"
+aws_region="$5"
 
 [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
   echo "operator address must be 20-byte hex: $operator_address" >&2
@@ -1553,6 +1562,63 @@ fi
   exit 1
 }
 
+normalize_region() {
+  local value="${1:-}"
+  value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | xargs)"
+  if [[ "$value" =~ ^([a-z0-9-]+-[0-9])[a-z]$ ]]; then
+    value="${BASH_REMATCH[1]}"
+  fi
+  printf '%s' "$value"
+}
+
+resolve_aws_region() {
+  local candidate="${1:-}"
+  candidate="$(normalize_region "$candidate")"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  candidate="$(normalize_region "$(awk -F= '/^AWS_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(normalize_region "$(awk -F= '/^AWS_DEFAULT_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  candidate="$(normalize_region "${AWS_REGION:-}")"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+  candidate="$(normalize_region "${AWS_DEFAULT_REGION:-}")"
+  if [[ -n "$candidate" ]]; then
+    printf '%s' "$candidate"
+    return 0
+  fi
+
+  if command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    local token identity_doc imds_region
+    token="$(curl -fsS --max-time 2 -X PUT 'http://169.254.169.254/latest/api/token' -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600' || true)"
+    if [[ -n "$token" ]]; then
+      identity_doc="$(curl -fsS --max-time 2 -H "X-aws-ec2-metadata-token: $token" 'http://169.254.169.254/latest/dynamic/instance-identity/document' || true)"
+      if [[ -n "$identity_doc" ]]; then
+        imds_region="$(jq -r '.region // empty' <<<"$identity_doc" 2>/dev/null || true)"
+        candidate="$(normalize_region "$imds_region")"
+        if [[ -n "$candidate" ]]; then
+          printf '%s' "$candidate"
+          return 0
+        fi
+      fi
+    fi
+  fi
+  return 1
+}
+
 set_env_value() {
   local file="$1"
   local key="$2"
@@ -1580,6 +1646,12 @@ set_env_value() {
   install -m 0600 "$tmp" "$file"
   rm -f "$tmp"
 }
+
+aws_region="$(resolve_aws_region "$aws_region" || true)"
+if [[ -z "$aws_region" ]]; then
+  echo "failed to resolve aws region for checkpoint aggregator s3 persistence" >&2
+  exit 1
+fi
 
 tmp_json="$(mktemp)"
 tmp_next="$(mktemp)"
@@ -1612,6 +1684,8 @@ sudo chown "$(id -u):$(id -g)" "$tmp_env"
 chmod 600 "$tmp_env"
 set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"
 set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"
+set_env_value "$tmp_env" AWS_REGION "$aws_region"
+set_env_value "$tmp_env" AWS_DEFAULT_REGION "$aws_region"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_LEASE_NAME "$checkpoint_signer_lease_name"
@@ -1694,7 +1768,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex")" <<<"$remote_script"
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region")" <<<"$remote_script"
 }
 
 endpoint_host_port() {
@@ -4261,6 +4335,8 @@ command_run() {
       (( ${#checkpoint_operator_key_files[@]} == ${#relayer_runtime_operator_hosts[@]} )) || \
         die "checkpoint key list length does not match dkg summary operators: hosts=${#relayer_runtime_operator_hosts[@]} keys=${#checkpoint_operator_key_files[@]}"
       stage_checkpoint_bridge_config_update_target="${#relayer_runtime_operator_hosts[@]}"
+      local checkpoint_runtime_aws_region
+      checkpoint_runtime_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
 
       local checkpoint_host checkpoint_operator_id checkpoint_operator_key_file checkpoint_operator_key_hex checkpoint_idx
       for ((checkpoint_idx = 0; checkpoint_idx < ${#relayer_runtime_operator_hosts[@]}; checkpoint_idx++)); do
@@ -4280,7 +4356,8 @@ command_run() {
           "$deployed_bridge_address" \
           "$base_chain_id" \
           "$checkpoint_operator_id" \
-          "$checkpoint_operator_key_hex" || \
+          "$checkpoint_operator_key_hex" \
+          "$checkpoint_runtime_aws_region" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done

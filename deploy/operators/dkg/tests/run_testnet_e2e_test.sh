@@ -277,6 +277,8 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" '"$checkpoint_operator_key_hex"' "checkpoint bridge config updater forwards operator signer key into remote checkpoint config update"
   assert_contains "$script_text" 'set_env_value "$tmp_env" BRIDGE_ADDRESS "$bridge_address"' "checkpoint bridge config updater writes BRIDGE_ADDRESS into operator stack env"
   assert_contains "$script_text" 'set_env_value "$tmp_env" BASE_CHAIN_ID "$base_chain_id"' "checkpoint bridge config updater writes BASE_CHAIN_ID into operator stack env"
+  assert_contains "$script_text" 'set_env_value "$tmp_env" AWS_REGION "$aws_region"' "checkpoint bridge config updater writes AWS_REGION into operator stack env"
+  assert_contains "$script_text" 'set_env_value "$tmp_env" AWS_DEFAULT_REGION "$aws_region"' "checkpoint bridge config updater writes AWS_DEFAULT_REGION into operator stack env"
   assert_contains "$script_text" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"' "checkpoint bridge config updater writes operator DKG signer key into operator stack env"
   assert_contains "$script_text" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "checkpoint bridge config updater writes operator DKG address into operator stack env"
   assert_contains "$script_text" 'checkpoint_signer_lease_name="checkpoint-signer-${operator_address#0x}"' "checkpoint bridge config updater derives a per-operator checkpoint signer lease name"
@@ -296,6 +298,9 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'sudo install -m 0755 "$lease_tmp" "$checkpoint_signer_script"' "checkpoint bridge config updater atomically writes checkpoint-signer wrapper after lease insertion"
   assert_contains "$script_text" 'sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator base chain id flag"
   assert_contains "$script_text" 'sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"' "checkpoint bridge config updater rewrites checkpoint-aggregator bridge address flag"
+  assert_contains "$script_text" 'local aws_region="$8"' "checkpoint bridge config updater accepts aws region as explicit input"
+  assert_contains "$script_text" 'resolve_aws_region "$aws_region"' "checkpoint bridge config updater resolves aws region via explicit/env/imds fallback"
+  assert_contains "$script_text" 'die "checkpoint bridge config update requires resolvable aws region for host=$host"' "checkpoint bridge config updater fails fast when aws region cannot be resolved"
 }
 
 test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window() {
