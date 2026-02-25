@@ -288,6 +288,17 @@ test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission() {
   assert_contains "$script_text" "/v1/status/withdrawal/" "live bridge flow checks withdrawal status through bridge-api"
 }
 
+test_live_bridge_flow_retries_transient_bridge_api_write_failures() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "bridge_api_post_json_with_retry() {" "run-testnet-e2e defines retry helper for bridge-api write endpoints"
+  assert_contains "$script_text" "http_status" "bridge-api retry helper captures HTTP status for retry classification"
+  assert_contains "$script_text" "bridge-api write retrying" "bridge-api retry helper logs retry context for transient failures"
+  assert_contains "$script_text" 'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' "deposit submit uses bridge-api retry helper"
+  assert_contains "$script_text" 'bridge_api_post_json_with_retry "${bridge_api_url}/v1/withdrawals/request"' "withdraw request uses bridge-api retry helper"
+}
+
 test_bridge_address_prediction_parses_cast_labeled_output() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -566,6 +577,7 @@ main() {
   test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
+  test_live_bridge_flow_retries_transient_bridge_api_write_failures
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode

@@ -184,6 +184,61 @@ run_with_optional_timeout() {
   "$@"
 }
 
+bridge_api_post_json_with_retry() {
+  local url="$1"
+  local payload="$2"
+  local output_path="$3"
+  local operation_label="$4"
+  local max_attempts="${5:-8}"
+  local retry_sleep_seconds="${6:-3}"
+  local attempt curl_status http_status response_file response_preview
+
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || die "bridge-api retry max attempts must be numeric"
+  (( max_attempts > 0 )) || die "bridge-api retry max attempts must be > 0"
+  [[ "$retry_sleep_seconds" =~ ^[0-9]+$ ]] || die "bridge-api retry sleep seconds must be numeric"
+  (( retry_sleep_seconds >= 0 )) || die "bridge-api retry sleep seconds must be >= 0"
+
+  response_file="$(mktemp)"
+  for attempt in $(seq 1 "$max_attempts"); do
+    : >"$response_file"
+    set +e
+    http_status="$(
+      curl -sS \
+        -o "$response_file" \
+        -w '%{http_code}' \
+        -X POST \
+        -H "Content-Type: application/json" \
+        --data "$payload" \
+        "$url"
+    )"
+    curl_status=$?
+    set -e
+
+    if (( curl_status == 0 )) && [[ "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+      cp "$response_file" "$output_path"
+      rm -f "$response_file"
+      return 0
+    fi
+
+    response_preview="$(tr '\r\n' ' ' <"$response_file" | tr -s ' ' | cut -c1-400)"
+    if (( attempt < max_attempts )) && { (( curl_status != 0 )) || [[ "$http_status" =~ ^5[0-9][0-9]$ ]] || [[ "$http_status" == "429" ]]; }; then
+      log "bridge-api write retrying label=$operation_label attempt=${attempt}/${max_attempts} curl_status=$curl_status http_status=${http_status:-000} response_preview=${response_preview:-<empty>}"
+      sleep "$retry_sleep_seconds"
+      continue
+    fi
+
+    if [[ -s "$response_file" ]]; then
+      cat "$response_file" >&2
+    fi
+    log "bridge-api write failed label=$operation_label attempt=${attempt}/${max_attempts} curl_status=$curl_status http_status=${http_status:-000}"
+    rm -f "$response_file"
+    return 1
+  done
+
+  rm -f "$response_file"
+  return 1
+}
+
 RUN_WORKDIR_LOCK_DIR=""
 RUN_WORKDIR_LOCK_PID_FILE=""
 
@@ -5281,11 +5336,7 @@ command_run() {
             --arg proof_witness_item "0x$run_deposit_witness_hex" \
             '{baseRecipient:$base_recipient,amount:$amount,nonce:$nonce,proofWitnessItem:$proof_witness_item}'
         )"
-        if ! curl -fsS \
-          -X POST \
-          -H "Content-Type: application/json" \
-          --data "$run_deposit_submit_body" \
-          "${bridge_api_url}/v1/deposits/submit" >"$deposit_event_payload"; then
+        if ! bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit" "$run_deposit_submit_body" "$deposit_event_payload" "deposit_submit"; then
           relayer_status=1
         fi
       fi
@@ -5331,11 +5382,7 @@ command_run() {
           --arg recipient_raw_address_hex "$withdraw_recipient_raw_hex" \
           '{amount:$amount,recipientRawAddressHex:$recipient_raw_address_hex}'
       )"
-      if ! curl -fsS \
-        -X POST \
-        -H "Content-Type: application/json" \
-        --data "$withdraw_submit_body" \
-        "${bridge_api_url}/v1/withdrawals/request" >"$withdraw_request_payload"; then
+      if ! bridge_api_post_json_with_retry "${bridge_api_url}/v1/withdrawals/request" "$withdraw_submit_body" "$withdraw_request_payload" "withdraw_request"; then
         relayer_status=1
       fi
     fi
