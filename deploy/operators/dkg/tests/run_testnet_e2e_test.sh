@@ -79,6 +79,15 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
+test_remote_relayer_service_preserves_quoted_args_over_ssh() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "start_remote_relayer_service() {" "run-testnet-e2e defines remote relayer service launcher helper"
+  assert_contains "$script_text" 'remote_joined_args="$(shell_join "$@")"' "remote relayer launcher shell-quotes arguments before ssh handoff"
+  assert_contains "$script_text" '"bash -lc $(printf '\''%q'\'' "$remote_joined_args")"' "remote relayer launcher executes quoted command via remote bash -lc"
+}
+
 test_operator_signer_is_lazy_for_runner_core_flow() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -476,6 +485,7 @@ test_sp1_rpc_defaults_and_validation_target_succinct_network() {
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
+  test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_operator_signer_is_lazy_for_runner_core_flow
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_pool_retries_endpoint_health_before_quorum_failure

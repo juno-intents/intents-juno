@@ -1457,6 +1457,9 @@ start_remote_relayer_service() {
   local ssh_key_file="$3"
   local log_path="$4"
   shift 4
+  local remote_joined_args
+  remote_joined_args="$(shell_join "$@")"
+  [[ -n "$remote_joined_args" ]] || die "remote relayer service command must not be empty (host=$host)"
 
   (
     ssh \
@@ -1467,7 +1470,7 @@ start_remote_relayer_service() {
       -o ServerAliveCountMax=6 \
       -o TCPKeepAlive=yes \
       "$ssh_user@$host" \
-      "$@"
+      "bash -lc $(printf '%q' "$remote_joined_args")"
   ) >"$log_path" 2>&1 &
   printf '%s' "$!"
 }
