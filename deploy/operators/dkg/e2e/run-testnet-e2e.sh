@@ -1492,11 +1492,11 @@ stop_remote_relayer_binaries_on_host() {
   local ssh_user="$2"
   local ssh_key_file="$3"
   local remote_cleanup_cmd
-  remote_cleanup_cmd=$'pkill -f \'/usr/local/bin/base-relayer\' >/dev/null 2>&1 || true\n'
-  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/deposit-relayer\' >/dev/null 2>&1 || true\n'
-  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/withdraw-coordinator\' >/dev/null 2>&1 || true\n'
-  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/withdraw-finalizer\' >/dev/null 2>&1 || true\n'
-  remote_cleanup_cmd+=$'pkill -f \'/usr/local/bin/bridge-api\' >/dev/null 2>&1 || true\n'
+  remote_cleanup_cmd="pkill -f /usr/local/bin/base-relayer >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" pkill -f /usr/local/bin/deposit-relayer >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" pkill -f /usr/local/bin/withdraw-coordinator >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" pkill -f /usr/local/bin/withdraw-finalizer >/dev/null 2>&1 || true;"
+  remote_cleanup_cmd+=" pkill -f /usr/local/bin/bridge-api >/dev/null 2>&1 || true;"
 
   ssh \
     -i "$ssh_key_file" \
@@ -4727,8 +4727,7 @@ command_run() {
         "$relayer_cleanup_host" \
         "$relayer_runtime_operator_ssh_user" \
         "$relayer_runtime_operator_ssh_key_file"; then
-        log "failed to stop stale remote relayer processes host=$relayer_cleanup_host"
-        relayer_status=1
+        log "failed to stop stale remote relayer processes host=$relayer_cleanup_host; continuing with launch"
       fi
     done
 
