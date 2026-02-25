@@ -5048,6 +5048,11 @@ command_run() {
     local run_deposit_action_index_selected=""
     local -a run_deposit_action_indexes=()
     local -a run_deposit_action_indexes_rpc=()
+    local -a run_deposit_scan_urls=()
+    local -a run_deposit_rpc_urls=()
+    local run_deposit_scan_upsert_count=0
+    local run_deposit_scan_backfill_tx_height=""
+    local run_deposit_scan_backfill_from_height=""
     local run_deposit_action_candidate
 
     [[ -n "$witness_funder_source_address" ]] || relayer_status=1
@@ -5103,6 +5108,58 @@ command_run() {
     fi
 
     if (( relayer_status == 0 )); then
+      local run_deposit_scan_idx run_deposit_scan_url run_deposit_rpc_url
+      if (( ${#witness_healthy_scan_urls[@]} > 0 )); then
+        run_deposit_scan_urls=("${witness_healthy_scan_urls[@]}")
+      else
+        run_deposit_scan_urls=("$sp1_witness_juno_scan_url")
+      fi
+      if (( ${#witness_healthy_rpc_urls[@]} > 0 )); then
+        run_deposit_rpc_urls=("${witness_healthy_rpc_urls[@]}")
+      else
+        run_deposit_rpc_urls=("$sp1_witness_juno_rpc_url")
+      fi
+      while (( ${#run_deposit_rpc_urls[@]} < ${#run_deposit_scan_urls[@]} )); do
+        run_deposit_rpc_urls+=("$sp1_witness_juno_rpc_url")
+      done
+
+      run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"
+      for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
+        run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
+        if ! witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$sp1_witness_recipient_ufvk"; then
+          log "run deposit witness wallet upsert failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id (continuing)"
+        fi
+      done
+
+      run_deposit_scan_backfill_tx_height="$(
+        witness_rpc_tx_height \
+          "$sp1_witness_juno_rpc_url" \
+          "$withdraw_coordinator_juno_rpc_user_value" \
+          "$withdraw_coordinator_juno_rpc_pass_value" \
+          "$run_deposit_juno_tx_hash" || true
+      )"
+      if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
+        run_deposit_scan_backfill_from_height="$run_deposit_scan_backfill_tx_height"
+        if (( run_deposit_scan_backfill_from_height > 32 )); then
+          run_deposit_scan_backfill_from_height=$((run_deposit_scan_backfill_from_height - 32))
+        else
+          run_deposit_scan_backfill_from_height=0
+        fi
+        for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
+          run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
+          if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"; then
+            log "run deposit witness backfill best-effort failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id from_height=$run_deposit_scan_backfill_from_height"
+          fi
+        done
+      else
+        log "run deposit witness backfill tx height unknown; skipping proactive backfill txid=$run_deposit_juno_tx_hash"
+      fi
+    fi
+
+    if (( relayer_status == 0 )); then
+      local run_deposit_scan_idx run_deposit_scan_url run_deposit_rpc_url
+      local run_deposit_selected_scan_url=""
+      local run_deposit_indexed_wallet_id=""
       run_deposit_witness_file="$workdir/reports/witness/run-deposit.witness.bin"
       run_deposit_extract_json="$workdir/reports/witness/run-deposit-witness.json"
       run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
@@ -5110,37 +5167,56 @@ command_run() {
       while true; do
         local run_deposit_note_pending="false"
         run_deposit_extract_ok="false"
-        for run_deposit_action_candidate in "${run_deposit_action_indexes[@]}"; do
-          rm -f "$run_deposit_extract_json"
-          if (
-            cd "$REPO_ROOT"
-            go run ./cmd/juno-witness-extract deposit \
-              --juno-scan-url "$sp1_witness_juno_scan_url" \
-              --wallet-id "$withdraw_coordinator_juno_wallet_id" \
-              --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
-              --juno-rpc-url "$sp1_witness_juno_rpc_url" \
-              --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
-              --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
-              --txid "$run_deposit_juno_tx_hash" \
-              --action-index "$run_deposit_action_candidate" \
-              --output-witness-item-file "$run_deposit_witness_file" \
-              >"$run_deposit_extract_json" 2>"$run_deposit_extract_error_file"
-          ); then
-            run_deposit_extract_ok="true"
-            run_deposit_action_index_selected="$run_deposit_action_candidate"
-            rm -f "$run_deposit_extract_error_file"
+        for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < ${#run_deposit_scan_urls[@]}; run_deposit_scan_idx++)); do
+          run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
+          run_deposit_rpc_url="${run_deposit_rpc_urls[$run_deposit_scan_idx]:-$sp1_witness_juno_rpc_url}"
+          for run_deposit_action_candidate in "${run_deposit_action_indexes[@]}"; do
+            rm -f "$run_deposit_extract_json"
+            if (
+              cd "$REPO_ROOT"
+              go run ./cmd/juno-witness-extract deposit \
+                --juno-scan-url "$run_deposit_scan_url" \
+                --wallet-id "$withdraw_coordinator_juno_wallet_id" \
+                --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
+                --juno-rpc-url "$run_deposit_rpc_url" \
+                --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+                --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
+                --txid "$run_deposit_juno_tx_hash" \
+                --action-index "$run_deposit_action_candidate" \
+                --output-witness-item-file "$run_deposit_witness_file" \
+                >"$run_deposit_extract_json" 2>"$run_deposit_extract_error_file"
+            ); then
+              run_deposit_extract_ok="true"
+              run_deposit_action_index_selected="$run_deposit_action_candidate"
+              run_deposit_selected_scan_url="$run_deposit_scan_url"
+              rm -f "$run_deposit_extract_error_file"
+              break
+            fi
+            run_deposit_extract_last_error="$(tail -n 1 "$run_deposit_extract_error_file" 2>/dev/null | tr -d '\r\n')"
+            if grep -qi "note not found" "$run_deposit_extract_error_file"; then
+              run_deposit_note_pending="true"
+            fi
+          done
+          if [[ "$run_deposit_extract_ok" == "true" ]]; then
             break
           fi
-          run_deposit_extract_last_error="$(tail -n 1 "$run_deposit_extract_error_file" 2>/dev/null | tr -d '\r\n')"
-          if grep -qi "note not found" "$run_deposit_extract_error_file"; then
-            run_deposit_note_pending="true"
+          if [[ "$run_deposit_note_pending" == "true" ]]; then
+            run_deposit_indexed_wallet_id="$(
+              witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$withdraw_coordinator_juno_wallet_id" || true
+            )"
+            if [[ -n "$run_deposit_indexed_wallet_id" && "$run_deposit_indexed_wallet_id" != "$withdraw_coordinator_juno_wallet_id" ]]; then
+              log "run deposit switching witness wallet id during extraction old_wallet_id=$withdraw_coordinator_juno_wallet_id indexed_wallet_id=$run_deposit_indexed_wallet_id txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_scan_url"
+              withdraw_coordinator_juno_wallet_id="$run_deposit_indexed_wallet_id"
+              run_deposit_extract_wait_logged="false"
+              continue
+            fi
           fi
         done
         if [[ "$run_deposit_extract_ok" == "true" ]]; then
           break
         fi
         if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_extract_wait_logged" != "true" ]]; then
-          log "run deposit witness note pending wallet=$withdraw_coordinator_juno_wallet_id txid=$run_deposit_juno_tx_hash action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
+          log "run deposit witness note pending wallet=$withdraw_coordinator_juno_wallet_id txid=$run_deposit_juno_tx_hash scan_urls=$(IFS=,; printf '%s' "${run_deposit_scan_urls[*]}") action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
           run_deposit_extract_wait_logged="true"
         fi
         if (( $(date +%s) >= run_deposit_extract_deadline_epoch )); then
@@ -5180,7 +5256,7 @@ command_run() {
       [[ "$run_deposit_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
       [[ "$run_deposit_amount" =~ ^[0-9]+$ ]] || relayer_status=1
       if [[ "$run_deposit_extract_ok" == "true" && -n "$run_deposit_action_index_selected" ]]; then
-        log "run deposit witness extracted action_index=$run_deposit_action_index_selected txid=$run_deposit_juno_tx_hash"
+        log "run deposit witness extracted action_index=$run_deposit_action_index_selected txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_selected_scan_url"
       fi
     fi
 

@@ -230,6 +230,22 @@ test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts()
   assert_contains "$script_text" "direct-cli witness backfill best-effort failed" "direct-cli witness extraction path also backfills wallet history before note extraction"
 }
 
+test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "run_deposit_scan_urls=()" "relayer deposit extraction initializes a scan endpoint pool"
+  assert_contains "$script_text" "run_deposit_rpc_urls=()" "relayer deposit extraction initializes an rpc endpoint pool"
+  assert_contains "$script_text" 'run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"' "relayer deposit extraction computes upsert/backfill fanout from scan pool size"
+  assert_contains "$script_text" 'witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$sp1_witness_recipient_ufvk"' "relayer deposit extraction upserts witness wallet across scan endpoints before extraction"
+  assert_contains "$script_text" 'witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"' "relayer deposit extraction proactively backfills witness wallet history from tx-confirmation height"
+  assert_contains "$script_text" "run deposit witness backfill tx height unknown; skipping proactive backfill" "relayer deposit extraction logs missing tx-height fallback"
+  assert_contains "$script_text" "run deposit witness backfill best-effort failed for scan_url=" "relayer deposit extraction tolerates endpoint-specific backfill failures"
+  assert_contains "$script_text" 'witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$withdraw_coordinator_juno_wallet_id"' "relayer deposit extraction reuses indexed wallet ids when generated wallet id is not visible yet"
+  assert_contains "$script_text" "run deposit switching witness wallet id during extraction" "relayer deposit extraction logs indexed-wallet fallback transitions"
+  assert_contains "$script_text" "run deposit witness note pending wallet=" "relayer deposit extraction still surfaces note-pending waits with context"
+}
+
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -535,6 +551,7 @@ main() {
   test_witness_extraction_reuses_existing_indexed_wallet_id
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
+  test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
   test_bridge_address_prediction_parses_cast_labeled_output
