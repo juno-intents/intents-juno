@@ -962,6 +962,7 @@ wait_for_shared_connectivity_from_runner() {
   local shared_postgres_host="$4"
   local shared_postgres_port="$5"
   local shared_kafka_brokers="$6"
+  local shared_ipfs_api_url="$7"
 
   local -a ssh_opts=(
     -i "$ssh_private_key"
@@ -977,7 +978,8 @@ wait_for_shared_connectivity_from_runner() {
     build_runner_shared_probe_script \
       "$shared_postgres_host" \
       "$shared_postgres_port" \
-      "$shared_kafka_brokers"
+      "$shared_kafka_brokers" \
+      "$shared_ipfs_api_url"
   )"
 
   local attempt
@@ -992,6 +994,102 @@ wait_for_shared_connectivity_from_runner() {
   done
 
   return 1
+}
+
+parse_url_host_port() {
+  local raw_url="$1"
+  local scheme_stripped host_port host port
+
+  scheme_stripped="${raw_url#*://}"
+  host_port="${scheme_stripped%%/*}"
+  host="${host_port%%:*}"
+  port="${host_port##*:}"
+
+  if [[ -z "$host" ]]; then
+    return 1
+  fi
+  if [[ "$host" == "$port" ]]; then
+    case "$raw_url" in
+      https://*) port="443" ;;
+      *) port="80" ;;
+    esac
+  fi
+
+  [[ "$port" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\t%s\n' "$host" "$port"
+}
+
+resolve_shared_ipfs_direct_api_url() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local shared_ipfs_api_url="$3"
+  local scheme="http"
+  case "$shared_ipfs_api_url" in
+    https://*) scheme="https" ;;
+    http://*) scheme="http" ;;
+  esac
+
+  local host port
+  if ! IFS=$'\t' read -r host port <<<"$(parse_url_host_port "$shared_ipfs_api_url")"; then
+    return 1
+  fi
+
+  aws_env_args "$aws_profile" "$aws_region"
+
+  local lb_arn
+  lb_arn="$(
+    env "${AWS_ENV_ARGS[@]}" aws elbv2 describe-load-balancers \
+      --region "$aws_region" \
+      --query "LoadBalancers[?DNSName==\`$host\`].LoadBalancerArn | [0]" \
+      --output text 2>/dev/null || true
+  )"
+  [[ -n "$lb_arn" && "$lb_arn" != "None" ]] || return 1
+
+  local listener_arn
+  listener_arn="$(
+    env "${AWS_ENV_ARGS[@]}" aws elbv2 describe-listeners \
+      --region "$aws_region" \
+      --load-balancer-arn "$lb_arn" \
+      --query "Listeners[?Port==\`$port\`].ListenerArn | [0]" \
+      --output text 2>/dev/null || true
+  )"
+  [[ -n "$listener_arn" && "$listener_arn" != "None" ]] || return 1
+
+  local target_group_arn
+  target_group_arn="$(
+    env "${AWS_ENV_ARGS[@]}" aws elbv2 describe-listeners \
+      --region "$aws_region" \
+      --listener-arns "$listener_arn" \
+      --query 'Listeners[0].DefaultActions[0].TargetGroupArn' \
+      --output text 2>/dev/null || true
+  )"
+  [[ -n "$target_group_arn" && "$target_group_arn" != "None" ]] || return 1
+
+  local target_id
+  target_id="$(
+    env "${AWS_ENV_ARGS[@]}" aws elbv2 describe-target-health \
+      --region "$aws_region" \
+      --target-group-arn "$target_group_arn" \
+      --query 'TargetHealthDescriptions[?TargetHealth.State==`healthy`].Target.Id | [0]' \
+      --output text 2>/dev/null || true
+  )"
+  [[ -n "$target_id" && "$target_id" != "None" ]] || return 1
+
+  local direct_host
+  if [[ "$target_id" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    direct_host="$target_id"
+  else
+    direct_host="$(
+      env "${AWS_ENV_ARGS[@]}" aws ec2 describe-instances \
+        --region "$aws_region" \
+        --instance-ids "$target_id" \
+        --query 'Reservations[0].Instances[0].PrivateIpAddress' \
+        --output text 2>/dev/null || true
+    )"
+  fi
+  [[ -n "$direct_host" && "$direct_host" != "None" ]] || return 1
+
+  printf '%s://%s:%s' "$scheme" "$direct_host" "$port"
 }
 
 validate_shared_services_dr_readiness() {
@@ -1389,6 +1487,7 @@ build_runner_shared_probe_script() {
   local shared_postgres_host="$1"
   local shared_postgres_port="$2"
   local shared_kafka_brokers="$3"
+  local shared_ipfs_api_url="$4"
 
   cat <<EOF
 set -euo pipefail
@@ -1398,12 +1497,13 @@ if [[ \${#broker_list[@]} -eq 0 ]]; then
   exit 1
 fi
 
-for attempt in \$(seq 1 120); do
-  postgres_ready="false"
-  kafka_ready="true"
-  if timeout 2 bash -lc '</dev/tcp/${shared_postgres_host}/${shared_postgres_port}' >/dev/null 2>&1; then
-    postgres_ready="true"
-  fi
+  for attempt in \$(seq 1 120); do
+    postgres_ready="false"
+    kafka_ready="true"
+    ipfs_ready="true"
+    if timeout 2 bash -lc '</dev/tcp/${shared_postgres_host}/${shared_postgres_port}' >/dev/null 2>&1; then
+      postgres_ready="true"
+    fi
 
   for broker in "\${broker_list[@]}"; do
     broker="\${broker//[[:space:]]/}"
@@ -1418,9 +1518,15 @@ for attempt in \$(seq 1 120); do
       kafka_ready="false"
       break
     fi
-  done
+    done
 
-  if [[ "\$postgres_ready" == "true" && "\$kafka_ready" == "true" ]]; then
+  if [[ -n "${shared_ipfs_api_url}" ]]; then
+    if ! curl -fsS --max-time 3 -X POST "${shared_ipfs_api_url%/}/api/v0/version" >/dev/null 2>&1; then
+      ipfs_ready="false"
+    fi
+  fi
+
+  if [[ "\$postgres_ready" == "true" && "\$kafka_ready" == "true" && "\$ipfs_ready" == "true" ]]; then
     echo "shared services reachable from runner"
     exit 0
   fi
@@ -1429,7 +1535,7 @@ for attempt in \$(seq 1 120); do
   fi
 done
 
-echo "timed out waiting for shared services connectivity from runner (postgres=${shared_postgres_host}:${shared_postgres_port}, kafka=${shared_kafka_brokers})" >&2
+echo "timed out waiting for shared services connectivity from runner (postgres=${shared_postgres_host}:${shared_postgres_port}, kafka=${shared_kafka_brokers}, ipfs=${shared_ipfs_api_url})" >&2
 exit 1
 EOF
 }
@@ -3532,13 +3638,37 @@ command_run() {
   fi
   if [[ "$with_shared_services" == "true" ]]; then
     log "waiting for shared services connectivity from runner"
-    wait_for_shared_connectivity_from_runner \
+    if ! wait_for_shared_connectivity_from_runner \
       "$ssh_key_private" \
       "$runner_ssh_user" \
       "$runner_public_ip" \
       "$shared_postgres_endpoint" \
       "$shared_postgres_port" \
-      "$shared_kafka_bootstrap_brokers"
+      "$shared_kafka_bootstrap_brokers" \
+      "$shared_ipfs_api_url"; then
+      local shared_ipfs_api_direct_url=""
+      shared_ipfs_api_direct_url="$(
+        resolve_shared_ipfs_direct_api_url \
+          "$aws_profile" \
+          "$aws_region" \
+          "$shared_ipfs_api_url" || true
+      )"
+      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url" ]]; then
+        log "shared services connectivity via shared IPFS NLB failed; retrying runner probe with direct IPFS endpoint=$shared_ipfs_api_direct_url"
+        wait_for_shared_connectivity_from_runner \
+          "$ssh_key_private" \
+          "$runner_ssh_user" \
+          "$runner_public_ip" \
+          "$shared_postgres_endpoint" \
+          "$shared_postgres_port" \
+          "$shared_kafka_bootstrap_brokers" \
+          "$shared_ipfs_api_direct_url" || \
+          die "shared services unreachable from runner after direct IPFS fallback (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs_primary=${shared_ipfs_api_url}, ipfs_direct=${shared_ipfs_api_direct_url})"
+        shared_ipfs_api_url="$shared_ipfs_api_direct_url"
+      else
+        die "shared services unreachable from runner (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs=${shared_ipfs_api_url})"
+      fi
+    fi
 
     local shared_postgres_dsn shared_kafka_brokers
     log "assembling shared service remote args"

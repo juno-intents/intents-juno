@@ -77,13 +77,16 @@ test_runner_shared_probe_script_supports_managed_endpoints() {
     build_runner_shared_probe_script \
       "juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com" \
       "5432" \
-      "b-1.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094,b-2.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094"
+      "b-1.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094,b-2.juno-live-e2e.kafka.us-east-1.amazonaws.com:9094" \
+      "http://juno-live-e2e-ipfs.elb.us-east-1.amazonaws.com:5001"
   )"
 
   assert_contains "$script_text" "timeout 2 bash -lc '</dev/tcp/juno-live-e2e.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com/5432'" "aurora readiness check"
   assert_contains "$script_text" "IFS=',' read -r -a broker_list <<<" "broker split"
   assert_contains "$script_text" "for broker in \"\${broker_list[@]}\"; do" "broker iteration"
   assert_contains "$script_text" "timeout 2 bash -lc \"</dev/tcp/\${broker_host}/\${broker_port}\"" "broker tcp checks"
+  assert_contains "$script_text" 'curl -fsS --max-time 3 -X POST "http://juno-live-e2e-ipfs.elb.us-east-1.amazonaws.com:5001/api/v0/version"' "ipfs api readiness check"
+  assert_contains "$script_text" "ipfs_ready" "shared probe tracks ipfs readiness state"
   assert_not_contains "$script_text" "intents-shared-postgres" "no docker postgres container bootstrap"
   assert_not_contains "$script_text" "intents-shared-kafka" "no docker kafka container bootstrap"
 }
@@ -375,6 +378,13 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_not_contains "$wrapper_script_text" "shared connectivity reported ready despite ssh exit status" "no ssh fallback for managed shared stack"
   assert_contains "$wrapper_script_text" "wait_for_shared_connectivity_from_runner" "runner-to-shared readiness gate"
   assert_contains "$wrapper_script_text" "if ssh \"\${ssh_opts[@]}\" \"\$ssh_user@\$ssh_host\" 'bash -s' <<<\"\$remote_script\"; then" "shared connectivity probe executes remote script via stdin for reliable ssh exit status"
+  assert_contains "$wrapper_script_text" "parse_url_host_port()" "aws wrapper defines shared url host/port parser helper"
+  assert_contains "$wrapper_script_text" "resolve_shared_ipfs_direct_api_url()" "aws wrapper defines direct ipfs endpoint resolver for nlb fallback"
+  assert_contains "$wrapper_script_text" 'LoadBalancers[?DNSName==\`$host\`].LoadBalancerArn | [0]' "aws wrapper resolves nlb arn from shared ipfs dns name"
+  assert_contains "$wrapper_script_text" 'TargetHealthDescriptions[?TargetHealth.State==`healthy`].Target.Id | [0]' "aws wrapper selects healthy ipfs target for direct fallback"
+  assert_contains "$wrapper_script_text" "shared services connectivity via shared IPFS NLB failed; retrying runner probe with direct IPFS endpoint=" "aws wrapper logs direct ipfs fallback when nlb probe fails"
+  assert_contains "$wrapper_script_text" 'timed out waiting for shared services connectivity from runner (postgres=${shared_postgres_host}:${shared_postgres_port}, kafka=${shared_kafka_brokers}, ipfs=${shared_ipfs_api_url})' "shared connectivity probe timeout includes ipfs endpoint context"
+  assert_contains "$wrapper_script_text" 'curl -fsS --max-time 3 -X POST "${shared_ipfs_api_url%/}/api/v0/version"' "shared connectivity probe checks ipfs api version endpoint"
   assert_contains "$wrapper_script_text" "tss-host restart deferred until hydrator config has been staged" "aws wrapper defers tss-host restart until hydrator input staging"
   assert_contains "$wrapper_script_text" "staging hydrator config and restarting operator stack services on op" "aws wrapper stages hydrator config per operator"
   assert_contains "$wrapper_script_text" "default_config_json_path=\"/etc/intents-juno/operator-stack-config.json\"" "aws wrapper stages hydrator json to operator stack config path"
