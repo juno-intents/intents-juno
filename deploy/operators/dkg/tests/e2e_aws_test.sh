@@ -1282,8 +1282,9 @@ test_aws_wrapper_supports_resume_without_terraform_apply() {
   assert_contains "$wrapper_script_text" "--skip-terraform-apply)" "aws wrapper parses skip-terraform-apply run option"
   assert_contains "$wrapper_script_text" "--skip-terraform-apply requires --skip-distributed-dkg" "aws wrapper validates skip-terraform-apply requires distributed dkg skip"
   assert_contains "$wrapper_script_text" "--skip-terraform-apply requires existing terraform tfvars and state in workdir infra/" "aws wrapper validates resume artifacts for skip-terraform-apply"
-  assert_contains "$wrapper_script_text" "resume mode: skipping terraform apply; using existing terraform state outputs" "aws wrapper logs skip-terraform-apply activation"
-  assert_contains "$wrapper_script_text" "resume mode: initializing terraform plugins for existing state outputs" "aws wrapper initializes terraform plugins before output reads in skip-terraform-apply mode"
+  assert_contains "$wrapper_script_text" "terraform_refresh_live_e2e()" "aws wrapper defines terraform refresh-only helper"
+  assert_contains "$wrapper_script_text" "resume mode: skipping terraform apply; refreshing existing terraform state outputs" "aws wrapper logs skip-terraform-apply activation"
+  assert_contains "$wrapper_script_text" "terraform refresh-only apply (region=\$aws_region state=\$state_file)" "aws wrapper refreshes terraform state outputs before remote run in skip-terraform-apply mode"
   assert_contains "$wrapper_script_text" "if [[ \"\$skip_terraform_apply\" != \"true\" ]]; then" "aws wrapper gates terraform apply behind skip-terraform-apply"
 }
 

@@ -438,6 +438,17 @@ test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario() {
   assert_contains "$script_text" "skipping direct-cli user proof scenario for stop-after-stage=checkpoint_validated" "checkpoint stop-stage logs direct-cli proof skip reason"
 }
 
+test_checkpoint_stop_stage_with_existing_summary_does_not_require_bridge_proof_inputs() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local require_bridge_proof_inputs="true"' "bridge proof/deploy input validation tracks stage-aware requirement gate"
+  assert_contains "$script_text" 'if [[ -n "$existing_bridge_summary_path" && "$stop_after_stage" != "full" ]]; then' "bridge proof/deploy input validation gate drops hard requirements for pre-full stop stages when reusing existing summary"
+  assert_contains "$script_text" 'require_bridge_proof_inputs="false"' "bridge proof/deploy input validation gate can be disabled for checkpoint canary runs"
+  assert_contains "$script_text" "skipping bridge proof/deploy input validation for stop-after-stage=" "checkpoint canary logs when bridge proof/deploy input validation is intentionally skipped"
+  assert_contains "$script_text" 'if [[ "$require_bridge_proof_inputs" == "true" ]]; then' "bridge proof/deploy input requirements remain enforced for full runs"
+}
+
 test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -485,6 +496,7 @@ main() {
   test_shared_ecs_rollout_retries_transient_unstable_services
   test_stop_after_stage_emits_stage_control_and_stops_cleanly
   test_checkpoint_stop_stage_skips_direct_cli_user_proof_scenario
+  test_checkpoint_stop_stage_with_existing_summary_does_not_require_bridge_proof_inputs
   test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only
   test_sp1_rpc_defaults_and_validation_target_succinct_network
 }

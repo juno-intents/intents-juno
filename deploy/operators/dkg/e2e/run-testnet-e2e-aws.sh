@@ -736,6 +736,27 @@ terraform_apply_live_e2e() {
       -var-file="$tfvars_file"
 }
 
+terraform_refresh_live_e2e() {
+  local terraform_dir="$1"
+  local state_file="$2"
+  local tfvars_file="$3"
+  local aws_profile="$4"
+  local aws_region="$5"
+
+  terraform_env_args "$aws_profile" "$aws_region"
+  run_with_retry "terraform init (region=$aws_region state=$state_file)" 3 5 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+  run_with_retry "terraform refresh-only apply (region=$aws_region state=$state_file)" 3 10 \
+    env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform \
+      -chdir="$terraform_dir" \
+      apply \
+      -refresh-only \
+      -input=false \
+      -auto-approve \
+      -state="$state_file" \
+      -var-file="$tfvars_file"
+}
+
 terraform_destroy_live_e2e() {
   local terraform_dir="$1"
   local state_file="$2"
@@ -3014,15 +3035,10 @@ command_run() {
       terraform_apply_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$aws_dr_region"
     fi
   else
-    log "resume mode: skipping terraform apply; using existing terraform state outputs"
-    log "resume mode: initializing terraform plugins for existing state outputs"
-    terraform_env_args "$aws_profile" "$aws_region"
-    run_with_retry "terraform init (region=$aws_region state=$state_file)" 3 5 \
-      env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+    log "resume mode: skipping terraform apply; refreshing existing terraform state outputs"
+    terraform_refresh_live_e2e "$terraform_dir" "$state_file" "$tfvars_file" "$aws_profile" "$aws_region"
     if [[ "$with_shared_services" == "true" ]]; then
-      terraform_env_args "$aws_profile" "$aws_dr_region"
-      run_with_retry "terraform init (region=$aws_dr_region state=$dr_state_file)" 3 5 \
-        env "${TF_ENV_ARGS[@]}" TF_IN_AUTOMATION=1 terraform -chdir="$terraform_dir" init -input=false >/dev/null
+      terraform_refresh_live_e2e "$terraform_dir" "$dr_state_file" "$dr_tfvars_file" "$aws_profile" "$aws_dr_region"
     fi
   fi
 

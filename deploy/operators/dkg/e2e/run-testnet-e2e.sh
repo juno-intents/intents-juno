@@ -2488,15 +2488,28 @@ command_run() {
       die "existing bridge summary file not found: $existing_bridge_summary_path"
   fi
 
+  case "$stop_after_stage" in
+    witness_ready|shared_services_ready|checkpoint_validated|full) ;;
+    *) die "--stop-after-stage must be one of: witness_ready, shared_services_ready, checkpoint_validated, full" ;;
+  esac
+
+  local require_bridge_proof_inputs="true"
+  if [[ -n "$existing_bridge_summary_path" && "$stop_after_stage" != "full" ]]; then
+    require_bridge_proof_inputs="false"
+    log "skipping bridge proof/deploy input validation for stop-after-stage=$stop_after_stage with existing bridge summary path=$existing_bridge_summary_path"
+  fi
+
   [[ -n "$sp1_requestor_key_file" ]] || die "--sp1-requestor-key-file is required"
   [[ -f "$sp1_requestor_key_file" ]] || die "sp1 requestor key file not found: $sp1_requestor_key_file"
-  [[ -n "$sp1_deposit_program_url" ]] || die "--sp1-deposit-program-url is required"
-  [[ -n "$sp1_withdraw_program_url" ]] || die "--sp1-withdraw-program-url is required"
   [[ -n "$sp1_input_s3_prefix" ]] || die "--sp1-input-s3-prefix must not be empty"
   [[ -n "$sp1_input_s3_presign_ttl" ]] || die "--sp1-input-s3-presign-ttl must not be empty"
-  [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
-  [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
-  [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
+  if [[ "$require_bridge_proof_inputs" == "true" ]]; then
+    [[ -n "$sp1_deposit_program_url" ]] || die "--sp1-deposit-program-url is required"
+    [[ -n "$sp1_withdraw_program_url" ]] || die "--sp1-withdraw-program-url is required"
+    [[ -n "$bridge_verifier_address" ]] || die "--bridge-verifier-address is required"
+    [[ -n "$bridge_deposit_image_id" ]] || die "--bridge-deposit-image-id is required"
+    [[ -n "$bridge_withdraw_image_id" ]] || die "--bridge-withdraw-image-id is required"
+  fi
   local sp1_rpc_url_lc
   sp1_rpc_url_lc="$(lower "$sp1_rpc_url")"
   if [[ "$sp1_rpc_url_lc" == *"mainnet.base.org"* || "$sp1_rpc_url_lc" == *"base-sepolia"* ]]; then
@@ -2515,10 +2528,6 @@ command_run() {
   (( sp1_witness_metadata_timeout_seconds > 0 )) || die "--sp1-witness-metadata-timeout-seconds must be > 0"
   [[ "$sp1_witness_quorum_threshold" =~ ^[0-9]+$ ]] || die "--sp1-witness-quorum-threshold must be numeric"
   (( sp1_witness_quorum_threshold > 0 )) || die "--sp1-witness-quorum-threshold must be > 0"
-  case "$stop_after_stage" in
-    witness_ready|shared_services_ready|checkpoint_validated|full) ;;
-    *) die "--stop-after-stage must be one of: witness_ready, shared_services_ready, checkpoint_validated, full" ;;
-  esac
   if [[ -z "$sp1_witness_juno_scan_urls_csv" ]]; then
     sp1_witness_juno_scan_urls_csv="$sp1_witness_juno_scan_url"
   fi
