@@ -178,6 +178,14 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		w.successCount.Add(1)
 		w.emitMetrics(msg.Timestamp, true, out.FallbackUsed)
 	case StatusFailed:
+		w.log.Error(
+			"proof-requestor submission failed",
+			"job_id", job.JobID.Hex(),
+			"request_id", out.RequestID,
+			"error_code", out.ErrorCode,
+			"retryable", out.Retryable,
+			"message", out.ErrorMessage,
+		)
 		payload, err := proof.EncodeFailureMessage(proof.FailureMessage{
 			JobID:     job.JobID,
 			RequestID: out.RequestID,

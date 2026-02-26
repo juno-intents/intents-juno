@@ -68,7 +68,69 @@ func TestClassifyProveError(t *testing.T) {
 	}
 
 	code, retryable, _ = ClassifyProveError(errors.New("upstream timeout"))
-	if code != "sp1_prove_error" || !retryable {
+	if code != "sp1_request_timeout" || !retryable {
 		t.Fatalf("unexpected fallback classification: code=%s retryable=%v", code, retryable)
+	}
+}
+
+func TestClassifyProveError_Heuristics(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name      string
+		err       error
+		wantCode  string
+		wantRetry bool
+	}{
+		{
+			name:      "unexecutable is permanent",
+			err:       errors.New("proverexec: sp1 network groth16 prove failed: Proof request 0xabc is unexecutable"),
+			wantCode:  "sp1_request_unexecutable",
+			wantRetry: false,
+		},
+		{
+			name:      "unfulfillable is retryable",
+			err:       errors.New("proverexec: sp1 network groth16 prove failed: Proof request 0xabc is unfulfillable"),
+			wantCode:  "sp1_request_unfulfillable",
+			wantRetry: true,
+		},
+		{
+			name:      "auction timeout is retryable",
+			err:       errors.New("proverexec: sp1 network groth16 prove failed: Proof request 0xabc timed out during the auction"),
+			wantCode:  "sp1_request_auction_timeout",
+			wantRetry: true,
+		},
+		{
+			name:      "invalid payload is permanent",
+			err:       errors.New("proverexec: unsupported image id"),
+			wantCode:  "sp1_invalid_input",
+			wantRetry: false,
+		},
+		{
+			name:      "simulation failure is permanent",
+			err:       errors.New("proverexec: sp1 network groth16 prove failed: Program simulation failed"),
+			wantCode:  "sp1_simulation_failed",
+			wantRetry: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			gotCode, gotRetryable, gotMessage := ClassifyProveError(tc.err)
+			if gotCode != tc.wantCode || gotRetryable != tc.wantRetry {
+				t.Fatalf(
+					"classification mismatch code=%s retryable=%v want_code=%s want_retryable=%v",
+					gotCode,
+					gotRetryable,
+					tc.wantCode,
+					tc.wantRetry,
+				)
+			}
+			if gotMessage == "" {
+				t.Fatalf("expected non-empty message")
+			}
+		})
 	}
 }

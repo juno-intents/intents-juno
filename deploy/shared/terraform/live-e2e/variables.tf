@@ -236,13 +236,13 @@ variable "shared_ecs_desired_count" {
 variable "shared_ecs_task_cpu" {
   description = "Fargate CPU units for each shared proof-service task definition."
   type        = number
-  default     = 256
+  default     = 2048
 }
 
 variable "shared_ecs_task_memory" {
   description = "Fargate memory (MiB) for each shared proof-service task definition."
   type        = number
-  default     = 512
+  default     = 8192
 }
 
 variable "shared_ecs_assign_public_ip" {

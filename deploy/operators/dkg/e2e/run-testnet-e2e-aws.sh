@@ -28,6 +28,7 @@ DISTRIBUTED_SP1_WITNESS_RECIPIENT_UA=""
 FAILURE_SIGNATURES_FILE="$SCRIPT_DIR/failure-signatures.yaml"
 DEFAULT_SHARED_PROOF_SERVICES_IMAGE_RELEASE_TAG="shared-proof-services-image-latest"
 DEFAULT_BRIDGE_GUEST_RELEASE_TAG="bridge-guests-latest"
+DEFAULT_BRIDGE_VERIFIER_ADDRESS="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
 
 usage() {
   cat <<'EOF'
@@ -244,6 +245,32 @@ normalize_hex_prefixed_value() {
   value="$(lower "$value")"
   [[ "$value" =~ ^[0-9a-f]+$ ]] || return 1
   printf '0x%s' "$value"
+}
+
+normalize_evm_address() {
+  local value="${1:-}"
+  value="$(trim "$value")"
+  [[ -n "$value" ]] || return 1
+  value="${value#0x}"
+  value="${value#0X}"
+  [[ "$value" =~ ^[0-9a-fA-F]{40}$ ]] || return 1
+  printf '0x%s' "$value"
+}
+
+extract_bridge_verifier_from_summary() {
+  local summary_path="$1"
+  [[ -f "$summary_path" ]] || return 1
+
+  local raw_verifier=""
+  raw_verifier="$(
+    jq -r '
+      .contracts.verifier // .contracts.verifier_address // .bridge.verifier // .bridge.verifier_address // empty
+    ' "$summary_path" 2>/dev/null || true
+  )"
+  raw_verifier="$(trim "$raw_verifier")"
+  [[ -n "$raw_verifier" && "$raw_verifier" != "null" ]] || return 1
+
+  normalize_evm_address "$raw_verifier"
 }
 
 derive_owallet_keys_from_ufvk() {
@@ -2920,6 +2947,7 @@ command_run() {
 
   local resolved_sp1_deposit_program_url=""
   local resolved_sp1_withdraw_program_url=""
+  local resolved_bridge_verifier_address=""
   local forwarded_bridge_deposit_image_id=""
   local forwarded_bridge_withdraw_image_id=""
   if forwarded_arg_value "--sp1-deposit-program-url" "${e2e_args[@]}" >/dev/null 2>&1; then
@@ -2958,6 +2986,25 @@ command_run() {
       die "failed to derive --sp1-withdraw-program-url from --bridge-withdraw-image-id=$forwarded_bridge_withdraw_image_id using release tag '$bridge_guest_release_tag'"
     log "defaulting --sp1-withdraw-program-url to release asset URL derived from --bridge-withdraw-image-id: $resolved_sp1_withdraw_program_url"
     e2e_args+=("--sp1-withdraw-program-url" "$resolved_sp1_withdraw_program_url")
+  fi
+
+  if forwarded_arg_value "--bridge-verifier-address" "${e2e_args[@]}" >/dev/null 2>&1; then
+    resolved_bridge_verifier_address="$(forwarded_arg_value "--bridge-verifier-address" "${e2e_args[@]}")"
+    resolved_bridge_verifier_address="$(normalize_evm_address "$resolved_bridge_verifier_address" || true)"
+    [[ -n "$resolved_bridge_verifier_address" ]] || \
+      die "forwarded --bridge-verifier-address must be a valid 0x-prefixed EVM address"
+  else
+    if [[ -n "$reuse_bridge_summary_path" ]]; then
+      resolved_bridge_verifier_address="$(extract_bridge_verifier_from_summary "$reuse_bridge_summary_path" || true)"
+      if [[ -n "$resolved_bridge_verifier_address" ]]; then
+        log "defaulting --bridge-verifier-address from --reuse-bridge-summary-path contracts.verifier: $resolved_bridge_verifier_address"
+      fi
+    fi
+    if [[ -z "$resolved_bridge_verifier_address" ]]; then
+      resolved_bridge_verifier_address="$DEFAULT_BRIDGE_VERIFIER_ADDRESS"
+      log "defaulting --bridge-verifier-address to canonical base verifier: $resolved_bridge_verifier_address"
+    fi
+    e2e_args+=("--bridge-verifier-address" "$resolved_bridge_verifier_address")
   fi
 
   if [[ "$with_shared_services" == "true" ]]; then

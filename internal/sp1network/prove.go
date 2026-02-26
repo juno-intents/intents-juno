@@ -68,7 +68,31 @@ func ClassifyProveError(err error) (code string, retryable bool, message string)
 		}
 		return code, p.Retryable, p.Error()
 	}
-	return "sp1_prove_error", true, err.Error()
+
+	message = err.Error()
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	switch {
+	case strings.Contains(normalized, "unexecutable"):
+		return "sp1_request_unexecutable", false, message
+	case strings.Contains(normalized, "program vkey mismatch"),
+		strings.Contains(normalized, "journal mismatch"),
+		strings.Contains(normalized, "unsupported image id"),
+		strings.Contains(normalized, "decode prover request"),
+		strings.Contains(normalized, "decode prover journal"),
+		strings.Contains(normalized, "decode prover private_input"):
+		return "sp1_invalid_input", false, message
+	case strings.Contains(normalized, "program simulation failed"):
+		return "sp1_simulation_failed", false, message
+	case strings.Contains(normalized, "timed out during the auction"):
+		return "sp1_request_auction_timeout", true, message
+	case strings.Contains(normalized, "timed out"),
+		strings.Contains(normalized, "timeout"):
+		return "sp1_request_timeout", true, message
+	case strings.Contains(normalized, "unfulfillable"):
+		return "sp1_request_unfulfillable", true, message
+	default:
+		return "sp1_prove_error", true, message
+	}
 }
 
 func NewPermanentError(code string, cause error) error {

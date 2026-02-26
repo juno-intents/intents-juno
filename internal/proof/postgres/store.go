@@ -755,7 +755,5 @@ func jobsEqual(a, b proof.JobRequest) bool {
 		strings.TrimSpace(a.Pipeline) == strings.TrimSpace(b.Pipeline) &&
 		a.ImageID == b.ImageID &&
 		bytes.Equal(a.Journal, b.Journal) &&
-		bytes.Equal(a.PrivateInput, b.PrivateInput) &&
-		a.Deadline.UTC().Equal(b.Deadline.UTC()) &&
-		a.Priority == b.Priority
+		bytes.Equal(a.PrivateInput, b.PrivateInput)
 }

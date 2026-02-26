@@ -10,7 +10,7 @@ This runbook defines the default SP1 network auction baseline for shared `proof-
 
 ## Runtime Defaults (as configured)
 
-- `sp1-max-price-per-pgu`: `1000000000000`
+- `sp1-max-price-per-pgu`: `2000000000`
 - `sp1-deposit-pgu-estimate`: `1000000`
 - `sp1-withdraw-pgu-estimate`: `1000000`
 - `sp1-groth16-base-fee-wei`: `200000000000000000` (0.2 PROVE)

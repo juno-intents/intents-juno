@@ -203,6 +203,45 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_not_contains "$outputs_tf" "output \"shared_private_ip\"" "legacy shared host private ip output removed"
 }
 
+test_shared_ecs_proof_service_task_sizing_defaults_are_sp1_safe() {
+  local variables_tf
+  local cpu_default memory_default
+  variables_tf="$(cat "$REPO_ROOT/deploy/shared/terraform/live-e2e/variables.tf")"
+
+  cpu_default="$(
+    awk '
+      $0 ~ /^variable "shared_ecs_task_cpu" \{/ { in_var=1; next }
+      in_var && $0 ~ /^}/ { in_var=0 }
+      in_var && $1 == "default" { print $3; exit }
+    ' <<<"$variables_tf"
+  )"
+  memory_default="$(
+    awk '
+      $0 ~ /^variable "shared_ecs_task_memory" \{/ { in_var=1; next }
+      in_var && $0 ~ /^}/ { in_var=0 }
+      in_var && $1 == "default" { print $3; exit }
+    ' <<<"$variables_tf"
+  )"
+
+  [[ "$cpu_default" =~ ^[0-9]+$ ]] || {
+    printf 'assert_numeric failed: shared_ecs_task_cpu default is non-numeric: %s\n' "$cpu_default" >&2
+    exit 1
+  }
+  [[ "$memory_default" =~ ^[0-9]+$ ]] || {
+    printf 'assert_numeric failed: shared_ecs_task_memory default is non-numeric: %s\n' "$memory_default" >&2
+    exit 1
+  }
+
+  if (( cpu_default < 1024 )); then
+    printf 'assert_min failed: shared_ecs_task_cpu default must be >= 1024, got=%s\n' "$cpu_default" >&2
+    exit 1
+  fi
+  if (( memory_default < 4096 )); then
+    printf 'assert_min failed: shared_ecs_task_memory default must be >= 4096, got=%s\n' "$memory_default" >&2
+    exit 1
+  fi
+}
+
 test_synced_junocashd_ami_runbook_exists() {
   local runbook_text
   runbook_text="$(cat "$REPO_ROOT/deploy/shared/runbooks/create-synced-junocashd-ami.sh")"
@@ -276,12 +315,16 @@ test_aws_wrapper_supports_operator_fleet_and_distributed_dkg() {
   assert_contains "$wrapper_script_text" "defaulting --sp1-input-s3-bucket to terraform dkg bucket output" "aws wrapper defaults sp1 input bucket to dkg output"
   assert_contains "$wrapper_script_text" "\"--sp1-input-s3-bucket\" \"\$dkg_s3_bucket\"" "aws wrapper forwards dkg bucket as sp1 input bucket fallback"
   assert_contains "$wrapper_script_text" "DEFAULT_BRIDGE_GUEST_RELEASE_TAG=\"bridge-guests-latest\"" "aws wrapper defines default bridge guest release tag for SP1 program URL derivation"
+  assert_contains "$wrapper_script_text" "DEFAULT_BRIDGE_VERIFIER_ADDRESS=\"0x397A5f7f3dBd538f23DE225B51f532c34448dA9B\"" "aws wrapper defines canonical base verifier default for bridge verifier forwarding"
   assert_contains "$wrapper_script_text" "--bridge-guest-release-tag <tag>" "aws wrapper usage documents bridge guest release tag override"
   assert_contains "$wrapper_script_text" "--bridge-guest-release-tag)" "aws wrapper parses bridge guest release tag override option"
   assert_contains "$wrapper_script_text" "defaulting --sp1-deposit-program-url to release asset URL derived from --bridge-deposit-image-id" "aws wrapper auto-derives deposit program URL when omitted"
   assert_contains "$wrapper_script_text" "defaulting --sp1-withdraw-program-url to release asset URL derived from --bridge-withdraw-image-id" "aws wrapper auto-derives withdraw program URL when omitted"
   assert_contains "$wrapper_script_text" "\"--sp1-deposit-program-url\" \"\$resolved_sp1_deposit_program_url\"" "aws wrapper forwards derived deposit program URL"
   assert_contains "$wrapper_script_text" "\"--sp1-withdraw-program-url\" \"\$resolved_sp1_withdraw_program_url\"" "aws wrapper forwards derived withdraw program URL"
+  assert_contains "$wrapper_script_text" "extract_bridge_verifier_from_summary" "aws wrapper extracts bridge verifier from reused bridge summary"
+  assert_contains "$wrapper_script_text" "defaulting --bridge-verifier-address from --reuse-bridge-summary-path contracts.verifier" "aws wrapper auto-derives bridge verifier from summary when omitted"
+  assert_contains "$wrapper_script_text" "\"--bridge-verifier-address\" \"\$resolved_bridge_verifier_address\"" "aws wrapper forwards resolved bridge verifier address"
   assert_contains "$wrapper_script_text" "operator-export-kms.sh export" "operator kms export invocation"
   assert_contains "$wrapper_script_text" "remote_prepare_operator_host" "remote operator host preparation hook"
   assert_contains "$wrapper_script_text" "run_distributed_dkg_backup_restore" "distributed dkg orchestration hook"
@@ -589,6 +632,8 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "shared infra command invocation"
   assert_contains "$e2e_script_text" "--checkpoint-ipfs-api-url \"\$shared_ipfs_api_url\"" "shared infra ipfs checkpoint package verification wiring"
   assert_contains "$e2e_script_text" "--required-kafka-topics \"\${checkpoint_signature_topic},\${checkpoint_package_topic},\${proof_request_topic},\${proof_result_topic},\${proof_failure_topic},\${deposit_event_topic},\${withdraw_request_topic}\"" "shared infra validation pre-creates checkpoint/proof/bridge kafka topics"
+  assert_contains "$e2e_script_text" "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments" "local e2e restarts shared proof services after kafka topic ensure"
+  assert_order "$e2e_script_text" "go run ./cmd/shared-infra-e2e" "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments" "shared proof service restart occurs after shared infra kafka topic ensure"
   assert_contains "$e2e_script_text" "operator-service checkpoint publication" "shared infra validation waits for operator-service checkpoint publication"
   assert_order "$e2e_script_text" "bridge summary missing deployed contracts.bridge address: \$bridge_summary" "go run ./cmd/shared-infra-e2e" "shared infra validation runs after bridge deploy summary is available"
   assert_contains "$e2e_script_text" "ensure_juno_txsign_binary" "local e2e signer resolution installs juno-txsign when missing"
@@ -1368,6 +1413,7 @@ main() {
   test_runner_shared_probe_script_supports_managed_endpoints
   test_remote_operator_prepare_script_boots_full_stack_services
   test_live_e2e_terraform_supports_operator_instances
+  test_shared_ecs_proof_service_task_sizing_defaults_are_sp1_safe
   test_synced_junocashd_ami_runbook_exists
   test_aws_wrapper_uses_ssh_keepalive_options
   test_aws_wrapper_supports_operator_fleet_and_distributed_dkg

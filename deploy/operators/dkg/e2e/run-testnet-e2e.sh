@@ -83,7 +83,7 @@ Options:
   --sp1-input-s3-region <region> optional AWS region override for oversized input uploads
   --sp1-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
                                    (default: 2h)
-  --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 1000000000000)
+  --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 2000000000)
   --sp1-deposit-pgu-estimate <n> projected deposit proof PGU usage for credit guardrails
                                    (default: 1000000)
   --sp1-withdraw-pgu-estimate <n> projected withdraw proof PGU usage for credit guardrails
@@ -2202,7 +2202,7 @@ command_run() {
   local sp1_input_s3_prefix="bridge-e2e/sp1-input"
   local sp1_input_s3_region=""
   local sp1_input_s3_presign_ttl="2h"
-  local sp1_max_price_per_pgu="1000000000000"
+  local sp1_max_price_per_pgu="2000000000"
   local sp1_deposit_pgu_estimate="1000000"
   local sp1_withdraw_pgu_estimate="1000000"
   local sp1_groth16_base_fee_wei="200000000000000000"

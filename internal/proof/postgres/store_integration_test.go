@@ -77,6 +77,28 @@ func TestStore_AllocatorAndDedupe(t *testing.T) {
 		t.Fatalf("expected ErrJobMismatch, got %v", err)
 	}
 
+	// Request retries may bump deadline/priority while retaining the same job id
+	// and proof payload identity.
+	retryDeadline := job
+	retryDeadline.Deadline = job.Deadline.Add(5 * time.Minute)
+	created, err = store.UpsertJob(ctx, retryDeadline, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("UpsertJob retry deadline update: %v", err)
+	}
+	if created {
+		t.Fatalf("expected dedupe on retry deadline update")
+	}
+
+	retryPriority := job
+	retryPriority.Priority = job.Priority + 1
+	created, err = store.UpsertJob(ctx, retryPriority, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("UpsertJob retry priority update: %v", err)
+	}
+	if created {
+		t.Fatalf("expected dedupe on retry priority update")
+	}
+
 	const workers = 64
 	var (
 		wg   sync.WaitGroup

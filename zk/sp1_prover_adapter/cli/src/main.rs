@@ -122,7 +122,7 @@ async fn handle_balance_request(_req: BalanceRequest) -> Result<()> {
         Err(err) => BalanceResponse {
             version: VERSION_SP1_BALANCE_RESPONSE,
             balance_wei: "0".to_owned(),
-            error: err.to_string(),
+            error: render_error_chain(&err),
         },
     };
     write_json(&response)
@@ -143,7 +143,7 @@ async fn handle_prover_request(req: ProverRequest) -> Result<()> {
         Err(err) => ProverResponse {
             version: VERSION_PROVER_RESPONSE,
             seal: String::new(),
-            error: err.to_string(),
+            error: render_error_chain(&err),
         },
     };
     write_json(&response)
@@ -241,6 +241,10 @@ async fn build_network_prover() -> Result<NetworkProver> {
 
 fn read_required_private_key() -> Result<String> {
     read_required_private_key_from(|name| read_env_nonempty(name))
+}
+
+fn render_error_chain(err: &anyhow::Error) -> String {
+    format!("{err:#}")
 }
 
 fn read_required_private_key_from<F>(mut read_env: F) -> Result<String>
@@ -525,6 +529,14 @@ mod tests {
         let err = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| envs.get(name).cloned())
             .expect_err("invalid gas limit should error");
         assert!(err.to_string().contains("SP1_WITHDRAW_MAX_GAS_LIMIT"));
+    }
+
+    #[test]
+    fn render_error_chain_includes_context_and_cause() {
+        let err = anyhow::anyhow!("inner error").context("outer error");
+        let rendered = render_error_chain(&err);
+        assert!(rendered.contains("outer error"));
+        assert!(rendered.contains("inner error"));
     }
 
 }
