@@ -296,7 +296,7 @@ test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission() {
   assert_contains "$script_text" "juno_wait_tx_confirmed" "live bridge flow waits for mined Juno deposit tx"
   assert_contains "$script_text" "/v1/deposits/submit" "deposit submit is performed through bridge-api write endpoint"
   assert_contains "$script_text" "/v1/withdrawals/request" "withdraw request is performed through bridge-api write endpoint"
-  assert_not_contains "$script_text" "go run ./cmd/queue-publish" "runner no longer publishes queue messages directly"
+  assert_not_contains "$script_text" '"--topic" "$deposit_event_topic"' "runner does not publish deposit events directly; deposit submission stays bridge-api driven"
   assert_not_contains "$script_text" "go run ./cmd/deposit-event" "runner no longer builds deposit queue payload directly"
   assert_contains "$script_text" "/v1/status/deposit/" "live bridge flow checks deposit status through bridge-api"
   assert_contains "$script_text" "/v1/status/withdrawal/" "live bridge flow checks withdrawal status through bridge-api"
@@ -439,6 +439,11 @@ test_relayer_runtime_seeds_checkpoint_after_startup() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"' "relayer runtime seeds a fresh checkpoint package after relayers start"
+  assert_contains "$script_text" "replaying latest checkpoint package onto relayer checkpoint topic after startup" "relayer runtime logs checkpoint replay step after relayer startup"
+  assert_contains "$script_text" "SELECT convert_from(package_json, 'UTF8')" "relayer runtime reloads latest persisted checkpoint package payload from postgres"
+  assert_contains "$script_text" 'go run ./cmd/queue-publish \' "relayer runtime replays checkpoint payload through queue-publish"
+  assert_contains "$script_text" '"--topic" "$checkpoint_package_topic"' "relayer runtime publishes replayed checkpoint payload onto active checkpoint package topic"
+  assert_contains "$script_text" '"--payload-file" "$relayer_checkpoint_replay_payload_file"' "relayer runtime publishes checkpoint replay payload via temp file"
   assert_contains "$script_text" 'wait_for_log_pattern "$deposit_relayer_log" "updated checkpoint" 180' "relayer runtime waits for deposit-relayer checkpoint ingestion before deposit submission"
   assert_contains "$script_text" 'wait_for_log_pattern "$withdraw_finalizer_log" "updated checkpoint" 180' "relayer runtime waits for withdraw-finalizer checkpoint ingestion before withdrawal flow"
 }

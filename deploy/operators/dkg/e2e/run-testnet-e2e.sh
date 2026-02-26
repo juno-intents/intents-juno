@@ -5229,12 +5229,54 @@ command_run() {
 
   if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
     local relayer_checkpoint_seed_started_at relayer_checkpoint_seed_summary
+    local relayer_checkpoint_replay_payload_file relayer_checkpoint_replay_status
     relayer_checkpoint_seed_started_at="$(timestamp_utc)"
     relayer_checkpoint_seed_summary="$workdir/reports/shared-infra-relayer-runtime-summary.json"
+    relayer_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.json"
     log "seeding checkpoint package after relayer startup to ensure relayers ingest a fresh checkpoint"
     if ! run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"; then
       log "failed to seed relayer runtime checkpoint package after relayer startup"
       relayer_status=1
+    fi
+    if (( relayer_status == 0 )); then
+      log "replaying latest checkpoint package onto relayer checkpoint topic after startup"
+      set +e
+      psql "$shared_postgres_dsn" -Atqc "
+        SELECT convert_from(package_json, 'UTF8')
+        FROM checkpoint_packages
+        WHERE package_json IS NOT NULL
+        ORDER BY persisted_at DESC
+        LIMIT 1;
+      " >"$relayer_checkpoint_replay_payload_file"
+      relayer_checkpoint_replay_status=$?
+      set -e
+      if (( relayer_checkpoint_replay_status != 0 )) || [[ ! -s "$relayer_checkpoint_replay_payload_file" ]]; then
+        log "failed to load latest checkpoint package payload for relayer runtime replay"
+        relayer_status=1
+      fi
+    fi
+    if (( relayer_status == 0 )); then
+      if ! jq -e . "$relayer_checkpoint_replay_payload_file" >/dev/null 2>&1; then
+        log "latest checkpoint package payload is not valid JSON; cannot replay to relayers"
+        relayer_status=1
+      fi
+    fi
+    if (( relayer_status == 0 )); then
+      set +e
+      (
+        cd "$REPO_ROOT"
+        go run ./cmd/queue-publish \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          "--topic" "$checkpoint_package_topic" \
+          "--payload-file" "$relayer_checkpoint_replay_payload_file"
+      )
+      relayer_checkpoint_replay_status=$?
+      set -e
+      if (( relayer_checkpoint_replay_status != 0 )); then
+        log "failed to replay latest checkpoint package onto relayer checkpoint topic"
+        relayer_status=1
+      fi
     fi
   fi
 

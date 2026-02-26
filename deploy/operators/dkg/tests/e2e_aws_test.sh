@@ -654,7 +654,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--extend-signer-bin \"\$bridge_operator_signer_bin\"" "withdraw coordinator uses real extend signer binary"
   assert_contains "$e2e_script_text" "withdraw coordinator mock runtime is forbidden in live e2e" "live e2e aborts if mock runtime is requested"
   assert_contains "$e2e_script_text" "go run ./cmd/withdraw-finalizer" "withdraw-finalizer service startup in local e2e"
-  assert_not_contains "$e2e_script_text" "go run ./cmd/queue-publish" "runner no longer publishes queue events directly"
+  assert_not_contains "$e2e_script_text" '"--topic" "$deposit_event_topic"' "runner does not publish deposit events directly; deposit submission stays bridge-api driven"
   assert_not_contains "$e2e_script_text" "go run ./cmd/deposit-event" "runner no longer derives deposit queue payload locally"
   assert_contains "$e2e_script_text" "go run ./cmd/bridge-api" "live e2e starts bridge-api service for user flow"
   assert_contains "$e2e_script_text" "/v1/deposit-memo?baseRecipient=" "live e2e requests deposit memo via bridge-api"
