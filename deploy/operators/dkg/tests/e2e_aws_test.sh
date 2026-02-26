@@ -1387,9 +1387,14 @@ test_aws_wrapper_stops_stale_remote_e2e_processes_before_launch() {
   wrapper_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh")"
 
   assert_contains "$wrapper_script_text" 'stale_run_pid_file="$remote_workdir/.run.lock/pid"' "aws wrapper checks remote workdir lock pid before launch"
-  assert_contains "$wrapper_script_text" "stopping stale remote run-testnet-e2e process before launch" "aws wrapper logs stale remote e2e process cleanup"
+  assert_contains "$wrapper_script_text" "declare -A stale_run_pid_seen=()" "aws wrapper deduplicates stale remote e2e pids"
+  assert_contains "$wrapper_script_text" 'collect_stale_run_pid()' "aws wrapper defines stale remote e2e pid collector"
+  assert_contains "$wrapper_script_text" 'done < <(pgrep -f -- "run-testnet-e2e.sh run --workdir $remote_workdir" 2>/dev/null || true)' "aws wrapper discovers stale remote e2e pids by workdir command pattern"
+  assert_contains "$wrapper_script_text" '[[ "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && return 0' "aws wrapper avoids self-terminating current ssh shell process tree"
+  assert_contains "$wrapper_script_text" "stopping stale remote run-testnet-e2e processes before launch" "aws wrapper logs stale remote e2e process cleanup"
   assert_contains "$wrapper_script_text" 'kill -TERM "\$stale_run_pid"' "aws wrapper sends TERM to stale remote e2e process"
   assert_contains "$wrapper_script_text" 'kill -KILL "\$stale_run_pid"' "aws wrapper escalates to KILL when stale remote e2e process ignores TERM"
+  assert_contains "$wrapper_script_text" 'rm -rf "$remote_workdir/.run.lock" >/dev/null 2>&1 || true' "aws wrapper always clears stale remote lock directory before launch"
 }
 
 test_failure_signature_catalog_exists() {

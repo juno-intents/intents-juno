@@ -4066,24 +4066,55 @@ fi
 mkdir -p "$remote_workdir/reports"
 
 stale_run_pid_file="$remote_workdir/.run.lock/pid"
+declare -A stale_run_pid_seen=()
+declare -a stale_run_pids=()
+
+collect_stale_run_pid() {
+  local pid="\$1"
+  [[ "\$pid" =~ ^[0-9]+$ ]] || return 0
+  [[ "\$pid" == "\$\$" || "\$pid" == "\$PPID" ]] && return 0
+  [[ -n "\${stale_run_pid_seen[\$pid]:-}" ]] && return 0
+  if kill -0 "\$pid" >/dev/null 2>&1; then
+    stale_run_pid_seen["\$pid"]=1
+    stale_run_pids+=("\$pid")
+  fi
+}
+
 if [[ -f "\$stale_run_pid_file" ]]; then
   stale_run_pid="\$(tr -d '\r\n' < "\$stale_run_pid_file" 2>/dev/null || true)"
-  if [[ "\$stale_run_pid" =~ ^[0-9]+$ ]] && kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
-    echo "stopping stale remote run-testnet-e2e process before launch pid=\$stale_run_pid workdir=$remote_workdir"
+  collect_stale_run_pid "\$stale_run_pid"
+fi
+
+while IFS= read -r stale_run_pid; do
+  collect_stale_run_pid "\$stale_run_pid"
+done < <(pgrep -f -- "run-testnet-e2e.sh run --workdir $remote_workdir" 2>/dev/null || true)
+
+if (( \${#stale_run_pids[@]} > 0 )); then
+  echo "stopping stale remote run-testnet-e2e processes before launch pids=\${stale_run_pids[*]} workdir=$remote_workdir"
+  for stale_run_pid in "\${stale_run_pids[@]}"; do
     kill -TERM "\$stale_run_pid" >/dev/null 2>&1 || true
-    for attempt in \$(seq 1 20); do
-      if ! kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
+  done
+  for attempt in \$(seq 1 20); do
+    stale_run_remaining=0
+    for stale_run_pid in "\${stale_run_pids[@]}"; do
+      if kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
+        stale_run_remaining=1
         break
       fi
-      sleep 1
     done
+    if [[ "\$stale_run_remaining" == "0" ]]; then
+      break
+    fi
+    sleep 1
+  done
+  for stale_run_pid in "\${stale_run_pids[@]}"; do
     if kill -0 "\$stale_run_pid" >/dev/null 2>&1; then
       echo "stale remote run-testnet-e2e process ignored TERM; sending SIGKILL pid=\$stale_run_pid workdir=$remote_workdir"
       kill -KILL "\$stale_run_pid" >/dev/null 2>&1 || true
     fi
-  fi
-  rm -rf "$remote_workdir/.run.lock" >/dev/null 2>&1 || true
+  done
 fi
+rm -rf "$remote_workdir/.run.lock" >/dev/null 2>&1 || true
 
 operator_ssh_key=".ci/secrets/operator-fleet-ssh.key"
 operator_ssh_user="${runner_ssh_user}"
