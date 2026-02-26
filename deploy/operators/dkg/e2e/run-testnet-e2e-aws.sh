@@ -1631,6 +1631,90 @@ copy_remote_secret_file() {
   done
 }
 
+copy_remote_secret_bundle() {
+  local ssh_private_key="$1"
+  local ssh_user="$2"
+  local ssh_host="$3"
+  local remote_secret_dir="$4"
+  shift 4
+
+  local -a secret_entries=("$@")
+  if (( ${#secret_entries[@]} == 0 )); then
+    return 0
+  fi
+  (( ${#secret_entries[@]} % 2 == 0 )) || die "copy_remote_secret_bundle expects local/remote-file pairs"
+
+  local bundle_tmp_dir
+  bundle_tmp_dir="$(mktemp -d)"
+  local bundle_payload_dir="$bundle_tmp_dir/payload"
+  local bundle_local="$bundle_tmp_dir/secrets.tgz"
+  mkdir -p "$bundle_payload_dir"
+
+  local -a remote_secret_files=()
+  local idx local_file remote_file_name
+  for ((idx = 0; idx < ${#secret_entries[@]}; idx += 2)); do
+    local_file="${secret_entries[$idx]}"
+    remote_file_name="${secret_entries[$((idx + 1))]}"
+    [[ -f "$local_file" ]] || die "remote secret source file not found: $local_file"
+    [[ "$remote_file_name" != */* ]] || die "remote secret bundle file name must not contain '/': $remote_file_name"
+    cp "$local_file" "$bundle_payload_dir/$remote_file_name"
+    remote_secret_files+=("$remote_file_name")
+  done
+
+  tar -czf "$bundle_local" -C "$bundle_payload_dir" .
+
+  local remote_bundle_path="/tmp/intents-juno-secrets-$(date +%s)-$$.tgz"
+
+  local -a ssh_opts=(
+    -i "$ssh_private_key"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o IdentitiesOnly=yes
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o TCPKeepAlive=yes
+  )
+
+  local attempt
+  for attempt in $(seq 1 6); do
+    if run_with_local_timeout 45 scp "${ssh_opts[@]}" "$bundle_local" "$ssh_user@$ssh_host:$remote_bundle_path"; then
+      break
+    fi
+    if (( attempt == 6 )); then
+      rm -rf "$bundle_tmp_dir"
+      die "failed to copy remote secret bundle after retries: host=$ssh_host remote=$remote_bundle_path"
+    fi
+    log "remote secret bundle copy failed attempt=$attempt/6 host=$ssh_host remote=$remote_bundle_path; retrying"
+    sleep 2
+  done
+
+  local remote_unpack_script
+  remote_unpack_script="$(cat <<EOF
+set -euo pipefail
+mkdir -p $(printf '%q' "$remote_secret_dir")
+tar -xzf $(printf '%q' "$remote_bundle_path") -C $(printf '%q' "$remote_secret_dir")
+rm -f $(printf '%q' "$remote_bundle_path")
+EOF
+)"
+  local remote_secret_file
+  for remote_secret_file in "${remote_secret_files[@]}"; do
+    remote_unpack_script+=$'\n'"chmod 600 $(printf '%q' "$remote_secret_dir/$remote_secret_file")"
+  done
+
+  for attempt in $(seq 1 6); do
+    if run_with_local_timeout 45 ssh "${ssh_opts[@]}" "$ssh_user@$ssh_host" "bash -lc $(printf '%q' "$remote_unpack_script")"; then
+      rm -rf "$bundle_tmp_dir"
+      return 0
+    fi
+    if (( attempt == 6 )); then
+      rm -rf "$bundle_tmp_dir"
+      die "failed to unpack remote secret bundle after retries: host=$ssh_host remote_dir=$remote_secret_dir"
+    fi
+    log "remote secret bundle unpack failed attempt=$attempt/6 host=$ssh_host remote_dir=$remote_secret_dir; retrying"
+    sleep 2
+  done
+}
+
 run_distributed_dkg_backup_restore() {
   local ssh_private_key="$1"
   local ssh_user="$2"
@@ -3537,87 +3621,36 @@ command_run() {
       "$checkpoint_blob_prefix_for_operator"
   fi
 
-  copy_remote_secret_file \
-    "$ssh_key_private" \
-    "$runner_ssh_user" \
-    "$runner_public_ip" \
-    "$base_funder_key_file" \
-    "$remote_repo/.ci/secrets/base-funder.key"
-
+  local -a runner_secret_bundle_entries=(
+    "$base_funder_key_file" "base-funder.key"
+    "$juno_rpc_user_file" "juno-rpc-user.txt"
+    "$juno_rpc_pass_file" "juno-rpc-pass.txt"
+    "$ssh_key_private" "operator-fleet-ssh.key"
+  )
   if [[ -n "$juno_funder_key_file" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$juno_funder_key_file" \
-      "$remote_repo/.ci/secrets/juno-funder.key"
+    runner_secret_bundle_entries+=("$juno_funder_key_file" "juno-funder.key")
   fi
-
   if [[ -n "$juno_funder_seed_file" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$juno_funder_seed_file" \
-      "$remote_repo/.ci/secrets/juno-funder.seed.txt"
+    runner_secret_bundle_entries+=("$juno_funder_seed_file" "juno-funder.seed.txt")
   fi
-
   if [[ -n "$juno_funder_source_address_file" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$juno_funder_source_address_file" \
-      "$remote_repo/.ci/secrets/juno-funder.ua"
+    runner_secret_bundle_entries+=("$juno_funder_source_address_file" "juno-funder.ua")
   fi
-
-  copy_remote_secret_file \
-    "$ssh_key_private" \
-    "$runner_ssh_user" \
-    "$runner_public_ip" \
-    "$juno_rpc_user_file" \
-    "$remote_repo/.ci/secrets/juno-rpc-user.txt"
-
-  copy_remote_secret_file \
-    "$ssh_key_private" \
-    "$runner_ssh_user" \
-    "$runner_public_ip" \
-    "$juno_rpc_pass_file" \
-    "$remote_repo/.ci/secrets/juno-rpc-pass.txt"
-
   if [[ -n "$juno_scan_bearer_token_file" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$juno_scan_bearer_token_file" \
-      "$remote_repo/.ci/secrets/juno-scan-bearer.txt"
+    runner_secret_bundle_entries+=("$juno_scan_bearer_token_file" "juno-scan-bearer.txt")
   fi
-
   if [[ -n "$sp1_requestor_key_file" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$sp1_requestor_key_file" \
-      "$remote_repo/.ci/secrets/sp1-requestor.key"
+    runner_secret_bundle_entries+=("$sp1_requestor_key_file" "sp1-requestor.key")
   fi
-
   if [[ -n "$reuse_bridge_summary_path" ]]; then
-    copy_remote_secret_file \
-      "$ssh_key_private" \
-      "$runner_ssh_user" \
-      "$runner_public_ip" \
-      "$reuse_bridge_summary_path" \
-      "$remote_repo/.ci/secrets/reuse-bridge-summary.json"
+    runner_secret_bundle_entries+=("$reuse_bridge_summary_path" "reuse-bridge-summary.json")
   fi
-
-  copy_remote_secret_file \
+  copy_remote_secret_bundle \
     "$ssh_key_private" \
     "$runner_ssh_user" \
     "$runner_public_ip" \
-    "$ssh_key_private" \
-    "$remote_repo/.ci/secrets/operator-fleet-ssh.key"
+    "$remote_repo/.ci/secrets" \
+    "${runner_secret_bundle_entries[@]}"
 
   local witness_tss_ca_local_path
   local witness_tss_ca_remote_source_path=""
