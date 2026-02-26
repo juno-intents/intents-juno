@@ -169,3 +169,83 @@ func TestWorker_E2E_FailurePublished(t *testing.T) {
 		t.Fatalf("unexpected failure payload: %+v", msg)
 	}
 }
+
+func TestWorker_E2E_JobMismatchDoesNotPublishFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 11, 15, 0, 0, 0, time.UTC)
+	store := proof.NewMemoryStore(func() time.Time { return now })
+	submitter := &stubProver{seal: []byte{0xaa}}
+
+	svc, err := New(Config{
+		Owner:                  "requestor-e2e",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, submitter, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	existing := proof.JobRequest{
+		JobID:        common.HexToHash("0xf14f5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(2 * time.Minute),
+		Priority:     1,
+	}
+	inserted, err := store.UpsertJob(context.Background(), existing, 72*time.Hour)
+	if err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	if !inserted {
+		t.Fatalf("expected initial insert")
+	}
+
+	// Same job_id with different request payload should not emit a public failure message.
+	inputPayload := `{"job_id":"0xf14f5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d5d5d5f8d","pipeline":"deposit","image_id":"0x000000000000000000000000000000000000000000000000000000000000aa01","journal":"0x03","private_input":"0x04","deadline":"2026-02-11T15:05:00Z","priority":1}` + "\n"
+	consumer, err := queue.NewConsumer(context.Background(), queue.ConsumerConfig{
+		Driver: queue.DriverStdio,
+		Reader: strings.NewReader(inputPayload),
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	var out bytes.Buffer
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver: queue.DriverStdio,
+		Writer: &out,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	worker, err := NewWorker(WorkerConfig{
+		InputTopic:   "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		MaxInflight:  1,
+		AckTimeout:   time.Second,
+	}, svc, consumer, producer, nil)
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("expected no published message, got %q", got)
+	}
+	if submitter.calls != 0 {
+		t.Fatalf("expected no prover calls, got %d", submitter.calls)
+	}
+}

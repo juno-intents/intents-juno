@@ -138,6 +138,15 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 
 	out, err := w.service.ProcessJob(ctx, job)
 	if err != nil {
+		if errors.Is(err, proof.ErrJobMismatch) {
+			w.log.Warn(
+				"proof-requestor ignoring mismatched duplicate payload",
+				"job_id", job.JobID.Hex(),
+				"err", err,
+			)
+			ackMessage(msg, w.cfg.AckTimeout, w.log)
+			return nil
+		}
 		failPayload, ferr := proof.EncodeFailureMessage(proof.FailureMessage{
 			JobID:     job.JobID,
 			ErrorCode: "requestor_internal_error",
