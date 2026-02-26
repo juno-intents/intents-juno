@@ -504,6 +504,9 @@ test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
 
   assert_not_contains "$script_text" '{name:"PROOF_REQUESTOR_KEY", value:$requestor_key}' "shared ecs env list does not duplicate secret-backed PROOF_REQUESTOR_KEY"
   assert_not_contains "$script_text" '{name:"PROOF_FUNDER_KEY", value:$funder_key}' "shared ecs env list does not duplicate secret-backed PROOF_FUNDER_KEY"
+  assert_contains "$script_text" '{name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit}' "shared ecs env list includes global SP1 gas cap"
+  assert_contains "$script_text" '{name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit}' "shared ecs env list includes deposit SP1 gas cap"
+  assert_contains "$script_text" '{name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit}' "shared ecs env list includes withdraw SP1 gas cap"
   assert_contains "$script_text" '{name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url}' "shared ecs env list still includes deposit program URL"
   assert_contains "$script_text" '{name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url}' "shared ecs env list still includes withdraw program URL"
 }

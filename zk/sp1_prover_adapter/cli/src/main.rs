@@ -195,6 +195,15 @@ async fn prove_once(
             1800,
         )?));
 
+    if let Some(max_gas_limit) = read_pipeline_max_gas_limit(pipeline)? {
+        eprintln!(
+            "applying SP1 gas limit cap for {} pipeline: {} PGUs",
+            pipeline.name(),
+            max_gas_limit
+        );
+        req = req.gas_limit(max_gas_limit);
+    }
+
     if let Some(max_price_per_pgu) = read_optional_u64_env("SP1_MAX_PRICE_PER_PGU")? {
         req = req.max_price_per_pgu(max_price_per_pgu);
     }
@@ -275,6 +284,37 @@ fn read_optional_u64_env(name: &str) -> Result<Option<u64>> {
         .parse::<u64>()
         .with_context(|| format!("{name} must be an unsigned integer"))?;
     Ok(Some(value))
+}
+
+fn read_optional_u64_env_from<F>(name: &str, mut read_env: F) -> Result<Option<u64>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let Some(raw) = read_env(name) else {
+        return Ok(None);
+    };
+    let value = raw
+        .parse::<u64>()
+        .with_context(|| format!("{name} must be an unsigned integer"))?;
+    Ok(Some(value))
+}
+
+fn read_pipeline_max_gas_limit(pipeline: PipelineKind) -> Result<Option<u64>> {
+    read_pipeline_max_gas_limit_from(pipeline, |name| read_env_nonempty(name))
+}
+
+fn read_pipeline_max_gas_limit_from<F>(pipeline: PipelineKind, mut read_env: F) -> Result<Option<u64>>
+where
+    F: FnMut(&str) -> Option<String>,
+{
+    let specific_name = match pipeline {
+        PipelineKind::Deposit => "SP1_DEPOSIT_MAX_GAS_LIMIT",
+        PipelineKind::Withdraw => "SP1_WITHDRAW_MAX_GAS_LIMIT",
+    };
+    if let Some(limit) = read_optional_u64_env_from(specific_name, &mut read_env)? {
+        return Ok(Some(limit));
+    }
+    read_optional_u64_env_from("SP1_MAX_GAS_LIMIT", read_env)
 }
 
 async fn load_program_elf(pipeline: PipelineKind) -> Result<(Vec<u8>, String)> {
@@ -452,6 +492,39 @@ mod tests {
         let err =
             read_required_private_key_from(|name| envs.get(name).cloned()).expect_err("missing key");
         assert!(err.to_string().contains("NETWORK_PRIVATE_KEY is required"));
+    }
+
+    #[test]
+    fn read_pipeline_max_gas_limit_prefers_pipeline_specific_value() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_MAX_GAS_LIMIT", "1000000".to_owned());
+        envs.insert("SP1_DEPOSIT_MAX_GAS_LIMIT", "123456".to_owned());
+
+        let got = read_pipeline_max_gas_limit_from(PipelineKind::Deposit, |name| envs.get(name).cloned())
+            .expect("resolve pipeline-specific gas limit")
+            .expect("gas limit should be set");
+        assert_eq!(got, 123456);
+    }
+
+    #[test]
+    fn read_pipeline_max_gas_limit_uses_global_fallback() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_MAX_GAS_LIMIT", "7654321".to_owned());
+
+        let got = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| envs.get(name).cloned())
+            .expect("resolve global gas limit")
+            .expect("gas limit should be set");
+        assert_eq!(got, 7654321);
+    }
+
+    #[test]
+    fn read_pipeline_max_gas_limit_rejects_invalid_values() {
+        let mut envs = HashMap::new();
+        envs.insert("SP1_WITHDRAW_MAX_GAS_LIMIT", "not-a-number".to_owned());
+
+        let err = read_pipeline_max_gas_limit_from(PipelineKind::Withdraw, |name| envs.get(name).cloned())
+            .expect_err("invalid gas limit should error");
+        assert!(err.to_string().contains("SP1_WITHDRAW_MAX_GAS_LIMIT"));
     }
 
 }

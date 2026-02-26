@@ -2844,7 +2844,17 @@ command_run() {
   local sp1_required_credit_buffer_wei="${sp1_credit_guardrail[0]}"
   local sp1_critical_credit_threshold_wei="${sp1_credit_guardrail[1]}"
   local sp1_projected_pair_cost_wei="${sp1_credit_guardrail[2]}"
+  local sp1_deposit_max_gas_limit="$((sp1_deposit_pgu_estimate * 2))"
+  local sp1_withdraw_max_gas_limit="$((sp1_withdraw_pgu_estimate * 2))"
+  local sp1_global_max_gas_limit="$sp1_deposit_max_gas_limit"
+  if (( sp1_withdraw_max_gas_limit > sp1_global_max_gas_limit )); then
+    sp1_global_max_gas_limit="$sp1_withdraw_max_gas_limit"
+  fi
+  (( sp1_deposit_max_gas_limit > 0 )) || die "computed SP1 deposit max gas limit must be > 0"
+  (( sp1_withdraw_max_gas_limit > 0 )) || die "computed SP1 withdraw max gas limit must be > 0"
+  (( sp1_global_max_gas_limit > 0 )) || die "computed SP1 global max gas limit must be > 0"
   log "sp1 credit guardrail projected_pair_cost_wei=$sp1_projected_pair_cost_wei critical_threshold_wei=$sp1_critical_credit_threshold_wei required_buffer_wei=$sp1_required_credit_buffer_wei"
+  log "sp1 gas guardrail deposit_max_gas_limit=$sp1_deposit_max_gas_limit withdraw_max_gas_limit=$sp1_withdraw_max_gas_limit global_max_gas_limit=$sp1_global_max_gas_limit"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
@@ -4496,6 +4506,9 @@ command_run() {
 	      --arg sp1_min_auction_period "$sp1_min_auction_period" \
 	      --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
 	      --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
+	      --arg sp1_global_max_gas_limit "$sp1_global_max_gas_limit" \
+	      --arg sp1_deposit_max_gas_limit "$sp1_deposit_max_gas_limit" \
+	      --arg sp1_withdraw_max_gas_limit "$sp1_withdraw_max_gas_limit" \
 	      --arg deposit_program_url "$sp1_deposit_program_url" \
 	      --arg withdraw_program_url "$sp1_withdraw_program_url" \
 	      --arg deposit_vkey "$bridge_deposit_image_id" \
@@ -4507,6 +4520,9 @@ command_run() {
 	        {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
 	        {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
         {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
+        {name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit},
+        {name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit},
+        {name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit},
         {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
         {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
         {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
