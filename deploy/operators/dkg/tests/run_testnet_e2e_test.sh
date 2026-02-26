@@ -434,6 +434,15 @@ test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window()
   assert_contains "$script_text" 'run_shared_infra_validation_attempt "$checkpoint_canary_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"' "shared checkpoint validation retries with extended window for checkpoint-stage resume canaries"
 }
 
+test_relayer_runtime_seeds_checkpoint_after_startup() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"' "relayer runtime seeds a fresh checkpoint package after relayers start"
+  assert_contains "$script_text" 'wait_for_log_pattern "$deposit_relayer_log" "updated checkpoint" 180' "relayer runtime waits for deposit-relayer checkpoint ingestion before deposit submission"
+  assert_contains "$script_text" 'wait_for_log_pattern "$withdraw_finalizer_log" "updated checkpoint" 180' "relayer runtime waits for withdraw-finalizer checkpoint ingestion before withdrawal flow"
+}
+
 test_direct_cli_witness_extraction_retries_note_visibility() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -612,6 +621,7 @@ main() {
   test_existing_bridge_summary_reuses_deployed_contracts
   test_checkpoint_bridge_config_updates_stack_env_runtime_keys
   test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window
+  test_relayer_runtime_seeds_checkpoint_after_startup
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
   test_workdir_run_lock_prevents_overlapping_runs

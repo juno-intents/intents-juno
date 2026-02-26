@@ -4620,6 +4620,7 @@ command_run() {
     shared_validation_log="$(mktemp)"
     run_shared_infra_validation_attempt() {
       local checkpoint_min_persisted_at="$1"
+      local shared_validation_output_path="${2:-$shared_summary}"
       (
         cd "$REPO_ROOT"
 	        go run ./cmd/shared-infra-e2e \
@@ -4632,7 +4633,7 @@ command_run() {
 	          --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}" \
 	          --topic-prefix "$shared_topic_prefix" \
 	          --timeout "$shared_timeout" \
-	          --output "$shared_summary"
+	          --output "$shared_validation_output_path"
 	      )
 	    }
 
@@ -5223,6 +5224,31 @@ command_run() {
       if ! wait_for_condition 60 2 "bridge-api health" check_bridge_api_health; then
         relayer_status=1
       fi
+    fi
+  fi
+
+  if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
+    local relayer_checkpoint_seed_started_at relayer_checkpoint_seed_summary
+    relayer_checkpoint_seed_started_at="$(timestamp_utc)"
+    relayer_checkpoint_seed_summary="$workdir/reports/shared-infra-relayer-runtime-summary.json"
+    log "seeding checkpoint package after relayer startup to ensure relayers ingest a fresh checkpoint"
+    if ! run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"; then
+      log "failed to seed relayer runtime checkpoint package after relayer startup"
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    if ! wait_for_log_pattern "$deposit_relayer_log" "updated checkpoint" 180; then
+      log "deposit relayer did not ingest a checkpoint package after startup"
+      relayer_status=1
+    fi
+  fi
+
+  if (( relayer_status == 0 )); then
+    if ! wait_for_log_pattern "$withdraw_finalizer_log" "updated checkpoint" 180; then
+      log "withdraw finalizer did not ingest a checkpoint package after startup"
+      relayer_status=1
     fi
   fi
 
