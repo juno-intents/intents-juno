@@ -601,6 +601,42 @@ test_shared_infra_validation_precreates_bridge_and_proof_topics() {
   assert_contains "$script_text" '--required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"' "shared infra validation pre-creates proof/deposit/withdraw topics before bridge-api and relayer traffic"
 }
 
+test_shared_proof_services_restart_after_topic_ensure() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments" "shared proof services are force-restarted after topic ensure"
+  assert_contains "$script_text" 'die "shared ecs services failed to stabilize after post-topic-ensure restart"' "shared proof service post-topic restart has explicit hard-fail message"
+  assert_order "$script_text" \
+    'run_shared_infra_validation_attempt "$checkpoint_started_at"' \
+    "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments" \
+    "shared proof services restart runs after shared kafka topic ensure/validation"
+  assert_order "$script_text" \
+    "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments" \
+    'maybe_stop_after_stage "checkpoint_validated"' \
+    "checkpoint canary stage gate runs after post-topic shared service restart"
+}
+
+test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "proof_jobs_count() {" "run-testnet-e2e defines helper to read proof_jobs count from shared postgres"
+  assert_contains "$script_text" "restart_shared_proof_services_with_wait() {" "run-testnet-e2e defines helper to restart shared proof services with stability wait"
+  assert_contains "$script_text" "proof_requestor_progress_guard_interval_seconds" "run-testnet-e2e defines explicit proof-requestor progress guard interval"
+  assert_contains "$script_text" "proof_requestor_progress_guard_max_restarts" "run-testnet-e2e bounds self-heal restarts for stalled proof-requestor progress"
+  assert_contains "$script_text" "proof_requestor_progress_observed=\"false\"" "run-testnet-e2e tracks proof-requestor progress while deposit status is pending"
+  assert_contains "$script_text" "proof_jobs_count_before_run_deposit" "run-testnet-e2e snapshots proof_jobs count before run deposit submission"
+  assert_contains "$script_text" "proof_jobs_count_current" "run-testnet-e2e reads current proof_jobs count during deposit-status wait"
+  assert_contains "$script_text" "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services" "run-testnet-e2e logs explicit self-heal reason before restarting proof services"
+  assert_contains "$script_text" 'proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))' "run-testnet-e2e increments bounded proof-requestor restart attempts"
+  assert_contains "$script_text" "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is pending" "run-testnet-e2e fails explicitly when bounded self-heal attempts are exhausted"
+  assert_order "$script_text" \
+    "proof_jobs_count_before_run_deposit" \
+    "wait_for_condition 1200 5 \"bridge-api deposit status\" wait_bridge_api_deposit_finalized" \
+    "proof-requestor progress baseline is captured before bridge-api deposit status wait begins"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -641,6 +677,8 @@ main() {
   test_direct_cli_user_proof_is_disabled_by_default_for_runner_orchestration_only
   test_sp1_rpc_defaults_and_validation_target_succinct_network
   test_shared_infra_validation_precreates_bridge_and_proof_topics
+  test_shared_proof_services_restart_after_topic_ensure
+  test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
 }
 
 main "$@"

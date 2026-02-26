@@ -1062,6 +1062,23 @@ wait_for_log_pattern() {
   return 1
 }
 
+proof_jobs_count() {
+  local postgres_dsn="$1"
+  local count_raw status
+
+  set +e
+  count_raw="$(psql "$postgres_dsn" -Atqc 'SELECT COUNT(*) FROM proof_jobs;' 2>/dev/null)"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  count_raw="$(trim "$count_raw")"
+  [[ "$count_raw" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$count_raw"
+}
+
 supports_sign_digest_subcommand() {
   local signer_bin="$1"
   local probe_digest output status lowered
@@ -2861,6 +2878,28 @@ command_run() {
         "$shared_proof_funder_service_name" \
         "0" || true
     fi
+  }
+
+  restart_shared_proof_services_with_wait() {
+    if [[ "$shared_ecs_started" != "true" ]]; then
+      return 0
+    fi
+
+    aws ecs update-service \
+      --region "$shared_ecs_region" \
+      --cluster "$shared_ecs_cluster_arn" \
+      --service "$shared_proof_requestor_service_name" \
+      --force-new-deployment >/dev/null
+    aws ecs update-service \
+      --region "$shared_ecs_region" \
+      --cluster "$shared_ecs_cluster_arn" \
+      --service "$shared_proof_funder_service_name" \
+      --force-new-deployment >/dev/null
+    wait_for_shared_proof_services_ecs_stable \
+      "$shared_ecs_region" \
+      "$shared_ecs_cluster_arn" \
+      "$shared_proof_requestor_service_name" \
+      "$shared_proof_funder_service_name"
   }
 
   write_stage_checkpoint_summary() {
@@ -4677,6 +4716,15 @@ command_run() {
       die "shared infra validation failed (operator-service checkpoint publication)"
     fi
     stage_checkpoint_shared_validation_passed="true"
+    log "restarting shared ECS proof-requestor/proof-funder services after shared Kafka topic ensure to refresh consumer assignments"
+    if ! restart_shared_proof_services_with_wait; then
+      dump_shared_proof_services_ecs_logs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name"
+      die "shared ecs services failed to stabilize after post-topic-ensure restart"
+    fi
     maybe_stop_after_stage "checkpoint_validated"
     if [[ "$stage_stop_after_stage_reached" == "true" ]]; then
       return 0
@@ -5517,17 +5565,75 @@ command_run() {
     fi
 
     if (( relayer_status == 0 )); then
+      local proof_jobs_count_before_run_deposit=""
+      local proof_jobs_count_current=""
+      local proof_requestor_progress_guard_interval_seconds=120
+      local proof_requestor_progress_guard_max_restarts=2
+      local proof_requestor_progress_restart_attempts=0
+      local proof_requestor_progress_observed="false"
+      local proof_requestor_progress_guard_failed="false"
+      local proof_requestor_progress_guard_last_probe_epoch=0
+
+      if [[ "$shared_enabled" == "true" && "$proof_services_mode" == "shared-ecs" ]]; then
+        proof_jobs_count_before_run_deposit="$(proof_jobs_count "$shared_postgres_dsn" || true)"
+        if [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
+          log "proof-requestor progress guard baseline proof_jobs_count_before_run_deposit=$proof_jobs_count_before_run_deposit"
+        else
+          log "proof-requestor progress guard disabled: unable to read proof_jobs baseline from shared postgres"
+        fi
+      fi
+      proof_requestor_progress_guard_last_probe_epoch="$(date +%s)"
+
       wait_bridge_api_deposit_finalized() {
-        local status_json found state
+        local status_json found state now_epoch
         status_json="$(curl -fsS "${bridge_api_url}/v1/status/deposit/${run_deposit_id}" || true)"
         [[ -n "$status_json" ]] || return 1
         found="$(jq -r '.found // false' <<<"$status_json" 2>/dev/null || true)"
         state="$(jq -r '.state // empty' <<<"$status_json" 2>/dev/null || true)"
         bridge_api_deposit_state="$state"
         [[ "$found" == "true" ]] || return 1
-        [[ "$state" == "finalized" ]]
+        if [[ "$state" == "finalized" ]]; then
+          return 0
+        fi
+
+        if [[ "$state" == "pending" ]] &&
+          [[ "$shared_enabled" == "true" ]] &&
+          [[ "$proof_services_mode" == "shared-ecs" ]] &&
+          [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]] &&
+          [[ "$proof_requestor_progress_observed" != "true" ]]; then
+          proof_jobs_count_current="$(proof_jobs_count "$shared_postgres_dsn" || true)"
+          if [[ "$proof_jobs_count_current" =~ ^[0-9]+$ ]] &&
+            (( proof_jobs_count_current > proof_jobs_count_before_run_deposit )); then
+            proof_requestor_progress_observed="true"
+            log "proof-requestor progress observed via proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=$proof_jobs_count_current"
+          else
+            now_epoch="$(date +%s)"
+            if (( now_epoch - proof_requestor_progress_guard_last_probe_epoch >= proof_requestor_progress_guard_interval_seconds )); then
+              if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
+                log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
+                proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
+                if ! restart_shared_proof_services_with_wait; then
+                  log "proof-requestor progress guard failed to restart shared proof services"
+                  proof_requestor_progress_guard_failed="true"
+                  bridge_api_deposit_state="failed_proof_requestor_restart_failed"
+                  return 0
+                fi
+              else
+                log "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                proof_requestor_progress_guard_failed="true"
+                bridge_api_deposit_state="failed_proof_requestor_guard_exhausted"
+                return 0
+              fi
+            fi
+          fi
+        fi
+        return 1
       }
       if ! wait_for_condition 1200 5 "bridge-api deposit status" wait_bridge_api_deposit_finalized; then
+        relayer_status=1
+      fi
+      if [[ "$proof_requestor_progress_guard_failed" == "true" ]]; then
         relayer_status=1
       fi
     fi
