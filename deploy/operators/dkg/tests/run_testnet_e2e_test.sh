@@ -498,6 +498,25 @@ test_workdir_run_lock_prevents_overlapping_runs() {
   assert_contains "$script_text" 'acquire_workdir_run_lock "$workdir"' "command_run acquires lock before executing live flow"
 }
 
+test_wait_for_condition_preserves_check_fn_side_effects() {
+  local function_body
+  function_body="$(
+    awk '
+      /^wait_for_condition\(\) {/ { in_fn=1 }
+      in_fn { print }
+      in_fn && /^}/ { exit }
+    ' "$TARGET_SCRIPT"
+  )"
+  [[ -n "$function_body" ]] || {
+    printf 'failed to extract wait_for_condition from %s\n' "$TARGET_SCRIPT" >&2
+    exit 1
+  }
+
+  assert_contains "$function_body" 'wait_output_file="$(mktemp "${TMPDIR:-/tmp}/wait-for-condition.XXXXXX")"' "wait_for_condition allocates a dedicated output temp file"
+  assert_contains "$function_body" '"$@" >"$wait_output_file" 2>&1' "wait_for_condition executes check callback directly (no command substitution subshell)"
+  assert_not_contains "$function_body" 'output="$("$@" 2>&1)"' "wait_for_condition no longer uses command substitution that drops callback side effects"
+}
+
 test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -679,6 +698,7 @@ main() {
   test_direct_cli_witness_extraction_retries_note_visibility
   test_json_array_from_args_separates_jq_options_from_cli_flags
   test_workdir_run_lock_prevents_overlapping_runs
+  test_wait_for_condition_preserves_check_fn_side_effects
   test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys
   test_shared_ecs_uses_explicit_sp1_adapter_binary_path
   test_shared_ecs_env_enforces_kafka_tls_for_proof_services

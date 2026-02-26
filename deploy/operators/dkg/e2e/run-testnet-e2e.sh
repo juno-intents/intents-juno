@@ -1505,15 +1505,20 @@ wait_for_condition() {
   shift 3
 
   local elapsed=0
-  local status
+  local status=0
   local output=""
+  local wait_output_file
+
+  wait_output_file="$(mktemp "${TMPDIR:-/tmp}/wait-for-condition.XXXXXX")"
 
   while (( elapsed < timeout_seconds )); do
     set +e
-    output="$("$@" 2>&1)"
+    "$@" >"$wait_output_file" 2>&1
     status=$?
     set -e
+    output="$(cat "$wait_output_file")"
     if (( status == 0 )); then
+      rm -f "$wait_output_file"
       return 0
     fi
     if [[ -n "$output" ]]; then
@@ -1526,9 +1531,11 @@ wait_for_condition() {
   done
 
   set +e
-  output="$("$@" 2>&1)"
+  "$@" >"$wait_output_file" 2>&1
   status=$?
   set -e
+  output="$(cat "$wait_output_file")"
+  rm -f "$wait_output_file"
   if (( status != 0 )); then
     if [[ -n "$output" ]]; then
       log "$label failed: $output"
