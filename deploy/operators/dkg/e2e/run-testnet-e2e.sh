@@ -2203,6 +2203,7 @@ command_run() {
   local sp1_input_s3_region=""
   local sp1_input_s3_presign_ttl="2h"
   local sp1_max_price_per_pgu="2000000000"
+  local sp1_progress_guard_bump_max_price_per_pgu="1000000000000"
   local sp1_deposit_pgu_estimate="1000000"
   local sp1_withdraw_pgu_estimate="1000000"
   local sp1_groth16_base_fee_wei="200000000000000000"
@@ -2652,6 +2653,7 @@ command_run() {
   [[ "$base_port" =~ ^[0-9]+$ ]] || die "--base-port must be numeric"
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
   [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "--sp1-max-price-per-pgu must be numeric"
+  [[ "$sp1_progress_guard_bump_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "sp1 progress guard bump max price must be numeric"
   [[ "$sp1_deposit_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-deposit-pgu-estimate must be numeric"
   [[ "$sp1_withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-withdraw-pgu-estimate must be numeric"
   [[ "$sp1_groth16_base_fee_wei" =~ ^[0-9]+$ ]] || die "--sp1-groth16-base-fee-wei must be numeric"
@@ -2659,6 +2661,9 @@ command_run() {
   [[ "$sp1_auction_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-auction-timeout must be seconds with s suffix (example: 625s)"
   [[ "$sp1_request_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-request-timeout must be seconds with s suffix (example: 1500s)"
   (( sp1_max_price_per_pgu > 0 )) || die "--sp1-max-price-per-pgu must be > 0"
+  (( sp1_progress_guard_bump_max_price_per_pgu > 0 )) || die "sp1 progress guard bump max price must be > 0"
+  (( sp1_progress_guard_bump_max_price_per_pgu >= sp1_max_price_per_pgu )) || \
+    die "sp1 progress guard bump max price must be >= --sp1-max-price-per-pgu"
   (( sp1_deposit_pgu_estimate > 0 )) || die "--sp1-deposit-pgu-estimate must be > 0"
   (( sp1_withdraw_pgu_estimate > 0 )) || die "--sp1-withdraw-pgu-estimate must be > 0"
   (( sp1_groth16_base_fee_wei > 0 )) || die "--sp1-groth16-base-fee-wei must be > 0"
@@ -2893,6 +2898,22 @@ command_run() {
   restart_shared_proof_services_with_wait() {
     if [[ "$shared_ecs_started" != "true" ]]; then
       return 0
+    fi
+
+    if [[ -n "${proof_requestor_ecs_command_json:-}" ]] &&
+      [[ -n "${proof_funder_ecs_command_json:-}" ]] &&
+      [[ -n "${proof_requestor_ecs_environment_json:-}" ]] &&
+      [[ -n "${proof_funder_ecs_environment_json:-}" ]]; then
+      rollout_shared_proof_services_ecs \
+        "$shared_ecs_region" \
+        "$shared_ecs_cluster_arn" \
+        "$shared_proof_requestor_service_name" \
+        "$shared_proof_funder_service_name" \
+        "$proof_requestor_ecs_command_json" \
+        "$proof_funder_ecs_command_json" \
+        "$proof_requestor_ecs_environment_json" \
+        "$proof_funder_ecs_environment_json"
+      return $?
     fi
 
     aws ecs update-service \
@@ -4500,48 +4521,57 @@ command_run() {
     local proof_funder_ecs_environment_json
     proof_requestor_ecs_command_json="$(json_array_from_args "${proof_requestor_ecs_command[@]}")"
     proof_funder_ecs_command_json="$(json_array_from_args "${proof_funder_ecs_command[@]}")"
-	    proof_requestor_ecs_environment_json="$(jq -n \
-	      --arg sp1_network_rpc_url "$sp1_rpc_url" \
-	      --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
-	      --arg sp1_min_auction_period "$sp1_min_auction_period" \
-	      --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
-	      --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
-	      --arg sp1_global_max_gas_limit "$sp1_global_max_gas_limit" \
-	      --arg sp1_deposit_max_gas_limit "$sp1_deposit_max_gas_limit" \
-	      --arg sp1_withdraw_max_gas_limit "$sp1_withdraw_max_gas_limit" \
-	      --arg deposit_program_url "$sp1_deposit_program_url" \
-	      --arg withdraw_program_url "$sp1_withdraw_program_url" \
-	      --arg deposit_vkey "$bridge_deposit_image_id" \
-	      --arg withdraw_vkey "$bridge_withdraw_image_id" \
-	      '[
-	        {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
-	        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
-	        {name:"SP1_MAX_PRICE_PER_PGU", value:$sp1_max_price_per_pgu},
-	        {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
-	        {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
-        {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
-        {name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit},
-        {name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit},
-        {name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit},
-        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
-        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
-        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
-        {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
-      ]')"
-	    proof_funder_ecs_environment_json="$(jq -n \
-	      --arg sp1_network_rpc_url "$sp1_rpc_url" \
-	      --arg deposit_program_url "$sp1_deposit_program_url" \
-	      --arg withdraw_program_url "$sp1_withdraw_program_url" \
-	      --arg deposit_vkey "$bridge_deposit_image_id" \
-	      --arg withdraw_vkey "$bridge_withdraw_image_id" \
-	      '[
-	        {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
-	        {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
-	        {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
-	        {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
-	        {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
-        {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
-      ]')"
+
+    build_proof_requestor_ecs_environment_json() {
+      jq -n \
+        --arg sp1_network_rpc_url "$sp1_rpc_url" \
+        --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+        --arg sp1_min_auction_period "$sp1_min_auction_period" \
+        --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
+        --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
+        --arg sp1_global_max_gas_limit "$sp1_global_max_gas_limit" \
+        --arg sp1_deposit_max_gas_limit "$sp1_deposit_max_gas_limit" \
+        --arg sp1_withdraw_max_gas_limit "$sp1_withdraw_max_gas_limit" \
+        --arg deposit_program_url "$sp1_deposit_program_url" \
+        --arg withdraw_program_url "$sp1_withdraw_program_url" \
+        --arg deposit_vkey "$bridge_deposit_image_id" \
+        --arg withdraw_vkey "$bridge_withdraw_image_id" \
+        '[
+          {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
+          {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
+          {name:"SP1_MAX_PRICE_PER_PGU", value:$sp1_max_price_per_pgu},
+          {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
+          {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
+          {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
+          {name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit},
+          {name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit},
+          {name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit},
+          {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
+          {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
+          {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
+          {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
+        ]'
+    }
+
+    build_proof_funder_ecs_environment_json() {
+      jq -n \
+        --arg sp1_network_rpc_url "$sp1_rpc_url" \
+        --arg deposit_program_url "$sp1_deposit_program_url" \
+        --arg withdraw_program_url "$sp1_withdraw_program_url" \
+        --arg deposit_vkey "$bridge_deposit_image_id" \
+        --arg withdraw_vkey "$bridge_withdraw_image_id" \
+        '[
+          {name:"JUNO_QUEUE_KAFKA_TLS", value:"true"},
+          {name:"SP1_NETWORK_RPC_URL", value:$sp1_network_rpc_url},
+          {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
+          {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
+          {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
+          {name:"SP1_WITHDRAW_PROGRAM_VKEY", value:$withdraw_vkey}
+        ]'
+    }
+
+    proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
+    proof_funder_ecs_environment_json="$(build_proof_funder_ecs_environment_json)"
 
     log "rolling out shared ECS proof-requestor/proof-funder services"
     rollout_shared_proof_services_ecs \
@@ -5551,6 +5581,16 @@ command_run() {
       done
     fi
 
+    local proof_jobs_count_before_run_deposit=""
+    if [[ "$shared_enabled" == "true" && "$proof_services_mode" == "shared-ecs" ]]; then
+      proof_jobs_count_before_run_deposit="$(proof_jobs_count "$shared_postgres_dsn" || true)"
+      if [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
+        log "proof-requestor progress guard baseline proof_jobs_count_before_run_deposit=$proof_jobs_count_before_run_deposit"
+      else
+        log "proof-requestor progress guard disabled: unable to read proof_jobs baseline from shared postgres"
+      fi
+    fi
+
     deposit_event_payload="$workdir/reports/deposit-event.json"
     if (( relayer_status == 0 )); then
       local run_deposit_witness_hex run_deposit_submit_body
@@ -5581,7 +5621,6 @@ command_run() {
     fi
 
     if (( relayer_status == 0 )); then
-      local proof_jobs_count_before_run_deposit=""
       local proof_jobs_count_current=""
       local proof_requestor_progress_guard_interval_seconds=120
       local proof_requestor_progress_guard_max_restarts=2
@@ -5590,14 +5629,6 @@ command_run() {
       local proof_requestor_progress_guard_failed="false"
       local proof_requestor_progress_guard_last_probe_epoch=0
 
-      if [[ "$shared_enabled" == "true" && "$proof_services_mode" == "shared-ecs" ]]; then
-        proof_jobs_count_before_run_deposit="$(proof_jobs_count "$shared_postgres_dsn" || true)"
-        if [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
-          log "proof-requestor progress guard baseline proof_jobs_count_before_run_deposit=$proof_jobs_count_before_run_deposit"
-        else
-          log "proof-requestor progress guard disabled: unable to read proof_jobs baseline from shared postgres"
-        fi
-      fi
       proof_requestor_progress_guard_last_probe_epoch="$(date +%s)"
 
       wait_bridge_api_deposit_finalized() {
@@ -5629,6 +5660,14 @@ command_run() {
                 log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
                 proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
                 proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
+                if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
+                  (( sp1_max_price_per_pgu < sp1_progress_guard_bump_max_price_per_pgu )); then
+                  local sp1_progress_guard_previous_max_price
+                  sp1_progress_guard_previous_max_price="$sp1_max_price_per_pgu"
+                  sp1_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"
+                  proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
+                  log "proof-requestor progress guard bumped SP1 max price per PGU from $sp1_progress_guard_previous_max_price to $sp1_max_price_per_pgu before shared proof service restart"
+                fi
                 if ! restart_shared_proof_services_with_wait; then
                   log "proof-requestor progress guard failed to restart shared proof services"
                   proof_requestor_progress_guard_failed="true"

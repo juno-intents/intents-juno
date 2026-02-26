@@ -630,10 +630,17 @@ test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_
   assert_contains "$script_text" "proof_requestor_progress_guard_max_restarts" "run-testnet-e2e bounds self-heal restarts for stalled proof-requestor progress"
   assert_contains "$script_text" "proof_requestor_progress_observed=\"false\"" "run-testnet-e2e tracks proof-requestor progress while deposit status is pending"
   assert_contains "$script_text" "proof_jobs_count_before_run_deposit" "run-testnet-e2e snapshots proof_jobs count before run deposit submission"
+  assert_contains "$script_text" "sp1_progress_guard_bump_max_price_per_pgu" "run-testnet-e2e defines a bounded SP1 guardrail bump target for stalled proof submissions"
   assert_contains "$script_text" "proof_jobs_count_current" "run-testnet-e2e reads current proof_jobs count during deposit-status wait"
   assert_contains "$script_text" "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services" "run-testnet-e2e logs explicit self-heal reason before restarting proof services"
+  assert_contains "$script_text" "proof-requestor progress guard bumped SP1 max price per PGU" "run-testnet-e2e escalates SP1 max price when pending proof jobs stall"
+  assert_contains "$script_text" 'proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"' "run-testnet-e2e rebuilds shared proof-requestor ecs env after SP1 max-price escalation"
   assert_contains "$script_text" 'proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))' "run-testnet-e2e increments bounded proof-requestor restart attempts"
   assert_contains "$script_text" "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is pending" "run-testnet-e2e fails explicitly when bounded self-heal attempts are exhausted"
+  assert_order "$script_text" \
+    "proof_jobs_count_before_run_deposit" \
+    "bridge_api_post_json_with_retry \"\${bridge_api_url}/v1/deposits/submit\"" \
+    "proof-requestor progress baseline is captured before bridge-api deposit submission"
   assert_order "$script_text" \
     "proof_jobs_count_before_run_deposit" \
     "wait_for_condition 1200 5 \"bridge-api deposit status\" wait_bridge_api_deposit_finalized" \
