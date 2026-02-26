@@ -5625,7 +5625,6 @@ command_run() {
       local proof_requestor_progress_guard_interval_seconds=120
       local proof_requestor_progress_guard_max_restarts=2
       local proof_requestor_progress_restart_attempts=0
-      local proof_requestor_progress_observed="false"
       local proof_requestor_progress_guard_failed="false"
       local proof_requestor_progress_guard_last_probe_epoch=0
 
@@ -5646,15 +5645,15 @@ command_run() {
         if [[ "$state" == "pending" ]] &&
           [[ "$shared_enabled" == "true" ]] &&
           [[ "$proof_services_mode" == "shared-ecs" ]] &&
-          [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]] &&
-          [[ "$proof_requestor_progress_observed" != "true" ]]; then
+          [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
+          now_epoch="$(date +%s)"
           proof_jobs_count_current="$(proof_jobs_count "$shared_postgres_dsn" || true)"
           if [[ "$proof_jobs_count_current" =~ ^[0-9]+$ ]] &&
             (( proof_jobs_count_current > proof_jobs_count_before_run_deposit )); then
-            proof_requestor_progress_observed="true"
             log "proof-requestor progress observed via proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=$proof_jobs_count_current"
+            proof_jobs_count_before_run_deposit="$proof_jobs_count_current"
+            proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
           else
-            now_epoch="$(date +%s)"
             if (( now_epoch - proof_requestor_progress_guard_last_probe_epoch >= proof_requestor_progress_guard_interval_seconds )); then
               if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
                 log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
