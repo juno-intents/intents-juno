@@ -116,6 +116,7 @@ test_distributed_relayer_runtime_cleans_stale_processes_before_launch() {
   assert_contains "$script_text" "distributed relayer runtime enabled; stopping stale remote relayer processes before launch" "distributed relayer mode logs stale-process cleanup phase"
   assert_contains "$script_text" "for relayer_cleanup_host in" "distributed relayer mode iterates selected hosts for stale-process cleanup"
   assert_contains "$script_text" "stop_remote_relayer_binaries_on_host \\" "distributed relayer mode invokes stale-process cleanup helper"
+  assert_contains "$script_text" 'JUNO_QUEUE_KAFKA_TLS="true"' "distributed relayer runtime forces kafka tls for remote relayer processes"
   assert_contains "$script_text" "failed to stop stale remote relayer processes host=" "stale cleanup failures are logged explicitly"
   assert_contains "$script_text" "marking relayer launch failed" "stale cleanup failures hard-fail relayer startup"
   assert_not_contains "$script_text" "continuing with launch" "stale cleanup failures are no longer treated as best-effort"

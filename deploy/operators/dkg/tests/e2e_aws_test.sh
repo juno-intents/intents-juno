@@ -642,6 +642,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "/usr/local/bin/deposit-relayer" "distributed relayer runtime uses operator-installed deposit relayer binary"
   assert_contains "$e2e_script_text" "/usr/local/bin/withdraw-coordinator" "distributed relayer runtime uses operator-installed withdraw coordinator binary"
   assert_contains "$e2e_script_text" "/usr/local/bin/withdraw-finalizer" "distributed relayer runtime uses operator-installed withdraw finalizer binary"
+  assert_contains "$e2e_script_text" 'JUNO_QUEUE_KAFKA_TLS="true"' "distributed relayer runtime explicitly enables kafka tls for remote relayer queue clients"
   assert_not_contains "$e2e_script_text" "resolve_runner_relayer_host()" "distributed relayer runtime no longer depends on runner host discovery"
   assert_not_contains "$e2e_script_text" "--runtime-mode mock" "withdraw coordinator mock runtime removed from live e2e"
   assert_contains "$e2e_script_text" "--juno-rpc-url \"\$sp1_witness_juno_rpc_url\"" "withdraw coordinator uses witness-derived Juno RPC"

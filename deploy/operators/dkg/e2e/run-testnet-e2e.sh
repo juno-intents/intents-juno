@@ -4981,6 +4981,7 @@ command_run() {
           "$deposit_relayer_log" \
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          JUNO_QUEUE_KAFKA_TLS="true" \
           /usr/local/bin/deposit-relayer \
           --postgres-dsn "$shared_postgres_dsn" \
           --store-driver postgres \
@@ -5011,6 +5012,7 @@ command_run() {
           "$withdraw_coordinator_log" \
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          JUNO_QUEUE_KAFKA_TLS="true" \
           "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
           "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
           /usr/local/bin/withdraw-coordinator \
@@ -5042,6 +5044,7 @@ command_run() {
       local -a withdraw_finalizer_remote_env=(
         env
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token"
+        JUNO_QUEUE_KAFKA_TLS="true"
         "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
         "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
       )
@@ -5265,7 +5268,7 @@ command_run() {
       set +e
       (
         cd "$REPO_ROOT"
-        go run ./cmd/queue-publish \
+        JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           "--topic" "$checkpoint_package_topic" \
