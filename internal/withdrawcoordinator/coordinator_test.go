@@ -451,6 +451,68 @@ func TestCoordinator_PersistsTxPlanAndSignedTxArtifacts(t *testing.T) {
 	}
 }
 
+func TestCoordinator_DedupesReclaimedWithdrawalBeforeFlush(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 30 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	w := withdraw.Withdrawal{
+		ID:          seq32(0x00),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: []byte{0x01},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if err := c.IngestWithdrawRequested(ctx, w); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+
+	// Claim once, then repeatedly advance beyond claim TTL but below/at max age.
+	// Coordinator must not duplicate the same withdrawal in the in-memory batch.
+	for i := 0; i < 6; i++ {
+		if err := c.Tick(ctx); err != nil {
+			t.Fatalf("Tick #%d: %v", i+1, err)
+		}
+		now = now.Add(40 * time.Second)
+	}
+
+	confirmed, err := store.ListBatchesByState(ctx, withdraw.BatchStateConfirmed)
+	if err != nil {
+		t.Fatalf("ListBatchesByState: %v", err)
+	}
+	if len(confirmed) != 1 {
+		t.Fatalf("expected 1 confirmed batch, got %d", len(confirmed))
+	}
+	if len(confirmed[0].WithdrawalIDs) != 1 {
+		t.Fatalf("expected 1 withdrawal id in batch, got %d", len(confirmed[0].WithdrawalIDs))
+	}
+	if confirmed[0].WithdrawalIDs[0] != w.ID {
+		t.Fatalf("batch withdrawal id mismatch")
+	}
+	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 || confirmer.calls != 1 {
+		t.Fatalf("unexpected call counts: planner=%d signer=%d broadcaster=%d confirmer=%d", planner.calls, signer.calls, broadcaster.calls, confirmer.calls)
+	}
+}
+
 func TestCoordinator_FailsWhenTxPlanArtifactPersistenceFails(t *testing.T) {
 	t.Parallel()
 

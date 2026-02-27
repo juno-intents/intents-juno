@@ -71,6 +71,10 @@ type Coordinator struct {
 	log *slog.Logger
 
 	batcher *batching.Batcher[withdraw.Withdrawal]
+	// pendingIDs tracks withdrawals currently buffered in the in-memory batcher.
+	// This prevents duplicate re-claims (after claim TTL expiry) from being
+	// appended multiple times before a flush occurs.
+	pendingIDs map[[32]byte]struct{}
 }
 
 func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, log *slog.Logger) (*Coordinator, error) {
@@ -139,6 +143,7 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 		confirmer:   confirmer,
 		log:         log,
 		batcher:     b,
+		pendingIDs:  make(map[[32]byte]struct{}),
 	}, nil
 }
 
@@ -178,8 +183,13 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 			return err
 		}
 		for _, w := range ws {
+			if _, exists := c.pendingIDs[w.ID]; exists {
+				continue
+			}
+			c.pendingIDs[w.ID] = struct{}{}
 			batch, ok := c.batcher.Add(w.ID, w)
 			if ok {
+				c.releasePending(batch.Items)
 				if err := c.processNewBatch(ctx, batch); err != nil {
 					return err
 				}
@@ -188,12 +198,22 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	}
 
 	if batch, ok := c.batcher.FlushDue(); ok {
+		c.releasePending(batch.Items)
 		if err := c.processNewBatch(ctx, batch); err != nil {
 			return err
 		}
 	}
 
 	return c.resume(ctx)
+}
+
+func (c *Coordinator) releasePending(items []batching.Item[withdraw.Withdrawal]) {
+	if len(items) == 0 || c.pendingIDs == nil {
+		return
+	}
+	for _, it := range items {
+		delete(c.pendingIDs, it.ID)
+	}
 }
 
 func (c *Coordinator) resume(ctx context.Context) error {
