@@ -5769,7 +5769,8 @@ command_run() {
     if (( relayer_status == 0 )); then
       local proof_jobs_count_current=""
       local proof_jobs_last_update_epoch_current=""
-      local proof_requestor_progress_guard_interval_seconds=120
+      local proof_requestor_progress_guard_interval_seconds="$((10#${sp1_auction_timeout%s}))"
+      (( proof_requestor_progress_guard_interval_seconds >= 300 )) || proof_requestor_progress_guard_interval_seconds=300
       local proof_requestor_progress_guard_max_restarts=2
       local proof_requestor_progress_restart_attempts=0
       local proof_requestor_progress_guard_failed="false"

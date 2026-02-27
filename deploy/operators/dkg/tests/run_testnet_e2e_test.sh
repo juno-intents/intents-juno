@@ -651,6 +651,8 @@ test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_
   assert_contains "$script_text" "proof_jobs_count() {" "run-testnet-e2e defines helper to read proof_jobs count from shared postgres"
   assert_contains "$script_text" "restart_shared_proof_services_with_wait() {" "run-testnet-e2e defines helper to restart shared proof services with stability wait"
   assert_contains "$script_text" "proof_requestor_progress_guard_interval_seconds" "run-testnet-e2e defines explicit proof-requestor progress guard interval"
+  assert_contains "$script_text" 'local proof_requestor_progress_guard_interval_seconds="$((10#${sp1_auction_timeout%s}))"' "proof-requestor progress guard interval is derived from SP1 auction timeout"
+  assert_contains "$script_text" '(( proof_requestor_progress_guard_interval_seconds >= 300 )) || proof_requestor_progress_guard_interval_seconds=300' "proof-requestor progress guard interval enforces minimum stabilization cooldown before restart"
   assert_contains "$script_text" "proof_requestor_progress_guard_max_restarts" "run-testnet-e2e bounds self-heal restarts for stalled proof-requestor progress"
   assert_not_contains "$script_text" "proof_requestor_progress_observed=\"false\"" "run-testnet-e2e no longer permanently disables guard checks after first proof_jobs growth event"
   assert_contains "$script_text" "proof_jobs_count_before_run_deposit" "run-testnet-e2e snapshots proof_jobs count before run deposit submission"
