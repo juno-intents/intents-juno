@@ -116,8 +116,6 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := s.now()
-
 	ids, err := sortedUnique32(b.WithdrawalIDs)
 	if err != nil {
 		return err
@@ -144,9 +142,6 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 			return ErrInvalidTransition
 		}
 		if rec.claimedBy != owner {
-			return ErrInvalidTransition
-		}
-		if !rec.claimExpiresAt.After(now) {
 			return ErrInvalidTransition
 		}
 	}

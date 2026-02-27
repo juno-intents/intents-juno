@@ -198,7 +198,6 @@ func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw
 				updated_at = now()
 			WHERE withdrawal_id = $1
 				AND claimed_by = $2
-				AND claim_expires_at > now()
 		`, id[:], owner)
 		if err != nil {
 			return fmt.Errorf("withdraw/postgres: clear claim: %w", err)

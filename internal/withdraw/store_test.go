@@ -146,6 +146,40 @@ func TestMemoryStore_ClaimAndBatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_CreatePlannedBatch_AllowsExpiredClaimForSameOwner(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	s := NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := Withdrawal{
+		ID:          seq32(0x70),
+		Amount:      10,
+		FeeBps:      25,
+		RecipientUA: []byte{0x0a},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if _, _, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+	if _, err := s.ClaimUnbatched(ctx, "owner-a", 1*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+
+	now = now.Add(2 * time.Second)
+
+	if err := s.CreatePlannedBatch(ctx, "owner-a", Batch{
+		ID:            seq32(0x71),
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch with expired own claim: %v", err)
+	}
+}
+
 func TestMemoryStore_BatchStateMachine(t *testing.T) {
 	t.Parallel()
 
