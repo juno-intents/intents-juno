@@ -1098,6 +1098,62 @@ proof_jobs_latest_updated_epoch() {
   printf '%s' "$epoch_raw"
 }
 
+clear_live_bridge_runtime_state() {
+  local postgres_dsn="$1"
+  local max_attempts="${2:-5}"
+  local retry_sleep_seconds="${3:-3}"
+  local attempt status
+
+  [[ -n "$postgres_dsn" ]] || return 1
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || return 1
+  (( max_attempts > 0 )) || return 1
+  [[ "$retry_sleep_seconds" =~ ^[0-9]+$ ]] || return 1
+  (( retry_sleep_seconds >= 0 )) || return 1
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    psql "$postgres_dsn" -v ON_ERROR_STOP=1 -qc "
+DO \$\$
+BEGIN
+  IF to_regclass('public.proof_events') IS NOT NULL THEN
+    DELETE FROM proof_events;
+  END IF;
+  IF to_regclass('public.proof_jobs') IS NOT NULL THEN
+    DELETE FROM proof_jobs;
+  END IF;
+  IF to_regclass('public.proof_request_ids') IS NOT NULL THEN
+    DELETE FROM proof_request_ids;
+  END IF;
+  IF to_regclass('public.withdrawal_batch_items') IS NOT NULL THEN
+    DELETE FROM withdrawal_batch_items;
+  END IF;
+  IF to_regclass('public.withdrawal_batches') IS NOT NULL THEN
+    DELETE FROM withdrawal_batches;
+  END IF;
+  IF to_regclass('public.withdrawal_requests') IS NOT NULL THEN
+    DELETE FROM withdrawal_requests;
+  END IF;
+  IF to_regclass('public.deposit_jobs') IS NOT NULL THEN
+    DELETE FROM deposit_jobs WHERE state <> 6;
+  END IF;
+END
+\$\$;
+" >/dev/null 2>&1
+    status=$?
+    set -e
+    if (( status == 0 )); then
+      return 0
+    fi
+
+    if (( attempt < max_attempts )); then
+      log "stale bridge runtime cleanup retry attempt=${attempt}/${max_attempts}"
+      sleep "$retry_sleep_seconds"
+    fi
+  done
+
+  return 1
+}
+
 supports_sign_digest_subcommand() {
   local signer_bin="$1"
   local probe_digest output status lowered
@@ -4975,6 +5031,10 @@ command_run() {
   : >"$withdraw_coordinator_log"
   : >"$withdraw_finalizer_log"
   : >"$bridge_api_log"
+  log "clearing stale bridge runtime rows from shared postgres before relayer launch"
+  if ! clear_live_bridge_runtime_state "$shared_postgres_dsn"; then
+    die "failed to clear stale bridge runtime rows from shared postgres"
+  fi
   log "stopping stale local relayer processes before launch"
   stop_local_relayer_binaries
   free_local_tcp_port "$bridge_api_port"

@@ -661,6 +661,26 @@ test_shared_proof_services_restart_after_topic_ensure() {
     "checkpoint canary stage gate runs after post-topic shared service restart"
 }
 
+test_relayer_runtime_clears_stale_bridge_rows_before_launch() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "clear_live_bridge_runtime_state() {" "run-testnet-e2e defines helper to clear stale bridge runtime rows"
+  assert_contains "$script_text" "DELETE FROM proof_events;" "stale bridge cleanup clears proof event rows"
+  assert_contains "$script_text" "DELETE FROM proof_jobs;" "stale bridge cleanup clears proof job rows"
+  assert_contains "$script_text" "DELETE FROM proof_request_ids;" "stale bridge cleanup resets deterministic proof request id rows"
+  assert_contains "$script_text" "DELETE FROM withdrawal_batch_items;" "stale bridge cleanup clears withdrawal batch item rows"
+  assert_contains "$script_text" "DELETE FROM withdrawal_batches;" "stale bridge cleanup clears withdrawal batch rows"
+  assert_contains "$script_text" "DELETE FROM withdrawal_requests;" "stale bridge cleanup clears withdrawal request rows"
+  assert_contains "$script_text" "DELETE FROM deposit_jobs WHERE state <> 6;" "stale bridge cleanup removes non-finalized deposit rows that can poison new checkpoint batches"
+  assert_contains "$script_text" "clearing stale bridge runtime rows from shared postgres before relayer launch" "run-testnet-e2e logs explicit stale bridge cleanup phase before relayer launch"
+  assert_order "$script_text" \
+    "clearing stale bridge runtime rows from shared postgres before relayer launch" \
+    "log \"stopping stale local relayer processes before launch\"" \
+    "stale bridge runtime cleanup runs before relayer launch and process bootstrapping"
+  assert_contains "$script_text" "failed to clear stale bridge runtime rows from shared postgres" "stale bridge cleanup has explicit hard-fail path"
+}
+
 test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -762,6 +782,7 @@ main() {
   test_sp1_rpc_defaults_and_validation_target_succinct_network
   test_shared_infra_validation_precreates_bridge_and_proof_topics
   test_shared_proof_services_restart_after_topic_ensure
+  test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
 }
