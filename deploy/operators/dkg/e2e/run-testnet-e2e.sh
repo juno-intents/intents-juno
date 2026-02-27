@@ -99,6 +99,7 @@ Options:
   --shared-ecs-cluster-arn <arn>    shared ECS cluster ARN for centralized proof services (optional; enables ECS-managed proof services)
   --shared-proof-requestor-service-name <name> ECS service name for shared proof-requestor
   --shared-proof-funder-service-name <name> ECS service name for shared proof-funder
+  --shared-proof-services-image <image> optional shared proof services container image override for ECS task definition rollout
   --shared-topic-prefix <prefix>    shared infra Kafka topic prefix (default: shared.infra.e2e)
   --shared-timeout <duration>       shared infra validation timeout (default: 300s)
   --shared-output <path>            shared infra report output (default: <workdir>/reports/shared-infra-summary.json)
@@ -305,6 +306,7 @@ ecs_register_service_task_definition() {
   local container_name="$4"
   local command_json="$5"
   local environment_json="${6:-[]}"
+  local container_image="${7:-}"
 
   local service_json task_definition_arn task_definition_json register_input
   service_json="$(
@@ -327,6 +329,7 @@ ecs_register_service_task_definition() {
       --arg container_name "$container_name" \
       --argjson command "$command_json" \
       --argjson environment "$environment_json" \
+      --arg container_image "$container_image" \
       '
         .taskDefinition
         | .containerDefinitions = (
@@ -335,6 +338,7 @@ ecs_register_service_task_definition() {
                 if .name == $container_name then
                   .command = $command
                   | .environment = $environment
+                  | .image = (if ($container_image | length) > 0 then $container_image else .image end)
                 else
                   .
                 end
@@ -491,8 +495,12 @@ rollout_shared_proof_services_ecs() {
   local proof_funder_command_json="$6"
   local proof_requestor_environment_json="${7:-[]}"
   local proof_funder_environment_json="${8:-[]}"
+  local shared_proof_services_image="${9:-}"
 
   local requestor_task_definition_arn funder_task_definition_arn
+  if [[ -n "$shared_proof_services_image" ]]; then
+    log "overriding shared ECS proof services image image=$shared_proof_services_image"
+  fi
   requestor_task_definition_arn="$(
     ecs_register_service_task_definition \
       "$aws_region" \
@@ -500,7 +508,8 @@ rollout_shared_proof_services_ecs() {
       "$proof_requestor_service_name" \
       "proof-requestor" \
       "$proof_requestor_command_json" \
-      "$proof_requestor_environment_json"
+      "$proof_requestor_environment_json" \
+      "$shared_proof_services_image"
   )"
   [[ -n "$requestor_task_definition_arn" ]] || die "failed to register proof-requestor task definition revision"
 
@@ -511,7 +520,8 @@ rollout_shared_proof_services_ecs() {
       "$proof_funder_service_name" \
       "proof-funder" \
       "$proof_funder_command_json" \
-      "$proof_funder_environment_json"
+      "$proof_funder_environment_json" \
+      "$shared_proof_services_image"
   )"
   [[ -n "$funder_task_definition_arn" ]] || die "failed to register proof-funder task definition revision"
 
@@ -2298,6 +2308,7 @@ command_run() {
   local shared_ecs_cluster_arn=""
   local shared_proof_requestor_service_name=""
   local shared_proof_funder_service_name=""
+  local shared_proof_services_image=""
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="300s"
   local shared_output=""
@@ -2657,6 +2668,11 @@ command_run() {
         shared_proof_funder_service_name="$2"
         shift 2
         ;;
+      --shared-proof-services-image)
+        [[ $# -ge 2 ]] || die "missing value for --shared-proof-services-image"
+        shared_proof_services_image="$2"
+        shift 2
+        ;;
       --shared-topic-prefix)
         [[ $# -ge 2 ]] || die "missing value for --shared-topic-prefix"
         shared_topic_prefix="$2"
@@ -2878,6 +2894,9 @@ command_run() {
   [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
   [[ -n "$shared_proof_requestor_service_name" ]] || die "--shared-proof-requestor-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
   [[ -n "$shared_proof_funder_service_name" ]] || die "--shared-proof-funder-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
+  if [[ -n "$shared_proof_services_image" && "$shared_proof_services_image" =~ [[:space:]] ]]; then
+    die "--shared-proof-services-image must not contain whitespace"
+  fi
   local shared_ecs_enabled="true"
   local shared_enabled="true"
 
@@ -2999,7 +3018,8 @@ command_run() {
         "$proof_requestor_ecs_command_json" \
         "$proof_funder_ecs_command_json" \
         "$proof_requestor_ecs_environment_json" \
-        "$proof_funder_ecs_environment_json"
+        "$proof_funder_ecs_environment_json" \
+        "$shared_proof_services_image"
       return $?
     fi
 
@@ -4673,7 +4693,8 @@ command_run() {
       "$proof_requestor_ecs_command_json" \
       "$proof_funder_ecs_command_json" \
       "$proof_requestor_ecs_environment_json" \
-      "$proof_funder_ecs_environment_json"
+      "$proof_funder_ecs_environment_json" \
+      "$shared_proof_services_image"
   shared_ecs_started="true"
   stage_shared_services_stable="true"
   maybe_stop_after_stage "shared_services_ready"

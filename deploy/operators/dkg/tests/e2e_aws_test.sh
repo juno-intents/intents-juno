@@ -476,6 +476,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "\"--shared-ecs-cluster-arn\" \"\$shared_ecs_cluster_arn\"" "remote shared ecs cluster arg"
   assert_contains "$wrapper_script_text" "\"--shared-proof-requestor-service-name\" \"\$shared_proof_requestor_service_name\"" "remote shared proof requestor arg"
   assert_contains "$wrapper_script_text" "\"--shared-proof-funder-service-name\" \"\$shared_proof_funder_service_name\"" "remote shared proof funder arg"
+  assert_contains "$wrapper_script_text" "\"--shared-proof-services-image\" \"\$shared_proof_services_image_override\"" "remote shared proof services image override arg"
   assert_contains "$wrapper_script_text" "operator-fleet-ssh.key" "aws wrapper stages operator ssh key on runner for witness tunnel"
   assert_contains "$wrapper_script_text" "--sp1-witness-juno-scan-url\" \"\$witness_juno_scan_url\"" "aws wrapper forwards stack-derived witness scan endpoint"
   assert_contains "$wrapper_script_text" "--sp1-witness-juno-rpc-url\" \"\$witness_juno_rpc_url\"" "aws wrapper forwards stack-derived witness rpc endpoint"

@@ -3875,6 +3875,7 @@ command_run() {
       "--shared-ecs-cluster-arn" "$shared_ecs_cluster_arn"
       "--shared-proof-requestor-service-name" "$shared_proof_requestor_service_name"
       "--shared-proof-funder-service-name" "$shared_proof_funder_service_name"
+      "--shared-proof-services-image" "$shared_proof_services_image_override"
     )
     log "shared service remote args assembled"
   fi

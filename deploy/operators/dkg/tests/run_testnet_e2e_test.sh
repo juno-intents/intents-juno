@@ -751,6 +751,20 @@ test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout() {
   fi
 }
 
+test_shared_ecs_rollout_accepts_explicit_proof_services_image_override() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "--shared-proof-services-image <image>" "run-testnet-e2e usage documents shared proof services image override"
+  assert_contains "$script_text" 'local shared_proof_services_image=""' "run-testnet-e2e tracks shared proof services image override option"
+  assert_contains "$script_text" "--shared-proof-services-image)" "run-testnet-e2e parses shared proof services image override argument"
+  assert_contains "$script_text" 'local container_image="${7:-}"' "ecs task definition helper accepts optional container image override"
+  assert_contains "$script_text" '| .image = (if ($container_image | length) > 0 then $container_image else .image end)' "ecs task definition helper overwrites container image when override is set"
+  assert_contains "$script_text" 'local shared_proof_services_image="${9:-}"' "shared ecs rollout helper accepts proof services image override"
+  assert_contains "$script_text" '"$shared_proof_services_image"' "shared ecs rollout forwards image override through task definition registration"
+  assert_contains "$script_text" "overriding shared ECS proof services image image=" "run-testnet-e2e logs explicit shared proof services image override usage"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -798,6 +812,7 @@ main() {
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
+  test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
 }
 
 main "$@"
