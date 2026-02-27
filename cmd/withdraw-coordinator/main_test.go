@@ -1,8 +1,10 @@
 package main
 
 import (
+	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestNormalizeRuntimeMode(t *testing.T) {
@@ -43,5 +45,25 @@ func TestNormalizeRuntimeMode(t *testing.T) {
 				t.Fatalf("mode mismatch: got=%q want=%q", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestNewTSSHTTPClient_ServerName(t *testing.T) {
+	t.Parallel()
+
+	client, err := newTSSHTTPClient(5*time.Second, "", "", "", "10.0.0.141")
+	if err != nil {
+		t.Fatalf("newTSSHTTPClient: %v", err)
+	}
+
+	transport, ok := client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("expected *http.Transport, got %T", client.Transport)
+	}
+	if transport.TLSClientConfig == nil {
+		t.Fatalf("expected TLS client config")
+	}
+	if transport.TLSClientConfig.ServerName != "10.0.0.141" {
+		t.Fatalf("server name mismatch: got=%q want=%q", transport.TLSClientConfig.ServerName, "10.0.0.141")
 	}
 }

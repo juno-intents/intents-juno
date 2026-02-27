@@ -121,6 +121,7 @@ func main() {
 		tssTimeout        = flag.Duration("tss-timeout", 10*time.Second, "tss request timeout")
 		tssMaxRespBytes   = flag.Int64("tss-max-response-bytes", 1<<20, "max tss response size (bytes)")
 		tssServerCAFile   = flag.String("tss-server-ca-file", "", "server root CA PEM file (optional; defaults to system roots)")
+		tssServerName     = flag.String("tss-server-name", "", "optional TLS server name override for tss-url certificate validation")
 		tssClientCertFile = flag.String("tss-client-cert-file", "", "client cert PEM file (optional; for mTLS)")
 		tssClientKeyFile  = flag.String("tss-client-key-file", "", "client key PEM file (optional; for mTLS)")
 
@@ -306,7 +307,7 @@ func main() {
 		os.Exit(2)
 	}
 
-	tssHTTPClient, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile)
+	tssHTTPClient, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile, *tssServerName)
 	if err != nil {
 		log.Error("init tss http client", "err", err)
 		os.Exit(2)
@@ -644,13 +645,16 @@ func newBlobStore(ctx context.Context, driver string, bucket string, prefix stri
 	return blobstore.New(cfg)
 }
 
-func newTSSHTTPClient(timeout time.Duration, serverCAFile string, clientCertFile string, clientKeyFile string) (*http.Client, error) {
+func newTSSHTTPClient(timeout time.Duration, serverCAFile string, clientCertFile string, clientKeyFile string, serverName string) (*http.Client, error) {
 	if timeout <= 0 {
 		return nil, fmt.Errorf("tss timeout must be > 0")
 	}
 
 	tlsCfg := &tls.Config{
 		MinVersion: tls.VersionTLS13,
+	}
+	if strings.TrimSpace(serverName) != "" {
+		tlsCfg.ServerName = strings.TrimSpace(serverName)
 	}
 
 	// If a CA file is provided, trust ONLY that CA (avoid mixing in system roots accidentally).

@@ -5078,6 +5078,7 @@ command_run() {
   local withdraw_coordinator_host=""
   local withdraw_finalizer_host=""
   local distributed_withdraw_coordinator_tss_server_ca_file="$withdraw_coordinator_tss_server_ca_file"
+  local distributed_withdraw_coordinator_tss_server_name=""
   local distributed_withdraw_coordinator_tss_url="$withdraw_coordinator_tss_url"
   local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
@@ -5125,6 +5126,7 @@ command_run() {
     withdraw_coordinator_host="${relayer_runtime_operator_hosts[0]}"
     withdraw_finalizer_host="${relayer_runtime_operator_hosts[$((1 % relayer_host_count))]}"
     distributed_withdraw_coordinator_tss_url="https://127.0.0.1:9443"
+    distributed_withdraw_coordinator_tss_server_name="$withdraw_coordinator_host"
     distributed_withdraw_coordinator_juno_rpc_url="http://127.0.0.1:18232"
     distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
@@ -5270,6 +5272,7 @@ command_run() {
           --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-change-address "$withdraw_coordinator_juno_change_address" \
           --tss-url "$distributed_withdraw_coordinator_tss_url" \
+          --tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \
           --tss-server-ca-file "$distributed_withdraw_coordinator_tss_server_ca_file" \
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \

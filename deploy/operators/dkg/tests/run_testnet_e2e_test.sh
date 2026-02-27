@@ -158,6 +158,15 @@ test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch() {
     "withdraw coordinator signer bootstrap gate runs before coordinator launch arguments"
 }
 
+test_distributed_withdraw_coordinator_sets_tss_server_name_override() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_tss_server_name=""' "distributed relayer runtime tracks explicit withdraw coordinator TLS server-name override"
+  assert_contains "$script_text" 'distributed_withdraw_coordinator_tss_server_name="$withdraw_coordinator_host"' "distributed relayer runtime binds withdraw coordinator TLS server-name to operator private host"
+  assert_contains "$script_text" '--tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \' "withdraw coordinator launch forwards TLS server-name override"
+}
+
 test_witness_pool_uses_per_endpoint_timeout_slices() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -788,6 +797,7 @@ main() {
   test_operator_signer_is_lazy_for_runner_core_flow
   test_withdraw_coordinator_includes_extend_signer_response_limit
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
+  test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure
