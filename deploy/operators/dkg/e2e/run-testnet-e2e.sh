@@ -1735,6 +1735,10 @@ stop_remote_relayer_binaries_on_host() {
   remote_cleanup_cmd+=" '/usr/local/bin/[w]ithdraw-coordinator'"
   remote_cleanup_cmd+=" '/usr/local/bin/[w]ithdraw-finalizer'"
   remote_cleanup_cmd+=" '/usr/local/bin/[b]ridge-api'"
+  remote_cleanup_cmd+=" '/tmp/testnet-e2e-bin/[b]ase-relayer'"
+  remote_cleanup_cmd+=" '/tmp/testnet-e2e-bin/[d]eposit-relayer'"
+  remote_cleanup_cmd+=" '/tmp/testnet-e2e-bin/[w]ithdraw-coordinator'"
+  remote_cleanup_cmd+=" '/tmp/testnet-e2e-bin/[w]ithdraw-finalizer'"
   remote_cleanup_cmd+=" 'go run ./cmd/[b]ase-relayer'"
   remote_cleanup_cmd+=" 'go run ./cmd/[d]eposit-relayer'"
   remote_cleanup_cmd+=" 'go run ./cmd/[w]ithdraw-coordinator'"
@@ -1844,6 +1848,57 @@ stage_remote_runtime_file() {
     -o TCPKeepAlive=yes \
     "$src_path" \
     "$ssh_user@$host:$remote_path" >/dev/null
+}
+
+build_local_relayer_binaries() {
+  local output_dir="$1"
+  mkdir -p "$output_dir"
+  (
+    cd "$REPO_ROOT"
+    GO111MODULE=on go build -o "$output_dir/base-relayer" ./cmd/base-relayer
+    GO111MODULE=on go build -o "$output_dir/deposit-relayer" ./cmd/deposit-relayer
+    GO111MODULE=on go build -o "$output_dir/withdraw-coordinator" ./cmd/withdraw-coordinator
+    GO111MODULE=on go build -o "$output_dir/withdraw-finalizer" ./cmd/withdraw-finalizer
+  )
+}
+
+stage_remote_relayer_binaries() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local local_bin_dir="$4"
+  local remote_bin_dir="$5"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "mkdir -p '$remote_bin_dir'" >/dev/null
+
+  local bin_name=""
+  for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer; do
+    [[ -f "$local_bin_dir/$bin_name" ]] || die "missing local relayer binary for staging: $local_bin_dir/$bin_name"
+    stage_remote_runtime_file \
+      "$local_bin_dir/$bin_name" \
+      "$host" \
+      "$ssh_user" \
+      "$ssh_key_file" \
+      "$remote_bin_dir/$bin_name"
+  done
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "chmod 0755 '$remote_bin_dir/base-relayer' '$remote_bin_dir/deposit-relayer' '$remote_bin_dir/withdraw-coordinator' '$remote_bin_dir/withdraw-finalizer'" >/dev/null
 }
 
 configure_remote_operator_checkpoint_services_for_bridge() {
@@ -5083,6 +5138,12 @@ command_run() {
   local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
   local distributed_withdraw_finalizer_juno_rpc_url="$sp1_witness_juno_rpc_url"
+  local distributed_relayer_bin_dir="/tmp/testnet-e2e-bin"
+  local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"
+  local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
+  local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"
+  local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"
+  local runner_distributed_relayer_bin_dir="$workdir/bin/distributed-relayer"
   : >"$base_relayer_log"
   : >"$deposit_relayer_log"
   : >"$withdraw_coordinator_log"
@@ -5172,6 +5233,27 @@ command_run() {
         relayer_status=1
       fi
     fi
+    if (( relayer_status == 0 )); then
+      log "distributed relayer runtime staging freshly built relayer binaries to operator hosts"
+      if ! build_local_relayer_binaries "$runner_distributed_relayer_bin_dir"; then
+        log "failed to build local relayer binaries for distributed runtime staging"
+        relayer_status=1
+      fi
+    fi
+    if (( relayer_status == 0 )); then
+      for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
+        if ! stage_remote_relayer_binaries \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$runner_distributed_relayer_bin_dir" \
+          "$distributed_relayer_bin_dir"; then
+          log "failed to stage relayer binaries onto host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+      done
+    fi
   else
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   fi
@@ -5191,7 +5273,7 @@ command_run() {
         env \
         BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-        /usr/local/bin/base-relayer \
+        "$distributed_base_relayer_bin_path" \
         --rpc-url "$base_rpc_url" \
         --chain-id "$base_chain_id" \
         --listen "0.0.0.0:${base_relayer_port}"
@@ -5225,7 +5307,7 @@ command_run() {
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
           JUNO_QUEUE_KAFKA_TLS="true" \
-          /usr/local/bin/deposit-relayer \
+          "$distributed_deposit_relayer_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --store-driver postgres \
           --base-chain-id "$base_chain_id" \
@@ -5259,7 +5341,7 @@ command_run() {
           JUNO_QUEUE_KAFKA_TLS="true" \
           "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
           "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
-          /usr/local/bin/withdraw-coordinator \
+          "$distributed_withdraw_coordinator_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
           --queue-driver kafka \
@@ -5290,9 +5372,9 @@ command_run() {
         env
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token"
         JUNO_QUEUE_KAFKA_TLS="true"
-        "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
-        "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
-      )
+          "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
+          "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
+        )
       if [[ -n "$withdraw_finalizer_juno_scan_bearer_value" ]]; then
         withdraw_finalizer_remote_env+=("$sp1_witness_juno_scan_bearer_token_env=$withdraw_finalizer_juno_scan_bearer_value")
       fi
@@ -5303,7 +5385,7 @@ command_run() {
           "$relayer_runtime_operator_ssh_key_file" \
           "$withdraw_finalizer_log" \
           "${withdraw_finalizer_remote_env[@]}" \
-          /usr/local/bin/withdraw-finalizer \
+          "$distributed_withdraw_finalizer_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \

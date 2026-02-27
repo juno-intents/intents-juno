@@ -167,6 +167,22 @@ test_distributed_withdraw_coordinator_sets_tss_server_name_override() {
   assert_contains "$script_text" '--tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \' "withdraw coordinator launch forwards TLS server-name override"
 }
 
+test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "stage_remote_relayer_binaries() {" "run-testnet-e2e defines helper to stage relayer binaries to operator hosts"
+  assert_contains "$script_text" "distributed relayer runtime staging freshly built relayer binaries to operator hosts" "distributed relayer runtime logs binary staging phase"
+  assert_contains "$script_text" 'local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"' "distributed relayer runtime uses staged base-relayer binary path"
+  assert_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"' "distributed relayer runtime uses staged deposit-relayer binary path"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"' "distributed relayer runtime uses staged withdraw-coordinator binary path"
+  assert_contains "$script_text" 'local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"' "distributed relayer runtime uses staged withdraw-finalizer binary path"
+  assert_contains "$script_text" '"$distributed_base_relayer_bin_path"' "base-relayer launch uses staged binary path"
+  assert_contains "$script_text" '"$distributed_deposit_relayer_bin_path"' "deposit-relayer launch uses staged binary path"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_bin_path"' "withdraw-coordinator launch uses staged binary path"
+  assert_contains "$script_text" '"$distributed_withdraw_finalizer_bin_path"' "withdraw-finalizer launch uses staged binary path"
+}
+
 test_witness_pool_uses_per_endpoint_timeout_slices() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -798,6 +814,7 @@ main() {
   test_withdraw_coordinator_includes_extend_signer_response_limit
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
+  test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure
