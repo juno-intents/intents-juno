@@ -219,7 +219,8 @@ test_witness_extraction_reuses_existing_indexed_wallet_id() {
 
   assert_contains "$script_text" "witness_scan_find_wallet_for_txid()" "run-testnet-e2e defines helper to locate existing indexed wallet ids by txid"
   assert_contains "$script_text" '"${scan_url%/}/v1/wallets"' "indexed wallet fallback queries scan wallet inventory"
-  assert_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000"' "indexed wallet fallback scans wallet notes for tx visibility"
+  assert_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=1000"' "indexed wallet fallback scans wallet notes for tx visibility using scanner-supported max page size"
+  assert_not_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000"' "indexed wallet fallback must not request unsupported scanner page sizes"
   assert_contains "$script_text" "reusing indexed witness wallet id for tx visibility" "run-testnet-e2e logs indexed wallet id fallback when generated wallet id has no note visibility"
   assert_contains "$script_text" "switching witness wallet id during extraction" "run-testnet-e2e can switch to an already-indexed wallet id mid-extraction when note visibility stalls"
   assert_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$generated_wallet_id"' "wallet-id fallback updates withdraw coordinator wallet id for downstream witness extraction"
@@ -273,6 +274,9 @@ test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
   assert_contains "$script_text" "run_deposit_anchor_height" "relayer deposit extraction tracks a checkpoint anchor height for witness extraction"
   assert_contains "$script_text" "run_deposit_anchor_height_latest" "relayer deposit extraction samples latest relayer checkpoint height while waiting for note visibility"
   assert_contains "$script_text" "run deposit witness extraction advanced anchor to relayer checkpoint height=" "relayer deposit extraction refreshes anchor height when relayer checkpoints advance"
+  assert_contains "$script_text" 'rm -f "$run_deposit_witness_file" "$run_deposit_extract_json" "$run_deposit_extract_error_file" || true' "relayer deposit extraction clears stale run-deposit witness artifacts before each extraction run"
+  assert_contains "$script_text" 'if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]] && (' "relayer deposit extraction ensures anchor selection can compare against run-deposit tx height"
+  assert_contains "$script_text" "run deposit witness extraction raised anchor to tx height=" "relayer deposit extraction logs anchor raises when relayer checkpoint lags below tx height"
   assert_contains "$script_text" '--anchor-height "$run_deposit_anchor_height"' "relayer deposit extraction pins juno-witness-extract to the relayer checkpoint anchor height"
   assert_contains "$script_text" "run deposit witness extraction anchored to relayer checkpoint height=" "relayer deposit extraction logs the selected checkpoint anchor height"
 }
@@ -285,6 +289,9 @@ test_relayer_deposit_extraction_retries_backfill_while_note_pending() {
   assert_contains "$script_text" "run_deposit_last_backfill_epoch=0" "relayer deposit extraction tracks periodic backfill retry cadence state"
   assert_contains "$script_text" "run deposit witness note pending; retrying scan backfill" "relayer deposit extraction logs periodic backfill retries during note-pending waits"
   assert_contains "$script_text" 'if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then' "relayer deposit extraction gates periodic backfill retries on note-pending state and known tx height"
+  assert_contains "$script_text" 'if [[ "$run_deposit_note_pending" == "true" && ! "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then' "relayer deposit extraction re-queries tx height while note remains pending when initial lookup was unavailable"
+  assert_contains "$script_text" "run deposit witness resolved tx height during note-pending retry" "relayer deposit extraction logs delayed tx-height resolution for backfill retries"
+  assert_contains "$script_text" "run deposit witness extraction raised anchor to tx height=" "relayer deposit extraction raises anchor floor after delayed tx-height resolution"
 }
 
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {

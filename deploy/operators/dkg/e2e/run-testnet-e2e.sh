@@ -948,7 +948,7 @@ witness_scan_find_wallet_for_txid() {
       curl -fsS \
         --max-time 20 \
         "${headers[@]}" \
-        "${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000" 2>/dev/null || true
+        "${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=1000" 2>/dev/null || true
     )"
     [[ -n "$notes_response" ]] || continue
 
@@ -5560,6 +5560,7 @@ command_run() {
       run_deposit_witness_file="$workdir/reports/witness/run-deposit.witness.bin"
       run_deposit_extract_json="$workdir/reports/witness/run-deposit-witness.json"
       run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
+      rm -f "$run_deposit_witness_file" "$run_deposit_extract_json" "$run_deposit_extract_error_file" || true
       run_deposit_extract_deadline_epoch=$(( $(date +%s) + 900 ))
       run_deposit_checkpoint_height_before="$(
         awk '
@@ -5624,6 +5625,13 @@ command_run() {
             }
           ' "$deposit_relayer_log" 2>/dev/null || true
         )"
+      fi
+      if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]] && (
+        [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
+          (( run_deposit_anchor_height < run_deposit_scan_backfill_tx_height ))
+      ); then
+        run_deposit_anchor_height="$run_deposit_scan_backfill_tx_height"
+        log "run deposit witness extraction raised anchor to tx height=$run_deposit_anchor_height because relayer checkpoint lagged"
       fi
       if [[ "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
         run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
@@ -5710,6 +5718,32 @@ command_run() {
         done
         if [[ "$run_deposit_extract_ok" == "true" ]]; then
           break
+        fi
+        if [[ "$run_deposit_note_pending" == "true" && ! "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
+          run_deposit_scan_backfill_tx_height="$(
+            witness_rpc_tx_height \
+              "$sp1_witness_juno_rpc_url" \
+              "$withdraw_coordinator_juno_rpc_user_value" \
+              "$withdraw_coordinator_juno_rpc_pass_value" \
+              "$run_deposit_juno_tx_hash" || true
+          )"
+          if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
+            run_deposit_scan_backfill_from_height="$run_deposit_scan_backfill_tx_height"
+            if (( run_deposit_scan_backfill_from_height > 32 )); then
+              run_deposit_scan_backfill_from_height=$((run_deposit_scan_backfill_from_height - 32))
+            else
+              run_deposit_scan_backfill_from_height=0
+            fi
+            run_deposit_last_backfill_epoch=0
+            if [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
+              (( run_deposit_anchor_height < run_deposit_scan_backfill_tx_height )); then
+              run_deposit_anchor_height="$run_deposit_scan_backfill_tx_height"
+              run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
+              run_deposit_extract_wait_logged="false"
+              log "run deposit witness extraction raised anchor to tx height=$run_deposit_anchor_height because relayer checkpoint lagged"
+            fi
+            log "run deposit witness resolved tx height during note-pending retry tx_height=$run_deposit_scan_backfill_tx_height backfill_from_height=$run_deposit_scan_backfill_from_height"
+          fi
         fi
         if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then
           local run_deposit_now_epoch
