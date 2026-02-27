@@ -5611,6 +5611,33 @@ command_run() {
         log "run deposit witness extraction proceeding without explicit anchor height (checkpoint height unavailable)"
       fi
       while true; do
+        local run_deposit_anchor_height_latest=""
+        run_deposit_anchor_height_latest="$(
+          awk '
+            /updated checkpoint/ {
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /^height=/) {
+                  sub(/^height=/, "", $i)
+                  h = $i
+                }
+              }
+            }
+            END {
+              if (h != "") {
+                print h
+              }
+            }
+          ' "$deposit_relayer_log" 2>/dev/null || true
+        )"
+        if [[ "$run_deposit_anchor_height_latest" =~ ^[0-9]+$ ]] && (
+          [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
+            (( run_deposit_anchor_height_latest > run_deposit_anchor_height ))
+        ); then
+          run_deposit_anchor_height="$run_deposit_anchor_height_latest"
+          run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
+          run_deposit_extract_wait_logged="false"
+          log "run deposit witness extraction advanced anchor to relayer checkpoint height=$run_deposit_anchor_height"
+        fi
         local run_deposit_note_pending="false"
         run_deposit_extract_ok="false"
         for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < ${#run_deposit_scan_urls[@]}; run_deposit_scan_idx++)); do

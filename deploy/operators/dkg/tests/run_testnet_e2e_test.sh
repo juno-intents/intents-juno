@@ -271,6 +271,8 @@ test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
   assert_contains "$script_text" "run deposit switching witness wallet id during extraction" "relayer deposit extraction logs indexed-wallet fallback transitions"
   assert_contains "$script_text" "run deposit witness note pending wallet=" "relayer deposit extraction still surfaces note-pending waits with context"
   assert_contains "$script_text" "run_deposit_anchor_height" "relayer deposit extraction tracks a checkpoint anchor height for witness extraction"
+  assert_contains "$script_text" "run_deposit_anchor_height_latest" "relayer deposit extraction samples latest relayer checkpoint height while waiting for note visibility"
+  assert_contains "$script_text" "run deposit witness extraction advanced anchor to relayer checkpoint height=" "relayer deposit extraction refreshes anchor height when relayer checkpoints advance"
   assert_contains "$script_text" '--anchor-height "$run_deposit_anchor_height"' "relayer deposit extraction pins juno-witness-extract to the relayer checkpoint anchor height"
   assert_contains "$script_text" "run deposit witness extraction anchored to relayer checkpoint height=" "relayer deposit extraction logs the selected checkpoint anchor height"
 }
