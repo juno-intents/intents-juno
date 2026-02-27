@@ -557,9 +557,9 @@ test_shared_ecs_rollout_does_not_shadow_secret_backed_requestor_keys() {
 
   assert_not_contains "$script_text" '{name:"PROOF_REQUESTOR_KEY", value:$requestor_key}' "shared ecs env list does not duplicate secret-backed PROOF_REQUESTOR_KEY"
   assert_not_contains "$script_text" '{name:"PROOF_FUNDER_KEY", value:$funder_key}' "shared ecs env list does not duplicate secret-backed PROOF_FUNDER_KEY"
-  assert_contains "$script_text" '{name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit}' "shared ecs env list includes global SP1 gas cap"
-  assert_contains "$script_text" '{name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit}' "shared ecs env list includes deposit SP1 gas cap"
-  assert_contains "$script_text" '{name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit}' "shared ecs env list includes withdraw SP1 gas cap"
+  assert_not_contains "$script_text" '{name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit}' "shared ecs env list does not force a global SP1 gas cap"
+  assert_not_contains "$script_text" '{name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit}' "shared ecs env list does not force a deposit SP1 gas cap"
+  assert_not_contains "$script_text" '{name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit}' "shared ecs env list does not force a withdraw SP1 gas cap"
   assert_contains "$script_text" '{name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url}' "shared ecs env list still includes deposit program URL"
   assert_contains "$script_text" '{name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url}' "shared ecs env list still includes withdraw program URL"
 }
@@ -765,6 +765,21 @@ test_shared_ecs_rollout_accepts_explicit_proof_services_image_override() {
   assert_contains "$script_text" "overriding shared ECS proof services image image=" "run-testnet-e2e logs explicit shared proof services image override usage"
 }
 
+test_run_deposit_submission_waits_for_relayer_checkpoint_catchup() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "latest_checkpoint_height_from_log() {" "run-testnet-e2e defines helper to parse latest relayer checkpoint height from logs"
+  assert_contains "$script_text" "wait_for_relayer_checkpoint_height_at_least() {" "run-testnet-e2e defines helper to gate on relayer checkpoint catch-up"
+  assert_contains "$script_text" "run deposit waiting for relayer checkpoint catch-up" "run-testnet-e2e logs explicit relayer checkpoint wait before submitting deposit"
+  assert_contains "$script_text" "run_deposit_submit_min_checkpoint_height" "run-testnet-e2e computes the deposit tx checkpoint floor before submit"
+  assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300' "run-testnet-e2e enforces relayer checkpoint >= deposit tx height before bridge-api submit"
+  assert_order "$script_text" \
+    "run_deposit_submit_min_checkpoint_height" \
+    'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' \
+    "run-testnet-e2e computes checkpoint floor before bridge-api deposit submission"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -813,6 +828,7 @@ main() {
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
+  test_run_deposit_submission_waits_for_relayer_checkpoint_catchup
 }
 
 main "$@"

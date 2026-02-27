@@ -240,6 +240,52 @@ bridge_api_post_json_with_retry() {
   return 1
 }
 
+latest_checkpoint_height_from_log() {
+  local relayer_log_path="$1"
+  [[ -f "$relayer_log_path" ]] || return 0
+
+  awk '
+    /updated checkpoint/ {
+      for (i = 1; i <= NF; i++) {
+        if ($i ~ /^height=/) {
+          sub(/^height=/, "", $i)
+          h = $i
+        }
+      }
+    }
+    END {
+      if (h != "") {
+        print h
+      }
+    }
+  ' "$relayer_log_path" 2>/dev/null || true
+}
+
+wait_for_relayer_checkpoint_height_at_least() {
+  local relayer_log_path="$1"
+  local min_height="$2"
+  local timeout_seconds="$3"
+  local deadline_epoch latest_height
+
+  [[ "$min_height" =~ ^[0-9]+$ ]] || die "minimum checkpoint height must be numeric"
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || die "checkpoint wait timeout seconds must be numeric"
+  (( timeout_seconds > 0 )) || die "checkpoint wait timeout seconds must be > 0"
+
+  deadline_epoch=$(( $(date +%s) + timeout_seconds ))
+  while (( $(date +%s) < deadline_epoch )); do
+    latest_height="$(latest_checkpoint_height_from_log "$relayer_log_path" || true)"
+    if [[ "$latest_height" =~ ^[0-9]+$ ]] && (( latest_height >= min_height )); then
+      log "relayer checkpoint catch-up satisfied latest_height=$latest_height required_height=$min_height"
+      return 0
+    fi
+    sleep 2
+  done
+
+  latest_height="$(latest_checkpoint_height_from_log "$relayer_log_path" || true)"
+  log "relayer checkpoint catch-up timeout latest_height=${latest_height:-unknown} required_height=$min_height timeout_seconds=$timeout_seconds"
+  return 1
+}
+
 RUN_WORKDIR_LOCK_DIR=""
 RUN_WORKDIR_LOCK_PID_FILE=""
 
@@ -2955,17 +3001,8 @@ command_run() {
   local sp1_required_credit_buffer_wei="${sp1_credit_guardrail[0]}"
   local sp1_critical_credit_threshold_wei="${sp1_credit_guardrail[1]}"
   local sp1_projected_pair_cost_wei="${sp1_credit_guardrail[2]}"
-  local sp1_deposit_max_gas_limit="$((sp1_deposit_pgu_estimate * 2))"
-  local sp1_withdraw_max_gas_limit="$((sp1_withdraw_pgu_estimate * 2))"
-  local sp1_global_max_gas_limit="$sp1_deposit_max_gas_limit"
-  if (( sp1_withdraw_max_gas_limit > sp1_global_max_gas_limit )); then
-    sp1_global_max_gas_limit="$sp1_withdraw_max_gas_limit"
-  fi
-  (( sp1_deposit_max_gas_limit > 0 )) || die "computed SP1 deposit max gas limit must be > 0"
-  (( sp1_withdraw_max_gas_limit > 0 )) || die "computed SP1 withdraw max gas limit must be > 0"
-  (( sp1_global_max_gas_limit > 0 )) || die "computed SP1 global max gas limit must be > 0"
   log "sp1 credit guardrail projected_pair_cost_wei=$sp1_projected_pair_cost_wei critical_threshold_wei=$sp1_critical_credit_threshold_wei required_buffer_wei=$sp1_required_credit_buffer_wei"
-  log "sp1 gas guardrail deposit_max_gas_limit=$sp1_deposit_max_gas_limit withdraw_max_gas_limit=$sp1_withdraw_max_gas_limit global_max_gas_limit=$sp1_global_max_gas_limit"
+  log "sp1 gas policy uses SDK-managed simulation gas limits (no forced cap env vars)"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"
   local bridge_summary="$workdir/reports/base-bridge-summary.json"
@@ -4640,9 +4677,6 @@ command_run() {
         --arg sp1_min_auction_period "$sp1_min_auction_period" \
         --arg sp1_auction_timeout_seconds "${sp1_auction_timeout%s}" \
         --arg sp1_request_timeout_seconds "${sp1_request_timeout%s}" \
-        --arg sp1_global_max_gas_limit "$sp1_global_max_gas_limit" \
-        --arg sp1_deposit_max_gas_limit "$sp1_deposit_max_gas_limit" \
-        --arg sp1_withdraw_max_gas_limit "$sp1_withdraw_max_gas_limit" \
         --arg deposit_program_url "$sp1_deposit_program_url" \
         --arg withdraw_program_url "$sp1_withdraw_program_url" \
         --arg deposit_vkey "$bridge_deposit_image_id" \
@@ -4654,9 +4688,6 @@ command_run() {
           {name:"SP1_MIN_AUCTION_PERIOD", value:$sp1_min_auction_period},
           {name:"SP1_AUCTION_TIMEOUT_SECONDS", value:$sp1_auction_timeout_seconds},
           {name:"SP1_REQUEST_TIMEOUT_SECONDS", value:$sp1_request_timeout_seconds},
-          {name:"SP1_MAX_GAS_LIMIT", value:$sp1_global_max_gas_limit},
-          {name:"SP1_DEPOSIT_MAX_GAS_LIMIT", value:$sp1_deposit_max_gas_limit},
-          {name:"SP1_WITHDRAW_MAX_GAS_LIMIT", value:$sp1_withdraw_max_gas_limit},
           {name:"SP1_DEPOSIT_PROGRAM_URL", value:$deposit_program_url},
           {name:"SP1_WITHDRAW_PROGRAM_URL", value:$withdraw_program_url},
           {name:"SP1_DEPOSIT_PROGRAM_VKEY", value:$deposit_vkey},
@@ -5567,6 +5598,7 @@ command_run() {
     local run_deposit_checkpoint_height_before=""
     local run_deposit_checkpoint_height_latest=""
     local run_deposit_checkpoint_wait_deadline_epoch=0
+    local run_deposit_submit_min_checkpoint_height=""
     local run_deposit_anchor_height=""
     local -a run_deposit_anchor_args=()
 
@@ -5681,43 +5713,11 @@ command_run() {
       run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
       rm -f "$run_deposit_witness_file" "$run_deposit_extract_json" "$run_deposit_extract_error_file" || true
       run_deposit_extract_deadline_epoch=$(( $(date +%s) + 900 ))
-      run_deposit_checkpoint_height_before="$(
-        awk '
-          /updated checkpoint/ {
-            for (i = 1; i <= NF; i++) {
-              if ($i ~ /^height=/) {
-                sub(/^height=/, "", $i)
-                h = $i
-              }
-            }
-          }
-          END {
-            if (h != "") {
-              print h
-            }
-          }
-        ' "$deposit_relayer_log" 2>/dev/null || true
-      )"
+      run_deposit_checkpoint_height_before="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
       if [[ "$run_deposit_checkpoint_height_before" =~ ^[0-9]+$ ]]; then
         run_deposit_checkpoint_wait_deadline_epoch=$(( $(date +%s) + 120 ))
         while (( $(date +%s) < run_deposit_checkpoint_wait_deadline_epoch )); do
-          run_deposit_checkpoint_height_latest="$(
-            awk '
-              /updated checkpoint/ {
-                for (i = 1; i <= NF; i++) {
-                  if ($i ~ /^height=/) {
-                    sub(/^height=/, "", $i)
-                    h = $i
-                  }
-                }
-              }
-              END {
-                if (h != "") {
-                  print h
-                }
-              }
-            ' "$deposit_relayer_log" 2>/dev/null || true
-          )"
+          run_deposit_checkpoint_height_latest="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
           if [[ "$run_deposit_checkpoint_height_latest" =~ ^[0-9]+$ ]] &&
             (( run_deposit_checkpoint_height_latest > run_deposit_checkpoint_height_before )); then
             run_deposit_anchor_height="$run_deposit_checkpoint_height_latest"
@@ -5727,23 +5727,7 @@ command_run() {
         done
       fi
       if [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
-        run_deposit_anchor_height="$(
-          awk '
-            /updated checkpoint/ {
-              for (i = 1; i <= NF; i++) {
-                if ($i ~ /^height=/) {
-                  sub(/^height=/, "", $i)
-                  h = $i
-                }
-              }
-            }
-            END {
-              if (h != "") {
-                print h
-              }
-            }
-          ' "$deposit_relayer_log" 2>/dev/null || true
-        )"
+        run_deposit_anchor_height="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
       fi
       if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]] && (
         [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
@@ -5912,6 +5896,26 @@ command_run() {
       local run_deposit_witness_hex run_deposit_submit_body
       run_deposit_witness_hex="$(od -An -vtx1 "$run_deposit_witness_file" | tr -d '\r\n[:space:]')"
       [[ -n "$run_deposit_witness_hex" ]] || relayer_status=1
+      if (( relayer_status == 0 )); then
+        run_deposit_submit_min_checkpoint_height="$run_deposit_scan_backfill_tx_height"
+        if [[ ! "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
+          run_deposit_submit_min_checkpoint_height="$(
+            witness_rpc_tx_height \
+              "$sp1_witness_juno_rpc_url" \
+              "$juno_rpc_user" \
+              "$juno_rpc_pass" \
+              "$run_deposit_juno_tx_hash" || true
+          )"
+        fi
+        if [[ "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
+          log "run deposit waiting for relayer checkpoint catch-up min_height=$run_deposit_submit_min_checkpoint_height txid=$run_deposit_juno_tx_hash"
+          if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300; then
+            relayer_status=1
+          fi
+        else
+          log "run deposit checkpoint catch-up skipped because tx height could not be resolved txid=$run_deposit_juno_tx_hash"
+        fi
+      fi
       if (( relayer_status == 0 )); then
         run_deposit_submit_body="$(
           jq -cn \
