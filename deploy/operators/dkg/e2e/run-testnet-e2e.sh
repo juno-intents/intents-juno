@@ -1079,6 +1079,25 @@ proof_jobs_count() {
   printf '%s' "$count_raw"
 }
 
+proof_jobs_latest_updated_epoch() {
+  local postgres_dsn="$1"
+  local epoch_raw status
+
+  set +e
+  epoch_raw="$(
+    psql "$postgres_dsn" -Atqc "SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)),0)::bigint FROM proof_jobs;" 2>/dev/null
+  )"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  epoch_raw="$(trim "$epoch_raw")"
+  [[ "$epoch_raw" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$epoch_raw"
+}
+
 supports_sign_digest_subcommand() {
   local signer_bin="$1"
   local probe_digest output status lowered
@@ -5702,12 +5721,19 @@ command_run() {
     fi
 
     local proof_jobs_count_before_run_deposit=""
+    local proof_jobs_last_update_epoch_before_run_deposit=""
     if [[ "$shared_enabled" == "true" && "$proof_services_mode" == "shared-ecs" ]]; then
       proof_jobs_count_before_run_deposit="$(proof_jobs_count "$shared_postgres_dsn" || true)"
+      proof_jobs_last_update_epoch_before_run_deposit="$(proof_jobs_latest_updated_epoch "$shared_postgres_dsn" || true)"
       if [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
         log "proof-requestor progress guard baseline proof_jobs_count_before_run_deposit=$proof_jobs_count_before_run_deposit"
       else
         log "proof-requestor progress guard disabled: unable to read proof_jobs baseline from shared postgres"
+      fi
+      if [[ "$proof_jobs_last_update_epoch_before_run_deposit" =~ ^[0-9]+$ ]]; then
+        log "proof-requestor progress guard baseline proof_jobs_last_update_epoch_before_run_deposit=$proof_jobs_last_update_epoch_before_run_deposit"
+      else
+        log "proof-requestor progress guard fallback: unable to read proof_jobs latest updated_at epoch from shared postgres"
       fi
     fi
 
@@ -5742,6 +5768,7 @@ command_run() {
 
     if (( relayer_status == 0 )); then
       local proof_jobs_count_current=""
+      local proof_jobs_last_update_epoch_current=""
       local proof_requestor_progress_guard_interval_seconds=120
       local proof_requestor_progress_guard_max_restarts=2
       local proof_requestor_progress_restart_attempts=0
@@ -5773,15 +5800,25 @@ command_run() {
           [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
           now_epoch="$(date +%s)"
           proof_jobs_count_current="$(proof_jobs_count "$shared_postgres_dsn" || true)"
+          proof_jobs_last_update_epoch_current="$(proof_jobs_latest_updated_epoch "$shared_postgres_dsn" || true)"
           if [[ "$proof_jobs_count_current" =~ ^[0-9]+$ ]] &&
             (( proof_jobs_count_current > proof_jobs_count_before_run_deposit )); then
             log "proof-requestor progress observed via proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=$proof_jobs_count_current"
             proof_jobs_count_before_run_deposit="$proof_jobs_count_current"
+            if [[ "$proof_jobs_last_update_epoch_current" =~ ^[0-9]+$ ]]; then
+              proof_jobs_last_update_epoch_before_run_deposit="$proof_jobs_last_update_epoch_current"
+            fi
+            proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
+          elif [[ "$proof_jobs_last_update_epoch_before_run_deposit" =~ ^[0-9]+$ ]] &&
+            [[ "$proof_jobs_last_update_epoch_current" =~ ^[0-9]+$ ]] &&
+            (( proof_jobs_last_update_epoch_current > proof_jobs_last_update_epoch_before_run_deposit )); then
+            log "proof-requestor progress observed via proof_jobs updated_at advancement while deposit status is pending baseline_epoch=$proof_jobs_last_update_epoch_before_run_deposit current_epoch=$proof_jobs_last_update_epoch_current"
+            proof_jobs_last_update_epoch_before_run_deposit="$proof_jobs_last_update_epoch_current"
             proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
           else
             if (( now_epoch - proof_requestor_progress_guard_last_probe_epoch >= proof_requestor_progress_guard_interval_seconds )); then
               if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
-                log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=$state; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=$state; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown} baseline_last_update_epoch=${proof_jobs_last_update_epoch_before_run_deposit:-unknown} current_last_update_epoch=${proof_jobs_last_update_epoch_current:-unknown}"
                 proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
                 proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
                 if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
@@ -5799,7 +5836,7 @@ command_run() {
                   return 0
                 fi
               else
-                log "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is non-finalized state=$state baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                log "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is non-finalized state=$state baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown} baseline_last_update_epoch=${proof_jobs_last_update_epoch_before_run_deposit:-unknown} current_last_update_epoch=${proof_jobs_last_update_epoch_current:-unknown}"
                 proof_requestor_progress_guard_failed="true"
                 bridge_api_deposit_state="failed_proof_requestor_guard_exhausted"
                 return 0
