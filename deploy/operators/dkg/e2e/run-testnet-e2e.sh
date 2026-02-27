@@ -5426,11 +5426,45 @@ command_run() {
   if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
     local relayer_checkpoint_seed_started_at relayer_checkpoint_seed_summary
     local relayer_checkpoint_replay_payload_file relayer_checkpoint_replay_status
+    local relayer_checkpoint_seed_log relayer_checkpoint_seed_status
     relayer_checkpoint_seed_started_at="$(timestamp_utc)"
     relayer_checkpoint_seed_summary="$workdir/reports/shared-infra-relayer-runtime-summary.json"
     relayer_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.json"
+    relayer_checkpoint_seed_log="$workdir/reports/relayer-runtime-shared-infra-validation.log"
     log "seeding checkpoint package after relayer startup to ensure relayers ingest a fresh checkpoint"
-    if ! run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"; then
+    : >"$relayer_checkpoint_seed_log"
+    set +e
+    run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee "$relayer_checkpoint_seed_log"
+    relayer_checkpoint_seed_status="${PIPESTATUS[0]}"
+    set -e
+    if (( relayer_checkpoint_seed_status != 0 )) && grep -q "$shared_validation_no_fresh_package_pattern" "$relayer_checkpoint_seed_log"; then
+      local relayer_checkpoint_seed_relaxed_min_persisted_at
+      relayer_checkpoint_seed_relaxed_min_persisted_at="$(date -u -d "$relayer_checkpoint_seed_started_at - 30 minutes" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+      if [[ -z "$relayer_checkpoint_seed_relaxed_min_persisted_at" ]]; then
+        relayer_checkpoint_seed_relaxed_min_persisted_at="$(date -u -d '30 minutes ago' +"%Y-%m-%dT%H:%M:%SZ")"
+      fi
+      log "relayer runtime checkpoint seed found no fresh checkpoint package after relayer startup; retrying with relaxed checkpoint-min-persisted-at=$relayer_checkpoint_seed_relaxed_min_persisted_at"
+      set +e
+      run_shared_infra_validation_attempt "$relayer_checkpoint_seed_relaxed_min_persisted_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee -a "$relayer_checkpoint_seed_log"
+      relayer_checkpoint_seed_status="${PIPESTATUS[0]}"
+      set -e
+    fi
+    if (( relayer_checkpoint_seed_status != 0 )) &&
+      [[ -n "$existing_bridge_summary_path" ]] &&
+      grep -q "$shared_validation_no_fresh_package_pattern" "$relayer_checkpoint_seed_log"; then
+      local relayer_checkpoint_seed_resume_min_persisted_at
+      relayer_checkpoint_seed_resume_min_persisted_at="$(date -u -d "$relayer_checkpoint_seed_started_at - 6 hours" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"
+      if [[ -z "$relayer_checkpoint_seed_resume_min_persisted_at" ]]; then
+        relayer_checkpoint_seed_resume_min_persisted_at="$(date -u -d '6 hours ago' +"%Y-%m-%dT%H:%M:%SZ")"
+      fi
+      log "relayer runtime checkpoint seed still found no fresh package during resume; retrying with extended checkpoint-min-persisted-at=$relayer_checkpoint_seed_resume_min_persisted_at"
+      set +e
+      run_shared_infra_validation_attempt "$relayer_checkpoint_seed_resume_min_persisted_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee -a "$relayer_checkpoint_seed_log"
+      relayer_checkpoint_seed_status="${PIPESTATUS[0]}"
+      set -e
+    fi
+    rm -f "$relayer_checkpoint_seed_log"
+    if (( relayer_checkpoint_seed_status != 0 )); then
       log "failed to seed relayer runtime checkpoint package after relayer startup"
       relayer_status=1
     fi

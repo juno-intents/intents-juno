@@ -471,6 +471,9 @@ test_relayer_runtime_seeds_checkpoint_after_startup() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_started_at" "$relayer_checkpoint_seed_summary"' "relayer runtime seeds a fresh checkpoint package after relayers start"
+  assert_contains "$script_text" 'relayer runtime checkpoint seed found no fresh checkpoint package after relayer startup; retrying with relaxed checkpoint-min-persisted-at=' "relayer runtime checkpoint seed logs relaxed persisted-at retry context"
+  assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_relaxed_min_persisted_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee -a "$relayer_checkpoint_seed_log"' "relayer runtime checkpoint seed retries with relaxed persisted-at window when no fresh package exists"
+  assert_contains "$script_text" 'run_shared_infra_validation_attempt "$relayer_checkpoint_seed_resume_min_persisted_at" "$relayer_checkpoint_seed_summary" 2>&1 | tee -a "$relayer_checkpoint_seed_log"' "relayer runtime checkpoint seed retries with extended persisted-at window during resume runs"
   assert_contains "$script_text" "replaying latest checkpoint package onto relayer checkpoint topic after startup" "relayer runtime logs checkpoint replay step after relayer startup"
   assert_contains "$script_text" "SELECT convert_from(package_json, 'UTF8')" "relayer runtime reloads latest persisted checkpoint package payload from postgres"
   assert_contains "$script_text" 'go run ./cmd/queue-publish \' "relayer runtime replays checkpoint payload through queue-publish"
