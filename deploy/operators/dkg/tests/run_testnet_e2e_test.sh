@@ -270,6 +270,9 @@ test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
   assert_contains "$script_text" 'witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$withdraw_coordinator_juno_wallet_id"' "relayer deposit extraction reuses indexed wallet ids when generated wallet id is not visible yet"
   assert_contains "$script_text" "run deposit switching witness wallet id during extraction" "relayer deposit extraction logs indexed-wallet fallback transitions"
   assert_contains "$script_text" "run deposit witness note pending wallet=" "relayer deposit extraction still surfaces note-pending waits with context"
+  assert_contains "$script_text" "run_deposit_anchor_height" "relayer deposit extraction tracks a checkpoint anchor height for witness extraction"
+  assert_contains "$script_text" '--anchor-height "$run_deposit_anchor_height"' "relayer deposit extraction pins juno-witness-extract to the relayer checkpoint anchor height"
+  assert_contains "$script_text" "run deposit witness extraction anchored to relayer checkpoint height=" "relayer deposit extraction logs the selected checkpoint anchor height"
 }
 
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {
@@ -653,19 +656,41 @@ test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_
   assert_contains "$script_text" 'proof_requestor_progress_guard_last_probe_epoch="$now_epoch"' "run-testnet-e2e resets stall probe timer when proof_jobs growth is observed"
   assert_contains "$script_text" "sp1_progress_guard_bump_max_price_per_pgu" "run-testnet-e2e defines a bounded SP1 guardrail bump target for stalled proof submissions"
   assert_contains "$script_text" "proof_jobs_count_current" "run-testnet-e2e reads current proof_jobs count during deposit-status wait"
-  assert_contains "$script_text" "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services" "run-testnet-e2e logs explicit self-heal reason before restarting proof services"
+  assert_contains "$script_text" 'if [[ "$state" == "pending" || "$state" == "confirmed" ]]' "proof-requestor progress guard applies while deposit status is non-finalized confirmed/pending"
+  assert_contains "$script_text" "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=" "run-testnet-e2e logs explicit self-heal reason with current non-finalized deposit state"
   assert_contains "$script_text" "proof-requestor progress guard bumped SP1 max price per PGU" "run-testnet-e2e escalates SP1 max price when pending proof jobs stall"
   assert_contains "$script_text" 'proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"' "run-testnet-e2e rebuilds shared proof-requestor ecs env after SP1 max-price escalation"
   assert_contains "$script_text" 'proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))' "run-testnet-e2e increments bounded proof-requestor restart attempts"
-  assert_contains "$script_text" "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is pending" "run-testnet-e2e fails explicitly when bounded self-heal attempts are exhausted"
+  assert_contains "$script_text" "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is non-finalized state=" "run-testnet-e2e fails explicitly when bounded self-heal attempts are exhausted"
+  assert_contains "$script_text" 'local bridge_api_deposit_wait_timeout_seconds="$((sp1_request_timeout_seconds + 600))"' "deposit status wait timeout is derived from sp1 request timeout plus buffer"
+  assert_contains "$script_text" 'wait_for_condition "$bridge_api_deposit_wait_timeout_seconds" 5 "bridge-api deposit status" wait_bridge_api_deposit_finalized' "deposit status wait uses derived timeout window"
+  assert_contains "$script_text" 'log "bridge-api deposit did not finalize state=$bridge_api_deposit_state"' "deposit status wait fails fast when terminal non-final state is observed"
+  assert_contains "$script_text" 'echo "state=$state"' "deposit status wait surfaces current bridge-api state to pending logs"
   assert_order "$script_text" \
     "proof_jobs_count_before_run_deposit" \
     "bridge_api_post_json_with_retry \"\${bridge_api_url}/v1/deposits/submit\"" \
     "proof-requestor progress baseline is captured before bridge-api deposit submission"
   assert_order "$script_text" \
     "proof_jobs_count_before_run_deposit" \
-    "wait_for_condition 1200 5 \"bridge-api deposit status\" wait_bridge_api_deposit_finalized" \
+    "wait_for_condition \"\$bridge_api_deposit_wait_timeout_seconds\" 5 \"bridge-api deposit status\" wait_bridge_api_deposit_finalized" \
     "proof-requestor progress baseline is captured before bridge-api deposit status wait begins"
+}
+
+test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout() {
+  local script_text
+  local submit_timeout_reference_count
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local sp1_request_timeout_seconds="$((10#${sp1_request_timeout%s}))"' "run-testnet-e2e parses sp1 request timeout seconds for relayer timeout alignment"
+  assert_contains "$script_text" 'local relayer_submit_timeout_seconds="$((sp1_request_timeout_seconds + 300))"' "run-testnet-e2e derives relayer submit timeout from sp1 request timeout plus safety buffer"
+  assert_contains "$script_text" '(( relayer_submit_timeout_seconds >= 1800 )) || relayer_submit_timeout_seconds=1800' "run-testnet-e2e enforces a floor submit-timeout for long-running live proofs"
+  assert_contains "$script_text" 'local relayer_submit_timeout="${relayer_submit_timeout_seconds}s"' "run-testnet-e2e formats relayer submit timeout as duration string"
+  assert_contains "$script_text" '--submit-timeout "$relayer_submit_timeout" \' "relayer launch paths pass explicit submit-timeout override"
+  submit_timeout_reference_count="$(grep -c -- '--submit-timeout "\$relayer_submit_timeout"' <<<"$script_text" | tr -d ' ')"
+  if (( submit_timeout_reference_count < 4 )); then
+    printf 'assert_count failed: expected submit-timeout override in all relayer launch paths (count=%s)\n' "$submit_timeout_reference_count" >&2
+    exit 1
+  fi
 }
 
 main() {
@@ -711,6 +736,7 @@ main() {
   test_shared_infra_validation_precreates_bridge_and_proof_topics
   test_shared_proof_services_restart_after_topic_ensure
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
+  test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
 }
 
 main "$@"

@@ -2706,6 +2706,11 @@ command_run() {
     bridge_run_timeout="90m"
   fi
 
+  local sp1_request_timeout_seconds="$((10#${sp1_request_timeout%s}))"
+  local relayer_submit_timeout_seconds="$((sp1_request_timeout_seconds + 300))"
+  (( relayer_submit_timeout_seconds >= 1800 )) || relayer_submit_timeout_seconds=1800
+  local relayer_submit_timeout="${relayer_submit_timeout_seconds}s"
+
   if [[ -n "$existing_bridge_summary_path" ]]; then
     [[ -f "$existing_bridge_summary_path" ]] || \
       die "existing bridge summary file not found: $existing_bridge_summary_path"
@@ -5099,6 +5104,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$deposit_relayer_proof_group" \
+          --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$deposit_relayer_group" \
@@ -5181,6 +5187,7 @@ command_run() {
           --proof-result-topic "$proof_result_topic" \
           --proof-failure-topic "$proof_failure_topic" \
           --proof-response-group "$withdraw_finalizer_proof_group" \
+          --submit-timeout "$relayer_submit_timeout" \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_finalizer_group" \
@@ -5209,6 +5216,7 @@ command_run() {
             --proof-result-topic "$proof_result_topic" \
             --proof-failure-topic "$proof_failure_topic" \
             --proof-response-group "$deposit_relayer_proof_group" \
+            --submit-timeout "$relayer_submit_timeout" \
             --queue-driver kafka \
             --queue-brokers "$shared_kafka_brokers" \
             --queue-group "$deposit_relayer_group" \
@@ -5269,15 +5277,16 @@ command_run() {
             --base-relayer-url "$base_relayer_url" \
             --owner "testnet-e2e-withdraw-finalizer-${proof_topic_seed}" \
             --proof-driver queue \
-            --proof-request-topic "$proof_request_topic" \
-            --proof-result-topic "$proof_result_topic" \
-            --proof-failure-topic "$proof_failure_topic" \
-            --proof-response-group "$withdraw_finalizer_proof_group" \
-            --queue-driver kafka \
-            --queue-brokers "$shared_kafka_brokers" \
-            --queue-group "$withdraw_finalizer_group" \
-            --queue-topics "$checkpoint_package_topic" \
-            --blob-driver s3 \
+          --proof-request-topic "$proof_request_topic" \
+          --proof-result-topic "$proof_result_topic" \
+          --proof-failure-topic "$proof_failure_topic" \
+          --proof-response-group "$withdraw_finalizer_proof_group" \
+          --submit-timeout "$relayer_submit_timeout" \
+          --queue-driver kafka \
+          --queue-brokers "$shared_kafka_brokers" \
+          --queue-group "$withdraw_finalizer_group" \
+          --queue-topics "$checkpoint_package_topic" \
+          --blob-driver s3 \
             --blob-bucket "$withdraw_blob_bucket" \
             --blob-prefix "$withdraw_blob_prefix" \
             >"$withdraw_finalizer_log" 2>&1
@@ -5415,6 +5424,11 @@ command_run() {
     local run_deposit_scan_backfill_tx_height=""
     local run_deposit_scan_backfill_from_height=""
     local run_deposit_action_candidate
+    local run_deposit_checkpoint_height_before=""
+    local run_deposit_checkpoint_height_latest=""
+    local run_deposit_checkpoint_wait_deadline_epoch=0
+    local run_deposit_anchor_height=""
+    local -a run_deposit_anchor_args=()
 
     [[ -n "$witness_funder_source_address" ]] || relayer_status=1
     [[ -n "$withdraw_coordinator_juno_wallet_id" ]] || relayer_status=1
@@ -5525,6 +5539,77 @@ command_run() {
       run_deposit_extract_json="$workdir/reports/witness/run-deposit-witness.json"
       run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
       run_deposit_extract_deadline_epoch=$(( $(date +%s) + 900 ))
+      run_deposit_checkpoint_height_before="$(
+        awk '
+          /updated checkpoint/ {
+            for (i = 1; i <= NF; i++) {
+              if ($i ~ /^height=/) {
+                sub(/^height=/, "", $i)
+                h = $i
+              }
+            }
+          }
+          END {
+            if (h != "") {
+              print h
+            }
+          }
+        ' "$deposit_relayer_log" 2>/dev/null || true
+      )"
+      if [[ "$run_deposit_checkpoint_height_before" =~ ^[0-9]+$ ]]; then
+        run_deposit_checkpoint_wait_deadline_epoch=$(( $(date +%s) + 120 ))
+        while (( $(date +%s) < run_deposit_checkpoint_wait_deadline_epoch )); do
+          run_deposit_checkpoint_height_latest="$(
+            awk '
+              /updated checkpoint/ {
+                for (i = 1; i <= NF; i++) {
+                  if ($i ~ /^height=/) {
+                    sub(/^height=/, "", $i)
+                    h = $i
+                  }
+                }
+              }
+              END {
+                if (h != "") {
+                  print h
+                }
+              }
+            ' "$deposit_relayer_log" 2>/dev/null || true
+          )"
+          if [[ "$run_deposit_checkpoint_height_latest" =~ ^[0-9]+$ ]] &&
+            (( run_deposit_checkpoint_height_latest > run_deposit_checkpoint_height_before )); then
+            run_deposit_anchor_height="$run_deposit_checkpoint_height_latest"
+            break
+          fi
+          sleep 2
+        done
+      fi
+      if [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
+        run_deposit_anchor_height="$(
+          awk '
+            /updated checkpoint/ {
+              for (i = 1; i <= NF; i++) {
+                if ($i ~ /^height=/) {
+                  sub(/^height=/, "", $i)
+                  h = $i
+                }
+              }
+            }
+            END {
+              if (h != "") {
+                print h
+              }
+            }
+          ' "$deposit_relayer_log" 2>/dev/null || true
+        )"
+      fi
+      if [[ "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
+        run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
+        log "run deposit witness extraction anchored to relayer checkpoint height=$run_deposit_anchor_height"
+      else
+        run_deposit_anchor_args=()
+        log "run deposit witness extraction proceeding without explicit anchor height (checkpoint height unavailable)"
+      fi
       while true; do
         local run_deposit_note_pending="false"
         run_deposit_extract_ok="false"
@@ -5542,6 +5627,7 @@ command_run() {
                 --juno-rpc-url "$run_deposit_rpc_url" \
                 --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
                 --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
+                "${run_deposit_anchor_args[@]}" \
                 --txid "$run_deposit_juno_tx_hash" \
                 --action-index "$run_deposit_action_candidate" \
                 --output-witness-item-file "$run_deposit_witness_file" \
@@ -5634,6 +5720,7 @@ command_run() {
       local proof_requestor_progress_restart_attempts=0
       local proof_requestor_progress_guard_failed="false"
       local proof_requestor_progress_guard_last_probe_epoch=0
+      local bridge_api_deposit_wait_timeout_seconds="$((sp1_request_timeout_seconds + 600))"
 
       proof_requestor_progress_guard_last_probe_epoch="$(date +%s)"
 
@@ -5648,8 +5735,12 @@ command_run() {
         if [[ "$state" == "finalized" ]]; then
           return 0
         fi
+        if [[ "$state" == failed* ]]; then
+          echo "state=$state"
+          return 0
+        fi
 
-        if [[ "$state" == "pending" ]] &&
+        if [[ "$state" == "pending" || "$state" == "confirmed" ]] &&
           [[ "$shared_enabled" == "true" ]] &&
           [[ "$proof_services_mode" == "shared-ecs" ]] &&
           [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
@@ -5663,7 +5754,7 @@ command_run() {
           else
             if (( now_epoch - proof_requestor_progress_guard_last_probe_epoch >= proof_requestor_progress_guard_interval_seconds )); then
               if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
-                log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is pending; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=$state; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
                 proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
                 proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
                 if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
@@ -5681,7 +5772,7 @@ command_run() {
                   return 0
                 fi
               else
-                log "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
+                log "proof-requestor progress guard exhausted restarts without proof_jobs growth while deposit status is non-finalized state=$state baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown}"
                 proof_requestor_progress_guard_failed="true"
                 bridge_api_deposit_state="failed_proof_requestor_guard_exhausted"
                 return 0
@@ -5689,12 +5780,19 @@ command_run() {
             fi
           fi
         fi
+        if [[ -n "$state" ]]; then
+          echo "state=$state"
+        fi
         return 1
       }
-      if ! wait_for_condition 1200 5 "bridge-api deposit status" wait_bridge_api_deposit_finalized; then
+      if ! wait_for_condition "$bridge_api_deposit_wait_timeout_seconds" 5 "bridge-api deposit status" wait_bridge_api_deposit_finalized; then
         relayer_status=1
       fi
       if [[ "$proof_requestor_progress_guard_failed" == "true" ]]; then
+        relayer_status=1
+      fi
+      if (( relayer_status == 0 )) && [[ "$bridge_api_deposit_state" != "finalized" ]]; then
+        log "bridge-api deposit did not finalize state=$bridge_api_deposit_state"
         relayer_status=1
       fi
     fi
