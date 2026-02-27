@@ -5138,6 +5138,7 @@ command_run() {
   local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
   local distributed_withdraw_finalizer_juno_rpc_url="$sp1_witness_juno_rpc_url"
+  local distributed_relayer_aws_region=""
   local distributed_relayer_bin_dir="/tmp/testnet-e2e-bin"
   local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"
   local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
@@ -5192,6 +5193,9 @@ command_run() {
     distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
+    distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
+    [[ -n "$distributed_relayer_aws_region" ]] || \
+      die "distributed relayer runtime requires AWS_REGION or AWS_DEFAULT_REGION for s3 withdraw artifacts"
 
     log "distributed relayer runtime enabled; launching relayers on operator hosts"
     log "base-relayer host=$base_relayer_host"
@@ -5269,13 +5273,15 @@ command_run() {
         "$base_relayer_host" \
         "$relayer_runtime_operator_ssh_user" \
         "$relayer_runtime_operator_ssh_key_file" \
-        "$base_relayer_log" \
-        env \
-        BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
-        BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
-        "$distributed_base_relayer_bin_path" \
-        --rpc-url "$base_rpc_url" \
-        --chain-id "$base_chain_id" \
+          "$base_relayer_log" \
+          env \
+          BASE_RELAYER_PRIVATE_KEYS="$bridge_deployer_key_hex" \
+          BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+          AWS_REGION="$distributed_relayer_aws_region" \
+          AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \
+          "$distributed_base_relayer_bin_path" \
+          --rpc-url "$base_rpc_url" \
+          --chain-id "$base_chain_id" \
         --listen "0.0.0.0:${base_relayer_port}"
     )"
   else
@@ -5307,6 +5313,8 @@ command_run() {
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
           JUNO_QUEUE_KAFKA_TLS="true" \
+          AWS_REGION="$distributed_relayer_aws_region" \
+          AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \
           "$distributed_deposit_relayer_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --store-driver postgres \
@@ -5339,6 +5347,8 @@ command_run() {
           env \
           BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
           JUNO_QUEUE_KAFKA_TLS="true" \
+          AWS_REGION="$distributed_relayer_aws_region" \
+          AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \
           "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
           "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
           "$distributed_withdraw_coordinator_bin_path" \
@@ -5372,6 +5382,8 @@ command_run() {
         env
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token"
         JUNO_QUEUE_KAFKA_TLS="true"
+        AWS_REGION="$distributed_relayer_aws_region"
+        AWS_DEFAULT_REGION="$distributed_relayer_aws_region"
           "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value"
           "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value"
         )

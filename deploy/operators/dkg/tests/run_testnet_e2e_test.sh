@@ -167,6 +167,16 @@ test_distributed_withdraw_coordinator_sets_tss_server_name_override() {
   assert_contains "$script_text" '--tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \' "withdraw coordinator launch forwards TLS server-name override"
 }
 
+test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local distributed_relayer_aws_region=""' "distributed relayer runtime tracks resolved aws region for remote relayer env"
+  assert_contains "$script_text" 'distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"' "distributed relayer runtime resolves aws region from live runner environment"
+  assert_contains "$script_text" 'AWS_REGION="$distributed_relayer_aws_region"' "distributed relayer runtime forwards aws region to remote relayer processes"
+  assert_contains "$script_text" 'AWS_DEFAULT_REGION="$distributed_relayer_aws_region"' "distributed relayer runtime forwards aws default region to remote relayer processes"
+}
+
 test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -814,6 +824,7 @@ main() {
   test_withdraw_coordinator_includes_extend_signer_response_limit
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
+  test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
