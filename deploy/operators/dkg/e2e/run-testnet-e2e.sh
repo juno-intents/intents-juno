@@ -3422,7 +3422,7 @@ command_run() {
     witness_metadata_pre_upsert_scan_urls_csv="$(IFS=,; printf '%s' "${witness_healthy_scan_urls[*]}")"
     for ((witness_idx = 0; witness_idx < witness_endpoint_healthy_count; witness_idx++)); do
       local witness_scan_url witness_rpc_url witness_operator_label
-      local witness_operator_safe_label witness_wallet_id_attempt witness_metadata_attempt_json
+      local witness_operator_safe_label witness_wallet_id_attempt witness_metadata_attempt_json witness_metadata_attempt_err
       witness_scan_url="${witness_healthy_scan_urls[$witness_idx]}"
       witness_rpc_url="${witness_healthy_rpc_urls[$witness_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_idx]}"
@@ -3431,6 +3431,7 @@ command_run() {
       witness_operator_safe_label="${witness_operator_safe_label%_}"
       [[ -n "$witness_operator_safe_label" ]] || witness_operator_safe_label="op$((witness_idx + 1))"
       witness_metadata_attempt_json="$workdir/reports/witness/generated-witness-metadata-${witness_operator_safe_label}.json"
+      witness_metadata_attempt_err="$workdir/reports/witness/generated-witness-metadata-${witness_operator_safe_label}.err"
       # Keep a single wallet id across failover attempts for the same UFVK.
       # Some scan backends index UFVK notes against the first wallet id only.
       witness_wallet_id_attempt="$witness_wallet_id"
@@ -3472,7 +3473,7 @@ command_run() {
       (
         cd "$REPO_ROOT"
         run_with_optional_timeout "$witness_metadata_attempt_timeout_seconds" \
-          deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null
+          deploy/operators/dkg/e2e/generate-juno-witness-metadata.sh "${witness_metadata_args[@]}" >/dev/null 2>"$witness_metadata_attempt_err"
       )
       witness_metadata_status=$?
       set -e
@@ -3484,6 +3485,9 @@ command_run() {
         witness_metadata_generated="true"
         log "generated witness metadata from operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url"
         break
+      fi
+      if grep -qi "insufficient funds" "$witness_metadata_attempt_err"; then
+        die "witness metadata generation failed due to insufficient funds for configured JUNO funder source address; top up JUNO_FUNDER_SOURCE_ADDRESS and rerun"
       fi
       if (( witness_metadata_status == 124 )); then
         log "witness metadata generation timed out for operator=$witness_operator_label scan_url=$witness_scan_url rpc_url=$witness_rpc_url timeout_seconds=$witness_metadata_attempt_timeout_seconds; trying next healthy endpoint"

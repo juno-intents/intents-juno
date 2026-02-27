@@ -294,6 +294,15 @@ test_relayer_deposit_extraction_retries_backfill_while_note_pending() {
   assert_contains "$script_text" "run deposit witness extraction raised anchor to tx height=" "relayer deposit extraction raises anchor floor after delayed tx-height resolution"
 }
 
+test_witness_generation_fails_fast_on_funder_insufficient_funds() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'witness_metadata_attempt_err="$workdir/reports/witness/generated-witness-metadata-${witness_operator_safe_label}.err"' "witness metadata generation captures per-endpoint stderr for error classification"
+  assert_contains "$script_text" 'if grep -qi "insufficient funds" "$witness_metadata_attempt_err"; then' "witness metadata generation classifies insufficient-funds errors as non-retryable"
+  assert_contains "$script_text" 'die "witness metadata generation failed due to insufficient funds for configured JUNO funder source address; top up JUNO_FUNDER_SOURCE_ADDRESS and rerun"' "witness metadata generation fails fast with actionable source-address top-up guidance"
+}
+
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -757,6 +766,7 @@ main() {
   test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
   test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id
   test_relayer_deposit_extraction_retries_backfill_while_note_pending
+  test_witness_generation_fails_fast_on_funder_insufficient_funds
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
   test_live_bridge_flow_retries_transient_bridge_api_write_failures
