@@ -1482,6 +1482,40 @@ else
 fi
 git submodule update --init --recursive
 
+if ! command -v juno-txsign >/dev/null 2>&1; then
+  juno_txsign_release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+  juno_txsign_release_tag="\$(jq -r '.tag_name // empty' <<<"\$juno_txsign_release_json")"
+  case "\$(uname -m)" in
+    x86_64|amd64) juno_txsign_arch="amd64" ;;
+    aarch64|arm64) juno_txsign_arch="arm64" ;;
+    *)
+      echo "unsupported architecture for juno-txsign install: \$(uname -m)" >&2
+      exit 1
+      ;;
+  esac
+  [[ -n "\$juno_txsign_release_tag" ]] || {
+    echo "failed to resolve juno-txsign latest release tag" >&2
+    exit 1
+  }
+  juno_txsign_asset="juno-txsign_\${juno_txsign_release_tag}_linux_\${juno_txsign_arch}.tar.gz"
+  juno_txsign_asset_url="\$(jq -r --arg name "\$juno_txsign_asset" '.assets[] | select(.name == \$name) | .browser_download_url' <<<"\$juno_txsign_release_json" | head -n 1)"
+  [[ -n "\$juno_txsign_asset_url" ]] || {
+    echo "failed to resolve juno-txsign release asset: \$juno_txsign_asset" >&2
+    exit 1
+  }
+  juno_txsign_archive="\$(mktemp)"
+  juno_txsign_extract_dir="\$(mktemp -d)"
+  curl -fsSL "\$juno_txsign_asset_url" -o "\$juno_txsign_archive"
+  tar -xzf "\$juno_txsign_archive" -C "\$juno_txsign_extract_dir"
+  [[ -x "\$juno_txsign_extract_dir/juno-txsign" ]] || {
+    echo "juno-txsign archive extraction failed for asset: \$juno_txsign_asset" >&2
+    exit 1
+  }
+  sudo install -m 0755 "\$juno_txsign_extract_dir/juno-txsign" /usr/local/bin/juno-txsign
+  rm -f "\$juno_txsign_archive"
+  rm -rf "\$juno_txsign_extract_dir"
+fi
+
 required_services=(
   junocashd.service
   juno-scan.service
