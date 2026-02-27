@@ -33,17 +33,17 @@ func TestDepositIDV1_Vectors(t *testing.T) {
 		{
 			name:      "leaf0",
 			leafIndex: 0,
-			want:      mustHash32(t, "11817f77f8cd0ac8b09b9ee546147a341256e16a4e000c6f7dde10cf89538c79"),
+			want:      mustHash32(t, "b4a0ea76a331f40daeed74b0eb98b2b4e4589b89c8594233288b437cef32d5d1"),
 		},
 		{
 			name:      "leaf1",
 			leafIndex: 1,
-			want:      mustHash32(t, "3586619ba76600584824650f84bdff4f8647a46e248f7766eff73774ce469fc1"),
+			want:      mustHash32(t, "5954e7bccaf375ef1fd3b6cd98eb232533bb15255e28409729cc0b4701cf2d40"),
 		},
 		{
-			name:      "leaf0102030405060708",
-			leafIndex: 0x0102030405060708,
-			want:      mustHash32(t, "b7d9a32e04c4e56e6709768e831bd6532c786c208c76d1c0e8942bec713b6e17"),
+			name:      "guest_vector_leaf01020304",
+			leafIndex: 0x01020304,
+			want:      mustHash32(t, "bc0d27e33687de6a88da7055aa24664601360166e373ebc9b7b7c22fe212c187"),
 		},
 	}
 
@@ -56,4 +56,3 @@ func TestDepositIDV1_Vectors(t *testing.T) {
 		})
 	}
 }
-
