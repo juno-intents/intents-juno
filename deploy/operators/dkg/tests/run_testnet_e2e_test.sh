@@ -143,7 +143,7 @@ test_withdraw_coordinator_includes_extend_signer_response_limit() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" "--extend-signer-bin \"\$bridge_operator_signer_bin\" \\" "withdraw coordinator wires configured extend signer binary"
+  assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator wires runtime-selected extend signer binary"
   assert_contains "$script_text" "--extend-signer-max-response-bytes \"1048576\" \\" "withdraw coordinator sets explicit extend signer response byte limit"
 }
 
@@ -154,7 +154,7 @@ test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch() {
   assert_contains "$script_text" "ensuring bridge operator signer for withdraw coordinator relayer flow" "relayer flow logs explicit signer bootstrap gate"
   assert_order "$script_text" \
     "ensuring bridge operator signer for withdraw coordinator relayer flow" \
-    "--extend-signer-bin \"\$bridge_operator_signer_bin\" \\" \
+    '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' \
     "withdraw coordinator signer bootstrap gate runs before coordinator launch arguments"
 }
 
@@ -191,6 +191,18 @@ test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   assert_contains "$script_text" '"$distributed_deposit_relayer_bin_path"' "deposit-relayer launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_withdraw_coordinator_bin_path"' "withdraw-coordinator launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_withdraw_finalizer_bin_path"' "withdraw-finalizer launch uses staged binary path"
+}
+
+test_distributed_relayer_runtime_stages_operator_signer_binary() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local distributed_bridge_operator_signer_bin=""' "distributed relayer runtime tracks staged operator signer path"
+  assert_contains "$script_text" 'distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"' "distributed relayer runtime uses staged juno-txsign path on operator hosts"
+  assert_contains "$script_text" 'stage_remote_runtime_file \' "distributed relayer runtime reuses staged file helper for signer binary copy"
+  assert_contains "$script_text" '"$runner_bridge_operator_signer_bin_path"' "distributed relayer runtime copies resolved signer binary from runner to operators"
+  assert_contains "$script_text" '"$distributed_bridge_operator_signer_bin"' "distributed relayer runtime marks staged signer binary executable on operators"
+  assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {
@@ -826,6 +838,7 @@ main() {
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
+  test_distributed_relayer_runtime_stages_operator_signer_binary
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure

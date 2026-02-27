@@ -702,7 +702,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "--base-chain-id \"\$base_chain_id\"" "withdraw coordinator receives base chain id"
   assert_contains "$e2e_script_text" "--bridge-address \"\$deployed_bridge_address\"" "withdraw coordinator receives deployed bridge address"
   assert_contains "$e2e_script_text" "--base-relayer-url \"\$base_relayer_url\"" "withdraw coordinator receives base-relayer url"
-  assert_contains "$e2e_script_text" "--extend-signer-bin \"\$bridge_operator_signer_bin\"" "withdraw coordinator uses real extend signer binary"
+  assert_contains "$e2e_script_text" "--extend-signer-bin \"\$withdraw_coordinator_extend_signer_bin\"" "withdraw coordinator uses runtime-selected extend signer binary"
   assert_contains "$e2e_script_text" "withdraw coordinator mock runtime is forbidden in live e2e" "live e2e aborts if mock runtime is requested"
   assert_contains "$e2e_script_text" "go run ./cmd/withdraw-finalizer" "withdraw-finalizer service startup in local e2e"
   assert_not_contains "$e2e_script_text" '"--topic" "$deposit_event_topic"' "runner does not publish deposit events directly; deposit submission stays bridge-api driven"

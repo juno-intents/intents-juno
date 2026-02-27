@@ -5144,7 +5144,10 @@ command_run() {
   local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
   local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"
   local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"
+  local distributed_bridge_operator_signer_bin=""
+  local runner_bridge_operator_signer_bin_path=""
   local runner_distributed_relayer_bin_dir="$workdir/bin/distributed-relayer"
+  local withdraw_coordinator_extend_signer_bin=""
   : >"$base_relayer_log"
   : >"$deposit_relayer_log"
   : >"$withdraw_coordinator_log"
@@ -5194,6 +5197,7 @@ command_run() {
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
     distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
+    distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"
     [[ -n "$distributed_relayer_aws_region" ]] || \
       die "distributed relayer runtime requires AWS_REGION or AWS_DEFAULT_REGION for s3 withdraw artifacts"
 
@@ -5258,13 +5262,58 @@ command_run() {
         fi
       done
     fi
+    if (( relayer_status == 0 )); then
+      log "ensuring bridge operator signer for withdraw coordinator relayer flow"
+      ensure_bridge_operator_signer_ready
+      if [[ "$bridge_operator_signer_bin" == */* ]]; then
+        runner_bridge_operator_signer_bin_path="$bridge_operator_signer_bin"
+      else
+        runner_bridge_operator_signer_bin_path="$(command -v "$bridge_operator_signer_bin" 2>/dev/null || true)"
+      fi
+      if [[ -z "$runner_bridge_operator_signer_bin_path" || ! -x "$runner_bridge_operator_signer_bin_path" ]]; then
+        log "resolved bridge operator signer binary is missing or not executable path=$runner_bridge_operator_signer_bin_path"
+        relayer_status=1
+      fi
+    fi
+    if (( relayer_status == 0 )); then
+      for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
+        if ! stage_remote_runtime_file \
+          "$runner_bridge_operator_signer_bin_path" \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$distributed_bridge_operator_signer_bin"; then
+          log "failed to stage bridge operator signer binary onto host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+        if ! ssh \
+          -i "$relayer_runtime_operator_ssh_key_file" \
+          -o StrictHostKeyChecking=no \
+          -o UserKnownHostsFile=/dev/null \
+          -o ServerAliveInterval=30 \
+          -o ServerAliveCountMax=6 \
+          -o TCPKeepAlive=yes \
+          "$relayer_runtime_operator_ssh_user@$relayer_cleanup_host" \
+          "chmod 0755 '$distributed_bridge_operator_signer_bin'" >/dev/null; then
+          log "failed to mark staged bridge operator signer binary executable on host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+      done
+    fi
   else
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   fi
 
   if (( relayer_status == 0 )); then
-    log "ensuring bridge operator signer for withdraw coordinator relayer flow"
-    ensure_bridge_operator_signer_ready
+    if [[ "$relayer_runtime_mode" != "distributed" ]]; then
+      log "ensuring bridge operator signer for withdraw coordinator relayer flow"
+      ensure_bridge_operator_signer_ready
+      withdraw_coordinator_extend_signer_bin="$bridge_operator_signer_bin"
+    else
+      withdraw_coordinator_extend_signer_bin="$distributed_bridge_operator_signer_bin"
+    fi
   fi
 
   if [[ "$relayer_runtime_mode" == "distributed" ]]; then
@@ -5369,7 +5418,7 @@ command_run() {
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \
           --base-relayer-url "$base_relayer_url" \
-          --extend-signer-bin "$bridge_operator_signer_bin" \
+          --extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \
           --extend-signer-max-response-bytes "1048576" \
           --expiry-safety-margin "30h" \
           --max-expiry-extension "12h" \
@@ -5477,7 +5526,7 @@ command_run() {
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \
           --base-relayer-url "$base_relayer_url" \
-          --extend-signer-bin "$bridge_operator_signer_bin" \
+          --extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \
           --extend-signer-max-response-bytes "1048576" \
           --expiry-safety-margin "30h" \
           --max-expiry-extension "12h" \
