@@ -200,6 +200,65 @@ func TestTxBuildPlanner_Plan_RejectsRecipientUAWithWhitespace(t *testing.T) {
 	}
 }
 
+func TestTxBuildPlanner_Plan_ConvertsRawRecipientUA(t *testing.T) {
+	t.Parallel()
+
+	cfg := TxBuildPlannerConfig{
+		Binary:           "juno-txbuild",
+		WalletID:         "wallet-1",
+		ChangeAddress:    "jtest1u2ppkwg8vz84h6wygjrm848gl7pcac66gzxds64mtj4xz43ke826lznpy8pymd43klc5py9mfyqhl0r9l7ylczrdj0ucnnjztgtw6dmp",
+		BaseChainID:      8453,
+		BridgeAddress:    common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		MinConfirmations: 1,
+		ExpiryOffset:     40,
+		FeeMultiplier:    1,
+	}
+	p, err := NewTxBuildPlanner(cfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner: %v", err)
+	}
+
+	recipientRaw, err := hex.DecodeString("0cfbbe956b892b3140a902deede70c6077a256266dd705a5c1110b4f4df86f25e35fec939e897def9b1c04")
+	if err != nil {
+		t.Fatalf("decode recipient raw: %v", err)
+	}
+	const wantRecipientUA = "jtest1l0lzgn5vty7qm8mhn2zwdde8e2kxmm8x2x9ant2s0rell0a8yy9wwxk8vdaep4k6z3qautusjdtp0r06q8mdct2wpw6un7u7tyguwju8"
+
+	p.execCommand = func(_ context.Context, _ string, args []string, _ []string) ([]byte, error) {
+		idx := slices.Index(args, "--outputs-file")
+		if idx < 0 || idx+1 >= len(args) {
+			t.Fatalf("missing --outputs-file in args: %v", args)
+		}
+		raw, err := os.ReadFile(args[idx+1])
+		if err != nil {
+			t.Fatalf("read outputs file: %v", err)
+		}
+		var outs []txbuildOutput
+		if err := json.Unmarshal(raw, &outs); err != nil {
+			t.Fatalf("decode outputs file: %v", err)
+		}
+		if len(outs) != 1 {
+			t.Fatalf("outputs len: got %d want 1", len(outs))
+		}
+		if outs[0].ToAddress != wantRecipientUA {
+			t.Fatalf("recipient ua mismatch: got=%q want=%q", outs[0].ToAddress, wantRecipientUA)
+		}
+		return []byte(`{"version":"v1","status":"ok","data":{"version":"v0","kind":"send-many"}}`), nil
+	}
+
+	w := withdraw.Withdrawal{
+		ID:          seq32ForPlanner(0x00),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: recipientRaw,
+		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
+	}
+
+	if _, err := p.Plan(context.Background(), seq32ForPlanner(0x80), []withdraw.Withdrawal{w}); err != nil {
+		t.Fatalf("Plan: %v", err)
+	}
+}
+
 func TestParseTxBuildJSONEnvelope_HandlesErrorEnvelope(t *testing.T) {
 	t.Parallel()
 

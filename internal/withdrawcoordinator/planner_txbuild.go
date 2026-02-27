@@ -10,7 +10,6 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -93,7 +92,12 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 		return nil, fmt.Errorf("%w: nil planner", ErrInvalidTxBuildPlannerConfig)
 	}
 
-	outs, err := buildTxBuildOutputs(batchID, ws, p.cfg.BaseChainID, p.cfg.BridgeAddress)
+	recipientHRP, err := bech32HRPFromAddress(p.cfg.ChangeAddress)
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid change address hrp: %v", ErrInvalidTxBuildPlannerConfig, err)
+	}
+
+	outs, err := buildTxBuildOutputs(batchID, ws, p.cfg.BaseChainID, p.cfg.BridgeAddress, recipientHRP)
 	if err != nil {
 		return nil, err
 	}
@@ -140,7 +144,7 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 	return parseTxBuildJSONEnvelope(out)
 }
 
-func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID uint32, bridgeAddress common.Address) ([]txbuildOutput, error) {
+func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID uint32, bridgeAddress common.Address, recipientHRP string) ([]txbuildOutput, error) {
 	ws2, err := withdraw.SelectForBatch(ws, len(ws))
 	if err != nil {
 		return nil, err
@@ -151,7 +155,7 @@ func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID
 
 	outs := make([]txbuildOutput, 0, len(ws2))
 	for _, w := range ws2 {
-		recipient, err := parseTxBuildRecipientAddress(w.RecipientUA)
+		recipient, err := parseTxBuildRecipientAddress(w.RecipientUA, recipientHRP)
 		if err != nil {
 			return nil, fmt.Errorf("withdrawcoordinator: invalid withdrawal recipient UA for %x", w.ID)
 		}
@@ -177,27 +181,38 @@ func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID
 	return outs, nil
 }
 
-func parseTxBuildRecipientAddress(recipientUA []byte) (string, error) {
+func parseTxBuildRecipientAddress(recipientUA []byte, recipientHRP string) (string, error) {
 	if len(recipientUA) == 0 {
 		return "", fmt.Errorf("empty recipient ua")
 	}
-	if !utf8.Valid(recipientUA) {
-		return "", fmt.Errorf("recipient ua is not utf-8")
+
+	if len(recipientUA) == orchardRawAddressLen {
+		encoded, err := encodeOrchardRawUnifiedAddress(recipientUA, recipientHRP)
+		if err == nil {
+			return encoded, nil
+		}
 	}
 
 	recipient := string(recipientUA)
-	if recipient != strings.TrimSpace(recipient) {
+	if !isValidTxBuildAddress(recipient) {
 		return "", fmt.Errorf("recipient ua has leading/trailing whitespace")
 	}
+	return recipient, nil
+}
+
+func isValidTxBuildAddress(recipient string) bool {
+	if recipient != strings.TrimSpace(recipient) {
+		return false
+	}
 	if len(recipient) < 8 {
-		return "", fmt.Errorf("recipient ua too short")
+		return false
 	}
 	for _, r := range recipient {
 		if (r < '0' || r > '9') && (r < 'a' || r > 'z') {
-			return "", fmt.Errorf("recipient ua has invalid character %q", r)
+			return false
 		}
 	}
-	return recipient, nil
+	return true
 }
 
 func (p *TxBuildPlanner) commandEnv() []string {
