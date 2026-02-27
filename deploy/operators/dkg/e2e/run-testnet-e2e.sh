@@ -5433,6 +5433,8 @@ command_run() {
     local run_deposit_extract_ok="false"
     local run_deposit_extract_wait_logged="false"
     local run_deposit_extract_sleep_seconds=5
+    local run_deposit_backfill_retry_interval_seconds=20
+    local run_deposit_last_backfill_epoch=0
     local run_deposit_extract_deadline_epoch
     local run_deposit_action_index_selected=""
     local -a run_deposit_action_indexes=()
@@ -5545,6 +5547,7 @@ command_run() {
             log "run deposit witness backfill best-effort failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id from_height=$run_deposit_scan_backfill_from_height"
           fi
         done
+        run_deposit_last_backfill_epoch="$(date +%s)"
       else
         log "run deposit witness backfill tx height unknown; skipping proactive backfill txid=$run_deposit_juno_tx_hash"
       fi
@@ -5707,6 +5710,20 @@ command_run() {
         done
         if [[ "$run_deposit_extract_ok" == "true" ]]; then
           break
+        fi
+        if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then
+          local run_deposit_now_epoch
+          run_deposit_now_epoch="$(date +%s)"
+          if (( run_deposit_last_backfill_epoch == 0 || run_deposit_now_epoch - run_deposit_last_backfill_epoch >= run_deposit_backfill_retry_interval_seconds )); then
+            log "run deposit witness note pending; retrying scan backfill from_height=$run_deposit_scan_backfill_from_height"
+            for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
+              run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
+              if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"; then
+                log "run deposit witness backfill retry best-effort failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id from_height=$run_deposit_scan_backfill_from_height"
+              fi
+            done
+            run_deposit_last_backfill_epoch="$run_deposit_now_epoch"
+          fi
         fi
         if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_extract_wait_logged" != "true" ]]; then
           log "run deposit witness note pending wallet=$withdraw_coordinator_juno_wallet_id txid=$run_deposit_juno_tx_hash scan_urls=$(IFS=,; printf '%s' "${run_deposit_scan_urls[*]}") action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"

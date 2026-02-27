@@ -277,6 +277,16 @@ test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
   assert_contains "$script_text" "run deposit witness extraction anchored to relayer checkpoint height=" "relayer deposit extraction logs the selected checkpoint anchor height"
 }
 
+test_relayer_deposit_extraction_retries_backfill_while_note_pending() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "run_deposit_backfill_retry_interval_seconds=20" "relayer deposit extraction defines periodic backfill retry interval while waiting for note visibility"
+  assert_contains "$script_text" "run_deposit_last_backfill_epoch=0" "relayer deposit extraction tracks periodic backfill retry cadence state"
+  assert_contains "$script_text" "run deposit witness note pending; retrying scan backfill" "relayer deposit extraction logs periodic backfill retries during note-pending waits"
+  assert_contains "$script_text" 'if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then' "relayer deposit extraction gates periodic backfill retries on note-pending state and known tx height"
+}
+
 test_witness_generation_binds_memos_to_predicted_bridge_domain() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -719,6 +729,7 @@ main() {
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
   test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id
+  test_relayer_deposit_extraction_retries_backfill_while_note_pending
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
   test_live_bridge_flow_retries_transient_bridge_api_write_failures
