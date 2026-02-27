@@ -20,6 +20,8 @@ var (
 	ErrProofFailed   = errors.New("proofclient: proof request failed")
 )
 
+const staleFailureMessageSkew = 30 * time.Second
+
 type Request struct {
 	JobID        common.Hash
 	Pipeline     string
@@ -107,6 +109,7 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 	if err := validateRequest(req); err != nil {
 		return Result{}, err
 	}
+	requestStartedAt := time.Now().UTC()
 
 	deadline := req.Deadline.UTC()
 	if deadline.IsZero() {
@@ -143,7 +146,7 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 			if !ok {
 				return Result{}, fmt.Errorf("proofclient: response consumer closed")
 			}
-			result, matched, err := c.handleResponseMessage(msg, req.JobID)
+			result, matched, err := c.handleResponseMessage(msg, req.JobID, requestStartedAt)
 			c.ack(msg)
 			if err != nil {
 				return Result{}, err
@@ -155,7 +158,7 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 	}
 }
 
-func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash) (Result, bool, error) {
+func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash, requestStartedAt time.Time) (Result, bool, error) {
 	if strings.TrimSpace(string(msg.Value)) == "" {
 		return Result{}, false, nil
 	}
@@ -199,6 +202,17 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 			Metadata: cloneMap(res.Metadata),
 		}, true, nil
 	case "proof.failure.v1":
+		if !msg.Timestamp.IsZero() &&
+			!requestStartedAt.IsZero() &&
+			msg.Timestamp.Add(staleFailureMessageSkew).Before(requestStartedAt) {
+			c.cfg.Log.Warn(
+				"proofclient: ignore stale failure response",
+				"job_id", jobID.Hex(),
+				"message_timestamp", msg.Timestamp.UTC().Format(time.RFC3339Nano),
+				"request_started_at", requestStartedAt.UTC().Format(time.RFC3339Nano),
+			)
+			return Result{}, false, nil
+		}
 		var fail struct {
 			ErrorCode string `json:"error_code"`
 			Retryable bool   `json:"retryable"`

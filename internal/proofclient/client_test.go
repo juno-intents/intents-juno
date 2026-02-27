@@ -129,6 +129,54 @@ func TestQueueClient_RequestProofFailure(t *testing.T) {
 	}
 }
 
+func TestQueueClient_RequestProofIgnoresStaleFailureMessage(t *testing.T) {
+	t.Parallel()
+
+	producer := &fakeProducer{}
+	consumer := &fakeConsumer{
+		msgCh: make(chan queue.Message, 2),
+		errCh: make(chan error, 1),
+	}
+	client, err := NewQueueClient(QueueConfig{
+		RequestTopic: "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		Producer:     producer,
+		Consumer:     consumer,
+	})
+	if err != nil {
+		t.Fatalf("NewQueueClient: %v", err)
+	}
+
+	jobID := common.HexToHash("0x9f5adf65a45f0a9dcc4ba85db2ac4d1be2a1d3d6c9db22a3a3885ad250ab3cf3")
+	consumer.msgCh <- queue.Message{
+		Topic:     "proof.failures.v1",
+		Timestamp: time.Now().UTC().Add(-10 * time.Minute),
+		Value:     []byte(`{"version":"proof.failure.v1","job_id":"` + jobID.Hex() + `","error_code":"timeout","retryable":true,"message":"stale timeout"}`),
+	}
+	consumer.msgCh <- queue.Message{
+		Topic:     "proof.fulfillments.v1",
+		Timestamp: time.Now().UTC(),
+		Value:     []byte(`{"version":"proof.fulfillment.v1","job_id":"` + jobID.Hex() + `","seal":"0x99","journal":"0x0102","metadata":{"provider":"sp1"}}`),
+	}
+
+	res, err := client.RequestProof(context.Background(), Request{
+		JobID:        jobID,
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     time.Now().UTC().Add(time.Minute),
+		Priority:     1,
+	})
+	if err != nil {
+		t.Fatalf("RequestProof: %v", err)
+	}
+	if len(res.Seal) != 1 || res.Seal[0] != 0x99 {
+		t.Fatalf("seal mismatch: %x", res.Seal)
+	}
+}
+
 func TestQueueClient_RequestProofFulfillmentRejectsInvalidJournal(t *testing.T) {
 	t.Parallel()
 
