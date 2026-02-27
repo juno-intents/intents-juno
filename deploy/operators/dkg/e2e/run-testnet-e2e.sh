@@ -1850,6 +1850,45 @@ stage_remote_runtime_file() {
     "$ssh_user@$host:$remote_path" >/dev/null
 }
 
+stage_remote_runtime_file_atomic() {
+  local src_path="$1"
+  local host="$2"
+  local ssh_user="$3"
+  local ssh_key_file="$4"
+  local remote_path="$5"
+  local remote_temp_path="${remote_path}.tmp.$$"
+
+  if ! stage_remote_runtime_file \
+    "$src_path" \
+    "$host" \
+    "$ssh_user" \
+    "$ssh_key_file" \
+    "$remote_temp_path"; then
+    return 1
+  fi
+
+  if ! ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "mv -f '$remote_temp_path' '$remote_path'" >/dev/null; then
+    ssh \
+      -i "$ssh_key_file" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$ssh_user@$host" \
+      "rm -f '$remote_temp_path'" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
 build_local_relayer_binaries() {
   local output_dir="$1"
   mkdir -p "$output_dir"
@@ -1882,12 +1921,14 @@ stage_remote_relayer_binaries() {
   local bin_name=""
   for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer; do
     [[ -f "$local_bin_dir/$bin_name" ]] || die "missing local relayer binary for staging: $local_bin_dir/$bin_name"
-    stage_remote_runtime_file \
+    if ! stage_remote_runtime_file_atomic \
       "$local_bin_dir/$bin_name" \
       "$host" \
       "$ssh_user" \
       "$ssh_key_file" \
-      "$remote_bin_dir/$bin_name"
+      "$remote_bin_dir/$bin_name"; then
+      return 1
+    fi
   done
 
   ssh \
@@ -5277,7 +5318,7 @@ command_run() {
     fi
     if (( relayer_status == 0 )); then
       for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
-        if ! stage_remote_runtime_file \
+        if ! stage_remote_runtime_file_atomic \
           "$runner_bridge_operator_signer_bin_path" \
           "$relayer_cleanup_host" \
           "$relayer_runtime_operator_ssh_user" \

@@ -181,7 +181,10 @@ test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" "stage_remote_runtime_file_atomic() {" "run-testnet-e2e defines helper to stage runtime files via temp-path + atomic move"
+  assert_contains "$script_text" 'local remote_temp_path="${remote_path}.tmp.$$"' "atomic staging helper uses per-process temp path to avoid busy-target writes"
   assert_contains "$script_text" "stage_remote_relayer_binaries() {" "run-testnet-e2e defines helper to stage relayer binaries to operator hosts"
+  assert_contains "$script_text" "if ! stage_remote_runtime_file_atomic \\" "distributed relayer binary staging hard-fails on per-binary upload/move failure"
   assert_contains "$script_text" "distributed relayer runtime staging freshly built relayer binaries to operator hosts" "distributed relayer runtime logs binary staging phase"
   assert_contains "$script_text" 'local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"' "distributed relayer runtime uses staged base-relayer binary path"
   assert_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"' "distributed relayer runtime uses staged deposit-relayer binary path"
