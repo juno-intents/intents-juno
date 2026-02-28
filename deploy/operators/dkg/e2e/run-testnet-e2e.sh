@@ -7079,8 +7079,12 @@ command_run() {
 
       scenario_endpoint="${operator_signer_endpoints[$endpoint_idx]}"
       [[ -n "$scenario_endpoint" ]] || return 1
-      scenario_pid="$(inject_operator_endpoint_failure "$scenario_endpoint" "$operator_down_ssh_key_path" "$operator_down_ssh_user" || true)"
-      [[ -n "$scenario_pid" ]] || return 1
+      if [[ "$operator_signer_supports_endpoints" == "true" ]]; then
+        scenario_pid="$(inject_operator_endpoint_failure "$scenario_endpoint" "$operator_down_ssh_key_path" "$operator_down_ssh_user" || true)"
+        [[ -n "$scenario_pid" ]] || return 1
+      else
+        scenario_pid="key-pruned"
+      fi
       operator_failures_injected=$((operator_failures_injected + 1))
 
       if [[ "$operator_signer_supports_endpoints" != "true" ]]; then
@@ -7108,7 +7112,11 @@ command_run() {
       elif (( operator_failures_injected == 2 )); then
         operator_down_2_endpoint="$scenario_endpoint"
       fi
-      log "injected operator endpoint failure count=$operator_failures_injected endpoint=$scenario_endpoint listener_pid=$scenario_pid"
+      if [[ "$operator_signer_supports_endpoints" == "true" ]]; then
+        log "injected operator endpoint failure count=$operator_failures_injected endpoint=$scenario_endpoint listener_pid=$scenario_pid"
+      else
+        log "simulated operator-down by pruning signer key count=$operator_failures_injected endpoint=$scenario_endpoint"
+      fi
     done
 
     if [[ "$operator_signer_supports_endpoints" != "true" ]] && (( ${#operator_signer_active_key_hexes[@]} < threshold )); then

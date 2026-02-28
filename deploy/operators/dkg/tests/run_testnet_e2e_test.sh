@@ -339,6 +339,16 @@ test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension
   assert_contains "$script_text" 'if (( expiry_on_chain > run_withdraw_request_expiry )); then' "run-scoped invariants track whether coordinator extended withdrawal expiry beyond requested value"
 }
 
+test_operator_down_chaos_prunes_keys_when_endpoint_mode_is_unavailable() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'if [[ "$operator_signer_supports_endpoints" == "true" ]]; then' "operator-down chaos only injects endpoint failure when signer endpoint mode is available"
+  assert_contains "$script_text" 'scenario_pid="key-pruned"' "operator-down chaos records synthetic failure id when operating in key-prune mode"
+  assert_contains "$script_text" $'if [[ "$operator_signer_supports_endpoints" == "true" ]]; then\n        scenario_pid="$(inject_operator_endpoint_failure "$scenario_endpoint" "$operator_down_ssh_key_path" "$operator_down_ssh_user" || true)"\n        [[ -n "$scenario_pid" ]] || return 1\n      else\n        scenario_pid="key-pruned"\n      fi' "operator-down chaos scopes listener-required checks to endpoint-capable signer mode"
+  assert_contains "$script_text" "simulated operator-down by pruning signer key count=" "operator-down chaos logs key-prune simulation path in local-key mode"
+}
+
 test_witness_generation_uses_funded_amount_defaults() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -999,6 +1009,7 @@ test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
   test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows
   test_run_restores_bridge_refund_window_baseline_before_live_flow
   test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension_flag
+  test_operator_down_chaos_prunes_keys_when_endpoint_mode_is_unavailable
 test_witness_generation_uses_funded_amount_defaults
 test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
