@@ -36,6 +36,7 @@ type WalletNote struct {
 	TxID        string
 	ActionIndex int32
 	Position    *int64
+	ValueZat    uint64
 }
 
 type WitnessPath struct {
@@ -60,6 +61,7 @@ type WithdrawRequest struct {
 	WalletID            string
 	TxID                string
 	ActionIndex         uint32
+	ExpectedValueZat    *uint64
 	AnchorHeight        *int64
 	WithdrawalID        [32]byte
 	RecipientRawAddress [43]byte
@@ -120,7 +122,7 @@ func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (Build
 	if b == nil || b.scan == nil || b.rpc == nil {
 		return BuildResult{}, fmt.Errorf("%w: nil clients", ErrInvalidConfig)
 	}
-	position, err := b.findNotePosition(ctx, req.WalletID, req.TxID, req.ActionIndex)
+	position, actionIndex, err := b.findWithdrawNote(ctx, req.WalletID, req.TxID, req.ActionIndex, req.ExpectedValueZat)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -140,7 +142,7 @@ func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (Build
 	if err != nil {
 		return BuildResult{}, err
 	}
-	action, err := b.rpc.GetOrchardAction(ctx, req.TxID, req.ActionIndex)
+	action, err := b.rpc.GetOrchardAction(ctx, req.TxID, actionIndex)
 	if err != nil {
 		return BuildResult{}, fmt.Errorf("witnessextract: get orchard action: %w", err)
 	}
@@ -160,6 +162,82 @@ func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (Build
 		Position:         position,
 		WitnessItem:      item,
 	}, nil
+}
+
+func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, uint32, error) {
+	wallet := strings.TrimSpace(walletID)
+	if wallet == "" {
+		return 0, 0, fmt.Errorf("%w: wallet id is required", ErrInvalidConfig)
+	}
+	txid = strings.TrimPrefix(strings.ToLower(strings.TrimSpace(txid)), "0x")
+	if _, err := parseHash32Hex(txid); err != nil {
+		return 0, 0, fmt.Errorf("%w: invalid txid: %v", ErrInvalidConfig, err)
+	}
+
+	notes, err := b.scan.ListWalletNotes(ctx, wallet)
+	if err != nil {
+		return 0, 0, fmt.Errorf("witnessextract: list wallet notes: %w", err)
+	}
+
+	matching := make([]WalletNote, 0, len(notes))
+	for _, n := range notes {
+		nTxID := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(n.TxID)), "0x")
+		if nTxID == txid {
+			matching = append(matching, n)
+		}
+	}
+	if len(matching) == 0 {
+		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+	}
+
+	if pos, ok, err := notePositionForActionIndex(matching, txid, actionIndex, expectedValueZat); err != nil {
+		return 0, 0, err
+	} else if ok {
+		return pos, actionIndex, nil
+	}
+
+	if expectedValueZat != nil {
+		selectedIdx := -1
+		for i := range matching {
+			n := matching[i]
+			if n.ValueZat != *expectedValueZat {
+				continue
+			}
+			if selectedIdx >= 0 {
+				return 0, 0, fmt.Errorf("%w: ambiguous txid=%s expected_value_zat=%d", ErrNoteNotFound, txid, *expectedValueZat)
+			}
+			selectedIdx = i
+		}
+		if selectedIdx < 0 {
+			return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d expected_value_zat=%d", ErrNoteNotFound, wallet, txid, actionIndex, *expectedValueZat)
+		}
+		selected := matching[selectedIdx]
+		if selected.ActionIndex < 0 {
+			return 0, 0, fmt.Errorf("witnessextract: invalid action index for txid=%s action_index=%d", txid, selected.ActionIndex)
+		}
+		if selected.Position == nil || *selected.Position < 0 || *selected.Position > math.MaxUint32 {
+			return 0, 0, fmt.Errorf("witnessextract: invalid note position for txid=%s action_index=%d", txid, selected.ActionIndex)
+		}
+		return uint32(*selected.Position), uint32(selected.ActionIndex), nil
+	}
+
+	return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+}
+
+func notePositionForActionIndex(notes []WalletNote, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, bool, error) {
+	for _, n := range notes {
+		if n.ActionIndex < 0 || uint32(n.ActionIndex) != actionIndex {
+			continue
+		}
+		if expectedValueZat != nil && n.ValueZat != *expectedValueZat {
+			return 0, false, nil
+		}
+		if n.Position == nil || *n.Position < 0 || *n.Position > math.MaxUint32 {
+			return 0, false, fmt.Errorf("witnessextract: invalid note position for txid=%s action_index=%d", txid, actionIndex)
+		}
+		return uint32(*n.Position), true, nil
+	}
+	return 0, false, nil
 }
 
 func (b *Builder) findNotePosition(ctx context.Context, walletID, txid string, actionIndex uint32) (uint32, error) {

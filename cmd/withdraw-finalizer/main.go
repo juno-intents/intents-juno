@@ -486,6 +486,7 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 		WalletID:            e.walletID,
 		TxID:                txHash,
 		ActionIndex:         req.ActionIndex,
+		ExpectedValueZat:    req.ExpectedValueZat,
 		AnchorHeight:        req.AnchorHeight,
 		WithdrawalID:        req.WithdrawalID,
 		RecipientRawAddress: recipientRaw,
@@ -538,6 +539,7 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 				TxID        string `json:"txid"`
 				ActionIndex int32  `json:"action_index"`
 				Position    *int64 `json:"position,omitempty"`
+				ValueZat    uint64 `json:"value_zat,omitempty"`
 			} `json:"notes"`
 			NextCursor string `json:"next_cursor"`
 		}
@@ -549,6 +551,7 @@ func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) (
 				TxID:        n.TxID,
 				ActionIndex: n.ActionIndex,
 				Position:    n.Position,
+				ValueZat:    n.ValueZat,
 			})
 		}
 

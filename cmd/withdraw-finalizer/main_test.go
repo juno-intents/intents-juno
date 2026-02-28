@@ -212,6 +212,62 @@ func TestWithdrawWitnessExtractor_ExtractRejectsInvalidRecipientUALength(t *test
 	}
 }
 
+func TestWithdrawWitnessExtractor_ExtractFallbacksByExpectedValue(t *testing.T) {
+	t.Parallel()
+
+	expectedValue := uint64(995)
+	scan := &stubWitnessScanClient{
+		notes: []witnessextract.WalletNote{
+			{
+				TxID:        strings.Repeat("ab", 32),
+				ActionIndex: 0,
+				Position:    ptrInt64(2),
+				ValueZat:    2500000,
+			},
+			{
+				TxID:        strings.Repeat("ab", 32),
+				ActionIndex: 2,
+				Position:    ptrInt64(7),
+				ValueZat:    expectedValue,
+			},
+		},
+		witness: witnessextract.WitnessResponse{
+			AnchorHeight: 321,
+			Root:         "0x" + strings.Repeat("cd", 32),
+			Paths: []witnessextract.WitnessPath{
+				{
+					Position: 7,
+					AuthPath: testAuthPathHex(),
+				},
+			},
+		},
+	}
+	rpc := &stubWitnessRPCClient{
+		action: testRPCAction(),
+	}
+	extractor := &withdrawWitnessExtractor{
+		walletID: "wallet-1",
+		builder:  witnessextract.New(scan, rpc),
+	}
+
+	recipientRaw := bytes.Repeat([]byte{0x7a}, 43)
+	anchorHeight := int64(321)
+	_, err := extractor.ExtractWithdrawWitness(context.Background(), withdrawfinalizer.WithdrawWitnessExtractRequest{
+		TxHash:           strings.Repeat("ab", 32),
+		ActionIndex:      0,
+		ExpectedValueZat: &expectedValue,
+		AnchorHeight:     &anchorHeight,
+		WithdrawalID:     [32]byte{},
+		RecipientUA:      recipientRaw,
+	})
+	if err != nil {
+		t.Fatalf("ExtractWithdrawWitness: %v", err)
+	}
+	if got, want := rpc.gotActionIndex, uint32(2); got != want {
+		t.Fatalf("action index: got %d want %d", got, want)
+	}
+}
+
 type stubWitnessScanClient struct {
 	notes           []witnessextract.WalletNote
 	witness         witnessextract.WitnessResponse

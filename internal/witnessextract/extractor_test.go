@@ -122,6 +122,67 @@ func TestBuilder_BuildWithdraw_Success(t *testing.T) {
 	if len(got.WitnessItem) != proverinput.WithdrawWitnessItemLen {
 		t.Fatalf("witness len mismatch: got=%d want=%d", len(got.WitnessItem), proverinput.WithdrawWitnessItemLen)
 	}
+	if rpc.gotActionIndex != 1 {
+		t.Fatalf("rpc action index mismatch: got=%d want=1", rpc.gotActionIndex)
+	}
+}
+
+func TestBuilder_BuildWithdraw_FallbackActionIndexByExpectedValue(t *testing.T) {
+	t.Parallel()
+
+	expectedValue := uint64(9900)
+	scan := &stubScan{
+		notes: []WalletNote{
+			{
+				TxID:        "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e",
+				ActionIndex: 0,
+				Position:    ptrInt64(2),
+				ValueZat:    2500000,
+			},
+			{
+				TxID:        "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e",
+				ActionIndex: 1,
+				Position:    ptrInt64(3),
+				ValueZat:    expectedValue,
+			},
+		},
+		witness: WitnessResponse{
+			Root: "0x" + strings.Repeat("88", 32),
+			Paths: []WitnessPath{
+				{
+					Position: 3,
+					AuthPath: testAuthPathHex(),
+				},
+			},
+		},
+	}
+	rpc := &stubRPC{
+		action: testRPCAction(),
+	}
+
+	var withdrawalID [32]byte
+	withdrawalID[0] = 0xaa
+	var recipientRaw [43]byte
+	recipientRaw[0] = 0xbb
+
+	b := New(scan, rpc)
+	got, err := b.BuildWithdraw(context.Background(), WithdrawRequest{
+		WalletID:            "wallet-b",
+		TxID:                scan.notes[0].TxID,
+		ActionIndex:         0,
+		ExpectedValueZat:    &expectedValue,
+		WithdrawalID:        withdrawalID,
+		RecipientRawAddress: recipientRaw,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithdraw: %v", err)
+	}
+	if got.Position != 3 {
+		t.Fatalf("position mismatch: got=%d want=3", got.Position)
+	}
+	if rpc.gotActionIndex != 1 {
+		t.Fatalf("rpc action index mismatch: got=%d want=1", rpc.gotActionIndex)
+	}
 }
 
 type stubScan struct {
@@ -145,11 +206,15 @@ func (s *stubScan) OrchardWitness(ctx context.Context, anchorHeight *int64, posi
 }
 
 type stubRPC struct {
-	action junorpc.OrchardAction
-	err    error
+	action         junorpc.OrchardAction
+	err            error
+	gotTxID        string
+	gotActionIndex uint32
 }
 
 func (s *stubRPC) GetOrchardAction(ctx context.Context, txid string, actionIndex uint32) (junorpc.OrchardAction, error) {
+	s.gotTxID = txid
+	s.gotActionIndex = actionIndex
 	if s.err != nil {
 		return junorpc.OrchardAction{}, s.err
 	}

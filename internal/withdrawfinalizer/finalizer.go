@@ -34,11 +34,12 @@ type Sender interface {
 }
 
 type WithdrawWitnessExtractRequest struct {
-	TxHash       string
-	ActionIndex  uint32
-	AnchorHeight *int64
-	WithdrawalID [32]byte
-	RecipientUA  []byte
+	TxHash           string
+	ActionIndex      uint32
+	ExpectedValueZat *uint64
+	AnchorHeight     *int64
+	WithdrawalID     [32]byte
+	RecipientUA      []byte
 }
 
 type WithdrawWitnessExtractor interface {
@@ -277,11 +278,12 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 			}
 			anchorHeight := int64(cp.Height)
 			extracted, err := f.witnessExtractor.ExtractWithdrawWitness(ctx, WithdrawWitnessExtractRequest{
-				TxHash:       b.JunoTxID,
-				ActionIndex:  uint32(idx),
-				AnchorHeight: &anchorHeight,
-				WithdrawalID: w.ID,
-				RecipientUA:  append([]byte(nil), w.RecipientUA...),
+				TxHash:           b.JunoTxID,
+				ActionIndex:      uint32(idx),
+				ExpectedValueZat: &net,
+				AnchorHeight:     &anchorHeight,
+				WithdrawalID:     w.ID,
+				RecipientUA:      append([]byte(nil), w.RecipientUA...),
 			})
 			if err != nil {
 				return fmt.Errorf("withdrawfinalizer: extract proof witness item: %w", err)

@@ -805,6 +805,12 @@ func TestFinalizer_UsesExtractorWitnessFromBatchTxHashWhenConfigured(t *testing.
 	if got, want := extractor.lastReq.ActionIndex, uint32(0); got != want {
 		t.Fatalf("extractor action index: got %d want %d", got, want)
 	}
+	if extractor.lastReq.ExpectedValueZat == nil {
+		t.Fatalf("extractor expected value was nil")
+	}
+	if got, want := *extractor.lastReq.ExpectedValueZat, uint64(995); got != want {
+		t.Fatalf("extractor expected value: got %d want %d", got, want)
+	}
 	if got, want := extractor.lastReq.WithdrawalID, w.ID; got != want {
 		t.Fatalf("extractor withdrawal id mismatch")
 	}
