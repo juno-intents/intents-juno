@@ -128,6 +128,7 @@ test_distributed_relayer_runtime_cleans_stale_processes_before_launch() {
   assert_contains "$script_text" 'fuser -k \"\${cleanup_port}/tcp\"' "remote stale cleanup uses fuser fallback for occupied ports"
   assert_contains "$script_text" "distributed relayer runtime enabled; stopping stale remote relayer processes before launch" "distributed relayer mode logs stale-process cleanup phase"
   assert_contains "$script_text" 'withdraw_finalizer_host="${relayer_runtime_operator_hosts[0]}"' "distributed relayer mode co-locates withdraw finalizer with base relayer to keep base-relayer sender path local"
+  assert_contains "$script_text" 'for relayer_cleanup_host in "${relayer_runtime_operator_hosts[@]}"; do' "distributed relayer mode sweeps full operator host list when cleaning stale relayer services"
   assert_contains "$script_text" "for relayer_cleanup_host in" "distributed relayer mode iterates selected hosts for stale-process cleanup"
   assert_contains "$script_text" "stop_remote_relayer_binaries_on_host \\" "distributed relayer mode invokes stale-process cleanup helper"
   assert_contains "$script_text" 'JUNO_QUEUE_KAFKA_TLS="true"' "distributed relayer runtime forces kafka tls for remote relayer processes"

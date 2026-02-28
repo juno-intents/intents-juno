@@ -5630,6 +5630,15 @@ command_run() {
       relayer_cleanup_hosts+=("$relayer_cleanup_host")
       relayer_cleanup_seen["$relayer_cleanup_host"]="1"
     done
+    # Sweep all declared operator hosts to kill stale relayer services from prior placement strategies.
+    for relayer_cleanup_host in "${relayer_runtime_operator_hosts[@]}"; do
+      [[ -n "$relayer_cleanup_host" ]] || continue
+      if [[ -n "${relayer_cleanup_seen[$relayer_cleanup_host]:-}" ]]; then
+        continue
+      fi
+      relayer_cleanup_hosts+=("$relayer_cleanup_host")
+      relayer_cleanup_seen["$relayer_cleanup_host"]="1"
+    done
     if (( relayer_status == 0 )); then
       for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
         if ! set_remote_operator_stack_env_value \
