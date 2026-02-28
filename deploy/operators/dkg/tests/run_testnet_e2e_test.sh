@@ -220,6 +220,8 @@ test_distributed_relayer_runtime_stages_operator_signer_binary() {
   assert_contains "$script_text" '"$distributed_bridge_operator_signer_bin"' "distributed relayer runtime marks staged signer binary executable on operators"
   assert_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime defines helper to align tss-host signer/tooling runtime paths"
   assert_contains "$script_text" 'remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"' "distributed relayer runtime stages a spendauth wrapper with explicit dkg-admin config path"
+  assert_contains "$script_text" 'dkg_admin_workdir="/var/lib/intents-juno/operator-runtime"' "distributed relayer runtime tracks explicit dkg-admin working directory for spendauth signer wrapper"
+  assert_contains "$script_text" 'cd "$dkg_admin_workdir"' "distributed relayer runtime spendauth signer wrapper sets dkg-admin working directory before exec"
   assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"' "distributed relayer runtime points tss-host spendauth signer at the staged wrapper"
   assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged juno-txsign binary"
   assert_contains "$script_text" 'sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign' "distributed relayer runtime ensures tss-signer can find juno-txsign via PATH-stable location"

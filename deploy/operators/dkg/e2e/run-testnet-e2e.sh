@@ -2142,6 +2142,7 @@ stack_env_file="/etc/intents-juno/operator-stack.env"
 remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"
 dkg_admin_bin="/var/lib/intents-juno/operator-runtime/bin/dkg-admin"
 dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.json"
+dkg_admin_workdir="/var/lib/intents-juno/operator-runtime"
 
 [[ -x "$signer_bin" ]] || {
   echo "withdraw coordinator signer binary is missing or not executable: $signer_bin" >&2
@@ -2153,6 +2154,10 @@ dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.jso
 }
 [[ -s "$dkg_admin_config" ]] || {
   echo "tss-host spendauth signer config is missing: $dkg_admin_config" >&2
+  exit 1
+}
+[[ -d "$dkg_admin_workdir/state" ]] || {
+  echo "tss-host spendauth signer state directory is missing: $dkg_admin_workdir/state" >&2
   exit 1
 }
 [[ -s "$stack_env_file" ]] || {
@@ -2186,6 +2191,7 @@ tmp_signer_wrapper="$(mktemp)"
 cat >"$tmp_signer_wrapper" <<EOF_WRAPPER
 #!/usr/bin/env bash
 set -euo pipefail
+cd "$dkg_admin_workdir"
 exec "$dkg_admin_bin" --config "$dkg_admin_config" "\$@"
 EOF_WRAPPER
 chmod 0755 "$tmp_signer_wrapper"
