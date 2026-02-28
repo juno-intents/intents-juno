@@ -7286,6 +7286,7 @@ command_run() {
     local scenario_wait_deadline scenario_now
     local scenario_restore_output scenario_restore_status
     local scenario_current_refund_window
+    local scenario_owner_wjuno_balance scenario_withdraw_amount
     local scenario_params_mutated="false"
 
     restore_refund_after_expiry_params() {
@@ -7360,6 +7361,44 @@ command_run() {
     fi
     scenario_params_mutated="true"
 
+    scenario_owner_wjuno_balance="$(
+      cast_contract_call_one \
+        "$base_rpc_url" \
+        "$deployed_wjuno_address" \
+        "balanceOf(address)" \
+        "balanceOf(address)(uint256)" \
+        "$bridge_deployer_address"
+    )"
+    if [[ ! "$scenario_owner_wjuno_balance" =~ ^[0-9]+$ ]]; then
+      printf 'refund-after-expiry scenario owner wjuno balance read failed: value=%s\n' \
+        "$scenario_owner_wjuno_balance"
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
+    if (( scenario_owner_wjuno_balance == 0 )); then
+      printf 'refund-after-expiry scenario owner has zero wjuno balance; cannot request withdrawal requester=%s\n' \
+        "$bridge_deployer_address"
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
+    scenario_withdraw_amount="$scenario_owner_wjuno_balance"
+    if [[ "${#scenario_withdraw_amount}" -gt 4 || "$scenario_withdraw_amount" -gt 1000 ]]; then
+      scenario_withdraw_amount="1000"
+    fi
+    [[ "$scenario_withdraw_amount" =~ ^[0-9]+$ ]] || {
+      printf 'refund-after-expiry scenario computed withdraw amount is invalid: value=%s\n' \
+        "$scenario_withdraw_amount"
+      restore_refund_after_expiry_params || true
+      return 1
+    }
+    (( scenario_withdraw_amount > 0 )) || {
+      printf 'refund-after-expiry scenario computed withdraw amount must be > 0: value=%s\n' \
+        "$scenario_withdraw_amount"
+      restore_refund_after_expiry_params || true
+      return 1
+    }
+    log "refund-after-expiry scenario requesting withdraw amount=$scenario_withdraw_amount owner_balance=$scenario_owner_wjuno_balance"
+
     scenario_withdraw_request_payload="$workdir/reports/refund-after-expiry-withdraw-request.json"
     scenario_request_status=1
     scenario_request_output=""
@@ -7373,7 +7412,7 @@ command_run() {
             --owner-key-file "$bridge_deployer_key_file" \
             --wjuno-address "$deployed_wjuno_address" \
             --bridge-address "$deployed_bridge_address" \
-            --amount "1000" \
+            --amount "$scenario_withdraw_amount" \
             --recipient-raw-address-hex "$scenario_recipient_raw_hex" \
             --output "$scenario_withdraw_request_payload" 2>&1
       )"

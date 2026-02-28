@@ -363,6 +363,9 @@ test_refund_after_expiry_retries_nonce_sensitive_bridge_updates() {
   assert_contains "$script_text" 'scenario_current_refund_window="$scenario_restore_output"' "refund-after-expiry scenario validates restored refund window from verified helper output"
   assert_contains "$script_text" "refund-after-expiry scenario restore mismatch" "refund-after-expiry scenario validates setParams restore outcome after retries"
   assert_contains "$script_text" "refund-after-expiry scenario retrying withdraw request after nonce race" "refund-after-expiry scenario retries withdraw request when nonce races occur"
+  assert_contains "$script_text" 'scenario_owner_wjuno_balance="$(' "refund-after-expiry scenario reads owner wJUNO balance before requesting withdraw"
+  assert_contains "$script_text" 'scenario_withdraw_amount="$scenario_owner_wjuno_balance"' "refund-after-expiry scenario caps withdraw amount to available owner wJUNO balance"
+  assert_not_contains "$script_text" '--amount "1000"' "refund-after-expiry scenario must not use fixed withdraw amount literal"
 }
 
 test_witness_generation_uses_funded_amount_defaults() {
