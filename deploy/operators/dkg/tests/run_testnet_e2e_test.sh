@@ -316,6 +316,17 @@ test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows() {
   assert_contains "$script_text" '--max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \' "withdraw coordinator launch forwards env-overridable max expiry extension"
 }
 
+test_run_restores_bridge_refund_window_baseline_before_live_flow() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local bridge_min_refund_window_seconds="${BRIDGE_MIN_REFUND_WINDOW_SECONDS:-86400}"' "run-testnet-e2e defines baseline bridge refund window with env override"
+  assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
+  assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "run-testnet-e2e logs baseline bridge param restoration"
+  assert_contains "$script_text" "failed to restore baseline bridge params before relayer launch" "run-testnet-e2e hard-fails when bridge baseline restore transaction fails"
+  assert_contains "$script_text" "bridge refundWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline refund window after restore"
+}
+
 test_witness_generation_uses_funded_amount_defaults() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -974,6 +985,7 @@ main() {
   test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
 test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
   test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows
+  test_run_restores_bridge_refund_window_baseline_before_live_flow
 test_witness_generation_uses_funded_amount_defaults
 test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards

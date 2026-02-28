@@ -5368,6 +5368,7 @@ command_run() {
 
   local bridge_fee_bps bridge_relayer_tip_bps bridge_fee_distributor
   local bridge_refund_window_seconds bridge_max_expiry_extension_seconds
+  local bridge_min_refund_window_seconds="${BRIDGE_MIN_REFUND_WINDOW_SECONDS:-86400}"
   local owner_wjuno_balance_before recipient_wjuno_balance_before
   local fee_distributor_wjuno_balance_before bridge_wjuno_balance_before
   bridge_fee_bps="$(
@@ -5412,6 +5413,43 @@ command_run() {
     die "bridge refundWindowSeconds is invalid: $bridge_refund_window_seconds"
   [[ "$bridge_max_expiry_extension_seconds" =~ ^[0-9]+$ ]] || \
     die "bridge maxExpiryExtensionSeconds is invalid: $bridge_max_expiry_extension_seconds"
+  [[ "$bridge_min_refund_window_seconds" =~ ^[0-9]+$ ]] || \
+    die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be numeric: $bridge_min_refund_window_seconds"
+  (( bridge_min_refund_window_seconds > 0 )) || \
+    die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be > 0"
+  if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then
+    local bridge_params_restore_output bridge_params_restore_status
+    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64) current=$bridge_refund_window_seconds target=$bridge_min_refund_window_seconds"
+    set +e
+    bridge_params_restore_output="$(
+      cast send \
+        --rpc-url "$base_rpc_url" \
+        --private-key "$bridge_deployer_key_hex" \
+        "$deployed_bridge_address" \
+        "setParams(uint96,uint96,uint64,uint64)" \
+        "$bridge_fee_bps" \
+        "$bridge_relayer_tip_bps" \
+        "$bridge_min_refund_window_seconds" \
+        "$bridge_max_expiry_extension_seconds" 2>&1
+    )"
+    bridge_params_restore_status=$?
+    set -e
+    if (( bridge_params_restore_status != 0 )); then
+      die "failed to restore baseline bridge params before relayer launch: status=$bridge_params_restore_status output=$bridge_params_restore_output"
+    fi
+    bridge_refund_window_seconds="$(
+      cast_contract_call_one \
+        "$base_rpc_url" \
+        "$deployed_bridge_address" \
+        "refundWindowSeconds()" \
+        "refundWindowSeconds()(uint64)"
+    )"
+    [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
+      die "bridge refundWindowSeconds is invalid after baseline restore: $bridge_refund_window_seconds"
+    if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then
+      die "bridge refundWindowSeconds baseline restore mismatch: got=$bridge_refund_window_seconds target=$bridge_min_refund_window_seconds"
+    fi
+  fi
   owner_wjuno_balance_before="$(
     cast_contract_call_one \
       "$base_rpc_url" \
