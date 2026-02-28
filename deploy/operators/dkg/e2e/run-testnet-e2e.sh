@@ -3730,7 +3730,7 @@ command_run() {
   local withdraw_coordinator_juno_wallet_id=""
   local withdraw_coordinator_juno_change_address=""
   local witness_extraction_wallet_id=""
-  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-100000}"
+  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"
   local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"
   local -a witness_pool_operator_labels=()
@@ -3948,8 +3948,8 @@ command_run() {
         --withdrawal-id-hex "$predicted_witness_withdrawal_id"
         --withdraw-batch-id-hex "$predicted_witness_withdraw_batch_id"
         --skip-action-index-lookup
-        --deposit-amount-zat "100000"
-        --withdraw-amount-zat "10000"
+        --deposit-amount-zat "1000000"
+        --withdraw-amount-zat "100000"
         --timeout-seconds "$witness_timeout_slice_seconds"
         --output "$witness_metadata_attempt_json"
       )
@@ -4712,7 +4712,7 @@ command_run() {
       --withdrawal-id-hex "$direct_cli_generated_withdrawal_id_no_prefix"
       --withdraw-batch-id-hex "$direct_cli_generated_withdraw_batch_id_no_prefix"
       --skip-action-index-lookup
-      --deposit-amount-zat "100000"
+      --deposit-amount-zat "1000000"
       --withdraw-amount-zat "$direct_cli_withdraw_amount"
       --timeout-seconds "$sp1_witness_metadata_timeout_seconds"
       --output "$direct_cli_generated_witness_metadata_json"

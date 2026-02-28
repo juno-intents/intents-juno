@@ -296,12 +296,20 @@ test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-100000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
+  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
   assert_contains "$script_text" 'local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "withdraw coordinator runtime configures low-latency batch size override for live e2e"
   assert_contains "$script_text" 'local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"' "withdraw coordinator runtime configures low-latency batch age override for live e2e"
   assert_contains "$script_text" '--juno-fee-add-zat "$withdraw_coordinator_juno_fee_add_zat" \' "withdraw coordinator launch passes explicit juno fee floor to txbuild planner"
   assert_contains "$script_text" '--max-items "$withdraw_coordinator_max_items" \' "withdraw coordinator launch passes explicit max-items override"
   assert_contains "$script_text" '--max-age "$withdraw_coordinator_max_age" \' "withdraw coordinator launch passes explicit max-age override"
+}
+
+test_witness_generation_uses_funded_amount_defaults() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" '--deposit-amount-zat "1000000"' "witness metadata generation uses elevated deposit funding default for withdraw payout solvency"
+  assert_contains "$script_text" '--withdraw-amount-zat "100000"' "witness metadata generation uses elevated withdraw funding default for withdraw payout solvency"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {
@@ -952,8 +960,9 @@ main() {
   test_distributed_relayer_runtime_stages_operator_signer_binary
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
   test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
-  test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
-  test_witness_pool_uses_per_endpoint_timeout_slices
+test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
+test_witness_generation_uses_funded_amount_defaults
+test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure
   test_witness_generation_reuses_distributed_dkg_recipient_identity
