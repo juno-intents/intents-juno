@@ -5473,6 +5473,7 @@ command_run() {
     distributed_withdraw_coordinator_tss_url="https://127.0.0.1:9443"
     distributed_withdraw_coordinator_tss_server_name="$withdraw_coordinator_host"
     distributed_withdraw_coordinator_juno_rpc_url="http://127.0.0.1:18232"
+    distributed_withdraw_coordinator_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
@@ -5528,6 +5529,26 @@ command_run() {
           "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" \
           "$withdraw_coordinator_juno_change_address"; then
           log "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS into operator stack env host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+        if ! set_remote_operator_stack_env_value \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "WITHDRAW_BLOB_BUCKET" \
+          "$withdraw_blob_bucket"; then
+          log "distributed relayer runtime failed to persist WITHDRAW_BLOB_BUCKET into operator stack env host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+        if ! set_remote_operator_stack_env_value \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "WITHDRAW_BLOB_PREFIX" \
+          "$withdraw_blob_prefix"; then
+          log "distributed relayer runtime failed to persist WITHDRAW_BLOB_PREFIX into operator stack env host=$relayer_cleanup_host"
           relayer_status=1
           break
         fi
@@ -5736,6 +5757,8 @@ command_run() {
           --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
           --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-change-address "$withdraw_coordinator_juno_change_address" \
+          --juno-scan-url "$distributed_withdraw_coordinator_juno_scan_url" \
+          --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \
           --tss-url "$distributed_withdraw_coordinator_tss_url" \
           --tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \
           --tss-server-ca-file "$distributed_withdraw_coordinator_tss_server_ca_file" \
@@ -5845,6 +5868,8 @@ command_run() {
           --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
           --juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \
           --juno-change-address "$withdraw_coordinator_juno_change_address" \
+          --juno-scan-url "$sp1_witness_juno_scan_url" \
+          --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \
           --tss-url "$withdraw_coordinator_tss_url" \
           --tss-server-ca-file "$withdraw_coordinator_tss_server_ca_file" \
           --base-chain-id "$base_chain_id" \

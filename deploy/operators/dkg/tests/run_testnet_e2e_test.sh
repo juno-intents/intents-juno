@@ -234,6 +234,14 @@ test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_en
   assert_contains "$script_text" "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS into operator stack env host=" "distributed relayer runtime logs change-address persistence failures"
 }
 
+test_withdraw_coordinator_runtime_forwards_juno_scan_inputs() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" $'--juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \\\n          --juno-change-address "$withdraw_coordinator_juno_change_address" \\\n          --juno-scan-url "$distributed_withdraw_coordinator_juno_scan_url" \\\n          --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \\' "distributed withdraw coordinator forwards juno-scan URL and bearer env in its own command path"
+  assert_contains "$script_text" $'--juno-wallet-id "$withdraw_coordinator_juno_wallet_id" \\\n          --juno-change-address "$withdraw_coordinator_juno_change_address" \\\n          --juno-scan-url "$sp1_witness_juno_scan_url" \\\n          --juno-scan-bearer-env "$sp1_witness_juno_scan_bearer_token_env" \\' "local withdraw coordinator forwards juno-scan URL and bearer env in its own command path"
+}
+
 test_witness_pool_uses_per_endpoint_timeout_slices() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -877,6 +885,7 @@ main() {
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_distributed_relayer_runtime_stages_operator_signer_binary
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
+  test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure
