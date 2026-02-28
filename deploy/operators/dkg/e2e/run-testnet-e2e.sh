@@ -7187,10 +7187,12 @@ command_run() {
     local scenario_refund_window_seconds="$1"
     local witness_metadata_json scenario_recipient_raw_hex
     local scenario_withdraw_request_payload scenario_request_status
+    local scenario_request_output scenario_request_attempt
     local scenario_withdrawal_view_json scenario_refunded_on_chain scenario_finalized_on_chain
     local scenario_refund_output scenario_refund_status scenario_refund_attempt
     local scenario_wait_deadline scenario_now
     local scenario_restore_output scenario_restore_status
+    local scenario_current_refund_window
     local scenario_params_mutated="false"
 
     restore_refund_after_expiry_params() {
@@ -7199,7 +7201,7 @@ command_run() {
       fi
       log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$bridge_refund_window_seconds"
       set +e
-      scenario_restore_output="$(
+      scenario_restore_output="$(run_with_rpc_retry 5 2 "cast send" \
         cast send \
           --rpc-url "$base_rpc_url" \
           --private-key "$bridge_deployer_key_hex" \
@@ -7208,14 +7210,27 @@ command_run() {
           "$bridge_fee_bps" \
           "$bridge_relayer_tip_bps" \
           "$bridge_refund_window_seconds" \
-          "$bridge_max_expiry_extension_seconds" 2>&1
-      )"
+          "$bridge_max_expiry_extension_seconds")"
       scenario_restore_status=$?
       set -e
       if (( scenario_restore_status != 0 )); then
         printf 'refund-after-expiry scenario failed to restore bridge params: status=%s output=%s\n' \
           "$scenario_restore_status" \
           "$scenario_restore_output"
+        return 1
+      fi
+      scenario_current_refund_window="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_bridge_address" \
+          "refundWindowSeconds()" \
+          "refundWindowSeconds()(uint64)"
+      )"
+      if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
+        (( scenario_current_refund_window != bridge_refund_window_seconds )); then
+        printf 'refund-after-expiry scenario restore mismatch: got_refund_window=%s expected=%s\n' \
+          "$scenario_current_refund_window" \
+          "$bridge_refund_window_seconds"
         return 1
       fi
       scenario_params_mutated="false"
@@ -7228,7 +7243,7 @@ command_run() {
 
     log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$scenario_refund_window_seconds"
     set +e
-    scenario_refund_output="$(
+    scenario_refund_output="$(run_with_rpc_retry 5 2 "cast send" \
       cast send \
         --rpc-url "$base_rpc_url" \
         --private-key "$bridge_deployer_key_hex" \
@@ -7237,8 +7252,7 @@ command_run() {
         "$bridge_fee_bps" \
         "$bridge_relayer_tip_bps" \
         "$scenario_refund_window_seconds" \
-        "$bridge_max_expiry_extension_seconds" 2>&1
-    )"
+        "$bridge_max_expiry_extension_seconds")"
     scenario_refund_status=$?
     set -e
     if (( scenario_refund_status != 0 )); then
@@ -7247,26 +7261,55 @@ command_run() {
         "$scenario_refund_output"
       return 1
     fi
+    scenario_current_refund_window="$(
+      cast_contract_call_one \
+        "$base_rpc_url" \
+        "$deployed_bridge_address" \
+        "refundWindowSeconds()" \
+        "refundWindowSeconds()(uint64)"
+    )"
+    if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
+      (( scenario_current_refund_window != scenario_refund_window_seconds )); then
+      printf 'refund-after-expiry scenario configure mismatch: got_refund_window=%s expected=%s\n' \
+        "$scenario_current_refund_window" \
+        "$scenario_refund_window_seconds"
+      return 1
+    fi
     scenario_params_mutated="true"
 
     scenario_withdraw_request_payload="$workdir/reports/refund-after-expiry-withdraw-request.json"
-    set +e
-    (
-      cd "$REPO_ROOT"
-      go run ./cmd/withdraw-request \
-        --rpc-url "$base_rpc_url" \
-        --chain-id "$base_chain_id" \
-        --owner-key-file "$bridge_deployer_key_file" \
-        --wjuno-address "$deployed_wjuno_address" \
-        --bridge-address "$deployed_bridge_address" \
-        --amount "1000" \
-        --recipient-raw-address-hex "$scenario_recipient_raw_hex" \
-        --output "$scenario_withdraw_request_payload"
-    ) >/dev/null 2>&1
-    scenario_request_status=$?
-    set -e
+    scenario_request_status=1
+    scenario_request_output=""
+    for scenario_request_attempt in $(seq 1 3); do
+      set +e
+      scenario_request_output="$(
+        cd "$REPO_ROOT" && \
+          go run ./cmd/withdraw-request \
+            --rpc-url "$base_rpc_url" \
+            --chain-id "$base_chain_id" \
+            --owner-key-file "$bridge_deployer_key_file" \
+            --wjuno-address "$deployed_wjuno_address" \
+            --bridge-address "$deployed_bridge_address" \
+            --amount "1000" \
+            --recipient-raw-address-hex "$scenario_recipient_raw_hex" \
+            --output "$scenario_withdraw_request_payload" 2>&1
+      )"
+      scenario_request_status=$?
+      set -e
+      if (( scenario_request_status == 0 )); then
+        break
+      fi
+      if (( scenario_request_attempt < 3 )) && is_nonce_race_error "$scenario_request_output"; then
+        log "refund-after-expiry scenario retrying withdraw request after nonce race attempt=${scenario_request_attempt}/3"
+        sleep 2
+        continue
+      fi
+      break
+    done
     if (( scenario_request_status != 0 )); then
-      printf 'refund-after-expiry scenario failed to request withdrawal: status=%s\n' "$scenario_request_status"
+      printf 'refund-after-expiry scenario failed to request withdrawal: status=%s output=%s\n' \
+        "$scenario_request_status" \
+        "$scenario_request_output"
       restore_refund_after_expiry_params || true
       return 1
     fi
