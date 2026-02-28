@@ -217,6 +217,17 @@ test_distributed_relayer_runtime_stages_operator_signer_binary() {
   assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
 }
 
+test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "set_remote_operator_stack_env_value() {" "distributed relayer runtime defines helper to persist operator stack env keys"
+  assert_contains "$script_text" 'set_remote_operator_stack_env_value \' "distributed relayer runtime invokes operator stack env persistence helper"
+  assert_contains "$script_text" '"BASE_RELAYER_AUTH_TOKEN" \' "distributed relayer runtime forwards base relayer auth token key to operator stack env persistence helper"
+  assert_contains "$script_text" '"$base_relayer_auth_token"; then' "distributed relayer runtime forwards per-run auth token value to operator stack env persistence helper"
+  assert_contains "$script_text" "distributed relayer runtime failed to persist BASE_RELAYER_AUTH_TOKEN into operator stack env host=" "distributed relayer runtime logs explicit operator stack env persistence failures"
+}
+
 test_witness_pool_uses_per_endpoint_timeout_slices() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -859,6 +870,7 @@ main() {
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_distributed_relayer_runtime_stages_operator_signer_binary
+  test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
   test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
   test_witness_pool_retries_endpoint_health_before_quorum_failure

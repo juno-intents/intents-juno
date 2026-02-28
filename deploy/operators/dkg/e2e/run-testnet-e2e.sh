@@ -1784,6 +1784,73 @@ start_remote_relayer_service() {
   printf '%s' "$!"
 }
 
+set_remote_operator_stack_env_value() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local env_key="$4"
+  local env_value="$5"
+
+  local remote_script
+  remote_script="$(cat <<'EOF'
+set -euo pipefail
+env_key="$1"
+env_value="$2"
+stack_env_file="/etc/intents-juno/operator-stack.env"
+
+[[ -n "$env_key" ]] || {
+  echo "operator stack env key must not be empty" >&2
+  exit 1
+}
+[[ -s "$stack_env_file" ]] || {
+  echo "operator stack env is missing: $stack_env_file" >&2
+  exit 1
+}
+
+set_env() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_next
+  tmp_next="$(mktemp)"
+  if ! awk -F= -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    $1 == key { print key "=" value; updated = 1; next }
+    { print }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" >"$tmp_next"; then
+    rm -f "$tmp_next"
+    return 1
+  fi
+  mv "$tmp_next" "$file"
+}
+
+tmp_env_file="$(mktemp)"
+sudo cp "$stack_env_file" "$tmp_env_file"
+sudo chown "$(id -u):$(id -g)" "$tmp_env_file"
+chmod 600 "$tmp_env_file"
+set_env "$tmp_env_file" "$env_key" "$env_value"
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo install -m 0640 -o root -g ubuntu "$tmp_env_file" "$stack_env_file"
+rm -f "$tmp_env_file"
+EOF
+)"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$env_key") $(printf '%q' "$env_value")"
+}
+
 stop_remote_relayer_binaries_on_host() {
   local host="$1"
   local ssh_user="$2"
@@ -5432,6 +5499,20 @@ command_run() {
       relayer_cleanup_hosts+=("$relayer_cleanup_host")
       relayer_cleanup_seen["$relayer_cleanup_host"]="1"
     done
+    if (( relayer_status == 0 )); then
+      for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
+        if ! set_remote_operator_stack_env_value \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "BASE_RELAYER_AUTH_TOKEN" \
+          "$base_relayer_auth_token"; then
+          log "distributed relayer runtime failed to persist BASE_RELAYER_AUTH_TOKEN into operator stack env host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+      done
+    fi
     for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
       if ! stop_remote_relayer_binaries_on_host \
         "$relayer_cleanup_host" \
