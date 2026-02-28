@@ -5576,7 +5576,7 @@ command_run() {
 
     deposit_relayer_host="${relayer_runtime_operator_hosts[0]}"
     withdraw_coordinator_host="${relayer_runtime_operator_hosts[0]}"
-    withdraw_finalizer_host="${relayer_runtime_operator_hosts[$((1 % relayer_host_count))]}"
+    withdraw_finalizer_host="${relayer_runtime_operator_hosts[0]}"
     distributed_withdraw_coordinator_tss_url="https://127.0.0.1:9443"
     distributed_withdraw_coordinator_tss_server_name="$withdraw_coordinator_host"
     distributed_withdraw_coordinator_juno_rpc_url="http://127.0.0.1:18232"

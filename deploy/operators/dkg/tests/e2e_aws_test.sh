@@ -188,6 +188,9 @@ test_live_e2e_terraform_supports_operator_instances() {
   assert_contains "$main_tf" "count = var.operator_instance_count" "operator instance count wiring"
   assert_contains "$main_tf" "from_port       = var.operator_base_port" "operator grpc ingress start"
   assert_contains "$main_tf" "to_port         = var.operator_base_port + var.operator_instance_count - 1" "operator grpc ingress range"
+  assert_contains "$main_tf" "resource \"aws_security_group_rule\" \"operator_grpc_mesh_ingress\"" "operator grpc mesh ingress rule resource"
+  assert_contains "$main_tf" "description              = \"Operator gRPC from operators\"" "operator grpc mesh ingress description"
+  assert_contains "$main_tf" "source_security_group_id = aws_security_group.operator.id" "operator grpc mesh ingress source"
   assert_contains "$main_tf" "ami                    = local.operator_ami_id" "operator ami wiring"
 
   assert_contains "$outputs_tf" "output \"operator_instance_ids\"" "operator ids output"
@@ -810,7 +813,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "check_relayer_flow_invariants()" "run-scoped bridge invariant check helper exists"
   assert_contains "$e2e_script_text" "depositUsed(bytes32)" "run-scoped invariants validate depositUsed"
   assert_contains "$e2e_script_text" "getWithdrawal(bytes32)" "run-scoped invariants validate withdrawal state"
-  assert_contains "$e2e_script_text" "--expiry-safety-margin \"30h\"" "withdraw coordinator is configured to force expiry extension coverage"
+  assert_contains "$e2e_script_text" 'local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"' "withdraw coordinator expiry safety margin is env-overridable with sane default"
   assert_contains "$e2e_script_text" "run_withdraw_request_expiry" "run-scoped invariants track requested withdraw expiry"
   assert_contains "$e2e_script_text" "withdraw expiry did not increase after forced extension" "run-scoped invariants assert on-chain expiry extension"
   assert_contains "$e2e_script_text" "run_refund_after_expiry_scenario()" "live e2e defines refund-after-expiry chaos scenario helper"
