@@ -3733,6 +3733,8 @@ command_run() {
   local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"
   local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"
+  local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"
+  local withdraw_coordinator_max_expiry_extension="${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"
   local -a witness_pool_operator_labels=()
   local -a witness_healthy_operator_labels=()
   local -a witness_quorum_operator_labels=()
@@ -5925,8 +5927,8 @@ command_run() {
           --base-relayer-url "$base_relayer_url" \
           --extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \
           --extend-signer-max-response-bytes "1048576" \
-          --expiry-safety-margin "30h" \
-          --max-expiry-extension "12h" \
+          --expiry-safety-margin "$withdraw_coordinator_expiry_safety_margin" \
+          --max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
           --blob-prefix "$withdraw_blob_prefix"
@@ -6039,8 +6041,8 @@ command_run() {
           --base-relayer-url "$base_relayer_url" \
           --extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \
           --extend-signer-max-response-bytes "1048576" \
-          --expiry-safety-margin "30h" \
-          --max-expiry-extension "12h" \
+          --expiry-safety-margin "$withdraw_coordinator_expiry_safety_margin" \
+          --max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
           --blob-prefix "$withdraw_blob_prefix" \

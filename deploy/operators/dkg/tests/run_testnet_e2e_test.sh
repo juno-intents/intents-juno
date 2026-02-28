@@ -304,6 +304,16 @@ test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor() {
   assert_contains "$script_text" '--max-age "$withdraw_coordinator_max_age" \' "withdraw coordinator launch passes explicit max-age override"
 }
 
+test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"' "withdraw coordinator runtime defaults expiry safety margin to 4h with env override"
+  assert_contains "$script_text" 'local withdraw_coordinator_max_expiry_extension="${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"' "withdraw coordinator runtime defaults max expiry extension to 12h with env override"
+  assert_contains "$script_text" '--expiry-safety-margin "$withdraw_coordinator_expiry_safety_margin" \' "withdraw coordinator launch forwards env-overridable expiry safety margin"
+  assert_contains "$script_text" '--max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \' "withdraw coordinator launch forwards env-overridable max expiry extension"
+}
+
 test_witness_generation_uses_funded_amount_defaults() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -961,6 +971,7 @@ main() {
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
   test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
 test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
+  test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows
 test_witness_generation_uses_funded_amount_defaults
 test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards
