@@ -296,7 +296,7 @@ test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-20000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
+  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
   assert_contains "$script_text" '--juno-fee-add-zat "$withdraw_coordinator_juno_fee_add_zat" \' "withdraw coordinator launch passes explicit juno fee floor to txbuild planner"
 }
 

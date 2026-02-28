@@ -3730,7 +3730,7 @@ command_run() {
   local withdraw_coordinator_juno_wallet_id=""
   local withdraw_coordinator_juno_change_address=""
   local witness_extraction_wallet_id=""
-  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-20000}"
+  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"
   local -a witness_pool_operator_labels=()
   local -a witness_healthy_operator_labels=()
   local -a witness_quorum_operator_labels=()
