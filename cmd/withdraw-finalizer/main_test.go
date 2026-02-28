@@ -268,6 +268,67 @@ func TestWithdrawWitnessExtractor_ExtractFallbacksByExpectedValue(t *testing.T) 
 	}
 }
 
+func TestWithdrawWitnessExtractor_ExtractDefersWhenAnchorBelowTxMinimumHeight(t *testing.T) {
+	t.Parallel()
+
+	scan := &stubWitnessScanClient{
+		notes: []witnessextract.WalletNote{
+			{
+				TxID:        strings.Repeat("ab", 32),
+				ActionIndex: 0,
+				Position:    ptrInt64(7),
+				ValueZat:    995,
+			},
+		},
+		witness: witnessextract.WitnessResponse{
+			AnchorHeight: 321,
+			Root:         "0x" + strings.Repeat("cd", 32),
+			Paths: []witnessextract.WitnessPath{
+				{
+					Position: 7,
+					AuthPath: testAuthPathHex(),
+				},
+			},
+		},
+	}
+	rpc := &stubWitnessRPCClient{
+		action: testRPCAction(),
+	}
+
+	var gotAnchorTxID string
+	extractor := &withdrawWitnessExtractor{
+		walletID: "wallet-1",
+		builder:  witnessextract.New(scan, rpc),
+		minAnchorHeight: func(_ context.Context, txid string) (int64, error) {
+			gotAnchorTxID = txid
+			return 500, nil
+		},
+	}
+
+	recipientRaw := bytes.Repeat([]byte{0x7a}, 43)
+	anchorHeight := int64(321)
+	_, err := extractor.ExtractWithdrawWitness(context.Background(), withdrawfinalizer.WithdrawWitnessExtractRequest{
+		TxHash:           strings.Repeat("ab", 32),
+		ActionIndex:      0,
+		ExpectedValueZat: ptrUint64(995),
+		AnchorHeight:     &anchorHeight,
+		WithdrawalID:     [32]byte{},
+		RecipientUA:      recipientRaw,
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "anchor height 321 below tx minimum anchor height 500") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotAnchorTxID != strings.Repeat("ab", 32) {
+		t.Fatalf("anchor guard txid: got %q want %q", gotAnchorTxID, strings.Repeat("ab", 32))
+	}
+	if rpc.gotTxID != "" {
+		t.Fatalf("expected orchard action lookup to be skipped when anchor is below tx minimum height, got txid=%q", rpc.gotTxID)
+	}
+}
+
 type stubWitnessScanClient struct {
 	notes           []witnessextract.WalletNote
 	notesByWallet   map[string][]witnessextract.WalletNote
@@ -352,5 +413,9 @@ func bytesToHex(in []byte) string {
 }
 
 func ptrInt64(v int64) *int64 {
+	return &v
+}
+
+func ptrUint64(v uint64) *uint64 {
 	return &v
 }

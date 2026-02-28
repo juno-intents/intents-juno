@@ -459,12 +459,44 @@ func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig) (withdrawfi
 	return &withdrawWitnessExtractor{
 		walletID: strings.TrimSpace(cfg.WalletID),
 		builder:  witnessextract.New(scanClient, rpcClient),
+		minAnchorHeight: func(ctx context.Context, txid string) (int64, error) {
+			return txMinAnchorHeight(ctx, rpcClient, txid)
+		},
 	}, nil
 }
 
 type withdrawWitnessExtractor struct {
-	walletID string
-	builder  *witnessextract.Builder
+	walletID        string
+	builder         *witnessextract.Builder
+	minAnchorHeight func(ctx context.Context, txid string) (int64, error)
+}
+
+func txMinAnchorHeight(ctx context.Context, rpcClient *junorpc.Client, txid string) (int64, error) {
+	if rpcClient == nil {
+		return 0, fmt.Errorf("withdraw witness extractor: nil rpc client")
+	}
+	txMeta, err := rpcClient.GetRawTransaction(ctx, txid)
+	if err != nil {
+		return 0, fmt.Errorf("withdraw witness extractor: getrawtransaction metadata: %w", err)
+	}
+	if txMeta.Confirmations <= 0 {
+		return 0, fmt.Errorf("withdraw witness extractor: tx not confirmed yet txid=%s confirmations=%d", txid, txMeta.Confirmations)
+	}
+
+	chainInfo, err := rpcClient.GetBlockChainInfo(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("withdraw witness extractor: getblockchaininfo: %w", err)
+	}
+	confirms := uint64(txMeta.Confirmations)
+	if confirms > chainInfo.Blocks+1 {
+		return 0, fmt.Errorf(
+			"withdraw witness extractor: inconsistent confirmations for txid=%s confirmations=%d chain_height=%d",
+			txid,
+			txMeta.Confirmations,
+			chainInfo.Blocks,
+		)
+	}
+	return int64(chainInfo.Blocks-confirms) + 1, nil
 }
 
 func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, req withdrawfinalizer.WithdrawWitnessExtractRequest) ([]byte, error) {
@@ -481,6 +513,20 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 
 	var recipientRaw [43]byte
 	copy(recipientRaw[:], req.RecipientUA)
+	if req.AnchorHeight != nil && e.minAnchorHeight != nil {
+		minHeight, err := e.minAnchorHeight(ctx, txHash)
+		if err != nil {
+			return nil, fmt.Errorf("withdraw witness extractor: derive tx minimum anchor height: %w", err)
+		}
+		if *req.AnchorHeight < minHeight {
+			return nil, fmt.Errorf(
+				"withdraw witness extractor: anchor height %d below tx minimum anchor height %d for txid=%s",
+				*req.AnchorHeight,
+				minHeight,
+				txHash,
+			)
+		}
+	}
 
 	out, err := e.builder.BuildWithdraw(ctx, witnessextract.WithdrawRequest{
 		WalletID:            e.walletID,
