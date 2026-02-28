@@ -4071,6 +4071,9 @@ fi
 if [[ -f .ci/secrets/juno-rpc-pass.txt ]]; then
   export JUNO_RPC_PASS="\$(tr -d '\r\n' < .ci/secrets/juno-rpc-pass.txt)"
 fi
+if [[ -z "\${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-}" ]]; then
+  export WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN="30h"
+fi
 # Live e2e queues target TLS-enabled Kafka brokers in both managed and forwarded shared modes.
 export JUNO_QUEUE_KAFKA_TLS="true"
 if [[ -f .ci/secrets/juno-scan-bearer.txt ]]; then
