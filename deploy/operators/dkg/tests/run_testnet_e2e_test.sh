@@ -81,6 +81,17 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
+test_bridge_config_contract_reads_retry_on_malformed_rpc_responses() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "is_transient_cast_decode_error() {" "cast decode transient helper exists"
+  assert_contains "$script_text" 'if (( call_status == 0 )) && [[ "$raw_response" =~ ^0x[0-9a-fA-F]*$ ]]; then' "contract call helper validates raw cast call hex response before decode"
+  assert_contains "$script_text" "cast decode-abi transient error for \$calldata_sig" "contract call helper retries transient decode failures"
+  assert_contains "$script_text" "cast call transient/malformed response for \$calldata_sig" "contract call helper retries transient or malformed cast call responses"
+  assert_contains "$script_text" 'if (( call_status == 0 )); then' "contract call helper fails explicitly on malformed success-path outputs"
+}
+
 test_remote_relayer_service_preserves_quoted_args_over_ssh() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -875,6 +886,7 @@ test_run_deposit_submission_waits_for_relayer_checkpoint_catchup() {
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
+  test_bridge_config_contract_reads_retry_on_malformed_rpc_responses
   test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
   test_operator_signer_is_lazy_for_runner_core_flow

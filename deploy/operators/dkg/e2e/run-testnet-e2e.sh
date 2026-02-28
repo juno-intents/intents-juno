@@ -750,6 +750,15 @@ is_transient_rpc_error() {
     [[ "$lowered" == *"eof"* ]]
 }
 
+is_transient_cast_decode_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  is_transient_rpc_error "$msg" ||
+    [[ "$lowered" == *"abi decoding failed"* ]] ||
+    [[ "$lowered" == *"buffer overrun"* ]]
+}
+
 is_nonce_race_error() {
   local msg lowered
   msg="${1:-}"
@@ -1673,10 +1682,51 @@ cast_contract_call_json() {
   local decode_sig="$4"
   shift 4
 
-  local call_data raw_response
+  local call_data
   call_data="$(cast calldata "$calldata_sig" "$@")"
-  raw_response="$(cast call --rpc-url "$rpc_url" "$contract_addr" --data "$call_data")"
-  cast decode-abi --json "$decode_sig" "$raw_response"
+
+  local max_attempts=6
+  local delay_seconds=3
+  local attempt raw_response call_status decoded_json decode_status
+
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    raw_response="$(cast call --rpc-url "$rpc_url" "$contract_addr" --data "$call_data" 2>&1)"
+    call_status=$?
+    set -e
+
+    if (( call_status == 0 )) && [[ "$raw_response" =~ ^0x[0-9a-fA-F]*$ ]]; then
+      set +e
+      decoded_json="$(cast decode-abi --json "$decode_sig" "$raw_response" 2>&1)"
+      decode_status=$?
+      set -e
+      if (( decode_status == 0 )); then
+        printf '%s\n' "$decoded_json"
+        return 0
+      fi
+      if (( attempt < max_attempts )) && is_transient_cast_decode_error "$decoded_json"; then
+        log "cast decode-abi transient error for $calldata_sig (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s"
+        sleep "$delay_seconds"
+        continue
+      fi
+      printf '%s\n' "$decoded_json" >&2
+      return "$decode_status"
+    fi
+
+    if (( attempt < max_attempts )) && { is_transient_rpc_error "$raw_response" || [[ ! "$raw_response" =~ ^0x[0-9a-fA-F]*$ ]]; }; then
+      log "cast call transient/malformed response for $calldata_sig (attempt ${attempt}/${max_attempts}); retrying in ${delay_seconds}s"
+      sleep "$delay_seconds"
+      continue
+    fi
+
+    printf '%s\n' "$raw_response" >&2
+    if (( call_status == 0 )); then
+      return 1
+    fi
+    return "$call_status"
+  done
+
+  return 1
 }
 
 cast_contract_call_one() {
