@@ -5592,10 +5592,13 @@ command_run() {
       distributed_withdraw_coordinator_client_cert_source="$dkg_coordinator_workdir/tls/coordinator-client.pem"
       distributed_withdraw_coordinator_client_key_source="$dkg_coordinator_workdir/tls/coordinator-client.key"
     fi
-    [[ -s "$distributed_withdraw_coordinator_client_cert_source" ]] || \
-      die "distributed relayer runtime requires coordinator client cert: $distributed_withdraw_coordinator_client_cert_source"
-    [[ -s "$distributed_withdraw_coordinator_client_key_source" ]] || \
-      die "distributed relayer runtime requires coordinator client key: $distributed_withdraw_coordinator_client_key_source"
+    if [[ -n "$distributed_withdraw_coordinator_client_cert_source" || -n "$distributed_withdraw_coordinator_client_key_source" ]]; then
+      if [[ ! -s "$distributed_withdraw_coordinator_client_cert_source" || ! -s "$distributed_withdraw_coordinator_client_key_source" ]]; then
+        log "distributed relayer runtime coordinator client cert/key not present on runner; reusing operator-local TLS material"
+        distributed_withdraw_coordinator_client_cert_source=""
+        distributed_withdraw_coordinator_client_key_source=""
+      fi
+    fi
 
     log "distributed relayer runtime enabled; launching relayers on operator hosts"
     log "base-relayer host=$base_relayer_host"

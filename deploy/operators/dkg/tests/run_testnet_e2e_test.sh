@@ -198,6 +198,17 @@ test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts() {
   assert_contains "$script_text" 'AWS_DEFAULT_REGION="$distributed_relayer_aws_region"' "distributed relayer runtime forwards aws default region to remote relayer processes"
 }
 
+test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_missing() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "distributed relayer runtime coordinator client cert/key not present on runner; reusing operator-local TLS material" "distributed relayer runtime logs fallback to operator-local coordinator TLS material in resume mode"
+  assert_contains "$script_text" 'distributed_withdraw_coordinator_client_cert_source=""' "distributed relayer runtime can clear runner coordinator cert source when unavailable"
+  assert_contains "$script_text" 'distributed_withdraw_coordinator_client_key_source=""' "distributed relayer runtime can clear runner coordinator key source when unavailable"
+  assert_not_contains "$script_text" 'die "distributed relayer runtime requires coordinator client cert:' "distributed relayer runtime no longer hard-fails when runner coordinator cert artifact is absent"
+  assert_not_contains "$script_text" 'die "distributed relayer runtime requires coordinator client key:' "distributed relayer runtime no longer hard-fails when runner coordinator key artifact is absent"
+}
+
 test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -909,6 +920,7 @@ main() {
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
+  test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_missing
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_distributed_relayer_runtime_stages_operator_signer_binary
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
