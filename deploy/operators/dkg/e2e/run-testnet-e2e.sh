@@ -5417,9 +5417,14 @@ command_run() {
     die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be numeric: $bridge_min_refund_window_seconds"
   (( bridge_min_refund_window_seconds > 0 )) || \
     die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be > 0"
-  if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then
+  local bridge_effective_refund_window_floor_seconds="$bridge_min_refund_window_seconds"
+  if (( bridge_effective_refund_window_floor_seconds > bridge_max_expiry_extension_seconds )); then
+    log "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target floor=$bridge_effective_refund_window_floor_seconds max=$bridge_max_expiry_extension_seconds"
+    bridge_effective_refund_window_floor_seconds="$bridge_max_expiry_extension_seconds"
+  fi
+  if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
     local bridge_params_restore_output bridge_params_restore_status
-    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64) current=$bridge_refund_window_seconds target=$bridge_min_refund_window_seconds"
+    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64) current=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
     set +e
     bridge_params_restore_output="$(
       cast send \
@@ -5429,7 +5434,7 @@ command_run() {
         "setParams(uint96,uint96,uint64,uint64)" \
         "$bridge_fee_bps" \
         "$bridge_relayer_tip_bps" \
-        "$bridge_min_refund_window_seconds" \
+        "$bridge_effective_refund_window_floor_seconds" \
         "$bridge_max_expiry_extension_seconds" 2>&1
     )"
     bridge_params_restore_status=$?
@@ -5446,8 +5451,8 @@ command_run() {
     )"
     [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
       die "bridge refundWindowSeconds is invalid after baseline restore: $bridge_refund_window_seconds"
-    if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then
-      die "bridge refundWindowSeconds baseline restore mismatch: got=$bridge_refund_window_seconds target=$bridge_min_refund_window_seconds"
+    if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
+      die "bridge refundWindowSeconds baseline restore mismatch: got=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
     fi
   fi
   owner_wjuno_balance_before="$(
@@ -6882,8 +6887,8 @@ command_run() {
           "$expiry_on_chain"
         return 1
       fi
-      if (( expiry_on_chain <= run_withdraw_request_expiry )); then
-        printf 'withdraw expiry did not increase after forced extension for withdrawalId=%s (on_chain=%s request=%s)\n' \
+      if (( expiry_on_chain < run_withdraw_request_expiry )); then
+        printf 'withdraw expiry is below request after withdrawal finalization for withdrawalId=%s (on_chain=%s request=%s)\n' \
           "$run_withdrawal_id" \
           "$expiry_on_chain" \
           "$run_withdraw_request_expiry"
@@ -7015,7 +7020,11 @@ command_run() {
       invariant_withdraw_amount="$amount_on_chain"
       invariant_withdraw_fee_bps="$fee_bps_on_chain"
       invariant_withdraw_expiry="$expiry_on_chain"
-      invariant_withdraw_expiry_extended_vs_request="true"
+      if (( expiry_on_chain > run_withdraw_request_expiry )); then
+        invariant_withdraw_expiry_extended_vs_request="true"
+      else
+        invariant_withdraw_expiry_extended_vs_request="false"
+      fi
       invariant_withdraw_finalized="$finalized_on_chain"
       invariant_withdraw_refunded="$refunded_on_chain"
       invariant_withdraw_recipient_ua="$recipient_ua_on_chain"

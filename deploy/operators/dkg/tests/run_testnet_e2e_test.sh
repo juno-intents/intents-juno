@@ -321,10 +321,22 @@ test_run_restores_bridge_refund_window_baseline_before_live_flow() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" 'local bridge_min_refund_window_seconds="${BRIDGE_MIN_REFUND_WINDOW_SECONDS:-86400}"' "run-testnet-e2e defines baseline bridge refund window with env override"
-  assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_min_refund_window_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
+  assert_contains "$script_text" 'local bridge_effective_refund_window_floor_seconds="$bridge_min_refund_window_seconds"' "run-testnet-e2e computes effective refund window floor before bridge param restore"
+  assert_contains "$script_text" 'if (( bridge_effective_refund_window_floor_seconds > bridge_max_expiry_extension_seconds )); then' "run-testnet-e2e clamps baseline floor to contract max expiry extension when needed"
+  assert_contains "$script_text" "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target" "run-testnet-e2e logs floor clamp when baseline exceeds contract max extension"
+  assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
   assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "run-testnet-e2e logs baseline bridge param restoration"
   assert_contains "$script_text" "failed to restore baseline bridge params before relayer launch" "run-testnet-e2e hard-fails when bridge baseline restore transaction fails"
   assert_contains "$script_text" "bridge refundWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline refund window after restore"
+}
+
+test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension_flag() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'if (( expiry_on_chain < run_withdraw_request_expiry )); then' "run-scoped invariants only fail when on-chain withdraw expiry is below requested expiry"
+  assert_not_contains "$script_text" 'if (( expiry_on_chain <= run_withdraw_request_expiry )); then' "run-scoped invariants no longer require expiry growth when request already satisfies coordinator safety margin"
+  assert_contains "$script_text" 'if (( expiry_on_chain > run_withdraw_request_expiry )); then' "run-scoped invariants track whether coordinator extended withdrawal expiry beyond requested value"
 }
 
 test_witness_generation_uses_funded_amount_defaults() {
@@ -986,6 +998,7 @@ main() {
 test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
   test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows
   test_run_restores_bridge_refund_window_baseline_before_live_flow
+  test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension_flag
 test_witness_generation_uses_funded_amount_defaults
 test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards

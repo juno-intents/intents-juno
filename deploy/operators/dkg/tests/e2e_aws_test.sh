@@ -525,7 +525,7 @@ test_aws_wrapper_wires_shared_services_into_remote_e2e() {
   assert_contains "$wrapper_script_text" "JUNO_RPC_USER is required for withdraw coordinator full mode" "aws wrapper remote run hard-fails when coordinator rpc auth is missing"
   assert_contains "$wrapper_script_text" "JUNO_RPC_PASS is required for withdraw coordinator full mode" "aws wrapper remote run hard-fails when coordinator rpc auth is missing"
   assert_contains "$wrapper_script_text" 'if [[ -z "\${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-}" ]]; then' "aws wrapper sets forced withdraw expiry extension margin default when unset"
-  assert_contains "$wrapper_script_text" 'export WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN="30h"' "aws wrapper defaults forced withdraw expiry extension margin to 30h"
+  assert_contains "$wrapper_script_text" 'export WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN="6h"' "aws wrapper defaults forced withdraw expiry extension margin to 6h"
   assert_contains "$wrapper_script_text" 'export JUNO_QUEUE_KAFKA_TLS="true"' "aws wrapper enforces kafka tls for live queue clients in remote run"
   assert_contains "$wrapper_script_text" "command -v psql" "aws wrapper ensures psql is available on remote runner"
   assert_contains "$wrapper_script_text" "withdraw coordinator mock runtime is forbidden in live e2e (do not pass --runtime-mode)" "aws wrapper rejects forwarded runtime-mode flag"
