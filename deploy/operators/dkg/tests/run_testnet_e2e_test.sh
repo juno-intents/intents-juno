@@ -296,8 +296,12 @@ test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
+  assert_contains "$script_text" 'local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-100000}"' "withdraw coordinator runtime defines explicit juno fee floor override with env escape hatch"
+  assert_contains "$script_text" 'local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "withdraw coordinator runtime configures low-latency batch size override for live e2e"
+  assert_contains "$script_text" 'local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"' "withdraw coordinator runtime configures low-latency batch age override for live e2e"
   assert_contains "$script_text" '--juno-fee-add-zat "$withdraw_coordinator_juno_fee_add_zat" \' "withdraw coordinator launch passes explicit juno fee floor to txbuild planner"
+  assert_contains "$script_text" '--max-items "$withdraw_coordinator_max_items" \' "withdraw coordinator launch passes explicit max-items override"
+  assert_contains "$script_text" '--max-age "$withdraw_coordinator_max_age" \' "withdraw coordinator launch passes explicit max-age override"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {

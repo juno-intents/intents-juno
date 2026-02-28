@@ -3730,7 +3730,9 @@ command_run() {
   local withdraw_coordinator_juno_wallet_id=""
   local withdraw_coordinator_juno_change_address=""
   local witness_extraction_wallet_id=""
-  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"
+  local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-100000}"
+  local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
+  local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"
   local -a witness_pool_operator_labels=()
   local -a witness_healthy_operator_labels=()
   local -a witness_quorum_operator_labels=()
@@ -5905,6 +5907,8 @@ command_run() {
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
+          --max-items "$withdraw_coordinator_max_items" \
+          --max-age "$withdraw_coordinator_max_age" \
           --juno-rpc-url "$distributed_withdraw_coordinator_juno_rpc_url" \
           --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
           --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
@@ -6018,6 +6022,8 @@ command_run() {
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_coordinator_group" \
           --queue-topics "$withdraw_request_topic" \
+          --max-items "$withdraw_coordinator_max_items" \
+          --max-age "$withdraw_coordinator_max_age" \
           --juno-rpc-url "$sp1_witness_juno_rpc_url" \
           --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
           --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
