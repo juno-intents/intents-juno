@@ -31,19 +31,21 @@ assert_order() {
   local first="$2"
   local second="$3"
   local msg="$4"
+  local first_offset second_offset
 
-  if [[ "$haystack" != *"$first"* ]]; then
+  first_offset="$(printf '%s' "$haystack" | LC_ALL=C grep -Fbo -m1 -- "$first" | cut -d: -f1 || true)"
+  second_offset="$(printf '%s' "$haystack" | LC_ALL=C grep -Fbo -m1 -- "$second" | cut -d: -f1 || true)"
+
+  if [[ -z "$first_offset" ]]; then
     printf 'assert_order failed: %s: first missing=%q\n' "$msg" "$first" >&2
     exit 1
   fi
-  if [[ "$haystack" != *"$second"* ]]; then
+  if [[ -z "$second_offset" ]]; then
     printf 'assert_order failed: %s: second missing=%q\n' "$msg" "$second" >&2
     exit 1
   fi
 
-  local after_first
-  after_first="${haystack#*"$first"}"
-  if [[ "$after_first" != *"$second"* ]]; then
+  if (( second_offset < first_offset )); then
     printf 'assert_order failed: %s: expected %q before %q\n' "$msg" "$first" "$second" >&2
     exit 1
   fi
@@ -205,9 +207,11 @@ test_distributed_relayer_runtime_stages_operator_signer_binary() {
   assert_contains "$script_text" 'stage_remote_runtime_file \' "distributed relayer runtime reuses staged file helper for signer binary copy"
   assert_contains "$script_text" '"$runner_bridge_operator_signer_bin_path"' "distributed relayer runtime copies resolved signer binary from runner to operators"
   assert_contains "$script_text" '"$distributed_bridge_operator_signer_bin"' "distributed relayer runtime marks staged signer binary executable on operators"
-  assert_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime defines helper to retarget tss-host spendauth signer"
-  assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$signer_bin"' "distributed relayer runtime rewires tss-host spendauth signer to staged signer binary"
-  assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged signer binary"
+  assert_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime defines helper to align tss-host signer/tooling runtime paths"
+  assert_contains "$script_text" 'remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"' "distributed relayer runtime stages a spendauth wrapper with explicit dkg-admin config path"
+  assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"' "distributed relayer runtime points tss-host spendauth signer at the staged wrapper"
+  assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged juno-txsign binary"
+  assert_contains "$script_text" 'sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign' "distributed relayer runtime ensures tss-signer can find juno-txsign via PATH-stable location"
   assert_contains "$script_text" "sudo systemctl restart tss-host.service" "distributed relayer runtime restarts tss-host after signer rewiring"
   assert_contains "$script_text" "if ! configure_remote_tss_host_signer_bin \\" "distributed relayer runtime hard-fails when remote tss-host signer rewiring fails"
   assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
@@ -278,7 +282,9 @@ test_witness_extraction_reuses_existing_indexed_wallet_id() {
   assert_not_contains "$script_text" '"${scan_url%/}/v1/wallets/${encoded_wallet_id}/notes?limit=2000"' "indexed wallet fallback must not request unsupported scanner page sizes"
   assert_contains "$script_text" "reusing indexed witness wallet id for tx visibility" "run-testnet-e2e logs indexed wallet id fallback when generated wallet id has no note visibility"
   assert_contains "$script_text" "switching witness wallet id during extraction" "run-testnet-e2e can switch to an already-indexed wallet id mid-extraction when note visibility stalls"
-  assert_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$generated_wallet_id"' "wallet-id fallback updates withdraw coordinator wallet id for downstream witness extraction"
+  assert_contains "$script_text" 'local witness_extraction_wallet_id=""' "witness extraction tracks a dedicated wallet id independent from withdraw coordinator planner wallet id"
+  assert_contains "$script_text" 'witness_extraction_wallet_id="$generated_wallet_id"' "witness extraction initializes dedicated wallet id from generated metadata wallet id"
+  assert_not_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$witness_indexed_wallet_id"' "indexed wallet fallback must not mutate withdraw coordinator planner wallet id"
 }
 
 test_witness_extraction_derives_action_indexes_from_tx_orchard_actions() {
@@ -307,7 +313,7 @@ test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts()
   assert_contains "$script_text" "witness_rpc_tx_height()" "run-testnet-e2e defines helper to derive tx confirmation height for scan backfill windows"
   assert_contains "$script_text" "witness_scan_backfill_wallet()" "run-testnet-e2e defines helper for scan wallet backfill calls"
   assert_contains "$script_text" "witness backfill tx height unknown; skipping proactive backfill" "run-testnet-e2e logs when tx height is unavailable for proactive scan backfill"
-  assert_contains "$script_text" 'witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$witness_backfill_from_height"' "run-testnet-e2e proactively backfills each healthy witness scan endpoint before quorum extraction"
+  assert_contains "$script_text" 'witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$witness_extraction_wallet_id" "$witness_backfill_from_height"' "run-testnet-e2e proactively backfills each healthy witness scan endpoint before quorum extraction"
   assert_contains "$script_text" "witness backfill best-effort failed for operator=" "run-testnet-e2e keeps extraction resilient when an endpoint backfill fails"
   assert_contains "$script_text" "direct-cli witness backfill best-effort failed" "direct-cli witness extraction path also backfills wallet history before note extraction"
 }
@@ -319,13 +325,16 @@ test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
   assert_contains "$script_text" "run_deposit_scan_urls=()" "relayer deposit extraction initializes a scan endpoint pool"
   assert_contains "$script_text" "run_deposit_rpc_urls=()" "relayer deposit extraction initializes an rpc endpoint pool"
   assert_contains "$script_text" 'run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"' "relayer deposit extraction computes upsert/backfill fanout from scan pool size"
-  assert_contains "$script_text" 'witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$sp1_witness_recipient_ufvk"' "relayer deposit extraction upserts witness wallet across scan endpoints before extraction"
-  assert_contains "$script_text" 'witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"' "relayer deposit extraction proactively backfills witness wallet history from tx-confirmation height"
+  assert_contains "$script_text" 'local run_deposit_witness_wallet_id=""' "relayer deposit extraction tracks a dedicated witness wallet id for tx visibility fallback"
+  assert_contains "$script_text" 'run_deposit_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"' "relayer deposit extraction initializes dedicated witness wallet id from withdraw coordinator planner wallet id"
+  assert_contains "$script_text" 'witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$sp1_witness_recipient_ufvk"' "relayer deposit extraction upserts witness wallet across scan endpoints before extraction"
+  assert_contains "$script_text" 'witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"' "relayer deposit extraction proactively backfills witness wallet history from tx-confirmation height"
   assert_contains "$script_text" "run deposit witness backfill tx height unknown; skipping proactive backfill" "relayer deposit extraction logs missing tx-height fallback"
   assert_contains "$script_text" "run deposit witness backfill best-effort failed for scan_url=" "relayer deposit extraction tolerates endpoint-specific backfill failures"
-  assert_contains "$script_text" 'witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$withdraw_coordinator_juno_wallet_id"' "relayer deposit extraction reuses indexed wallet ids when generated wallet id is not visible yet"
+  assert_contains "$script_text" 'witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$run_deposit_witness_wallet_id"' "relayer deposit extraction reuses indexed wallet ids when generated wallet id is not visible yet"
   assert_contains "$script_text" "run deposit switching witness wallet id during extraction" "relayer deposit extraction logs indexed-wallet fallback transitions"
   assert_contains "$script_text" "run deposit witness note pending wallet=" "relayer deposit extraction still surfaces note-pending waits with context"
+  assert_not_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$run_deposit_indexed_wallet_id"' "run deposit indexed-wallet fallback must not mutate withdraw coordinator planner wallet id"
   assert_contains "$script_text" "run_deposit_anchor_height" "relayer deposit extraction tracks a checkpoint anchor height for witness extraction"
   assert_contains "$script_text" "run_deposit_anchor_height_latest" "relayer deposit extraction samples latest relayer checkpoint height while waiting for note visibility"
   assert_contains "$script_text" "run deposit witness extraction advanced anchor to relayer checkpoint height=" "relayer deposit extraction refreshes anchor height when relayer checkpoints advance"
@@ -638,8 +647,11 @@ test_shared_ecs_rollout_retries_transient_unstable_services() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" "shared_ecs_services_stability_reason()" "shared ecs rollout defines explicit bounded stability reason probe"
   assert_contains "$script_text" "wait_for_shared_proof_services_ecs_stable()" "shared ecs rollout defines explicit stability wait helper"
+  assert_not_contains "$script_text" "aws ecs wait services-stable" "shared ecs rollout no longer blocks on AWS waiter defaults"
   assert_contains "$script_text" "shared ecs services not stable (attempt" "shared ecs rollout logs each unstable attempt"
+  assert_contains "$script_text" 'reason=$stability_reason' "shared ecs rollout logs machine-readable stability reason on unstable attempts"
   assert_contains "$script_text" "ecs_events_indicate_transient_bootstrap_failure()" "shared ecs rollout classifies transient bootstrap failures"
   assert_contains "$script_text" "ResourceInitializationError" "shared ecs rollout recognizes ecs resource initialization startup failures"
   assert_contains "$script_text" "rolling out shared proof services retry deployment after transient startup failure" "shared ecs rollout retries deployment when startup failures are transient"

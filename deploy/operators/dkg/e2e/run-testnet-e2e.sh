@@ -468,6 +468,55 @@ ecs_events_indicate_transient_bootstrap_failure() {
     [[ "$lowered" == *"context deadline exceeded"* && "$lowered" == *"ecr"* ]]
 }
 
+shared_ecs_services_stability_reason() {
+  local aws_region="$1"
+  local cluster_arn="$2"
+  local proof_requestor_service_name="$3"
+  local proof_funder_service_name="$4"
+
+  local service_json reason
+  service_json="$(
+    aws ecs describe-services \
+      --region "$aws_region" \
+      --cluster "$cluster_arn" \
+      --services "$proof_requestor_service_name" "$proof_funder_service_name" 2>/dev/null
+  )"
+  reason="$(
+    jq -r '
+      def svc_names($filter):
+        [.services[] | select($filter) | .serviceName] | unique | join(",");
+      if (.failures // [] | length) > 0 then
+        "describe-failures:" + ([.failures[] | (.arn // .reason // "unknown")] | join(","))
+      elif (.services | length) == 0 then
+        "service-discovery-empty"
+      elif any(.services[]; (.status // "") != "ACTIVE") then
+        "service-inactive:" + svc_names((.status // "") != "ACTIVE")
+      elif any(.services[]; (.pendingCount // 0) > 0) then
+        "pending-tasks:" + svc_names((.pendingCount // 0) > 0)
+      elif any(.services[]; (.runningCount // 0) < (.desiredCount // 0)) then
+        "running-below-desired:" + svc_names((.runningCount // 0) < (.desiredCount // 0))
+      elif any(.services[]; any((.deployments // [])[]; ((.status // "") != "PRIMARY") and (((.runningCount // 0) > 0) or ((.pendingCount // 0) > 0)))) then
+        "non-primary-deployment-active:" + (
+          [
+            .services[]
+            | select(any((.deployments // [])[]; ((.status // "") != "PRIMARY") and (((.runningCount // 0) > 0) or ((.pendingCount // 0) > 0)))
+            )
+            | .serviceName
+          ]
+          | unique
+          | join(",")
+        )
+      else
+        "stable"
+      end
+    ' <<<"$service_json" 2>/dev/null || true
+  )"
+  if [[ -z "$reason" ]]; then
+    reason="describe-parse-failed"
+  fi
+  printf '%s' "$reason"
+}
+
 wait_for_shared_proof_services_ecs_stable() {
   local aws_region="$1"
   local cluster_arn="$2"
@@ -475,20 +524,33 @@ wait_for_shared_proof_services_ecs_stable() {
   local proof_funder_service_name="$4"
   local max_attempts="${5:-6}"
   local retry_sleep_seconds="${6:-20}"
+  local per_attempt_wait_seconds="${7:-180}"
+  local per_attempt_poll_seconds="${8:-5}"
 
-  local attempt wait_status events_text
+  local attempt events_text stability_reason attempt_deadline_epoch
   for attempt in $(seq 1 "$max_attempts"); do
-    set +e
-    aws ecs wait services-stable \
-      --region "$aws_region" \
-      --cluster "$cluster_arn" \
-      --services "$proof_requestor_service_name" "$proof_funder_service_name"
-    wait_status=$?
-    set -e
-    if (( wait_status == 0 )); then
-      return 0
-    fi
+    attempt_deadline_epoch=$(( $(date +%s) + per_attempt_wait_seconds ))
+    while (( $(date +%s) < attempt_deadline_epoch )); do
+      stability_reason="$(
+        shared_ecs_services_stability_reason \
+          "$aws_region" \
+          "$cluster_arn" \
+          "$proof_requestor_service_name" \
+          "$proof_funder_service_name"
+      )"
+      if [[ "$stability_reason" == "stable" ]]; then
+        return 0
+      fi
+      sleep "$per_attempt_poll_seconds"
+    done
 
+    stability_reason="$(
+      shared_ecs_services_stability_reason \
+        "$aws_region" \
+        "$cluster_arn" \
+        "$proof_requestor_service_name" \
+        "$proof_funder_service_name"
+    )"
     events_text="$(
       shared_ecs_services_recent_events \
         "$aws_region" \
@@ -497,13 +559,13 @@ wait_for_shared_proof_services_ecs_stable() {
         "$proof_funder_service_name"
     )"
     if [[ -n "$events_text" ]]; then
-      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}); recent events:"
+      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}) reason=$stability_reason; recent events:"
       while IFS= read -r event_line; do
         [[ -n "$event_line" ]] || continue
         log "  $event_line"
       done <<<"$events_text"
     else
-      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}); recent events unavailable"
+      log "shared ecs services not stable (attempt ${attempt}/${max_attempts}) reason=$stability_reason; recent events unavailable"
     fi
 
     if (( attempt >= max_attempts )); then
@@ -620,10 +682,17 @@ scale_shared_proof_services_ecs() {
     --service "$proof_funder_service_name" \
     --desired-count "$desired_count" >/dev/null
 
-  aws ecs wait services-stable \
-    --region "$aws_region" \
-    --cluster "$cluster_arn" \
-    --services "$proof_requestor_service_name" "$proof_funder_service_name"
+  if ! wait_for_shared_proof_services_ecs_stable \
+    "$aws_region" \
+    "$cluster_arn" \
+    "$proof_requestor_service_name" \
+    "$proof_funder_service_name" \
+    3 \
+    10 \
+    120 \
+    5; then
+    die "shared ecs services failed to stabilize after scale desired_count=$desired_count"
+  fi
 }
 
 dump_shared_proof_services_ecs_logs() {
@@ -1953,9 +2022,20 @@ configure_remote_tss_host_signer_bin() {
 set -euo pipefail
 signer_bin="$1"
 stack_env_file="/etc/intents-juno/operator-stack.env"
+remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"
+dkg_admin_bin="/var/lib/intents-juno/operator-runtime/bin/dkg-admin"
+dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.json"
 
 [[ -x "$signer_bin" ]] || {
-  echo "tss-host signer binary is missing or not executable: $signer_bin" >&2
+  echo "withdraw coordinator signer binary is missing or not executable: $signer_bin" >&2
+  exit 1
+}
+[[ -x "$dkg_admin_bin" ]] || {
+  echo "tss-host spendauth signer binary is missing or not executable: $dkg_admin_bin" >&2
+  exit 1
+}
+[[ -s "$dkg_admin_config" ]] || {
+  echo "tss-host spendauth signer config is missing: $dkg_admin_config" >&2
   exit 1
 }
 [[ -s "$stack_env_file" ]] || {
@@ -1985,15 +2065,32 @@ set_env() {
   mv "$tmp_next" "$file"
 }
 
+tmp_signer_wrapper="$(mktemp)"
+cat >"$tmp_signer_wrapper" <<EOF_WRAPPER
+#!/usr/bin/env bash
+set -euo pipefail
+exec "$dkg_admin_bin" --config "$dkg_admin_config" "\$@"
+EOF_WRAPPER
+chmod 0755 "$tmp_signer_wrapper"
+sudo install -d -m 0755 -o ubuntu -g ubuntu "$(dirname "$remote_signer_wrapper_path")"
+sudo install -m 0755 -o ubuntu -g ubuntu "$tmp_signer_wrapper" "$remote_signer_wrapper_path"
+rm -f "$tmp_signer_wrapper"
+
 tmp_env_file="$(mktemp)"
 sudo cp "$stack_env_file" "$tmp_env_file"
 sudo chown "$(id -u):$(id -g)" "$tmp_env_file"
 chmod 600 "$tmp_env_file"
-set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$signer_bin"
+set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"
 set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"
 sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
 sudo install -m 0640 -o root -g ubuntu "$tmp_env_file" "$stack_env_file"
 rm -f "$tmp_env_file"
+
+sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign
+[[ -x /usr/local/bin/juno-txsign ]] || {
+  echo "failed to provide /usr/local/bin/juno-txsign for tss-signer ext-prepare" >&2
+  exit 1
+}
 
 sudo systemctl restart tss-host.service
 if ! sudo systemctl is-active --quiet tss-host.service; then
@@ -3463,6 +3560,7 @@ command_run() {
   local witness_funder_source_address=""
   local withdraw_coordinator_juno_wallet_id=""
   local withdraw_coordinator_juno_change_address=""
+  local witness_extraction_wallet_id=""
   local -a witness_pool_operator_labels=()
   local -a witness_healthy_operator_labels=()
   local -a witness_quorum_operator_labels=()
@@ -3763,7 +3861,9 @@ command_run() {
     )"
     if [[ -n "$indexed_wallet_id" && "$indexed_wallet_id" != "$generated_wallet_id" ]]; then
       log "reusing indexed witness wallet id for tx visibility generated_wallet_id=$generated_wallet_id indexed_wallet_id=$indexed_wallet_id txid=$generated_deposit_txid"
-      generated_wallet_id="$indexed_wallet_id"
+      witness_extraction_wallet_id="$indexed_wallet_id"
+    else
+      witness_extraction_wallet_id="$generated_wallet_id"
     fi
     witness_funder_source_address="$generated_funder_source_address"
     withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
@@ -3820,7 +3920,7 @@ command_run() {
       local witness_scan_url witness_operator_label
       witness_scan_url="${witness_healthy_scan_urls[$witness_upsert_idx]}"
       witness_operator_label="${witness_healthy_labels[$witness_upsert_idx]}"
-      if ! witness_scan_upsert_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$generated_ufvk"; then
+      if ! witness_scan_upsert_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$witness_extraction_wallet_id" "$generated_ufvk"; then
         log "witness wallet upsert failed for operator=$witness_operator_label scan_url=$witness_scan_url (continuing; extraction will determine usable quorum)"
       fi
     done
@@ -3845,8 +3945,8 @@ command_run() {
         local witness_scan_url witness_operator_label
         witness_scan_url="${witness_healthy_scan_urls[$witness_upsert_idx]}"
         witness_operator_label="${witness_healthy_labels[$witness_upsert_idx]}"
-        if ! witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$generated_wallet_id" "$witness_backfill_from_height"; then
-          log "witness backfill best-effort failed for operator=$witness_operator_label scan_url=$witness_scan_url wallet=$generated_wallet_id from_height=$witness_backfill_from_height"
+        if ! witness_scan_backfill_wallet "$witness_scan_url" "$juno_scan_bearer_token" "$witness_extraction_wallet_id" "$witness_backfill_from_height"; then
+          log "witness backfill best-effort failed for operator=$witness_operator_label scan_url=$witness_scan_url wallet=$witness_extraction_wallet_id from_height=$witness_backfill_from_height"
         fi
       done
     else
@@ -3900,13 +4000,13 @@ command_run() {
         for witness_action_index_candidate in "${generated_deposit_action_indexes[@]}"; do
           rm -f "$deposit_candidate_json"
           if (
-            cd "$REPO_ROOT"
-            go run ./cmd/juno-witness-extract deposit \
-              --juno-scan-url "$witness_scan_url" \
-              --wallet-id "$generated_wallet_id" \
-              --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
-              --juno-rpc-url "$witness_rpc_url" \
-              --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+              cd "$REPO_ROOT"
+              go run ./cmd/juno-witness-extract deposit \
+                --juno-scan-url "$witness_scan_url" \
+                --wallet-id "$witness_extraction_wallet_id" \
+                --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
+                --juno-rpc-url "$witness_rpc_url" \
+                --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
               --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
               --txid "$generated_deposit_txid" \
               --action-index "$witness_action_index_candidate" \
@@ -3927,23 +4027,22 @@ command_run() {
         fi
         if [[ "$witness_candidate_note_pending" == "true" ]]; then
           local witness_indexed_wallet_id
-          witness_indexed_wallet_id="$(
-            witness_scan_find_wallet_for_txid \
-              "$witness_scan_url" \
-              "$juno_scan_bearer_token" \
-              "$generated_deposit_txid" \
-              "$generated_wallet_id" || true
-          )"
-          if [[ -n "$witness_indexed_wallet_id" && "$witness_indexed_wallet_id" != "$generated_wallet_id" ]]; then
-            log "switching witness wallet id during extraction generated_wallet_id=$generated_wallet_id indexed_wallet_id=$witness_indexed_wallet_id txid=$generated_deposit_txid operator=$witness_operator_label"
-            generated_wallet_id="$witness_indexed_wallet_id"
-            withdraw_coordinator_juno_wallet_id="$generated_wallet_id"
+            witness_indexed_wallet_id="$(
+              witness_scan_find_wallet_for_txid \
+                "$witness_scan_url" \
+                "$juno_scan_bearer_token" \
+                "$generated_deposit_txid" \
+                "$witness_extraction_wallet_id" || true
+            )"
+          if [[ -n "$witness_indexed_wallet_id" && "$witness_indexed_wallet_id" != "$witness_extraction_wallet_id" ]]; then
+            log "switching witness wallet id during extraction generated_wallet_id=$witness_extraction_wallet_id indexed_wallet_id=$witness_indexed_wallet_id txid=$generated_deposit_txid operator=$witness_operator_label"
+            witness_extraction_wallet_id="$witness_indexed_wallet_id"
             witness_extract_wait_logged="false"
             continue
           fi
         fi
         if [[ "$witness_candidate_note_pending" == "true" && "$witness_extract_wait_logged" != "true" ]]; then
-          log "waiting for note visibility on operator=$witness_operator_label wallet=$generated_wallet_id txid=$generated_deposit_txid action_index_candidates=$(IFS=,; printf '%s' "${generated_deposit_action_indexes[*]}")"
+          log "waiting for note visibility on operator=$witness_operator_label wallet=$witness_extraction_wallet_id txid=$generated_deposit_txid action_index_candidates=$(IFS=,; printf '%s' "${generated_deposit_action_indexes[*]}")"
           witness_extract_wait_logged="true"
         fi
         if (( $(date +%s) >= witness_extract_deadline_epoch )); then
@@ -5940,11 +6039,13 @@ command_run() {
         run_deposit_rpc_urls+=("$sp1_witness_juno_rpc_url")
       done
 
+      local run_deposit_witness_wallet_id=""
+      run_deposit_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"
       run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"
       for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
         run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-        if ! witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$sp1_witness_recipient_ufvk"; then
-          log "run deposit witness wallet upsert failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id (continuing)"
+        if ! witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$sp1_witness_recipient_ufvk"; then
+          log "run deposit witness wallet upsert failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id (continuing)"
         fi
       done
 
@@ -5964,8 +6065,8 @@ command_run() {
         fi
         for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
           run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-          if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"; then
-            log "run deposit witness backfill best-effort failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id from_height=$run_deposit_scan_backfill_from_height"
+          if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"; then
+            log "run deposit witness backfill best-effort failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id from_height=$run_deposit_scan_backfill_from_height"
           fi
         done
         run_deposit_last_backfill_epoch="$(date +%s)"
@@ -6052,7 +6153,7 @@ command_run() {
               cd "$REPO_ROOT"
               go run ./cmd/juno-witness-extract deposit \
                 --juno-scan-url "$run_deposit_scan_url" \
-                --wallet-id "$withdraw_coordinator_juno_wallet_id" \
+                --wallet-id "$run_deposit_witness_wallet_id" \
                 --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
                 --juno-rpc-url "$run_deposit_rpc_url" \
                 --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
@@ -6079,11 +6180,11 @@ command_run() {
           fi
           if [[ "$run_deposit_note_pending" == "true" ]]; then
             run_deposit_indexed_wallet_id="$(
-              witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$withdraw_coordinator_juno_wallet_id" || true
+              witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$run_deposit_witness_wallet_id" || true
             )"
-            if [[ -n "$run_deposit_indexed_wallet_id" && "$run_deposit_indexed_wallet_id" != "$withdraw_coordinator_juno_wallet_id" ]]; then
-              log "run deposit switching witness wallet id during extraction old_wallet_id=$withdraw_coordinator_juno_wallet_id indexed_wallet_id=$run_deposit_indexed_wallet_id txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_scan_url"
-              withdraw_coordinator_juno_wallet_id="$run_deposit_indexed_wallet_id"
+            if [[ -n "$run_deposit_indexed_wallet_id" && "$run_deposit_indexed_wallet_id" != "$run_deposit_witness_wallet_id" ]]; then
+              log "run deposit switching witness wallet id during extraction old_wallet_id=$run_deposit_witness_wallet_id indexed_wallet_id=$run_deposit_indexed_wallet_id txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_scan_url"
+              run_deposit_witness_wallet_id="$run_deposit_indexed_wallet_id"
               run_deposit_extract_wait_logged="false"
               continue
             fi
@@ -6125,15 +6226,15 @@ command_run() {
             log "run deposit witness note pending; retrying scan backfill from_height=$run_deposit_scan_backfill_from_height"
             for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
               run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-              if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$withdraw_coordinator_juno_wallet_id" "$run_deposit_scan_backfill_from_height"; then
-                log "run deposit witness backfill retry best-effort failed for scan_url=$run_deposit_scan_url wallet=$withdraw_coordinator_juno_wallet_id from_height=$run_deposit_scan_backfill_from_height"
+              if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"; then
+                log "run deposit witness backfill retry best-effort failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id from_height=$run_deposit_scan_backfill_from_height"
               fi
             done
             run_deposit_last_backfill_epoch="$run_deposit_now_epoch"
           fi
         fi
         if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_extract_wait_logged" != "true" ]]; then
-          log "run deposit witness note pending wallet=$withdraw_coordinator_juno_wallet_id txid=$run_deposit_juno_tx_hash scan_urls=$(IFS=,; printf '%s' "${run_deposit_scan_urls[*]}") action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
+          log "run deposit witness note pending wallet=$run_deposit_witness_wallet_id txid=$run_deposit_juno_tx_hash scan_urls=$(IFS=,; printf '%s' "${run_deposit_scan_urls[*]}") action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
           run_deposit_extract_wait_logged="true"
         fi
         if (( $(date +%s) >= run_deposit_extract_deadline_epoch )); then
