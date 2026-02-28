@@ -7287,6 +7287,8 @@ command_run() {
     local scenario_restore_output scenario_restore_status
     local scenario_current_refund_window
     local scenario_owner_wjuno_balance scenario_withdraw_amount
+    local scenario_requester_address_from_key scenario_withdraw_requester_address
+    local scenario_bridge_paused scenario_diag_owner_allowance
     local scenario_params_mutated="false"
 
     restore_refund_after_expiry_params() {
@@ -7361,13 +7363,38 @@ command_run() {
     fi
     scenario_params_mutated="true"
 
+    scenario_requester_address_from_key="$(cast wallet address --private-key "$bridge_deployer_key_hex" 2>/dev/null || true)"
+    scenario_requester_address_from_key="$(normalize_hex_prefixed "$scenario_requester_address_from_key" || true)"
+    if [[ ! "$scenario_requester_address_from_key" =~ ^0x[0-9a-f]{40}$ ]]; then
+      printf 'refund-after-expiry scenario failed to derive requester address from owner key\n'
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
+    scenario_withdraw_requester_address="$scenario_requester_address_from_key"
+    if [[ "$(lower "$bridge_deployer_address")" != "$(lower "$scenario_withdraw_requester_address")" ]]; then
+      log "refund-after-expiry scenario bridge deployer address mismatch detected summary_address=$bridge_deployer_address key_address=$scenario_withdraw_requester_address; using key-derived requester address"
+    fi
+    scenario_bridge_paused="$(
+      cast_contract_call_one \
+        "$base_rpc_url" \
+        "$deployed_bridge_address" \
+        "paused()" \
+        "paused()(bool)"
+    )"
+    if [[ "$scenario_bridge_paused" == "true" ]]; then
+      printf 'refund-after-expiry scenario bridge paused before withdrawal request bridge=%s\n' \
+        "$deployed_bridge_address"
+      restore_refund_after_expiry_params || true
+      return 1
+    fi
+
     scenario_owner_wjuno_balance="$(
       cast_contract_call_one \
         "$base_rpc_url" \
         "$deployed_wjuno_address" \
         "balanceOf(address)" \
         "balanceOf(address)(uint256)" \
-        "$bridge_deployer_address"
+        "$scenario_withdraw_requester_address"
     )"
     if [[ ! "$scenario_owner_wjuno_balance" =~ ^[0-9]+$ ]]; then
       printf 'refund-after-expiry scenario owner wjuno balance read failed: value=%s\n' \
@@ -7377,7 +7404,7 @@ command_run() {
     fi
     if (( scenario_owner_wjuno_balance == 0 )); then
       printf 'refund-after-expiry scenario owner has zero wjuno balance; cannot request withdrawal requester=%s\n' \
-        "$bridge_deployer_address"
+        "$scenario_withdraw_requester_address"
       restore_refund_after_expiry_params || true
       return 1
     fi
@@ -7429,9 +7456,30 @@ command_run() {
       break
     done
     if (( scenario_request_status != 0 )); then
+      scenario_bridge_paused="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_bridge_address" \
+          "paused()" \
+          "paused()(bool)" 2>/dev/null || true
+      )"
+      scenario_diag_owner_allowance="$(
+        cast_contract_call_one \
+          "$base_rpc_url" \
+          "$deployed_wjuno_address" \
+          "allowance(address,address)" \
+          "allowance(address,address)(uint256)" \
+          "$scenario_withdraw_requester_address" \
+          "$deployed_bridge_address" 2>/dev/null || true
+      )"
       printf 'refund-after-expiry scenario failed to request withdrawal: status=%s output=%s\n' \
         "$scenario_request_status" \
         "$scenario_request_output"
+      printf 'refund-after-expiry scenario request diagnostics requester=%s owner_balance=%s allowance=%s bridge_paused=%s\n' \
+        "$scenario_withdraw_requester_address" \
+        "$scenario_owner_wjuno_balance" \
+        "${scenario_diag_owner_allowance:-<unknown>}" \
+        "${scenario_bridge_paused:-<unknown>}"
       restore_refund_after_expiry_params || true
       return 1
     fi
