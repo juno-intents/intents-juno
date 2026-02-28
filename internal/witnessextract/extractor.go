@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -20,6 +21,7 @@ var (
 
 type ScanClient interface {
 	ListWalletNotes(ctx context.Context, walletID string) ([]WalletNote, error)
+	ListWalletIDs(ctx context.Context) ([]string, error)
 	OrchardWitness(ctx context.Context, anchorHeight *int64, positions []uint32) (WitnessResponse, error)
 }
 
@@ -174,54 +176,93 @@ func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, a
 		return 0, 0, fmt.Errorf("%w: invalid txid: %v", ErrInvalidConfig, err)
 	}
 
-	notes, err := b.scan.ListWalletNotes(ctx, wallet)
-	if err != nil {
-		return 0, 0, fmt.Errorf("witnessextract: list wallet notes: %w", err)
-	}
-
-	matching := make([]WalletNote, 0, len(notes))
-	for _, n := range notes {
-		nTxID := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(n.TxID)), "0x")
-		if nTxID == txid {
-			matching = append(matching, n)
+	walletsToTry := []string{wallet}
+	if wallets, err := b.scan.ListWalletIDs(ctx); err == nil {
+		for _, candidate := range wallets {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" || slices.Contains(walletsToTry, candidate) {
+				continue
+			}
+			walletsToTry = append(walletsToTry, candidate)
 		}
 	}
-	if len(matching) == 0 {
-		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
-	}
 
-	if pos, ok, err := notePositionForActionIndex(matching, txid, actionIndex, expectedValueZat); err != nil {
-		return 0, 0, err
-	} else if ok {
-		return pos, actionIndex, nil
+	matchingSeen := false
+	for _, candidateWallet := range walletsToTry {
+		notes, err := b.scan.ListWalletNotes(ctx, candidateWallet)
+		if err != nil {
+			if candidateWallet == wallet {
+				return 0, 0, fmt.Errorf("witnessextract: list wallet notes: %w", err)
+			}
+			continue
+		}
+
+		matching := filterNotesByTxID(notes, txid)
+		if len(matching) == 0 {
+			continue
+		}
+		matchingSeen = true
+
+		if pos, selectedActionIndex, ok, err := selectWithdrawNote(matching, txid, actionIndex, expectedValueZat); err != nil {
+			return 0, 0, err
+		} else if ok {
+			return pos, selectedActionIndex, nil
+		}
 	}
 
 	if expectedValueZat != nil {
-		selectedIdx := -1
-		for i := range matching {
-			n := matching[i]
-			if n.ValueZat != *expectedValueZat {
-				continue
-			}
-			if selectedIdx >= 0 {
-				return 0, 0, fmt.Errorf("%w: ambiguous txid=%s expected_value_zat=%d", ErrNoteNotFound, txid, *expectedValueZat)
-			}
-			selectedIdx = i
+		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d expected_value_zat=%d", ErrNoteNotFound, wallet, txid, actionIndex, *expectedValueZat)
+	}
+	if matchingSeen {
+		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+	}
+	return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+}
+
+func filterNotesByTxID(notes []WalletNote, txid string) []WalletNote {
+	out := make([]WalletNote, 0, len(notes))
+	for _, n := range notes {
+		nTxID := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(n.TxID)), "0x")
+		if nTxID == txid {
+			out = append(out, n)
 		}
-		if selectedIdx < 0 {
-			return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d expected_value_zat=%d", ErrNoteNotFound, wallet, txid, actionIndex, *expectedValueZat)
-		}
-		selected := matching[selectedIdx]
-		if selected.ActionIndex < 0 {
-			return 0, 0, fmt.Errorf("witnessextract: invalid action index for txid=%s action_index=%d", txid, selected.ActionIndex)
-		}
-		if selected.Position == nil || *selected.Position < 0 || *selected.Position > math.MaxUint32 {
-			return 0, 0, fmt.Errorf("witnessextract: invalid note position for txid=%s action_index=%d", txid, selected.ActionIndex)
-		}
-		return uint32(*selected.Position), uint32(selected.ActionIndex), nil
+	}
+	return out
+}
+
+func selectWithdrawNote(notes []WalletNote, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, uint32, bool, error) {
+	if pos, ok, err := notePositionForActionIndex(notes, txid, actionIndex, expectedValueZat); err != nil {
+		return 0, 0, false, err
+	} else if ok {
+		return pos, actionIndex, true, nil
 	}
 
-	return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+	if expectedValueZat == nil {
+		return 0, 0, false, nil
+	}
+
+	selectedIdx := -1
+	for i := range notes {
+		n := notes[i]
+		if n.ValueZat != *expectedValueZat {
+			continue
+		}
+		if selectedIdx >= 0 {
+			return 0, 0, false, fmt.Errorf("%w: ambiguous txid=%s expected_value_zat=%d", ErrNoteNotFound, txid, *expectedValueZat)
+		}
+		selectedIdx = i
+	}
+	if selectedIdx < 0 {
+		return 0, 0, false, nil
+	}
+	selected := notes[selectedIdx]
+	if selected.ActionIndex < 0 {
+		return 0, 0, false, fmt.Errorf("witnessextract: invalid action index for txid=%s action_index=%d", txid, selected.ActionIndex)
+	}
+	if selected.Position == nil || *selected.Position < 0 || *selected.Position > math.MaxUint32 {
+		return 0, 0, false, fmt.Errorf("witnessextract: invalid note position for txid=%s action_index=%d", txid, selected.ActionIndex)
+	}
+	return uint32(*selected.Position), uint32(selected.ActionIndex), true, nil
 }
 
 func notePositionForActionIndex(notes []WalletNote, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, bool, error) {

@@ -298,6 +298,56 @@ type scanHTTPClient struct {
 	hc      *http.Client
 }
 
+func (c *scanHTTPClient) ListWalletIDs(ctx context.Context) ([]string, error) {
+	if c == nil || c.hc == nil {
+		return nil, errors.New("scan client is nil")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return nil, errors.New("scan client base URL is empty")
+	}
+
+	body, status, err := c.do(ctx, http.MethodGet, c.baseURL+"/v1/wallets", nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("juno-scan list wallets status=%d body=%s", status, strings.TrimSpace(string(body)))
+	}
+
+	var resp struct {
+		Wallets []json.RawMessage `json:"wallets"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode juno-scan list wallets: %w", err)
+	}
+
+	out := make([]string, 0, len(resp.Wallets))
+	seen := make(map[string]struct{}, len(resp.Wallets))
+	for _, raw := range resp.Wallets {
+		id := ""
+		if err := json.Unmarshal(raw, &id); err == nil {
+			id = strings.TrimSpace(id)
+		} else {
+			var item struct {
+				WalletID string `json:"wallet_id"`
+			}
+			if err := json.Unmarshal(raw, &item); err != nil {
+				continue
+			}
+			id = strings.TrimSpace(item.WalletID)
+		}
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
 func (c *scanHTTPClient) ListWalletNotes(ctx context.Context, walletID string) ([]witnessextract.WalletNote, error) {
 	if c == nil || c.hc == nil {
 		return nil, errors.New("scan client is nil")

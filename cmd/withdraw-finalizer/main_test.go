@@ -270,13 +270,32 @@ func TestWithdrawWitnessExtractor_ExtractFallbacksByExpectedValue(t *testing.T) 
 
 type stubWitnessScanClient struct {
 	notes           []witnessextract.WalletNote
+	notesByWallet   map[string][]witnessextract.WalletNote
+	walletIDs       []string
 	witness         witnessextract.WitnessResponse
 	gotWalletID     string
 	gotAnchorHeight *int64
 }
 
+func (s *stubWitnessScanClient) ListWalletIDs(_ context.Context) ([]string, error) {
+	if len(s.walletIDs) > 0 {
+		return append([]string(nil), s.walletIDs...), nil
+	}
+	if len(s.notesByWallet) > 0 {
+		out := make([]string, 0, len(s.notesByWallet))
+		for walletID := range s.notesByWallet {
+			out = append(out, walletID)
+		}
+		return out, nil
+	}
+	return []string{"wallet-1"}, nil
+}
+
 func (s *stubWitnessScanClient) ListWalletNotes(_ context.Context, walletID string) ([]witnessextract.WalletNote, error) {
 	s.gotWalletID = walletID
+	if s.notesByWallet != nil {
+		return append([]witnessextract.WalletNote(nil), s.notesByWallet[walletID]...), nil
+	}
 	return append([]witnessextract.WalletNote(nil), s.notes...), nil
 }
 
