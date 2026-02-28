@@ -2142,7 +2142,7 @@ stack_env_file="/etc/intents-juno/operator-stack.env"
 remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"
 dkg_admin_bin="/var/lib/intents-juno/operator-runtime/bin/dkg-admin"
 dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.json"
-dkg_admin_workdir="/var/lib/intents-juno/operator-runtime"
+dkg_admin_workdir="/var/lib/intents-juno/operator-runtime/bundle"
 
 [[ -x "$signer_bin" ]] || {
   echo "withdraw coordinator signer binary is missing or not executable: $signer_bin" >&2
