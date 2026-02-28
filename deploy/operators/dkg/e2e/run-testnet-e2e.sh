@@ -1748,6 +1748,111 @@ cast_contract_call_one() {
   jq -r '.[0] | if type == "number" then tostring else . end' <<<"$decoded_json"
 }
 
+read_bridge_refund_window_seconds() {
+  local rpc_url="$1"
+  local bridge_address="$2"
+  cast_contract_call_one \
+    "$rpc_url" \
+    "$bridge_address" \
+    "refundWindowSeconds()" \
+    "refundWindowSeconds()(uint64)"
+}
+
+wait_for_bridge_refund_window_seconds() {
+  local rpc_url="$1"
+  local bridge_address="$2"
+  local expected_refund_window_seconds="$3"
+  local timeout_seconds="${4:-20}"
+  local interval_seconds="${5:-2}"
+
+  local deadline_epoch now_epoch current_refund_window=""
+  deadline_epoch=$(( $(date +%s) + timeout_seconds ))
+  while true; do
+    current_refund_window="$(read_bridge_refund_window_seconds "$rpc_url" "$bridge_address" 2>/dev/null || true)"
+    if [[ "$current_refund_window" =~ ^[0-9]+$ ]] && (( current_refund_window == expected_refund_window_seconds )); then
+      printf '%s' "$current_refund_window"
+      return 0
+    fi
+
+    now_epoch="$(date +%s)"
+    if (( now_epoch >= deadline_epoch )); then
+      printf '%s' "$current_refund_window"
+      return 1
+    fi
+    sleep "$interval_seconds"
+  done
+}
+
+set_bridge_params_with_refund_window_retry() {
+  local rpc_url="$1"
+  local bridge_deployer_key_hex="$2"
+  local bridge_address="$3"
+  local fee_bps="$4"
+  local relayer_tip_bps="$5"
+  local target_refund_window_seconds="$6"
+  local max_expiry_extension_seconds="$7"
+  local action_label="$8"
+
+  local max_attempts="4"
+  local attempt send_output send_status
+  local readback_output readback_status
+  for attempt in $(seq 1 "$max_attempts"); do
+    set +e
+    send_output="$(run_with_rpc_retry 5 2 "cast send" \
+      cast send \
+        --rpc-url "$rpc_url" \
+        --private-key "$bridge_deployer_key_hex" \
+        "$bridge_address" \
+        "setParams(uint96,uint96,uint64,uint64)" \
+        "$fee_bps" \
+        "$relayer_tip_bps" \
+        "$target_refund_window_seconds" \
+        "$max_expiry_extension_seconds")"
+    send_status=$?
+    set -e
+    if (( send_status != 0 )); then
+      if (( attempt < max_attempts )); then
+        log "$action_label setParams submission failed attempt=${attempt}/${max_attempts}; retrying"
+        sleep 2
+        continue
+      fi
+      printf '%s failed to submit setParams: status=%s output=%s\n' \
+        "$action_label" \
+        "$send_status" \
+        "$send_output"
+      return 1
+    fi
+
+    set +e
+    readback_output="$(
+      wait_for_bridge_refund_window_seconds \
+        "$rpc_url" \
+        "$bridge_address" \
+        "$target_refund_window_seconds" \
+        20 \
+        2
+    )"
+    readback_status=$?
+    set -e
+    if (( readback_status == 0 )); then
+      printf '%s' "$readback_output"
+      return 0
+    fi
+
+    if (( attempt < max_attempts )); then
+      log "$action_label readback mismatch after setParams attempt=${attempt}/${max_attempts} got_refund_window=${readback_output:-<empty>} expected_refund_window=$target_refund_window_seconds; retrying"
+      sleep 2
+      continue
+    fi
+  done
+
+  printf '%s configure mismatch: got_refund_window=%s expected=%s\n' \
+    "$action_label" \
+    "${readback_output:-<empty>}" \
+    "$target_refund_window_seconds"
+  return 1
+}
+
 wait_for_condition() {
   local timeout_seconds="$1"
   local interval_seconds="$2"
@@ -5392,13 +5497,7 @@ command_run() {
       "feeDistributor()" \
       "feeDistributor()(address)"
   )"
-  bridge_refund_window_seconds="$(
-    cast_contract_call_one \
-      "$base_rpc_url" \
-      "$deployed_bridge_address" \
-      "refundWindowSeconds()" \
-      "refundWindowSeconds()(uint64)"
-  )"
+  bridge_refund_window_seconds="$(read_bridge_refund_window_seconds "$base_rpc_url" "$deployed_bridge_address")"
   bridge_max_expiry_extension_seconds="$(
     cast_contract_call_one \
       "$base_rpc_url" \
@@ -5427,28 +5526,22 @@ command_run() {
     log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64) current=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
     set +e
     bridge_params_restore_output="$(
-      cast send \
-        --rpc-url "$base_rpc_url" \
-        --private-key "$bridge_deployer_key_hex" \
+      set_bridge_params_with_refund_window_retry \
+        "$base_rpc_url" \
+        "$bridge_deployer_key_hex" \
         "$deployed_bridge_address" \
-        "setParams(uint96,uint96,uint64,uint64)" \
         "$bridge_fee_bps" \
         "$bridge_relayer_tip_bps" \
         "$bridge_effective_refund_window_floor_seconds" \
-        "$bridge_max_expiry_extension_seconds" 2>&1
+        "$bridge_max_expiry_extension_seconds" \
+        "bridge baseline restore"
     )"
     bridge_params_restore_status=$?
     set -e
     if (( bridge_params_restore_status != 0 )); then
       die "failed to restore baseline bridge params before relayer launch: status=$bridge_params_restore_status output=$bridge_params_restore_output"
     fi
-    bridge_refund_window_seconds="$(
-      cast_contract_call_one \
-        "$base_rpc_url" \
-        "$deployed_bridge_address" \
-        "refundWindowSeconds()" \
-        "refundWindowSeconds()(uint64)"
-    )"
+    bridge_refund_window_seconds="$bridge_params_restore_output"
     [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
       die "bridge refundWindowSeconds is invalid after baseline restore: $bridge_refund_window_seconds"
     if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
@@ -7201,16 +7294,17 @@ command_run() {
       fi
       log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$bridge_refund_window_seconds"
       set +e
-      scenario_restore_output="$(run_with_rpc_retry 5 2 "cast send" \
-        cast send \
-          --rpc-url "$base_rpc_url" \
-          --private-key "$bridge_deployer_key_hex" \
+      scenario_restore_output="$(
+        set_bridge_params_with_refund_window_retry \
+          "$base_rpc_url" \
+          "$bridge_deployer_key_hex" \
           "$deployed_bridge_address" \
-          "setParams(uint96,uint96,uint64,uint64)" \
           "$bridge_fee_bps" \
           "$bridge_relayer_tip_bps" \
           "$bridge_refund_window_seconds" \
-          "$bridge_max_expiry_extension_seconds")"
+          "$bridge_max_expiry_extension_seconds" \
+          "refund-after-expiry scenario restore"
+      )"
       scenario_restore_status=$?
       set -e
       if (( scenario_restore_status != 0 )); then
@@ -7219,13 +7313,7 @@ command_run() {
           "$scenario_restore_output"
         return 1
       fi
-      scenario_current_refund_window="$(
-        cast_contract_call_one \
-          "$base_rpc_url" \
-          "$deployed_bridge_address" \
-          "refundWindowSeconds()" \
-          "refundWindowSeconds()(uint64)"
-      )"
+      scenario_current_refund_window="$scenario_restore_output"
       if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
         (( scenario_current_refund_window != bridge_refund_window_seconds )); then
         printf 'refund-after-expiry scenario restore mismatch: got_refund_window=%s expected=%s\n' \
@@ -7243,16 +7331,17 @@ command_run() {
 
     log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$scenario_refund_window_seconds"
     set +e
-    scenario_refund_output="$(run_with_rpc_retry 5 2 "cast send" \
-      cast send \
-        --rpc-url "$base_rpc_url" \
-        --private-key "$bridge_deployer_key_hex" \
+    scenario_refund_output="$(
+      set_bridge_params_with_refund_window_retry \
+        "$base_rpc_url" \
+        "$bridge_deployer_key_hex" \
         "$deployed_bridge_address" \
-        "setParams(uint96,uint96,uint64,uint64)" \
         "$bridge_fee_bps" \
         "$bridge_relayer_tip_bps" \
         "$scenario_refund_window_seconds" \
-        "$bridge_max_expiry_extension_seconds")"
+        "$bridge_max_expiry_extension_seconds" \
+        "refund-after-expiry scenario configure"
+    )"
     scenario_refund_status=$?
     set -e
     if (( scenario_refund_status != 0 )); then
@@ -7261,13 +7350,7 @@ command_run() {
         "$scenario_refund_output"
       return 1
     fi
-    scenario_current_refund_window="$(
-      cast_contract_call_one \
-        "$base_rpc_url" \
-        "$deployed_bridge_address" \
-        "refundWindowSeconds()" \
-        "refundWindowSeconds()(uint64)"
-    )"
+    scenario_current_refund_window="$scenario_refund_output"
     if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
       (( scenario_current_refund_window != scenario_refund_window_seconds )); then
       printf 'refund-after-expiry scenario configure mismatch: got_refund_window=%s expected=%s\n' \

@@ -817,7 +817,7 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "getWithdrawal(bytes32)" "run-scoped invariants validate withdrawal state"
   assert_contains "$e2e_script_text" 'local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"' "withdraw coordinator expiry safety margin is env-overridable with sane default"
   assert_contains "$e2e_script_text" "run_withdraw_request_expiry" "run-scoped invariants track requested withdraw expiry"
-  assert_contains "$e2e_script_text" "withdraw expiry did not increase after forced extension" "run-scoped invariants assert on-chain expiry extension"
+  assert_contains "$e2e_script_text" "withdraw expiry is below request after withdrawal finalization" "run-scoped invariants assert on-chain expiry is never below request expiry"
   assert_contains "$e2e_script_text" "run_refund_after_expiry_scenario()" "live e2e defines refund-after-expiry chaos scenario helper"
   assert_contains "$e2e_script_text" "Bridge.setParams(uint96,uint96,uint64,uint64)" "refund-after-expiry scenario temporarily configures bridge refund window"
   assert_contains "$e2e_script_text" "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "refund-after-expiry scenario restores original bridge params"
@@ -1336,10 +1336,14 @@ test_aws_wrapper_preflight_runs_required_checks() {
   assert_not_contains "$wrapper_script_text" "(( balance_wei < required_buffer_wei ))" "aws wrapper preflight avoids shell integer overflow for guardrail comparison"
   assert_contains "$wrapper_script_text" "projected_pair_cost_wei" "aws wrapper preflight computes projected proof pair cost"
   assert_contains "$wrapper_script_text" "required_wei=" "aws wrapper preflight computes required guardrail buffer"
-  assert_contains "$wrapper_script_text" "preflight missing required forwarded argument after '--'" "aws wrapper preflight hard-fails on missing required forwarded args"
+  assert_contains "$wrapper_script_text" 'die "$validation_context missing required forwarded argument after '\''--'\'': $required_forwarded_flag"' "aws wrapper hard-fails on missing required forwarded args using shared validation helper"
+  assert_contains "$wrapper_script_text" 'validate_required_forwarded_flags_or_die "preflight"' "aws wrapper preflight enforces required forwarded args"
+  assert_contains "$wrapper_script_text" 'validate_required_forwarded_flags_or_die "run"' "aws wrapper run mode enforces required forwarded args"
   assert_contains "$wrapper_script_text" 'run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"' "aws wrapper preflight executes aws identity/reachability probes"
   assert_contains "$wrapper_script_text" "run_preflight_script_tests" "aws wrapper preflight executes shell test suite before run"
   assert_contains "$wrapper_script_text" "write_status_json" "aws wrapper preflight writes machine-readable status json"
+  assert_contains "$wrapper_script_text" 'rm -f "$remote_workdir/reports/testnet-e2e-summary.json"' "aws wrapper clears stale summary artifact before each remote run"
+  assert_contains "$wrapper_script_text" 'rm -rf "$artifacts_dir/reports" >/dev/null 2>&1 || true' "aws wrapper clears local reports directory before artifact collection"
 }
 
 test_aws_wrapper_canary_forces_resume_checkpoint_stage_and_triage() {

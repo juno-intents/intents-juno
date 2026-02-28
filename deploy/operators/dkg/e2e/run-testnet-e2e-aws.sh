@@ -3041,15 +3041,8 @@ command_run() {
     e2e_args+=("--bridge-verifier-address" "$resolved_bridge_verifier_address")
   fi
 
-  if [[ "$with_shared_services" == "true" ]]; then
-    log "shared services are enabled; validating dr readiness"
-    validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"
-  elif [[ -n "$aws_dr_region" && "$aws_dr_readiness_checks_enabled" == "true" ]]; then
-    log "shared services disabled; skipping dr readiness checks for aws-dr-region=$aws_dr_region"
-  fi
-
-  if [[ "$preflight_only" == "true" ]]; then
-    log "running preflight hard-block checks"
+  validate_required_forwarded_flags_or_die() {
+    local validation_context="$1"
     local required_forwarded_flag
     local -a required_forwarded_flags=(
       "--base-rpc-url"
@@ -3067,9 +3060,25 @@ command_run() {
     )
     for required_forwarded_flag in "${required_forwarded_flags[@]}"; do
       forwarded_arg_value "$required_forwarded_flag" "${e2e_args[@]}" >/dev/null 2>&1 || \
-        die "preflight missing required forwarded argument after '--': $required_forwarded_flag"
+        die "$validation_context missing required forwarded argument after '--': $required_forwarded_flag"
     done
+  }
 
+  if [[ "$preflight_only" == "true" ]]; then
+    validate_required_forwarded_flags_or_die "preflight"
+  else
+    validate_required_forwarded_flags_or_die "run"
+  fi
+
+  if [[ "$with_shared_services" == "true" ]]; then
+    log "shared services are enabled; validating dr readiness"
+    validate_shared_services_dr_readiness "$aws_profile" "$aws_region" "$aws_dr_region"
+  elif [[ -n "$aws_dr_region" && "$aws_dr_readiness_checks_enabled" == "true" ]]; then
+    log "shared services disabled; skipping dr readiness checks for aws-dr-region=$aws_dr_region"
+  fi
+
+  if [[ "$preflight_only" == "true" ]]; then
+    log "running preflight hard-block checks"
     run_preflight_aws_reachability_probes "$aws_profile" "$aws_region" "$with_shared_services"
 
     if [[ "$skip_distributed_dkg" == "true" || "$skip_terraform_apply" == "true" ]]; then
@@ -4102,6 +4111,8 @@ if ! command -v psql >/dev/null 2>&1; then
   sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client
 fi
 mkdir -p "$remote_workdir/reports"
+rm -f "$remote_workdir/reports/testnet-e2e-summary.json" >/dev/null 2>&1 || true
+rm -f "$remote_workdir"/reports/witness-tunnel-op*.log >/dev/null 2>&1 || true
 
 stale_run_pid_file="$remote_workdir/.run.lock/pid"
 declare -A stale_run_pid_seen=()
@@ -4299,6 +4310,8 @@ EOF
   set -e
 
   log "collecting artifacts"
+  rm -rf "$artifacts_dir/reports" >/dev/null 2>&1 || true
+  ensure_dir "$artifacts_dir"
   scp -r \
     -i "$ssh_key_private" \
     -o StrictHostKeyChecking=no \

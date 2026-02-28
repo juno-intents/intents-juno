@@ -326,6 +326,7 @@ test_run_restores_bridge_refund_window_baseline_before_live_flow() {
   assert_contains "$script_text" "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target" "run-testnet-e2e logs floor clamp when baseline exceeds contract max extension"
   assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
   assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "run-testnet-e2e logs baseline bridge param restoration"
+  assert_contains "$script_text" "set_bridge_params_with_refund_window_retry \\" "run-testnet-e2e baseline restore uses verified setParams helper with readback retries"
   assert_contains "$script_text" "failed to restore baseline bridge params before relayer launch" "run-testnet-e2e hard-fails when bridge baseline restore transaction fails"
   assert_contains "$script_text" "bridge refundWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline refund window after restore"
 }
@@ -353,9 +354,13 @@ test_refund_after_expiry_retries_nonce_sensitive_bridge_updates() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'scenario_refund_output="$(run_with_rpc_retry 5 2 "cast send" \' "refund-after-expiry scenario wraps setParams configure call with nonce/transient retry helper"
-  assert_contains "$script_text" 'scenario_restore_output="$(run_with_rpc_retry 5 2 "cast send" \' "refund-after-expiry scenario wraps setParams restore call with nonce/transient retry helper"
-  assert_contains "$script_text" 'scenario_current_refund_window="$(' "refund-after-expiry scenario re-reads bridge refund window after setParams changes"
+  assert_contains "$script_text" "wait_for_bridge_refund_window_seconds() {" "refund window helper waits for on-chain value convergence before failing"
+  assert_contains "$script_text" "set_bridge_params_with_refund_window_retry() {" "refund window helper wraps setParams + readback verification"
+  assert_contains "$script_text" 'scenario_refund_output="$(' "refund-after-expiry scenario captures verified setParams configure helper output"
+  assert_contains "$script_text" 'scenario_restore_output="$(' "refund-after-expiry scenario captures verified setParams restore helper output"
+  assert_contains "$script_text" "readback mismatch after setParams attempt=" "refund-after-expiry scenario logs readback mismatch retries before failing"
+  assert_contains "$script_text" 'scenario_current_refund_window="$scenario_refund_output"' "refund-after-expiry scenario validates configured refund window from verified helper output"
+  assert_contains "$script_text" 'scenario_current_refund_window="$scenario_restore_output"' "refund-after-expiry scenario validates restored refund window from verified helper output"
   assert_contains "$script_text" "refund-after-expiry scenario restore mismatch" "refund-after-expiry scenario validates setParams restore outcome after retries"
   assert_contains "$script_text" "refund-after-expiry scenario retrying withdraw request after nonce race" "refund-after-expiry scenario retries withdraw request when nonce races occur"
 }
