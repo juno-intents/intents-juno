@@ -205,6 +205,11 @@ test_distributed_relayer_runtime_stages_operator_signer_binary() {
   assert_contains "$script_text" 'stage_remote_runtime_file \' "distributed relayer runtime reuses staged file helper for signer binary copy"
   assert_contains "$script_text" '"$runner_bridge_operator_signer_bin_path"' "distributed relayer runtime copies resolved signer binary from runner to operators"
   assert_contains "$script_text" '"$distributed_bridge_operator_signer_bin"' "distributed relayer runtime marks staged signer binary executable on operators"
+  assert_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime defines helper to retarget tss-host spendauth signer"
+  assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$signer_bin"' "distributed relayer runtime rewires tss-host spendauth signer to staged signer binary"
+  assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged signer binary"
+  assert_contains "$script_text" "sudo systemctl restart tss-host.service" "distributed relayer runtime restarts tss-host after signer rewiring"
+  assert_contains "$script_text" "if ! configure_remote_tss_host_signer_bin \\" "distributed relayer runtime hard-fails when remote tss-host signer rewiring fails"
   assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
 }
 

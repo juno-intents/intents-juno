@@ -1942,6 +1942,79 @@ stage_remote_relayer_binaries() {
     "chmod 0755 '$remote_bin_dir/base-relayer' '$remote_bin_dir/deposit-relayer' '$remote_bin_dir/withdraw-coordinator' '$remote_bin_dir/withdraw-finalizer'" >/dev/null
 }
 
+configure_remote_tss_host_signer_bin() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local signer_bin="$4"
+
+  local remote_script
+  remote_script="$(cat <<'EOF'
+set -euo pipefail
+signer_bin="$1"
+stack_env_file="/etc/intents-juno/operator-stack.env"
+
+[[ -x "$signer_bin" ]] || {
+  echo "tss-host signer binary is missing or not executable: $signer_bin" >&2
+  exit 1
+}
+[[ -s "$stack_env_file" ]] || {
+  echo "operator stack env is missing: $stack_env_file" >&2
+  exit 1
+}
+
+set_env() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp_next
+  tmp_next="$(mktemp)"
+  if ! awk -F= -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    $1 == key { print key "=" value; updated = 1; next }
+    { print }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" >"$tmp_next"; then
+    rm -f "$tmp_next"
+    return 1
+  fi
+  mv "$tmp_next" "$file"
+}
+
+tmp_env_file="$(mktemp)"
+sudo cp "$stack_env_file" "$tmp_env_file"
+sudo chown "$(id -u):$(id -g)" "$tmp_env_file"
+chmod 600 "$tmp_env_file"
+set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$signer_bin"
+set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo install -m 0640 -o root -g ubuntu "$tmp_env_file" "$stack_env_file"
+rm -f "$tmp_env_file"
+
+sudo systemctl restart tss-host.service
+if ! sudo systemctl is-active --quiet tss-host.service; then
+  echo "tss-host failed to restart after signer update" >&2
+  sudo systemctl status tss-host.service --no-pager || true
+  exit 1
+fi
+EOF
+)"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$signer_bin")"
+}
+
 configure_remote_operator_checkpoint_services_for_bridge() {
   local host="$1"
   local ssh_user="$2"
@@ -5342,6 +5415,16 @@ command_run() {
           break
         fi
       done
+    fi
+    if (( relayer_status == 0 )); then
+      if ! configure_remote_tss_host_signer_bin \
+        "$withdraw_coordinator_host" \
+        "$relayer_runtime_operator_ssh_user" \
+        "$relayer_runtime_operator_ssh_key_file" \
+        "$distributed_bridge_operator_signer_bin"; then
+        log "failed to update tss-host signer binary on withdraw-coordinator host=$withdraw_coordinator_host"
+        relayer_status=1
+      fi
     fi
   else
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
