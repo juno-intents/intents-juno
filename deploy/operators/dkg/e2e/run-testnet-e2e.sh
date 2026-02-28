@@ -5511,6 +5511,26 @@ command_run() {
           relayer_status=1
           break
         fi
+        if ! set_remote_operator_stack_env_value \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "WITHDRAW_COORDINATOR_JUNO_WALLET_ID" \
+          "$withdraw_coordinator_juno_wallet_id"; then
+          log "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_WALLET_ID into operator stack env host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
+        if ! set_remote_operator_stack_env_value \
+          "$relayer_cleanup_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" \
+          "$withdraw_coordinator_juno_change_address"; then
+          log "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS into operator stack env host=$relayer_cleanup_host"
+          relayer_status=1
+          break
+        fi
       done
     fi
     for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do

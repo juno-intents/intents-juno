@@ -226,6 +226,12 @@ test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_en
   assert_contains "$script_text" '"BASE_RELAYER_AUTH_TOKEN" \' "distributed relayer runtime forwards base relayer auth token key to operator stack env persistence helper"
   assert_contains "$script_text" '"$base_relayer_auth_token"; then' "distributed relayer runtime forwards per-run auth token value to operator stack env persistence helper"
   assert_contains "$script_text" "distributed relayer runtime failed to persist BASE_RELAYER_AUTH_TOKEN into operator stack env host=" "distributed relayer runtime logs explicit operator stack env persistence failures"
+  assert_contains "$script_text" '"WITHDRAW_COORDINATOR_JUNO_WALLET_ID" \' "distributed relayer runtime persists withdraw coordinator wallet id into operator stack env"
+  assert_contains "$script_text" '"$withdraw_coordinator_juno_wallet_id"; then' "distributed relayer runtime writes withdraw coordinator wallet id value into operator stack env"
+  assert_contains "$script_text" "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_WALLET_ID into operator stack env host=" "distributed relayer runtime logs wallet-id persistence failures"
+  assert_contains "$script_text" '"WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" \' "distributed relayer runtime persists withdraw coordinator change address into operator stack env"
+  assert_contains "$script_text" '"$withdraw_coordinator_juno_change_address"; then' "distributed relayer runtime writes withdraw coordinator change address value into operator stack env"
+  assert_contains "$script_text" "distributed relayer runtime failed to persist WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS into operator stack env host=" "distributed relayer runtime logs change-address persistence failures"
 }
 
 test_witness_pool_uses_per_endpoint_timeout_slices() {
