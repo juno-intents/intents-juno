@@ -3,6 +3,7 @@ package tsssigner
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -98,9 +99,15 @@ func (a *Adapter) extPrepare(ctx context.Context, p paths) error {
 }
 
 func (a *Adapter) signSpendAuth(ctx context.Context, sessionID [32]byte, p paths) error {
+	requestsJSON, err := os.ReadFile(p.requests)
+	if err != nil {
+		return fmt.Errorf("tsssigner: read signing requests: %w", err)
+	}
+	spendAuthSessionID := deriveSpendAuthSessionID(sessionID, requestsJSON)
+
 	stdout, stderr, err := a.cfg.Exec(ctx, a.cfg.SpendAuthSignerBin, []string{
 		"sign-spendauth",
-		"--session-id", "0x" + hex.EncodeToString(sessionID[:]),
+		"--session-id", "0x" + hex.EncodeToString(spendAuthSessionID[:]),
 		"--requests", p.requests,
 		"--out", p.sigs,
 	}, nil)
@@ -120,6 +127,20 @@ func (a *Adapter) signSpendAuth(ctx context.Context, sessionID [32]byte, p paths
 		return fmt.Errorf("tsssigner: invalid spend-auth signatures: %w", err)
 	}
 	return nil
+}
+
+// deriveSpendAuthSessionID binds the spend-auth session to both the coordinator
+// signing session id and the concrete request payload produced by ext-prepare.
+// This avoids stale-session conflicts when ext-prepare yields a different
+// request set for the same txplan across retries.
+func deriveSpendAuthSessionID(signingSessionID [32]byte, requestsJSON []byte) [32]byte {
+	h := sha256.New()
+	_, _ = h.Write([]byte("withdraw-spendauth-session-v1"))
+	_, _ = h.Write(signingSessionID[:])
+	_, _ = h.Write(requestsJSON)
+	var out [32]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }
 
 func (a *Adapter) extFinalize(ctx context.Context, p paths) ([]byte, error) {

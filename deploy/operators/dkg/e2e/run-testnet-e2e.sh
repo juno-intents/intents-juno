@@ -2084,6 +2084,7 @@ build_local_relayer_binaries() {
     GO111MODULE=on go build -o "$output_dir/deposit-relayer" ./cmd/deposit-relayer
     GO111MODULE=on go build -o "$output_dir/withdraw-coordinator" ./cmd/withdraw-coordinator
     GO111MODULE=on go build -o "$output_dir/withdraw-finalizer" ./cmd/withdraw-finalizer
+    GO111MODULE=on go build -o "$output_dir/tss-signer" ./cmd/tss-signer
   )
 }
 
@@ -2105,7 +2106,7 @@ stage_remote_relayer_binaries() {
     "mkdir -p '$remote_bin_dir'" >/dev/null
 
   local bin_name=""
-  for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer; do
+  for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer tss-signer; do
     [[ -f "$local_bin_dir/$bin_name" ]] || die "missing local relayer binary for staging: $local_bin_dir/$bin_name"
     if ! stage_remote_runtime_file_atomic \
       "$local_bin_dir/$bin_name" \
@@ -2125,7 +2126,7 @@ stage_remote_relayer_binaries() {
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "chmod 0755 '$remote_bin_dir/base-relayer' '$remote_bin_dir/deposit-relayer' '$remote_bin_dir/withdraw-coordinator' '$remote_bin_dir/withdraw-finalizer'" >/dev/null
+    "chmod 0755 '$remote_bin_dir/base-relayer' '$remote_bin_dir/deposit-relayer' '$remote_bin_dir/withdraw-coordinator' '$remote_bin_dir/withdraw-finalizer' '$remote_bin_dir/tss-signer'" >/dev/null
 }
 
 configure_remote_tss_host_signer_bin() {
@@ -2133,16 +2134,24 @@ configure_remote_tss_host_signer_bin() {
   local ssh_user="$2"
   local ssh_key_file="$3"
   local signer_bin="$4"
+  local coordinator_client_cert_source="${5:-}"
+  local coordinator_client_key_source="${6:-}"
 
   local remote_script
-  remote_script="$(cat <<'EOF'
+remote_script="$(cat <<'EOF'
 set -euo pipefail
 signer_bin="$1"
+coordinator_client_cert_source="${2:-}"
+coordinator_client_key_source="${3:-}"
 stack_env_file="/etc/intents-juno/operator-stack.env"
 remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"
+remote_tss_signer_bin="/tmp/testnet-e2e-bin/tss-signer"
 dkg_admin_bin="/var/lib/intents-juno/operator-runtime/bin/dkg-admin"
 dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.json"
 dkg_admin_workdir="/var/lib/intents-juno/operator-runtime/bundle"
+dkg_admin_tls_dir="$dkg_admin_workdir/tls"
+dkg_admin_client_cert_path="$dkg_admin_tls_dir/coordinator-client.pem"
+dkg_admin_client_key_path="$dkg_admin_tls_dir/coordinator-client.key"
 
 [[ -x "$signer_bin" ]] || {
   echo "withdraw coordinator signer binary is missing or not executable: $signer_bin" >&2
@@ -2158,6 +2167,10 @@ dkg_admin_workdir="/var/lib/intents-juno/operator-runtime/bundle"
 }
 [[ -d "$dkg_admin_workdir/state" ]] || {
   echo "tss-host spendauth signer state directory is missing: $dkg_admin_workdir/state" >&2
+  exit 1
+}
+[[ -d "$dkg_admin_tls_dir" ]] || {
+  echo "tss-host spendauth signer TLS directory is missing: $dkg_admin_tls_dir" >&2
   exit 1
 }
 [[ -s "$stack_env_file" ]] || {
@@ -2209,9 +2222,42 @@ sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
 sudo install -m 0640 -o root -g ubuntu "$tmp_env_file" "$stack_env_file"
 rm -f "$tmp_env_file"
 
+if [[ -n "$coordinator_client_cert_source" || -n "$coordinator_client_key_source" ]]; then
+  [[ -s "$coordinator_client_cert_source" ]] || {
+    echo "coordinator client cert source is missing: $coordinator_client_cert_source" >&2
+    exit 1
+  }
+  [[ -s "$coordinator_client_key_source" ]] || {
+    echo "coordinator client key source is missing: $coordinator_client_key_source" >&2
+    exit 1
+  }
+
+  tmp_admin_config="$(mktemp)"
+  cp "$dkg_admin_config" "$tmp_admin_config"
+  jq --arg cert "./tls/coordinator-client.pem" \
+     --arg key "./tls/coordinator-client.key" \
+     '.grpc = (.grpc // {}) | .grpc.tls_client_cert_pem_path = $cert | .grpc.tls_client_key_pem_path = $key' \
+     "$tmp_admin_config" >"${tmp_admin_config}.next"
+  mv "${tmp_admin_config}.next" "$tmp_admin_config"
+  sudo install -m 0644 -o ubuntu -g ubuntu "$tmp_admin_config" "$dkg_admin_config"
+  rm -f "$tmp_admin_config"
+
+  sudo install -m 0644 -o ubuntu -g ubuntu "$coordinator_client_cert_source" "$dkg_admin_client_cert_path"
+  sudo install -m 0600 -o ubuntu -g ubuntu "$coordinator_client_key_source" "$dkg_admin_client_key_path"
+fi
+
 sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign
 [[ -x /usr/local/bin/juno-txsign ]] || {
   echo "failed to provide /usr/local/bin/juno-txsign for tss-signer ext-prepare" >&2
+  exit 1
+}
+[[ -x "$remote_tss_signer_bin" ]] || {
+  echo "distributed relayer runtime requires staged tss-signer binary: $remote_tss_signer_bin" >&2
+  exit 1
+}
+sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer
+[[ -x /usr/local/bin/tss-signer ]] || {
+  echo "failed to provide /usr/local/bin/tss-signer for tss-host runtime" >&2
   exit 1
 }
 
@@ -2232,7 +2278,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$signer_bin")"
+    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$signer_bin") $(printf '%q' "$coordinator_client_cert_source") $(printf '%q' "$coordinator_client_key_source")"
 }
 
 configure_remote_operator_checkpoint_services_for_bridge() {
@@ -5533,10 +5579,23 @@ command_run() {
     distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
+    distributed_withdraw_coordinator_client_cert_source=""
+    distributed_withdraw_coordinator_client_key_source=""
     distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
     distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"
     [[ -n "$distributed_relayer_aws_region" ]] || \
       die "distributed relayer runtime requires AWS_REGION or AWS_DEFAULT_REGION for s3 withdraw artifacts"
+
+    local dkg_coordinator_workdir
+    dkg_coordinator_workdir="$(jq -r '.coordinator_workdir // empty' "$dkg_summary" 2>/dev/null || true)"
+    if [[ -n "$dkg_coordinator_workdir" ]]; then
+      distributed_withdraw_coordinator_client_cert_source="$dkg_coordinator_workdir/tls/coordinator-client.pem"
+      distributed_withdraw_coordinator_client_key_source="$dkg_coordinator_workdir/tls/coordinator-client.key"
+    fi
+    [[ -s "$distributed_withdraw_coordinator_client_cert_source" ]] || \
+      die "distributed relayer runtime requires coordinator client cert: $distributed_withdraw_coordinator_client_cert_source"
+    [[ -s "$distributed_withdraw_coordinator_client_key_source" ]] || \
+      die "distributed relayer runtime requires coordinator client key: $distributed_withdraw_coordinator_client_key_source"
 
     log "distributed relayer runtime enabled; launching relayers on operator hosts"
     log "base-relayer host=$base_relayer_host"
@@ -5698,7 +5757,9 @@ command_run() {
         "$withdraw_coordinator_host" \
         "$relayer_runtime_operator_ssh_user" \
         "$relayer_runtime_operator_ssh_key_file" \
-        "$distributed_bridge_operator_signer_bin"; then
+        "$distributed_bridge_operator_signer_bin" \
+        "$distributed_withdraw_coordinator_client_cert_source" \
+        "$distributed_withdraw_coordinator_client_key_source"; then
         log "failed to update tss-host signer binary on withdraw-coordinator host=$withdraw_coordinator_host"
         relayer_status=1
       fi
@@ -5801,6 +5862,7 @@ command_run() {
           AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \
           "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
           "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
+          "${bridge_operator_signer_env[@]}" \
           "$distributed_withdraw_coordinator_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
@@ -5912,6 +5974,7 @@ command_run() {
       (
         cd "$REPO_ROOT"
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        "${bridge_operator_signer_env[@]}" \
         go run ./cmd/withdraw-coordinator \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \

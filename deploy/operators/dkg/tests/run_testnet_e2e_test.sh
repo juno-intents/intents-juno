@@ -160,6 +160,14 @@ test_withdraw_coordinator_includes_extend_signer_response_limit() {
   assert_contains "$script_text" "--extend-signer-max-response-bytes \"1048576\" \\" "withdraw coordinator sets explicit extend signer response byte limit"
 }
 
+test_withdraw_coordinator_forwards_operator_signer_env() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" $'AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \\\n          "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \\\n          "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \\\n          "${bridge_operator_signer_env[@]}" \\\n          "$distributed_withdraw_coordinator_bin_path" \\' "distributed withdraw coordinator forwards operator signer env to extend signer binary"
+  assert_contains "$script_text" $'BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \\\n        "${bridge_operator_signer_env[@]}" \\\n        go run ./cmd/withdraw-coordinator \\' "local withdraw coordinator forwards operator signer env to extend signer binary"
+}
+
 test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -203,6 +211,8 @@ test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   assert_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"' "distributed relayer runtime uses staged deposit-relayer binary path"
   assert_contains "$script_text" 'local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"' "distributed relayer runtime uses staged withdraw-coordinator binary path"
   assert_contains "$script_text" 'local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"' "distributed relayer runtime uses staged withdraw-finalizer binary path"
+  assert_contains "$script_text" 'GO111MODULE=on go build -o "$output_dir/tss-signer" ./cmd/tss-signer' "distributed relayer runtime builds tss-signer for live host patch iteration"
+  assert_contains "$script_text" "for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer tss-signer; do" "distributed relayer runtime stages tss-signer alongside relayer binaries"
   assert_contains "$script_text" '"$distributed_base_relayer_bin_path"' "base-relayer launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_deposit_relayer_bin_path"' "deposit-relayer launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_withdraw_coordinator_bin_path"' "withdraw-coordinator launch uses staged binary path"
@@ -225,6 +235,8 @@ test_distributed_relayer_runtime_stages_operator_signer_binary() {
   assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"' "distributed relayer runtime points tss-host spendauth signer at the staged wrapper"
   assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged juno-txsign binary"
   assert_contains "$script_text" 'sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign' "distributed relayer runtime ensures tss-signer can find juno-txsign via PATH-stable location"
+  assert_contains "$script_text" 'remote_tss_signer_bin="/tmp/testnet-e2e-bin/tss-signer"' "distributed relayer runtime expects staged tss-signer on operator host"
+  assert_contains "$script_text" 'sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer' "distributed relayer runtime repoints operator tss-signer to freshly staged binary"
   assert_contains "$script_text" "sudo systemctl restart tss-host.service" "distributed relayer runtime restarts tss-host after signer rewiring"
   assert_contains "$script_text" "if ! configure_remote_tss_host_signer_bin \\" "distributed relayer runtime hard-fails when remote tss-host signer rewiring fails"
   assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
@@ -893,6 +905,7 @@ main() {
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
   test_operator_signer_is_lazy_for_runner_core_flow
   test_withdraw_coordinator_includes_extend_signer_response_limit
+  test_withdraw_coordinator_forwards_operator_signer_env
   test_withdraw_coordinator_bootstraps_operator_signer_before_relayer_launch
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
