@@ -366,6 +366,8 @@ test_refund_after_expiry_retries_nonce_sensitive_bridge_updates() {
   assert_contains "$script_text" 'scenario_owner_wjuno_balance="$(' "refund-after-expiry scenario reads owner wJUNO balance before requesting withdraw"
   assert_contains "$script_text" 'scenario_withdraw_amount="$scenario_owner_wjuno_balance"' "refund-after-expiry scenario caps withdraw amount to available owner wJUNO balance"
   assert_not_contains "$script_text" '--amount "1000"' "refund-after-expiry scenario must not use fixed withdraw amount literal"
+  assert_contains "$script_text" "refund tx submitted but refunded flag not visible yet; retrying state check" "refund-after-expiry scenario waits for on-chain refunded=true after refund tx submission"
+  assert_contains "$script_text" 'if [[ "$scenario_refunded_on_chain" == "true" ]]; then' "refund-after-expiry scenario re-reads withdrawal state after refund submission before deciding success/failure"
 }
 
 test_witness_generation_uses_funded_amount_defaults() {

@@ -7448,6 +7448,8 @@ command_run() {
     fi
 
     scenario_wait_deadline=$(( $(date +%s) + scenario_refund_window_seconds + 240 ))
+    scenario_refunded_on_chain="false"
+    scenario_finalized_on_chain="false"
     for scenario_refund_attempt in $(seq 1 180); do
       set +e
       scenario_refund_output="$(
@@ -7464,10 +7466,7 @@ command_run() {
         if [[ "$scenario_refund_output" =~ (0x[0-9a-fA-F]{64}) ]]; then
           refund_after_expiry_refund_tx_hash="$(normalize_hex_prefixed "${BASH_REMATCH[1]}" || true)"
         fi
-        break
-      fi
-
-      if ! is_withdraw_not_expired_error "$scenario_refund_output"; then
+      elif ! is_withdraw_not_expired_error "$scenario_refund_output"; then
         printf 'refund-after-expiry scenario refund tx failed: status=%s output=%s\n' \
           "$scenario_refund_status" \
           "$scenario_refund_output"
@@ -7475,31 +7474,40 @@ command_run() {
         return 1
       fi
 
-      scenario_now="$(date +%s)"
-      if (( scenario_now >= scenario_wait_deadline )); then
-        printf 'refund-after-expiry scenario timed out waiting for expiry withdrawalId=%s expiry=%s\n' \
+      scenario_withdrawal_view_json="$(
+        cast_contract_call_json \
+          "$base_rpc_url" \
+          "$deployed_bridge_address" \
+          "getWithdrawal(bytes32)" \
+          "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
+          "$refund_after_expiry_withdrawal_id"
+      )"
+      scenario_finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$scenario_withdrawal_view_json")"
+      scenario_refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$scenario_withdrawal_view_json")"
+      if [[ "$scenario_refunded_on_chain" == "true" ]]; then
+        break
+      fi
+      if [[ "$scenario_finalized_on_chain" == "true" ]]; then
+        printf 'refund-after-expiry scenario expected finalized=false for withdrawalId=%s (got=%s)\n' \
           "$refund_after_expiry_withdrawal_id" \
-          "$refund_after_expiry_request_expiry"
+          "$scenario_finalized_on_chain"
         restore_refund_after_expiry_params || true
         return 1
       fi
+
+      scenario_now="$(date +%s)"
+      if (( scenario_now >= scenario_wait_deadline )); then
+        printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
+          "$refund_after_expiry_withdrawal_id" \
+          "$scenario_refunded_on_chain"
+        restore_refund_after_expiry_params || true
+        return 1
+      fi
+      if (( scenario_refund_status == 0 )); then
+        log "refund-after-expiry scenario refund tx submitted but refunded flag not visible yet; retrying state check"
+      fi
       sleep 2
     done
-    if [[ -z "$refund_after_expiry_refund_tx_hash" ]]; then
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-
-    scenario_withdrawal_view_json="$(
-      cast_contract_call_json \
-        "$base_rpc_url" \
-        "$deployed_bridge_address" \
-        "getWithdrawal(bytes32)" \
-        "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
-        "$refund_after_expiry_withdrawal_id"
-    )"
-    scenario_finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$scenario_withdrawal_view_json")"
-    scenario_refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$scenario_withdrawal_view_json")"
     if [[ "$scenario_refunded_on_chain" != "true" ]]; then
       printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
         "$refund_after_expiry_withdrawal_id" \
