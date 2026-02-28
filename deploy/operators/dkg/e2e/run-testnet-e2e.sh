@@ -5581,6 +5581,8 @@ command_run() {
     distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
     distributed_withdraw_coordinator_client_cert_source=""
     distributed_withdraw_coordinator_client_key_source=""
+    local distributed_withdraw_coordinator_client_cert_file="/tmp/testnet-e2e-coordinator-client.pem"
+    local distributed_withdraw_coordinator_client_key_file="/tmp/testnet-e2e-coordinator-client.key"
     distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
     distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"
     [[ -n "$distributed_relayer_aws_region" ]] || \
@@ -5597,7 +5599,12 @@ command_run() {
         log "distributed relayer runtime coordinator client cert/key not present on runner; reusing operator-local TLS material"
         distributed_withdraw_coordinator_client_cert_source=""
         distributed_withdraw_coordinator_client_key_source=""
+        distributed_withdraw_coordinator_client_cert_file=""
+        distributed_withdraw_coordinator_client_key_file=""
       fi
+    else
+      distributed_withdraw_coordinator_client_cert_file=""
+      distributed_withdraw_coordinator_client_key_file=""
     fi
 
     log "distributed relayer runtime enabled; launching relayers on operator hosts"
@@ -5756,13 +5763,37 @@ command_run() {
       done
     fi
     if (( relayer_status == 0 )); then
+      if [[ -n "$distributed_withdraw_coordinator_client_cert_source" ]]; then
+        if ! stage_remote_runtime_file \
+          "$distributed_withdraw_coordinator_client_cert_source" \
+          "$withdraw_coordinator_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$distributed_withdraw_coordinator_client_cert_file"; then
+          relayer_status=1
+        fi
+      fi
+    fi
+    if (( relayer_status == 0 )); then
+      if [[ -n "$distributed_withdraw_coordinator_client_key_source" ]]; then
+        if ! stage_remote_runtime_file \
+          "$distributed_withdraw_coordinator_client_key_source" \
+          "$withdraw_coordinator_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$distributed_withdraw_coordinator_client_key_file"; then
+          relayer_status=1
+        fi
+      fi
+    fi
+    if (( relayer_status == 0 )); then
       if ! configure_remote_tss_host_signer_bin \
         "$withdraw_coordinator_host" \
         "$relayer_runtime_operator_ssh_user" \
         "$relayer_runtime_operator_ssh_key_file" \
         "$distributed_bridge_operator_signer_bin" \
-        "$distributed_withdraw_coordinator_client_cert_source" \
-        "$distributed_withdraw_coordinator_client_key_source"; then
+        "$distributed_withdraw_coordinator_client_cert_file" \
+        "$distributed_withdraw_coordinator_client_key_file"; then
         log "failed to update tss-host signer binary on withdraw-coordinator host=$withdraw_coordinator_host"
         relayer_status=1
       fi

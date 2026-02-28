@@ -209,6 +209,20 @@ test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_
   assert_not_contains "$script_text" 'die "distributed relayer runtime requires coordinator client key:' "distributed relayer runtime no longer hard-fails when runner coordinator key artifact is absent"
 }
 
+test_distributed_relayer_runtime_stages_coordinator_client_tls_to_operator_host() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_cert_file="/tmp/testnet-e2e-coordinator-client.pem"' "distributed relayer runtime defines staged operator-host path for coordinator client cert"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_key_file="/tmp/testnet-e2e-coordinator-client.key"' "distributed relayer runtime defines staged operator-host path for coordinator client key"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_source" \' "distributed relayer runtime stages runner coordinator client cert source"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_file"; then' "distributed relayer runtime copies coordinator client cert to operator-host staging path"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_source" \' "distributed relayer runtime stages runner coordinator client key source"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_file"; then' "distributed relayer runtime copies coordinator client key to operator-host staging path"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_file" \' "distributed relayer runtime passes staged operator-host cert path into tss-host signer rewiring helper"
+  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_file"; then' "distributed relayer runtime passes staged operator-host key path into tss-host signer rewiring helper"
+}
+
 test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -921,6 +935,7 @@ main() {
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
   test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_missing
+  test_distributed_relayer_runtime_stages_coordinator_client_tls_to_operator_host
   test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
   test_distributed_relayer_runtime_stages_operator_signer_binary
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
