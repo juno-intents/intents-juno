@@ -95,7 +95,9 @@ Options:
   --sp1-request-timeout <duration> SP1 request timeout (default: 1500s)
   --shared-postgres-dsn <dsn>       shared Postgres DSN (required; proof-requestor/proof-funder store + lease backend)
   --shared-kafka-brokers <list>     shared Kafka brokers CSV (required; centralized proof request/fulfillment topics)
-  --shared-ipfs-api-url <url>       shared IPFS API URL (required; operator checkpoint package pin/fetch verification)
+  --shared-ipfs-api-url <url>       shared IPFS API URL (required; runner-side shared-infra checkpoint pin/fetch verification)
+  --operator-checkpoint-ipfs-api-url <url>
+                                   optional operator checkpoint IPFS API URL override (defaults to --shared-ipfs-api-url)
   --shared-ecs-cluster-arn <arn>    shared ECS cluster ARN for centralized proof services (optional; enables ECS-managed proof services)
   --shared-proof-requestor-service-name <name> ECS service name for shared proof-requestor
   --shared-proof-funder-service-name <name> ECS service name for shared proof-funder
@@ -2397,7 +2399,7 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   local aws_region="$8"
   local shared_postgres_dsn="$9"
   local shared_kafka_brokers="${10}"
-  local shared_ipfs_api_url="${11}"
+  local operator_checkpoint_ipfs_api_url="${11}"
 
   operator_address="$(normalize_hex_prefixed "$operator_address" || true)"
   [[ "$operator_address" =~ ^0x[0-9a-f]{40}$ ]] || \
@@ -2414,7 +2416,7 @@ configure_remote_operator_checkpoint_services_for_bridge() {
   [[ -n "$aws_region" ]] || die "checkpoint bridge config update requires resolvable aws region for host=$host"
   [[ -n "$shared_postgres_dsn" ]] || die "checkpoint bridge config update requires shared postgres dsn for host=$host"
   [[ -n "$shared_kafka_brokers" ]] || die "checkpoint bridge config update requires shared kafka brokers for host=$host"
-  [[ -n "$shared_ipfs_api_url" ]] || die "checkpoint bridge config update requires shared ipfs api url for host=$host"
+  [[ -n "$operator_checkpoint_ipfs_api_url" ]] || die "checkpoint bridge config update requires operator checkpoint ipfs api url for host=$host"
 
   local remote_script
   remote_script="$(cat <<'EOF'
@@ -2426,7 +2428,7 @@ operator_signer_key_hex="$4"
 aws_region="$5"
 shared_postgres_dsn="$6"
 shared_kafka_brokers="$7"
-shared_ipfs_api_url="$8"
+operator_checkpoint_ipfs_api_url="$8"
 
 [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
   echo "operator address must be 20-byte hex: $operator_address" >&2
@@ -2562,13 +2564,13 @@ jq \
   --arg chain "$base_chain_id" \
   --arg shared_postgres_dsn "$shared_postgres_dsn" \
   --arg shared_kafka_brokers "$shared_kafka_brokers" \
-  --arg shared_ipfs_api_url "$shared_ipfs_api_url" \
+  --arg operator_checkpoint_ipfs_api_url "$operator_checkpoint_ipfs_api_url" \
   '
   .BRIDGE_ADDRESS = $bridge
   | .BASE_CHAIN_ID = $chain
   | .CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn
   | .CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers
-  | .CHECKPOINT_IPFS_API_URL = $shared_ipfs_api_url
+  | .CHECKPOINT_IPFS_API_URL = $operator_checkpoint_ipfs_api_url
   | .JUNO_QUEUE_KAFKA_TLS = (
       if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
         "true"
@@ -2592,7 +2594,7 @@ set_env_value "$tmp_env" AWS_REGION "$aws_region"
 set_env_value "$tmp_env" AWS_DEFAULT_REGION "$aws_region"
 set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$shared_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$shared_kafka_brokers"
-set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$shared_ipfs_api_url"
+set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$operator_checkpoint_ipfs_api_url"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "true"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
@@ -2676,7 +2678,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region") $(printf '%q' "$shared_postgres_dsn") $(printf '%q' "$shared_kafka_brokers") $(printf '%q' "$shared_ipfs_api_url")" <<<"$remote_script"
+    "bash -s -- $(printf '%q' "$bridge_address") $(printf '%q' "$base_chain_id") $(printf '%q' "$operator_address") $(printf '%q' "$operator_signer_key_hex") $(printf '%q' "$aws_region") $(printf '%q' "$shared_postgres_dsn") $(printf '%q' "$shared_kafka_brokers") $(printf '%q' "$operator_checkpoint_ipfs_api_url")" <<<"$remote_script"
 }
 
 endpoint_host_port() {
@@ -2891,6 +2893,7 @@ command_run() {
   local shared_postgres_dsn=""
   local shared_kafka_brokers=""
   local shared_ipfs_api_url=""
+  local operator_checkpoint_ipfs_api_url=""
   local shared_ecs_cluster_arn=""
   local shared_proof_requestor_service_name=""
   local shared_proof_funder_service_name=""
@@ -3239,6 +3242,11 @@ command_run() {
         shared_ipfs_api_url="$2"
         shift 2
         ;;
+      --operator-checkpoint-ipfs-api-url)
+        [[ $# -ge 2 ]] || die "missing value for --operator-checkpoint-ipfs-api-url"
+        operator_checkpoint_ipfs_api_url="$2"
+        shift 2
+        ;;
       --shared-ecs-cluster-arn)
         [[ $# -ge 2 ]] || die "missing value for --shared-ecs-cluster-arn"
         shared_ecs_cluster_arn="$2"
@@ -3474,7 +3482,11 @@ command_run() {
 
   [[ -n "$shared_postgres_dsn" ]] || die "--shared-postgres-dsn is required (centralized proof-requestor/proof-funder topology)"
   [[ -n "$shared_kafka_brokers" ]] || die "--shared-kafka-brokers is required (centralized proof-requestor/proof-funder topology)"
-  [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (operator checkpoint package pin/fetch verification)"
+  [[ -n "$shared_ipfs_api_url" ]] || die "--shared-ipfs-api-url is required (runner-side shared-infra checkpoint package pin/fetch verification)"
+  if [[ -z "$operator_checkpoint_ipfs_api_url" ]]; then
+    operator_checkpoint_ipfs_api_url="$shared_ipfs_api_url"
+  fi
+  [[ -n "$operator_checkpoint_ipfs_api_url" ]] || die "--operator-checkpoint-ipfs-api-url must not be empty"
   [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
   command -v psql >/dev/null 2>&1 || die "psql is required for live withdrawal payout-state checks (install postgresql client)"
   [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
@@ -5381,7 +5393,7 @@ command_run() {
           "$checkpoint_runtime_aws_region" \
           "$shared_postgres_dsn" \
           "$shared_kafka_brokers" \
-          "$shared_ipfs_api_url" || \
+          "$operator_checkpoint_ipfs_api_url" || \
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
@@ -5390,7 +5402,13 @@ command_run() {
     log "validating operator-service checkpoint publication via shared infra"
     local shared_status=0
     local shared_validation_no_fresh_package_pattern
+    local shared_validation_ipfs_timeout_pattern
+    local shared_validation_retry_min_persisted_at
+    local shared_validation_ipfs_retry_performed
     shared_validation_no_fresh_package_pattern='no operator checkpoint package with IPFS CID found in checkpoint_packages persisted_at >='
+    shared_validation_ipfs_timeout_pattern='checkpoint ipfs check: context deadline exceeded'
+    shared_validation_retry_min_persisted_at="$checkpoint_started_at"
+    shared_validation_ipfs_retry_performed="false"
     local shared_validation_log
     shared_validation_log="$(mktemp)"
     run_shared_infra_validation_attempt() {
@@ -5423,10 +5441,22 @@ command_run() {
       if [[ -z "$checkpoint_relaxed_min_persisted_at" ]]; then
         checkpoint_relaxed_min_persisted_at="$(date -u -d '30 minutes ago' +"%Y-%m-%dT%H:%M:%SZ")"
       fi
+      shared_validation_retry_min_persisted_at="$checkpoint_relaxed_min_persisted_at"
       log "shared infra validation found no fresh checkpoint package after checkpoint_started_at=$checkpoint_started_at; retrying with relaxed checkpoint-min-persisted-at=$checkpoint_relaxed_min_persisted_at"
 
       set +e
       run_shared_infra_validation_attempt "$checkpoint_relaxed_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"
+      shared_status="${PIPESTATUS[0]}"
+      set -e
+    fi
+    if (( shared_status != 0 )) &&
+      [[ "$shared_validation_ipfs_retry_performed" != "true" ]] &&
+      grep -q "$shared_validation_ipfs_timeout_pattern" "$shared_validation_log"; then
+      shared_validation_ipfs_retry_performed="true"
+      log "shared infra validation encountered transient checkpoint ipfs timeout; retrying once with checkpoint-min-persisted-at=$shared_validation_retry_min_persisted_at"
+
+      set +e
+      run_shared_infra_validation_attempt "$shared_validation_retry_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"
       shared_status="${PIPESTATUS[0]}"
       set -e
     fi

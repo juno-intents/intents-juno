@@ -3861,24 +3861,25 @@ command_run() {
   if [[ "$with_shared_services" == "true" ]]; then
     log "waiting for shared services connectivity from runner"
     local shared_ipfs_api_direct_url=""
+    local shared_ipfs_api_url_runner="$shared_ipfs_api_url"
     if ! runner_ipfs_api_reachable \
       "$ssh_key_private" \
       "$runner_ssh_user" \
       "$runner_public_ip" \
-      "$shared_ipfs_api_url"; then
+      "$shared_ipfs_api_url_runner"; then
       shared_ipfs_api_direct_url="$(
         resolve_shared_ipfs_direct_api_url \
           "$aws_profile" \
           "$aws_region" \
           "$shared_ipfs_api_url" || true
       )"
-      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url" ]] && runner_ipfs_api_reachable \
+      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url_runner" ]] && runner_ipfs_api_reachable \
         "$ssh_key_private" \
         "$runner_ssh_user" \
         "$runner_public_ip" \
         "$shared_ipfs_api_direct_url"; then
-        log "shared IPFS NLB endpoint unreachable from runner; using direct IPFS endpoint=$shared_ipfs_api_direct_url"
-        shared_ipfs_api_url="$shared_ipfs_api_direct_url"
+        log "shared IPFS NLB endpoint unreachable from runner; using direct IPFS endpoint for runner probes=$shared_ipfs_api_direct_url"
+        shared_ipfs_api_url_runner="$shared_ipfs_api_direct_url"
       fi
     fi
 
@@ -3889,8 +3890,8 @@ command_run() {
       "$shared_postgres_endpoint" \
       "$shared_postgres_port" \
       "$shared_kafka_bootstrap_brokers" \
-      "$shared_ipfs_api_url"; then
-      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url" ]]; then
+      "$shared_ipfs_api_url_runner"; then
+      if [[ -n "$shared_ipfs_api_direct_url" && "$shared_ipfs_api_direct_url" != "$shared_ipfs_api_url_runner" ]]; then
         log "shared services connectivity via shared IPFS NLB failed; retrying runner probe with direct IPFS endpoint=$shared_ipfs_api_direct_url"
         wait_for_shared_connectivity_from_runner \
           "$ssh_key_private" \
@@ -3900,10 +3901,10 @@ command_run() {
           "$shared_postgres_port" \
           "$shared_kafka_bootstrap_brokers" \
           "$shared_ipfs_api_direct_url" || \
-          die "shared services unreachable from runner after direct IPFS fallback (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs_primary=${shared_ipfs_api_url}, ipfs_direct=${shared_ipfs_api_direct_url})"
-        shared_ipfs_api_url="$shared_ipfs_api_direct_url"
+          die "shared services unreachable from runner after direct IPFS fallback (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs_runner_primary=${shared_ipfs_api_url_runner}, ipfs_direct=${shared_ipfs_api_direct_url})"
+        shared_ipfs_api_url_runner="$shared_ipfs_api_direct_url"
       else
-        die "shared services unreachable from runner (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs=${shared_ipfs_api_url})"
+        die "shared services unreachable from runner (postgres=${shared_postgres_endpoint}:${shared_postgres_port}, kafka=${shared_kafka_bootstrap_brokers}, ipfs=${shared_ipfs_api_url_runner})"
       fi
     fi
 
@@ -3914,7 +3915,8 @@ command_run() {
     remote_args+=(
       "--shared-postgres-dsn" "$shared_postgres_dsn"
       "--shared-kafka-brokers" "$shared_kafka_brokers"
-      "--shared-ipfs-api-url" "$shared_ipfs_api_url"
+      "--shared-ipfs-api-url" "$shared_ipfs_api_url_runner"
+      "--operator-checkpoint-ipfs-api-url" "$shared_ipfs_api_url_for_operator"
       "--shared-ecs-cluster-arn" "$shared_ecs_cluster_arn"
       "--shared-proof-requestor-service-name" "$shared_proof_requestor_service_name"
       "--shared-proof-funder-service-name" "$shared_proof_funder_service_name"
