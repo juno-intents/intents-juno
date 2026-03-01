@@ -6788,7 +6788,11 @@ command_run() {
                 "$checkpoint_package_topic" \
                 "run-deposit-catchup-retry"; then
                 if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600; then
-                  relayer_status=1
+                  if [[ -n "$existing_bridge_summary_path" ]]; then
+                    log "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline"
+                  else
+                    relayer_status=1
+                  fi
                 fi
               else
                 relayer_status=1

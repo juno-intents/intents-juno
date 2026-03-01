@@ -1023,6 +1023,8 @@ test_run_deposit_submission_waits_for_relayer_checkpoint_catchup() {
   assert_contains "$script_text" 'if replay_latest_checkpoint_package_to_topic \' "run-testnet-e2e invokes checkpoint replay helper before retrying relayer catch-up"
   assert_contains "$script_text" '"$run_deposit_checkpoint_replay_payload_file" \' "run-testnet-e2e forwards a dedicated run-deposit replay payload path into checkpoint replay helper"
   assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600' "run-testnet-e2e performs a second relayer checkpoint catch-up wait after replay fallback"
+  assert_contains "$script_text" 'if [[ -n "$existing_bridge_summary_path" ]]; then' "run-testnet-e2e has a resume-aware branch when relayer catch-up remains below deposit tx height after replay retry"
+  assert_contains "$script_text" "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline" "run-testnet-e2e logs explicit resume continuation when checkpoint catch-up stays behind"
   assert_order "$script_text" \
     "run_deposit_submit_min_checkpoint_height" \
     'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' \
