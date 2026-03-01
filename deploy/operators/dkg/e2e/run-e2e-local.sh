@@ -414,6 +414,8 @@ terraform_apply() {
   # Generate a stable deployment ID from the workdir name
   local deployment_id
   deployment_id="$(basename "$WORKDIR" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]')"
+  deployment_id="${deployment_id#-}"   # strip leading hyphen
+  deployment_id="${deployment_id%-}"   # strip trailing hyphen
   deployment_id="${deployment_id:0:20}"
 
   # Generate Postgres password (or reuse from prior run)
