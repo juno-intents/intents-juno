@@ -15,6 +15,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
+	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -23,9 +24,10 @@ import (
 )
 
 var (
-	ErrInvalidConfig     = errors.New("depositrelayer: invalid config")
-	ErrInvalidEvent      = errors.New("depositrelayer: invalid event")
-	ErrInvalidCheckpoint = errors.New("depositrelayer: invalid checkpoint")
+	ErrInvalidConfig          = errors.New("depositrelayer: invalid config")
+	ErrInvalidEvent           = errors.New("depositrelayer: invalid event")
+	ErrInvalidCheckpoint      = errors.New("depositrelayer: invalid checkpoint")
+	ErrProofAttemptsExhausted = errors.New("depositrelayer: proof attempts exhausted")
 )
 
 type Sender interface {
@@ -53,6 +55,11 @@ type Config struct {
 
 	ProofRequestTimeout time.Duration
 	ProofPriority       int
+
+	MaxProofAttempts int // default 3; 0 = unlimited
+
+	// DLQStore is an optional dead-letter queue store. If nil, DLQ insertion is skipped.
+	DLQStore dlq.Store
 
 	Now func() time.Time
 }
@@ -82,13 +89,22 @@ type Relayer struct {
 
 	expectedBridgeMemo [20]byte
 
-	batcher *batching.Batcher[mintBatchItem]
-	staged  map[common.Hash]struct{}
+	batcher       *batching.Batcher[mintBatchItem]
+	staged        map[common.Hash]struct{}
+	proofAttempts map[common.Hash]int // per-batch proof attempt count
 
 	quorumVerifier *checkpoint.QuorumVerifier
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
+
+	// pauseChecker is an optional bridge pause checker.
+	pauseChecker PauseChecker
+}
+
+// PauseChecker checks whether the bridge contract is paused.
+type PauseChecker interface {
+	IsPaused(ctx context.Context) (bool, error)
 }
 
 type mintBatchItem struct {
@@ -130,6 +146,9 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	if cfg.ProofPriority < 0 {
 		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
 	}
+	if cfg.MaxProofAttempts == 0 {
+		cfg.MaxProofAttempts = 3
+	}
 	if n := len(cfg.OWalletIVKBytes); n != 0 && n != 64 {
 		return nil, fmt.Errorf("%w: OWalletIVKBytes must be 64 bytes when set", ErrInvalidConfig)
 	}
@@ -169,8 +188,15 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		expectedBridgeMemo: bridge20,
 		batcher:            b,
 		staged:             make(map[common.Hash]struct{}, cfg.MaxItems*2),
+		proofAttempts:      make(map[common.Hash]int),
 		quorumVerifier:     quorumVerifier,
 	}, nil
+}
+
+// WithPauseChecker sets an optional bridge pause checker.
+func (r *Relayer) WithPauseChecker(pc PauseChecker) *Relayer {
+	r.pauseChecker = pc
+	return r
 }
 
 func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
@@ -317,6 +343,35 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return nil
 	}
 
+	// Bridge pause check: if paused, skip submission (items stay staged for next tick).
+	if r.pauseChecker != nil {
+		paused, err := r.pauseChecker.IsPaused(ctx)
+		if err != nil {
+			r.log.Warn("bridge pause check error (fail-safe: skipping submit)", "err", err)
+		}
+		if paused {
+			r.log.Warn("bridge is paused, skipping batch submission")
+			return fmt.Errorf("depositrelayer: bridge is paused, skipping submit")
+		}
+	}
+
+	// Check per-batch proof attempt limits.
+	depositIDs := make([]common.Hash, 0, len(batch.Items))
+	for _, it := range batch.Items {
+		depositIDs = append(depositIDs, common.Hash(it.ID))
+	}
+	batchID := idempotency.DepositBatchIDV1(depositIDs)
+	if r.cfg.MaxProofAttempts > 0 {
+		r.proofAttempts[batchID]++
+		attempts := r.proofAttempts[batchID]
+		if attempts >= r.cfg.MaxProofAttempts {
+			r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "proof", "proof_attempts_exhausted",
+				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts)
+			delete(r.proofAttempts, batchID)
+			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, batchID[:8], attempts)
+		}
+	}
+
 	items := make([]bridgeabi.MintItem, 0, len(batch.Items))
 	witnessItems := make([][]byte, 0, len(batch.Items))
 	for _, it := range batch.Items {
@@ -339,11 +394,6 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	depositIDs := make([]common.Hash, 0, len(batch.Items))
-	for _, it := range batch.Items {
-		depositIDs = append(depositIDs, common.Hash(it.ID))
-	}
-	batchID := idempotency.DepositBatchIDV1(depositIDs)
 	jobID := idempotency.ProofJobIDV1("deposit", batchID, r.cfg.DepositImageID, journal, privateInput)
 
 	pctx, cancel := context.WithTimeout(ctx, r.cfg.ProofRequestTimeout)
@@ -393,6 +443,8 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return fmt.Errorf("depositrelayer: base-relayer did not return a receipt")
 	}
 	if res.Receipt.Status != 1 {
+		r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "bridge_tx", "tx_reverted",
+			fmt.Sprintf("mintBatch tx reverted: %s", res.TxHash), 0)
 		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
 	}
 
@@ -401,12 +453,53 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
 	}
 
+	// Clear proof attempt counter on success.
+	delete(r.proofAttempts, batchID)
+
 	r.log.Info("submitted mintBatch",
 		"checkpointHeight", cp.Height,
 		"items", len(items),
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+// maybeDLQDepositBatch inserts a deposit batch into the dead-letter queue.
+// If DLQStore is nil, this is a no-op.
+func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, batch batching.Batch[mintBatchItem], failureStage, errorCode, errorMessage string, attemptCount int) {
+	if r.cfg.DLQStore == nil {
+		return
+	}
+
+	ids := make([][32]byte, 0, len(batch.Items))
+	for _, it := range batch.Items {
+		ids = append(ids, it.ID)
+	}
+
+	rec := dlq.DepositBatchDLQRecord{
+		BatchID:      batchID,
+		DepositIDs:   ids,
+		ItemsCount:   len(ids),
+		State:        int16(deposit.StateConfirmed),
+		FailureStage: failureStage,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		AttemptCount: attemptCount,
+	}
+
+	if err := r.cfg.DLQStore.InsertDepositBatchDLQ(ctx, rec); err != nil {
+		r.log.Error("depositrelayer: failed to insert into DLQ",
+			"batch_id", fmt.Sprintf("%x", batchID[:8]),
+			"failure_stage", failureStage,
+			"err", err,
+		)
+	} else {
+		r.log.Info("depositrelayer: inserted batch into DLQ",
+			"batch_id", fmt.Sprintf("%x", batchID[:8]),
+			"failure_stage", failureStage,
+			"items", len(ids),
+		)
+	}
 }
 
 func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {

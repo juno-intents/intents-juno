@@ -12,11 +12,21 @@ import (
 
 	"github.com/juno-intents/intents-juno/internal/batching"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
+	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
-var ErrInvalidConfig = errors.New("withdrawcoordinator: invalid config")
+var (
+	ErrInvalidConfig        = errors.New("withdrawcoordinator: invalid config")
+	ErrRebroadcastExhausted = errors.New("withdrawcoordinator: rebroadcast attempts exhausted")
+)
+
+const (
+	TxStatusConfirmed = "confirmed"
+	TxStatusMempool   = "mempool"
+	TxStatusMissing   = "missing"
+)
 
 type Planner interface {
 	Plan(ctx context.Context, batchID [32]byte, withdrawals []withdraw.Withdrawal) ([]byte, error)
@@ -35,6 +45,13 @@ type Confirmer interface {
 	WaitConfirmed(ctx context.Context, txid string) error
 }
 
+// TxChecker checks the status of a Juno transaction (confirmed, mempool, missing)
+// and provides chain-tip height for wait-one-block logic.
+type TxChecker interface {
+	TxStatus(ctx context.Context, txid string) (string, error)
+	TipHeight(ctx context.Context) (uint64, error)
+}
+
 // ExpiryExtender optionally extends withdrawal expiries on Base before broadcasting a Juno payout.
 //
 // Implementations must be idempotent.
@@ -49,8 +66,12 @@ type Config struct {
 	MaxAge   time.Duration
 	ClaimTTL time.Duration
 
-	RebroadcastBaseDelay time.Duration
-	RebroadcastMaxDelay  time.Duration
+	RebroadcastBaseDelay   time.Duration
+	RebroadcastMaxDelay    time.Duration
+	MaxRebroadcastAttempts int // default 5; 0 = unlimited
+
+	// DLQStore is an optional dead-letter queue store. If nil, DLQ insertion is skipped.
+	DLQStore dlq.Store
 
 	ExpiryPolicy policy.WithdrawExpiryConfig
 
@@ -65,6 +86,7 @@ type Coordinator struct {
 	signer      Signer
 	broadcaster Broadcaster
 	confirmer   Confirmer
+	txChecker   TxChecker
 	extender    ExpiryExtender
 	blobStore   blobstore.Store
 
@@ -92,6 +114,9 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 	}
 	if cfg.ClaimTTL <= 0 {
 		return nil, fmt.Errorf("%w: ClaimTTL must be > 0", ErrInvalidConfig)
+	}
+	if cfg.MaxRebroadcastAttempts == 0 {
+		cfg.MaxRebroadcastAttempts = 5
 	}
 	if cfg.RebroadcastBaseDelay == 0 {
 		cfg.RebroadcastBaseDelay = 30 * time.Second
@@ -150,6 +175,12 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 // WithExpiryExtender configures an optional Base expiry extension hook.
 func (c *Coordinator) WithExpiryExtender(ext ExpiryExtender) *Coordinator {
 	c.extender = ext
+	return c
+}
+
+// WithTxChecker configures an optional TxChecker for double-spend prevention.
+func (c *Coordinator) WithTxChecker(tc TxChecker) *Coordinator {
+	c.txChecker = tc
 	return c
 }
 
@@ -309,6 +340,7 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
+		c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error())
 		return err
 	}
 	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
@@ -359,6 +391,45 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			return nil
 		}
 		if errors.Is(err, ErrConfirmationMissing) {
+			// Double-spend prevention: if TxChecker is configured, verify the tx
+			// is truly missing from both mempool and chain before rebroadcasting.
+			if c.txChecker != nil && b.JunoTxID != "" {
+				status, txErr := c.txChecker.TxStatus(ctx, b.JunoTxID)
+				if txErr != nil {
+					c.log.Error("tx status check failed, skipping rebroadcast", "txid", b.JunoTxID, "err", txErr)
+					return nil
+				}
+				switch status {
+				case TxStatusConfirmed:
+					// Tx is confirmed on-chain; advance directly.
+					return c.store.SetBatchConfirmed(ctx, batchID)
+				case TxStatusMempool:
+					// Tx is in mempool; wait — do not rebroadcast.
+					return nil
+				case TxStatusMissing:
+					// Tx appears missing. Wait for 1 more block and re-check
+					// to guard against propagation delay.
+					if recheck, recheckErr := c.waitOneBlockAndRecheck(ctx, b.JunoTxID); recheckErr != nil {
+						c.log.Error("wait-one-block recheck failed, skipping rebroadcast", "txid", b.JunoTxID, "err", recheckErr)
+						return nil
+					} else if recheck != TxStatusMissing {
+						if recheck == TxStatusConfirmed {
+							return c.store.SetBatchConfirmed(ctx, batchID)
+						}
+						// Back in mempool after the new block; keep waiting.
+						return nil
+					}
+					// Still missing after 1 block — proceed with rebroadcast below.
+				}
+			}
+
+			// Check max rebroadcast attempts.
+			if c.cfg.MaxRebroadcastAttempts > 0 && int(b.RebroadcastAttempts) >= c.cfg.MaxRebroadcastAttempts {
+				c.maybeDLQWithdrawalBatch(ctx, b, "confirm", "rebroadcast_exhausted",
+					fmt.Sprintf("exceeded max rebroadcast attempts (%d)", c.cfg.MaxRebroadcastAttempts))
+				return fmt.Errorf("%w: batch %x after %d attempts", ErrRebroadcastExhausted, b.ID[:8], b.RebroadcastAttempts)
+			}
+
 			now := c.cfg.Now().UTC()
 			if !b.NextRebroadcastAt.IsZero() && now.Before(b.NextRebroadcastAt) {
 				return nil
@@ -368,6 +439,44 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 		return err
 	}
 	return c.store.SetBatchConfirmed(ctx, batchID)
+}
+
+// waitOneBlockAndRecheck waits for the Juno chain to advance by at least one
+// block, then re-checks the tx status. This prevents rebroadcasting a tx that
+// was recently submitted but hasn't propagated to the mempool yet.
+func (c *Coordinator) waitOneBlockAndRecheck(ctx context.Context, txid string) (string, error) {
+	startHeight, err := c.txChecker.TipHeight(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get tip height: %w", err)
+	}
+
+	targetHeight := startHeight + 1
+	pollInterval := 2 * time.Second
+	timeout := 5 * time.Minute
+
+	deadline := c.cfg.Now().Add(timeout)
+	for {
+		if !c.cfg.Now().Before(deadline) {
+			return "", fmt.Errorf("timed out waiting for block %d (stuck at %d)", targetHeight, startHeight)
+		}
+		t := time.NewTimer(pollInterval)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return "", ctx.Err()
+		case <-t.C:
+		}
+		h, err := c.txChecker.TipHeight(ctx)
+		if err != nil {
+			c.log.Warn("tip height poll failed, retrying", "err", err)
+			continue
+		}
+		if h >= targetHeight {
+			break
+		}
+	}
+
+	return c.txChecker.TxStatus(ctx, txid)
 }
 
 func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32]byte) error {
@@ -515,6 +624,40 @@ func (c *Coordinator) persistTxPlanArtifact(ctx context.Context, batchID [32]byt
 		return fmt.Errorf("withdrawcoordinator: persist tx plan artifact: %w", err)
 	}
 	return nil
+}
+
+// maybeDLQWithdrawalBatch inserts a withdrawal batch into the dead-letter queue.
+// If DLQStore is nil, this is a no-op.
+func (c *Coordinator) maybeDLQWithdrawalBatch(ctx context.Context, b withdraw.Batch, failureStage, errorCode, errorMessage string) {
+	if c.cfg.DLQStore == nil {
+		return
+	}
+
+	rec := dlq.WithdrawalBatchDLQRecord{
+		BatchID:             b.ID,
+		WithdrawalIDs:       b.WithdrawalIDs,
+		ItemsCount:          len(b.WithdrawalIDs),
+		State:               int16(b.State),
+		FailureStage:        failureStage,
+		ErrorCode:           errorCode,
+		ErrorMessage:        errorMessage,
+		RebroadcastAttempts: int(b.RebroadcastAttempts),
+		JunoTxID:            b.JunoTxID,
+	}
+
+	if err := c.cfg.DLQStore.InsertWithdrawalBatchDLQ(ctx, rec); err != nil {
+		c.log.Error("withdrawcoordinator: failed to insert into DLQ",
+			"batch_id", fmt.Sprintf("%x", b.ID[:8]),
+			"failure_stage", failureStage,
+			"err", err,
+		)
+	} else {
+		c.log.Info("withdrawcoordinator: inserted batch into DLQ",
+			"batch_id", fmt.Sprintf("%x", b.ID[:8]),
+			"failure_stage", failureStage,
+			"items", len(b.WithdrawalIDs),
+		)
+	}
 }
 
 func (c *Coordinator) persistSignedTxArtifact(ctx context.Context, batchID [32]byte, signedTx []byte) error {

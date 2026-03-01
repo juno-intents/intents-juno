@@ -24,6 +24,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
@@ -102,6 +103,8 @@ func main() {
 		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for durable withdrawal proof artifacts (required for s3)")
 		blobPrefix     = flag.String("blob-prefix", "withdraw-finalizer", "blob key prefix")
 		blobMaxGetSize = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -284,6 +287,12 @@ func main() {
 		os.Exit(2)
 	}
 	f.WithBlobStore(artifactStore)
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "withdraw-finalizer"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	log.Info("withdraw finalizer started",
 		"owner", *owner,

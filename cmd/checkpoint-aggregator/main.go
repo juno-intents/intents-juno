@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -70,6 +71,8 @@ func main() {
 		queueOutTopic   = flag.String("queue-output-topic", "checkpoints.packages.v1", "queue output topic")
 		queueMaxBytes   = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		queueAckTimeout = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -223,6 +226,12 @@ func main() {
 		log.Error("init aggregator", "err", err)
 		os.Exit(2)
 	}
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	log.Info("checkpoint aggregator started",
 		"baseChainID", *baseChainID,

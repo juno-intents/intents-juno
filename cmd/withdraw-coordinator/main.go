@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -23,6 +24,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/policy"
@@ -134,6 +136,8 @@ func main() {
 		extendGasLimit      = flag.Uint64("extend-gas-limit", 0, "optional gas limit override for extendWithdrawExpiryBatch")
 		extendSignerBin     = flag.String("extend-signer-bin", "", "path to external extend signer binary (required; must support `sign-digest --digest <0x..> --json`)")
 		extendSignerMaxResp = flag.Int("extend-signer-max-response-bytes", 1<<20, "max extend signer response size (bytes)")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 	mode, err := normalizeRuntimeMode(*runtimeMode)
@@ -340,11 +344,12 @@ func main() {
 		log.Error("init juno broadcaster", "err", err)
 		os.Exit(2)
 	}
-	confirmer, err = withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll, *junoConfirmWait)
+	junoConfirmer, err := withdrawcoordinator.NewJunoConfirmer(junoClient, *junoConfirmations, *junoConfirmPoll, *junoConfirmWait)
 	if err != nil {
 		log.Error("init juno confirmer", "err", err)
 		os.Exit(2)
 	}
+	confirmer = junoConfirmer
 
 	baseClient, err := httpapi.NewClient(*baseRelayerURL, baseRelayerAuth, httpapi.WithHTTPClient(&http.Client{Timeout: *baseRelayerTimeout}))
 	if err != nil {
@@ -406,6 +411,13 @@ func main() {
 		coord.WithExpiryExtender(extender)
 	}
 	coord.WithBlobStore(artifactStore)
+	coord.WithTxChecker(junoConfirmer)
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "withdraw-coordinator"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	log.Info("withdraw coordinator started",
 		"runtimeMode", mode,
@@ -455,7 +467,11 @@ func main() {
 			}
 
 			if err := coord.Tick(ctx); err != nil {
-				log.Error("tick", "err", err)
+				if errors.Is(err, withdrawcoordinator.ErrRebroadcastExhausted) {
+					log.Error("CRITICAL: rebroadcast attempts exhausted, manual intervention required", "err", err)
+				} else {
+					log.Error("tick", "err", err)
+				}
 			}
 		case qmsg, ok := <-msgCh:
 			if !ok {

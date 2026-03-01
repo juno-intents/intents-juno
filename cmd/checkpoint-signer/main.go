@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
@@ -87,6 +88,8 @@ func main() {
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 		queueOutTopic = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -203,6 +206,12 @@ func main() {
 		log.Error("init checkpoint signer", "err", err)
 		os.Exit(2)
 	}
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-signer"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	t := time.NewTicker(*pollInterval)
 	defer t.Stop()

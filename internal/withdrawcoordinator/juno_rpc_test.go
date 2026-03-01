@@ -15,6 +15,9 @@ type stubJunoRPC struct {
 
 	getCalls int
 	getSeq   []getResult
+
+	tipHeight    uint64
+	tipHeightErr error
 }
 
 type getResult struct {
@@ -24,6 +27,13 @@ type getResult struct {
 
 func (s *stubJunoRPC) SendRawTransaction(_ context.Context, _ []byte) (string, error) {
 	return s.sendTxID, s.sendErr
+}
+
+func (s *stubJunoRPC) GetBlockChainInfo(_ context.Context) (junorpc.BlockChainInfo, error) {
+	if s.tipHeightErr != nil {
+		return junorpc.BlockChainInfo{}, s.tipHeightErr
+	}
+	return junorpc.BlockChainInfo{Blocks: s.tipHeight}, nil
 }
 
 func (s *stubJunoRPC) GetRawTransaction(_ context.Context, _ string) (junorpc.RawTransaction, error) {
@@ -131,5 +141,97 @@ func TestNewJunoConfirmer_RejectsInvalidConfig(t *testing.T) {
 	_, err := NewJunoConfirmer(nil, 1, 1*time.Second, 1*time.Second)
 	if !errors.Is(err, ErrInvalidJunoRuntimeConfig) {
 		t.Fatalf("expected ErrInvalidJunoRuntimeConfig, got %v", err)
+	}
+}
+
+func TestJunoConfirmer_TxStatus(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		getSeq     []getResult
+		wantStatus string
+		wantErr    bool
+	}{
+		{
+			name: "confirmed",
+			getSeq: []getResult{
+				{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 3}},
+			},
+			wantStatus: TxStatusConfirmed,
+		},
+		{
+			name: "mempool",
+			getSeq: []getResult{
+				{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 0}},
+			},
+			wantStatus: TxStatusMempool,
+		},
+		{
+			name:       "missing",
+			getSeq:     nil, // will return ErrTxNotFound
+			wantStatus: TxStatusMissing,
+		},
+		{
+			name: "rpc error",
+			getSeq: []getResult{
+				{err: errors.New("connection refused")},
+			},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			rpc := &stubJunoRPC{getSeq: tt.getSeq}
+			c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 5*time.Millisecond)
+			if err != nil {
+				t.Fatalf("NewJunoConfirmer: %v", err)
+			}
+
+			status, err := c.TxStatus(context.Background(), "a")
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("TxStatus error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if !tt.wantErr && status != tt.wantStatus {
+				t.Fatalf("TxStatus = %q, want %q", status, tt.wantStatus)
+			}
+		})
+	}
+}
+
+func TestJunoConfirmer_TipHeight(t *testing.T) {
+	t.Parallel()
+
+	rpc := &stubJunoRPC{tipHeight: 12345}
+	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewJunoConfirmer: %v", err)
+	}
+
+	h, err := c.TipHeight(context.Background())
+	if err != nil {
+		t.Fatalf("TipHeight: %v", err)
+	}
+	if h != 12345 {
+		t.Fatalf("TipHeight = %d, want %d", h, 12345)
+	}
+}
+
+func TestJunoConfirmer_TipHeight_Error(t *testing.T) {
+	t.Parallel()
+
+	wantErr := errors.New("rpc down")
+	rpc := &stubJunoRPC{tipHeightErr: wantErr}
+	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 5*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewJunoConfirmer: %v", err)
+	}
+
+	_, err = c.TipHeight(context.Background())
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("expected %v, got %v", wantErr, err)
 	}
 }

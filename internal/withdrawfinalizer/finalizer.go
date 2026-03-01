@@ -51,6 +51,11 @@ type CheckpointPackage struct {
 	OperatorSignatures [][]byte
 }
 
+// PauseChecker checks whether the bridge contract is paused.
+type PauseChecker interface {
+	IsPaused(ctx context.Context) (bool, error)
+}
+
 type Config struct {
 	Owner    string
 	LeaseTTL time.Duration
@@ -88,6 +93,7 @@ type Finalizer struct {
 
 	quorumVerifier   *checkpoint.QuorumVerifier
 	witnessExtractor WithdrawWitnessExtractor
+	pauseChecker     PauseChecker
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
@@ -151,6 +157,12 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 // WithBlobStore configures optional artifact persistence for proof inputs/outputs.
 func (f *Finalizer) WithBlobStore(store blobstore.Store) *Finalizer {
 	f.blobStore = store
+	return f
+}
+
+// WithPauseChecker sets an optional bridge pause checker.
+func (f *Finalizer) WithPauseChecker(pc PauseChecker) *Finalizer {
+	f.pauseChecker = pc
 	return f
 }
 
@@ -231,6 +243,18 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return nil
 	}
 	defer func() { _ = f.leaseStore.Release(context.Background(), leaseName, f.cfg.Owner) }()
+
+	// Bridge pause check: if paused, skip finalization.
+	if f.pauseChecker != nil {
+		paused, err := f.pauseChecker.IsPaused(ctx)
+		if err != nil {
+			f.log.Warn("bridge pause check error (fail-safe: skipping finalize)", "err", err)
+		}
+		if paused {
+			f.log.Warn("bridge is paused, skipping batch finalization", "batchID", hex.EncodeToString(batchID[:]))
+			return nil
+		}
+	}
 
 	b, err := f.store.GetBatch(ctx, batchID)
 	if err != nil {

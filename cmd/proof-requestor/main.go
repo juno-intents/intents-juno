@@ -13,6 +13,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/proof/postgres"
 	"github.com/juno-intents/intents-juno/internal/proofrequestor"
@@ -51,6 +52,8 @@ func main() {
 
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter binary")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -181,6 +184,12 @@ func main() {
 		log.Error("init proof requestor worker", "err", err)
 		os.Exit(2)
 	}
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-requestor"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	log.Info("proof-requestor started",
 		"owner", *owner,

@@ -14,6 +14,7 @@ var ErrInvalidJunoRuntimeConfig = errors.New("withdrawcoordinator: invalid juno 
 type JunoRPC interface {
 	SendRawTransaction(ctx context.Context, rawTx []byte) (string, error)
 	GetRawTransaction(ctx context.Context, txid string) (junorpc.RawTransaction, error)
+	GetBlockChainInfo(ctx context.Context) (junorpc.BlockChainInfo, error)
 }
 
 type JunoBroadcaster struct {
@@ -74,6 +75,37 @@ func NewJunoConfirmer(rpc JunoRPC, minConfirmations int64, pollInterval time.Dur
 		maxWait:          maxWait,
 		now:              time.Now,
 	}, nil
+}
+
+// TipHeight returns the current Juno chain tip height.
+func (c *JunoConfirmer) TipHeight(ctx context.Context) (uint64, error) {
+	if c == nil || c.rpc == nil {
+		return 0, fmt.Errorf("%w: nil confirmer", ErrInvalidJunoRuntimeConfig)
+	}
+	info, err := c.rpc.GetBlockChainInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return info.Blocks, nil
+}
+
+// TxStatus checks the status of a Juno transaction.
+// Returns TxStatusConfirmed, TxStatusMempool, or TxStatusMissing.
+func (c *JunoConfirmer) TxStatus(ctx context.Context, txid string) (string, error) {
+	if c == nil || c.rpc == nil {
+		return "", fmt.Errorf("%w: nil confirmer", ErrInvalidJunoRuntimeConfig)
+	}
+	tx, err := c.rpc.GetRawTransaction(ctx, txid)
+	if err != nil {
+		if errors.Is(err, junorpc.ErrTxNotFound) {
+			return TxStatusMissing, nil
+		}
+		return "", err
+	}
+	if tx.Confirmations > 0 {
+		return TxStatusConfirmed, nil
+	}
+	return TxStatusMempool, nil
 }
 
 func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {

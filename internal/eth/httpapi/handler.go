@@ -39,10 +39,16 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 
 	mux := http.NewServeMux()
 
+	startTime := time.Now()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("ok\n"))
+		uptime := time.Since(startTime).Truncate(time.Second).String()
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"status":  "ok",
+			"uptime":  uptime,
+			"service": "base-relayer",
+		})
 	})
 
 	mux.HandleFunc("POST /v1/send", func(w http.ResponseWriter, r *http.Request) {

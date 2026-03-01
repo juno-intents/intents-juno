@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -22,6 +23,7 @@ import (
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -89,6 +91,8 @@ func main() {
 		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
+
+		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -260,6 +264,12 @@ func main() {
 		os.Exit(2)
 	}
 
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "deposit-relayer"); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
+
 	log.Info("deposit relayer started",
 		"baseChainID", *baseChainID,
 		"bridge", bridge,
@@ -412,6 +422,13 @@ func main() {
 				cancel()
 				if err != nil {
 					log.Error("ingest deposit", "err", err)
+					// Permanent errors (bad payload): ACK so message is not redelivered.
+					// Transient errors (network, DB): do NOT ACK — Kafka will redeliver.
+					if isDepositPermanentError(err) {
+						log.Warn("permanent deposit error, acking unprocessable message", "err", err)
+						ackMessage(qmsg, *ackTimeout, log)
+					}
+					continue
 				}
 				ackMessage(qmsg, *ackTimeout, log)
 			default:
@@ -541,6 +558,17 @@ func decodeHexBytes(s string) ([]byte, error) {
 		return nil, fmt.Errorf("decode hex: %w", err)
 	}
 	return b, nil
+}
+
+func isDepositPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// ErrInvalidEvent covers bad payload, zero amount, bad memo length, etc.
+	if errors.Is(err, depositrelayer.ErrInvalidEvent) {
+		return true
+	}
+	return false
 }
 
 func decodeHexBytesOptional(s string) ([]byte, error) {
