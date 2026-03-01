@@ -48,4 +48,6 @@ ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS claim_owner_nonempty;
 ALTER TABLE deposit_jobs ADD CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE deposit_jobs ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848);
+ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS juno_height BIGINT;
+CREATE INDEX IF NOT EXISTS deposit_jobs_juno_height_idx ON deposit_jobs (juno_height);
 `

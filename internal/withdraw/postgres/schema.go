@@ -30,6 +30,8 @@ CREATE INDEX IF NOT EXISTS withdrawal_requests_expiry_idx ON withdrawal_requests
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
 ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE withdrawal_requests ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923);
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_block_number BIGINT;
+CREATE INDEX IF NOT EXISTS withdrawal_requests_base_block_number_idx ON withdrawal_requests (base_block_number);
 
 CREATE TABLE IF NOT EXISTS withdrawal_batches (
 	batch_id BYTEA PRIMARY KEY,

@@ -48,6 +48,10 @@ type Deposit struct {
 	// the deposit guest, excluding checkpoint fields, IVK, and item count.
 	// Layout must match proverinput.DepositWitnessItemLen.
 	ProofWitnessItem []byte
+
+	// JunoHeight is the Juno chain height at which this deposit was observed.
+	// Zero means unknown (legacy rows).
+	JunoHeight int64
 }
 
 type Job struct {

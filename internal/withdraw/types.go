@@ -29,6 +29,10 @@ type Withdrawal struct {
 
 	// Expiry is the on-chain expiry time (block.timestamp seconds) as a UTC time.
 	Expiry time.Time
+
+	// BaseBlockNumber is the Base chain block number where this withdrawal was requested.
+	// Zero means unknown (legacy rows).
+	BaseBlockNumber int64
 }
 
 func (w Withdrawal) Validate() error {

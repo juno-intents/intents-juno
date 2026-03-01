@@ -50,6 +50,12 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 		return withdraw.Withdrawal{}, false, fmt.Errorf("%w: amount too large", withdraw.ErrInvalidConfig)
 	}
 
+	var baseBlockNumber *int64
+	if w.BaseBlockNumber > 0 {
+		bn := w.BaseBlockNumber
+		baseBlockNumber = &bn
+	}
+
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO withdrawal_requests (
 			withdrawal_id,
@@ -59,11 +65,12 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 			recipient_ua,
 			proof_witness_item,
 			expiry,
+			base_block_number,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
 		ON CONFLICT (withdrawal_id) DO NOTHING
-	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry)
+	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, baseBlockNumber)
 	if err != nil {
 		return withdraw.Withdrawal{}, false, fmt.Errorf("withdraw/postgres: insert requested: %w", err)
 	}
@@ -109,7 +116,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			updated_at = now()
 		FROM cte
 		WHERE wr.withdrawal_id = cte.withdrawal_id
-		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry
+		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry, wr.base_block_number
 	`, max, owner, ttlMS)
 	if err != nil {
 		return nil, fmt.Errorf("withdraw/postgres: claim unbatched: %w", err)
@@ -119,15 +126,16 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 	var out []withdraw.Withdrawal
 	for rows.Next() {
 		var (
-			idRaw   []byte
-			reqRaw  []byte
-			amount  int64
-			feeBps  int32
-			recipUA []byte
-			witness []byte
-			expiry  time.Time
+			idRaw           []byte
+			reqRaw          []byte
+			amount          int64
+			feeBps          int32
+			recipUA         []byte
+			witness         []byte
+			expiry          time.Time
+			baseBlockNumber *int64
 		)
-		if err := rows.Scan(&idRaw, &reqRaw, &amount, &feeBps, &recipUA, &witness, &expiry); err != nil {
+		if err := rows.Scan(&idRaw, &reqRaw, &amount, &feeBps, &recipUA, &witness, &expiry, &baseBlockNumber); err != nil {
 			return nil, fmt.Errorf("withdraw/postgres: scan claim row: %w", err)
 		}
 		id, err := to32(idRaw)
@@ -141,6 +149,10 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 		if amount < 0 || feeBps < 0 {
 			return nil, fmt.Errorf("withdraw/postgres: negative values in db")
 		}
+		var bn int64
+		if baseBlockNumber != nil {
+			bn = *baseBlockNumber
+		}
 		out = append(out, withdraw.Withdrawal{
 			ID:               id,
 			Requester:        req,
@@ -149,6 +161,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			RecipientUA:      append([]byte(nil), recipUA...),
 			ProofWitnessItem: append([]byte(nil), witness...),
 			Expiry:           expiry,
+			BaseBlockNumber:  bn,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -682,19 +695,20 @@ func (s *Store) getBatchFinalizationFields(ctx context.Context, batchID [32]byte
 
 func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdrawal, error) {
 	var (
-		idRaw   []byte
-		reqRaw  []byte
-		amount  int64
-		feeBps  int32
-		ua      []byte
-		witness []byte
-		expiry  time.Time
+		idRaw           []byte
+		reqRaw          []byte
+		amount          int64
+		feeBps          int32
+		ua              []byte
+		witness         []byte
+		expiry          time.Time
+		baseBlockNumber *int64
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT withdrawal_id, requester, amount, fee_bps, recipient_ua, proof_witness_item, expiry
+		SELECT withdrawal_id, requester, amount, fee_bps, recipient_ua, proof_witness_item, expiry, base_block_number
 		FROM withdrawal_requests
 		WHERE withdrawal_id = $1
-	`, id[:]).Scan(&idRaw, &reqRaw, &amount, &feeBps, &ua, &witness, &expiry)
+	`, id[:]).Scan(&idRaw, &reqRaw, &amount, &feeBps, &ua, &witness, &expiry, &baseBlockNumber)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Withdrawal{}, withdraw.ErrNotFound
@@ -713,6 +727,10 @@ func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 	if amount < 0 || feeBps < 0 {
 		return withdraw.Withdrawal{}, fmt.Errorf("withdraw/postgres: negative values in db")
 	}
+	var bn int64
+	if baseBlockNumber != nil {
+		bn = *baseBlockNumber
+	}
 	return withdraw.Withdrawal{
 		ID:               gotID,
 		Requester:        req,
@@ -721,6 +739,7 @@ func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 		RecipientUA:      append([]byte(nil), ua...),
 		ProofWitnessItem: append([]byte(nil), witness...),
 		Expiry:           expiry,
+		BaseBlockNumber:  bn,
 	}, nil
 }
 
@@ -731,7 +750,7 @@ func cloneWithdrawal(w withdraw.Withdrawal) withdraw.Withdrawal {
 }
 
 func withdrawalEqual(a, b withdraw.Withdrawal) bool {
-	if a.ID != b.ID || a.Requester != b.Requester || a.Amount != b.Amount || a.FeeBps != b.FeeBps || !a.Expiry.Equal(b.Expiry) {
+	if a.ID != b.ID || a.Requester != b.Requester || a.Amount != b.Amount || a.FeeBps != b.FeeBps || !a.Expiry.Equal(b.Expiry) || a.BaseBlockNumber != b.BaseBlockNumber {
 		return false
 	}
 	return bytes.Equal(a.RecipientUA, b.RecipientUA) &&

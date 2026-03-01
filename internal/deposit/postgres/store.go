@@ -49,6 +49,12 @@ func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit
 		return deposit.Job{}, false, fmt.Errorf("%w: leaf index too large", deposit.ErrDepositMismatch)
 	}
 
+	var junoHeight *int64
+	if d.JunoHeight > 0 {
+		h := d.JunoHeight
+		junoHeight = &h
+	}
+
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO deposit_jobs (
 			deposit_id,
@@ -57,12 +63,13 @@ func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit
 			amount,
 			base_recipient,
 			proof_witness_item,
+			juno_height,
 			state,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
 		ON CONFLICT (deposit_id) DO NOTHING
-	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], d.ProofWitnessItem, int16(deposit.StateConfirmed))
+	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], d.ProofWitnessItem, junoHeight, int16(deposit.StateConfirmed))
 	if err != nil {
 		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: insert: %w", err)
 	}
@@ -115,6 +122,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		cpBridgeRaw    []byte
 		proofSeal      []byte
 		txHashRaw      []byte
+		junoHeight     *int64
 	)
 
 	err := s.pool.QueryRow(ctx, `
@@ -132,7 +140,8 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 			checkpoint_base_chain_id,
 			checkpoint_bridge_contract,
 			proof_seal,
-			tx_hash
+			tx_hash,
+			juno_height
 		FROM deposit_jobs
 		WHERE deposit_id = $1
 	`, depositID[:]).Scan(
@@ -150,6 +159,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		&cpBridgeRaw,
 		&proofSeal,
 		&txHashRaw,
+		&junoHeight,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -174,6 +184,10 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		return deposit.Job{}, fmt.Errorf("deposit/postgres: negative values in db")
 	}
 
+	var jh int64
+	if junoHeight != nil {
+		jh = *junoHeight
+	}
 	job := deposit.Job{
 		Deposit: deposit.Deposit{
 			DepositID:        id,
@@ -182,6 +196,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 			Amount:           uint64(amount),
 			BaseRecipient:    recip,
 			ProofWitnessItem: append([]byte(nil), proofWitnessRaw...),
+			JunoHeight:       jh,
 		},
 		State: deposit.State(state),
 	}
@@ -705,7 +720,8 @@ func depositEqual(a, b deposit.Deposit) bool {
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
 		a.BaseRecipient == b.BaseRecipient &&
-		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
+		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem) &&
+		a.JunoHeight == b.JunoHeight
 }
 
 var _ deposit.Store = (*Store)(nil)
