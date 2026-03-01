@@ -50,14 +50,17 @@ CREATE INDEX IF NOT EXISTS proof_jobs_processing_idx ON proof_jobs (processing_e
 CREATE INDEX IF NOT EXISTS proof_jobs_callback_expires_idx ON proof_jobs (callback_expires_at);
 
 CREATE TABLE IF NOT EXISTS proof_events (
-	event_id BIGSERIAL PRIMARY KEY,
+	event_id BIGSERIAL,
 	job_id BYTEA NOT NULL REFERENCES proof_jobs(job_id) ON DELETE CASCADE,
 	event_type TEXT NOT NULL,
 	payload JSONB NOT NULL DEFAULT '{}'::jsonb,
 	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (event_id, created_at),
 	CONSTRAINT proof_events_job_id_len CHECK (octet_length(job_id) = 32),
 	CONSTRAINT proof_events_type_nonempty CHECK (event_type <> '')
-);
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE IF NOT EXISTS proof_events_default PARTITION OF proof_events DEFAULT;
 
 CREATE INDEX IF NOT EXISTS proof_events_job_created_idx ON proof_events (job_id, created_at);
 `

@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
@@ -247,5 +249,153 @@ func TestWorker_E2E_JobMismatchDoesNotPublishFailure(t *testing.T) {
 	}
 	if submitter.calls != 0 {
 		t.Fatalf("expected no prover calls, got %d", submitter.calls)
+	}
+}
+
+func TestWorker_E2E_TerminalFailureInsertsDLQ(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
+	store := proof.NewMemoryStore(func() time.Time { return now })
+	submitter := &stubProver{err: sp1.NewPermanentError("sp1_invalid_input", errors.New("bad witness"))}
+	dlqStore := dlq.NewMemoryStore(func() time.Time { return now })
+
+	svc, err := New(Config{
+		Owner:                  "requestor-dlq",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, submitter, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	inputPayload := `{"job_id":"0xdead000000000000000000000000000000000000000000000000000000000001","pipeline":"deposit","image_id":"0x000000000000000000000000000000000000000000000000000000000000aa01","journal":"0x01","private_input":"0x02","deadline":"2026-02-15T12:05:00Z","priority":1}` + "\n"
+	consumer, err := queue.NewConsumer(context.Background(), queue.ConsumerConfig{
+		Driver: queue.DriverStdio,
+		Reader: strings.NewReader(inputPayload),
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	var out bytes.Buffer
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver: queue.DriverStdio,
+		Writer: &out,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	worker, err := NewWorker(WorkerConfig{
+		InputTopic:   "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		MaxInflight:  1,
+		AckTimeout:   time.Second,
+		DLQStore:     dlqStore,
+	}, svc, consumer, producer, nil)
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Verify failure was published.
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(lines))
+	}
+
+	// Verify DLQ record was inserted.
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.Proofs != 1 {
+		t.Fatalf("expected 1 proof DLQ entry, got %d", counts.Proofs)
+	}
+
+	recs, err := dlqStore.ListProofDLQ(ctx, dlq.DLQFilter{})
+	if err != nil {
+		t.Fatalf("ListProofDLQ: %v", err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 DLQ record, got %d", len(recs))
+	}
+	if recs[0].ErrorCode != "sp1_invalid_input" {
+		t.Fatalf("DLQ error_code: got %q want %q", recs[0].ErrorCode, "sp1_invalid_input")
+	}
+	if recs[0].Pipeline != "deposit" {
+		t.Fatalf("DLQ pipeline: got %q want %q", recs[0].Pipeline, "deposit")
+	}
+}
+
+func TestWorker_E2E_NilDLQStoreSkipsDLQ(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
+	store := proof.NewMemoryStore(func() time.Time { return now })
+	submitter := &stubProver{err: sp1.NewPermanentError("sp1_invalid_input", errors.New("bad witness"))}
+
+	svc, err := New(Config{
+		Owner:                  "requestor-no-dlq",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, submitter, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	inputPayload := `{"job_id":"0xdead000000000000000000000000000000000000000000000000000000000002","pipeline":"deposit","image_id":"0x000000000000000000000000000000000000000000000000000000000000aa01","journal":"0x01","private_input":"0x02","deadline":"2026-02-15T12:05:00Z","priority":1}` + "\n"
+	consumer, err := queue.NewConsumer(context.Background(), queue.ConsumerConfig{
+		Driver: queue.DriverStdio,
+		Reader: strings.NewReader(inputPayload),
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	var out bytes.Buffer
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver: queue.DriverStdio,
+		Writer: &out,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	// No DLQStore configured - should not panic or error.
+	worker, err := NewWorker(WorkerConfig{
+		InputTopic:   "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		MaxInflight:  1,
+		AckTimeout:   time.Second,
+	}, svc, consumer, producer, nil)
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Verify failure was still published normally.
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 1 {
+		t.Fatalf("expected one failure message, got %d", len(lines))
 	}
 }

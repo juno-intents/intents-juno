@@ -10,9 +10,13 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
+
+// DefaultMaxDLQAttempts is the default max attempts before a retryable failure is sent to the DLQ.
+const DefaultMaxDLQAttempts = 3
 
 type WorkerConfig struct {
 	InputTopic   string
@@ -21,6 +25,12 @@ type WorkerConfig struct {
 
 	MaxInflight int
 	AckTimeout  time.Duration
+
+	// DLQStore is an optional dead-letter queue store. If nil, DLQ insertion is skipped.
+	DLQStore dlq.Store
+	// MaxDLQAttempts is the max number of attempts before a retryable failure is sent to the DLQ.
+	// Defaults to DefaultMaxDLQAttempts if zero.
+	MaxDLQAttempts int
 }
 
 type Worker struct {
@@ -49,6 +59,9 @@ func NewWorker(cfg WorkerConfig, service *Service, consumer queue.Consumer, prod
 	}
 	if cfg.InputTopic == "" || cfg.ResultTopic == "" || cfg.FailureTopic == "" {
 		return nil, fmt.Errorf("%w: input/result/failure topics are required", proof.ErrInvalidConfig)
+	}
+	if cfg.MaxDLQAttempts <= 0 {
+		cfg.MaxDLQAttempts = DefaultMaxDLQAttempts
 	}
 	if log == nil {
 		log = slog.Default()
@@ -194,6 +207,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			"error_code", out.ErrorCode,
 			"retryable", out.Retryable,
 			"message", out.ErrorMessage,
+			"attempt_count", out.AttemptCount,
 		)
 		payload, err := proof.EncodeFailureMessage(proof.FailureMessage{
 			JobID:     job.JobID,
@@ -210,12 +224,58 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 		}
 		w.failureCount.Add(1)
 		w.emitMetrics(msg.Timestamp, false, false)
+
+		// Insert into DLQ on terminal failure or when max attempts exceeded.
+		shouldDLQ := !out.Retryable || out.AttemptCount >= w.cfg.MaxDLQAttempts
+		if shouldDLQ {
+			w.maybeDLQProof(ctx, job, out)
+		}
 	case StatusSkipped:
 		// Already handled by another worker instance or terminal state.
 	}
 
 	ackMessage(msg, w.cfg.AckTimeout, w.log)
 	return nil
+}
+
+// maybeDLQProof inserts a failed proof job into the dead-letter queue.
+// If DLQStore is nil, this is a no-op.
+func (w *Worker) maybeDLQProof(ctx context.Context, job proof.JobRequest, out Outcome) {
+	if w.cfg.DLQStore == nil {
+		return
+	}
+
+	rec := dlq.ProofDLQRecord{
+		JobID:        [32]byte(job.JobID),
+		Pipeline:     job.Pipeline,
+		ImageID:      [32]byte(job.ImageID),
+		State:        int16(proofStateFromOutcome(out)),
+		ErrorCode:    out.ErrorCode,
+		ErrorMessage: out.ErrorMessage,
+		AttemptCount: out.AttemptCount,
+		JobPayload:   nil, // Payload not stored by default to save space.
+	}
+
+	if err := w.cfg.DLQStore.InsertProofDLQ(ctx, rec); err != nil {
+		w.log.Error("proof-requestor failed to insert into DLQ",
+			"job_id", job.JobID.Hex(),
+			"err", err,
+		)
+	} else {
+		w.log.Info("proof-requestor inserted into DLQ",
+			"job_id", job.JobID.Hex(),
+			"error_code", out.ErrorCode,
+			"attempt_count", out.AttemptCount,
+		)
+	}
+}
+
+// proofStateFromOutcome maps an Outcome to a proof lifecycle state int for DLQ storage.
+func proofStateFromOutcome(out Outcome) int {
+	if out.Retryable {
+		return 3 // failed_retryable
+	}
+	return 4 // failed_terminal
 }
 
 func (w *Worker) emitMetrics(ts time.Time, success bool, fallback bool) {

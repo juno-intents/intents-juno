@@ -42,6 +42,7 @@ type Outcome struct {
 	Retryable    bool
 	ErrorCode    string
 	ErrorMessage string
+	AttemptCount int
 }
 
 type Service struct {
@@ -99,6 +100,7 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 			Retryable:      rec.Retryable,
 			ErrorCode:      rec.ErrorCode,
 			ErrorMessage:   rec.ErrorMessage,
+			AttemptCount:   rec.AttemptCount,
 		}
 		switch rec.State {
 		case proof.StateFulfilled:
@@ -132,6 +134,7 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 		Retryable:    retryable,
 		ErrorCode:    code,
 		ErrorMessage: message,
+		AttemptCount: rec.AttemptCount,
 	}, nil
 }
 
