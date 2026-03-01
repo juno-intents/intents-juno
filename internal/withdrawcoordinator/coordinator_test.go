@@ -869,3 +869,200 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 		t.Fatalf("expected batch confirmed, got %s", b.State)
 	}
 }
+
+func TestCoordinator_DLQ_RebroadcastExhausted(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x90)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
+	// Set RebroadcastAttempts to the max.
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 2, now.Add(-1*time.Hour))
+
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
+	dlqStore := dlq.NewMemoryStore(nil)
+
+	c, err := New(Config{
+		Owner:                  "a",
+		MaxItems:               10,
+		MaxAge:                 3 * time.Minute,
+		ClaimTTL:               10 * time.Second,
+		MaxRebroadcastAttempts: 2,
+		DLQStore:               dlqStore,
+		Now:                    nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected ErrRebroadcastExhausted")
+	}
+	if !errors.Is(err, ErrRebroadcastExhausted) {
+		t.Fatalf("expected ErrRebroadcastExhausted, got %v", err)
+	}
+
+	counts, cerr := dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged: %v", cerr)
+	}
+	if counts.WithdrawalBatches != 1 {
+		t.Fatalf("expected 1 withdrawal batch DLQ entry, got %d", counts.WithdrawalBatches)
+	}
+
+	recs, lerr := dlqStore.ListWithdrawalBatchDLQ(ctx, dlq.DLQFilter{})
+	if lerr != nil {
+		t.Fatalf("ListWithdrawalBatchDLQ: %v", lerr)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 DLQ record, got %d", len(recs))
+	}
+	if recs[0].FailureStage != "confirm" {
+		t.Fatalf("failure_stage: got %q want %q", recs[0].FailureStage, "confirm")
+	}
+	if recs[0].ErrorCode != "rebroadcast_exhausted" {
+		t.Fatalf("error_code: got %q want %q", recs[0].ErrorCode, "rebroadcast_exhausted")
+	}
+	if recs[0].JunoTxID != "tx-gone" {
+		t.Fatalf("juno_tx_id: got %q want %q", recs[0].JunoTxID, "tx-gone")
+	}
+	if recs[0].RebroadcastAttempts != 2 {
+		t.Fatalf("rebroadcast_attempts: got %d want 2", recs[0].RebroadcastAttempts)
+	}
+}
+
+type failingSigner struct {
+	err error
+}
+
+func (s *failingSigner) Sign(_ context.Context, _ [32]byte, _ []byte) ([]byte, error) {
+	return nil, s.err
+}
+
+func TestCoordinator_DLQ_SigningFailed(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x91)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+
+	dlqStore := dlq.NewMemoryStore(nil)
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		DLQStore: dlqStore,
+		Now:      nowFn,
+	}, store, &stubPlanner{}, &failingSigner{err: errors.New("hsm unavailable")}, &stubBroadcaster{}, &stubConfirmer{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected signing error")
+	}
+	if !strings.Contains(err.Error(), "hsm unavailable") {
+		t.Fatalf("expected signing error, got %v", err)
+	}
+
+	counts, cerr := dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged: %v", cerr)
+	}
+	if counts.WithdrawalBatches != 1 {
+		t.Fatalf("expected 1 withdrawal batch DLQ entry, got %d", counts.WithdrawalBatches)
+	}
+
+	recs, lerr := dlqStore.ListWithdrawalBatchDLQ(ctx, dlq.DLQFilter{})
+	if lerr != nil {
+		t.Fatalf("ListWithdrawalBatchDLQ: %v", lerr)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("expected 1 DLQ record, got %d", len(recs))
+	}
+	if recs[0].FailureStage != "signing" {
+		t.Fatalf("failure_stage: got %q want %q", recs[0].FailureStage, "signing")
+	}
+	if recs[0].ErrorCode != "signing_failed" {
+		t.Fatalf("error_code: got %q want %q", recs[0].ErrorCode, "signing_failed")
+	}
+}
+
+func TestCoordinator_DLQ_NilStoreSkipsDLQ(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x92)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 5, now.Add(-1*time.Hour))
+
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
+
+	// No DLQStore configured — should not panic.
+	c, err := New(Config{
+		Owner:                  "a",
+		MaxItems:               10,
+		MaxAge:                 3 * time.Minute,
+		ClaimTTL:               10 * time.Second,
+		MaxRebroadcastAttempts: 5,
+		Now:                    nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if !errors.Is(err, ErrRebroadcastExhausted) {
+		t.Fatalf("expected ErrRebroadcastExhausted, got %v", err)
+	}
+	// No panic, no DLQ store interaction — backwards compatible.
+}

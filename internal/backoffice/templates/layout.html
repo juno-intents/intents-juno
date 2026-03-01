@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Juno Bridge Backoffice</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <header>
+        <h1>Juno Bridge Backoffice</h1>
+        <nav>
+            <a href="#overview" class="tab active" data-tab="overview">Overview</a>
+            <a href="#dlq" class="tab" data-tab="dlq">DLQ</a>
+            <a href="#funds" class="tab" data-tab="funds">Funds</a>
+            <a href="#analytics" class="tab" data-tab="analytics">Analytics</a>
+            <a href="#alerts" class="tab" data-tab="alerts">Alerts <span id="alert-badge" class="badge badge-crit hidden">0</span></a>
+            <a href="#ops" class="tab" data-tab="ops">Operations</a>
+        </nav>
+    </header>
+
+    <main>
+        <!-- ===== OVERVIEW ===== -->
+        <section id="overview" class="tab-content active">
+            <h2 class="section-title">Overview</h2>
+            <div class="cards">
+                <div class="card">
+                    <h3>Total Deposits</h3>
+                    <div class="value" id="stat-total-deposits">-</div>
+                </div>
+                <div class="card">
+                    <h3>Total Withdrawals</h3>
+                    <div class="value" id="stat-total-withdrawals">-</div>
+                </div>
+                <div class="card">
+                    <h3>Deposits Today</h3>
+                    <div class="value" id="stat-deposits-today">-</div>
+                </div>
+                <div class="card">
+                    <h3>Withdrawals Today</h3>
+                    <div class="value" id="stat-withdrawals-today">-</div>
+                </div>
+                <div class="card">
+                    <h3>Active wJUNO Supply</h3>
+                    <div class="value" id="stat-wjuno-supply">-</div>
+                </div>
+            </div>
+
+            <div id="overview-alert-box" class="card hidden" style="border-color:var(--crit)">
+                <h3>Active Alerts</h3>
+                <div class="value" id="overview-alert-count">0</div>
+            </div>
+
+            <h2 class="section-title" style="margin-top:1rem">Service Health</h2>
+            <div class="card">
+                <div id="svc-health-grid" class="loading">Loading...</div>
+            </div>
+        </section>
+
+        <!-- ===== DLQ ===== -->
+        <section id="dlq" class="tab-content">
+            <h2 class="section-title">Dead-Letter Queue</h2>
+
+            <div class="filters">
+                <label>Status:
+                    <select id="dlq-ack-filter">
+                        <option value="false">Unacknowledged</option>
+                        <option value="true">Acknowledged</option>
+                        <option value="">All</option>
+                    </select>
+                </label>
+            </div>
+
+            <div class="sub-tabs">
+                <span class="sub-tab active" data-sub="proofs">Proofs</span>
+                <span class="sub-tab" data-sub="deposits">Deposits</span>
+                <span class="sub-tab" data-sub="withdrawals">Withdrawals</span>
+            </div>
+
+            <div class="sub-content active" data-sub-id="proofs">
+                <div class="table-wrap scroll-y">
+                    <table>
+                        <thead>
+                            <tr><th>ID</th><th>Error Code</th><th>Stage</th><th>Attempts</th><th>Created</th><th>Status</th><th>Action</th></tr>
+                        </thead>
+                        <tbody id="dlq-tbody-proofs">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="sub-content" data-sub-id="deposits">
+                <div class="table-wrap scroll-y">
+                    <table>
+                        <thead>
+                            <tr><th>ID</th><th>Error Code</th><th>Stage</th><th>Attempts</th><th>Created</th><th>Status</th><th>Action</th></tr>
+                        </thead>
+                        <tbody id="dlq-tbody-deposits">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="sub-content" data-sub-id="withdrawals">
+                <div class="table-wrap scroll-y">
+                    <table>
+                        <thead>
+                            <tr><th>ID</th><th>Error Code</th><th>Stage</th><th>Attempts</th><th>Created</th><th>Status</th><th>Action</th></tr>
+                        </thead>
+                        <tbody id="dlq-tbody-withdrawals">
+                            <tr><td colspan="7" class="loading">Loading...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== FUNDS ===== -->
+        <section id="funds" class="tab-content">
+            <h2 class="section-title">Funds Monitor</h2>
+
+            <h3 class="section-title">Operator Gas Balances</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Address</th><th>Balance</th><th>Status</th></tr>
+                    </thead>
+                    <tbody id="funds-ops-tbody">
+                        <tr><td colspan="3" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="cards">
+                <div class="card">
+                    <h3>Prover Funds</h3>
+                    <div>Address: <span class="mono" id="prover-addr">-</span></div>
+                    <div>Balance: <span id="prover-balance">-</span></div>
+                </div>
+                <div class="card">
+                    <h3>Bridge wJUNO Escrow</h3>
+                    <div>Balance: <span id="escrow-wjuno">-</span></div>
+                </div>
+                <div class="card">
+                    <h3>MPC Wallet (Juno)</h3>
+                    <div>Address: <span class="mono" id="mpc-addr">-</span></div>
+                    <div>Balance: <span id="mpc-balance">-</span></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- ===== ANALYTICS ===== -->
+        <section id="analytics" class="tab-content">
+            <h2 class="section-title">Analytics</h2>
+
+            <div class="cards">
+                <div class="card">
+                    <h3>Total Deposit Volume</h3>
+                    <div class="value" id="vol-deposit-total">-</div>
+                </div>
+                <div class="card">
+                    <h3>Total Withdrawal Volume</h3>
+                    <div class="value" id="vol-withdraw-total">-</div>
+                </div>
+            </div>
+
+            <h3 class="section-title">Bridges Per Day</h3>
+            <div class="card">
+                <div id="daily-chart" class="loading">Loading...</div>
+            </div>
+
+            <h3 class="section-title" style="margin-top:1rem">Operator Revenue</h3>
+            <div class="table-wrap">
+                <table>
+                    <thead>
+                        <tr><th>Address</th><th>Fee Recipient</th><th>Accumulated</th><th>Claimed</th><th>Pending</th></tr>
+                    </thead>
+                    <tbody id="revenue-tbody">
+                        <tr><td colspan="5" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ===== ALERTS ===== -->
+        <section id="alerts" class="tab-content">
+            <h2 class="section-title">Active Alerts</h2>
+            <div class="table-wrap scroll-y">
+                <table>
+                    <thead>
+                        <tr><th>Severity</th><th>Title</th><th>Detail</th><th>Fired At</th><th>Action</th></tr>
+                    </thead>
+                    <tbody id="alerts-active-tbody">
+                        <tr><td colspan="5" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h2 class="section-title" style="margin-top:1.5rem">Alert History</h2>
+            <div class="table-wrap scroll-y">
+                <table>
+                    <thead>
+                        <tr><th>Severity</th><th>Title</th><th>Fired At</th><th>Resolved At</th></tr>
+                    </thead>
+                    <tbody id="alerts-history-tbody">
+                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- ===== OPERATIONS ===== -->
+        <section id="ops" class="tab-content">
+            <h2 class="section-title">Recent Deposits</h2>
+            <div class="table-wrap scroll-y">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>State</th><th>Created</th><th>Juno Height</th></tr>
+                    </thead>
+                    <tbody id="ops-deposits-tbody">
+                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h2 class="section-title" style="margin-top:1rem">Recent Withdrawals</h2>
+            <div class="table-wrap scroll-y">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>State</th><th>Created</th><th>Base Block</th></tr>
+                    </thead>
+                    <tbody id="ops-withdrawals-tbody">
+                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <h2 class="section-title" style="margin-top:1rem">Stuck Batches</h2>
+            <div class="table-wrap scroll-y">
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>Kind</th><th>State</th><th>Age</th></tr>
+                    </thead>
+                    <tbody id="ops-stuck-tbody">
+                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>
