@@ -1026,6 +1026,14 @@ test_sp1_credit_guardrail_uses_bump_price_ceiling() {
   assert_contains "$script_text" '"$sp1_credit_guardrail_max_price_per_pgu" \' "sp1 credit guardrail passes effective max price (post bump-ceiling clamp) into guardrail math"
 }
 
+test_sp1_pgu_estimate_defaults_are_conservative_for_live_guardrails() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local sp1_deposit_pgu_estimate="50000000"' "run-testnet-e2e defaults deposit PGU estimate to conservative live-proof sizing"
+  assert_contains "$script_text" 'local sp1_withdraw_pgu_estimate="50000000"' "run-testnet-e2e defaults withdraw PGU estimate to conservative live-proof sizing"
+}
+
 test_shared_ecs_rollout_accepts_explicit_proof_services_image_override() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1128,6 +1136,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
   test_sp1_credit_guardrail_uses_bump_price_ceiling
+  test_sp1_pgu_estimate_defaults_are_conservative_for_live_guardrails
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_submission_waits_for_relayer_checkpoint_catchup
 }
