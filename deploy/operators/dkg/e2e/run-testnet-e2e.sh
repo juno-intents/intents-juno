@@ -84,10 +84,14 @@ Options:
   --sp1-input-s3-presign-ttl <duration> presigned URL TTL for oversized input uploads
                                    (default: 2h)
   --sp1-max-price-per-pgu <wei> SP1 max price per PGU (default: 2000000000)
+  --sp1-progress-guard-bump-max-price-per-pgu <wei> bounded SP1 max-price ceiling used by progress-guard retries
+                                   (default: 20000000000)
+  --sp1-progress-guard-bump-multiplier <n> multiplicative bump applied on retryable lock failures
+                                   (default: 4)
   --sp1-deposit-pgu-estimate <n> projected deposit proof PGU usage for credit guardrails
-                                   (default: 1000000)
+                                   (default: 50000000)
   --sp1-withdraw-pgu-estimate <n> projected withdraw proof PGU usage for credit guardrails
-                                   (default: 1000000)
+                                   (default: 50000000)
   --sp1-groth16-base-fee-wei <wei> projected groth16 base fee per proof in wei
                                    (default: 200000000000000000)
   --sp1-min-auction-period <s> SP1 minimum auction period in seconds (default: 85)
@@ -3031,7 +3035,8 @@ command_run() {
   local sp1_input_s3_region=""
   local sp1_input_s3_presign_ttl="2h"
   local sp1_max_price_per_pgu="2000000000"
-  local sp1_progress_guard_bump_max_price_per_pgu="2000000000000"
+  local sp1_progress_guard_bump_max_price_per_pgu="20000000000"
+  local sp1_progress_guard_bump_multiplier="4"
   local sp1_deposit_pgu_estimate="50000000"
   local sp1_withdraw_pgu_estimate="50000000"
   local sp1_groth16_base_fee_wei="200000000000000000"
@@ -3345,6 +3350,16 @@ command_run() {
         sp1_max_price_per_pgu="$2"
         shift 2
         ;;
+      --sp1-progress-guard-bump-max-price-per-pgu)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-progress-guard-bump-max-price-per-pgu"
+        sp1_progress_guard_bump_max_price_per_pgu="$2"
+        shift 2
+        ;;
+      --sp1-progress-guard-bump-multiplier)
+        [[ $# -ge 2 ]] || die "missing value for --sp1-progress-guard-bump-multiplier"
+        sp1_progress_guard_bump_multiplier="$2"
+        shift 2
+        ;;
       --sp1-deposit-pgu-estimate)
         [[ $# -ge 2 ]] || die "missing value for --sp1-deposit-pgu-estimate"
         sp1_deposit_pgu_estimate="$2"
@@ -3494,6 +3509,7 @@ command_run() {
   [[ "$base_operator_fund_wei" =~ ^[0-9]+$ ]] || die "--base-operator-fund-wei must be numeric"
   [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "--sp1-max-price-per-pgu must be numeric"
   [[ "$sp1_progress_guard_bump_max_price_per_pgu" =~ ^[0-9]+$ ]] || die "sp1 progress guard bump max price must be numeric"
+  [[ "$sp1_progress_guard_bump_multiplier" =~ ^[0-9]+$ ]] || die "sp1 progress guard bump multiplier must be numeric"
   [[ "$sp1_deposit_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-deposit-pgu-estimate must be numeric"
   [[ "$sp1_withdraw_pgu_estimate" =~ ^[0-9]+$ ]] || die "--sp1-withdraw-pgu-estimate must be numeric"
   [[ "$sp1_groth16_base_fee_wei" =~ ^[0-9]+$ ]] || die "--sp1-groth16-base-fee-wei must be numeric"
@@ -3502,6 +3518,7 @@ command_run() {
   [[ "$sp1_request_timeout" =~ ^[0-9]+s$ ]] || die "--sp1-request-timeout must be seconds with s suffix (example: 1500s)"
   (( sp1_max_price_per_pgu > 0 )) || die "--sp1-max-price-per-pgu must be > 0"
   (( sp1_progress_guard_bump_max_price_per_pgu > 0 )) || die "sp1 progress guard bump max price must be > 0"
+  (( sp1_progress_guard_bump_multiplier > 1 )) || die "sp1 progress guard bump multiplier must be > 1"
   (( sp1_progress_guard_bump_max_price_per_pgu >= sp1_max_price_per_pgu )) || \
     die "sp1 progress guard bump max price must be >= --sp1-max-price-per-pgu"
   (( sp1_deposit_pgu_estimate > 0 )) || die "--sp1-deposit-pgu-estimate must be > 0"
@@ -6950,6 +6967,30 @@ command_run() {
       local proof_requestor_progress_guard_last_probe_epoch=0
       local bridge_api_deposit_wait_timeout_seconds="$((sp1_request_timeout_seconds + 600))"
 
+      bump_sp1_max_price_for_progress_guard() {
+        local previous_max_price candidate_max_price
+        previous_max_price="$sp1_max_price_per_pgu"
+        [[ "$previous_max_price" =~ ^[0-9]+$ ]] || return 1
+        if (( previous_max_price >= sp1_progress_guard_bump_max_price_per_pgu )); then
+          return 1
+        fi
+        if (( previous_max_price > sp1_progress_guard_bump_max_price_per_pgu / sp1_progress_guard_bump_multiplier )); then
+          candidate_max_price="$sp1_progress_guard_bump_max_price_per_pgu"
+        else
+          candidate_max_price="$((previous_max_price * sp1_progress_guard_bump_multiplier))"
+        fi
+        if (( candidate_max_price > sp1_progress_guard_bump_max_price_per_pgu )); then
+          candidate_max_price="$sp1_progress_guard_bump_max_price_per_pgu"
+        fi
+        if (( candidate_max_price == previous_max_price )); then
+          return 1
+        fi
+        sp1_max_price_per_pgu="$candidate_max_price"
+        proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
+        log "proof-requestor progress guard bumped SP1 max price per PGU from $previous_max_price to $sp1_max_price_per_pgu (multiplier=$sp1_progress_guard_bump_multiplier cap=$sp1_progress_guard_bump_max_price_per_pgu) before shared proof service restart"
+        return 0
+      }
+
       proof_requestor_progress_guard_last_probe_epoch="$(date +%s)"
 
       wait_bridge_api_deposit_finalized() {
@@ -6999,14 +7040,7 @@ command_run() {
             if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
               proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
               proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
-              if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
-                (( sp1_max_price_per_pgu < sp1_progress_guard_bump_max_price_per_pgu )); then
-                local sp1_progress_guard_previous_max_price
-                sp1_progress_guard_previous_max_price="$sp1_max_price_per_pgu"
-                sp1_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"
-                proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
-                log "proof-requestor progress guard bumped SP1 max price per PGU from $sp1_progress_guard_previous_max_price to $sp1_max_price_per_pgu before shared proof service restart"
-              fi
+              bump_sp1_max_price_for_progress_guard || true
               if ! restart_shared_proof_services_with_wait; then
                 log "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature code=$proof_retryable_failure_code_current"
                 proof_requestor_progress_guard_failed="true"
@@ -7040,14 +7074,7 @@ command_run() {
                 log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=$state; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown} baseline_last_update_epoch=${proof_jobs_last_update_epoch_before_run_deposit:-unknown} current_last_update_epoch=${proof_jobs_last_update_epoch_current:-unknown}"
                 proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
                 proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
-                if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
-                  (( sp1_max_price_per_pgu < sp1_progress_guard_bump_max_price_per_pgu )); then
-                  local sp1_progress_guard_previous_max_price
-                  sp1_progress_guard_previous_max_price="$sp1_max_price_per_pgu"
-                  sp1_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"
-                  proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
-                  log "proof-requestor progress guard bumped SP1 max price per PGU from $sp1_progress_guard_previous_max_price to $sp1_max_price_per_pgu before shared proof service restart"
-                fi
+                bump_sp1_max_price_for_progress_guard || true
                 if ! restart_shared_proof_services_with_wait; then
                   log "proof-requestor progress guard failed to restart shared proof services"
                   proof_requestor_progress_guard_failed="true"
@@ -8137,6 +8164,8 @@ command_run() {
     --arg sp1_input_s3_region "$sp1_input_s3_region" \
     --arg sp1_input_s3_presign_ttl "$sp1_input_s3_presign_ttl" \
     --arg sp1_max_price_per_pgu "$sp1_max_price_per_pgu" \
+    --arg sp1_progress_guard_bump_max_price_per_pgu "$sp1_progress_guard_bump_max_price_per_pgu" \
+    --arg sp1_progress_guard_bump_multiplier "$sp1_progress_guard_bump_multiplier" \
     --arg sp1_deposit_pgu_estimate "$sp1_deposit_pgu_estimate" \
     --arg sp1_withdraw_pgu_estimate "$sp1_withdraw_pgu_estimate" \
     --arg sp1_groth16_base_fee_wei "$sp1_groth16_base_fee_wei" \
@@ -8257,6 +8286,8 @@ command_run() {
           input_s3_region: (if $sp1_input_s3_region == "" then null else $sp1_input_s3_region end),
           input_s3_presign_ttl: (if $sp1_input_s3_presign_ttl == "" then null else $sp1_input_s3_presign_ttl end),
           max_price_per_pgu: $sp1_max_price_per_pgu,
+          progress_guard_bump_max_price_per_pgu: $sp1_progress_guard_bump_max_price_per_pgu,
+          progress_guard_bump_multiplier: $sp1_progress_guard_bump_multiplier,
           deposit_pgu_estimate: $sp1_deposit_pgu_estimate,
           withdraw_pgu_estimate: $sp1_withdraw_pgu_estimate,
           groth16_base_fee_wei: $sp1_groth16_base_fee_wei,

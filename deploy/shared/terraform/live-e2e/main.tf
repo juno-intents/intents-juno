@@ -464,6 +464,16 @@ resource "aws_security_group" "operator" {
   tags = local.common_tags
 }
 
+resource "aws_security_group_rule" "operator_grpc_mesh_ingress" {
+  type                     = "ingress"
+  description              = "Operator gRPC from operators"
+  from_port                = var.operator_base_port
+  to_port                  = var.operator_base_port + var.operator_instance_count - 1
+  protocol                 = "tcp"
+  security_group_id        = aws_security_group.operator.id
+  source_security_group_id = aws_security_group.operator.id
+}
+
 resource "aws_db_subnet_group" "shared" {
   count = var.provision_shared_services ? 1 : 0
 

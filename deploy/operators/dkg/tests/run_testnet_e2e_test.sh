@@ -998,6 +998,24 @@ test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures() {
   assert_contains "$script_text" "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature" "run-testnet-e2e fails explicitly when post-failure restart fails"
 }
 
+test_sp1_progress_guard_uses_stepwise_bump_strategy() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "--sp1-progress-guard-bump-max-price-per-pgu <wei>" "run-testnet-e2e usage documents progress-guard bump max-price ceiling option"
+  assert_contains "$script_text" "--sp1-progress-guard-bump-multiplier <n>" "run-testnet-e2e usage documents progress-guard bump multiplier option"
+  assert_contains "$script_text" 'local sp1_progress_guard_bump_max_price_per_pgu="20000000000"' "run-testnet-e2e defaults progress-guard bump max price to a bounded 10x ceiling"
+  assert_contains "$script_text" 'local sp1_progress_guard_bump_multiplier="4"' "run-testnet-e2e defaults progress-guard bump multiplier for stepwise escalation"
+  assert_contains "$script_text" "--sp1-progress-guard-bump-max-price-per-pgu)" "run-testnet-e2e parses explicit progress-guard bump max-price option"
+  assert_contains "$script_text" "--sp1-progress-guard-bump-multiplier)" "run-testnet-e2e parses explicit progress-guard bump multiplier option"
+  assert_contains "$script_text" "sp1 progress guard bump multiplier must be > 1" "run-testnet-e2e enforces valid multiplicative bump factor"
+  assert_contains "$script_text" "bump_sp1_max_price_for_progress_guard() {" "run-testnet-e2e defines helper for bounded stepwise SP1 max-price bumps"
+  assert_contains "$script_text" "sp1_progress_guard_bump_max_price_per_pgu / sp1_progress_guard_bump_multiplier" "run-testnet-e2e caps stepwise bump before multiplication overflow"
+  assert_contains "$script_text" 'candidate_max_price="$((previous_max_price * sp1_progress_guard_bump_multiplier))"' "run-testnet-e2e applies multiplicative max-price bump when below cap"
+  assert_contains "$script_text" 'multiplier=$sp1_progress_guard_bump_multiplier cap=$sp1_progress_guard_bump_max_price_per_pgu' "run-testnet-e2e logs stepwise bump parameters for operator traceability"
+  assert_not_contains "$script_text" 'sp1_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"' "run-testnet-e2e no longer jumps directly to bump ceiling on first retry"
+}
+
 test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout() {
   local script_text
   local submit_timeout_reference_count
@@ -1134,6 +1152,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
   test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures
+  test_sp1_progress_guard_uses_stepwise_bump_strategy
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
   test_sp1_credit_guardrail_uses_bump_price_ceiling
   test_sp1_pgu_estimate_defaults_are_conservative_for_live_guardrails
