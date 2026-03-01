@@ -984,12 +984,16 @@ test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures() {
 
   assert_contains "$script_text" "proof_jobs_latest_retryable_failure_epoch() {" "run-testnet-e2e defines helper to query latest retryable proof-job failure epoch"
   assert_contains "$script_text" "proof_jobs_latest_retryable_failure_code() {" "run-testnet-e2e defines helper to query latest retryable proof-job failure code"
+  assert_contains "$script_text" "proof_jobs_latest_retryable_failure_message() {" "run-testnet-e2e defines helper to query latest retryable proof-job failure message"
   assert_contains "$script_text" "proof_retryable_failure_epoch_before_run_deposit" "run-testnet-e2e tracks retryable failure epoch baseline before run-deposit wait"
   assert_contains "$script_text" "proof_retryable_failure_epoch_current" "run-testnet-e2e reads latest retryable failure epoch during run-deposit wait"
   assert_contains "$script_text" "proof_retryable_failure_code_current" "run-testnet-e2e reads latest retryable failure code during run-deposit wait"
+  assert_contains "$script_text" "proof_retryable_failure_message_current" "run-testnet-e2e reads latest retryable failure message during run-deposit wait"
   assert_contains "$script_text" "sp1_request_unfulfillable" "run-testnet-e2e explicitly treats SP1 unfulfillable failures as restart/bump trigger candidates"
   assert_contains "$script_text" "sp1_request_auction_timeout" "run-testnet-e2e explicitly treats SP1 auction-timeout failures as restart/bump trigger candidates"
+  assert_contains "$script_text" "sp1_prove_error" "run-testnet-e2e recognizes generic retryable SP1 prove errors for additional classification"
   assert_contains "$script_text" "proof-requestor progress guard observed retryable SP1 failure signature" "run-testnet-e2e logs retryable SP1 failure signature detection while deposit status is pending"
+  assert_contains "$script_text" "proof-requestor progress guard detected insufficient SP1 credits while deposit status is pending" "run-testnet-e2e fails fast when retryable SP1 errors indicate insufficient deposited PROVE credits"
   assert_contains "$script_text" "proof-requestor progress guard bumped SP1 max price per PGU from" "run-testnet-e2e bumps SP1 max-price when retryable SP1 failure signatures repeat"
   assert_contains "$script_text" "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature" "run-testnet-e2e fails explicitly when post-failure restart fails"
 }

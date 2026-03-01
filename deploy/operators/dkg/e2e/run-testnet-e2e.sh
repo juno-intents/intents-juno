@@ -1301,7 +1301,7 @@ FROM proof_jobs
 WHERE pipeline = '$pipeline'
   AND state = 4
   AND retryable = true
-  AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout');
+  AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout','sp1_prove_error');
 " 2>/dev/null
   )"
   status=$?
@@ -1331,7 +1331,7 @@ SELECT COALESCE((
   WHERE pipeline = '$pipeline'
     AND state = 4
     AND retryable = true
-    AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout')
+    AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout','sp1_prove_error')
   ORDER BY updated_at DESC
   LIMIT 1
 ), '');
@@ -1345,10 +1345,41 @@ SELECT COALESCE((
 
   code_raw="$(trim "$code_raw")"
   case "$code_raw" in
-    ""|sp1_request_unfulfillable|sp1_request_auction_timeout) ;;
+    ""|sp1_request_unfulfillable|sp1_request_auction_timeout|sp1_prove_error) ;;
     *) return 1 ;;
   esac
   printf '%s' "$code_raw"
+}
+
+proof_jobs_latest_retryable_failure_message() {
+  local postgres_dsn="$1"
+  local pipeline="$2"
+  local message_raw status
+
+  [[ "$pipeline" =~ ^[a-z_]+$ ]] || return 1
+
+  set +e
+  message_raw="$(
+    psql "$postgres_dsn" -Atqc "
+SELECT COALESCE((
+  SELECT error_message
+  FROM proof_jobs
+  WHERE pipeline = '$pipeline'
+    AND state = 4
+    AND retryable = true
+    AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout','sp1_prove_error')
+  ORDER BY updated_at DESC
+  LIMIT 1
+), '');
+" 2>/dev/null
+  )"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  printf '%s' "$(trim "$message_raw")"
 }
 
 clear_live_bridge_runtime_state() {
@@ -6910,6 +6941,7 @@ command_run() {
       local proof_jobs_last_update_epoch_current=""
       local proof_retryable_failure_epoch_current=""
       local proof_retryable_failure_code_current=""
+      local proof_retryable_failure_message_current=""
       local proof_requestor_progress_guard_interval_seconds="$((10#${sp1_auction_timeout%s}))"
       (( proof_requestor_progress_guard_interval_seconds >= 300 )) || proof_requestor_progress_guard_interval_seconds=300
       local proof_requestor_progress_guard_max_restarts=2
@@ -6947,8 +6979,21 @@ command_run() {
           proof_retryable_failure_code_current="$(proof_jobs_latest_retryable_failure_code "$shared_postgres_dsn" "deposit" || true)"
           if [[ "$proof_retryable_failure_epoch_before_run_deposit" =~ ^[0-9]+$ ]] &&
             [[ "$proof_retryable_failure_epoch_current" =~ ^[0-9]+$ ]] &&
-            (( proof_retryable_failure_epoch_current > proof_retryable_failure_epoch_before_run_deposit )) &&
-            [[ "$proof_retryable_failure_code_current" =~ ^sp1_request_(unfulfillable|auction_timeout)$ ]]; then
+            (( proof_retryable_failure_epoch_current > proof_retryable_failure_epoch_before_run_deposit )); then
+            proof_retryable_failure_message_current="$(
+              proof_jobs_latest_retryable_failure_message "$shared_postgres_dsn" "deposit" || true
+            )"
+            if [[ "$proof_retryable_failure_code_current" == "sp1_prove_error" ]] &&
+              grep -qi "insufficient balance" <<<"$proof_retryable_failure_message_current"; then
+              log "proof-requestor progress guard detected insufficient SP1 credits while deposit status is pending code=$proof_retryable_failure_code_current message=$proof_retryable_failure_message_current"
+              proof_requestor_progress_guard_failed="true"
+              bridge_api_deposit_state="failed_sp1_insufficient_balance"
+              return 0
+            fi
+            if [[ ! "$proof_retryable_failure_code_current" =~ ^sp1_request_(unfulfillable|auction_timeout)$ ]]; then
+              proof_retryable_failure_epoch_before_run_deposit="$proof_retryable_failure_epoch_current"
+              return 1
+            fi
             log "proof-requestor progress guard observed retryable SP1 failure signature code=$proof_retryable_failure_code_current baseline_epoch=$proof_retryable_failure_epoch_before_run_deposit current_epoch=$proof_retryable_failure_epoch_current while deposit status is pending"
             proof_retryable_failure_epoch_before_run_deposit="$proof_retryable_failure_epoch_current"
             if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
