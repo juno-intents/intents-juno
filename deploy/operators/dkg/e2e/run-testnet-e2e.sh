@@ -3658,10 +3658,14 @@ command_run() {
   local withdraw_finalizer_group="${shared_topic_prefix}.withdraw-finalizer.${proof_topic_seed}"
   local withdraw_finalizer_proof_group="${shared_topic_prefix}.withdraw-finalizer.proof.${proof_topic_seed}"
   ensure_command python3
+  local sp1_credit_guardrail_max_price_per_pgu="$sp1_max_price_per_pgu"
+  if (( sp1_progress_guard_bump_max_price_per_pgu > sp1_credit_guardrail_max_price_per_pgu )); then
+    sp1_credit_guardrail_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"
+  fi
   local -a sp1_credit_guardrail=()
   mapfile -t sp1_credit_guardrail < <(
     compute_sp1_credit_guardrail_wei \
-      "$sp1_max_price_per_pgu" \
+      "$sp1_credit_guardrail_max_price_per_pgu" \
       "$sp1_deposit_pgu_estimate" \
       "$sp1_withdraw_pgu_estimate" \
       "$sp1_groth16_base_fee_wei"
@@ -3670,7 +3674,7 @@ command_run() {
   local sp1_required_credit_buffer_wei="${sp1_credit_guardrail[0]}"
   local sp1_critical_credit_threshold_wei="${sp1_credit_guardrail[1]}"
   local sp1_projected_pair_cost_wei="${sp1_credit_guardrail[2]}"
-  log "sp1 credit guardrail projected_pair_cost_wei=$sp1_projected_pair_cost_wei critical_threshold_wei=$sp1_critical_credit_threshold_wei required_buffer_wei=$sp1_required_credit_buffer_wei"
+  log "sp1 credit guardrail projected_pair_cost_wei=$sp1_projected_pair_cost_wei critical_threshold_wei=$sp1_critical_credit_threshold_wei required_buffer_wei=$sp1_required_credit_buffer_wei max_price_per_pgu_for_guardrail=$sp1_credit_guardrail_max_price_per_pgu"
   log "sp1 gas policy uses SDK-managed simulation gas limits (no forced cap env vars)"
 
   local dkg_summary="$workdir/reports/dkg-summary.json"

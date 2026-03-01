@@ -1011,6 +1011,17 @@ test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout() {
   fi
 }
 
+test_sp1_credit_guardrail_uses_bump_price_ceiling() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'local sp1_credit_guardrail_max_price_per_pgu="$sp1_max_price_per_pgu"' "sp1 credit guardrail starts from configured base max-price-per-pgu"
+  assert_contains "$script_text" 'if (( sp1_progress_guard_bump_max_price_per_pgu > sp1_credit_guardrail_max_price_per_pgu )); then' "sp1 credit guardrail accounts for progress-guard bump ceiling when higher than base price"
+  assert_contains "$script_text" 'sp1_credit_guardrail_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"' "sp1 credit guardrail uses bump ceiling as effective max price for budget math"
+  assert_contains "$script_text" 'compute_sp1_credit_guardrail_wei \' "sp1 credit guardrail helper is still used to derive required/critical thresholds"
+  assert_contains "$script_text" '"$sp1_credit_guardrail_max_price_per_pgu" \' "sp1 credit guardrail passes effective max price (post bump-ceiling clamp) into guardrail math"
+}
+
 test_shared_ecs_rollout_accepts_explicit_proof_services_image_override() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1112,6 +1123,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
   test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
+  test_sp1_credit_guardrail_uses_bump_price_ceiling
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_submission_waits_for_relayer_checkpoint_catchup
 }
