@@ -32,6 +32,8 @@ func main() {
 		oWalletUA   = flag.String("owallet-ua", "", "oWallet unified address (required)")
 
 		refundWindowSeconds = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
+		minDepositAmount    = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
+		minWithdrawAmount   = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
 
 		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
@@ -186,6 +188,8 @@ func main() {
 		BridgeAddress:           common.HexToAddress(*bridgeAddr),
 		OWalletUA:               *oWalletUA,
 		RefundWindowSeconds:     *refundWindowSeconds,
+		MinDepositAmount:        *minDepositAmount,
+		MinWithdrawAmount:       *minWithdrawAmount,
 		ActionService:           actionSvc,
 		RateLimitPerIPPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:          *rateLimitBurst,

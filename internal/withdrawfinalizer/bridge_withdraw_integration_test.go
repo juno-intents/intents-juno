@@ -122,6 +122,8 @@ func TestBridgeWithdrawHarness_RequestExtendFinalizeAndRefund(t *testing.T) {
 		new(big.Int).SetUint64(tipBps),
 		refundWindowSeconds,
 		maxExtendSeconds,
+		big.NewInt(0),
+		big.NewInt(0),
 	)
 
 	bridge := bind.NewBoundContract(bridgeAddr, bridgeABI, evm, evm, evm)

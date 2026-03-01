@@ -1945,7 +1945,9 @@ set_bridge_params_with_refund_window_retry() {
   local relayer_tip_bps="$5"
   local target_refund_window_seconds="$6"
   local max_expiry_extension_seconds="$7"
-  local action_label="$8"
+  local min_deposit_amount="$8"
+  local min_withdraw_amount="$9"
+  local action_label="${10}"
 
   local max_attempts="4"
   local attempt send_output send_status
@@ -1957,11 +1959,13 @@ set_bridge_params_with_refund_window_retry() {
         --rpc-url "$rpc_url" \
         --private-key "$bridge_deployer_key_hex" \
         "$bridge_address" \
-        "setParams(uint96,uint96,uint64,uint64)" \
+        "setParams(uint96,uint96,uint64,uint64,uint256,uint256)" \
         "$fee_bps" \
         "$relayer_tip_bps" \
         "$target_refund_window_seconds" \
-        "$max_expiry_extension_seconds")"
+        "$max_expiry_extension_seconds" \
+        "$min_deposit_amount" \
+        "$min_withdraw_amount")"
     send_status=$?
     set -e
     if (( send_status != 0 )); then
@@ -5729,7 +5733,7 @@ command_run() {
   fi
   if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
     local bridge_params_restore_output bridge_params_restore_status
-    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64) current=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
+    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) current=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
     set +e
     bridge_params_restore_output="$(
       set_bridge_params_with_refund_window_retry \
@@ -5740,6 +5744,8 @@ command_run() {
         "$bridge_relayer_tip_bps" \
         "$bridge_effective_refund_window_floor_seconds" \
         "$bridge_max_expiry_extension_seconds" \
+        0 \
+        0 \
         "bridge baseline restore"
     )"
     bridge_params_restore_status=$?
@@ -7560,7 +7566,7 @@ command_run() {
       if [[ "$scenario_params_mutated" != "true" ]]; then
         return 0
       fi
-      log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$bridge_refund_window_seconds"
+      log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) refund_window_seconds=$bridge_refund_window_seconds"
       set +e
       scenario_restore_output="$(
         set_bridge_params_with_refund_window_retry \
@@ -7571,6 +7577,8 @@ command_run() {
           "$bridge_relayer_tip_bps" \
           "$bridge_refund_window_seconds" \
           "$bridge_max_expiry_extension_seconds" \
+          0 \
+          0 \
           "refund-after-expiry scenario restore"
       )"
       scenario_restore_status=$?
@@ -7597,7 +7605,7 @@ command_run() {
     scenario_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
     [[ "$scenario_recipient_raw_hex" =~ ^[0-9a-fA-F]{86}$ ]] || return 1
 
-    log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64) refund_window_seconds=$scenario_refund_window_seconds"
+    log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) refund_window_seconds=$scenario_refund_window_seconds"
     set +e
     scenario_refund_output="$(
       set_bridge_params_with_refund_window_retry \
@@ -7608,6 +7616,8 @@ command_run() {
         "$bridge_relayer_tip_bps" \
         "$scenario_refund_window_seconds" \
         "$bridge_max_expiry_extension_seconds" \
+        0 \
+        0 \
         "refund-after-expiry scenario configure"
     )"
     scenario_refund_status=$?

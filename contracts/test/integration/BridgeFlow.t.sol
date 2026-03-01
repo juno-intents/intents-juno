@@ -55,7 +55,9 @@ contract BridgeFlowIntegrationTest is Test {
             FEE_BPS,
             TIP_BPS,
             REFUND_WINDOW,
-            MAX_EXTEND
+            MAX_EXTEND,
+            0,
+            0
         );
 
         token.setBridge(address(bridge));

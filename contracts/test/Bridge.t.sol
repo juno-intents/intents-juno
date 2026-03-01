@@ -78,7 +78,9 @@ contract BridgeTest is Test {
             FEE_BPS,
             TIP_BPS,
             REFUND_WINDOW,
-            MAX_EXTEND
+            MAX_EXTEND,
+            0,
+            0
         );
 
         token.setBridge(address(bridge));
@@ -429,7 +431,7 @@ contract BridgeTest is Test {
         }
 
         Bridge b = new Bridge(
-            owner, t, d, r, v, DEPOSIT_IMAGE_ID, WITHDRAW_IMAGE_ID, FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND
+            owner, t, d, r, v, DEPOSIT_IMAGE_ID, WITHDRAW_IMAGE_ID, FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND, 0, 0
         );
         t.setBridge(address(b));
         d.setBridge(address(b));

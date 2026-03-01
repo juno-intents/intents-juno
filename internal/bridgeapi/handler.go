@@ -30,6 +30,8 @@ type Config struct {
 	BridgeAddress       common.Address
 	OWalletUA           string
 	RefundWindowSeconds uint64
+	MinDepositAmount    uint64
+	MinWithdrawAmount   uint64
 	NonceFn             func() (uint64, error)
 	ActionService       ActionService
 
@@ -162,6 +164,8 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"bridgeAddress":       h.cfg.BridgeAddress.Hex(),
 		"oWalletUA":           h.cfg.OWalletUA,
 		"refundWindowSeconds": h.cfg.RefundWindowSeconds,
+		"minDepositAmount":    strconv.FormatUint(h.cfg.MinDepositAmount, 10),
+		"minWithdrawAmount":   strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
 	})
 }
 
@@ -261,6 +265,14 @@ func (h *handler) handleDepositSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"version": "v1",
 			"error":   "invalid_amount",
+		})
+		return
+	}
+	if h.cfg.MinDepositAmount > 0 && amount < h.cfg.MinDepositAmount {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version":          "v1",
+			"error":            "below_minimum_amount",
+			"minDepositAmount": strconv.FormatUint(h.cfg.MinDepositAmount, 10),
 		})
 		return
 	}
@@ -369,6 +381,14 @@ func (h *handler) handleWithdrawalRequest(w http.ResponseWriter, r *http.Request
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"version": "v1",
 			"error":   "invalid_amount",
+		})
+		return
+	}
+	if h.cfg.MinWithdrawAmount > 0 && amount < h.cfg.MinWithdrawAmount {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version":           "v1",
+			"error":             "below_minimum_amount",
+			"minWithdrawAmount": strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
 		})
 		return
 	}

@@ -325,7 +325,7 @@ test_run_restores_bridge_refund_window_baseline_before_live_flow() {
   assert_contains "$script_text" 'if (( bridge_effective_refund_window_floor_seconds > bridge_max_expiry_extension_seconds )); then' "run-testnet-e2e clamps baseline floor to contract max expiry extension when needed"
   assert_contains "$script_text" "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target" "run-testnet-e2e logs floor clamp when baseline exceeds contract max extension"
   assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
-  assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64)" "run-testnet-e2e logs baseline bridge param restoration"
+  assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256)" "run-testnet-e2e logs baseline bridge param restoration"
   assert_contains "$script_text" "set_bridge_params_with_refund_window_retry \\" "run-testnet-e2e baseline restore uses verified setParams helper with readback retries"
   assert_contains "$script_text" "failed to restore baseline bridge params before relayer launch" "run-testnet-e2e hard-fails when bridge baseline restore transaction fails"
   assert_contains "$script_text" "bridge refundWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline refund window after restore"

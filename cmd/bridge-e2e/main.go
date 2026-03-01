@@ -1194,6 +1194,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			new(big.Int).SetUint64(tipBps),
 			refundWindowSeconds,
 			maxExtendSeconds,
+			big.NewInt(0),
+			big.NewInt(0),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("deploy bridge: %w", err)

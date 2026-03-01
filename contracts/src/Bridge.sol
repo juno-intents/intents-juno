@@ -39,6 +39,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error InvalidExtendBatch();
     error ExpiryExtensionTooLarge();
     error BadJournalDomain();
+    error BelowMinimumAmount();
 
     // -------- Types --------
     struct Checkpoint {
@@ -114,6 +115,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     uint96 public relayerTipBps; // portion of fee (in bps) paid to msg.sender
     uint64 public refundWindowSeconds;
     uint64 public maxExpiryExtensionSeconds;
+    uint256 public minDepositAmount;
+    uint256 public minWithdrawAmount;
 
     uint256 public withdrawNonce;
 
@@ -122,7 +125,12 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     // -------- Events --------
     event ParamsUpdated(
-        uint96 feeBps, uint96 relayerTipBps, uint64 refundWindowSeconds, uint64 maxExpiryExtensionSeconds
+        uint96 feeBps,
+        uint96 relayerTipBps,
+        uint64 refundWindowSeconds,
+        uint64 maxExpiryExtensionSeconds,
+        uint256 minDepositAmount,
+        uint256 minWithdrawAmount
     );
     event VerifierUpdated(address indexed verifier);
     event ImageIdsUpdated(bytes32 depositImageId, bytes32 withdrawImageId);
@@ -154,7 +162,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint96 feeBps_,
         uint96 relayerTipBps_,
         uint64 refundWindowSeconds_,
-        uint64 maxExpiryExtensionSeconds_
+        uint64 maxExpiryExtensionSeconds_,
+        uint256 minDepositAmount_,
+        uint256 minWithdrawAmount_
     ) Ownable(initialOwner) EIP712("WJUNO Bridge", "1") {
         if (
             address(wjuno_) == address(0) || address(feeDistributor_) == address(0)
@@ -176,8 +186,10 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         relayerTipBps = relayerTipBps_;
         refundWindowSeconds = refundWindowSeconds_;
         maxExpiryExtensionSeconds = maxExpiryExtensionSeconds_;
+        minDepositAmount = minDepositAmount_;
+        minWithdrawAmount = minWithdrawAmount_;
 
-        emit ParamsUpdated(feeBps_, relayerTipBps_, refundWindowSeconds_, maxExpiryExtensionSeconds_);
+        emit ParamsUpdated(feeBps_, relayerTipBps_, refundWindowSeconds_, maxExpiryExtensionSeconds_, minDepositAmount_, minWithdrawAmount_);
         emit VerifierUpdated(address(verifier_));
         emit ImageIdsUpdated(depositImageId_, withdrawImageId_);
     }
@@ -187,7 +199,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint96 newFeeBps,
         uint96 newRelayerTipBps,
         uint64 newRefundWindowSeconds,
-        uint64 newMaxExpiryExtensionSeconds
+        uint64 newMaxExpiryExtensionSeconds,
+        uint256 newMinDepositAmount,
+        uint256 newMinWithdrawAmount
     ) external onlyOwner {
         if (newFeeBps > BPS_DENOMINATOR || newRelayerTipBps > BPS_DENOMINATOR) {
             revert InvalidBps();
@@ -198,8 +212,10 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         relayerTipBps = newRelayerTipBps;
         refundWindowSeconds = newRefundWindowSeconds;
         maxExpiryExtensionSeconds = newMaxExpiryExtensionSeconds;
+        minDepositAmount = newMinDepositAmount;
+        minWithdrawAmount = newMinWithdrawAmount;
 
-        emit ParamsUpdated(newFeeBps, newRelayerTipBps, newRefundWindowSeconds, newMaxExpiryExtensionSeconds);
+        emit ParamsUpdated(newFeeBps, newRelayerTipBps, newRefundWindowSeconds, newMaxExpiryExtensionSeconds, newMinDepositAmount, newMinWithdrawAmount);
     }
 
     function setVerifier(ISP1Verifier newVerifier) external onlyOwner {
@@ -277,7 +293,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             depositUsed[it.depositId] = true;
 
             // Skip invalid items to keep batches resilient (but prevent replays by marking used).
-            if (it.recipient == address(0) || it.amount == 0) {
+            if (it.recipient == address(0) || it.amount == 0 || it.amount < minDepositAmount) {
                 emit DepositSkipped(it.depositId);
                 continue;
             }
@@ -303,7 +319,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         nonReentrant
         returns (bytes32 withdrawalId)
     {
-        if (amount == 0) revert InvalidExtendBatch();
+        if (amount == 0) revert BelowMinimumAmount();
+        if (amount < minWithdrawAmount) revert BelowMinimumAmount();
         if (junoRecipientUA.length == 0 || junoRecipientUA.length > MAX_UA_BYTES) revert InvalidWithdrawalRecipient();
 
         IERC20(address(wjuno)).safeTransferFrom(msg.sender, address(this), amount);
