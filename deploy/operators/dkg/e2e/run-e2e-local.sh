@@ -1,750 +1,1399 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 #
-# Checkpoint-based local e2e runner against AWS infrastructure.
+# Full-lifecycle local e2e runner.
+#
+# Provisions AWS infrastructure via Terraform, prepares operators, runs the
+# distributed DKG ceremony, executes the e2e test on a remote runner host,
+# and tears everything down on exit.
 #
 # Usage:
-#   ./run-e2e-local.sh --config <env-file> [--stage <stage-name>] [--reset]
+#   ./run-e2e-local.sh run   [options]   # Full lifecycle
+#   ./run-e2e-local.sh resume [options]   # Resume from existing infra
+#   ./run-e2e-local.sh cleanup [options]  # Tear down leftover infra
 #
-# Stages execute sequentially and write checkpoint files. On re-run, completed
-# stages are skipped automatically. Use --stage to resume from a specific stage.
-# Use --reset to clear all checkpoints and start fresh.
+# Auto-discovers:
+#   - Base funder key:     $REPO_ROOT/tmp/funders/base-funder.key
+#   - Juno funder seed:    $REPO_ROOT/tmp/funders-orchard/juno-funder.seed.txt
+#   - SP1 requestor key:   ~/.juno-secrets/boundless-requestor-mainnet.key
+#   - Operator AMI:        from GH release operator-stack-ami-latest
+#   - SP1 vkeys + ELFs:    from GH release bridge-guests-latest
+#   - Proof services image: from GH release shared-proof-services-image-latest
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
-AWS_PROFILE="${AWS_PROFILE:-juno}"
-WORKDIR="${WORKDIR:-$REPO_ROOT/tmp/e2e-local}"
-CHECKPOINT_DIR="$WORKDIR/.checkpoints"
-LOG_DIR="$WORKDIR/logs"
-REPORT_DIR="$WORKDIR/reports"
-PID_DIR="$WORKDIR/pids"
+# shellcheck source=../common.sh
+source "$SCRIPT_DIR/../common.sh"
+prepare_script_runtime "$SCRIPT_DIR"
 
-# ── Colours and logging ──────────────────────────────────────────────────────
+# ── Defaults ─────────────────────────────────────────────────────────────────
+
+AWS_PROFILE="${AWS_PROFILE:-juno}"
+AWS_REGION="${AWS_REGION:-us-east-1}"
+WORKDIR=""
+TERRAFORM_DIR="$REPO_ROOT/deploy/shared/terraform/live-e2e"
+OPERATOR_COUNT=5
+OPERATOR_THRESHOLD=3
+OPERATOR_BASE_PORT=18443
+OPERATOR_AMI_ID=""
+RUNNER_INSTANCE_TYPE="c7i.4xlarge"
+OPERATOR_INSTANCE_TYPE="c7i.large"
+BRIDGE_VERIFIER_ADDRESS="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+BRIDGE_GUEST_RELEASE_TAG="bridge-guests-latest"
+PROOF_SERVICES_RELEASE_TAG="shared-proof-services-image-latest"
+DKG_RELEASE_TAG="v0.1.0"
+BASE_RPC_URL="https://sepolia.base.org"
+BASE_CHAIN_ID="84532"
+KEEP_INFRA=false
+COMMAND=""
+
+# Auto-discovered paths
+BASE_FUNDER_KEY_FILE=""
+JUNO_FUNDER_KEY_FILE=""
+JUNO_FUNDER_SEED_FILE=""
+JUNO_FUNDER_SOURCE_ADDRESS_FILE=""
+SP1_REQUESTOR_KEY_FILE=""
+
+# Resolved from GH releases
+BRIDGE_DEPOSIT_IMAGE_ID=""
+BRIDGE_WITHDRAW_IMAGE_ID=""
+SP1_DEPOSIT_PROGRAM_URL=""
+SP1_WITHDRAW_PROGRAM_URL=""
+PROOF_SERVICES_IMAGE=""
+
+# Terraform outputs (populated after apply)
+RUNNER_PUBLIC_IP=""
+RUNNER_SSH_USER="ubuntu"
+SHARED_POSTGRES_ENDPOINT=""
+SHARED_POSTGRES_DSN=""
+SHARED_KAFKA_BROKERS=""
+SHARED_IPFS_API_URL=""
+SHARED_ECS_CLUSTER_ARN=""
+SHARED_PROOF_REQUESTOR_SERVICE=""
+SHARED_PROOF_FUNDER_SERVICE=""
+DKG_KMS_KEY_ARN=""
+DKG_S3_BUCKET=""
+DKG_S3_KEY_PREFIX=""
+declare -a OPERATOR_PUBLIC_IPS=()
+declare -a OPERATOR_PRIVATE_IPS=()
+
+# Derived owallet keys (from DKG UFVK)
+SP1_DEPOSIT_OWALLET_IVK_HEX=""
+SP1_WITHDRAW_OWALLET_OVK_HEX=""
+
+# Cleanup globals
+CLEANUP_ENABLED=false
+CLEANUP_SP1_SECRET_ARN=""
+
+# SSH
+SSH_KEY_PRIVATE=""
+SSH_KEY_PUBLIC=""
+SSH_OPTS=()
+
+# ── Colours ──────────────────────────────────────────────────────────────────
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
-CYAN='\033[0;36m'; NC='\033[0m'
+CYAN='\033[0;36m'; BOLD='\033[1m'; NC='\033[0m'
 
-log()  { echo -e "${CYAN}[$(date +%H:%M:%S)]${NC} $*"; }
-ok()   { echo -e "${GREEN}[$(date +%H:%M:%S)] ✓${NC} $*"; }
+ok()   { echo -e "${GREEN}[$(date +%H:%M:%S)] ✓${NC} $*" >&2; }
 warn() { echo -e "${YELLOW}[$(date +%H:%M:%S)] !${NC} $*" >&2; }
-die()  { echo -e "${RED}[$(date +%H:%M:%S)] FATAL:${NC} $*" >&2; exit 1; }
+step() { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${NC}" >&2; }
 
-# ── Checkpoint helpers ────────────────────────────────────────────────────────
+# ── Checkpoint helpers ───────────────────────────────────────────────────────
 
-checkpoint_done() {
-  [[ -f "$CHECKPOINT_DIR/$1.done" ]]
-}
+CHECKPOINT_DIR=""
+
+checkpoint_done() { [[ -f "$CHECKPOINT_DIR/$1.done" ]]; }
 
 checkpoint_mark() {
   mkdir -p "$CHECKPOINT_DIR"
   date -u +%Y-%m-%dT%H:%M:%SZ > "$CHECKPOINT_DIR/$1.done"
-  ok "Stage '$1' completed"
+  ok "Checkpoint '$1' completed"
 }
 
-checkpoint_reset() {
-  rm -rf "$CHECKPOINT_DIR"
-  log "All checkpoints cleared"
-}
-
-# ── Process management ────────────────────────────────────────────────────────
-
-start_bg() {
-  local name="$1"; shift
-  local logfile="$LOG_DIR/$name.log"
-  mkdir -p "$PID_DIR" "$LOG_DIR"
-
-  log "Starting $name ..."
-  "$@" > "$logfile" 2>&1 &
-  local pid=$!
-  echo "$pid" > "$PID_DIR/$name.pid"
-  echo "$name" >> "$PID_DIR/.all"
-  log "  $name started (pid=$pid, log=$logfile)"
-}
-
-stop_all_bg() {
-  [[ -f "$PID_DIR/.all" ]] || return 0
-  log "Stopping background services ..."
-  while read -r name; do
-    local pidfile="$PID_DIR/$name.pid"
-    if [[ -f "$pidfile" ]]; then
-      local pid; pid=$(cat "$pidfile")
-      if kill -0 "$pid" 2>/dev/null; then
-        kill "$pid" 2>/dev/null || true
-        wait "$pid" 2>/dev/null || true
-        log "  Stopped $name (pid=$pid)"
-      fi
-    fi
-  done < "$PID_DIR/.all"
-  rm -f "$PID_DIR/.all"
-}
-
-is_running() {
-  local pidfile="$PID_DIR/$1.pid"
-  [[ -f "$pidfile" ]] && kill -0 "$(cat "$pidfile")" 2>/dev/null
-}
-
-# ── Canary / health checks ───────────────────────────────────────────────────
-
-wait_for_http() {
-  local label="$1" url="$2" timeout="${3:-60}"
-  local deadline; deadline=$(( $(date +%s) + timeout ))
-  while (( $(date +%s) < deadline )); do
-    if curl -sf -o /dev/null "$url" 2>/dev/null; then
-      ok "$label is healthy ($url)"
-      return 0
-    fi
-    sleep 2
-  done
-  die "$label did not become healthy within ${timeout}s ($url)"
-}
-
-wait_for_postgres() {
-  local dsn="$1" timeout="${2:-30}"
-  local deadline; deadline=$(( $(date +%s) + timeout ))
-  while (( $(date +%s) < deadline )); do
-    if psql "$dsn" -c "SELECT 1" >/dev/null 2>&1; then
-      ok "Postgres reachable"
-      return 0
-    fi
-    sleep 2
-  done
-  die "Postgres unreachable within ${timeout}s"
-}
-
-# ── Usage ─────────────────────────────────────────────────────────────────────
+# ── Usage ────────────────────────────────────────────────────────────────────
 
 usage() {
-  cat <<'USAGE'
-Usage: run-e2e-local.sh --config <env-file> [options]
+  cat <<'EOF'
+Usage:
+  run-e2e-local.sh run     [options]   Full lifecycle: provision → test → teardown
+  run-e2e-local.sh resume  [options]   Resume using existing infra + DKG state
+  run-e2e-local.sh cleanup [options]   Destroy leftover infrastructure
 
 Options:
-  --config <file>    Required. Env file with all configuration variables.
-  --stage <name>     Resume from this specific stage (skips earlier completed stages).
-  --reset            Clear all checkpoints and start fresh.
-  --skip-infra       Skip infrastructure validation (assume already running).
-  --skip-services    Skip service startup (assume already running).
-  --dry-run          Print what would happen without executing.
+  --workdir <path>             Working directory (default: $REPO_ROOT/tmp/e2e-local)
+  --aws-region <region>        AWS region (default: us-east-1)
+  --aws-profile <name>         AWS CLI profile (default: juno)
+  --operator-count <n>         Number of operator hosts (default: 5)
+  --operator-threshold <n>     Signature threshold (default: 3)
+  --operator-ami-id <ami-id>   Override operator AMI (default: auto-resolve from GH)
+  --base-rpc-url <url>         Base testnet RPC (default: https://sepolia.base.org)
+  --keep-infra                 Do not destroy infra on exit
+  --base-funder-key-file <p>   Override Base funder key file
+  --sp1-requestor-key-file <p> Override SP1 requestor key file
 
-Stages (in order):
-  01-validate-config       Validate all required config variables
-  02-build-binaries        Build Go binaries
-  03-check-aws-infra       Validate Postgres, Kafka, IPFS, ECS connectivity
-  04-check-operators       Verify operator checkpoint services are running
-  05-deploy-contracts      Deploy Bridge/wJUNO/FeeDistributor (or verify existing)
-  06-start-bridge-api      Start bridge-api service
-  07-start-base-relayer    Start base-relayer service
-  08-start-deposit-relayer Start deposit-relayer service
-  09-start-withdraw-coord  Start withdraw-coordinator service
-  10-start-withdraw-final  Start withdraw-finalizer service
-  11-canary-health         Canary: all services healthy, checkpoint flowing
-  12-run-orchestrator      Run e2e-orchestrator (deposit + withdrawal flow)
-  13-collect-results       Collect logs, report, cleanup
-
-Config file variables (source'd as bash):
-  # AWS
-  AWS_REGION=us-east-1
-
-  # Endpoints
-  BASE_RPC_URL=https://sepolia.base.org
-  BASE_CHAIN_ID=84532
-  JUNO_RPC_URL=http://...
-  JUNO_RPC_USER=...
-  JUNO_RPC_PASS=...
-
-  # Shared infrastructure
-  SHARED_POSTGRES_DSN="postgresql://..."
-  SHARED_KAFKA_BROKERS="b1:9094,b2:9094"
-  SHARED_IPFS_API_URL="http://..."
-  SHARED_TOPIC_PREFIX="shared.infra.e2e"
-
-  # Contracts (leave empty to deploy fresh)
-  BRIDGE_ADDRESS=
-  WJUNO_ADDRESS=
-  FEE_DISTRIBUTOR_ADDRESS=
-  OPERATOR_REGISTRY_ADDRESS=
-
-  # Bridge deploy params (if deploying fresh)
-  BASE_FUNDER_KEY_FILE=./base-funder.key
-  BRIDGE_VERIFIER_ADDRESS=0x397A...
-  BRIDGE_DEPOSIT_IMAGE_ID=0x...
-  BRIDGE_WITHDRAW_IMAGE_ID=0x...
-  BRIDGE_FEE_BPS=50
-  BRIDGE_RELAYER_TIP_BPS=1000
-  BRIDGE_REFUND_WINDOW=86400
-  BRIDGE_MAX_EXPIRY_EXT=604800
-
-  # Operators
-  OPERATOR_ADDRESSES="0x1,0x2,0x3,0x4,0x5"
-  OPERATOR_THRESHOLD=3
-
-  # e2e-orchestrator params
-  RECIPIENT_ADDRESS=0x...
-  JUNO_FUNDER_SOURCE_ADDRESS=...
-  OWALLET_UA=...
-  JUNO_WALLET_ID=...
-  DEPOSIT_AMOUNT_ZAT=100000
-  WITHDRAW_AMOUNT=10000
-  WITHDRAW_RECIPIENT_RAW_HEX=...
-
-  # Witness extraction
-  JUNO_SCAN_URL=https://...
-  JUNO_SCAN_BEARER_TOKEN=...
-  WITNESS_EXTRACT_BIN=juno-witness-extract
-
-  # SP1
-  SP1_REQUESTOR_KEY_FILE=./sp1.key
-
-  # Service ports (local)
-  BRIDGE_API_LISTEN=127.0.0.1:8082
-  BASE_RELAYER_LISTEN=127.0.0.1:8080
-
-  # TSS (for withdraw-coordinator)
-  TSS_URL=https://...
-  TSS_SERVER_CA_FILE=./tss-ca.pem
-
-  # Blobs
-  BLOB_S3_BUCKET=...
-  BLOB_S3_PREFIX=withdraw-live
-USAGE
+Auto-discovered secrets (override with flags if needed):
+  Base funder key:       tmp/funders/base-funder.key
+  Juno funder seed:      tmp/funders-orchard/juno-funder.seed.txt
+  SP1 requestor key:     ~/.juno-secrets/boundless-requestor-mainnet.key
+  Operator AMI:          from GH release operator-stack-ami-latest
+  SP1 guest programs:    from GH release bridge-guests-latest
+  Proof services image:  from GH release shared-proof-services-image-latest
+EOF
   exit 1
 }
 
-# ── Parse arguments ───────────────────────────────────────────────────────────
+# ── Argument parsing ─────────────────────────────────────────────────────────
 
-CONFIG_FILE=""
-RESUME_STAGE=""
-SKIP_INFRA=false
-SKIP_SERVICES=false
-DRY_RUN=false
+parse_args() {
+  [[ $# -gt 0 ]] || usage
+  COMMAND="$1"; shift
 
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --config)   CONFIG_FILE="$2"; shift 2 ;;
-    --stage)    RESUME_STAGE="$2"; shift 2 ;;
-    --reset)    checkpoint_reset; shift ;;
-    --skip-infra)    SKIP_INFRA=true; shift ;;
-    --skip-services) SKIP_SERVICES=true; shift ;;
-    --dry-run)       DRY_RUN=true; shift ;;
-    -h|--help)  usage ;;
-    *)          die "Unknown argument: $1" ;;
+  case "$COMMAND" in
+    run|resume|cleanup) ;;
+    -h|--help) usage ;;
+    *) die "unknown command: $COMMAND (expected: run, resume, cleanup)" ;;
   esac
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --workdir)                WORKDIR="$2"; shift 2 ;;
+      --aws-region)             AWS_REGION="$2"; shift 2 ;;
+      --aws-profile)            AWS_PROFILE="$2"; shift 2 ;;
+      --operator-count)         OPERATOR_COUNT="$2"; shift 2 ;;
+      --operator-threshold)     OPERATOR_THRESHOLD="$2"; shift 2 ;;
+      --operator-ami-id)        OPERATOR_AMI_ID="$2"; shift 2 ;;
+      --base-rpc-url)           BASE_RPC_URL="$2"; shift 2 ;;
+      --base-funder-key-file)   BASE_FUNDER_KEY_FILE="$2"; shift 2 ;;
+      --sp1-requestor-key-file) SP1_REQUESTOR_KEY_FILE="$2"; shift 2 ;;
+      --keep-infra)             KEEP_INFRA=true; shift ;;
+      -h|--help) usage ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+
+  WORKDIR="${WORKDIR:-$REPO_ROOT/tmp/e2e-local}"
+  CHECKPOINT_DIR="$WORKDIR/.checkpoints"
+}
+
+# ── Auto-discovery ───────────────────────────────────────────────────────────
+
+auto_discover_secrets() {
+  step "Auto-discovering secrets"
+
+  # Base funder key
+  if [[ -z "$BASE_FUNDER_KEY_FILE" ]]; then
+    local candidates=(
+      "$REPO_ROOT/tmp/funders/base-funder.key"
+      "$REPO_ROOT/tmp/funders-orchard/base-funder.key"
+    )
+    for f in "${candidates[@]}"; do
+      if [[ -f "$f" ]]; then
+        BASE_FUNDER_KEY_FILE="$f"
+        break
+      fi
+    done
+  fi
+  [[ -n "$BASE_FUNDER_KEY_FILE" && -f "$BASE_FUNDER_KEY_FILE" ]] || \
+    die "base funder key not found; provide --base-funder-key-file or place at tmp/funders/base-funder.key"
+  ok "Base funder key: $BASE_FUNDER_KEY_FILE"
+
+  # Juno funder (prefer orchard wallet with seed phrase)
+  if [[ -z "$JUNO_FUNDER_SEED_FILE" ]]; then
+    local seed_file="$REPO_ROOT/tmp/funders-orchard/juno-funder.seed.txt"
+    if [[ -f "$seed_file" ]]; then
+      JUNO_FUNDER_SEED_FILE="$seed_file"
+    fi
+  fi
+  if [[ -z "$JUNO_FUNDER_KEY_FILE" && -z "$JUNO_FUNDER_SEED_FILE" ]]; then
+    local key_file="$REPO_ROOT/tmp/funders/juno-funder.key"
+    if [[ -f "$key_file" ]]; then
+      JUNO_FUNDER_KEY_FILE="$key_file"
+    fi
+  fi
+  if [[ -n "$JUNO_FUNDER_SEED_FILE" ]]; then
+    ok "Juno funder seed: $JUNO_FUNDER_SEED_FILE"
+  elif [[ -n "$JUNO_FUNDER_KEY_FILE" ]]; then
+    ok "Juno funder key: $JUNO_FUNDER_KEY_FILE"
+  else
+    warn "no Juno funder key/seed found; witness metadata may fail"
+  fi
+
+  # Juno funder source address
+  local ua_file="$REPO_ROOT/tmp/funders/juno-funder.ua"
+  if [[ -f "$ua_file" ]]; then
+    JUNO_FUNDER_SOURCE_ADDRESS_FILE="$ua_file"
+    ok "Juno funder source address: $ua_file"
+  fi
+
+  # SP1 requestor key
+  if [[ -z "$SP1_REQUESTOR_KEY_FILE" ]]; then
+    local sp1_candidates=(
+      "$HOME/.juno-secrets/boundless-requestor-mainnet.key"
+      "$REPO_ROOT/tmp/funders/boundless-requestor-mainnet.key"
+    )
+    for f in "${sp1_candidates[@]}"; do
+      if [[ -f "$f" ]]; then
+        SP1_REQUESTOR_KEY_FILE="$f"
+        break
+      fi
+    done
+  fi
+  [[ -n "$SP1_REQUESTOR_KEY_FILE" && -f "$SP1_REQUESTOR_KEY_FILE" ]] || \
+    die "SP1 requestor key not found; provide --sp1-requestor-key-file or place at ~/.juno-secrets/boundless-requestor-mainnet.key"
+  ok "SP1 requestor key: $SP1_REQUESTOR_KEY_FILE"
+}
+
+# ── GH release resolution ───────────────────────────────────────────────────
+
+resolve_gh_releases() {
+  step "Resolving GitHub release assets"
+
+  # Bridge guest programs (vkeys + ELF URLs)
+  log "downloading bridge-guest-release.env from $BRIDGE_GUEST_RELEASE_TAG..."
+  local guest_env
+  guest_env="$(gh release download "$BRIDGE_GUEST_RELEASE_TAG" --pattern "bridge-guest-release.env" --output - 2>/dev/null)" || \
+    die "failed to download bridge-guest-release.env from release $BRIDGE_GUEST_RELEASE_TAG"
+
+  BRIDGE_DEPOSIT_IMAGE_ID="$(grep '^BRIDGE_DEPOSIT_IMAGE_ID=' <<<"$guest_env" | cut -d= -f2)"
+  BRIDGE_WITHDRAW_IMAGE_ID="$(grep '^BRIDGE_WITHDRAW_IMAGE_ID=' <<<"$guest_env" | cut -d= -f2)"
+  SP1_DEPOSIT_PROGRAM_URL="$(grep '^SP1_DEPOSIT_PROGRAM_URL=' <<<"$guest_env" | cut -d= -f2)"
+  SP1_WITHDRAW_PROGRAM_URL="$(grep '^SP1_WITHDRAW_PROGRAM_URL=' <<<"$guest_env" | cut -d= -f2)"
+
+  [[ -n "$BRIDGE_DEPOSIT_IMAGE_ID" ]] || die "missing BRIDGE_DEPOSIT_IMAGE_ID in release"
+  [[ -n "$BRIDGE_WITHDRAW_IMAGE_ID" ]] || die "missing BRIDGE_WITHDRAW_IMAGE_ID in release"
+  ok "deposit vkey: $BRIDGE_DEPOSIT_IMAGE_ID"
+  ok "withdraw vkey: $BRIDGE_WITHDRAW_IMAGE_ID"
+
+  # Operator AMI (if not overridden)
+  if [[ -z "$OPERATOR_AMI_ID" ]]; then
+    log "resolving operator AMI from GH release operator-stack-ami-latest..."
+    local ami_body
+    ami_body="$(gh release view operator-stack-ami-latest --json body --jq '.body' 2>/dev/null)" || \
+      die "failed to read operator-stack-ami-latest release"
+    OPERATOR_AMI_ID="$(echo "$ami_body" | sed -n 's/.*AMI:[[:space:]]*\(ami-[a-z0-9]*\).*/\1/p' | head -1)"
+    [[ -n "$OPERATOR_AMI_ID" ]] || die "could not extract AMI ID from operator-stack-ami-latest release"
+  fi
+  ok "Operator AMI: $OPERATOR_AMI_ID"
+
+  # Shared proof services image
+  log "resolving proof services image from $PROOF_SERVICES_RELEASE_TAG..."
+  local manifest
+  manifest="$(gh release download "$PROOF_SERVICES_RELEASE_TAG" \
+    --pattern "shared-proof-services-image-manifest.json" --output - 2>/dev/null)" || \
+    die "failed to download proof services manifest from $PROOF_SERVICES_RELEASE_TAG"
+  PROOF_SERVICES_IMAGE="$(jq -r ".regions.\"$AWS_REGION\".image_uri // empty" <<<"$manifest")"
+  if [[ -z "$PROOF_SERVICES_IMAGE" ]]; then
+    PROOF_SERVICES_IMAGE="$(jq -r '.image_uri // empty' <<<"$manifest")"
+  fi
+  [[ -n "$PROOF_SERVICES_IMAGE" ]] || die "could not resolve proof services image for region $AWS_REGION"
+  ok "Proof services image: $PROOF_SERVICES_IMAGE"
+}
+
+# ── SSH key management ───────────────────────────────────────────────────────
+
+setup_ssh_keys() {
+  local ssh_dir="$WORKDIR/ssh"
+  mkdir -p "$ssh_dir"
+
+  SSH_KEY_PRIVATE="$ssh_dir/id_ed25519"
+  SSH_KEY_PUBLIC="$ssh_dir/id_ed25519.pub"
+
+  if [[ -s "$SSH_KEY_PRIVATE" && -s "$SSH_KEY_PUBLIC" ]]; then
+    log "reusing existing SSH keypair from prior run"
+  else
+    rm -f "$SSH_KEY_PRIVATE" "$SSH_KEY_PUBLIC"
+    ssh-keygen -t ed25519 -N "" -f "$SSH_KEY_PRIVATE" >/dev/null
+    ok "generated SSH keypair"
+  fi
+
+  SSH_OPTS=(
+    -i "$SSH_KEY_PRIVATE"
+    -o StrictHostKeyChecking=no
+    -o UserKnownHostsFile=/dev/null
+    -o ServerAliveInterval=30
+    -o ServerAliveCountMax=6
+    -o ConnectTimeout=10
+    -o LogLevel=ERROR
+  )
+}
+
+# ── Terraform lifecycle ──────────────────────────────────────────────────────
+
+generate_tfvars() {
+  local tfvars_file="$1"
+  local deployment_id="$2"
+  local ssh_allowed_cidr="$3"
+  local shared_postgres_password="$4"
+  local sp1_secret_arn="${5:-}"
+
+  jq -n \
+    --arg aws_region "$AWS_REGION" \
+    --arg deployment_id "$deployment_id" \
+    --arg name_prefix "juno-e2e-local" \
+    --arg instance_type "$RUNNER_INSTANCE_TYPE" \
+    --arg runner_ami_id "" \
+    --argjson root_volume_size_gb 200 \
+    --argjson operator_instance_count "$OPERATOR_COUNT" \
+    --arg operator_instance_type "$OPERATOR_INSTANCE_TYPE" \
+    --arg operator_ami_id "$OPERATOR_AMI_ID" \
+    --argjson operator_root_volume_size_gb 100 \
+    --arg shared_ami_id "" \
+    --argjson operator_base_port "$OPERATOR_BASE_PORT" \
+    --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
+    --arg ssh_public_key "$(cat "$SSH_KEY_PUBLIC")" \
+    --argjson provision_shared_services true \
+    --arg shared_postgres_user "postgres" \
+    --arg shared_postgres_password "$shared_postgres_password" \
+    --arg shared_postgres_db "intents_e2e" \
+    --arg shared_proof_service_image "$PROOF_SERVICES_IMAGE" \
+    --arg shared_sp1_requestor_secret_arn "$sp1_secret_arn" \
+    --argjson shared_postgres_port 5432 \
+    --argjson shared_kafka_port 9094 \
+    --argjson runner_associate_public_ip_address true \
+    --argjson operator_associate_public_ip_address true \
+    --argjson shared_ecs_assign_public_ip false \
+    --arg dkg_s3_key_prefix "dkg/keypackages" \
+    '{
+      aws_region: $aws_region,
+      deployment_id: $deployment_id,
+      name_prefix: $name_prefix,
+      instance_type: $instance_type,
+      runner_ami_id: $runner_ami_id,
+      root_volume_size_gb: $root_volume_size_gb,
+      operator_instance_count: $operator_instance_count,
+      operator_instance_type: $operator_instance_type,
+      operator_ami_id: $operator_ami_id,
+      operator_root_volume_size_gb: $operator_root_volume_size_gb,
+      shared_ami_id: $shared_ami_id,
+      operator_base_port: $operator_base_port,
+      allowed_ssh_cidr: $allowed_ssh_cidr,
+      ssh_public_key: $ssh_public_key,
+      provision_shared_services: $provision_shared_services,
+      shared_postgres_user: "postgres",
+      shared_postgres_password: $shared_postgres_password,
+      shared_postgres_db: "intents_e2e",
+      shared_proof_service_image: $shared_proof_service_image,
+      shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+      shared_postgres_port: $shared_postgres_port,
+      shared_kafka_port: $shared_kafka_port,
+      runner_associate_public_ip_address: $runner_associate_public_ip_address,
+      operator_associate_public_ip_address: $operator_associate_public_ip_address,
+      shared_ecs_assign_public_ip: $shared_ecs_assign_public_ip,
+      dkg_s3_key_prefix: $dkg_s3_key_prefix
+    }' > "$tfvars_file"
+}
+
+tf_cmd() {
+  env AWS_PROFILE="$AWS_PROFILE" AWS_REGION="$AWS_REGION" \
+    TF_IN_AUTOMATION=1 terraform "$@"
+}
+
+terraform_apply() {
+  step "Terraform apply"
+
+  local infra_dir="$WORKDIR/infra"
+  local state_file="$infra_dir/terraform.tfstate"
+  local tfvars_file="$infra_dir/terraform.tfvars.json"
+  mkdir -p "$infra_dir"
+
+  # Detect caller public IP for SSH ingress
+  local my_ip
+  my_ip="$(curl -sf https://checkip.amazonaws.com | tr -d '\r\n')" || \
+    die "failed to detect public IP for SSH ingress CIDR"
+  local ssh_cidr="${my_ip}/32"
+  ok "SSH ingress CIDR: $ssh_cidr"
+
+  # Generate a stable deployment ID from the workdir name
+  local deployment_id
+  deployment_id="$(basename "$WORKDIR" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]')"
+  deployment_id="${deployment_id:0:20}"
+
+  # Generate Postgres password (or reuse from prior run)
+  local pg_pass_file="$WORKDIR/local-secrets/postgres-password.txt"
+  mkdir -p "$WORKDIR/local-secrets"
+  local pg_password
+  if [[ -f "$pg_pass_file" ]]; then
+    pg_password="$(cat "$pg_pass_file")"
+  else
+    pg_password="$(openssl rand -hex 16)"
+    echo -n "$pg_password" > "$pg_pass_file"
+    chmod 600 "$pg_pass_file"
+  fi
+
+  # Create SP1 Secrets Manager secret (for proof-requestor/proof-funder ECS tasks)
+  local sp1_secret_arn=""
+  local sp1_secret_arn_file="$WORKDIR/local-secrets/sp1-secret-arn.txt"
+  if [[ -f "$sp1_secret_arn_file" ]]; then
+    sp1_secret_arn="$(cat "$sp1_secret_arn_file")"
+    log "reusing SP1 Secrets Manager secret: $sp1_secret_arn"
+  else
+    local sp1_key_hex
+    sp1_key_hex="$(tr -d '\r\n' < "$SP1_REQUESTOR_KEY_FILE")"
+    local secret_name="juno-e2e-local-${deployment_id}-sp1-requestor"
+    log "creating SP1 Secrets Manager secret: $secret_name"
+    sp1_secret_arn="$(
+      env AWS_PROFILE="$AWS_PROFILE" aws secretsmanager create-secret \
+        --region "$AWS_REGION" \
+        --name "$secret_name" \
+        --secret-string "$sp1_key_hex" \
+        --query 'ARN' --output text 2>/dev/null
+    )" || die "failed to create SP1 secret in Secrets Manager"
+    echo -n "$sp1_secret_arn" > "$sp1_secret_arn_file"
+    CLEANUP_SP1_SECRET_ARN="$sp1_secret_arn"
+    ok "SP1 secret created: $sp1_secret_arn"
+  fi
+
+  generate_tfvars "$tfvars_file" "$deployment_id" "$ssh_cidr" "$pg_password" "$sp1_secret_arn"
+
+  log "running terraform init..."
+  tf_cmd -chdir="$TERRAFORM_DIR" init -input=false >/dev/null
+
+  log "running terraform apply (this takes 10-20 minutes)..."
+  tf_cmd -chdir="$TERRAFORM_DIR" apply \
+    -input=false -auto-approve \
+    -state="$state_file" \
+    -var-file="$tfvars_file" \
+    2>&1 | tee "$WORKDIR/logs/terraform-apply.log"
+
+  ok "Terraform apply completed"
+}
+
+read_tf_outputs() {
+  step "Reading Terraform outputs"
+
+  local state_file="$WORKDIR/infra/terraform.tfstate"
+  [[ -f "$state_file" ]] || die "terraform state not found: $state_file"
+
+  _tf_out() {
+    tf_cmd -chdir="$TERRAFORM_DIR" output -state="$state_file" -raw "$1" 2>/dev/null || true
+  }
+
+  RUNNER_PUBLIC_IP="$(_tf_out runner_public_ip)"
+  RUNNER_SSH_USER="$(_tf_out runner_ssh_user)"
+  [[ -n "$RUNNER_PUBLIC_IP" ]] || die "runner_public_ip is empty"
+  ok "Runner: $RUNNER_SSH_USER@$RUNNER_PUBLIC_IP"
+
+  SHARED_POSTGRES_ENDPOINT="$(_tf_out shared_postgres_endpoint)"
+  local pg_port; pg_port="$(_tf_out shared_postgres_port)"
+  local pg_password; pg_password="$(cat "$WORKDIR/local-secrets/postgres-password.txt")"
+  SHARED_POSTGRES_DSN="postgres://postgres:${pg_password}@${SHARED_POSTGRES_ENDPOINT}:${pg_port:-5432}/intents_e2e?sslmode=require"
+  ok "Postgres: $SHARED_POSTGRES_ENDPOINT"
+
+  SHARED_KAFKA_BROKERS="$(_tf_out shared_kafka_bootstrap_brokers)"
+  ok "Kafka: ${SHARED_KAFKA_BROKERS:0:60}..."
+
+  SHARED_IPFS_API_URL="$(_tf_out shared_ipfs_api_url)"
+  ok "IPFS: $SHARED_IPFS_API_URL"
+
+  SHARED_ECS_CLUSTER_ARN="$(_tf_out shared_ecs_cluster_arn)"
+  SHARED_PROOF_REQUESTOR_SERVICE="$(_tf_out shared_proof_requestor_service_name)"
+  SHARED_PROOF_FUNDER_SERVICE="$(_tf_out shared_proof_funder_service_name)"
+  ok "ECS cluster: $SHARED_ECS_CLUSTER_ARN"
+
+  DKG_KMS_KEY_ARN="$(_tf_out dkg_kms_key_arn)"
+  DKG_S3_BUCKET="$(_tf_out dkg_s3_bucket)"
+  DKG_S3_KEY_PREFIX="$(_tf_out dkg_s3_key_prefix)"
+  ok "DKG: bucket=$DKG_S3_BUCKET kms=$DKG_KMS_KEY_ARN"
+
+  # Operator IPs (JSON arrays)
+  local pub_json priv_json
+  pub_json="$(tf_cmd -chdir="$TERRAFORM_DIR" output -state="$state_file" -json operator_public_ips 2>/dev/null)"
+  priv_json="$(tf_cmd -chdir="$TERRAFORM_DIR" output -state="$state_file" -json operator_private_ips 2>/dev/null)"
+  mapfile -t OPERATOR_PUBLIC_IPS < <(jq -r '.[]' <<<"$pub_json")
+  mapfile -t OPERATOR_PRIVATE_IPS < <(jq -r '.[]' <<<"$priv_json")
+  ok "Operators: ${#OPERATOR_PUBLIC_IPS[@]} hosts (${OPERATOR_PUBLIC_IPS[0]}, ...)"
+}
+
+# ── SSH helpers ──────────────────────────────────────────────────────────────
+
+wait_for_ssh() {
+  local host="$1" user="$2" max_attempts="${3:-60}"
+  log "waiting for SSH on $user@$host..."
+  local attempt=0
+  while (( attempt < max_attempts )); do
+    if ssh "${SSH_OPTS[@]}" "$user@$host" "true" 2>/dev/null; then
+      ok "SSH ready: $user@$host"
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 10
+  done
+  die "SSH not ready after ${max_attempts} attempts: $user@$host"
+}
+
+run_on_host() {
+  local host="$1"; shift
+  ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$host" "bash -lc $(printf '%q' "$*")"
+}
+
+scp_to_host() {
+  local host="$1" local_path="$2" remote_path="$3"
+  scp "${SSH_OPTS[@]}" -q "$local_path" "$RUNNER_SSH_USER@$host:$remote_path"
+}
+
+scp_from_host() {
+  local host="$1" remote_path="$2" local_path="$3"
+  scp "${SSH_OPTS[@]}" -q "$RUNNER_SSH_USER@$host:$remote_path" "$local_path"
+}
+
+# ── Host preparation ────────────────────────────────────────────────────────
+
+prepare_runner_host() {
+  step "Preparing runner host"
+
+  wait_for_ssh "$RUNNER_PUBLIC_IP" "$RUNNER_SSH_USER" 90
+
+  local setup_script
+  setup_script="$(cat <<'SCRIPT'
+set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+# Wait for cloud-init
+cloud-init status --wait >/dev/null 2>&1 || true
+
+# Install dependencies
+sudo apt-get update -y
+sudo apt-get install -y \
+  build-essential git jq curl unzip rsync age \
+  ca-certificates postgresql-client-16 2>/dev/null || \
+  sudo apt-get install -y \
+  build-essential git jq curl unzip rsync age \
+  ca-certificates postgresql-client
+
+# Install Go if not present
+if ! command -v go >/dev/null 2>&1; then
+  GO_VERSION="1.22.8"
+  curl -sfL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xzf -
+  echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
+  export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
+fi
+go version
+
+# Install Rust if not present (needed for ufvk-derive-keys)
+if ! command -v cargo >/dev/null 2>&1; then
+  curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+  source "$HOME/.cargo/env"
+fi
+SCRIPT
+  )"
+  run_on_host "$RUNNER_PUBLIC_IP" "$setup_script"
+
+  # Clone or update repo
+  local repo_url
+  repo_url="$(git -C "$REPO_ROOT" remote get-url origin 2>/dev/null || echo "https://github.com/juno-intents/intents-juno.git")"
+  local current_commit
+  current_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "main")"
+
+  local clone_script
+  clone_script="$(cat <<CLONESCRIPT
+set -euo pipefail
+REMOTE_REPO="\$HOME/intents-juno"
+if [[ -d "\$REMOTE_REPO/.git" ]]; then
+  cd "\$REMOTE_REPO"
+  git fetch origin --prune
+  git checkout "$current_commit" 2>/dev/null || git checkout origin/main
+else
+  git clone "$repo_url" "\$REMOTE_REPO"
+  cd "\$REMOTE_REPO"
+  git checkout "$current_commit" 2>/dev/null || true
+fi
+CLONESCRIPT
+  )"
+  run_on_host "$RUNNER_PUBLIC_IP" "$clone_script"
+  ok "Runner prepared"
+}
+
+prepare_operator_hosts() {
+  step "Preparing operator hosts"
+
+  for i in "${!OPERATOR_PUBLIC_IPS[@]}"; do
+    local op_ip="${OPERATOR_PUBLIC_IPS[$i]}"
+    log "preparing operator $((i+1))/${#OPERATOR_PUBLIC_IPS[@]}: $op_ip"
+
+    wait_for_ssh "$op_ip" "$RUNNER_SSH_USER" 60
+
+    local prep_script
+    prep_script="$(cat <<'OPSCRIPT'
+set -euo pipefail
+cloud-init status --wait >/dev/null 2>&1 || true
+
+# Validate AMI has required systemd services
+for svc in junocashd.service juno-scan.service; do
+  if ! systemctl list-unit-files | grep -q "$svc"; then
+    echo "ERROR: missing systemd unit: $svc" >&2
+    exit 1
+  fi
 done
 
-[[ -n "$CONFIG_FILE" ]] || { warn "Missing --config <file>"; usage; }
-[[ -f "$CONFIG_FILE" ]] || die "Config file not found: $CONFIG_FILE"
+# Start junocashd and juno-scan
+sudo systemctl daemon-reload
+sudo systemctl enable junocashd.service juno-scan.service
+sudo systemctl restart junocashd.service juno-scan.service
 
-# shellcheck source=/dev/null
-source "$CONFIG_FILE"
-
-mkdir -p "$WORKDIR" "$CHECKPOINT_DIR" "$LOG_DIR" "$REPORT_DIR" "$PID_DIR"
-
-# Cleanup on exit.
-trap 'stop_all_bg; log "Done. Logs in $LOG_DIR, reports in $REPORT_DIR"' EXIT
-
-# ── Stage runner ──────────────────────────────────────────────────────────────
-
-STAGE_ORDER=(
-  01-validate-config
-  02-build-binaries
-  03-check-aws-infra
-  04-check-operators
-  05-deploy-contracts
-  06-start-bridge-api
-  07-start-base-relayer
-  08-start-deposit-relayer
-  09-start-withdraw-coord
-  10-start-withdraw-final
-  11-canary-health
-  12-run-orchestrator
-  13-collect-results
-)
-
-should_run_stage() {
-  local stage="$1"
-  if checkpoint_done "$stage"; then
-    log "Stage '$stage' already done — skipping"
-    return 1
+# Verify services are active
+sleep 5
+for svc in junocashd.service juno-scan.service; do
+  if ! systemctl is-active --quiet "$svc"; then
+    echo "ERROR: $svc is not active" >&2
+    systemctl status "$svc" --no-pager || true
+    exit 1
   fi
-  if [[ -n "$RESUME_STAGE" ]]; then
-    # Skip stages before the resume target.
-    local found=false
-    for s in "${STAGE_ORDER[@]}"; do
-      if [[ "$s" == "$RESUME_STAGE" ]]; then found=true; fi
-      if [[ "$s" == "$stage" ]]; then
-        $found && return 0 || return 1
-      fi
-    done
-  fi
-  return 0
-}
-
-run_stage() {
-  local stage="$1"
-  if ! should_run_stage "$stage"; then return 0; fi
-  log "━━━ Stage: $stage ━━━"
-  if $DRY_RUN; then
-    log "  [dry-run] would execute stage_${stage//-/_}"
-    return 0
-  fi
-  "stage_${stage//-/_}"
-  checkpoint_mark "$stage"
-}
-
-# ══════════════════════════════════════════════════════════════════════════════
-# STAGE IMPLEMENTATIONS
-# ══════════════════════════════════════════════════════════════════════════════
-
-stage_01_validate_config() {
-  local required_vars=(
-    BASE_RPC_URL BASE_CHAIN_ID JUNO_RPC_URL JUNO_RPC_USER JUNO_RPC_PASS
-    SHARED_POSTGRES_DSN SHARED_KAFKA_BROKERS
-    RECIPIENT_ADDRESS JUNO_FUNDER_SOURCE_ADDRESS OWALLET_UA JUNO_WALLET_ID
-    DEPOSIT_AMOUNT_ZAT WITHDRAW_AMOUNT WITHDRAW_RECIPIENT_RAW_HEX
-    JUNO_SCAN_URL OPERATOR_ADDRESSES OPERATOR_THRESHOLD
-    BASE_RELAYER_LISTEN BRIDGE_API_LISTEN
-  )
-  local missing=()
-  for var in "${required_vars[@]}"; do
-    if [[ -z "${!var:-}" ]]; then
-      missing+=("$var")
-    fi
+done
+echo "operator host ready"
+OPSCRIPT
+    )"
+    run_on_host "$op_ip" "$prep_script"
+    ok "Operator $((i+1)) ready ($op_ip)"
   done
-  if (( ${#missing[@]} > 0 )); then
-    die "Missing required config variables: ${missing[*]}"
-  fi
-
-  # Validate AWS profile.
-  if ! aws sts get-caller-identity --profile "$AWS_PROFILE" >/dev/null 2>&1; then
-    die "AWS profile '$AWS_PROFILE' is not configured or credentials expired"
-  fi
-  ok "AWS profile '$AWS_PROFILE' valid ($(aws sts get-caller-identity --profile "$AWS_PROFILE" --query Account --output text))"
-
-  # Check binaries exist in PATH.
-  for bin in psql curl jq forge go; do
-    command -v "$bin" >/dev/null || die "Required binary not in PATH: $bin"
-  done
-  ok "All required config variables and tools present"
 }
 
-stage_02_build_binaries() {
-  log "Building Go binaries..."
-  cd "$REPO_ROOT"
+# ── RPC credential extraction ───────────────────────────────────────────────
 
-  local bins=(
-    bridge-api base-relayer deposit-relayer withdraw-coordinator
-    withdraw-finalizer e2e-orchestrator shared-infra-e2e
-  )
-  for b in "${bins[@]}"; do
-    log "  Building cmd/$b ..."
-    go build -o "$WORKDIR/bin/$b" "./cmd/$b/"
-  done
-  ok "All binaries built to $WORKDIR/bin/"
+extract_rpc_credentials() {
+  step "Extracting Juno RPC credentials from operator"
 
-  # Build Solidity contracts if we need to deploy.
-  if [[ -z "${BRIDGE_ADDRESS:-}" ]]; then
-    log "  Building Solidity contracts..."
-    (cd "$REPO_ROOT/contracts" && forge build --silent)
-    ok "Solidity contracts compiled"
-  fi
-}
+  local secrets_dir="$WORKDIR/local-secrets"
+  local rpc_user_file="$secrets_dir/juno-rpc-user.txt"
+  local rpc_pass_file="$secrets_dir/juno-rpc-pass.txt"
 
-stage_03_check_aws_infra() {
-  if $SKIP_INFRA; then
-    warn "Skipping infrastructure checks (--skip-infra)"
+  if [[ -f "$rpc_user_file" && -f "$rpc_pass_file" ]]; then
+    ok "reusing cached RPC credentials"
     return 0
   fi
 
-  log "Checking Postgres connectivity..."
-  wait_for_postgres "$SHARED_POSTGRES_DSN" 15
+  local op_ip="${OPERATOR_PUBLIC_IPS[0]}"
+  local creds
+  creds="$(run_on_host "$op_ip" \
+    "sudo grep -E '^JUNO_RPC_(USER|PASS)=' /etc/intents-juno/operator-stack.env 2>/dev/null || \
+     echo 'JUNO_RPC_USER=juno'; echo 'JUNO_RPC_PASS='"
+  )"
 
-  log "Checking Kafka brokers..."
-  local first_broker; first_broker="${SHARED_KAFKA_BROKERS%%,*}"
-  local broker_host="${first_broker%%:*}"
-  local broker_port="${first_broker##*:}"
-  if timeout 5 bash -c "echo >/dev/tcp/$broker_host/$broker_port" 2>/dev/null; then
-    ok "Kafka broker reachable ($first_broker)"
-  else
-    die "Kafka broker unreachable: $first_broker"
-  fi
+  local rpc_user rpc_pass
+  rpc_user="$(grep '^JUNO_RPC_USER=' <<<"$creds" | cut -d= -f2 | tr -d '\r\n')"
+  rpc_pass="$(grep '^JUNO_RPC_PASS=' <<<"$creds" | cut -d= -f2 | tr -d '\r\n')"
 
-  if [[ -n "${SHARED_IPFS_API_URL:-}" ]]; then
-    log "Checking IPFS..."
-    if curl -sf -o /dev/null "${SHARED_IPFS_API_URL}/api/v0/id" 2>/dev/null; then
-      ok "IPFS reachable"
-    else
-      warn "IPFS not reachable (non-fatal, checkpoints may fail)"
-    fi
-  fi
+  [[ -n "$rpc_user" ]] || rpc_user="juno"
+  [[ -n "$rpc_pass" ]] || die "could not extract JUNO_RPC_PASS from operator ${op_ip}"
 
-  # Check ECS proof services if configured.
-  if [[ -n "${SHARED_ECS_CLUSTER_ARN:-}" ]]; then
-    log "Checking ECS proof services..."
-    local region="${AWS_REGION:-us-east-1}"
-    for svc in "${SHARED_PROOF_REQUESTOR_SERVICE:-}" "${SHARED_PROOF_FUNDER_SERVICE:-}"; do
-      [[ -n "$svc" ]] || continue
-      local running; running=$(
-        aws ecs describe-services --profile "$AWS_PROFILE" --region "$region" \
-          --cluster "$SHARED_ECS_CLUSTER_ARN" --services "$svc" \
-          --query 'services[0].runningCount' --output text 2>/dev/null
-      )
-      if [[ "$running" -gt 0 ]] 2>/dev/null; then
-        ok "ECS $svc: $running running"
-      else
-        warn "ECS $svc: not running (running=$running)"
-      fi
-    done
-  fi
-
-  ok "AWS infrastructure checks passed"
+  echo -n "$rpc_user" > "$rpc_user_file"
+  echo -n "$rpc_pass" > "$rpc_pass_file"
+  chmod 600 "$rpc_user_file" "$rpc_pass_file"
+  ok "RPC credentials extracted (user=$rpc_user)"
 }
 
-stage_04_check_operators() {
-  log "Checking operator checkpoint flow..."
+# ── DKG ceremony (distributed, via runner) ───────────────────────────────────
 
-  # Verify at least one recent checkpoint exists in Postgres.
-  local ckpt_count
-  ckpt_count=$(psql "$SHARED_POSTGRES_DSN" -Atqc \
-    "SELECT COUNT(*) FROM checkpoint_packages WHERE persisted_at > now() - interval '30 minutes'" 2>/dev/null || echo "0")
+run_distributed_dkg() {
+  step "Running distributed DKG ceremony"
 
-  if (( ckpt_count > 0 )); then
-    ok "Found $ckpt_count recent checkpoint packages (last 30m)"
-  else
-    warn "No recent checkpoints found. Operators may not be running."
-    log "Checking if checkpoint_packages table exists..."
-    local table_exists
-    table_exists=$(psql "$SHARED_POSTGRES_DSN" -Atqc \
-      "SELECT COUNT(*) FROM information_schema.tables WHERE table_name='checkpoint_packages'" 2>/dev/null || echo "0")
-    if (( table_exists == 0 )); then
-      die "checkpoint_packages table does not exist. Operators have never run."
-    fi
-    local total_ckpts
-    total_ckpts=$(psql "$SHARED_POSTGRES_DSN" -Atqc "SELECT COUNT(*) FROM checkpoint_packages" 2>/dev/null || echo "0")
-    warn "Total checkpoints ever: $total_ckpts (none recent — operators may be stopped)"
-    log "Continuing anyway — the deposit-relayer will wait for fresh checkpoints."
-  fi
-}
-
-stage_05_deploy_contracts() {
-  if [[ -n "${BRIDGE_ADDRESS:-}" && -n "${WJUNO_ADDRESS:-}" && -n "${FEE_DISTRIBUTOR_ADDRESS:-}" ]]; then
-    ok "Using existing contracts: Bridge=$BRIDGE_ADDRESS wJUNO=$WJUNO_ADDRESS FeeDistributor=$FEE_DISTRIBUTOR_ADDRESS"
+  local dkg_summary="$WORKDIR/reports/dkg-summary.json"
+  if [[ -f "$dkg_summary" ]]; then
+    ok "reusing existing DKG summary: $dkg_summary"
     return 0
   fi
 
-  log "Deploying fresh bridge contracts to Base..."
+  mkdir -p "$WORKDIR/reports"
 
-  # Ensure required deploy vars exist.
-  [[ -n "${BASE_FUNDER_KEY_FILE:-}" ]] || die "BASE_FUNDER_KEY_FILE required for fresh deploy"
-  [[ -f "$BASE_FUNDER_KEY_FILE" ]] || die "BASE_FUNDER_KEY_FILE not found: $BASE_FUNDER_KEY_FILE"
-  [[ -n "${BRIDGE_VERIFIER_ADDRESS:-}" ]] || die "BRIDGE_VERIFIER_ADDRESS required"
-  [[ -n "${BRIDGE_DEPOSIT_IMAGE_ID:-}" ]] || die "BRIDGE_DEPOSIT_IMAGE_ID required"
-  [[ -n "${BRIDGE_WITHDRAW_IMAGE_ID:-}" ]] || die "BRIDGE_WITHDRAW_IMAGE_ID required"
+  # Build the operator fleet SSH access script (SCP SSH key to runner)
+  local remote_ssh_key="/home/$RUNNER_SSH_USER/.ssh/fleet_ed25519"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$SSH_KEY_PRIVATE" "$remote_ssh_key"
+  run_on_host "$RUNNER_PUBLIC_IP" "chmod 600 $remote_ssh_key"
 
-  local deploy_output="$REPORT_DIR/bridge-deploy-summary.json"
-
-  "$WORKDIR/bin/bridge-e2e" \
-    --deploy-only \
-    --base-rpc-url "$BASE_RPC_URL" \
-    --base-chain-id "$BASE_CHAIN_ID" \
-    --private-key-file "$BASE_FUNDER_KEY_FILE" \
-    --verifier-address "$BRIDGE_VERIFIER_ADDRESS" \
-    --deposit-image-id "$BRIDGE_DEPOSIT_IMAGE_ID" \
-    --withdraw-image-id "$BRIDGE_WITHDRAW_IMAGE_ID" \
-    --fee-bps "${BRIDGE_FEE_BPS:-50}" \
-    --relayer-tip-bps "${BRIDGE_RELAYER_TIP_BPS:-1000}" \
-    --refund-window "${BRIDGE_REFUND_WINDOW:-86400}" \
-    --max-expiry-extension "${BRIDGE_MAX_EXPIRY_EXT:-604800}" \
-    --operator-addresses "$OPERATOR_ADDRESSES" \
-    --operator-threshold "$OPERATOR_THRESHOLD" \
-    --contracts-out "$REPO_ROOT/contracts/out" \
-    --output "$deploy_output" \
-    2>&1 | tee "$LOG_DIR/bridge-deploy.log"
-
-  # Parse deployed addresses from summary.
-  BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$deploy_output")
-  WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$deploy_output")
-  FEE_DISTRIBUTOR_ADDRESS=$(jq -r '.contracts.fee_distributor' "$deploy_output")
-  OPERATOR_REGISTRY_ADDRESS=$(jq -r '.contracts.operator_registry // empty' "$deploy_output")
-
-  ok "Contracts deployed: Bridge=$BRIDGE_ADDRESS wJUNO=$WJUNO_ADDRESS FeeDistributor=$FEE_DISTRIBUTOR_ADDRESS"
-
-  # Persist so checkpoint resume can load them.
-  cat > "$CHECKPOINT_DIR/contracts.env" <<ENVEOF
-BRIDGE_ADDRESS=$BRIDGE_ADDRESS
-WJUNO_ADDRESS=$WJUNO_ADDRESS
-FEE_DISTRIBUTOR_ADDRESS=$FEE_DISTRIBUTOR_ADDRESS
-OPERATOR_REGISTRY_ADDRESS=${OPERATOR_REGISTRY_ADDRESS:-}
-ENVEOF
-}
-
-# Load contract addresses from checkpoint if re-running after stage 5.
-_load_contract_checkpoint() {
-  if [[ -f "$CHECKPOINT_DIR/contracts.env" ]]; then
-    # shellcheck source=/dev/null
-    source "$CHECKPOINT_DIR/contracts.env"
-  fi
-}
-
-stage_06_start_bridge_api() {
-  _load_contract_checkpoint
-  if $SKIP_SERVICES; then warn "Skipping bridge-api start (--skip-services)"; return 0; fi
-  if is_running bridge-api; then ok "bridge-api already running"; return 0; fi
-
-  export JUNO_QUEUE_KAFKA_TLS=true
-  start_bg bridge-api \
-    "$WORKDIR/bin/bridge-api" \
-      --listen "$BRIDGE_API_LISTEN" \
-      --postgres-dsn "$SHARED_POSTGRES_DSN" \
-      --base-chain-id "$BASE_CHAIN_ID" \
-      --bridge-address "$BRIDGE_ADDRESS" \
-      --owallet-ua "$OWALLET_UA" \
-      --queue-driver kafka \
-      --queue-brokers "$SHARED_KAFKA_BROKERS" \
-      --deposit-event-topic "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.deposits.events" \
-      --withdraw-request-topic "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.withdrawals.requested"
-
-  wait_for_http "bridge-api" "http://$BRIDGE_API_LISTEN/healthz" 30
-}
-
-stage_07_start_base_relayer() {
-  if $SKIP_SERVICES; then warn "Skipping base-relayer start (--skip-services)"; return 0; fi
-  if is_running base-relayer; then ok "base-relayer already running"; return 0; fi
-
-  [[ -n "${BASE_RELAYER_PRIVATE_KEYS:-}" ]] || die "BASE_RELAYER_PRIVATE_KEYS env var required"
-  [[ -n "${BASE_RELAYER_AUTH_TOKEN:-}" ]] || die "BASE_RELAYER_AUTH_TOKEN env var required"
-
-  start_bg base-relayer \
-    "$WORKDIR/bin/base-relayer" \
-      --rpc-url "$BASE_RPC_URL" \
-      --chain-id "$BASE_CHAIN_ID" \
-      --listen "$BASE_RELAYER_LISTEN"
-
-  wait_for_http "base-relayer" "http://$BASE_RELAYER_LISTEN/healthz" 30
-}
-
-stage_08_start_deposit_relayer() {
-  _load_contract_checkpoint
-  if $SKIP_SERVICES; then warn "Skipping deposit-relayer start (--skip-services)"; return 0; fi
-  if is_running deposit-relayer; then ok "deposit-relayer already running"; return 0; fi
-
-  local oper_list; oper_list="${OPERATOR_ADDRESSES//,/ }"
-  local base_relayer_url="http://$BASE_RELAYER_LISTEN"
-
-  export JUNO_QUEUE_KAFKA_TLS=true
-  export BASE_RELAYER_AUTH_TOKEN="${BASE_RELAYER_AUTH_TOKEN:-}"
-
-  start_bg deposit-relayer \
-    "$WORKDIR/bin/deposit-relayer" \
-      --postgres-dsn "$SHARED_POSTGRES_DSN" \
-      --base-chain-id "$BASE_CHAIN_ID" \
-      --bridge-address "$BRIDGE_ADDRESS" \
-      --operators "$OPERATOR_ADDRESSES" \
-      --operator-threshold "$OPERATOR_THRESHOLD" \
-      --deposit-image-id "${BRIDGE_DEPOSIT_IMAGE_ID:-}" \
-      --base-relayer-url "$base_relayer_url" \
-      --queue-driver kafka \
-      --queue-brokers "$SHARED_KAFKA_BROKERS" \
-      --queue-topics "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.deposits.events,${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.checkpoints.packages" \
-      --proof-driver queue \
-      --proof-request-topic "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.proof.requests" \
-      --max-items "${DEPOSIT_MAX_ITEMS:-1}" \
-      --max-age "${DEPOSIT_MAX_AGE:-30s}"
-}
-
-stage_09_start_withdraw_coord() {
-  _load_contract_checkpoint
-  if $SKIP_SERVICES; then warn "Skipping withdraw-coordinator start (--skip-services)"; return 0; fi
-  if is_running withdraw-coordinator; then ok "withdraw-coordinator already running"; return 0; fi
-
-  [[ -n "${TSS_URL:-}" ]] || die "TSS_URL required for withdraw-coordinator"
-
-  export JUNO_QUEUE_KAFKA_TLS=true
-
-  local tss_ca_args=()
-  if [[ -n "${TSS_SERVER_CA_FILE:-}" ]]; then
-    tss_ca_args=(--tss-server-ca-file "$TSS_SERVER_CA_FILE")
-  fi
-
-  start_bg withdraw-coordinator \
-    "$WORKDIR/bin/withdraw-coordinator" \
-      --postgres-dsn "$SHARED_POSTGRES_DSN" \
-      --base-chain-id "$BASE_CHAIN_ID" \
-      --bridge-address "$BRIDGE_ADDRESS" \
-      --queue-driver kafka \
-      --queue-brokers "$SHARED_KAFKA_BROKERS" \
-      --queue-topics "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.withdrawals.requested" \
-      --juno-rpc-url "$JUNO_RPC_URL" \
-      --tss-url "$TSS_URL" \
-      "${tss_ca_args[@]}" \
-      --blob-driver s3 \
-      --blob-bucket "${BLOB_S3_BUCKET:-}" \
-      --blob-prefix "${BLOB_S3_PREFIX:-withdraw-live}" \
-      --max-items "${WITHDRAW_MAX_ITEMS:-1}" \
-      --max-age "${WITHDRAW_MAX_AGE:-30s}"
-}
-
-stage_10_start_withdraw_final() {
-  _load_contract_checkpoint
-  if $SKIP_SERVICES; then warn "Skipping withdraw-finalizer start (--skip-services)"; return 0; fi
-  if is_running withdraw-finalizer; then ok "withdraw-finalizer already running"; return 0; fi
-
-  local base_relayer_url="http://$BASE_RELAYER_LISTEN"
-
-  export JUNO_QUEUE_KAFKA_TLS=true
-  export BASE_RELAYER_AUTH_TOKEN="${BASE_RELAYER_AUTH_TOKEN:-}"
-
-  start_bg withdraw-finalizer \
-    "$WORKDIR/bin/withdraw-finalizer" \
-      --postgres-dsn "$SHARED_POSTGRES_DSN" \
-      --base-chain-id "$BASE_CHAIN_ID" \
-      --bridge-address "$BRIDGE_ADDRESS" \
-      --operators "$OPERATOR_ADDRESSES" \
-      --operator-threshold "$OPERATOR_THRESHOLD" \
-      --withdraw-image-id "${BRIDGE_WITHDRAW_IMAGE_ID:-}" \
-      --base-relayer-url "$base_relayer_url" \
-      --queue-driver kafka \
-      --queue-brokers "$SHARED_KAFKA_BROKERS" \
-      --queue-topics "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.checkpoints.packages" \
-      --proof-driver queue \
-      --proof-request-topic "${SHARED_TOPIC_PREFIX:-shared.infra.e2e}.proof.requests"
-}
-
-stage_11_canary_health() {
-  log "Running canary health checks..."
-
-  # Check bridge-api.
-  if ! $SKIP_SERVICES; then
-    wait_for_http "bridge-api" "http://$BRIDGE_API_LISTEN/healthz" 10
-    wait_for_http "base-relayer" "http://$BASE_RELAYER_LISTEN/healthz" 10
-  fi
-
-  # Verify bridge-api returns config.
-  local config_resp
-  config_resp=$(curl -sf "http://$BRIDGE_API_LISTEN/v1/config" 2>/dev/null || echo "{}")
-  local api_bridge; api_bridge=$(echo "$config_resp" | jq -r '.bridgeAddress // empty')
-  if [[ -n "$api_bridge" ]]; then
-    ok "bridge-api config OK (bridge=$api_bridge)"
-  else
-    warn "bridge-api /v1/config returned unexpected response"
-  fi
-
-  # Check that background processes haven't crashed.
-  local crashed=false
-  for svc in bridge-api base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer; do
-    if [[ -f "$PID_DIR/$svc.pid" ]] && ! is_running "$svc"; then
-      warn "$svc has crashed! Check $LOG_DIR/$svc.log"
-      tail -20 "$LOG_DIR/$svc.log" 2>/dev/null || true
-      crashed=true
-    fi
+  # Build operator registration info on runner
+  local op_private_ips_csv=""
+  for ip in "${OPERATOR_PRIVATE_IPS[@]}"; do
+    op_private_ips_csv="${op_private_ips_csv:+$op_private_ips_csv,}$ip"
   done
-  if $crashed; then
-    die "One or more services crashed during canary check"
-  fi
 
-  ok "All canary health checks passed"
+  local dkg_script
+  dkg_script="$(cat <<DKGSCRIPT
+set -euo pipefail
+export PATH="\$PATH:/usr/local/go/bin:\$HOME/go/bin"
+source "\$HOME/.cargo/env" 2>/dev/null || true
+cd "\$HOME/intents-juno"
+
+WORKDIR="\$HOME/e2e-dkg"
+mkdir -p "\$WORKDIR/reports"
+
+# Run the DKG backup-restore ceremony
+deploy/operators/dkg/e2e/run-dkg-backup-restore.sh run \\
+  --workdir "\$WORKDIR" \\
+  --operator-count $OPERATOR_COUNT \\
+  --threshold $OPERATOR_THRESHOLD \\
+  --base-port $OPERATOR_BASE_PORT \\
+  --output "\$WORKDIR/reports/dkg-summary.json" \\
+  --force
+
+cat "\$WORKDIR/reports/dkg-summary.json"
+DKGSCRIPT
+  )"
+
+  # For distributed DKG, we need to configure the runner to SSH to operators.
+  # The run-dkg-backup-restore.sh handles local DKG (all operators on localhost).
+  # For distributed, we use the run-testnet-e2e-aws.sh DKG flow which SSHes to operators.
+  # Since we're setting up our own flow, run the distributed DKG via the coordinator scripts.
+
+  local reg_dir="/home/$RUNNER_SSH_USER/e2e-dkg/registrations"
+  local coord_dir="/home/$RUNNER_SSH_USER/e2e-dkg/coordinator"
+  local dkg_dir="/home/$RUNNER_SSH_USER/e2e-dkg"
+
+  # Step 1: Generate operator keys on each operator host
+  local -a operator_ids=()
+  local -a operator_key_files=()
+  for i in "${!OPERATOR_PRIVATE_IPS[@]}"; do
+    local op_pub="${OPERATOR_PUBLIC_IPS[$i]}"
+    local op_priv="${OPERATOR_PRIVATE_IPS[$i]}"
+    local port=$((OPERATOR_BASE_PORT + i))
+
+    # Generate operator key on the runner
+    local keygen_output
+    keygen_output="$(run_on_host "$RUNNER_PUBLIC_IP" \
+      "cd /home/$RUNNER_SSH_USER/intents-juno && \
+       go run ./cmd/operator-keygen -private-key-path /home/$RUNNER_SSH_USER/e2e-dkg/op$((i+1))/key.hex"
+    )"
+
+    local op_id
+    op_id="$(echo "$keygen_output" | jq -r '.operator_id // empty' 2>/dev/null || true)"
+    [[ -n "$op_id" ]] || die "failed to generate operator key for operator $((i+1))"
+    operator_ids+=("$op_id")
+    operator_key_files+=("/home/$RUNNER_SSH_USER/e2e-dkg/op$((i+1))/key.hex")
+
+    # Create registration JSON
+    run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $reg_dir && cat > $reg_dir/op$((i+1)).json <<EOF
+{
+  \"operator_id\": \"$op_id\",
+  \"fee_recipient\": \"$op_id\",
+  \"grpc_endpoint\": \"https://$op_priv:$port\"
+}
+EOF"
+    log "  operator $((i+1)): $op_id @ $op_priv:$port"
+  done
+
+  # Step 2: Run coordinator init
+  local reg_args=""
+  for i in $(seq 1 "$OPERATOR_COUNT"); do
+    reg_args="$reg_args --registration-file $reg_dir/op${i}.json"
+  done
+
+  run_on_host "$RUNNER_PUBLIC_IP" "cd /home/$RUNNER_SSH_USER/intents-juno && \
+    deploy/operators/dkg/coordinator.sh init \
+      --workdir $coord_dir \
+      --network testnet \
+      --threshold $OPERATOR_THRESHOLD \
+      --max-signers $OPERATOR_COUNT \
+      --release-tag $DKG_RELEASE_TAG \
+      $reg_args"
+  ok "DKG coordinator initialized"
+
+  # Step 3: Distribute bundles to operators and start operator DKG processes
+  for i in "${!OPERATOR_PUBLIC_IPS[@]}"; do
+    local op_pub="${OPERATOR_PUBLIC_IPS[$i]}"
+    local op_id="${operator_ids[$i]}"
+    local op_id_slug
+    op_id_slug="$(echo "$op_id" | tr -cs '[:alnum:]' '_')"
+
+    # Find the bundle for this operator
+    local bundle_path
+    bundle_path="$(run_on_host "$RUNNER_PUBLIC_IP" \
+      "ls $coord_dir/bundles/*_${op_id_slug}*.tar.gz 2>/dev/null | head -1 || \
+       ls $coord_dir/bundles/*.tar.gz 2>/dev/null | sed -n '$((i+1))p'"
+    )"
+    [[ -n "$bundle_path" ]] || die "no DKG bundle found for operator $((i+1)) ($op_id)"
+
+    # SCP bundle from runner to operator (via runner as jump host)
+    local op_runtime="/home/$RUNNER_SSH_USER/operator-runtime"
+    run_on_host "$RUNNER_PUBLIC_IP" \
+      "scp -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -i $remote_ssh_key \
+       '$bundle_path' $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[$i]}:/tmp/dkg-bundle.tar.gz"
+
+    # Start operator DKG process on operator host (via runner as jump)
+    run_on_host "$RUNNER_PUBLIC_IP" \
+      "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -i $remote_ssh_key $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[$i]} \
+       'cd /home/$RUNNER_SSH_USER/intents-juno 2>/dev/null || cd \$HOME && \
+        mkdir -p $op_runtime && \
+        deploy/operators/dkg/operator.sh run \
+          --bundle /tmp/dkg-bundle.tar.gz \
+          --workdir $op_runtime \
+          --release-tag $DKG_RELEASE_TAG \
+          --daemon'"
+    ok "DKG operator $((i+1)) started"
+  done
+
+  # Step 4: Run coordinator ceremony
+  run_on_host "$RUNNER_PUBLIC_IP" "cd /home/$RUNNER_SSH_USER/intents-juno && \
+    deploy/operators/dkg/coordinator.sh preflight \
+      --workdir $coord_dir --release-tag $DKG_RELEASE_TAG && \
+    deploy/operators/dkg/coordinator.sh run \
+      --workdir $coord_dir --release-tag $DKG_RELEASE_TAG"
+  ok "DKG ceremony completed"
+
+  # Step 5: Run completion test and extract UFVK
+  run_on_host "$RUNNER_PUBLIC_IP" "cd /home/$RUNNER_SSH_USER/intents-juno && \
+    deploy/operators/dkg/test-completiton.sh run \
+      --workdir $coord_dir \
+      --skip-resume \
+      --release-tag $DKG_RELEASE_TAG \
+      --output $dkg_dir/reports/completion.json"
+
+  # Step 6: Build DKG summary
+  local completion_json
+  completion_json="$(run_on_host "$RUNNER_PUBLIC_IP" "cat $dkg_dir/reports/completion.json")"
+  local ufvk
+  ufvk="$(jq -r '.ufvk // empty' <<<"$completion_json")"
+  [[ -n "$ufvk" ]] || die "DKG completion report missing ufvk"
+
+  local juno_shielded_address
+  juno_shielded_address="$(jq -r '.juno_shielded_address // empty' <<<"$completion_json")"
+
+  # Build summary JSON and save locally
+  local operator_ids_json="[]"
+  local operator_keys_json="[]"
+  for i in "${!operator_ids[@]}"; do
+    operator_ids_json="$(jq --arg id "${operator_ids[$i]}" '. + [$id]' <<<"$operator_ids_json")"
+    operator_keys_json="$(jq --arg kf "${operator_key_files[$i]}" '. + [$kf]' <<<"$operator_keys_json")"
+  done
+
+  jq -n \
+    --arg ufvk "$ufvk" \
+    --arg juno_shielded_address "$juno_shielded_address" \
+    --argjson operator_ids "$operator_ids_json" \
+    --argjson operator_key_files "$operator_keys_json" \
+    --arg coordinator_workdir "$coord_dir" \
+    --argjson threshold "$OPERATOR_THRESHOLD" \
+    '{
+      ufvk: $ufvk,
+      juno_shielded_address: $juno_shielded_address,
+      operator_count: ($operator_ids | length),
+      threshold: $threshold,
+      operators: [range($operator_ids | length) | {
+        operator_id: $operator_ids[.],
+        operator_key_file: $operator_key_files[.],
+        endpoint: null
+      }],
+      coordinator_workdir: $coordinator_workdir,
+      completion_report: "'"$dkg_dir"'/reports/completion.json"
+    }' > "$dkg_summary"
+
+  ok "DKG summary saved: $dkg_summary"
+  ok "UFVK: ${ufvk:0:32}..."
+  ok "Juno shielded address: ${juno_shielded_address:0:40}..."
+
+  # Step 7: Backup/restore and KMS export for each operator
+  for i in "${!OPERATOR_PUBLIC_IPS[@]}"; do
+    local op_priv="${OPERATOR_PRIVATE_IPS[$i]}"
+    local op_runtime="/home/$RUNNER_SSH_USER/operator-runtime"
+
+    # KMS export via runner -> operator SSH
+    run_on_host "$RUNNER_PUBLIC_IP" \
+      "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+       -i $remote_ssh_key $RUNNER_SSH_USER@$op_priv \
+       'cd /home/$RUNNER_SSH_USER/intents-juno 2>/dev/null || cd \$HOME && \
+        deploy/operators/dkg/operator-export-kms.sh export \
+          --workdir $op_runtime \
+          --release-tag $DKG_RELEASE_TAG \
+          --kms-key-id $DKG_KMS_KEY_ARN \
+          --s3-bucket $DKG_S3_BUCKET \
+          --s3-key-prefix $DKG_S3_KEY_PREFIX \
+          --s3-sse-kms-key-id $DKG_KMS_KEY_ARN \
+          --aws-region $AWS_REGION \
+          --skip-aws-preflight'"
+    ok "Operator $((i+1)) KMS export done"
+  done
 }
 
-stage_12_run_orchestrator() {
-  _load_contract_checkpoint
-  log "Running e2e-orchestrator..."
+# ── Derive owallet keys from UFVK ───────────────────────────────────────────
 
-  local bridge_api_url="http://$BRIDGE_API_LISTEN"
-  local orchestrator_report="$REPORT_DIR/e2e-orchestrator-report.json"
+derive_owallet_keys() {
+  step "Deriving owallet keys from UFVK"
 
-  export JUNO_RPC_USER JUNO_RPC_PASS
-  export JUNO_SCAN_BEARER_TOKEN="${JUNO_SCAN_BEARER_TOKEN:-}"
+  local dkg_summary="$WORKDIR/reports/dkg-summary.json"
+  local ufvk
+  ufvk="$(jq -r '.ufvk' "$dkg_summary")"
 
-  "$WORKDIR/bin/e2e-orchestrator" \
-    --bridge-api-url "$bridge_api_url" \
-    --base-rpc-url "$BASE_RPC_URL" \
-    --base-chain-id "$BASE_CHAIN_ID" \
-    --juno-rpc-url "$JUNO_RPC_URL" \
-    --bridge-address "$BRIDGE_ADDRESS" \
-    --wjuno-address "$WJUNO_ADDRESS" \
-    --fee-distributor-address "$FEE_DISTRIBUTOR_ADDRESS" \
-    --recipient-address "$RECIPIENT_ADDRESS" \
-    --juno-funder-source-address "$JUNO_FUNDER_SOURCE_ADDRESS" \
-    --owallet-ua "$OWALLET_UA" \
-    --juno-wallet-id "$JUNO_WALLET_ID" \
-    --deposit-amount-zat "$DEPOSIT_AMOUNT_ZAT" \
-    --withdraw-amount "$WITHDRAW_AMOUNT" \
-    --withdraw-recipient-raw-hex "$WITHDRAW_RECIPIENT_RAW_HEX" \
-    --juno-scan-url "$JUNO_SCAN_URL" \
-    --witness-extract-bin "${WITNESS_EXTRACT_BIN:-juno-witness-extract}" \
-    --run-timeout "${E2E_RUN_TIMEOUT:-45m}" \
-    --deposit-timeout "${E2E_DEPOSIT_TIMEOUT:-20m}" \
-    --withdraw-timeout "${E2E_WITHDRAW_TIMEOUT:-30m}" \
-    --poll-interval "${E2E_POLL_INTERVAL:-5s}" \
-    --expected-fee-bps "${BRIDGE_FEE_BPS:-50}" \
-    --expected-tip-bps "${BRIDGE_RELAYER_TIP_BPS:-1000}" \
-    ${SHARED_IPFS_API_URL:+--ipfs-api-url "$SHARED_IPFS_API_URL"} \
-    --output "$orchestrator_report" \
-    2>&1 | tee "$LOG_DIR/e2e-orchestrator.log"
+  local derive_output
+  derive_output="$(run_on_host "$RUNNER_PUBLIC_IP" \
+    "cd /home/$RUNNER_SSH_USER/intents-juno && \
+     source \$HOME/.cargo/env 2>/dev/null || true && \
+     cargo run --quiet --manifest-path deploy/operators/dkg/e2e/ufvk-derive-keys/Cargo.toml -- '$ufvk'"
+  )"
 
-  local exit_code=${PIPESTATUS[0]}
+  SP1_DEPOSIT_OWALLET_IVK_HEX="$(grep '^SP1_DEPOSIT_OWALLET_IVK_HEX=' <<<"$derive_output" | cut -d= -f2)"
+  SP1_WITHDRAW_OWALLET_OVK_HEX="$(grep '^SP1_WITHDRAW_OWALLET_OVK_HEX=' <<<"$derive_output" | cut -d= -f2)"
 
-  if [[ -f "$orchestrator_report" ]]; then
-    local success; success=$(jq -r '.success' "$orchestrator_report" 2>/dev/null || echo "false")
-    if [[ "$success" == "true" ]]; then
-      ok "E2E orchestrator PASSED"
-    else
-      warn "E2E orchestrator FAILED (report: $orchestrator_report)"
-      jq -r '.deposit // empty, .withdrawal // empty' "$orchestrator_report" 2>/dev/null || true
-    fi
+  [[ -n "$SP1_DEPOSIT_OWALLET_IVK_HEX" ]] || die "failed to derive deposit owallet IVK"
+  [[ -n "$SP1_WITHDRAW_OWALLET_OVK_HEX" ]] || die "failed to derive withdraw owallet OVK"
+  ok "deposit IVK: ${SP1_DEPOSIT_OWALLET_IVK_HEX:0:20}..."
+  ok "withdraw OVK: ${SP1_WITHDRAW_OWALLET_OVK_HEX:0:20}..."
+}
+
+# ── Stage secrets on runner ──────────────────────────────────────────────────
+
+stage_secrets_on_runner() {
+  step "Staging secrets on runner"
+
+  local remote_secrets="/home/$RUNNER_SSH_USER/.ci/secrets"
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_secrets && chmod 700 $remote_secrets"
+
+  # Base funder key
+  scp_to_host "$RUNNER_PUBLIC_IP" "$BASE_FUNDER_KEY_FILE" "$remote_secrets/base-funder.key"
+
+  # Juno funder
+  if [[ -n "$JUNO_FUNDER_SEED_FILE" ]]; then
+    scp_to_host "$RUNNER_PUBLIC_IP" "$JUNO_FUNDER_SEED_FILE" "$remote_secrets/juno-funder-seed.txt"
+  fi
+  if [[ -n "${JUNO_FUNDER_KEY_FILE:-}" ]]; then
+    scp_to_host "$RUNNER_PUBLIC_IP" "$JUNO_FUNDER_KEY_FILE" "$remote_secrets/juno-funder.key"
+  fi
+  if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS_FILE:-}" ]]; then
+    scp_to_host "$RUNNER_PUBLIC_IP" "$JUNO_FUNDER_SOURCE_ADDRESS_FILE" "$remote_secrets/juno-funder-source-address.txt"
+  fi
+
+  # Juno RPC credentials
+  scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/local-secrets/juno-rpc-user.txt" "$remote_secrets/juno-rpc-user.txt"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/local-secrets/juno-rpc-pass.txt" "$remote_secrets/juno-rpc-pass.txt"
+
+  # SP1 requestor key
+  scp_to_host "$RUNNER_PUBLIC_IP" "$SP1_REQUESTOR_KEY_FILE" "$remote_secrets/sp1-requestor.key"
+
+  # SSH fleet key (for runner -> operator access)
+  scp_to_host "$RUNNER_PUBLIC_IP" "$SSH_KEY_PRIVATE" "$remote_secrets/fleet-ssh-key"
+  run_on_host "$RUNNER_PUBLIC_IP" "chmod 600 $remote_secrets/fleet-ssh-key"
+
+  ok "All secrets staged on runner"
+}
+
+# ── Scale ECS proof services ─────────────────────────────────────────────────
+
+scale_proof_services() {
+  local desired="$1"
+  step "Scaling ECS proof services to desired=$desired"
+
+  for svc in "$SHARED_PROOF_REQUESTOR_SERVICE" "$SHARED_PROOF_FUNDER_SERVICE"; do
+    [[ -n "$svc" ]] || continue
+    env AWS_PROFILE="$AWS_PROFILE" aws ecs update-service \
+      --region "$AWS_REGION" \
+      --cluster "$SHARED_ECS_CLUSTER_ARN" \
+      --service "$svc" \
+      --desired-count "$desired" \
+      --query 'service.serviceName' --output text >/dev/null 2>&1 || \
+      warn "failed to scale $svc to $desired"
+  done
+  ok "ECS services scaled"
+}
+
+# ── Run the e2e test on the runner ───────────────────────────────────────────
+
+run_e2e_test() {
+  step "Running e2e test on runner"
+
+  local dkg_summary="$WORKDIR/reports/dkg-summary.json"
+  local remote_secrets="/home/$RUNNER_SSH_USER/.ci/secrets"
+  local remote_workdir="/home/$RUNNER_SSH_USER/testnet-e2e-live"
+  local remote_repo="/home/$RUNNER_SSH_USER/intents-juno"
+
+  # Build operator host list
+  local op_hosts_csv=""
+  for ip in "${OPERATOR_PUBLIC_IPS[@]}"; do
+    op_hosts_csv="${op_hosts_csv:+$op_hosts_csv,}$ip"
+  done
+
+  # Build operator IDs from DKG summary
+  local operator_ids_csv=""
+  operator_ids_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
+
+  # Build the DKG summary path on runner
+  local remote_dkg_summary="$remote_workdir/dkg-summary.json"
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$dkg_summary" "$remote_dkg_summary"
+
+  # Resolve DKG juno shielded address
+  local witness_recipient_ua
+  witness_recipient_ua="$(jq -r '.juno_shielded_address' "$dkg_summary")"
+  local witness_ufvk
+  witness_ufvk="$(jq -r '.ufvk' "$dkg_summary")"
+
+  # Build SSH tunnel ports for each operator (juno-scan, juno-rpc, tss)
+  local tunnel_setup_script=""
+  local witness_scan_urls=""
+  local witness_rpc_urls=""
+  local tss_urls=""
+  for i in "${!OPERATOR_PRIVATE_IPS[@]}"; do
+    local op_priv="${OPERATOR_PRIVATE_IPS[$i]}"
+    local scan_port=$((38080 + i))
+    local rpc_port=$((38232 + i))
+    local tss_port=$((39443 + i))
+
+    tunnel_setup_script+="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+    tunnel_setup_script+="-i $remote_secrets/fleet-ssh-key "
+    tunnel_setup_script+="-L ${scan_port}:127.0.0.1:8080 "
+    tunnel_setup_script+="-L ${rpc_port}:127.0.0.1:18232 "
+    tunnel_setup_script+="-L ${tss_port}:127.0.0.1:9443 "
+    tunnel_setup_script+="-N $RUNNER_SSH_USER@$op_priv &"$'\n'
+    tunnel_setup_script+="TUNNEL_PIDS+=(\$!)"$'\n'
+
+    witness_scan_urls="${witness_scan_urls:+$witness_scan_urls,}http://127.0.0.1:${scan_port}"
+    witness_rpc_urls="${witness_rpc_urls:+$witness_rpc_urls,}http://127.0.0.1:${rpc_port}"
+    tss_urls="${tss_urls:+$tss_urls,}https://127.0.0.1:${tss_port}"
+  done
+
+  # Prepare environment variables
+  local juno_rpc_user juno_rpc_pass
+  juno_rpc_user="$(cat "$WORKDIR/local-secrets/juno-rpc-user.txt")"
+  juno_rpc_pass="$(cat "$WORKDIR/local-secrets/juno-rpc-pass.txt")"
+
+  # Build env exports for Juno funder
+  local funder_env=""
+  if [[ -n "$JUNO_FUNDER_SEED_FILE" ]]; then
+    local seed_phrase
+    seed_phrase="$(cat "$JUNO_FUNDER_SEED_FILE")"
+    funder_env="export JUNO_FUNDER_SEED_PHRASE=$(printf '%q' "$seed_phrase")"
+  elif [[ -n "${JUNO_FUNDER_KEY_FILE:-}" ]]; then
+    local juno_key_hex
+    juno_key_hex="$(cat "$JUNO_FUNDER_KEY_FILE")"
+    funder_env="export JUNO_FUNDER_PRIVATE_KEY_HEX=$(printf '%q' "$juno_key_hex")"
+  fi
+  if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS_FILE:-}" ]]; then
+    local funder_ua
+    funder_ua="$(cat "$JUNO_FUNDER_SOURCE_ADDRESS_FILE")"
+    funder_env+=$'\n'"export JUNO_FUNDER_SOURCE_ADDRESS=$(printf '%q' "$funder_ua")"
+  fi
+
+  # Resolve the TSS CA PEM from an operator
+  local tss_ca_remote="$remote_secrets/tss-ca.pem"
+  run_on_host "$RUNNER_PUBLIC_IP" \
+    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+     -i $remote_secrets/fleet-ssh-key $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[0]} \
+     'cat /var/lib/intents-juno/operator-runtime/tls/ca.pem 2>/dev/null || \
+      cat /home/$RUNNER_SSH_USER/operator-runtime/tls/ca.pem 2>/dev/null || \
+      cat /etc/intents-juno/tss-ca.pem 2>/dev/null || true' > $tss_ca_remote" || \
+    warn "could not extract TSS CA PEM; withdraw-coordinator TLS may fail"
+
+  # Build the remote run script
+  local remote_run_script
+  remote_run_script="$(cat <<REMOTESCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="\$PATH:/usr/local/go/bin:\$HOME/go/bin"
+source "\$HOME/.cargo/env" 2>/dev/null || true
+
+export JUNO_RPC_USER=$(printf '%q' "$juno_rpc_user")
+export JUNO_RPC_PASS=$(printf '%q' "$juno_rpc_pass")
+export AWS_REGION="$AWS_REGION"
+$funder_env
+
+# Set up SSH tunnels to operators
+TUNNEL_PIDS=()
+cleanup_tunnels() {
+  for pid in "\${TUNNEL_PIDS[@]}"; do
+    kill "\$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_tunnels EXIT
+
+$tunnel_setup_script
+
+# Wait for tunnels
+sleep 3
+
+cd $remote_repo
+
+# Forwarded args for run-testnet-e2e.sh
+exec deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
+  --workdir "$remote_workdir" \\
+  --base-rpc-url "$BASE_RPC_URL" \\
+  --base-chain-id "$BASE_CHAIN_ID" \\
+  --base-funder-key-file "$remote_secrets/base-funder.key" \\
+  --bridge-verifier-address "$BRIDGE_VERIFIER_ADDRESS" \\
+  --bridge-deposit-image-id "$BRIDGE_DEPOSIT_IMAGE_ID" \\
+  --bridge-withdraw-image-id "$BRIDGE_WITHDRAW_IMAGE_ID" \\
+  --sp1-requestor-key-file "$remote_secrets/sp1-requestor.key" \\
+  --sp1-deposit-program-url "$SP1_DEPOSIT_PROGRAM_URL" \\
+  --sp1-withdraw-program-url "$SP1_WITHDRAW_PROGRAM_URL" \\
+  --sp1-deposit-owallet-ivk-hex "$SP1_DEPOSIT_OWALLET_IVK_HEX" \\
+  --sp1-withdraw-owallet-ovk-hex "$SP1_WITHDRAW_OWALLET_OVK_HEX" \\
+  --sp1-witness-juno-scan-urls "$witness_scan_urls" \\
+  --sp1-witness-juno-rpc-urls "$witness_rpc_urls" \\
+  --sp1-witness-recipient-ua "$witness_recipient_ua" \\
+  --sp1-witness-recipient-ufvk "$witness_ufvk" \\
+  --sp1-input-s3-bucket "$DKG_S3_BUCKET" \\
+  --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
+  --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
+  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+  --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
+  --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\
+  --shared-proof-funder-service-name "$SHARED_PROOF_FUNDER_SERVICE" \\
+  --dkg-summary-path "$remote_dkg_summary" \\
+  --operator-count "$OPERATOR_COUNT" \\
+  --threshold "$OPERATOR_THRESHOLD" \\
+  --withdraw-coordinator-tss-server-ca-file "$tss_ca_remote" \\
+  --relayer-runtime-mode distributed \\
+  --relayer-runtime-operator-hosts "$op_hosts_csv" \\
+  --relayer-runtime-operator-ssh-user "$RUNNER_SSH_USER" \\
+  --relayer-runtime-operator-ssh-key-file "$remote_secrets/fleet-ssh-key" \\
+  --withdraw-blob-bucket "$DKG_S3_BUCKET" \\
+  --withdraw-blob-prefix "withdraw-live" \\
+  --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
+  --force
+REMOTESCRIPT
+  )"
+
+  # Execute on runner
+  log "executing e2e test on runner (this takes 30-90 minutes)..."
+  local exit_code=0
+  ssh "${SSH_OPTS[@]}" -t "$RUNNER_SSH_USER@$RUNNER_PUBLIC_IP" \
+    "bash -lc $(printf '%q' "$remote_run_script")" \
+    2>&1 | tee "$WORKDIR/logs/e2e-test.log" || exit_code=$?
+
+  if [[ $exit_code -eq 0 ]]; then
+    ok "E2E test PASSED"
+  else
+    warn "E2E test FAILED (exit code: $exit_code)"
   fi
 
   return "$exit_code"
 }
 
-stage_13_collect_results() {
-  log "Collecting results..."
+# ── Artifact collection ──────────────────────────────────────────────────────
 
-  # Copy orchestrator report to top-level.
-  if [[ -f "$REPORT_DIR/e2e-orchestrator-report.json" ]]; then
-    cp "$REPORT_DIR/e2e-orchestrator-report.json" "$WORKDIR/e2e-result.json"
-    ok "Result: $WORKDIR/e2e-result.json"
+collect_artifacts() {
+  step "Collecting artifacts from runner"
+
+  local remote_workdir="/home/$RUNNER_SSH_USER/testnet-e2e-live"
+  local artifacts_dir="$WORKDIR/artifacts"
+  mkdir -p "$artifacts_dir"
+
+  scp -r "${SSH_OPTS[@]}" -q \
+    "$RUNNER_SSH_USER@$RUNNER_PUBLIC_IP:$remote_workdir/reports/" "$artifacts_dir/" 2>/dev/null || \
+    warn "no reports to collect from runner"
+
+  if [[ -f "$artifacts_dir/testnet-e2e-summary.json" ]]; then
+    ok "Test summary: $artifacts_dir/testnet-e2e-summary.json"
+    jq -r '.success // "unknown"' "$artifacts_dir/testnet-e2e-summary.json" || true
+  fi
+}
+
+# ── Cleanup / teardown ───────────────────────────────────────────────────────
+
+terraform_destroy() {
+  local state_file="$WORKDIR/infra/terraform.tfstate"
+  local tfvars_file="$WORKDIR/infra/terraform.tfvars.json"
+
+  if [[ ! -f "$state_file" || ! -f "$tfvars_file" ]]; then
+    log "no terraform state found; nothing to destroy"
+    return 0
   fi
 
-  # Snapshot service logs.
-  for svc in bridge-api base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer; do
-    if [[ -f "$LOG_DIR/$svc.log" ]]; then
-      local lines; lines=$(wc -l < "$LOG_DIR/$svc.log")
-      log "  $svc.log: $lines lines"
+  step "Terraform destroy"
+  tf_cmd -chdir="$TERRAFORM_DIR" init -input=false >/dev/null 2>&1
+  tf_cmd -chdir="$TERRAFORM_DIR" destroy \
+    -input=false -auto-approve \
+    -state="$state_file" \
+    -var-file="$tfvars_file" \
+    2>&1 | tee "$WORKDIR/logs/terraform-destroy.log" || \
+    warn "terraform destroy failed (manual cleanup may be needed)"
+
+  ok "Terraform destroy completed"
+}
+
+delete_sp1_secret() {
+  local arn="$1"
+  [[ -n "$arn" ]] || return 0
+  log "deleting SP1 Secrets Manager secret: $arn"
+  env AWS_PROFILE="$AWS_PROFILE" aws secretsmanager delete-secret \
+    --region "$AWS_REGION" \
+    --secret-id "$arn" \
+    --force-delete-without-recovery >/dev/null 2>&1 || \
+    warn "failed to delete SP1 secret: $arn"
+}
+
+cleanup_trap() {
+  local rc=$?
+  if [[ "$CLEANUP_ENABLED" == "true" ]]; then
+    terraform_destroy
+    delete_sp1_secret "$CLEANUP_SP1_SECRET_ARN"
+  else
+    if [[ -n "$RUNNER_PUBLIC_IP" ]]; then
+      log "infrastructure kept alive (--keep-infra). Runner: $RUNNER_SSH_USER@$RUNNER_PUBLIC_IP"
+      log "to destroy: $0 cleanup --workdir $WORKDIR"
     fi
+  fi
+  if [[ $rc -ne 0 ]]; then
+    log "logs: $WORKDIR/logs/"
+  fi
+  exit "$rc"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# COMMANDS
+# ══════════════════════════════════════════════════════════════════════════════
+
+cmd_run() {
+  mkdir -p "$WORKDIR/logs" "$WORKDIR/reports" "$WORKDIR/local-secrets" "$CHECKPOINT_DIR"
+
+  # Preflight
+  for cmd in terraform aws ssh scp ssh-keygen jq curl gh go; do
+    have_cmd "$cmd" || die "missing required command: $cmd"
   done
 
-  # Print summary.
-  echo ""
-  echo "═══════════════════════════════════════════"
-  echo " E2E RUN COMPLETE"
-  echo "═══════════════════════════════════════════"
-  echo " Workdir:  $WORKDIR"
-  echo " Logs:     $LOG_DIR/"
-  echo " Reports:  $REPORT_DIR/"
-  echo " Result:   $WORKDIR/e2e-result.json"
-  echo "═══════════════════════════════════════════"
+  # Validate AWS profile
+  env AWS_PROFILE="$AWS_PROFILE" aws sts get-caller-identity --region "$AWS_REGION" >/dev/null 2>&1 || \
+    die "AWS profile '$AWS_PROFILE' not configured or credentials expired"
+  ok "AWS profile '$AWS_PROFILE' valid"
 
-  if [[ -f "$WORKDIR/e2e-result.json" ]]; then
-    local success; success=$(jq -r '.success' "$WORKDIR/e2e-result.json" 2>/dev/null || echo "unknown")
-    if [[ "$success" == "true" ]]; then
-      echo -e " Status:   ${GREEN}PASS${NC}"
-    else
-      echo -e " Status:   ${RED}FAIL${NC}"
-    fi
+  auto_discover_secrets
+  resolve_gh_releases
+  setup_ssh_keys
+
+  # Register cleanup trap
+  if [[ "$KEEP_INFRA" != "true" ]]; then
+    CLEANUP_ENABLED=true
+  fi
+  trap cleanup_trap EXIT
+
+  # Stage 1: Terraform
+  if ! checkpoint_done "terraform"; then
+    terraform_apply
+    checkpoint_mark "terraform"
+  fi
+  read_tf_outputs
+
+  # Load SP1 secret ARN for cleanup
+  if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
+    CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+
+  # Stage 2: Prepare hosts
+  if ! checkpoint_done "prepare-hosts"; then
+    prepare_runner_host
+    prepare_operator_hosts
+    extract_rpc_credentials
+    checkpoint_mark "prepare-hosts"
+  fi
+
+  # Stage 3: DKG
+  if ! checkpoint_done "dkg"; then
+    run_distributed_dkg
+    derive_owallet_keys
+    checkpoint_mark "dkg"
+  else
+    # Load derived keys from DKG summary
+    derive_owallet_keys
+  fi
+
+  # Stage 4: Stage secrets and scale ECS
+  if ! checkpoint_done "stage-secrets"; then
+    stage_secrets_on_runner
+    scale_proof_services 1
+    checkpoint_mark "stage-secrets"
+  fi
+
+  # Stage 5: Run test
+  local test_exit=0
+  run_e2e_test || test_exit=$?
+
+  # Stage 6: Collect artifacts
+  collect_artifacts
+
+  # Print summary
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo -e "${BOLD} E2E RUN COMPLETE${NC}"
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo " Workdir:   $WORKDIR"
+  echo " Logs:      $WORKDIR/logs/"
+  echo " Artifacts: $WORKDIR/artifacts/"
+  if [[ $test_exit -eq 0 ]]; then
+    echo -e " Status:    ${GREEN}PASS${NC}"
+  else
+    echo -e " Status:    ${RED}FAIL${NC}"
+  fi
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo ""
+
+  return "$test_exit"
+}
+
+cmd_resume() {
+  mkdir -p "$WORKDIR/logs" "$WORKDIR/reports" "$CHECKPOINT_DIR"
+
+  # Preflight
+  for cmd in terraform aws ssh scp jq curl gh go; do
+    have_cmd "$cmd" || die "missing required command: $cmd"
+  done
+
+  auto_discover_secrets
+  resolve_gh_releases
+  setup_ssh_keys
+
+  # Register cleanup trap (keep infra by default on resume)
+  KEEP_INFRA=true
+  trap cleanup_trap EXIT
+
+  # Read existing terraform state
+  read_tf_outputs
+
+  if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
+    CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+
+  # Ensure DKG is done
+  [[ -f "$WORKDIR/reports/dkg-summary.json" ]] || \
+    die "no DKG summary found; run 'run' first"
+
+  # Derive keys (needed for test args)
+  derive_owallet_keys
+
+  # Re-stage secrets (in case runner was restarted)
+  stage_secrets_on_runner
+  scale_proof_services 1
+
+  # Run test
+  local test_exit=0
+  run_e2e_test || test_exit=$?
+  collect_artifacts
+
+  echo ""
+  if [[ $test_exit -eq 0 ]]; then
+    echo -e "${GREEN}E2E RESUME: PASS${NC}"
+  else
+    echo -e "${RED}E2E RESUME: FAIL${NC}"
   fi
   echo ""
+
+  return "$test_exit"
+}
+
+cmd_cleanup() {
+  mkdir -p "$WORKDIR/logs" 2>/dev/null || true
+
+  for cmd in terraform aws; do
+    have_cmd "$cmd" || die "missing required command: $cmd"
+  done
+
+  terraform_destroy
+
+  if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
+    delete_sp1_secret "$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+
+  ok "Cleanup complete"
 }
 
 # ══════════════════════════════════════════════════════════════════════════════
 # MAIN
 # ══════════════════════════════════════════════════════════════════════════════
 
-log "E2E local runner — workdir=$WORKDIR"
-log "Checkpoint dir: $CHECKPOINT_DIR"
+parse_args "$@"
 
-for stage in "${STAGE_ORDER[@]}"; do
-  run_stage "$stage"
-done
+log "e2e-local: command=$COMMAND workdir=$WORKDIR aws-profile=$AWS_PROFILE region=$AWS_REGION"
 
-log "All stages complete."
+case "$COMMAND" in
+  run)     cmd_run ;;
+  resume)  cmd_resume ;;
+  cleanup) cmd_cleanup ;;
+esac
