@@ -978,6 +978,22 @@ test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_
     "proof-requestor progress baseline is captured before bridge-api deposit status wait begins"
 }
 
+test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "proof_jobs_latest_retryable_failure_epoch() {" "run-testnet-e2e defines helper to query latest retryable proof-job failure epoch"
+  assert_contains "$script_text" "proof_jobs_latest_retryable_failure_code() {" "run-testnet-e2e defines helper to query latest retryable proof-job failure code"
+  assert_contains "$script_text" "proof_retryable_failure_epoch_before_run_deposit" "run-testnet-e2e tracks retryable failure epoch baseline before run-deposit wait"
+  assert_contains "$script_text" "proof_retryable_failure_epoch_current" "run-testnet-e2e reads latest retryable failure epoch during run-deposit wait"
+  assert_contains "$script_text" "proof_retryable_failure_code_current" "run-testnet-e2e reads latest retryable failure code during run-deposit wait"
+  assert_contains "$script_text" "sp1_request_unfulfillable" "run-testnet-e2e explicitly treats SP1 unfulfillable failures as restart/bump trigger candidates"
+  assert_contains "$script_text" "sp1_request_auction_timeout" "run-testnet-e2e explicitly treats SP1 auction-timeout failures as restart/bump trigger candidates"
+  assert_contains "$script_text" "proof-requestor progress guard observed retryable SP1 failure signature" "run-testnet-e2e logs retryable SP1 failure signature detection while deposit status is pending"
+  assert_contains "$script_text" "proof-requestor progress guard bumped SP1 max price per PGU from" "run-testnet-e2e bumps SP1 max-price when retryable SP1 failure signatures repeat"
+  assert_contains "$script_text" "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature" "run-testnet-e2e fails explicitly when post-failure restart fails"
+}
+
 test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout() {
   local script_text
   local submit_timeout_reference_count
@@ -1094,6 +1110,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_shared_proof_services_restart_after_topic_ensure
   test_relayer_runtime_clears_stale_bridge_rows_before_launch
   test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_status_wait
+  test_live_bridge_flow_bumps_price_on_retryable_sp1_failure_signatures
   test_relayer_submit_timeout_is_aligned_with_sp1_request_timeout
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_submission_waits_for_relayer_checkpoint_catchup

@@ -1286,6 +1286,71 @@ proof_jobs_latest_updated_epoch() {
   printf '%s' "$epoch_raw"
 }
 
+proof_jobs_latest_retryable_failure_epoch() {
+  local postgres_dsn="$1"
+  local pipeline="$2"
+  local epoch_raw status
+
+  [[ "$pipeline" =~ ^[a-z_]+$ ]] || return 1
+
+  set +e
+  epoch_raw="$(
+    psql "$postgres_dsn" -Atqc "
+SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)),0)::bigint
+FROM proof_jobs
+WHERE pipeline = '$pipeline'
+  AND state = 4
+  AND retryable = true
+  AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout');
+" 2>/dev/null
+  )"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  epoch_raw="$(trim "$epoch_raw")"
+  [[ "$epoch_raw" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$epoch_raw"
+}
+
+proof_jobs_latest_retryable_failure_code() {
+  local postgres_dsn="$1"
+  local pipeline="$2"
+  local code_raw status
+
+  [[ "$pipeline" =~ ^[a-z_]+$ ]] || return 1
+
+  set +e
+  code_raw="$(
+    psql "$postgres_dsn" -Atqc "
+SELECT COALESCE((
+  SELECT error_code
+  FROM proof_jobs
+  WHERE pipeline = '$pipeline'
+    AND state = 4
+    AND retryable = true
+    AND error_code IN ('sp1_request_unfulfillable','sp1_request_auction_timeout')
+  ORDER BY updated_at DESC
+  LIMIT 1
+), '');
+" 2>/dev/null
+  )"
+  status=$?
+  set -e
+  if (( status != 0 )); then
+    return 1
+  fi
+
+  code_raw="$(trim "$code_raw")"
+  case "$code_raw" in
+    ""|sp1_request_unfulfillable|sp1_request_auction_timeout) ;;
+    *) return 1 ;;
+  esac
+  printf '%s' "$code_raw"
+}
+
 clear_live_bridge_runtime_state() {
   local postgres_dsn="$1"
   local max_attempts="${2:-5}"
@@ -6743,9 +6808,11 @@ command_run() {
 
     local proof_jobs_count_before_run_deposit=""
     local proof_jobs_last_update_epoch_before_run_deposit=""
+    local proof_retryable_failure_epoch_before_run_deposit=""
     if [[ "$shared_enabled" == "true" && "$proof_services_mode" == "shared-ecs" ]]; then
       proof_jobs_count_before_run_deposit="$(proof_jobs_count "$shared_postgres_dsn" || true)"
       proof_jobs_last_update_epoch_before_run_deposit="$(proof_jobs_latest_updated_epoch "$shared_postgres_dsn" || true)"
+      proof_retryable_failure_epoch_before_run_deposit="$(proof_jobs_latest_retryable_failure_epoch "$shared_postgres_dsn" "deposit" || true)"
       if [[ "$proof_jobs_count_before_run_deposit" =~ ^[0-9]+$ ]]; then
         log "proof-requestor progress guard baseline proof_jobs_count_before_run_deposit=$proof_jobs_count_before_run_deposit"
       else
@@ -6755,6 +6822,11 @@ command_run() {
         log "proof-requestor progress guard baseline proof_jobs_last_update_epoch_before_run_deposit=$proof_jobs_last_update_epoch_before_run_deposit"
       else
         log "proof-requestor progress guard fallback: unable to read proof_jobs latest updated_at epoch from shared postgres"
+      fi
+      if [[ "$proof_retryable_failure_epoch_before_run_deposit" =~ ^[0-9]+$ ]]; then
+        log "proof-requestor progress guard baseline proof_retryable_failure_epoch_before_run_deposit=$proof_retryable_failure_epoch_before_run_deposit"
+      else
+        log "proof-requestor progress guard fallback: unable to read retryable proof-job failure baseline from shared postgres"
       fi
     fi
 
@@ -6832,6 +6904,8 @@ command_run() {
     if (( relayer_status == 0 )); then
       local proof_jobs_count_current=""
       local proof_jobs_last_update_epoch_current=""
+      local proof_retryable_failure_epoch_current=""
+      local proof_retryable_failure_code_current=""
       local proof_requestor_progress_guard_interval_seconds="$((10#${sp1_auction_timeout%s}))"
       (( proof_requestor_progress_guard_interval_seconds >= 300 )) || proof_requestor_progress_guard_interval_seconds=300
       local proof_requestor_progress_guard_max_restarts=2
@@ -6865,6 +6939,38 @@ command_run() {
           now_epoch="$(date +%s)"
           proof_jobs_count_current="$(proof_jobs_count "$shared_postgres_dsn" || true)"
           proof_jobs_last_update_epoch_current="$(proof_jobs_latest_updated_epoch "$shared_postgres_dsn" || true)"
+          proof_retryable_failure_epoch_current="$(proof_jobs_latest_retryable_failure_epoch "$shared_postgres_dsn" "deposit" || true)"
+          proof_retryable_failure_code_current="$(proof_jobs_latest_retryable_failure_code "$shared_postgres_dsn" "deposit" || true)"
+          if [[ "$proof_retryable_failure_epoch_before_run_deposit" =~ ^[0-9]+$ ]] &&
+            [[ "$proof_retryable_failure_epoch_current" =~ ^[0-9]+$ ]] &&
+            (( proof_retryable_failure_epoch_current > proof_retryable_failure_epoch_before_run_deposit )) &&
+            [[ "$proof_retryable_failure_code_current" =~ ^sp1_request_(unfulfillable|auction_timeout)$ ]]; then
+            log "proof-requestor progress guard observed retryable SP1 failure signature code=$proof_retryable_failure_code_current baseline_epoch=$proof_retryable_failure_epoch_before_run_deposit current_epoch=$proof_retryable_failure_epoch_current while deposit status is pending"
+            proof_retryable_failure_epoch_before_run_deposit="$proof_retryable_failure_epoch_current"
+            if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
+              proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
+              proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
+              if [[ "$sp1_max_price_per_pgu" =~ ^[0-9]+$ ]] &&
+                (( sp1_max_price_per_pgu < sp1_progress_guard_bump_max_price_per_pgu )); then
+                local sp1_progress_guard_previous_max_price
+                sp1_progress_guard_previous_max_price="$sp1_max_price_per_pgu"
+                sp1_max_price_per_pgu="$sp1_progress_guard_bump_max_price_per_pgu"
+                proof_requestor_ecs_environment_json="$(build_proof_requestor_ecs_environment_json)"
+                log "proof-requestor progress guard bumped SP1 max price per PGU from $sp1_progress_guard_previous_max_price to $sp1_max_price_per_pgu before shared proof service restart"
+              fi
+              if ! restart_shared_proof_services_with_wait; then
+                log "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature code=$proof_retryable_failure_code_current"
+                proof_requestor_progress_guard_failed="true"
+                bridge_api_deposit_state="failed_proof_requestor_restart_failed"
+                return 0
+              fi
+              return 1
+            fi
+            log "proof-requestor progress guard exhausted restarts after retryable SP1 failure signatures code=$proof_retryable_failure_code_current"
+            proof_requestor_progress_guard_failed="true"
+            bridge_api_deposit_state="failed_proof_requestor_guard_exhausted"
+            return 0
+          fi
           if [[ "$proof_jobs_count_current" =~ ^[0-9]+$ ]] &&
             (( proof_jobs_count_current > proof_jobs_count_before_run_deposit )); then
             log "proof-requestor progress observed via proof_jobs growth while deposit status is pending baseline=$proof_jobs_count_before_run_deposit current=$proof_jobs_count_current"
