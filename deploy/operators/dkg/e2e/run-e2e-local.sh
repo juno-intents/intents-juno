@@ -83,6 +83,11 @@ declare -a OPERATOR_PRIVATE_IPS=()
 SP1_DEPOSIT_OWALLET_IVK_HEX=""
 SP1_WITHDRAW_OWALLET_OVK_HEX=""
 
+# Backoffice
+BACKOFFICE_PORT=8082
+BACKOFFICE_AUTH_TOKEN=""
+BACKOFFICE_SG_RULE_ADDED=false
+
 # Cleanup globals
 CLEANUP_ENABLED=false
 CLEANUP_SP1_SECRET_ARN=""
@@ -986,6 +991,95 @@ scale_proof_services() {
   ok "ECS services scaled"
 }
 
+# ── Deploy backoffice on runner ───────────────────────────────────────────────
+
+deploy_backoffice() {
+  step "Deploying backoffice on runner"
+
+  # Generate auth token
+  BACKOFFICE_AUTH_TOKEN="$(openssl rand -hex 24)"
+
+  # Cross-compile backoffice for linux/amd64
+  log "building backoffice for linux/amd64..."
+  GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/backoffice-linux-amd64" ./cmd/backoffice/
+  ok "backoffice binary built"
+
+  # SCP to runner
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p /home/$RUNNER_SSH_USER/bin"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/backoffice-linux-amd64" "/home/$RUNNER_SSH_USER/bin/backoffice"
+  run_on_host "$RUNNER_PUBLIC_IP" "chmod +x /home/$RUNNER_SSH_USER/bin/backoffice"
+
+  # Add security group ingress rule for backoffice port
+  local my_ip
+  my_ip="$(curl -sf https://checkip.amazonaws.com | tr -d '\r\n')" || true
+  if [[ -n "$my_ip" ]]; then
+    local runner_sg_id
+    runner_sg_id="$(
+      env AWS_PROFILE="$AWS_PROFILE" aws ec2 describe-instances \
+        --region "$AWS_REGION" \
+        --filters "Name=ip-address,Values=$RUNNER_PUBLIC_IP" \
+        --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+        --output text 2>/dev/null || true
+    )"
+    if [[ -n "$runner_sg_id" && "$runner_sg_id" != "None" ]]; then
+      env AWS_PROFILE="$AWS_PROFILE" aws ec2 authorize-security-group-ingress \
+        --region "$AWS_REGION" \
+        --group-id "$runner_sg_id" \
+        --protocol tcp --port "$BACKOFFICE_PORT" \
+        --cidr "0.0.0.0/0" \
+        --tag-specifications "ResourceType=security-group-rule,Tags=[{Key=Name,Value=backoffice-e2e}]" \
+        >/dev/null 2>&1 || warn "backoffice SG rule may already exist"
+      BACKOFFICE_SG_RULE_ADDED=true
+      ok "security group $runner_sg_id: opened port $BACKOFFICE_PORT"
+    fi
+  fi
+
+  # Build operator addresses list from DKG summary (if available)
+  local operator_addrs=""
+  if [[ -f "$WORKDIR/reports/dkg-summary.json" ]]; then
+    operator_addrs="$(jq -r '[.operators[].operator_id] | join(",")' "$WORKDIR/reports/dkg-summary.json" 2>/dev/null || true)"
+  fi
+
+  # Start backoffice on runner (background, nohup)
+  local backoffice_cmd
+  backoffice_cmd="/home/$RUNNER_SSH_USER/bin/backoffice"
+  backoffice_cmd+=" --listen 0.0.0.0:${BACKOFFICE_PORT}"
+  backoffice_cmd+=" --postgres-dsn '${SHARED_POSTGRES_DSN}'"
+  backoffice_cmd+=" --base-rpc-url '${BASE_RPC_URL}'"
+  backoffice_cmd+=" --auth-secret '${BACKOFFICE_AUTH_TOKEN}'"
+  if [[ -n "$operator_addrs" ]]; then
+    backoffice_cmd+=" --operator-addresses '${operator_addrs}'"
+  fi
+
+  run_on_host "$RUNNER_PUBLIC_IP" \
+    "pkill -f '/home/$RUNNER_SSH_USER/bin/backoffice' 2>/dev/null || true; \
+     sleep 1; \
+     nohup $backoffice_cmd > /home/$RUNNER_SSH_USER/backoffice.log 2>&1 &"
+  ok "backoffice started on runner"
+
+  # Write access details to local tmp file
+  local access_file="$REPO_ROOT/tmp/backoffice-access.txt"
+  cat > "$access_file" <<ACCESS_EOF
+# Backoffice Access Details (e2e run)
+# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+URL:        http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}
+Auth Token: ${BACKOFFICE_AUTH_TOKEN}
+
+# curl example:
+curl -H "Authorization: Bearer ${BACKOFFICE_AUTH_TOKEN}" http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}/api/ops/deposits/recent
+
+# Dashboard (open in browser, enter token when prompted):
+open http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}
+
+# Postgres DSN (for direct queries):
+${SHARED_POSTGRES_DSN}
+ACCESS_EOF
+  chmod 600 "$access_file"
+  ok "backoffice access details written to tmp/backoffice-access.txt"
+  log "backoffice URL: http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}"
+}
+
 # ── Run the e2e test on the runner ───────────────────────────────────────────
 
 run_e2e_test() {
@@ -1233,7 +1327,7 @@ cleanup_trap() {
 # ══════════════════════════════════════════════════════════════════════════════
 
 cmd_run() {
-  mkdir -p "$WORKDIR/logs" "$WORKDIR/reports" "$WORKDIR/local-secrets" "$CHECKPOINT_DIR"
+  mkdir -p "$WORKDIR/logs" "$WORKDIR/reports" "$WORKDIR/local-secrets" "$WORKDIR/bin" "$CHECKPOINT_DIR"
 
   # Preflight
   for cmd in terraform aws ssh scp ssh-keygen jq curl gh go; do
@@ -1292,7 +1386,13 @@ cmd_run() {
     checkpoint_mark "stage-secrets"
   fi
 
-  # Stage 5: Run test
+  # Stage 5: Deploy backoffice
+  if ! checkpoint_done "backoffice"; then
+    deploy_backoffice
+    checkpoint_mark "backoffice"
+  fi
+
+  # Stage 6: Run test
   local test_exit=0
   run_e2e_test || test_exit=$?
 
@@ -1351,6 +1451,9 @@ cmd_resume() {
   # Re-stage secrets (in case runner was restarted)
   stage_secrets_on_runner
   scale_proof_services 1
+
+  # Deploy backoffice
+  deploy_backoffice
 
   # Run test
   local test_exit=0
