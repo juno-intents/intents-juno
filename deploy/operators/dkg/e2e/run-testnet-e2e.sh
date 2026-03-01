@@ -288,6 +288,58 @@ wait_for_relayer_checkpoint_height_at_least() {
   return 1
 }
 
+replay_latest_checkpoint_package_to_topic() {
+  local checkpoint_replay_payload_file="$1"
+  local checkpoint_replay_postgres_dsn="$2"
+  local checkpoint_replay_kafka_brokers="$3"
+  local checkpoint_package_topic="$4"
+  local checkpoint_replay_context="${5:-runtime}"
+  local checkpoint_replay_status
+
+  [[ -n "$checkpoint_replay_payload_file" ]] || die "checkpoint replay requires payload file path"
+  [[ -n "$checkpoint_replay_postgres_dsn" ]] || die "checkpoint replay requires postgres dsn"
+  [[ -n "$checkpoint_replay_kafka_brokers" ]] || die "checkpoint replay requires kafka brokers"
+  [[ -n "$checkpoint_package_topic" ]] || die "checkpoint replay requires topic"
+
+  set +e
+  psql "$checkpoint_replay_postgres_dsn" -Atqc "
+    SELECT convert_from(package_json, 'UTF8')
+    FROM checkpoint_packages
+    WHERE package_json IS NOT NULL
+    ORDER BY persisted_at DESC
+    LIMIT 1;
+  " >"$checkpoint_replay_payload_file"
+  checkpoint_replay_status=$?
+  set -e
+  if (( checkpoint_replay_status != 0 )) || [[ ! -s "$checkpoint_replay_payload_file" ]]; then
+    log "failed to load latest checkpoint package payload for replay context=$checkpoint_replay_context"
+    return 1
+  fi
+
+  if ! jq -e . "$checkpoint_replay_payload_file" >/dev/null 2>&1; then
+    log "latest checkpoint package payload is not valid JSON for replay context=$checkpoint_replay_context"
+    return 1
+  fi
+
+  set +e
+  (
+    cd "$REPO_ROOT"
+    JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
+      --queue-driver kafka \
+      --queue-brokers "$checkpoint_replay_kafka_brokers" \
+      "--topic" "$checkpoint_package_topic" \
+      "--payload-file" "$checkpoint_replay_payload_file"
+  )
+  checkpoint_replay_status=$?
+  set -e
+  if (( checkpoint_replay_status != 0 )); then
+    log "failed to replay latest checkpoint package onto relayer checkpoint topic context=$checkpoint_replay_context"
+    return 1
+  fi
+
+  return 0
+}
+
 RUN_WORKDIR_LOCK_DIR=""
 RUN_WORKDIR_LOCK_PID_FILE=""
 
@@ -5476,6 +5528,13 @@ command_run() {
       shared_status="${PIPESTATUS[0]}"
       set -e
     fi
+    if (( shared_status != 0 )) &&
+      [[ "$stop_after_stage" == "full" ]] &&
+      [[ -n "$existing_bridge_summary_path" ]] &&
+      grep -q "$shared_validation_no_fresh_package_pattern" "$shared_validation_log"; then
+      log "shared infra validation in resume full run found no fresh checkpoint package before relayer startup; deferring freshness enforcement to relayer runtime checkpoint seed stage"
+      shared_status=0
+    fi
     rm -f "$shared_validation_log"
 
     if (( shared_status != 0 )); then
@@ -6311,7 +6370,7 @@ command_run() {
 
   if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
     local relayer_checkpoint_seed_started_at relayer_checkpoint_seed_summary
-    local relayer_checkpoint_replay_payload_file relayer_checkpoint_replay_status
+    local relayer_checkpoint_replay_payload_file
     local relayer_checkpoint_seed_log relayer_checkpoint_seed_status
     relayer_checkpoint_seed_started_at="$(timestamp_utc)"
     relayer_checkpoint_seed_summary="$workdir/reports/shared-infra-relayer-runtime-summary.json"
@@ -6356,41 +6415,13 @@ command_run() {
     fi
     if (( relayer_status == 0 )); then
       log "replaying latest checkpoint package onto relayer checkpoint topic after startup"
-      set +e
-      psql "$shared_postgres_dsn" -Atqc "
-        SELECT convert_from(package_json, 'UTF8')
-        FROM checkpoint_packages
-        WHERE package_json IS NOT NULL
-        ORDER BY persisted_at DESC
-        LIMIT 1;
-      " >"$relayer_checkpoint_replay_payload_file"
-      relayer_checkpoint_replay_status=$?
-      set -e
-      if (( relayer_checkpoint_replay_status != 0 )) || [[ ! -s "$relayer_checkpoint_replay_payload_file" ]]; then
-        log "failed to load latest checkpoint package payload for relayer runtime replay"
-        relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      if ! jq -e . "$relayer_checkpoint_replay_payload_file" >/dev/null 2>&1; then
-        log "latest checkpoint package payload is not valid JSON; cannot replay to relayers"
-        relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      set +e
-      (
-        cd "$REPO_ROOT"
-        JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
-          --queue-driver kafka \
-          --queue-brokers "$shared_kafka_brokers" \
-          "--topic" "$checkpoint_package_topic" \
-          "--payload-file" "$relayer_checkpoint_replay_payload_file"
-      )
-      relayer_checkpoint_replay_status=$?
-      set -e
-      if (( relayer_checkpoint_replay_status != 0 )); then
-        log "failed to replay latest checkpoint package onto relayer checkpoint topic"
+      if ! replay_latest_checkpoint_package_to_topic \
+        "$relayer_checkpoint_replay_payload_file" \
+        "$shared_postgres_dsn" \
+        "$shared_kafka_brokers" \
+        "$checkpoint_package_topic" \
+        "relayer-startup-seed"; then
+        log "failed to replay latest checkpoint package onto relayer checkpoint topic after startup"
         relayer_status=1
       fi
     fi
@@ -6746,7 +6777,25 @@ command_run() {
         if [[ "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
           log "run deposit waiting for relayer checkpoint catch-up min_height=$run_deposit_submit_min_checkpoint_height txid=$run_deposit_juno_tx_hash"
           if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300; then
-            relayer_status=1
+            if [[ "$shared_enabled" == "true" ]]; then
+              local run_deposit_checkpoint_replay_payload_file
+              run_deposit_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.retry.json"
+              log "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once"
+              if replay_latest_checkpoint_package_to_topic \
+                "$run_deposit_checkpoint_replay_payload_file" \
+                "$shared_postgres_dsn" \
+                "$shared_kafka_brokers" \
+                "$checkpoint_package_topic" \
+                "run-deposit-catchup-retry"; then
+                if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600; then
+                  relayer_status=1
+                fi
+              else
+                relayer_status=1
+              fi
+            else
+              relayer_status=1
+            fi
           fi
         else
           log "run deposit checkpoint catch-up skipped because tx height could not be resolved txid=$run_deposit_juno_tx_hash"

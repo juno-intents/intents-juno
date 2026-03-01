@@ -701,6 +701,9 @@ test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window()
   assert_contains "$script_text" '[[ -n "$existing_bridge_summary_path" ]]' "checkpoint validation applies canary-only fallback guard on existing bridge summary reuse"
   assert_contains "$script_text" 'checkpoint_canary_min_persisted_at="$(date -u -d "$checkpoint_started_at - 6 hours" +"%Y-%m-%dT%H:%M:%SZ" 2>/dev/null || true)"' "shared checkpoint validation derives extended fallback persisted-at window for resume canary runs"
   assert_contains "$script_text" 'run_shared_infra_validation_attempt "$checkpoint_canary_min_persisted_at" 2>&1 | tee -a "$shared_validation_log"' "shared checkpoint validation retries with extended window for checkpoint-stage resume canaries"
+  assert_contains "$script_text" '[[ "$stop_after_stage" == "full" ]]' "shared checkpoint validation has explicit full-run guard"
+  assert_contains "$script_text" "shared infra validation in resume full run found no fresh checkpoint package before relayer startup; deferring freshness enforcement to relayer runtime checkpoint seed stage" "shared checkpoint validation logs deferred freshness enforcement in resume full runs"
+  assert_contains "$script_text" "shared_status=0" "shared checkpoint validation can clear pre-relayer status in resume full runs when no-fresh-package is the only failure"
 }
 
 test_relayer_runtime_seeds_checkpoint_after_startup() {
@@ -715,7 +718,8 @@ test_relayer_runtime_seeds_checkpoint_after_startup() {
   assert_contains "$script_text" "SELECT convert_from(package_json, 'UTF8')" "relayer runtime reloads latest persisted checkpoint package payload from postgres"
   assert_contains "$script_text" 'go run ./cmd/queue-publish \' "relayer runtime replays checkpoint payload through queue-publish"
   assert_contains "$script_text" '"--topic" "$checkpoint_package_topic"' "relayer runtime publishes replayed checkpoint payload onto active checkpoint package topic"
-  assert_contains "$script_text" '"--payload-file" "$relayer_checkpoint_replay_payload_file"' "relayer runtime publishes checkpoint replay payload via temp file"
+  assert_contains "$script_text" 'replay_latest_checkpoint_package_to_topic \' "relayer runtime funnels checkpoint replay through reusable helper"
+  assert_contains "$script_text" '"$relayer_checkpoint_replay_payload_file" \' "relayer runtime replay helper receives relayer startup payload file path"
   assert_contains "$script_text" 'wait_for_log_pattern "$deposit_relayer_log" "updated checkpoint" 180' "relayer runtime waits for deposit-relayer checkpoint ingestion before deposit submission"
   assert_contains "$script_text" 'wait_for_log_pattern "$withdraw_finalizer_log" "updated checkpoint" 180' "relayer runtime waits for withdraw-finalizer checkpoint ingestion before withdrawal flow"
 }
@@ -1011,9 +1015,14 @@ test_run_deposit_submission_waits_for_relayer_checkpoint_catchup() {
 
   assert_contains "$script_text" "latest_checkpoint_height_from_log() {" "run-testnet-e2e defines helper to parse latest relayer checkpoint height from logs"
   assert_contains "$script_text" "wait_for_relayer_checkpoint_height_at_least() {" "run-testnet-e2e defines helper to gate on relayer checkpoint catch-up"
+  assert_contains "$script_text" "replay_latest_checkpoint_package_to_topic() {" "run-testnet-e2e defines helper to replay latest checkpoint package onto the relayer topic"
   assert_contains "$script_text" "run deposit waiting for relayer checkpoint catch-up" "run-testnet-e2e logs explicit relayer checkpoint wait before submitting deposit"
   assert_contains "$script_text" "run_deposit_submit_min_checkpoint_height" "run-testnet-e2e computes the deposit tx checkpoint floor before submit"
   assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300' "run-testnet-e2e enforces relayer checkpoint >= deposit tx height before bridge-api submit"
+  assert_contains "$script_text" "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once" "run-testnet-e2e logs explicit checkpoint replay fallback after initial relayer catch-up timeout"
+  assert_contains "$script_text" 'if replay_latest_checkpoint_package_to_topic \' "run-testnet-e2e invokes checkpoint replay helper before retrying relayer catch-up"
+  assert_contains "$script_text" '"$run_deposit_checkpoint_replay_payload_file" \' "run-testnet-e2e forwards a dedicated run-deposit replay payload path into checkpoint replay helper"
+  assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600' "run-testnet-e2e performs a second relayer checkpoint catch-up wait after replay fallback"
   assert_order "$script_text" \
     "run_deposit_submit_min_checkpoint_height" \
     'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' \
