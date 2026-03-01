@@ -3000,7 +3000,7 @@ command_run() {
   local sp1_input_s3_region=""
   local sp1_input_s3_presign_ttl="2h"
   local sp1_max_price_per_pgu="2000000000"
-  local sp1_progress_guard_bump_max_price_per_pgu="1000000000000"
+  local sp1_progress_guard_bump_max_price_per_pgu="2000000000000"
   local sp1_deposit_pgu_estimate="1000000"
   local sp1_withdraw_pgu_estimate="1000000"
   local sp1_groth16_base_fee_wei="200000000000000000"
