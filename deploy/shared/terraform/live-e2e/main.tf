@@ -413,6 +413,14 @@ resource "aws_security_group" "ipfs" {
     cidr_blocks = local.shared_subnet_cidrs
   }
 
+  ingress {
+    description = "IPFS API from operator/runner subnet (NLB preserves client IPs)"
+    from_port   = var.shared_ipfs_api_port
+    to_port     = var.shared_ipfs_api_port
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_subnet.selected.cidr_block]
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0
