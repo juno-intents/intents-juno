@@ -5,6 +5,7 @@ set -euo pipefail
 
 JUNO_DKG_VERSION_DEFAULT="${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}"
 JUNO_TXSIGN_VERSION_DEFAULT="${JUNO_TXSIGN_VERSION_DEFAULT:-v1.4}"
+JUNO_TXBUILD_VERSION_DEFAULT="${JUNO_TXBUILD_VERSION_DEFAULT:-v1.6}"
 JUNO_DKG_HOME_DEFAULT="${JUNO_DKG_HOME_DEFAULT:-$HOME/.juno-dkg}"
 
 _SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -650,4 +651,60 @@ ensure_juno_txsign_binary() {
   cp "$src_dir/target/release/juno-txsign" "$bin_path"
   prepare_execution_path "$bin_path"
   printf '%s' "$bin_path"
+}
+
+ensure_juno_txbuild_binary() {
+  local version="$1"
+  local out_dir="$2"
+  local env_override="${JUNO_TXBUILD_BIN:-}"
+
+  if [[ -z "$version" ]]; then
+    version="$JUNO_TXBUILD_VERSION_DEFAULT"
+  fi
+
+  if [[ -n "$env_override" ]]; then
+    prepare_execution_path "$env_override"
+    [[ -x "$env_override" ]] || die "juno-txbuild override is not executable: $env_override"
+    printf '%s' "$env_override"
+    return
+  fi
+
+  ensure_base_dependencies
+  local bin_path="$out_dir/juno-txbuild"
+  if [[ -x "$bin_path" ]]; then
+    prepare_execution_path "$bin_path"
+    printf '%s' "$bin_path"
+    return
+  fi
+
+  local os arch asset base_url tmp_dir archive checksum actual expected
+  os="$(detect_os)"
+  arch="$(detect_arch)"
+  asset="juno-txbuild_${version}_${os}_${arch}.tar.gz"
+  base_url="https://github.com/junocash-tools/juno-txbuild/releases/download/${version}"
+
+  ensure_dir "$out_dir"
+  tmp_dir="$(mktemp -d)"
+  archive="$tmp_dir/$asset"
+  checksum="$tmp_dir/$asset.sha256"
+
+  if download_file "$base_url/$asset" "$archive"; then
+    if download_file "$base_url/$asset.sha256" "$checksum"; then
+      expected="$(awk '{print $1}' "$checksum" | head -n1)"
+      actual="$(sha256_hex_file "$archive")"
+      [[ "$expected" == "$actual" ]] || die "checksum mismatch for $asset"
+    else
+      log "checksum file unavailable for $asset; proceeding without checksum validation"
+    fi
+    tar -xzf "$archive" -C "$tmp_dir" || die "failed to extract $asset"
+    [[ -f "$tmp_dir/juno-txbuild" ]] || die "juno-txbuild not present in archive $asset"
+    cp "$tmp_dir/juno-txbuild" "$bin_path"
+    prepare_execution_path "$bin_path"
+    rm -rf "$tmp_dir"
+    printf '%s' "$bin_path"
+    return
+  fi
+  rm -rf "$tmp_dir"
+
+  die "failed to download juno-txbuild release asset $asset from $base_url"
 }
