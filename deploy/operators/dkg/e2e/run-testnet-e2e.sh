@@ -1424,6 +1424,9 @@ BEGIN
   IF to_regclass('public.deposit_jobs') IS NOT NULL THEN
     DELETE FROM deposit_jobs WHERE state <> 6;
   END IF;
+  IF to_regclass('public.checkpoint_packages') IS NOT NULL THEN
+    DELETE FROM checkpoint_packages;
+  END IF;
 END
 \$\$;
 " >/dev/null 2>&1
@@ -5589,7 +5592,7 @@ command_run() {
       local shared_validation_output_path="${2:-$shared_summary}"
       (
         cd "$REPO_ROOT"
-	        go run ./cmd/shared-infra-e2e \
+	        JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/shared-infra-e2e \
 	          --postgres-dsn "$shared_postgres_dsn" \
 	          --kafka-brokers "$shared_kafka_brokers" \
 	          --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
@@ -5879,6 +5882,7 @@ command_run() {
   local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
   local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"
   local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"
+  local distributed_juno_txbuild_bin_path="/tmp/testnet-e2e-bin/juno-txbuild"
   local distributed_bridge_operator_signer_bin=""
   local runner_bridge_operator_signer_bin_path=""
   local runner_distributed_relayer_bin_dir="$workdir/bin/distributed-relayer"
@@ -6160,6 +6164,35 @@ command_run() {
         relayer_status=1
       fi
     fi
+    if (( relayer_status == 0 )); then
+      log "ensuring juno-txbuild binary for withdraw-coordinator"
+      local runner_juno_txbuild_bin
+      runner_juno_txbuild_bin="$(ensure_juno_txbuild_binary "$JUNO_TXBUILD_VERSION_DEFAULT" "$runner_distributed_relayer_bin_dir")"
+      if [[ -z "$runner_juno_txbuild_bin" || ! -x "$runner_juno_txbuild_bin" ]]; then
+        log "juno-txbuild binary download failed"
+        relayer_status=1
+      else
+        if ! stage_remote_runtime_file_atomic \
+          "$runner_juno_txbuild_bin" \
+          "$withdraw_coordinator_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$distributed_juno_txbuild_bin_path"; then
+          log "failed to stage juno-txbuild onto withdraw-coordinator host=$withdraw_coordinator_host"
+          relayer_status=1
+        else
+          ssh \
+            -i "$relayer_runtime_operator_ssh_key_file" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=6 \
+            -o TCPKeepAlive=yes \
+            "$relayer_runtime_operator_ssh_user@$withdraw_coordinator_host" \
+            "chmod 0755 '$distributed_juno_txbuild_bin_path'" >/dev/null
+        fi
+      fi
+    fi
   else
     base_relayer_url="http://127.0.0.1:${base_relayer_port}"
   fi
@@ -6286,6 +6319,7 @@ command_run() {
           --extend-signer-max-response-bytes "1048576" \
           --expiry-safety-margin "$withdraw_coordinator_expiry_safety_margin" \
           --max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \
+          --juno-txbuild-bin "$distributed_juno_txbuild_bin_path" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
           --blob-prefix "$withdraw_blob_prefix"
@@ -6460,6 +6494,7 @@ command_run() {
   if (( relayer_status == 0 )); then
     (
       cd "$REPO_ROOT"
+      JUNO_QUEUE_KAFKA_TLS="true" \
       go run ./cmd/bridge-api \
         --listen "127.0.0.1:${bridge_api_port}" \
         --postgres-dsn "$shared_postgres_dsn" \
@@ -7170,7 +7205,13 @@ command_run() {
       relayer_status=1
     fi
     if ! wait_for_log_pattern "$withdraw_finalizer_log" "submitted finalizeWithdrawBatch" 1500; then
-      relayer_status=1
+      # Fallback: if bridge-api already confirmed withdrawal as finalized, the log
+      # message may have been lost due to SetBatchFinalized race recovery path.
+      if [[ "$bridge_api_withdraw_state" == "finalized" ]]; then
+        log "withdraw-finalizer log pattern missing but bridge-api confirms finalized; continuing"
+      else
+        relayer_status=1
+      fi
     fi
   fi
 
