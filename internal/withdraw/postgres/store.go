@@ -32,11 +32,25 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
-	_, err := s.pool.Exec(ctx, schemaSQL)
-	if err != nil {
+	for attempt := 0; ; attempt++ {
+		_, err := s.pool.Exec(ctx, schemaSQL)
+		if err == nil {
+			return nil
+		}
+		// Concurrent CREATE TABLE IF NOT EXISTS can race on implicit
+		// composite-type creation, producing a unique_violation on
+		// pg_type_typname_nsp_index. Retry after a short delay.
+		var pgErr *pgconn.PgError
+		if attempt < 3 && errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "pg_type_typname_nsp_index" {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(200 * time.Millisecond):
+				continue
+			}
+		}
 		return fmt.Errorf("withdraw/postgres: ensure schema: %w", err)
 	}
-	return nil
 }
 
 func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (withdraw.Withdrawal, bool, error) {
