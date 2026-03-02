@@ -533,7 +533,16 @@ wait_for_ssh() {
 
 run_on_host() {
   local host="$1"; shift
-  ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$host" "bash -lc $(printf '%q' "$*")"
+  local cmd="$*"
+  # Use base64-encoded payload to avoid quoting issues with '!' and special chars.
+  # Prepend PATH and cargo env since bash non-interactive login skips .bashrc guard.
+  local preamble='export PATH="$HOME/.foundry/bin:$PATH:/usr/local/go/bin:$HOME/go/bin"
+[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+'
+  local encoded
+  encoded="$(printf '%s\n%s' "$preamble" "$cmd" | base64)"
+  ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$host" \
+    "echo '$encoded' | base64 -d | bash"
 }
 
 scp_to_host() {
@@ -584,6 +593,26 @@ if ! command -v cargo >/dev/null 2>&1; then
   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
   source "$HOME/.cargo/env"
 fi
+
+# Install Foundry (cast, forge) if not present
+export PATH="$HOME/.foundry/bin:$PATH"
+if ! command -v cast >/dev/null 2>&1; then
+  curl -L https://foundry.paradigm.xyz | bash
+  export PATH="$HOME/.foundry/bin:$PATH"
+  foundryup
+fi
+
+# Install juno-txsign if not present
+if ! command -v juno-txsign >/dev/null 2>&1; then
+  _rel_json="$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+  _rel_tag="$(echo "$_rel_json" | jq -r '.tag_name // empty')"
+  _asset="juno-txsign_${_rel_tag}_linux_amd64.tar.gz"
+  _url="$(echo "$_rel_json" | jq -r --arg n "$_asset" '.assets[] | select(.name == $n) | .browser_download_url' | head -n 1)"
+  _tmp="$(mktemp)" && _dir="$(mktemp -d)"
+  curl -fsSL "$_url" -o "$_tmp" && tar -xzf "$_tmp" -C "$_dir"
+  sudo install -m 0755 "$_dir/juno-txsign" /usr/local/bin/juno-txsign
+  rm -f "$_tmp" && rm -rf "$_dir"
+fi
 SCRIPT
   )"
   run_on_host "$RUNNER_PUBLIC_IP" "$setup_script"
@@ -622,37 +651,61 @@ prepare_operator_hosts() {
 
     wait_for_ssh "$op_ip" "$RUNNER_SSH_USER" 60
 
-    local prep_script
-    prep_script="$(cat <<'OPSCRIPT'
+    # Use heredoc-over-SSH to avoid quoting issues with '!'
+    ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$op_ip" bash -s <<'OPSCRIPT'
 set -euo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
 cloud-init status --wait >/dev/null 2>&1 || true
 
 # Validate AMI has required systemd services
+missing=0
 for svc in junocashd.service juno-scan.service; do
-  if ! systemctl list-unit-files | grep -q "$svc"; then
+  if ! sudo systemctl cat "$svc" >/dev/null 2>&1; then
     echo "ERROR: missing systemd unit: $svc" >&2
-    exit 1
+    missing=1
+  fi
+done
+if [ "$missing" -ne 0 ]; then exit 1; fi
+
+# Normalize stack config file access
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+for f in /etc/intents-juno/junocashd.conf /etc/intents-juno/operator-stack.env /etc/intents-juno/checkpoint-signer.key; do
+  if [ -f "$f" ]; then
+    sudo chgrp ubuntu "$f"
+    sudo chmod 0640 "$f"
   fi
 done
 
 # Start junocashd and juno-scan
 sudo systemctl daemon-reload
 sudo systemctl enable junocashd.service juno-scan.service
-sudo systemctl restart junocashd.service juno-scan.service
+sudo systemctl restart junocashd.service
 
-# Verify services are active
-sleep 5
-for svc in junocashd.service juno-scan.service; do
-  if ! systemctl is-active --quiet "$svc"; then
-    echo "ERROR: $svc is not active" >&2
-    systemctl status "$svc" --no-pager || true
+# Wait for junocashd to be fully ready (wallet loaded)
+echo "waiting for junocashd to finish loading..."
+for i in $(seq 1 60); do
+  if sudo -u ubuntu junocash-cli -conf=/etc/intents-juno/junocashd.conf getblockchaininfo >/dev/null 2>&1; then
+    echo "junocashd RPC ready after ${i}s"
+    break
+  fi
+  if [ "$i" -eq 60 ]; then
+    echo "ERROR: junocashd RPC not ready after 60s" >&2
+    sudo journalctl -u junocashd.service --no-pager -n 20 >&2
     exit 1
   fi
+  sleep 1
 done
+
+# Now start juno-scan (it needs junocashd RPC ready)
+sudo systemctl restart juno-scan.service
+sleep 2
+if ! systemctl is-active --quiet juno-scan.service; then
+  echo "WARNING: juno-scan not yet active, will auto-restart via systemd" >&2
+fi
+
 echo "operator host ready"
 OPSCRIPT
-    )"
-    run_on_host "$op_ip" "$prep_script"
     ok "Operator $((i+1)) ready ($op_ip)"
   done
 }
@@ -799,14 +852,10 @@ EOF"
   for i in "${!OPERATOR_PUBLIC_IPS[@]}"; do
     local op_pub="${OPERATOR_PUBLIC_IPS[$i]}"
     local op_id="${operator_ids[$i]}"
-    local op_id_slug
-    op_id_slug="$(echo "$op_id" | tr -cs '[:alnum:]' '_')"
-
-    # Find the bundle for this operator
+    # Find the bundle for this operator (bundles named like N_0xADDR.tar.gz)
     local bundle_path
     bundle_path="$(run_on_host "$RUNNER_PUBLIC_IP" \
-      "ls $coord_dir/bundles/*_${op_id_slug}*.tar.gz 2>/dev/null | head -1 || \
-       ls $coord_dir/bundles/*.tar.gz 2>/dev/null | sed -n '$((i+1))p'"
+      "ls $coord_dir/bundles/*_${op_id}.tar.gz 2>/dev/null | head -1"
     )"
     [[ -n "$bundle_path" ]] || die "no DKG bundle found for operator $((i+1)) ($op_id)"
 
@@ -817,11 +866,15 @@ EOF"
        -i $remote_ssh_key \
        '$bundle_path' $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[$i]}:/tmp/dkg-bundle.tar.gz"
 
-    # Start operator DKG process on operator host (via runner as jump)
+    # Stop any existing dkg-admin, then start fresh
+    # JUNO_DKG_NETWORK_MODE=vpc-private bypasses Tailscale check (operators use VPC private IPs)
     run_on_host "$RUNNER_PUBLIC_IP" \
       "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
        -i $remote_ssh_key $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[$i]} \
-       'cd /home/$RUNNER_SSH_USER/intents-juno 2>/dev/null || cd \$HOME && \
+       'export JUNO_DKG_NETWORK_MODE=vpc-private && \
+        cd /home/$RUNNER_SSH_USER/intents-juno 2>/dev/null || cd \$HOME && \
+        deploy/operators/dkg/operator.sh stop --workdir $op_runtime >/dev/null 2>&1 || true && \
+        rm -rf $op_runtime && \
         mkdir -p $op_runtime && \
         deploy/operators/dkg/operator.sh run \
           --bundle /tmp/dkg-bundle.tar.gz \
@@ -831,16 +884,34 @@ EOF"
     ok "DKG operator $((i+1)) started"
   done
 
-  # Step 4: Run coordinator ceremony
-  run_on_host "$RUNNER_PUBLIC_IP" "cd /home/$RUNNER_SSH_USER/intents-juno && \
-    deploy/operators/dkg/coordinator.sh preflight \
-      --workdir $coord_dir --release-tag $DKG_RELEASE_TAG && \
+  # Step 4: Run coordinator ceremony (vpc-private mode for all DKG scripts)
+  # Preflight may need retries while operators finish starting up
+  local preflight_attempts=0
+  while true; do
+    preflight_attempts=$((preflight_attempts + 1))
+    if run_on_host "$RUNNER_PUBLIC_IP" "export JUNO_DKG_NETWORK_MODE=vpc-private && \
+        cd /home/$RUNNER_SSH_USER/intents-juno && \
+        deploy/operators/dkg/coordinator.sh preflight \
+          --workdir $coord_dir --release-tag $DKG_RELEASE_TAG" 2>&1; then
+      break
+    fi
+    if [[ $preflight_attempts -ge 10 ]]; then
+      die "DKG coordinator preflight failed after $preflight_attempts attempts"
+    fi
+    log "preflight attempt $preflight_attempts failed, retrying in 10s..."
+    sleep 10
+  done
+  ok "DKG preflight passed"
+
+  run_on_host "$RUNNER_PUBLIC_IP" "export JUNO_DKG_NETWORK_MODE=vpc-private && \
+    cd /home/$RUNNER_SSH_USER/intents-juno && \
     deploy/operators/dkg/coordinator.sh run \
       --workdir $coord_dir --release-tag $DKG_RELEASE_TAG"
   ok "DKG ceremony completed"
 
   # Step 5: Run completion test and extract UFVK
-  run_on_host "$RUNNER_PUBLIC_IP" "cd /home/$RUNNER_SSH_USER/intents-juno && \
+  run_on_host "$RUNNER_PUBLIC_IP" "export JUNO_DKG_NETWORK_MODE=vpc-private && \
+    cd /home/$RUNNER_SSH_USER/intents-juno && \
     deploy/operators/dkg/test-completiton.sh run \
       --workdir $coord_dir \
       --skip-resume \
@@ -865,11 +936,19 @@ EOF"
     operator_keys_json="$(jq --arg kf "${operator_key_files[$i]}" '. + [$kf]' <<<"$operator_keys_json")"
   done
 
+  # Build operator endpoints for the summary (TSS gRPC endpoints on VPC IPs)
+  local operator_endpoints_json="[]"
+  for i in "${!OPERATOR_PRIVATE_IPS[@]}"; do
+    local port=$((OPERATOR_BASE_PORT + i))
+    operator_endpoints_json="$(jq --arg ep "https://${OPERATOR_PRIVATE_IPS[$i]}:$port" '. + [$ep]' <<<"$operator_endpoints_json")"
+  done
+
   jq -n \
     --arg ufvk "$ufvk" \
     --arg juno_shielded_address "$juno_shielded_address" \
     --argjson operator_ids "$operator_ids_json" \
     --argjson operator_key_files "$operator_keys_json" \
+    --argjson operator_endpoints "$operator_endpoints_json" \
     --arg coordinator_workdir "$coord_dir" \
     --argjson threshold "$OPERATOR_THRESHOLD" \
     '{
@@ -880,7 +959,7 @@ EOF"
       operators: [range($operator_ids | length) | {
         operator_id: $operator_ids[.],
         operator_key_file: $operator_key_files[.],
-        endpoint: null
+        endpoint: $operator_endpoints[.]
       }],
       coordinator_workdir: $coordinator_workdir,
       completion_report: "'"$dkg_dir"'/reports/completion.json"
@@ -972,6 +1051,78 @@ stage_secrets_on_runner() {
   run_on_host "$RUNNER_PUBLIC_IP" "chmod 600 $remote_secrets/fleet-ssh-key"
 
   ok "All secrets staged on runner"
+}
+
+# ── Provision operator-stack-config.json on each operator ────────────────────
+
+provision_operator_stack_config() {
+  step "Provisioning operator-stack-config.json on operators"
+
+  local dkg_summary="$WORKDIR/reports/dkg-summary.json"
+  [[ -f "$dkg_summary" ]] || die "DKG summary not found: $dkg_summary"
+
+  local checkpoint_operators_csv
+  checkpoint_operators_csv="$(jq -r '[.operators[].operator_id] | join(",")' "$dkg_summary")"
+  [[ -n "$checkpoint_operators_csv" ]] || die "failed to derive checkpoint operator set"
+
+  local dkg_ufvk
+  dkg_ufvk="$(jq -r '.ufvk // empty' "$dkg_summary")"
+  [[ -n "$dkg_ufvk" ]] || die "DKG summary missing .ufvk"
+
+  local config_json
+  config_json="$(jq -n \
+    --arg checkpoint_postgres_dsn "$SHARED_POSTGRES_DSN" \
+    --arg checkpoint_kafka_brokers "$SHARED_KAFKA_BROKERS" \
+    --arg checkpoint_ipfs_api_url "$SHARED_IPFS_API_URL" \
+    --arg checkpoint_blob_bucket "$DKG_S3_BUCKET" \
+    --arg checkpoint_blob_prefix "checkpoint-packages" \
+    --arg checkpoint_operators "$checkpoint_operators_csv" \
+    --arg checkpoint_threshold "$OPERATOR_THRESHOLD" \
+    '{
+      CHECKPOINT_POSTGRES_DSN: $checkpoint_postgres_dsn,
+      CHECKPOINT_KAFKA_BROKERS: $checkpoint_kafka_brokers,
+      CHECKPOINT_IPFS_API_URL: $checkpoint_ipfs_api_url,
+      CHECKPOINT_BLOB_BUCKET: $checkpoint_blob_bucket,
+      CHECKPOINT_BLOB_PREFIX: $checkpoint_blob_prefix,
+      CHECKPOINT_OPERATORS: $checkpoint_operators,
+      CHECKPOINT_THRESHOLD: $checkpoint_threshold,
+      CHECKPOINT_SIGNATURE_TOPIC: "checkpoints.signatures.v1",
+      CHECKPOINT_PACKAGE_TOPIC: "checkpoints.packages.v1",
+      JUNO_QUEUE_KAFKA_TLS: "true"
+    }'
+  )"
+
+  for i in "${!OPERATOR_PUBLIC_IPS[@]}"; do
+    local op_ip="${OPERATOR_PUBLIC_IPS[$i]}"
+    log "provisioning operator-stack-config.json on operator $((i+1)): $op_ip"
+    ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$op_ip" bash -s <<CFGSCRIPT
+set -euo pipefail
+tmp_json="\$(mktemp)"
+cat > "\$tmp_json" <<'JSONEOF'
+${config_json}
+JSONEOF
+sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
+sudo install -m 0640 -o root -g ubuntu "\$tmp_json" /etc/intents-juno/operator-stack-config.json
+rm -f "\$tmp_json"
+# Force host-process mode (e2e instances are not nitro enclaves)
+if grep -q '^TSS_SIGNER_RUNTIME_MODE=' /etc/intents-juno/operator-stack.env 2>/dev/null; then
+  sudo sed -i 's/^TSS_SIGNER_RUNTIME_MODE=.*/TSS_SIGNER_RUNTIME_MODE=host-process/' /etc/intents-juno/operator-stack.env
+fi
+# Ensure /var/lib/intents-juno/operator-runtime symlinks to the DKG output path
+if [[ ! -L /var/lib/intents-juno/operator-runtime ]] && [[ -d /home/ubuntu/operator-runtime ]]; then
+  sudo rm -rf /var/lib/intents-juno/operator-runtime
+  sudo ln -s /home/ubuntu/operator-runtime /var/lib/intents-juno/operator-runtime
+fi
+# Ensure ufvk.txt exists for tss-host signer
+if [[ ! -s /home/ubuntu/operator-runtime/ufvk.txt ]]; then
+  printf '%s\n' '${dkg_ufvk}' > /home/ubuntu/operator-runtime/ufvk.txt
+  chmod 0600 /home/ubuntu/operator-runtime/ufvk.txt
+fi
+echo "ok"
+CFGSCRIPT
+  done
+
+  ok "operator-stack-config.json deployed to all ${#OPERATOR_PUBLIC_IPS[@]} operators"
 }
 
 # ── Scale ECS proof services ─────────────────────────────────────────────────
@@ -1092,9 +1243,9 @@ run_e2e_test() {
   local remote_workdir="/home/$RUNNER_SSH_USER/testnet-e2e-live"
   local remote_repo="/home/$RUNNER_SSH_USER/intents-juno"
 
-  # Build operator host list
+  # Build operator host list (use private IPs since runner is in the same VPC)
   local op_hosts_csv=""
-  for ip in "${OPERATOR_PUBLIC_IPS[@]}"; do
+  for ip in "${OPERATOR_PRIVATE_IPS[@]}"; do
     op_hosts_csv="${op_hosts_csv:+$op_hosts_csv,}$ip"
   done
 
@@ -1106,6 +1257,17 @@ run_e2e_test() {
   local remote_dkg_summary="$remote_workdir/dkg-summary.json"
   run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir"
   scp_to_host "$RUNNER_PUBLIC_IP" "$dkg_summary" "$remote_dkg_summary"
+
+  # If a bridge summary already exists from a previous run, reuse it to skip deploy
+  local bridge_summary_flag=""
+  local bridge_summary="$WORKDIR/reports/base-bridge-summary.json"
+  if [[ -f "$bridge_summary" ]]; then
+    local remote_bridge_summary="$remote_workdir/reports/base-bridge-summary.json"
+    run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir/reports"
+    scp_to_host "$RUNNER_PUBLIC_IP" "$bridge_summary" "$remote_bridge_summary"
+    bridge_summary_flag="--existing-bridge-summary-path $remote_bridge_summary"
+    log "reusing existing bridge summary: $bridge_summary"
+  fi
 
   # Resolve DKG juno shielded address
   local witness_recipient_ua
@@ -1164,7 +1326,9 @@ run_e2e_test() {
   run_on_host "$RUNNER_PUBLIC_IP" \
     "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
      -i $remote_secrets/fleet-ssh-key $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[0]} \
-     'cat /var/lib/intents-juno/operator-runtime/tls/ca.pem 2>/dev/null || \
+     'cat /var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem 2>/dev/null || \
+      cat /home/$RUNNER_SSH_USER/operator-runtime/bundle/tls/ca.pem 2>/dev/null || \
+      cat /var/lib/intents-juno/operator-runtime/tls/ca.pem 2>/dev/null || \
       cat /home/$RUNNER_SSH_USER/operator-runtime/tls/ca.pem 2>/dev/null || \
       cat /etc/intents-juno/tss-ca.pem 2>/dev/null || true' > $tss_ca_remote" || \
     warn "could not extract TSS CA PEM; withdraw-coordinator TLS may fail"
@@ -1174,13 +1338,17 @@ run_e2e_test() {
   remote_run_script="$(cat <<REMOTESCRIPT
 #!/usr/bin/env bash
 set -euo pipefail
-export PATH="\$PATH:/usr/local/go/bin:\$HOME/go/bin"
+export PATH="\$HOME/.foundry/bin:\$PATH:/usr/local/go/bin:\$HOME/go/bin"
 source "\$HOME/.cargo/env" 2>/dev/null || true
 
 export JUNO_RPC_USER=$(printf '%q' "$juno_rpc_user")
 export JUNO_RPC_PASS=$(printf '%q' "$juno_rpc_pass")
 export AWS_REGION="$AWS_REGION"
 $funder_env
+
+# Kill any stale SSH tunnels from previous runs
+for _pid in \$(pgrep -f 'ssh.*-N.*10\\.0\\.0' 2>/dev/null); do kill "\$_pid" 2>/dev/null; done
+sleep 1
 
 # Set up SSH tunnels to operators
 TUNNEL_PIDS=()
@@ -1234,15 +1402,18 @@ exec deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --withdraw-blob-bucket "$DKG_S3_BUCKET" \\
   --withdraw-blob-prefix "withdraw-live" \\
   --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
+  $bridge_summary_flag \\
   --force
 REMOTESCRIPT
   )"
 
-  # Execute on runner
+  # Execute on runner (use base64 to avoid quoting issues)
   log "executing e2e test on runner (this takes 30-90 minutes)..."
   local exit_code=0
-  ssh "${SSH_OPTS[@]}" -t "$RUNNER_SSH_USER@$RUNNER_PUBLIC_IP" \
-    "bash -lc $(printf '%q' "$remote_run_script")" \
+  local encoded_script
+  encoded_script="$(printf '%s' "$remote_run_script" | base64)"
+  ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$RUNNER_PUBLIC_IP" \
+    "echo '$encoded_script' | base64 -d | bash" \
     2>&1 | tee "$WORKDIR/logs/e2e-test.log" || exit_code=$?
 
   if [[ $exit_code -eq 0 ]]; then
@@ -1381,9 +1552,10 @@ cmd_run() {
     derive_owallet_keys
   fi
 
-  # Stage 4: Stage secrets and scale ECS
+  # Stage 4: Stage secrets, provision operator config, and scale ECS
   if ! checkpoint_done "stage-secrets"; then
     stage_secrets_on_runner
+    provision_operator_stack_config
     scale_proof_services 1
     checkpoint_mark "stage-secrets"
   fi
@@ -1450,8 +1622,9 @@ cmd_resume() {
   # Derive keys (needed for test args)
   derive_owallet_keys
 
-  # Re-stage secrets (in case runner was restarted)
+  # Re-stage secrets and operator config (in case runner was restarted)
   stage_secrets_on_runner
+  provision_operator_stack_config
   scale_proof_services 1
 
   # Deploy backoffice
