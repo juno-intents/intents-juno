@@ -3067,8 +3067,13 @@ command_run() {
   local relayer_runtime_operator_ssh_key_file=""
   local aws_dr_region=""
   local refund_after_expiry_window_seconds="120"
+  local backoffice_url=""
+  local backoffice_auth_token=""
   local output_path=""
   local force="false"
+  local reuse_kafka_topics="false"
+  local disable_sp1_progress_guard_bump="false"
+  local disable_checkpoint_replay="false"
   local stop_after_stage="full"
 
   while [[ $# -gt 0 ]]; do
@@ -3482,6 +3487,28 @@ command_run() {
         refund_after_expiry_window_seconds="$2"
         shift 2
         ;;
+      --backoffice-url)
+        [[ $# -ge 2 ]] || die "missing value for --backoffice-url"
+        backoffice_url="$2"
+        shift 2
+        ;;
+      --backoffice-auth-token)
+        [[ $# -ge 2 ]] || die "missing value for --backoffice-auth-token"
+        backoffice_auth_token="$2"
+        shift 2
+        ;;
+      --reuse-kafka-topics)
+        reuse_kafka_topics="true"
+        shift
+        ;;
+      --disable-sp1-progress-guard-bump)
+        disable_sp1_progress_guard_bump="true"
+        shift
+        ;;
+      --disable-checkpoint-replay)
+        disable_checkpoint_replay="true"
+        shift
+        ;;
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output_path="$2"
@@ -3697,7 +3724,12 @@ command_run() {
   acquire_workdir_run_lock "$workdir"
 
   local proof_topic_seed
-  proof_topic_seed="$(date +%s)-$RANDOM"
+  if [[ "$reuse_kafka_topics" == "true" ]]; then
+    proof_topic_seed="stable"
+    log "kafka topic isolation disabled: using fixed topic seed 'stable' (consumer groups will resume from committed offsets)"
+  else
+    proof_topic_seed="$(date +%s)-$RANDOM"
+  fi
   local proof_request_topic="${shared_topic_prefix}.proof.requests.${proof_topic_seed}"
   local proof_result_topic="${shared_topic_prefix}.proof.fulfillments.${proof_topic_seed}"
   local proof_failure_topic="${shared_topic_prefix}.proof.failures.${proof_topic_seed}"
@@ -3838,6 +3870,9 @@ command_run() {
       --argjson witness_healthy_operator_labels "$witness_healthy_operator_labels_json" \
       --argjson witness_quorum_operator_labels "$witness_quorum_operator_labels_json" \
       --argjson witness_failed_operator_labels "$witness_failed_operator_labels_json" \
+      --arg reuse_kafka_topics "$reuse_kafka_topics" \
+      --arg sp1_progress_guard_bump_disabled "$disable_sp1_progress_guard_bump" \
+      --arg checkpoint_replay_disabled "$disable_checkpoint_replay" \
       '{
         summary_version: 1,
         generated_at: $generated_at,
@@ -3879,6 +3914,11 @@ command_run() {
         },
         shared_infra: {
           summary_path: (if $shared_summary == "" then null else $shared_summary end)
+        },
+        production_parity: {
+          reuse_kafka_topics: ($reuse_kafka_topics == "true"),
+          sp1_progress_guard_bump_disabled: ($sp1_progress_guard_bump_disabled == "true"),
+          checkpoint_replay_disabled: ($checkpoint_replay_disabled == "true")
         }
       }' >"$output_path"
   }
@@ -5852,6 +5892,18 @@ command_run() {
   local -a operator_signer_active_key_hexes=()
   local operator_signer_supports_endpoints="$bridge_operator_signer_supports_operator_endpoint"
   local operator_failures_injected=0
+  local backoffice_enabled="false"
+  local backoffice_health_check_passed="false"
+  local backoffice_data_validation_passed="false"
+  local backoffice_final_health_passed="false"
+  local backoffice_deposits_visible="false"
+  local backoffice_withdrawals_visible="false"
+  local backoffice_analytics_responding="false"
+  local backoffice_funds_responding="false"
+  local backoffice_dlq_responding="false"
+  if [[ -n "$backoffice_url" ]]; then
+    backoffice_enabled="true"
+  fi
 
   local base_relayer_log="$workdir/reports/base-relayer.log"
   local deposit_relayer_log="$workdir/reports/deposit-relayer.log"
@@ -6526,6 +6578,24 @@ command_run() {
     fi
   fi
 
+  # ── Backoffice health check ──────────────────────────────────────────────
+  if (( relayer_status == 0 )) && [[ "$backoffice_enabled" == "true" ]]; then
+    check_backoffice_health() {
+      local resp
+      resp="$(curl -fsS "${backoffice_url}/healthz" 2>/dev/null || true)"
+      [[ -n "$resp" ]] || return 1
+      local status_val
+      status_val="$(jq -r '.status // empty' <<<"$resp" 2>/dev/null || true)"
+      [[ "$status_val" == "ok" ]]
+    }
+    if wait_for_condition 60 2 "backoffice health" check_backoffice_health; then
+      backoffice_health_check_passed="true"
+      log "backoffice health check passed"
+    else
+      warn "backoffice health check failed"
+    fi
+  fi
+
   if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
     local relayer_checkpoint_seed_started_at relayer_checkpoint_seed_summary
     local relayer_checkpoint_replay_payload_file
@@ -6572,15 +6642,19 @@ command_run() {
       relayer_status=1
     fi
     if (( relayer_status == 0 )); then
-      log "replaying latest checkpoint package onto relayer checkpoint topic after startup"
-      if ! replay_latest_checkpoint_package_to_topic \
-        "$relayer_checkpoint_replay_payload_file" \
-        "$shared_postgres_dsn" \
-        "$shared_kafka_brokers" \
-        "$checkpoint_package_topic" \
-        "relayer-startup-seed"; then
-        log "failed to replay latest checkpoint package onto relayer checkpoint topic after startup"
-        relayer_status=1
+      if [[ "$disable_checkpoint_replay" != "true" ]]; then
+        log "replaying latest checkpoint package onto relayer checkpoint topic after startup"
+        if ! replay_latest_checkpoint_package_to_topic \
+          "$relayer_checkpoint_replay_payload_file" \
+          "$shared_postgres_dsn" \
+          "$shared_kafka_brokers" \
+          "$checkpoint_package_topic" \
+          "relayer-startup-seed"; then
+          log "failed to replay latest checkpoint package onto relayer checkpoint topic after startup"
+          relayer_status=1
+        fi
+      else
+        log "checkpoint replay suppressed by --disable-checkpoint-replay; relying on autonomous checkpoint delivery"
       fi
     fi
   fi
@@ -6942,28 +7016,39 @@ command_run() {
         if [[ "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
           log "run deposit waiting for relayer checkpoint catch-up min_height=$run_deposit_submit_min_checkpoint_height txid=$run_deposit_juno_tx_hash"
           if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300; then
-            if [[ "$shared_enabled" == "true" ]]; then
-              local run_deposit_checkpoint_replay_payload_file
-              run_deposit_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.retry.json"
-              log "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once"
-              if replay_latest_checkpoint_package_to_topic \
-                "$run_deposit_checkpoint_replay_payload_file" \
-                "$shared_postgres_dsn" \
-                "$shared_kafka_brokers" \
-                "$checkpoint_package_topic" \
-                "run-deposit-catchup-retry"; then
-                if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600; then
-                  if [[ -n "$existing_bridge_summary_path" ]]; then
-                    log "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline"
-                  else
-                    relayer_status=1
+            if [[ "$disable_checkpoint_replay" != "true" ]]; then
+              if [[ "$shared_enabled" == "true" ]]; then
+                local run_deposit_checkpoint_replay_payload_file
+                run_deposit_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.retry.json"
+                log "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once"
+                if replay_latest_checkpoint_package_to_topic \
+                  "$run_deposit_checkpoint_replay_payload_file" \
+                  "$shared_postgres_dsn" \
+                  "$shared_kafka_brokers" \
+                  "$checkpoint_package_topic" \
+                  "run-deposit-catchup-retry"; then
+                  if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600; then
+                    if [[ -n "$existing_bridge_summary_path" ]]; then
+                      log "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline"
+                    else
+                      relayer_status=1
+                    fi
                   fi
+                else
+                  relayer_status=1
                 fi
               else
                 relayer_status=1
               fi
             else
-              relayer_status=1
+              log "checkpoint replay suppressed; extending catch-up timeout for autonomous delivery"
+              if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 900; then
+                if [[ -n "$existing_bridge_summary_path" ]]; then
+                  log "checkpoint catch-up still below tx height without replay during resume; continuing"
+                else
+                  relayer_status=1
+                fi
+              fi
             fi
           fi
         else
@@ -7081,7 +7166,11 @@ command_run() {
             if (( proof_requestor_progress_restart_attempts < proof_requestor_progress_guard_max_restarts )); then
               proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
               proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
-              bump_sp1_max_price_for_progress_guard || true
+              if [[ "$disable_sp1_progress_guard_bump" != "true" ]]; then
+                bump_sp1_max_price_for_progress_guard || true
+              else
+                log "sp1 progress guard price bump suppressed by --disable-sp1-progress-guard-bump"
+              fi
               if ! restart_shared_proof_services_with_wait; then
                 log "proof-requestor progress guard failed to restart shared proof services after retryable SP1 failure signature code=$proof_retryable_failure_code_current"
                 proof_requestor_progress_guard_failed="true"
@@ -7115,7 +7204,11 @@ command_run() {
                 log "proof-requestor progress guard: no proof_jobs growth observed while deposit status is non-finalized state=$state; restarting shared proof services attempt=$((proof_requestor_progress_restart_attempts + 1))/$proof_requestor_progress_guard_max_restarts baseline=$proof_jobs_count_before_run_deposit current=${proof_jobs_count_current:-unknown} baseline_last_update_epoch=${proof_jobs_last_update_epoch_before_run_deposit:-unknown} current_last_update_epoch=${proof_jobs_last_update_epoch_current:-unknown}"
                 proof_requestor_progress_restart_attempts=$((proof_requestor_progress_restart_attempts + 1))
                 proof_requestor_progress_guard_last_probe_epoch="$now_epoch"
-                bump_sp1_max_price_for_progress_guard || true
+                if [[ "$disable_sp1_progress_guard_bump" != "true" ]]; then
+                  bump_sp1_max_price_for_progress_guard || true
+                else
+                  log "sp1 progress guard price bump suppressed by --disable-sp1-progress-guard-bump"
+                fi
                 if ! restart_shared_proof_services_with_wait; then
                   log "proof-requestor progress guard failed to restart shared proof services"
                   proof_requestor_progress_guard_failed="true"
@@ -7461,6 +7554,116 @@ command_run() {
     if [[ -z "$coordinator_payout_juno_tx_hash" ]]; then
       log "missing payout txid for withdrawalId=$run_withdrawal_id from withdraw coordinator state"
       relayer_status=1
+    fi
+  fi
+
+  # ── Backoffice data validation ───────────────────────────────────────────
+  if [[ "$backoffice_enabled" == "true" && "$backoffice_health_check_passed" == "true" ]]; then
+    local bo_auth_header="Authorization: Bearer ${backoffice_auth_token}"
+    local bo_data_ok="true"
+
+    # Validate recent deposits contain our test deposit
+    local bo_deposits_resp
+    bo_deposits_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/deposits/recent" 2>/dev/null || true)"
+    if [[ -n "$bo_deposits_resp" ]] && jq -e '.' <<<"$bo_deposits_resp" >/dev/null 2>&1; then
+      if [[ -n "$run_deposit_id" ]] && jq -e --arg id "$run_deposit_id" '.data[]? | select(.deposit_id == $id)' <<<"$bo_deposits_resp" >/dev/null 2>&1; then
+        backoffice_deposits_visible="true"
+        log "backoffice: test deposit $run_deposit_id visible"
+      else
+        warn "backoffice: test deposit $run_deposit_id not found in recent deposits"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/ops/deposits/recent returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate recent withdrawals contain our test withdrawal
+    local bo_withdrawals_resp
+    bo_withdrawals_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/withdrawals/recent" 2>/dev/null || true)"
+    if [[ -n "$bo_withdrawals_resp" ]] && jq -e '.' <<<"$bo_withdrawals_resp" >/dev/null 2>&1; then
+      if [[ -n "$run_withdrawal_id" ]] && jq -e --arg id "$run_withdrawal_id" '.data[]? | select(.withdrawal_id == $id)' <<<"$bo_withdrawals_resp" >/dev/null 2>&1; then
+        backoffice_withdrawals_visible="true"
+        log "backoffice: test withdrawal $run_withdrawal_id visible"
+      else
+        warn "backoffice: test withdrawal $run_withdrawal_id not found in recent withdrawals"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/ops/withdrawals/recent returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate analytics overview
+    local bo_analytics_resp
+    bo_analytics_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/analytics/overview" 2>/dev/null || true)"
+    if [[ -n "$bo_analytics_resp" ]] && jq -e '.' <<<"$bo_analytics_resp" >/dev/null 2>&1; then
+      local bo_total_deposits bo_total_withdrawals
+      bo_total_deposits="$(jq -r '.data.totalDeposits // .data.total_deposits // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
+      bo_total_withdrawals="$(jq -r '.data.totalWithdrawals // .data.total_withdrawals // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
+      if (( bo_total_deposits >= 1 )) && (( bo_total_withdrawals >= 1 )); then
+        backoffice_analytics_responding="true"
+        log "backoffice: analytics overview valid (deposits=$bo_total_deposits withdrawals=$bo_total_withdrawals)"
+      else
+        warn "backoffice: analytics overview has unexpected counts (deposits=$bo_total_deposits withdrawals=$bo_total_withdrawals)"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/analytics/overview returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate funds endpoint
+    local bo_funds_resp
+    bo_funds_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/funds" 2>/dev/null || true)"
+    if [[ -n "$bo_funds_resp" ]] && jq -e '.' <<<"$bo_funds_resp" >/dev/null 2>&1; then
+      local bo_operators_count
+      bo_operators_count="$(jq '[.data.operators[]?] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
+      if (( bo_operators_count > 0 )); then
+        local bo_has_balance
+        bo_has_balance="$(jq '[.data.operators[]? | select(.balanceWei != null or .balance_wei != null)] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
+        if (( bo_has_balance > 0 )); then
+          backoffice_funds_responding="true"
+          log "backoffice: funds endpoint valid (operators=$bo_operators_count with_balance=$bo_has_balance)"
+        else
+          warn "backoffice: funds endpoint operators missing balanceWei field"
+          bo_data_ok="false"
+        fi
+      else
+        warn "backoffice: funds endpoint returned empty operators array"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/funds returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate DLQ counts endpoint
+    local bo_dlq_resp
+    bo_dlq_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/dlq/counts" 2>/dev/null || true)"
+    if [[ -n "$bo_dlq_resp" ]] && jq -e '.' <<<"$bo_dlq_resp" >/dev/null 2>&1; then
+      backoffice_dlq_responding="true"
+      log "backoffice: DLQ counts endpoint valid"
+    else
+      warn "backoffice: /api/dlq/counts returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate stuck batches endpoint
+    local bo_stuck_resp
+    bo_stuck_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/batches/stuck" 2>/dev/null || true)"
+    if [[ -n "$bo_stuck_resp" ]] && jq -e '.' <<<"$bo_stuck_resp" >/dev/null 2>&1; then
+      log "backoffice: stuck batches endpoint valid"
+    else
+      warn "backoffice: /api/ops/batches/stuck returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    if [[ "$bo_data_ok" == "true" ]]; then
+      backoffice_data_validation_passed="true"
+      log "backoffice data validation passed"
+    else
+      warn "backoffice data validation had failures (non-fatal)"
     fi
   fi
 
@@ -8155,6 +8358,27 @@ command_run() {
         }
       }'
   )"
+
+  # ── Backoffice final crash check ─────────────────────────────────────────
+  if [[ "$backoffice_enabled" == "true" ]]; then
+    local bo_final_resp
+    bo_final_resp="$(curl -fsS "${backoffice_url}/healthz" 2>/dev/null || true)"
+    if [[ -n "$bo_final_resp" ]]; then
+      local bo_final_status
+      bo_final_status="$(jq -r '.status // empty' <<<"$bo_final_resp" 2>/dev/null || true)"
+      if [[ "$bo_final_status" == "ok" ]]; then
+        backoffice_final_health_passed="true"
+        log "backoffice final health check passed"
+      else
+        warn "backoffice final health check returned unexpected status: $bo_final_status"
+        relayer_status=1
+      fi
+    else
+      warn "backoffice final health check failed (no response)"
+      relayer_status=1
+    fi
+  fi
+
   stage_full="true"
 
   jq -n \
@@ -8252,6 +8476,16 @@ command_run() {
     --arg juno_funder_present "$([[ -n "${JUNO_FUNDER_PRIVATE_KEY_HEX:-}" || -n "${JUNO_FUNDER_SEED_PHRASE:-}" || -n "${JUNO_FUNDER_SOURCE_ADDRESS:-}" ]] && printf 'true' || printf '')" \
     --argjson run_invariants "$run_invariants_json" \
     --argjson chaos_scenarios "$chaos_scenarios_json" \
+    --arg backoffice_enabled "$backoffice_enabled" \
+    --arg backoffice_url "$backoffice_url" \
+    --arg backoffice_health_check_passed "$backoffice_health_check_passed" \
+    --arg backoffice_data_validation_passed "$backoffice_data_validation_passed" \
+    --arg backoffice_final_health_passed "$backoffice_final_health_passed" \
+    --arg backoffice_deposits_visible "$backoffice_deposits_visible" \
+    --arg backoffice_withdrawals_visible "$backoffice_withdrawals_visible" \
+    --arg backoffice_analytics_responding "$backoffice_analytics_responding" \
+    --arg backoffice_funds_responding "$backoffice_funds_responding" \
+    --arg backoffice_dlq_responding "$backoffice_dlq_responding" \
     --argjson shared "$(if [[ -f "$shared_summary" ]]; then cat "$shared_summary"; else printf 'null'; fi)" \
     --argjson dkg "$dkg_report_public_json" \
     --argjson bridge "$(cat "$bridge_summary")" \
@@ -8382,6 +8616,18 @@ command_run() {
         },
         summary_path: (if $shared_summary == "" then null else $shared_summary end),
         report: $shared
+      },
+      backoffice: {
+        enabled: ($backoffice_enabled == "true"),
+        url: (if $backoffice_url == "" then null else $backoffice_url end),
+        health_check_passed: ($backoffice_health_check_passed == "true"),
+        data_validation_passed: ($backoffice_data_validation_passed == "true"),
+        final_health_passed: ($backoffice_final_health_passed == "true"),
+        deposits_visible: ($backoffice_deposits_visible == "true"),
+        withdrawals_visible: ($backoffice_withdrawals_visible == "true"),
+        analytics_responding: ($backoffice_analytics_responding == "true"),
+        funds_responding: ($backoffice_funds_responding == "true"),
+        dlq_responding: ($backoffice_dlq_responding == "true")
       },
       juno: {
         funder_env_present: ($juno_funder_present == "true"),

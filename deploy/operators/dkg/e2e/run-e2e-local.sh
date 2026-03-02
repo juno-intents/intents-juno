@@ -1193,6 +1193,16 @@ deploy_backoffice() {
     operator_addrs="$(jq -r '[.operators[].operator_id] | join(",")' "$WORKDIR/reports/dkg-summary.json" 2>/dev/null || true)"
   fi
 
+  # Extract contract addresses from bridge summary (if available)
+  local bo_bridge_address="" bo_wjuno_address="" bo_operator_registry_address="" bo_fee_distributor_address=""
+  local bridge_summary_file="$WORKDIR/reports/base-bridge-summary.json"
+  if [[ -f "$bridge_summary_file" ]]; then
+    bo_bridge_address="$(jq -r '.contracts.bridge // empty' "$bridge_summary_file" 2>/dev/null || true)"
+    bo_wjuno_address="$(jq -r '.contracts.wjuno // empty' "$bridge_summary_file" 2>/dev/null || true)"
+    bo_operator_registry_address="$(jq -r '.contracts.operator_registry // empty' "$bridge_summary_file" 2>/dev/null || true)"
+    bo_fee_distributor_address="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary_file" 2>/dev/null || true)"
+  fi
+
   # Start backoffice on runner (background, nohup)
   local backoffice_cmd
   backoffice_cmd="/home/$RUNNER_SSH_USER/bin/backoffice"
@@ -1202,6 +1212,18 @@ deploy_backoffice() {
   backoffice_cmd+=" --auth-secret '${BACKOFFICE_AUTH_TOKEN}'"
   if [[ -n "$operator_addrs" ]]; then
     backoffice_cmd+=" --operator-addresses '${operator_addrs}'"
+  fi
+  if [[ -n "$bo_bridge_address" ]]; then
+    backoffice_cmd+=" --bridge-address '${bo_bridge_address}'"
+  fi
+  if [[ -n "$bo_wjuno_address" ]]; then
+    backoffice_cmd+=" --wjuno-address '${bo_wjuno_address}'"
+  fi
+  if [[ -n "$bo_operator_registry_address" ]]; then
+    backoffice_cmd+=" --operator-registry-address '${bo_operator_registry_address}'"
+  fi
+  if [[ -n "$bo_fee_distributor_address" ]]; then
+    backoffice_cmd+=" --fee-distributor-address '${bo_fee_distributor_address}'"
   fi
 
   run_on_host "$RUNNER_PUBLIC_IP" \
@@ -1401,8 +1423,11 @@ exec deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --relayer-runtime-operator-ssh-key-file "$remote_secrets/fleet-ssh-key" \\
   --withdraw-blob-bucket "$DKG_S3_BUCKET" \\
   --withdraw-blob-prefix "withdraw-live" \\
+  --backoffice-url "http://127.0.0.1:${BACKOFFICE_PORT}" \\
+  --backoffice-auth-token "${BACKOFFICE_AUTH_TOKEN}" \\
   --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
   $bridge_summary_flag \\
+  ${EXTRA_E2E_FLAGS:-} \\
   --force
 REMOTESCRIPT
   )"
