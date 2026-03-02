@@ -1163,6 +1163,10 @@ deploy_backoffice() {
   GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/backoffice-linux-amd64" ./cmd/backoffice/
   ok "backoffice binary built"
 
+  # Kill any running backoffice so the binary can be replaced.
+  run_on_host "$RUNNER_PUBLIC_IP" \
+    "pkill -f '/home/$RUNNER_SSH_USER/bin/backoffice' 2>/dev/null || true; sleep 1"
+
   # SCP to runner
   run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p /home/$RUNNER_SSH_USER/bin"
   scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/backoffice-linux-amd64" "/home/$RUNNER_SSH_USER/bin/backoffice"
