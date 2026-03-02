@@ -7974,10 +7974,19 @@ command_run() {
       if (( scenario_request_status == 0 )); then
         break
       fi
-      if (( scenario_request_attempt < 3 )) && is_nonce_race_error "$scenario_request_output"; then
-        log "refund-after-expiry scenario retrying withdraw request after nonce race attempt=${scenario_request_attempt}/3"
-        sleep 2
-        continue
+      if (( scenario_request_attempt < 3 )); then
+        if is_nonce_race_error "$scenario_request_output"; then
+          log "refund-after-expiry scenario retrying withdraw request after nonce race attempt=${scenario_request_attempt}/3"
+          sleep 2
+          continue
+        fi
+        local lowered_req_output
+        lowered_req_output="$(lower "$scenario_request_output")"
+        if [[ "$lowered_req_output" == *"execution reverted"* ]]; then
+          log "refund-after-expiry scenario retrying withdraw request after execution revert attempt=${scenario_request_attempt}/3"
+          sleep 3
+          continue
+        fi
       fi
       break
     done

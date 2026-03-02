@@ -127,6 +127,15 @@ func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, e
 		return Payload{}, errors.New("approve transaction failed")
 	}
 
+	// Wait for the allowance to be visible to the RPC before calling
+	// requestWithdraw. Public RPC endpoints (e.g. Base Sepolia) may route
+	// eth_estimateGas to a backend node that hasn't indexed the approve
+	// block yet, causing a spurious revert.
+	wantAllowance := new(big.Int).SetUint64(req.Amount)
+	if err := waitAllowanceVisible(ctx, wjunoContract, auth.From, cfg.BridgeAddr, wantAllowance); err != nil {
+		return Payload{}, fmt.Errorf("wait allowance visible: %w", err)
+	}
+
 	requestTx, err := bridgeContract.Transact(auth, "requestWithdraw", new(big.Int).SetUint64(req.Amount), req.RecipientUA)
 	if err != nil {
 		return Payload{}, fmt.Errorf("requestWithdraw: %w", err)
@@ -246,6 +255,24 @@ func ParseWithdrawRequestedEvent(logs []*types.Log, bridgeAddress common.Address
 	return RequestedEvent{}, errors.New("WithdrawRequested event not found in receipt logs")
 }
 
+func waitAllowanceVisible(ctx context.Context, wjunoContract *bind.BoundContract, owner, spender common.Address, want *big.Int) error {
+	for i := 0; i < 10; i++ {
+		var out []interface{}
+		err := wjunoContract.Call(&bind.CallOpts{Context: ctx}, &out, "allowance", owner, spender)
+		if err == nil && len(out) > 0 {
+			if allowance, ok := out[0].(*big.Int); ok && allowance.Cmp(want) >= 0 {
+				return nil
+			}
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+		}
+	}
+	return errors.New("allowance not visible after approve confirmation")
+}
+
 func toUint64(v any) (uint64, error) {
 	switch tv := v.(type) {
 	case uint8:
@@ -275,6 +302,16 @@ const WJunoABIJSON = `[
     "name": "approve",
     "outputs": [{"internalType": "bool", "name": "", "type": "bool"}],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"internalType": "address", "name": "owner", "type": "address"},
+      {"internalType": "address", "name": "spender", "type": "address"}
+    ],
+    "name": "allowance",
+    "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+    "stateMutability": "view",
     "type": "function"
   }
 ]`
