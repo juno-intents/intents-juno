@@ -266,7 +266,6 @@ func main() {
 		if msg.Digest == lastDigest {
 			continue
 		}
-		lastDigest = msg.Digest
 
 		out := outputMessageV1{
 			Version:    "checkpoints.signature.v1",
@@ -286,6 +285,7 @@ func main() {
 			log.Error("publish output", "err", err, "topic", *queueOutTopic)
 			continue
 		}
+		lastDigest = msg.Digest
 	}
 }
 
