@@ -4038,12 +4038,17 @@ command_run() {
       die "dkg summary operators length is invalid: $prefund_operator_count"
     (( prefund_operator_count >= 1 )) || die "dkg summary operators length must be >= 1"
 
-    bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
-    # Bridge deployment retries can require a high fee cap on Base testnet; keep
-    # a hard floor so replacement transactions do not fail with insufficient funds.
-    local bridge_deployer_min_wei="70000000000000000"
-    if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
-      bridge_deployer_required_wei="$bridge_deployer_min_wei"
+    if [[ -n "$existing_bridge_summary_path" ]]; then
+      bridge_deployer_required_wei=0
+      log "skipping bridge deployer pre-funding (reusing existing bridge summary)"
+    else
+      bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
+      # Bridge deployment retries can require a high fee cap on Base testnet; keep
+      # a hard floor so replacement transactions do not fail with insufficient funds.
+      local bridge_deployer_min_wei="70000000000000000"
+      if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
+        bridge_deployer_required_wei="$bridge_deployer_min_wei"
+      fi
     fi
 
     assert_prefund_sender_budget \
@@ -4763,8 +4768,10 @@ command_run() {
       ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$operator" "$base_operator_fund_wei" "operator pre-fund" || \
         die "failed to pre-fund operator: address=$operator required_wei=$base_operator_fund_wei"
     done < <(jq -r '.operators[].operator_id' "$dkg_summary")
-    ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$bridge_deployer_address" "$bridge_deployer_required_wei" "bridge deployer" || \
-      die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
+    if (( bridge_deployer_required_wei > 0 )); then
+      ensure_recipient_min_balance "$base_rpc_url" "$base_key" "$funding_sender_address" "$bridge_deployer_address" "$bridge_deployer_required_wei" "bridge deployer" || \
+        die "failed to fund bridge deployer: address=$bridge_deployer_address required_wei=$bridge_deployer_required_wei"
+    fi
   fi
 
   local bridge_deployer_key_file
