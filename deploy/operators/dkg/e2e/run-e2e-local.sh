@@ -474,6 +474,12 @@ read_tf_outputs() {
   local state_file="$WORKDIR/infra/terraform.tfstate"
   [[ -f "$state_file" ]] || die "terraform state not found: $state_file"
 
+  # Resolve to absolute path so -chdir doesn't break the -state reference.
+  state_file="$(cd "$(dirname "$state_file")" && pwd)/$(basename "$state_file")"
+
+  # Ensure providers are initialised so `terraform output` can read the state.
+  tf_cmd -chdir="$TERRAFORM_DIR" init -input=false -backend=false >/dev/null 2>&1 || true
+
   _tf_out() {
     tf_cmd -chdir="$TERRAFORM_DIR" output -state="$state_file" -raw "$1" 2>/dev/null || true
   }
