@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net/http"
 	"strings"
@@ -27,6 +28,9 @@ type Config struct {
 
 	// MaxWaitSeconds bounds per-request execution time (server-side). Defaults to 300s.
 	MaxWaitSeconds int
+
+	// Log is used to log internal errors. If nil, errors are logged to slog.Default().
+	Log *slog.Logger
 }
 
 func NewHandler(sender Sender, cfg Config) http.Handler {
@@ -35,6 +39,9 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	}
 	if cfg.MaxWaitSeconds <= 0 {
 		cfg.MaxWaitSeconds = 300
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.Default()
 	}
 
 	mux := http.NewServeMux()
@@ -124,6 +131,7 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 				writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "canceled"})
 				return
 			}
+			cfg.Log.Error("send transaction failed", "to", req.To, "err", err)
 			// Avoid leaking internal details by default.
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
 			return
