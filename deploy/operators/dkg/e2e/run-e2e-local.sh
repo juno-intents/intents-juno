@@ -1271,11 +1271,18 @@ deploy_backoffice() {
     backoffice_cmd+=" --juno-rpc-pass '$(cat "$juno_rpc_pass_file")'"
   fi
 
-  run_on_host "$RUNNER_PUBLIC_IP" \
-    "pkill -f '/home/$RUNNER_SSH_USER/bin/backoffice' 2>/dev/null || true; \
-     sleep 1; \
-     nohup $backoffice_cmd > /home/$RUNNER_SSH_USER/backoffice.log 2>&1 &"
-  ok "backoffice started on runner"
+  # Bridge addresses are required by the binary. If unavailable (e.g. first run
+  # before bridge deployment), deploy only the binary; the test script will
+  # (re)start the backoffice after bridge deployment with correct addresses.
+  if [[ -z "$bo_bridge_address" || -z "$bo_wjuno_address" || -z "$bo_operator_registry_address" ]]; then
+    warn "backoffice: bridge addresses not yet available — binary deployed but process deferred until after bridge deployment"
+  else
+    run_on_host "$RUNNER_PUBLIC_IP" \
+      "pkill -f '/home/$RUNNER_SSH_USER/bin/backoffice' 2>/dev/null || true; \
+       sleep 1; \
+       nohup $backoffice_cmd > /home/$RUNNER_SSH_USER/backoffice.log 2>&1 &"
+    ok "backoffice started on runner"
+  fi
 
   # Write access details to local tmp file
   local access_file="$REPO_ROOT/tmp/backoffice-access.txt"

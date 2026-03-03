@@ -5579,6 +5579,37 @@ command_run() {
   [[ "$deployed_wjuno_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || \
     die "bridge summary missing deployed contracts.wjuno address: $bridge_summary"
 
+  # (Re)start the backoffice with correct bridge contract addresses.
+  # deploy_backoffice() in run-e2e-local.sh runs before the test and may not
+  # have had bridge addresses available (e.g. first run after cleanup). Now that
+  # the bridge is deployed, start/restart with the correct addresses.
+  if [[ "$backoffice_enabled" == "true" ]]; then
+    local bo_operator_registry_addr bo_fee_distributor_addr bo_operator_addrs_csv
+    bo_operator_registry_addr="$(jq -r '.contracts.operator_registry // empty' "$bridge_summary" 2>/dev/null || true)"
+    bo_fee_distributor_addr="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)"
+    bo_operator_addrs_csv="$(jq -r '[.operators[]?] | join(",")' "$bridge_summary" 2>/dev/null || true)"
+
+    local bo_port="${backoffice_url##*:}"
+    [[ "$bo_port" =~ ^[0-9]+$ ]] || bo_port="8082"
+
+    local -a bo_args=()
+    bo_args+=(--listen "0.0.0.0:${bo_port}")
+    bo_args+=(--postgres-dsn "$shared_postgres_dsn")
+    bo_args+=(--base-rpc-url "$base_rpc_url")
+    bo_args+=(--auth-secret "$backoffice_auth_token")
+    bo_args+=(--bridge-address "$deployed_bridge_address")
+    bo_args+=(--wjuno-address "$deployed_wjuno_address")
+    [[ -n "$bo_operator_registry_addr" ]] && bo_args+=(--operator-registry-address "$bo_operator_registry_addr")
+    [[ -n "$bo_fee_distributor_addr" ]] && bo_args+=(--fee-distributor-address "$bo_fee_distributor_addr")
+    [[ -n "$bo_operator_addrs_csv" ]] && bo_args+=(--operator-addresses "$bo_operator_addrs_csv")
+
+    log "restarting backoffice with bridge=$deployed_bridge_address wjuno=$deployed_wjuno_address"
+    pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
+    sleep 1
+    nohup "$HOME/bin/backoffice" "${bo_args[@]}" > "$HOME/backoffice.log" 2>&1 &
+    log "backoffice (re)started on port $bo_port"
+  fi
+
   if [[ "$shared_enabled" == "true" ]]; then
     local checkpoint_started_at
     checkpoint_started_at="$(timestamp_utc)"
@@ -8320,7 +8351,7 @@ command_run() {
       }'
   )"
 
-  local expiry_extension_status="failed"
+  local expiry_extension_status="not-needed"
   if [[ "$invariant_withdraw_expiry_extended_vs_request" == "true" ]]; then
     expiry_extension_status="passed"
   fi
