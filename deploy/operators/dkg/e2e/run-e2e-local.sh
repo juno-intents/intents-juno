@@ -38,7 +38,7 @@ OPERATOR_COUNT=5
 OPERATOR_THRESHOLD=3
 OPERATOR_BASE_PORT=18443
 OPERATOR_AMI_ID=""
-RUNNER_INSTANCE_TYPE="c7i.4xlarge"
+RUNNER_INSTANCE_TYPE="c7i.2xlarge"
 OPERATOR_INSTANCE_TYPE="c7i.large"
 BRIDGE_VERIFIER_ADDRESS="0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
 BRIDGE_GUEST_RELEASE_TAG="bridge-guests-latest"
@@ -340,11 +340,11 @@ generate_tfvars() {
     --arg name_prefix "juno-e2e-local" \
     --arg instance_type "$RUNNER_INSTANCE_TYPE" \
     --arg runner_ami_id "" \
-    --argjson root_volume_size_gb 200 \
+    --argjson root_volume_size_gb 60 \
     --argjson operator_instance_count "$OPERATOR_COUNT" \
     --arg operator_instance_type "$OPERATOR_INSTANCE_TYPE" \
     --arg operator_ami_id "$OPERATOR_AMI_ID" \
-    --argjson operator_root_volume_size_gb 100 \
+    --argjson operator_root_volume_size_gb 40 \
     --arg shared_ami_id "" \
     --argjson operator_base_port "$OPERATOR_BASE_PORT" \
     --arg allowed_ssh_cidr "$ssh_allowed_cidr" \
@@ -1197,13 +1197,10 @@ deploy_backoffice() {
     fi
   fi
 
-  # Build operator addresses list from DKG summary (if available)
+  # Extract contract and operator addresses from bridge summary (if available).
+  # The bridge summary contains the on-chain registered operator addresses which
+  # differ from the DKG operator IDs (TSS signing keys).
   local operator_addrs=""
-  if [[ -f "$WORKDIR/reports/dkg-summary.json" ]]; then
-    operator_addrs="$(jq -r '[.operators[].operator_id] | join(",")' "$WORKDIR/reports/dkg-summary.json" 2>/dev/null || true)"
-  fi
-
-  # Extract contract addresses from bridge summary (if available)
   local bo_bridge_address="" bo_wjuno_address="" bo_operator_registry_address="" bo_fee_distributor_address=""
   local bridge_summary_file="$WORKDIR/reports/base-bridge-summary.json"
   if [[ -f "$bridge_summary_file" ]]; then
@@ -1211,6 +1208,11 @@ deploy_backoffice() {
     bo_wjuno_address="$(jq -r '.contracts.wjuno // empty' "$bridge_summary_file" 2>/dev/null || true)"
     bo_operator_registry_address="$(jq -r '.contracts.operator_registry // empty' "$bridge_summary_file" 2>/dev/null || true)"
     bo_fee_distributor_address="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary_file" 2>/dev/null || true)"
+    operator_addrs="$(jq -r '.operators | join(",")' "$bridge_summary_file" 2>/dev/null || true)"
+  fi
+  # Fallback to DKG summary if bridge summary has no operators
+  if [[ -z "$operator_addrs" && -f "$WORKDIR/reports/dkg-summary.json" ]]; then
+    operator_addrs="$(jq -r '[.operators[].operator_id] | join(",")' "$WORKDIR/reports/dkg-summary.json" 2>/dev/null || true)"
   fi
 
   # Start backoffice on runner (background, nohup)
@@ -1234,6 +1236,31 @@ deploy_backoffice() {
   fi
   if [[ -n "$bo_fee_distributor_address" ]]; then
     backoffice_cmd+=" --fee-distributor-address '${bo_fee_distributor_address}'"
+  fi
+
+  # SP1 requestor address and prover network RPC
+  if [[ -n "$SP1_REQUESTOR_KEY_FILE" && -f "$SP1_REQUESTOR_KEY_FILE" ]]; then
+    local sp1_requestor_addr
+    sp1_requestor_addr="$(cast wallet address --private-key "$(tr -d '\r\n' < "$SP1_REQUESTOR_KEY_FILE")" 2>/dev/null || true)"
+    if [[ -n "$sp1_requestor_addr" ]]; then
+      backoffice_cmd+=" --sp1-requestor-address '${sp1_requestor_addr}'"
+    fi
+  fi
+  if [[ -f "$bridge_summary_file" ]]; then
+    local sp1_rpc_url
+    sp1_rpc_url="$(jq -r '.proof.sp1.rpc_url // empty' "$bridge_summary_file" 2>/dev/null || true)"
+    if [[ -n "$sp1_rpc_url" ]]; then
+      backoffice_cmd+=" --sp1-rpc-url '${sp1_rpc_url}'"
+    fi
+  fi
+
+  # Juno RPC (via SSH tunnel on first operator, port 38232)
+  local juno_rpc_user_file="$WORKDIR/local-secrets/juno-rpc-user.txt"
+  local juno_rpc_pass_file="$WORKDIR/local-secrets/juno-rpc-pass.txt"
+  if [[ -f "$juno_rpc_user_file" && -f "$juno_rpc_pass_file" ]]; then
+    backoffice_cmd+=" --juno-rpc-url 'http://127.0.0.1:38232'"
+    backoffice_cmd+=" --juno-rpc-user '$(cat "$juno_rpc_user_file")'"
+    backoffice_cmd+=" --juno-rpc-pass '$(cat "$juno_rpc_pass_file")'"
   fi
 
   run_on_host "$RUNNER_PUBLIC_IP" \
@@ -1646,6 +1673,11 @@ cmd_resume() {
   # Read existing terraform state
   read_tf_outputs
 
+  # Apply any terraform changes (e.g. new SG rules) that were added since last full run
+  log "applying terraform to ensure infrastructure is current..."
+  terraform_apply
+  read_tf_outputs   # re-read in case apply created new outputs
+
   if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
     CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
   fi
@@ -1660,6 +1692,16 @@ cmd_resume() {
   # Re-stage secrets and operator config (in case runner was restarted)
   stage_secrets_on_runner
   provision_operator_stack_config
+
+  # Restart tss-host on all operators to clear stale signing state from prior runs
+  log "restarting tss-host.service on all operators..."
+  for op_ip in "${OPERATOR_PUBLIC_IPS[@]}"; do
+    ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$op_ip" \
+      'sudo systemctl restart tss-host.service' || \
+      warn "failed to restart tss-host on $op_ip"
+  done
+  ok "tss-host restarted on all operators"
+
   scale_proof_services 1
 
   # Deploy backoffice

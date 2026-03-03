@@ -17,7 +17,7 @@ variable "name_prefix" {
 variable "instance_type" {
   description = "EC2 instance type for the live e2e runner."
   type        = string
-  default     = "c7i.4xlarge"
+  default     = "c7i.2xlarge"
 }
 
 variable "runner_ami_id" {
@@ -29,7 +29,7 @@ variable "runner_ami_id" {
 variable "root_volume_size_gb" {
   description = "Root EBS size in GiB."
   type        = number
-  default     = 200
+  default     = 60
 }
 
 variable "operator_instance_count" {
@@ -58,7 +58,7 @@ variable "operator_ami_id" {
 variable "operator_root_volume_size_gb" {
   description = "Root EBS size in GiB for each dedicated operator host."
   type        = number
-  default     = 100
+  default     = 40
 
   validation {
     condition     = var.operator_root_volume_size_gb >= 20
@@ -144,7 +144,7 @@ variable "shared_ami_id" {
 variable "shared_root_volume_size_gb" {
   description = "Root EBS size in GiB for IPFS pinning ASG instances."
   type        = number
-  default     = 100
+  default     = 40
 
   validation {
     condition     = var.shared_root_volume_size_gb >= 20
@@ -214,7 +214,7 @@ variable "shared_msk_broker_instance_type" {
 variable "shared_msk_broker_ebs_volume_size_gb" {
   description = "MSK broker EBS volume size in GiB."
   type        = number
-  default     = 100
+  default     = 20
 
   validation {
     condition     = var.shared_msk_broker_ebs_volume_size_gb >= 1

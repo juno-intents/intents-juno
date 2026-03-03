@@ -7573,7 +7573,7 @@ command_run() {
     local bo_deposits_resp
     bo_deposits_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/deposits/recent" 2>/dev/null || true)"
     if [[ -n "$bo_deposits_resp" ]] && jq -e '.' <<<"$bo_deposits_resp" >/dev/null 2>&1; then
-      if [[ -n "$run_deposit_id" ]] && jq -e --arg id "$run_deposit_id" '.data[]? | select(.deposit_id == $id)' <<<"$bo_deposits_resp" >/dev/null 2>&1; then
+      if [[ -n "$run_deposit_id" ]] && jq -e --arg id "$run_deposit_id" '.data[]? | select(.depositId == $id)' <<<"$bo_deposits_resp" >/dev/null 2>&1; then
         backoffice_deposits_visible="true"
         log "backoffice: test deposit $run_deposit_id visible"
       else
@@ -7589,7 +7589,7 @@ command_run() {
     local bo_withdrawals_resp
     bo_withdrawals_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/withdrawals/recent" 2>/dev/null || true)"
     if [[ -n "$bo_withdrawals_resp" ]] && jq -e '.' <<<"$bo_withdrawals_resp" >/dev/null 2>&1; then
-      if [[ -n "$run_withdrawal_id" ]] && jq -e --arg id "$run_withdrawal_id" '.data[]? | select(.withdrawal_id == $id)' <<<"$bo_withdrawals_resp" >/dev/null 2>&1; then
+      if [[ -n "$run_withdrawal_id" ]] && jq -e --arg id "$run_withdrawal_id" '.data[]? | select(.withdrawalId == $id)' <<<"$bo_withdrawals_resp" >/dev/null 2>&1; then
         backoffice_withdrawals_visible="true"
         log "backoffice: test withdrawal $run_withdrawal_id visible"
       else
@@ -7606,8 +7606,8 @@ command_run() {
     bo_analytics_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/analytics/overview" 2>/dev/null || true)"
     if [[ -n "$bo_analytics_resp" ]] && jq -e '.' <<<"$bo_analytics_resp" >/dev/null 2>&1; then
       local bo_total_deposits bo_total_withdrawals
-      bo_total_deposits="$(jq -r '.data.totalDeposits // .data.total_deposits // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
-      bo_total_withdrawals="$(jq -r '.data.totalWithdrawals // .data.total_withdrawals // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
+      bo_total_deposits="$(jq -r '.totalDeposits // .total_deposits // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
+      bo_total_withdrawals="$(jq -r '.totalWithdrawals // .total_withdrawals // 0' <<<"$bo_analytics_resp" 2>/dev/null || true)"
       if (( bo_total_deposits >= 1 )) && (( bo_total_withdrawals >= 1 )); then
         backoffice_analytics_responding="true"
         log "backoffice: analytics overview valid (deposits=$bo_total_deposits withdrawals=$bo_total_withdrawals)"
@@ -7625,10 +7625,10 @@ command_run() {
     bo_funds_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/funds" 2>/dev/null || true)"
     if [[ -n "$bo_funds_resp" ]] && jq -e '.' <<<"$bo_funds_resp" >/dev/null 2>&1; then
       local bo_operators_count
-      bo_operators_count="$(jq '[.data.operators[]?] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
+      bo_operators_count="$(jq '[.operators[]?] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
       if (( bo_operators_count > 0 )); then
         local bo_has_balance
-        bo_has_balance="$(jq '[.data.operators[]? | select(.balanceWei != null or .balance_wei != null)] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
+        bo_has_balance="$(jq '[.operators[]? | select(.balanceWei != null or .balance_wei != null)] | length' <<<"$bo_funds_resp" 2>/dev/null || true)"
         if (( bo_has_balance > 0 )); then
           backoffice_funds_responding="true"
           log "backoffice: funds endpoint valid (operators=$bo_operators_count with_balance=$bo_has_balance)"
