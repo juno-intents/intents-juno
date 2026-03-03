@@ -3598,6 +3598,17 @@ command_run() {
   if [[ -n "$existing_bridge_summary_path" ]]; then
     [[ -f "$existing_bridge_summary_path" ]] || \
       die "existing bridge summary file not found: $existing_bridge_summary_path"
+
+    # Validate that the bridge's registered operators match the DKG summary.
+    # A mismatch means checkpoint signatures will be rejected on-chain.
+    if [[ -n "$dkg_summary" && -f "$dkg_summary" ]]; then
+      local _bridge_ops _dkg_ops
+      _bridge_ops="$(jq -r '[.operators[]?] | sort | join(",")' "$existing_bridge_summary_path" 2>/dev/null || true)"
+      _dkg_ops="$(jq -r '[.operators[].operator_id] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
+      if [[ -n "$_bridge_ops" && -n "$_dkg_ops" && "$_bridge_ops" != "$_dkg_ops" ]]; then
+        die "OPERATOR MISMATCH: bridge summary operators [$_bridge_ops] do not match DKG operators [$_dkg_ops]. The bridge must be redeployed with the current DKG keys."
+      fi
+    fi
   fi
 
   case "$stop_after_stage" in

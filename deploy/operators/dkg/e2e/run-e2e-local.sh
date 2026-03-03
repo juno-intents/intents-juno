@@ -761,6 +761,14 @@ run_distributed_dkg() {
     return 0
   fi
 
+  # Fresh DKG will produce new operator keys — any stale bridge summary from a
+  # previous run is no longer valid (operator addresses won't match).
+  local stale_bridge_summary="$WORKDIR/reports/base-bridge-summary.json"
+  if [[ -f "$stale_bridge_summary" ]]; then
+    warn "removing stale bridge summary (new DKG will generate different operator keys)"
+    rm -f "$stale_bridge_summary"
+  fi
+
   mkdir -p "$WORKDIR/reports"
 
   # Build the operator fleet SSH access script (SCP SSH key to runner)
@@ -1317,9 +1325,23 @@ run_e2e_test() {
   run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir"
   scp_to_host "$RUNNER_PUBLIC_IP" "$dkg_summary" "$remote_dkg_summary"
 
-  # If a bridge summary already exists from a previous run, reuse it to skip deploy
+  # If a bridge summary already exists from a previous run, reuse it to skip deploy.
+  # IMPORTANT: Validate that the bridge's registered operators match the current DKG
+  # summary. A mismatch (e.g. DKG was re-run but bridge was not redeployed) causes
+  # silent failures — checkpoint signatures won't pass the on-chain isOperator() check.
   local bridge_summary_flag=""
   local bridge_summary="$WORKDIR/reports/base-bridge-summary.json"
+  if [[ -f "$bridge_summary" ]]; then
+    local bridge_ops dkg_ops
+    bridge_ops="$(jq -r '[.operators[]?] | sort | join(",")' "$bridge_summary" 2>/dev/null || true)"
+    dkg_ops="$(jq -r '[.operators[].operator_id] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
+    if [[ -n "$bridge_ops" && -n "$dkg_ops" && "$bridge_ops" != "$dkg_ops" ]]; then
+      warn "bridge summary operators do not match DKG summary — forcing bridge redeploy"
+      warn "  bridge: $bridge_ops"
+      warn "  DKG:    $dkg_ops"
+      rm -f "$bridge_summary"
+    fi
+  fi
   if [[ -f "$bridge_summary" ]]; then
     local remote_bridge_summary="$remote_workdir/reports/base-bridge-summary.json"
     run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir/reports"
