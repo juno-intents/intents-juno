@@ -1711,6 +1711,14 @@ cmd_resume() {
     CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
   fi
 
+  # Update runner code to current local commit (test scripts may have changed)
+  local _current_commit
+  _current_commit="$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || echo "main")"
+  log "updating runner code to $_current_commit..."
+  run_on_host "$RUNNER_PUBLIC_IP" \
+    "cd \$HOME/intents-juno && git fetch origin --prune && git checkout $_current_commit 2>/dev/null || git checkout origin/main"
+  ok "runner code updated"
+
   # Ensure DKG is done
   [[ -f "$WORKDIR/reports/dkg-summary.json" ]] || \
     die "no DKG summary found; run 'run' first"
