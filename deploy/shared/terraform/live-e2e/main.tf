@@ -545,12 +545,30 @@ resource "aws_rds_cluster_instance" "shared" {
   })
 }
 
+resource "aws_msk_configuration" "shared" {
+  count = var.provision_shared_services ? 1 : 0
+
+  kafka_versions = [var.shared_msk_kafka_version]
+  name           = "${local.resource_slug}-shared-msk-config"
+
+  server_properties = <<-PROPERTIES
+    auto.create.topics.enable = true
+    default.replication.factor = 2
+    min.insync.replicas = 1
+  PROPERTIES
+}
+
 resource "aws_msk_cluster" "shared" {
   count = var.provision_shared_services ? 1 : 0
 
   cluster_name           = "${local.resource_name}-shared-msk"
   kafka_version          = var.shared_msk_kafka_version
   number_of_broker_nodes = length(local.shared_subnets)
+
+  configuration_info {
+    arn      = aws_msk_configuration.shared[0].arn
+    revision = aws_msk_configuration.shared[0].latest_revision
+  }
 
   broker_node_group_info {
     instance_type   = var.shared_msk_broker_instance_type
