@@ -118,10 +118,11 @@
     });
 
     // Service health
-    apiFetch("/ops/services/health", function (services) {
+    apiFetch("/ops/services/health", function (resp) {
       var html = "";
-      (services || []).forEach(function (svc) {
-        html += '<div>' + dot(svc.status === "up") + svc.url + '</div>';
+      var services = (resp && resp.data) || [];
+      services.forEach(function (svc) {
+        html += '<div>' + dot(svc.healthy) + svc.url + '</div>';
       });
       setHTML("svc-health-grid", html || '<span class="loading">No services reported</span>');
     });
@@ -176,7 +177,13 @@
       // Prover
       if (d.prover) {
         setText("prover-addr", fmtAddr(d.prover.address));
-        setText("prover-balance", d.prover.balanceEth || fmtETH(d.prover.balanceWei));
+        if (d.prover.error) {
+          setText("prover-balance", "Error: " + d.prover.error);
+        } else if (d.prover.network === "succinct") {
+          setText("prover-balance", (d.prover.creditsFormatted || d.prover.creditsRaw || "0") + " credits");
+        } else {
+          setText("prover-balance", d.prover.balanceEth || fmtETH(d.prover.balanceWei));
+        }
       }
       // Bridge escrow
       if (d.bridge) {
@@ -274,30 +281,37 @@
 
   // --- Ops ---
   function refreshOps() {
-    apiFetch("/ops/deposits/recent?limit=20", function (items) {
-      var rows = (items || []).map(function (r) {
+    apiFetch("/ops/deposits/recent?limit=20", function (resp) {
+      var items = (resp && resp.data) || [];
+      var rows = items.map(function (r) {
         return "<tr>" +
-          '<td class="mono">' + fmtAddr(r.id) + "</td>" +
+          '<td class="mono">' + fmtAddr(r.depositId) + "</td>" +
           "<td>" + (r.state || "-") + "</td>" +
-          "<td>" + fmtTime(r.created_at) + "</td>" +
-          "<td>" + (r.juno_height || "-") + "</td></tr>";
+          "<td>" + fmtTime(r.createdAt) + "</td>" +
+          "<td>" + (r.junoHeight || "-") + "</td></tr>";
       }).join("");
       setHTML("ops-deposits-tbody", rows || '<tr><td colspan="4" class="loading">-</td></tr>');
     });
 
-    apiFetch("/ops/withdrawals/recent?limit=20", function (items) {
-      var rows = (items || []).map(function (r) {
+    apiFetch("/ops/withdrawals/recent?limit=20", function (resp) {
+      var items = (resp && resp.data) || [];
+      var rows = items.map(function (r) {
         return "<tr>" +
-          '<td class="mono">' + fmtAddr(r.id) + "</td>" +
+          '<td class="mono">' + fmtAddr(r.withdrawalId) + "</td>" +
           "<td>" + (r.state || "-") + "</td>" +
-          "<td>" + fmtTime(r.created_at) + "</td>" +
-          "<td>" + (r.base_block || "-") + "</td></tr>";
+          "<td>" + fmtTime(r.createdAt) + "</td>" +
+          "<td>" + (r.baseBlockNumber || "-") + "</td></tr>";
       }).join("");
       setHTML("ops-withdrawals-tbody", rows || '<tr><td colspan="4" class="loading">-</td></tr>');
     });
 
-    apiFetch("/ops/batches/stuck", function (items) {
-      var rows = (items || []).map(function (r) {
+    apiFetch("/ops/batches/stuck", function (resp) {
+      var all = (resp && resp.stuckDeposits || []).map(function (r) {
+        return { id: r.depositId, kind: "deposit", state: r.state, age: r.stuckFor };
+      }).concat((resp && resp.stuckWithdrawals || []).map(function (r) {
+        return { id: r.batchId, kind: "withdrawal", state: r.state, age: r.stuckFor };
+      }));
+      var rows = all.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.id) + "</td>" +
           "<td>" + (r.kind || "-") + "</td>" +
@@ -310,12 +324,13 @@
 
   // --- Polling ---
   function startPolling() {
+    // Stagger initial requests to avoid rate-limit burst.
     refreshOverview();
-    refreshDLQ("proofs");
-    refreshFunds();
-    refreshAnalytics();
-    refreshAlerts();
-    refreshOps();
+    setTimeout(refreshDLQ, 500, "proofs");
+    setTimeout(refreshFunds, 1000);
+    setTimeout(refreshAnalytics, 1500);
+    setTimeout(refreshAlerts, 2000);
+    setTimeout(refreshOps, 2500);
 
     setInterval(refreshOverview, 10000);
     setInterval(function () { refreshDLQ(); }, 15000);
@@ -325,11 +340,55 @@
     setInterval(refreshOps, 15000);
   }
 
+  // --- Login ---
+  function hasToken() {
+    return !!localStorage.getItem("bo_token");
+  }
+
+  function showLogin() {
+    var overlay = document.getElementById("login-overlay");
+    if (overlay) overlay.classList.remove("hidden");
+  }
+
+  function hideLogin() {
+    var overlay = document.getElementById("login-overlay");
+    if (overlay) overlay.classList.add("hidden");
+  }
+
+  function initLogin() {
+    var form = document.getElementById("login-form");
+    if (!form) return;
+    form.addEventListener("submit", function (e) {
+      e.preventDefault();
+      var token = document.getElementById("login-token").value.trim();
+      if (!token) return;
+      // Validate the token against a known API endpoint.
+      fetch("/api/analytics/overview", { headers: { "Accept": "application/json", "Authorization": "Bearer " + token } })
+        .then(function (r) {
+          if (!r.ok) throw new Error(r.status);
+          localStorage.setItem("bo_token", token);
+          hideLogin();
+          startPolling();
+        })
+        .catch(function () {
+          var err = document.getElementById("login-error");
+          if (err) err.classList.remove("hidden");
+        });
+    });
+  }
+
   // --- Init ---
   document.addEventListener("DOMContentLoaded", function () {
     initTabs();
     initSubTabs();
-    startPolling();
+    initLogin();
+
+    if (hasToken()) {
+      hideLogin();
+      startPolling();
+    } else {
+      showLogin();
+    }
 
     // DLQ filter controls
     var sel = document.getElementById("dlq-ack-filter");

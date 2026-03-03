@@ -43,8 +43,8 @@ func (s *Server) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request)
 		`SELECT COALESCE(SUM(amount),0) FROM deposit_jobs WHERE state = 6`).Scan(&depVol)
 	_ = s.cfg.Pool.QueryRow(ctx,
 		`SELECT COALESCE(SUM(amount),0) FROM withdrawal_requests`).Scan(&wdVol)
-	resp["totalDepositVolume"] = strconv.FormatInt(depVol, 10)
-	resp["totalWithdrawalVolume"] = strconv.FormatInt(wdVol, 10)
+	resp["totalDepositVolume"] = zatToJunoString(depVol)
+	resp["totalWithdrawalVolume"] = zatToJunoString(wdVol)
 
 	// Active wJUNO supply.
 	if s.cfg.WJunoAddress != (common.Address{}) {
@@ -53,7 +53,7 @@ func (s *Server) handleAnalyticsOverview(w http.ResponseWriter, r *http.Request)
 			s.log.Warn("analytics: wjuno supply", "err", err)
 			resp["activeWjunoSupply"] = "0"
 		} else {
-			resp["activeWjunoSupply"] = supply.String()
+			resp["activeWjunoSupply"] = zatToJunoString(supply.Int64())
 		}
 	}
 
@@ -174,8 +174,8 @@ func (s *Server) handleBridgesOverTime(w http.ResponseWriter, r *http.Request) {
 			"date":             key,
 			"depositCount":     entry.depositCount,
 			"withdrawalCount":  entry.withdrawCount,
-			"depositVolume":    strconv.FormatInt(entry.depositVol, 10),
-			"withdrawalVolume": strconv.FormatInt(entry.withdrawVol, 10),
+			"depositVolume":    zatToJunoString(entry.depositVol),
+			"withdrawalVolume": zatToJunoString(entry.withdrawVol),
 		})
 	}
 

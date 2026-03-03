@@ -41,6 +41,7 @@ func main() {
 		opRegistryAddr  = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
 		feeDistAddr     = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
 		sp1RequestorStr = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
+		sp1RPCURL       = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
 		operatorAddrsRaw = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
 
 		serviceURLsRaw = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
@@ -173,6 +174,7 @@ func main() {
 	srv, err := backoffice.New(backoffice.ServerConfig{
 		Pool:       pool,
 		BaseClient: baseClient,
+		SP1RPCURL:  strings.TrimSpace(*sp1RPCURL),
 
 		JunoRPCURL:  strings.TrimSpace(*junoRPCURL),
 		JunoRPCUser: strings.TrimSpace(*junoRPCUser),

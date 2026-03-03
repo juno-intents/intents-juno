@@ -19,6 +19,7 @@ import (
 type ServerConfig struct {
 	Pool       *pgxpool.Pool
 	BaseClient *ethclient.Client
+	SP1RPCURL string // Succinct prover network gRPC URL (e.g. rpc.mainnet.succinct.xyz)
 
 	JunoRPCURL  string
 	JunoRPCUser string
@@ -73,7 +74,7 @@ func New(cfg ServerConfig) (*Server, error) {
 		cfg.RateLimitPerSecond = 5
 	}
 	if cfg.RateLimitBurst <= 0 {
-		cfg.RateLimitBurst = 10
+		cfg.RateLimitBurst = 20
 	}
 	if cfg.OperatorGasMinWei == nil {
 		cfg.OperatorGasMinWei = new(big.Int)

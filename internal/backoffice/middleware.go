@@ -9,11 +9,12 @@ import (
 )
 
 // authMiddleware checks the Authorization: Bearer <token> header against the
-// configured auth secret. Health checks (GET /healthz) are exempt.
+// configured auth secret. Health checks, the dashboard UI, and static assets
+// are exempt so the browser can load the page and prompt for a token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for healthz.
-		if r.URL.Path == "/healthz" {
+		// Skip auth for healthz, dashboard root, and static assets.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}

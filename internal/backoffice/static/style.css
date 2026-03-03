@@ -72,6 +72,16 @@ button.small{padding:.15rem .45rem;font-size:.72rem}
 .scroll-y{max-height:400px;overflow-y:auto}
 /* Alert badge in nav */
 #alert-badge{background:var(--crit);color:#fff;margin-left:.25rem;font-size:.65rem;min-width:18px;text-align:center}
+/* Login overlay */
+.login-overlay{position:fixed;inset:0;background:var(--bg);z-index:1000;display:flex;align-items:center;justify-content:center}
+.login-box{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:2rem;width:340px;text-align:center}
+.login-box h2{margin-bottom:.5rem;font-size:1.1rem}
+.login-box p{color:var(--muted);font-size:.85rem;margin-bottom:1rem}
+.login-box input{width:100%;padding:.5rem .75rem;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:.9rem;margin-bottom:.75rem}
+.login-box input:focus{outline:none;border-color:var(--hl)}
+.login-box button{width:100%;padding:.5rem;font-size:.9rem}
+.login-error{color:var(--crit);font-size:.8rem;margin-top:.5rem}
+.login-overlay.hidden{display:none}
 /* Responsive */
 @media(max-width:600px){
   header{flex-direction:column;align-items:flex-start}
