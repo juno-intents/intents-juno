@@ -5615,6 +5615,31 @@ command_run() {
     [[ -n "$bo_fee_distributor_addr" ]] && bo_args+=(--fee-distributor-address "$bo_fee_distributor_addr")
     [[ -n "$bo_operator_addrs_csv" ]] && bo_args+=(--operator-addresses "$bo_operator_addrs_csv")
 
+    # SP1 prover requestor address and RPC
+    [[ -n "${sp1_requestor_address:-}" ]] && bo_args+=(--sp1-requestor-address "$sp1_requestor_address")
+    [[ -n "${sp1_rpc_url:-}" ]] && bo_args+=(--sp1-rpc-url "$sp1_rpc_url")
+
+    # Juno RPC (via the witness RPC URL, which is directly reachable from the runner)
+    if [[ -n "${sp1_witness_juno_rpc_url:-}" ]]; then
+      bo_args+=(--juno-rpc-url "$sp1_witness_juno_rpc_url")
+      [[ -n "${juno_rpc_user:-}" ]] && bo_args+=(--juno-rpc-user "$juno_rpc_user")
+      [[ -n "${juno_rpc_pass:-}" ]] && bo_args+=(--juno-rpc-pass "$juno_rpc_pass")
+    fi
+
+    # Operator gRPC endpoints for health check (addr=host:port pairs)
+    if (( ${#bridge_operator_endpoints[@]:-0} > 0 )); then
+      local bo_op_endpoints_csv="" bo_op_idx=0
+      local -a bo_op_ids=()
+      mapfile -t bo_op_ids < <(jq -r '.operators[].operator_id' "$dkg_summary" 2>/dev/null)
+      for (( bo_op_idx=0; bo_op_idx < ${#bo_op_ids[@]}; bo_op_idx++ )); do
+        if [[ -n "${bridge_operator_endpoints[$bo_op_idx]:-}" ]]; then
+          [[ -n "$bo_op_endpoints_csv" ]] && bo_op_endpoints_csv+=","
+          bo_op_endpoints_csv+="${bo_op_ids[$bo_op_idx]}=${bridge_operator_endpoints[$bo_op_idx]}"
+        fi
+      done
+      [[ -n "$bo_op_endpoints_csv" ]] && bo_args+=(--operator-endpoints "$bo_op_endpoints_csv")
+    fi
+
     log "restarting backoffice with bridge=$deployed_bridge_address wjuno=$deployed_wjuno_address"
     pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
     sleep 1
@@ -7647,12 +7672,18 @@ command_run() {
     else
       # [P2] Verify withdrawal tx has chain inclusion on Juno.
       if [[ -n "${sp1_witness_juno_rpc_url:-}" ]]; then
-        local juno_tx_result
-        juno_tx_result="$(curl -fsS -u "${juno_rpc_user:-}:${juno_rpc_pass:-}" \
-          -X POST -H 'Content-Type: application/json' \
-          -d "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"getrawtransaction\",\"params\":[\"$coordinator_payout_juno_tx_hash\",true]}" \
-          "$sp1_witness_juno_rpc_url" 2>/dev/null || true)"
-        if [[ -n "$juno_tx_result" ]]; then
+        local juno_tx_result="" juno_tx_attempt
+        for juno_tx_attempt in 1 2 3 4 5; do
+          juno_tx_result="$(curl -sS --max-time 10 -u "${juno_rpc_user:-}:${juno_rpc_pass:-}" \
+            -X POST -H 'Content-Type: application/json' \
+            -d "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"getrawtransaction\",\"params\":[\"$coordinator_payout_juno_tx_hash\",true]}" \
+            "$sp1_witness_juno_rpc_url" 2>/dev/null || true)"
+          if [[ -n "$juno_tx_result" ]] && jq -e '.result.confirmations' <<<"$juno_tx_result" >/dev/null 2>&1; then
+            break
+          fi
+          (( juno_tx_attempt < 5 )) && sleep 5
+        done
+        if [[ -n "$juno_tx_result" ]] && jq -e '.result' <<<"$juno_tx_result" >/dev/null 2>&1; then
           local juno_confirmations
           juno_confirmations="$(echo "$juno_tx_result" | jq -r '.result.confirmations // 0' 2>/dev/null || echo 0)"
           if (( juno_confirmations >= 1 )); then
@@ -7661,7 +7692,7 @@ command_run() {
             warn "withdrawal Juno tx $coordinator_payout_juno_tx_hash has $juno_confirmations confirmations (expected >= 1)"
           fi
         else
-          warn "could not query Juno RPC for tx $coordinator_payout_juno_tx_hash (non-fatal)"
+          warn "could not query Juno RPC for tx $coordinator_payout_juno_tx_hash after $juno_tx_attempt attempts (non-fatal)"
         fi
       fi
     fi
@@ -7779,13 +7810,13 @@ command_run() {
         warn "bridge-api: /v1/deposits lookup returned no data for baseRecipient=$bridge_recipient_address (non-fatal)"
       fi
     fi
-    if [[ -n "${bridge_api_url:-}" && -n "${prefund_funding_sender_address:-}" ]]; then
+    if [[ -n "${bridge_api_url:-}" && -n "${run_withdraw_requester:-}" ]]; then
       local lookup_withdrawals_resp
-      lookup_withdrawals_resp="$(curl -fsS "${bridge_api_url}/v1/withdrawals?requester=${prefund_funding_sender_address}&limit=10" 2>/dev/null || true)"
+      lookup_withdrawals_resp="$(curl -fsS "${bridge_api_url}/v1/withdrawals?requester=${run_withdraw_requester}&limit=10" 2>/dev/null || true)"
       if [[ -n "$lookup_withdrawals_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_withdrawals_resp" >/dev/null 2>&1; then
-        log "bridge-api: /v1/withdrawals lookup returned data for requester=$prefund_funding_sender_address"
+        log "bridge-api: /v1/withdrawals lookup returned data for requester=$run_withdraw_requester"
       else
-        warn "bridge-api: /v1/withdrawals lookup returned no data for requester=$prefund_funding_sender_address (non-fatal)"
+        warn "bridge-api: /v1/withdrawals lookup returned no data for requester=$run_withdraw_requester (non-fatal)"
       fi
     fi
 

@@ -9,7 +9,8 @@
 
   function fmtAddr(hex) {
     if (!hex || hex.length < 12) return hex || "-";
-    return hex.slice(0, 6) + "\u2026" + hex.slice(-4);
+    return '<span class="addr" title="' + hex + '" onclick="navigator.clipboard.writeText(\'' + hex + '\')" style="cursor:pointer">' +
+      hex.slice(0, 6) + "\u2026" + hex.slice(-4) + '</span>';
   }
 
   function fmtETH(wei) {
