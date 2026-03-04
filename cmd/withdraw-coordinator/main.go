@@ -463,6 +463,7 @@ func main() {
 					continue
 				}
 				if !leader {
+					log.Info("not leader, skipping tick")
 					continue
 				}
 			}

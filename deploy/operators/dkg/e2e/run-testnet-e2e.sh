@@ -6433,6 +6433,7 @@ command_run() {
           "$distributed_withdraw_coordinator_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
+          --leader-election=false \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_coordinator_group" \
@@ -6549,6 +6550,7 @@ command_run() {
         go run ./cmd/withdraw-coordinator \
           --postgres-dsn "$shared_postgres_dsn" \
           --owner "testnet-e2e-withdraw-coordinator-${proof_topic_seed}" \
+          --leader-election=false \
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$withdraw_coordinator_group" \
