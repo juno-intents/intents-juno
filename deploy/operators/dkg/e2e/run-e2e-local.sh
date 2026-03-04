@@ -1340,8 +1340,8 @@ run_e2e_test() {
   local bridge_summary="$WORKDIR/reports/base-bridge-summary.json"
   if [[ -f "$bridge_summary" ]]; then
     local bridge_ops dkg_ops
-    bridge_ops="$(jq -r '[.operators[]?] | sort | join(",")' "$bridge_summary" 2>/dev/null || true)"
-    dkg_ops="$(jq -r '[.operators[].operator_id] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
+    bridge_ops="$(jq -r '[.operators[]? | ascii_downcase] | sort | join(",")' "$bridge_summary" 2>/dev/null || true)"
+    dkg_ops="$(jq -r '[.operators[].operator_id | ascii_downcase] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
     if [[ -n "$bridge_ops" && -n "$dkg_ops" && "$bridge_ops" != "$dkg_ops" ]]; then
       warn "bridge summary operators do not match DKG summary — forcing bridge redeploy"
       warn "  bridge: $bridge_ops"
