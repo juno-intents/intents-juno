@@ -71,6 +71,9 @@ type ConsumerConfig struct {
 	KafkaMinBytes int
 	KafkaMaxBytes int
 
+	// KafkaLogger, if non-nil, receives internal kafka-go reader logs (group joins, rebalances, fetches).
+	KafkaLogger kafka.Logger
+
 	// Stdio fields.
 	Reader       io.Reader
 	MaxLineBytes int
@@ -189,11 +192,13 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 	}
 
 	readerCfg := kafka.ReaderConfig{
-		Brokers:     brokers,
-		GroupID:     strings.TrimSpace(cfg.Group),
-		GroupTopics: topics,
-		MinBytes:    minBytes,
-		MaxBytes:    maxBytes,
+		Brokers:               brokers,
+		GroupID:               strings.TrimSpace(cfg.Group),
+		GroupTopics:           topics,
+		MinBytes:              minBytes,
+		MaxBytes:              maxBytes,
+		StartOffset:           kafka.FirstOffset,
+		WatchPartitionChanges: true,
 	}
 	if queueKafkaTLSEnabled() {
 		readerCfg.Dialer = &kafka.Dialer{
@@ -202,6 +207,10 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 				MinVersion: tls.VersionTLS12,
 			},
 		}
+	}
+	if cfg.KafkaLogger != nil {
+		readerCfg.Logger = cfg.KafkaLogger
+		readerCfg.ErrorLogger = cfg.KafkaLogger
 	}
 	reader := kafka.NewReader(readerCfg)
 	ctx, cancel := context.WithCancel(parent)

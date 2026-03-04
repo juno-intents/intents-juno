@@ -249,6 +249,7 @@ func main() {
 		Topics:        queue.SplitCommaList(*queueTopics),
 		KafkaMaxBytes: *queueMaxBytes,
 		MaxLineBytes:  *maxLineBytes,
+		KafkaLogger:   &slogKafkaLogger{log},
 	})
 	if err != nil {
 		log.Error("init queue consumer", "err", err)
@@ -477,6 +478,7 @@ func main() {
 			if !ok {
 				return
 			}
+			log.Info("queue message received", "topic", qmsg.Topic, "len", len(qmsg.Value))
 			line := qmsg.Value
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
@@ -544,6 +546,8 @@ func main() {
 				cancel()
 				if err != nil {
 					log.Error("ingest withdrawal", "err", err)
+				} else {
+					log.Info("withdrawal ingested", "id", reqMsg.WithdrawalID, "amount", reqMsg.Amount)
 				}
 				ackMessage(qmsg, *ackTimeout, log)
 
@@ -703,4 +707,13 @@ func newTSSHTTPClient(timeout time.Duration, serverCAFile string, clientCertFile
 			TLSClientConfig: tlsCfg,
 		},
 	}, nil
+}
+
+// slogKafkaLogger adapts slog.Logger to the kafka.Logger interface (Printf method).
+type slogKafkaLogger struct {
+	log *slog.Logger
+}
+
+func (l *slogKafkaLogger) Printf(msg string, args ...interface{}) {
+	l.log.Info(fmt.Sprintf(msg, args...), "component", "kafka-reader")
 }
