@@ -1455,7 +1455,10 @@ sleep 3
 cd $remote_repo
 
 # Forwarded args for run-testnet-e2e.sh
-exec deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
+# Do NOT use exec — the EXIT trap must fire to clean up SSH tunnels,
+# otherwise the SSH session hangs and the local orchestrator sees a
+# non-zero exit code even though the test passed.
+deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --workdir "$remote_workdir" \\
   --base-rpc-url "$BASE_RPC_URL" \\
   --base-chain-id "$BASE_CHAIN_ID" \\
