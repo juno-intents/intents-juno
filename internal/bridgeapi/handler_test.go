@@ -38,6 +38,39 @@ func (s *stubWithdrawalReader) Get(_ context.Context, _ [32]byte) (WithdrawalSta
 	return s.status, s.err
 }
 
+type stubDepositLister struct {
+	jobs  []deposit.Job
+	total int
+	job   *deposit.Job
+	err   error
+}
+
+func (s *stubDepositLister) ListByBaseRecipient(_ context.Context, _ [20]byte, _, _ int) ([]deposit.Job, int, error) {
+	return s.jobs, s.total, s.err
+}
+
+func (s *stubDepositLister) GetByTxHash(_ context.Context, _ [32]byte) (*deposit.Job, error) {
+	return s.job, s.err
+}
+
+type stubWithdrawalLister struct {
+	statuses []WithdrawalStatus
+	total    int
+	err      error
+}
+
+func (s *stubWithdrawalLister) ListByRequester(_ context.Context, _ [20]byte, _, _ int) ([]WithdrawalStatus, int, error) {
+	return s.statuses, s.total, s.err
+}
+
+func (s *stubWithdrawalLister) GetByJunoTxID(_ context.Context, _ string) ([]WithdrawalStatus, error) {
+	return s.statuses, s.err
+}
+
+func (s *stubWithdrawalLister) GetByBaseTxHash(_ context.Context, _ string) ([]WithdrawalStatus, error) {
+	return s.statuses, s.err
+}
+
 type stubActionService struct {
 	depositReq   DepositSubmitInput
 	depositResp  depositevent.Payload
@@ -576,5 +609,266 @@ func TestHandler_WithdrawalRequest_InvalidPayload(t *testing.T) {
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func testConfig() Config {
+	return Config{
+		BaseChainID:         8453,
+		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:           "u1example",
+		RefundWindowSeconds: 86400,
+		NonceFn: func() (uint64, error) {
+			return 1, nil
+		},
+	}
+}
+
+func TestListDeposits_ByBaseRecipient(t *testing.T) {
+	t.Parallel()
+
+	var did [32]byte
+	did[0] = 0xAA
+	var rec20 [20]byte
+	rec20[0] = 0xBB
+
+	cfg := testConfig()
+	cfg.DepositLister = &stubDepositLister{
+		jobs: []deposit.Job{
+			{Deposit: deposit.Deposit{DepositID: did, Amount: 5000, BaseRecipient: rec20}, State: deposit.StateConfirmed},
+		},
+		total: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/deposits?baseRecipient=0xBB00000000000000000000000000000000000000&limit=10&offset=0", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Version string `json:"version"`
+		Total   int    `json:"total"`
+		Data    []struct {
+			DepositID string `json:"depositId"`
+			State     string `json:"state"`
+			Amount    string `json:"amount"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Version != "v1" || out.Total != 1 || len(out.Data) != 1 {
+		t.Fatalf("bad response: %+v", out)
+	}
+	if out.Data[0].Amount != "5000" || out.Data[0].State != "confirmed" {
+		t.Fatalf("bad deposit entry: %+v", out.Data[0])
+	}
+}
+
+func TestListDeposits_ByTxHash(t *testing.T) {
+	t.Parallel()
+
+	var did [32]byte
+	did[0] = 0xCC
+	var txh [32]byte
+	txh[0] = 0xDD
+
+	cfg := testConfig()
+	cfg.DepositLister = &stubDepositLister{
+		job: &deposit.Job{
+			Deposit: deposit.Deposit{DepositID: did, Amount: 9999},
+			State:   deposit.StateFinalized,
+			TxHash:  txh,
+		},
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/deposits?txHash=0x"+hex.EncodeToString(txh[:]), nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Total int `json:"total"`
+		Data  []struct {
+			DepositID string `json:"depositId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 1 || len(out.Data) != 1 {
+		t.Fatalf("expected 1 result: %+v", out)
+	}
+}
+
+func TestListDeposits_NoFilter(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.DepositLister = &stubDepositLister{}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/deposits", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusBadRequest)
+	}
+}
+
+func TestListDeposits_ListerNil(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	// DepositLister intentionally nil
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/deposits?baseRecipient=0xBB00000000000000000000000000000000000000", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusNotImplemented {
+		t.Fatalf("status: got %d want %d", w.Code, http.StatusNotImplemented)
+	}
+}
+
+func TestListWithdrawals_ByRequester(t *testing.T) {
+	t.Parallel()
+
+	var wid [32]byte
+	wid[0] = 0xEE
+
+	cfg := testConfig()
+	cfg.WithdrawalLister = &stubWithdrawalLister{
+		statuses: []WithdrawalStatus{
+			{
+				Withdrawal: withdraw.Withdrawal{ID: wid, Amount: 2000, FeeBps: 50, Requester: [20]byte{0x11}},
+			},
+		},
+		total: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/withdrawals?requester=0x1100000000000000000000000000000000000000", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Total int `json:"total"`
+		Data  []struct {
+			WithdrawalID string `json:"withdrawalId"`
+			Amount       string `json:"amount"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out.Total != 1 || len(out.Data) != 1 || out.Data[0].Amount != "2000" {
+		t.Fatalf("bad response: %+v", out)
+	}
+}
+
+func TestListWithdrawals_ByJunoTxId(t *testing.T) {
+	t.Parallel()
+
+	var wid [32]byte
+	wid[0] = 0xFF
+
+	cfg := testConfig()
+	cfg.WithdrawalLister = &stubWithdrawalLister{
+		statuses: []WithdrawalStatus{
+			{
+				Withdrawal: withdraw.Withdrawal{ID: wid, Amount: 3000},
+				JunoTxID:   "abc123",
+			},
+		},
+		total: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/withdrawals?junoTxId=abc123", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Data []struct {
+			JunoTxID string `json:"junoTxId"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Data) != 1 || out.Data[0].JunoTxID != "abc123" {
+		t.Fatalf("bad response: %+v", out)
+	}
+}
+
+func TestListWithdrawals_ByBaseTxHash(t *testing.T) {
+	t.Parallel()
+
+	var wid [32]byte
+	wid[0] = 0xAA
+
+	cfg := testConfig()
+	cfg.WithdrawalLister = &stubWithdrawalLister{
+		statuses: []WithdrawalStatus{
+			{
+				Withdrawal: withdraw.Withdrawal{ID: wid, Amount: 4000},
+				BaseTxHash: "0xdeadbeef",
+			},
+		},
+		total: 1,
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/withdrawals?baseTxHash=0xdeadbeef", nil)
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status: got %d want %d body=%s", w.Code, http.StatusOK, w.Body.String())
+	}
+
+	var out struct {
+		Data []struct {
+			BaseTxHash string `json:"baseTxHash"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(out.Data) != 1 || out.Data[0].BaseTxHash != "0xdeadbeef" {
+		t.Fatalf("bad response: %+v", out)
 	}
 }

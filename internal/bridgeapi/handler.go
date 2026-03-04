@@ -42,6 +42,9 @@ type Config struct {
 	MemoCacheTTL        time.Duration
 	MemoCacheMaxEntries int
 
+	DepositLister    DepositLister
+	WithdrawalLister WithdrawalLister
+
 	Now func() time.Time
 }
 
@@ -59,6 +62,17 @@ type WithdrawalStatus struct {
 
 type WithdrawalReader interface {
 	Get(ctx context.Context, withdrawalID [32]byte) (WithdrawalStatus, error)
+}
+
+type DepositLister interface {
+	ListByBaseRecipient(ctx context.Context, recipient [20]byte, limit, offset int) ([]deposit.Job, int, error)
+	GetByTxHash(ctx context.Context, txHash [32]byte) (*deposit.Job, error)
+}
+
+type WithdrawalLister interface {
+	ListByRequester(ctx context.Context, requester [20]byte, limit, offset int) ([]WithdrawalStatus, int, error)
+	GetByJunoTxID(ctx context.Context, junoTxID string) ([]WithdrawalStatus, error)
+	GetByBaseTxHash(ctx context.Context, baseTxHash string) ([]WithdrawalStatus, error)
 }
 
 func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader) (http.Handler, error) {
@@ -97,10 +111,12 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	}
 
 	h := &handler{
-		cfg:         cfg,
-		deposits:    deposits,
-		withdrawals: withdrawals,
-		actions:     cfg.ActionService,
+		cfg:              cfg,
+		deposits:         deposits,
+		withdrawals:      withdrawals,
+		actions:          cfg.ActionService,
+		depositLister:    cfg.DepositLister,
+		withdrawalLister: cfg.WithdrawalLister,
 		limiter: newIPRateLimiter(
 			cfg.RateLimitPerIPPerSecond,
 			float64(cfg.RateLimitBurst),
@@ -117,6 +133,20 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /v1/status/deposit/{depositId}", h.handleDepositStatus)
 	mux.HandleFunc("POST /v1/withdrawals/request", h.handleWithdrawalRequest)
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
+	mux.HandleFunc("GET /v1/deposits", h.handleListDeposits)
+	mux.HandleFunc("GET /v1/withdrawals", h.handleListWithdrawals)
+
+	// SPA frontend fallback: serve embedded frontend for non-API paths.
+	frontendHandler := FrontendHandler()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		// Only serve frontend for paths that don't match API routes.
+		if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/healthz" {
+			http.NotFound(w, r)
+			return
+		}
+		frontendHandler.ServeHTTP(w, r)
+	})
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Health checks must never be throttled.
 		if r.URL.Path == "/healthz" {
@@ -144,11 +174,13 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 type handler struct {
 	cfg Config
 
-	deposits    DepositReader
-	withdrawals WithdrawalReader
-	actions     ActionService
-	limiter     *ipRateLimiter
-	memoCache   *memoResponseCache
+	deposits         DepositReader
+	withdrawals      WithdrawalReader
+	actions          ActionService
+	depositLister    DepositLister
+	withdrawalLister WithdrawalLister
+	limiter          *ipRateLimiter
+	memoCache        *memoResponseCache
 }
 
 func (h *handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {

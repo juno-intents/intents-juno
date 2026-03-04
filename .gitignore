@@ -21,6 +21,11 @@ coverage.*
 # Rust
 target/
 
+# Frontend
+/frontend/node_modules/
+/internal/bridgeapi/frontend_dist/assets/
+/internal/bridgeapi/frontend_dist/index.html
+
 # Solidity / JS toolchains
 /node_modules/
 /out/

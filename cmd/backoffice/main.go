@@ -44,7 +44,8 @@ func main() {
 		sp1RPCURL       = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
 		operatorAddrsRaw = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
 
-		serviceURLsRaw = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
+		serviceURLsRaw          = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
+		operatorEndpointsRaw = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
 
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
 
@@ -108,6 +109,26 @@ func main() {
 			if s != "" {
 				serviceURLs = append(serviceURLs, s)
 			}
+		}
+	}
+
+	// Parse operator endpoints (addr=host:port pairs).
+	var operatorEndpoints []backoffice.OperatorEndpoint
+	if raw := strings.TrimSpace(*operatorEndpointsRaw); raw != "" {
+		for _, pair := range strings.Split(raw, ",") {
+			pair = strings.TrimSpace(pair)
+			if pair == "" {
+				continue
+			}
+			parts := strings.SplitN(pair, "=", 2)
+			if len(parts) != 2 || !common.IsHexAddress(parts[0]) || parts[1] == "" {
+				fmt.Fprintf(os.Stderr, "error: invalid operator-endpoint pair (expected addr=host:port): %s\n", pair)
+				os.Exit(2)
+			}
+			operatorEndpoints = append(operatorEndpoints, backoffice.OperatorEndpoint{
+				Address:  common.HexToAddress(parts[0]),
+				Endpoint: parts[1],
+			})
 		}
 	}
 
@@ -190,7 +211,8 @@ func main() {
 		SP1RequestorAddress:     sp1Requestor,
 		OperatorAddresses:       operatorAddresses,
 
-		ServiceURLs: serviceURLs,
+		ServiceURLs:      serviceURLs,
+		OperatorEndpoints: operatorEndpoints,
 
 		AuthSecret: *authSecret,
 

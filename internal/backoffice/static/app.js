@@ -117,6 +117,17 @@
       setText("stat-wjuno-supply", d.activeWjunoSupply || "0");
     });
 
+    // Operator status
+    apiFetch("/ops/operators/status", function (resp) {
+      var ops = (resp && resp.operators) || [];
+      var html = "";
+      ops.forEach(function (op) {
+        html += '<div>' + dot(op.online) + ' <span class="mono">' + fmtAddr(op.address) + '</span> ' +
+          op.endpoint + ' (' + op.latencyMs + 'ms)</div>';
+      });
+      setHTML("operator-status-grid", html || '<span class="loading">No operators configured</span>');
+    });
+
     // Service health
     apiFetch("/ops/services/health", function (resp) {
       var html = "";
@@ -236,9 +247,9 @@
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.operatorAddress) + "</td>" +
           '<td class="mono">' + fmtAddr(r.feeRecipient) + "</td>" +
-          "<td>" + (r.accumulatedFees || "0") + "</td>" +
-          "<td>" + (r.claimedFees || "0") + "</td>" +
-          "<td>" + (r.pendingFees || "0") + "</td></tr>";
+          "<td>" + (r.accumulatedFeesFormatted || r.accumulatedFees || "0") + "</td>" +
+          "<td>" + (r.claimedFeesFormatted || r.claimedFees || "0") + "</td>" +
+          "<td>" + (r.pendingFeesFormatted || r.pendingFees || "0") + "</td></tr>";
       }).join("");
       setHTML("revenue-tbody", rows || '<tr><td colspan="5" class="loading">-</td></tr>');
     });
@@ -287,10 +298,13 @@
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.depositId) + "</td>" +
           "<td>" + (r.state || "-") + "</td>" +
+          '<td class="mono">' + fmtAddr(r.baseRecipient) + "</td>" +
+          "<td>" + (r.amount || "-") + "</td>" +
+          '<td class="mono">' + (r.txHash ? fmtAddr(r.txHash) : "-") + "</td>" +
           "<td>" + fmtTime(r.createdAt) + "</td>" +
           "<td>" + (r.junoHeight || "-") + "</td></tr>";
       }).join("");
-      setHTML("ops-deposits-tbody", rows || '<tr><td colspan="4" class="loading">-</td></tr>');
+      setHTML("ops-deposits-tbody", rows || '<tr><td colspan="7" class="loading">-</td></tr>');
     });
 
     apiFetch("/ops/withdrawals/recent?limit=20", function (resp) {
@@ -299,10 +313,13 @@
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.withdrawalId) + "</td>" +
           "<td>" + (r.state || "-") + "</td>" +
-          "<td>" + fmtTime(r.createdAt) + "</td>" +
-          "<td>" + (r.baseBlockNumber || "-") + "</td></tr>";
+          '<td class="mono">' + fmtAddr(r.requester) + "</td>" +
+          "<td>" + (r.amount || "-") + "</td>" +
+          '<td class="mono">' + (r.junoTxId ? fmtAddr(r.junoTxId) : "-") + "</td>" +
+          '<td class="mono">' + (r.baseTxHash ? fmtAddr(r.baseTxHash) : "-") + "</td>" +
+          "<td>" + fmtTime(r.createdAt) + "</td></tr>";
       }).join("");
-      setHTML("ops-withdrawals-tbody", rows || '<tr><td colspan="4" class="loading">-</td></tr>');
+      setHTML("ops-withdrawals-tbody", rows || '<tr><td colspan="7" class="loading">-</td></tr>');
     });
 
     apiFetch("/ops/batches/stuck", function (resp) {

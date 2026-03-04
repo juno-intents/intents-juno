@@ -64,6 +64,11 @@
                 <div class="value" id="overview-alert-count">0</div>
             </div>
 
+            <h2 class="section-title" style="margin-top:1rem">Operator Status</h2>
+            <div class="card">
+                <div id="operator-status-grid" class="loading">Loading...</div>
+            </div>
+
             <h2 class="section-title" style="margin-top:1rem">Service Health</h2>
             <div class="card">
                 <div id="svc-health-grid" class="loading">Loading...</div>
@@ -228,10 +233,10 @@
             <div class="table-wrap scroll-y">
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>State</th><th>Created</th><th>Juno Height</th></tr>
+                        <tr><th>ID</th><th>State</th><th>Recipient</th><th>Amount</th><th>Tx Hash</th><th>Created</th><th>Juno Height</th></tr>
                     </thead>
                     <tbody id="ops-deposits-tbody">
-                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                        <tr><td colspan="7" class="loading">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -240,10 +245,10 @@
             <div class="table-wrap scroll-y">
                 <table>
                     <thead>
-                        <tr><th>ID</th><th>State</th><th>Created</th><th>Base Block</th></tr>
+                        <tr><th>ID</th><th>State</th><th>Requester</th><th>Amount</th><th>Juno TxID</th><th>Base Tx</th><th>Created</th></tr>
                     </thead>
                     <tbody id="ops-withdrawals-tbody">
-                        <tr><td colspan="4" class="loading">Loading...</td></tr>
+                        <tr><td colspan="7" class="loading">Loading...</td></tr>
                     </tbody>
                 </table>
             </div>

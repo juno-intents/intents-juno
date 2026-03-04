@@ -4044,6 +4044,18 @@ command_run() {
     prefund_funding_sender_address="$(cast wallet address --private-key "$base_key")"
     [[ -n "$prefund_funding_sender_address" ]] || die "failed to derive funding sender address"
 
+    # [P1] Verify funder address is not one of the DKG operators.
+    local funder_lower
+    funder_lower="$(echo "$prefund_funding_sender_address" | tr '[:upper:]' '[:lower:]')"
+    local op_id_lower
+    while IFS= read -r op_id_lower; do
+      op_id_lower="$(echo "$op_id_lower" | tr '[:upper:]' '[:lower:]')"
+      if [[ "$funder_lower" == "$op_id_lower" ]]; then
+        die "funder address $prefund_funding_sender_address matches operator $op_id_lower — funder must be a separate key"
+      fi
+    done < <(jq -r '.operators[].operator_id' "$dkg_summary")
+    log "funder address $prefund_funding_sender_address confirmed distinct from all operators"
+
     prefund_operator_count="$(jq -r '.operators | length' "$dkg_summary")"
     [[ "$prefund_operator_count" =~ ^[0-9]+$ ]] || \
       die "dkg summary operators length is invalid: $prefund_operator_count"
@@ -7585,6 +7597,35 @@ command_run() {
       invariant_bridge_delta_expected="$bridge_delta_expected"
       invariant_bridge_delta_actual="$bridge_delta_actual"
       invariant_balance_delta_match="true"
+
+      # [P2] FeeDistributor.claim() verification: if pending > 0, claim and verify it drops to 0.
+      local fee_dist_addr
+      fee_dist_addr="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)"
+      if [[ -n "$fee_dist_addr" && -n "${base_key:-}" ]]; then
+        local first_op_addr
+        first_op_addr="$(jq -r '.operators[0] // empty' "$bridge_summary" 2>/dev/null || true)"
+        if [[ -n "$first_op_addr" ]]; then
+          local pending_before
+          pending_before="$(cast call "$fee_dist_addr" "pendingReward(address)(uint256)" "$first_op_addr" --rpc-url "$base_rpc_url" 2>/dev/null || echo "0")"
+          pending_before="${pending_before%%[[:space:]]*}"
+          if [[ "$pending_before" != "0" && -n "$pending_before" ]]; then
+            log "FeeDistributor pendingReward($first_op_addr) = $pending_before, calling claim..."
+            cast send "$fee_dist_addr" "claim(address)" "$first_op_addr" \
+              --rpc-url "$base_rpc_url" --private-key "$base_key" >/dev/null 2>&1 || true
+            local pending_after
+            pending_after="$(cast call "$fee_dist_addr" "pendingReward(address)(uint256)" "$first_op_addr" --rpc-url "$base_rpc_url" 2>/dev/null || echo "0")"
+            pending_after="${pending_after%%[[:space:]]*}"
+            if [[ "$pending_after" == "0" ]]; then
+              log "FeeDistributor claim verified: pending dropped from $pending_before to 0"
+            else
+              warn "FeeDistributor claim: pending went from $pending_before to $pending_after (expected 0)"
+            fi
+          else
+            log "FeeDistributor pendingReward($first_op_addr) = 0, skipping claim test"
+          fi
+        fi
+      fi
+
       return 0
     }
 
@@ -7603,6 +7644,26 @@ command_run() {
     if [[ -z "$coordinator_payout_juno_tx_hash" ]]; then
       log "missing payout txid for withdrawalId=$run_withdrawal_id from withdraw coordinator state"
       relayer_status=1
+    else
+      # [P2] Verify withdrawal tx has chain inclusion on Juno.
+      if [[ -n "${sp1_witness_juno_rpc_url:-}" ]]; then
+        local juno_tx_result
+        juno_tx_result="$(curl -fsS -u "${juno_rpc_user:-}:${juno_rpc_pass:-}" \
+          -X POST -H 'Content-Type: application/json' \
+          -d "{\"jsonrpc\":\"1.0\",\"id\":1,\"method\":\"getrawtransaction\",\"params\":[\"$coordinator_payout_juno_tx_hash\",true]}" \
+          "$sp1_witness_juno_rpc_url" 2>/dev/null || true)"
+        if [[ -n "$juno_tx_result" ]]; then
+          local juno_confirmations
+          juno_confirmations="$(echo "$juno_tx_result" | jq -r '.result.confirmations // 0' 2>/dev/null || echo 0)"
+          if (( juno_confirmations >= 1 )); then
+            log "withdrawal Juno tx $coordinator_payout_juno_tx_hash has $juno_confirmations confirmation(s)"
+          else
+            warn "withdrawal Juno tx $coordinator_payout_juno_tx_hash has $juno_confirmations confirmations (expected >= 1)"
+          fi
+        else
+          warn "could not query Juno RPC for tx $coordinator_payout_juno_tx_hash (non-fatal)"
+        fi
+      fi
     fi
   fi
 
@@ -7706,6 +7767,26 @@ command_run() {
     else
       warn "backoffice: /api/ops/batches/stuck returned invalid response"
       bo_data_ok="false"
+    fi
+
+    # [P2] Validate bridge-api lookup endpoints return test data
+    if [[ -n "${bridge_api_url:-}" && -n "${bridge_recipient_address:-}" ]]; then
+      local lookup_deposits_resp
+      lookup_deposits_resp="$(curl -fsS "${bridge_api_url}/v1/deposits?baseRecipient=${bridge_recipient_address}&limit=10" 2>/dev/null || true)"
+      if [[ -n "$lookup_deposits_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_deposits_resp" >/dev/null 2>&1; then
+        log "bridge-api: /v1/deposits lookup returned data for baseRecipient=$bridge_recipient_address"
+      else
+        warn "bridge-api: /v1/deposits lookup returned no data for baseRecipient=$bridge_recipient_address (non-fatal)"
+      fi
+    fi
+    if [[ -n "${bridge_api_url:-}" && -n "${prefund_funding_sender_address:-}" ]]; then
+      local lookup_withdrawals_resp
+      lookup_withdrawals_resp="$(curl -fsS "${bridge_api_url}/v1/withdrawals?requester=${prefund_funding_sender_address}&limit=10" 2>/dev/null || true)"
+      if [[ -n "$lookup_withdrawals_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_withdrawals_resp" >/dev/null 2>&1; then
+        log "bridge-api: /v1/withdrawals lookup returned data for requester=$prefund_funding_sender_address"
+      else
+        warn "bridge-api: /v1/withdrawals lookup returned no data for requester=$prefund_funding_sender_address (non-fatal)"
+      fi
     fi
 
     if [[ "$bo_data_ok" == "true" ]]; then

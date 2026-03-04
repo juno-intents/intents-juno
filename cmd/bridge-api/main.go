@@ -136,6 +136,18 @@ func main() {
 		os.Exit(2)
 	}
 
+	depositLister, err := bridgeapi.NewPostgresDepositLister(pool)
+	if err != nil {
+		log.Error("init deposit lister", "err", err)
+		os.Exit(2)
+	}
+
+	withdrawalLister, err := bridgeapi.NewPostgresWithdrawalLister(pool)
+	if err != nil {
+		log.Error("init withdrawal lister", "err", err)
+		os.Exit(2)
+	}
+
 	var actionSvc bridgeapi.ActionService
 	if strings.TrimSpace(*queueBrokers) != "" {
 		withdrawKeyHex := strings.TrimSpace(*withdrawOwnerKeyHex)
@@ -196,6 +208,8 @@ func main() {
 		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,
 		MemoCacheTTL:            *memoCacheTTL,
 		MemoCacheMaxEntries:     *memoCacheMaxEntries,
+		DepositLister:           depositLister,
+		WithdrawalLister:        withdrawalLister,
 		Now:                     time.Now,
 	}, depositStore, withdrawReader)
 	if err != nil {

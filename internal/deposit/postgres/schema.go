@@ -50,4 +50,6 @@ ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE deposit_jobs ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848);
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS juno_height BIGINT;
 CREATE INDEX IF NOT EXISTS deposit_jobs_juno_height_idx ON deposit_jobs (juno_height);
+CREATE INDEX IF NOT EXISTS deposit_jobs_base_recipient_idx ON deposit_jobs (base_recipient);
+CREATE INDEX IF NOT EXISTS deposit_jobs_tx_hash_idx ON deposit_jobs (tx_hash) WHERE tx_hash IS NOT NULL;
 `

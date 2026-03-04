@@ -31,6 +31,7 @@ type config struct {
 	KafkaBrokers             []string
 	RequiredKafkaTopics      []string
 	CheckpointIPFSAPIURL     string
+	CheckpointIPFSGatewayURL string
 	CheckpointOperators      []common.Address
 	CheckpointThreshold      int
 	CheckpointMinPersistedAt time.Time
@@ -65,12 +66,15 @@ type kafkaReport struct {
 }
 
 type checkpointReport struct {
-	Digest             string `json:"digest"`
-	CID                string `json:"cid"`
-	SignerCount        int    `json:"signer_count"`
-	Threshold          int    `json:"threshold"`
-	PublishRoundTripMS int64  `json:"publish_round_trip_ms"`
-	FetchRoundTripMS   int64  `json:"fetch_round_trip_ms"`
+	Digest              string `json:"digest"`
+	CID                 string `json:"cid"`
+	SignerCount         int    `json:"signer_count"`
+	Threshold           int    `json:"threshold"`
+	PublishRoundTripMS  int64  `json:"publish_round_trip_ms"`
+	FetchRoundTripMS    int64  `json:"fetch_round_trip_ms"`
+	GatewayReachable    bool   `json:"gateway_reachable,omitempty"`
+	GatewayRoundTripMS  int64  `json:"gateway_round_trip_ms,omitempty"`
+	GatewayWarning      string `json:"gateway_warning,omitempty"`
 }
 
 type checkpointPackageV1 struct {
@@ -201,6 +205,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&checkpointOperatorsRaw, "checkpoint-operators", "", "comma-separated expected checkpoint signer operator addresses")
 	fs.IntVar(&cfg.CheckpointThreshold, "checkpoint-threshold", 0, "expected minimum checkpoint signer threshold (requires --checkpoint-operators)")
 	fs.StringVar(&checkpointMinPersistedAtRaw, "checkpoint-min-persisted-at", "", "RFC3339 lower bound for checkpoint package persisted_at (run-bound filtering)")
+	fs.StringVar(&cfg.CheckpointIPFSGatewayURL, "ipfs-gateway-url", "", "IPFS public gateway URL to verify CID fetch (optional, warn on failure)")
 	fs.StringVar(&cfg.TopicPrefix, "topic-prefix", "shared.infra.e2e", "Kafka probe topic prefix")
 	fs.DurationVar(&cfg.Timeout, "timeout", 90*time.Second, "overall timeout")
 	fs.StringVar(&cfg.OutputPath, "output", "-", "output path or '-' for stdout")
@@ -566,14 +571,39 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 		return checkpointReport{}, fmt.Errorf("ipfs payload mismatch: cid=%s", rec.IPFSCID)
 	}
 
-	return checkpointReport{
+	rep := checkpointReport{
 		Digest:             payloadBody.Digest.Hex(),
 		CID:                rec.IPFSCID,
 		SignerCount:        len(payloadBody.Signers),
 		Threshold:          len(payloadBody.Signers),
 		PublishRoundTripMS: 0,
 		FetchRoundTripMS:   fetchMS,
-	}, nil
+	}
+
+	// Optional: verify CID is also fetchable via public IPFS gateway.
+	gwURL := strings.TrimSpace(cfg.CheckpointIPFSGatewayURL)
+	if gwURL != "" {
+		gwStart := time.Now()
+		gwFetchURL := strings.TrimRight(gwURL, "/") + "/ipfs/" + rec.IPFSCID
+		gwReq, gwErr := http.NewRequestWithContext(ctx, http.MethodGet, gwFetchURL, nil)
+		if gwErr == nil {
+			gwClient := &http.Client{Timeout: 30 * time.Second}
+			gwResp, gwErr := gwClient.Do(gwReq)
+			rep.GatewayRoundTripMS = time.Since(gwStart).Milliseconds()
+			if gwErr != nil {
+				rep.GatewayWarning = fmt.Sprintf("gateway fetch failed (non-fatal): %v", gwErr)
+			} else {
+				_ = gwResp.Body.Close()
+				if gwResp.StatusCode >= 200 && gwResp.StatusCode < 300 {
+					rep.GatewayReachable = true
+				} else {
+					rep.GatewayWarning = fmt.Sprintf("gateway returned status %d (non-fatal)", gwResp.StatusCode)
+				}
+			}
+		}
+	}
+
+	return rep, nil
 }
 
 func (postgresCheckpointPackageSource) Latest(ctx context.Context, postgresDSN string, minPersistedAt time.Time) (checkpointPackageRecord, error) {

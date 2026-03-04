@@ -35,7 +35,8 @@ type ServerConfig struct {
 	SP1RequestorAddress     common.Address
 	OperatorAddresses       []common.Address
 
-	ServiceURLs []string
+	ServiceURLs       []string
+	OperatorEndpoints []OperatorEndpoint
 
 	AuthSecret string
 
@@ -107,6 +108,7 @@ func New(cfg ServerConfig) (*Server, error) {
 	s.mux.HandleFunc("GET /api/ops/withdrawals/recent", s.handleRecentWithdrawals)
 	s.mux.HandleFunc("GET /api/ops/batches/stuck", s.handleStuckBatches)
 	s.mux.HandleFunc("GET /api/ops/services/health", s.handleServicesHealth)
+	s.mux.HandleFunc("GET /api/ops/operators/status", s.handleOperatorStatus)
 
 	// Analytics routes
 	s.mux.HandleFunc("GET /api/analytics/overview", s.handleAnalyticsOverview)
@@ -166,4 +168,10 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 // hex32 returns the 0x-prefixed hex encoding of a [32]byte.
 func hex32(b [32]byte) string {
 	return "0x" + common.Bytes2Hex(b[:])
+}
+
+// OperatorEndpoint describes an operator's gRPC endpoint for health checking.
+type OperatorEndpoint struct {
+	Address  common.Address
+	Endpoint string // host:port for gRPC TLS probe
 }

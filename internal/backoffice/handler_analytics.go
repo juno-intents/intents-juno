@@ -1,6 +1,8 @@
 package backoffice
 
 import (
+	"fmt"
+	"math/big"
 	"net/http"
 	"strconv"
 	"strings"
@@ -215,14 +217,18 @@ func (s *Server) handleOperatorRevenue(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				s.log.Warn("analytics: pending reward", "addr", addr.Hex(), "err", err)
 				entry["pendingFees"] = "0"
+				entry["pendingFeesFormatted"] = "0 JUNO"
 			} else {
 				entry["pendingFees"] = pending.String()
+				entry["pendingFeesFormatted"] = formatBigJuno(pending)
 			}
 
 			// Accumulated and claimed require event log scanning which is
 			// deferred to a future iteration. For now expose pending only.
 			entry["accumulatedFees"] = "0"
+			entry["accumulatedFeesFormatted"] = "0 JUNO"
 			entry["claimedFees"] = "0"
+			entry["claimedFeesFormatted"] = "0 JUNO"
 		}
 
 		items = append(items, entry)
@@ -232,4 +238,25 @@ func (s *Server) handleOperatorRevenue(w http.ResponseWriter, r *http.Request) {
 		"version": "v1",
 		"data":    items,
 	})
+}
+
+// formatBigJuno converts a raw amount (8-decimal wJUNO/zatoshi) to a
+// human-readable "X.YYYY JUNO" string.
+func formatBigJuno(raw *big.Int) string {
+	if raw == nil || raw.Sign() == 0 {
+		return "0 JUNO"
+	}
+	divisor := big.NewInt(1_0000_0000)
+	whole := new(big.Int)
+	frac := new(big.Int)
+	whole.DivMod(raw, divisor, frac)
+	if frac.Sign() < 0 {
+		frac.Abs(frac)
+	}
+	if frac.Sign() == 0 {
+		return fmt.Sprintf("%s.0 JUNO", whole.String())
+	}
+	fracStr := fmt.Sprintf("%08d", frac.Int64())
+	trimmed := strings.TrimRight(fracStr, "0")
+	return fmt.Sprintf("%s.%s JUNO", whole.String(), trimmed)
 }

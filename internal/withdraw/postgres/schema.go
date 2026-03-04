@@ -83,4 +83,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_batch_items (
 
 CREATE UNIQUE INDEX IF NOT EXISTS withdrawal_batch_items_withdrawal_uniq ON withdrawal_batch_items (withdrawal_id);
 CREATE INDEX IF NOT EXISTS withdrawal_batch_items_batch_idx ON withdrawal_batch_items (batch_id, position);
+CREATE INDEX IF NOT EXISTS withdrawal_requests_requester_idx ON withdrawal_requests (requester);
+CREATE INDEX IF NOT EXISTS withdrawal_batches_juno_txid_idx ON withdrawal_batches (juno_txid) WHERE juno_txid IS NOT NULL AND juno_txid <> '';
+CREATE INDEX IF NOT EXISTS withdrawal_batches_base_tx_hash_idx ON withdrawal_batches (base_tx_hash) WHERE base_tx_hash IS NOT NULL AND base_tx_hash <> '';
 `

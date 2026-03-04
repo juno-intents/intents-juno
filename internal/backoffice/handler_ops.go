@@ -2,9 +2,11 @@ package backoffice
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -19,7 +21,8 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows, err := s.cfg.Pool.Query(r.Context(), `
-		SELECT deposit_id, state, created_at, COALESCE(juno_height, 0)
+		SELECT deposit_id, state, created_at, COALESCE(juno_height, 0),
+		       base_recipient, tx_hash, amount
 		FROM deposit_jobs
 		ORDER BY created_at DESC
 		LIMIT $1`, limit)
@@ -36,17 +39,26 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 		var state int16
 		var createdAt time.Time
 		var junoHeight int64
-		if err := rows.Scan(&depositID, &state, &createdAt, &junoHeight); err != nil {
+		var baseRecipient []byte
+		var txHash []byte
+		var amount int64
+		if err := rows.Scan(&depositID, &state, &createdAt, &junoHeight, &baseRecipient, &txHash, &amount); err != nil {
 			s.log.Error("scan recent deposit", "err", err)
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		items = append(items, map[string]any{
-			"depositId":  "0x" + hex.EncodeToString(depositID),
-			"state":      state,
-			"createdAt":  createdAt.Format(time.RFC3339),
-			"junoHeight": junoHeight,
-		})
+		entry := map[string]any{
+			"depositId":     "0x" + hex.EncodeToString(depositID),
+			"state":         state,
+			"createdAt":     createdAt.Format(time.RFC3339),
+			"junoHeight":    junoHeight,
+			"baseRecipient": "0x" + hex.EncodeToString(baseRecipient),
+			"amount":        strconv.FormatInt(amount, 10),
+		}
+		if len(txHash) > 0 {
+			entry["txHash"] = "0x" + hex.EncodeToString(txHash)
+		}
+		items = append(items, entry)
 	}
 	if err := rows.Err(); err != nil {
 		s.log.Error("iterate recent deposits", "err", err)
@@ -68,9 +80,14 @@ func (s *Server) handleRecentWithdrawals(w http.ResponseWriter, r *http.Request)
 	}
 
 	rows, err := s.cfg.Pool.Query(r.Context(), `
-		SELECT withdrawal_id, COALESCE(claimed_by, ''), created_at, COALESCE(base_block_number, 0)
-		FROM withdrawal_requests
-		ORDER BY created_at DESC
+		SELECT wr.withdrawal_id, COALESCE(wr.claimed_by, ''), wr.created_at,
+		       COALESCE(wr.base_block_number, 0),
+		       wr.requester, wr.amount, wr.recipient_ua,
+		       wb.juno_txid, wb.base_tx_hash
+		FROM withdrawal_requests wr
+		LEFT JOIN withdrawal_batch_items wbi ON wbi.withdrawal_id = wr.withdrawal_id
+		LEFT JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
+		ORDER BY wr.created_at DESC
 		LIMIT $1`, limit)
 	if err != nil {
 		s.log.Error("query recent withdrawals", "err", err)
@@ -85,17 +102,33 @@ func (s *Server) handleRecentWithdrawals(w http.ResponseWriter, r *http.Request)
 		var state string
 		var createdAt time.Time
 		var baseBlockNumber int64
-		if err := rows.Scan(&withdrawalID, &state, &createdAt, &baseBlockNumber); err != nil {
+		var requester []byte
+		var amount int64
+		var recipientUA []byte
+		var junoTxID *string
+		var baseTxHash *string
+		if err := rows.Scan(&withdrawalID, &state, &createdAt, &baseBlockNumber,
+			&requester, &amount, &recipientUA, &junoTxID, &baseTxHash); err != nil {
 			s.log.Error("scan recent withdrawal", "err", err)
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
-		items = append(items, map[string]any{
+		entry := map[string]any{
 			"withdrawalId":    "0x" + hex.EncodeToString(withdrawalID),
 			"state":           state,
 			"createdAt":       createdAt.Format(time.RFC3339),
 			"baseBlockNumber": baseBlockNumber,
-		})
+			"requester":       "0x" + hex.EncodeToString(requester),
+			"amount":          strconv.FormatInt(amount, 10),
+			"recipientUA":     "0x" + hex.EncodeToString(recipientUA),
+		}
+		if junoTxID != nil {
+			entry["junoTxId"] = *junoTxID
+		}
+		if baseTxHash != nil {
+			entry["baseTxHash"] = *baseTxHash
+		}
+		items = append(items, entry)
 	}
 	if err := rows.Err(); err != nil {
 		s.log.Error("iterate recent withdrawals", "err", err)
@@ -256,6 +289,48 @@ func checkServiceHealth(ctx context.Context, client *http.Client, url string) ma
 	}
 
 	return result
+}
+
+// handleOperatorStatus probes each configured operator gRPC endpoint via TLS
+// and reports online/offline status with latency.
+func (s *Server) handleOperatorStatus(w http.ResponseWriter, r *http.Request) {
+	results := make([]map[string]any, 0, len(s.cfg.OperatorEndpoints))
+
+	for _, op := range s.cfg.OperatorEndpoints {
+		start := time.Now()
+		online := false
+		var errMsg string
+
+		conn, err := tls.DialWithDialer(
+			&net.Dialer{Timeout: 5 * time.Second},
+			"tcp",
+			op.Endpoint,
+			&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // operator TLS probe only
+		)
+		latency := time.Since(start).Milliseconds()
+		if err != nil {
+			errMsg = err.Error()
+		} else {
+			online = true
+			_ = conn.Close()
+		}
+
+		entry := map[string]any{
+			"address":   op.Address.Hex(),
+			"endpoint":  op.Endpoint,
+			"online":    online,
+			"latencyMs": latency,
+		}
+		if errMsg != "" {
+			entry["error"] = errMsg
+		}
+		results = append(results, entry)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":   "v1",
+		"operators": results,
+	})
 }
 
 // parseIntParam extracts an integer query parameter with a default.
