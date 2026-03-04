@@ -5583,7 +5583,7 @@ command_run() {
   # deploy_backoffice() in run-e2e-local.sh runs before the test and may not
   # have had bridge addresses available (e.g. first run after cleanup). Now that
   # the bridge is deployed, start/restart with the correct addresses.
-  if [[ "$backoffice_enabled" == "true" ]]; then
+  if [[ -n "${backoffice_url:-}" && -n "${backoffice_auth_token:-}" ]]; then
     local bo_operator_registry_addr bo_fee_distributor_addr bo_operator_addrs_csv
     bo_operator_registry_addr="$(jq -r '.contracts.operator_registry // empty' "$bridge_summary" 2>/dev/null || true)"
     bo_fee_distributor_addr="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)"
