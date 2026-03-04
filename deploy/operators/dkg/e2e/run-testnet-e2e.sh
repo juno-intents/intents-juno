@@ -5627,7 +5627,7 @@ command_run() {
     fi
 
     # Operator gRPC endpoints for health check (addr=host:port pairs)
-    if (( ${#bridge_operator_endpoints[@]:-0} > 0 )); then
+    if (( ${#bridge_operator_endpoints[@]} > 0 )); then
       local bo_op_endpoints_csv="" bo_op_idx=0
       local -a bo_op_ids=()
       mapfile -t bo_op_ids < <(jq -r '.operators[].operator_id' "$dkg_summary" 2>/dev/null)
