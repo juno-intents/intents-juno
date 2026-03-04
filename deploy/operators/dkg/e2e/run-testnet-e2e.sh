@@ -4066,9 +4066,9 @@ command_run() {
       log "skipping bridge deployer pre-funding (reusing existing bridge summary)"
     else
       bridge_deployer_required_wei=$((base_operator_fund_wei * 10))
-      # Bridge deployment retries can require a high fee cap on Base testnet; keep
-      # a hard floor so replacement transactions do not fail with insufficient funds.
-      local bridge_deployer_min_wei="70000000000000000"
+      # Bridge deployment on Base Sepolia has very low gas costs (~0.006 gwei);
+      # keep a reasonable floor for retries with bumped fee caps.
+      local bridge_deployer_min_wei="15000000000000000"
       if (( bridge_deployer_required_wei < bridge_deployer_min_wei )); then
         bridge_deployer_required_wei="$bridge_deployer_min_wei"
       fi
