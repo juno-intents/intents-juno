@@ -7665,7 +7665,16 @@ command_run() {
       invariant_bridge_delta_actual="$bridge_delta_actual"
       invariant_balance_delta_match="true"
 
-      # [P2] FeeDistributor.claim() verification: if pending > 0, claim and verify it drops to 0.
+      return 0
+    }
+
+    if ! wait_for_condition 900 5 "run-scoped bridge invariants" check_relayer_flow_invariants; then
+      relayer_status=1
+    fi
+
+    # [P2] FeeDistributor.claim() verification — run outside wait_for_condition
+    # so logs are visible and variable assignments are guaranteed to persist.
+    if (( relayer_status == 0 )); then
       local fee_dist_addr
       fee_dist_addr="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)"
       if [[ -n "$fee_dist_addr" && -n "${base_key:-}" ]]; then
@@ -7693,12 +7702,6 @@ command_run() {
           fi
         fi
       fi
-
-      return 0
-    }
-
-    if ! wait_for_condition 900 5 "run-scoped bridge invariants" check_relayer_flow_invariants; then
-      relayer_status=1
     fi
   fi
 
