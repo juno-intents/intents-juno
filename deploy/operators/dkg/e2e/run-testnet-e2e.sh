@@ -5634,16 +5634,17 @@ command_run() {
       for (( bo_op_idx=0; bo_op_idx < ${#bo_op_ids[@]}; bo_op_idx++ )); do
         if [[ -n "${bridge_operator_endpoints[$bo_op_idx]:-}" ]]; then
           [[ -n "$bo_op_endpoints_csv" ]] && bo_op_endpoints_csv+=","
-          bo_op_endpoints_csv+="${bo_op_ids[$bo_op_idx]}=${bridge_operator_endpoints[$bo_op_idx]}"
+          # Strip scheme — backoffice tls.DialWithDialer expects host:port, not a URL.
+          local ep_hostport="${bridge_operator_endpoints[$bo_op_idx]}"
+          ep_hostport="${ep_hostport#https://}"
+          ep_hostport="${ep_hostport#http://}"
+          bo_op_endpoints_csv+="${bo_op_ids[$bo_op_idx]}=${ep_hostport}"
         fi
       done
       [[ -n "$bo_op_endpoints_csv" ]] && bo_args+=(--operator-endpoints "$bo_op_endpoints_csv")
     fi
 
-    # Register bridge-api healthz as a monitored service endpoint (only if bridge-api URL is known).
-    if [[ -n "${bridge_api_url:-}" ]]; then
-      bo_args+=(--service-urls "${bridge_api_url}/healthz")
-    fi
+    # Service URLs are added later, after all services are launched (see --service-urls restart block).
 
     log "restarting backoffice with bridge=$deployed_bridge_address wjuno=$deployed_wjuno_address"
     pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
@@ -5961,6 +5962,7 @@ command_run() {
   local invariant_recipient_delta_raw=""
   local invariant_fee_distributor_delta_expected=""
   local invariant_fee_distributor_delta_actual=""
+  local invariant_fee_distributor_claimed=""
   local invariant_bridge_delta_expected=""
   local invariant_bridge_delta_actual=""
   local invariant_balance_delta_match="false"
@@ -6009,6 +6011,9 @@ command_run() {
   local bridge_api_pid=""
   local bridge_api_port="$((base_port + 1250))"
   local bridge_api_url="http://127.0.0.1:${bridge_api_port}"
+  local deposit_relayer_health_port="$((base_port + 1300))"
+  local withdraw_coordinator_health_port="$((base_port + 1310))"
+  local withdraw_finalizer_health_port="$((base_port + 1320))"
   local relayer_status=0
   local base_relayer_host=""
   local deposit_relayer_host=""
@@ -6545,6 +6550,7 @@ command_run() {
             --queue-brokers "$shared_kafka_brokers" \
             --queue-group "$deposit_relayer_group" \
             --queue-topics "$deposit_event_topic,$checkpoint_package_topic" \
+            --health-port "$deposit_relayer_health_port" \
             >"$deposit_relayer_log" 2>&1
       ) &
       deposit_relayer_pid="$!"
@@ -6583,6 +6589,7 @@ command_run() {
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
           --blob-prefix "$withdraw_blob_prefix" \
+          --health-port "$withdraw_coordinator_health_port" \
           >"$withdraw_coordinator_log" 2>&1
       ) &
       withdraw_coordinator_pid="$!"
@@ -6620,6 +6627,7 @@ command_run() {
           --blob-driver s3 \
             --blob-bucket "$withdraw_blob_bucket" \
             --blob-prefix "$withdraw_blob_prefix" \
+            --health-port "$withdraw_finalizer_health_port" \
             >"$withdraw_finalizer_log" 2>&1
       ) &
       withdraw_finalizer_pid="$!"
@@ -6679,8 +6687,17 @@ command_run() {
     local bo_has_svc_urls="false"
     for _arg in "${bo_args[@]:-}"; do [[ "$_arg" == "--service-urls" ]] && bo_has_svc_urls="true"; done
     if [[ "$bo_has_svc_urls" == "false" ]]; then
-      bo_args+=(--service-urls "${bridge_api_url}/healthz")
-      log "restarting backoffice with --service-urls ${bridge_api_url}/healthz"
+      # Build service-urls CSV: in local mode all five services run on the runner;
+      # in distributed mode only base-relayer and bridge-api are reachable.
+      local svc_urls_csv="http://127.0.0.1:${base_relayer_port}/healthz"
+      if [[ "$relayer_runtime_mode" != "distributed" ]]; then
+        svc_urls_csv+=",http://127.0.0.1:${deposit_relayer_health_port}/healthz"
+        svc_urls_csv+=",http://127.0.0.1:${withdraw_coordinator_health_port}/healthz"
+        svc_urls_csv+=",http://127.0.0.1:${withdraw_finalizer_health_port}/healthz"
+      fi
+      svc_urls_csv+=",${bridge_api_url}/healthz"
+      bo_args+=(--service-urls "$svc_urls_csv")
+      log "restarting backoffice with --service-urls $svc_urls_csv"
       pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
       sleep 1
       nohup "$HOME/bin/backoffice" "${bo_args[@]}" > "$HOME/backoffice.log" 2>&1 &
@@ -7666,6 +7683,7 @@ command_run() {
             pending_after="${pending_after%%[[:space:]]*}"
             if [[ "$pending_after" == "0" ]]; then
               log "FeeDistributor claim verified: pending dropped from $pending_before to 0"
+              invariant_fee_distributor_claimed="$pending_before"
             else
               warn "FeeDistributor claim: pending went from $pending_before to $pending_after (expected 0)"
             fi
@@ -7840,10 +7858,16 @@ command_run() {
           local total_pending_fees
           total_pending_fees="$(jq '[.data[]? | .pendingFees | tonumber] | add // 0' <<<"$bo_revenue_resp" 2>/dev/null || echo "0")"
           if [[ -n "${invariant_fee_distributor_delta_expected:-}" ]] && [[ "$invariant_fee_distributor_delta_expected" =~ ^[0-9]+$ ]] && (( invariant_fee_distributor_delta_expected > 0 )); then
-            if (( total_pending_fees >= invariant_fee_distributor_delta_expected )); then
-              log "backoffice: operator-revenue valid (operators=$revenue_count totalPendingFees=$total_pending_fees >= feeDistributorDelta=$invariant_fee_distributor_delta_expected)"
+            # Adjust expected total down by the amount claimed during the FeeDistributor.claim() test.
+            local adjusted_expected="$invariant_fee_distributor_delta_expected"
+            if [[ -n "${invariant_fee_distributor_claimed:-}" ]] && [[ "$invariant_fee_distributor_claimed" =~ ^[0-9]+$ ]] && (( invariant_fee_distributor_claimed > 0 )); then
+              adjusted_expected="$(( invariant_fee_distributor_delta_expected - invariant_fee_distributor_claimed ))"
+              (( adjusted_expected < 0 )) && adjusted_expected=0
+            fi
+            if (( total_pending_fees >= adjusted_expected )); then
+              log "backoffice: operator-revenue valid (operators=$revenue_count totalPendingFees=$total_pending_fees >= adjustedExpected=$adjusted_expected feeDistributorDelta=$invariant_fee_distributor_delta_expected claimed=$invariant_fee_distributor_claimed)"
             else
-              warn "backoffice: operator-revenue totalPendingFees=$total_pending_fees < expected feeDistributorDelta=$invariant_fee_distributor_delta_expected (non-fatal, may reflect prior runs)"
+              warn "backoffice: operator-revenue totalPendingFees=$total_pending_fees < adjustedExpected=$adjusted_expected (feeDistributorDelta=$invariant_fee_distributor_delta_expected claimed=${invariant_fee_distributor_claimed:-0}) (non-fatal, may reflect prior runs)"
             fi
           else
             log "backoffice: operator-revenue endpoint valid (operators=$revenue_count totalPendingFees=$total_pending_fees)"
@@ -7878,8 +7902,8 @@ command_run() {
         if (( online_count == op_count )); then
           log "backoffice: operator-status valid — all operators online (total=$op_count online=$online_count)"
         else
-          # Runner may not be able to TLS-dial operator gRPC ports (SG topology).
-          warn "backoffice: operator-status shows $offline_count/$op_count offline before chaos tests (non-fatal, may be SG restriction)"
+          warn "backoffice: operator-status shows $offline_count/$op_count offline before chaos tests"
+          bo_data_ok="false"
         fi
       elif (( op_count > 0 )); then
         warn "backoffice: operator-status entries missing required fields (valid=$op_valid_count/$op_count)"
@@ -7913,7 +7937,15 @@ command_run() {
             warn "backoffice: service-health reports $svc_unhealthy/$svc_total unhealthy: $unhealthy_urls"
             bo_data_ok="false"
           else
-            log "backoffice: service-health valid (services=$svc_total healthy=$svc_healthy)"
+            # Verify expected service count: 5 in local mode (base-relayer, deposit-relayer,
+            # withdraw-coordinator, withdraw-finalizer, bridge-api), 2 in distributed mode.
+            local expected_svc_count=5
+            [[ "$relayer_runtime_mode" == "distributed" ]] && expected_svc_count=2
+            if (( svc_total == expected_svc_count )); then
+              log "backoffice: service-health valid (services=$svc_total healthy=$svc_healthy)"
+            else
+              warn "backoffice: service-health count mismatch (services=$svc_total expected=$expected_svc_count healthy=$svc_healthy)"
+            fi
           fi
         else
           warn "backoffice: service-health entries missing required fields (valid=$svc_valid_schema/$svc_total)"
@@ -8648,6 +8680,7 @@ command_run() {
       --arg invariant_recipient_delta_raw "$invariant_recipient_delta_raw" \
       --arg invariant_fee_distributor_delta_expected "$invariant_fee_distributor_delta_expected" \
       --arg invariant_fee_distributor_delta_actual "$invariant_fee_distributor_delta_actual" \
+      --arg invariant_fee_distributor_claimed "$invariant_fee_distributor_claimed" \
       --arg invariant_bridge_delta_expected "$invariant_bridge_delta_expected" \
       --arg invariant_bridge_delta_actual "$invariant_bridge_delta_actual" \
       --arg invariant_balance_delta_match "$invariant_balance_delta_match" \
@@ -8695,7 +8728,8 @@ command_run() {
             },
             fee_distributor: {
               expected: (if $invariant_fee_distributor_delta_expected == "" then null else ($invariant_fee_distributor_delta_expected | tonumber) end),
-              actual: (if $invariant_fee_distributor_delta_actual == "" then null else ($invariant_fee_distributor_delta_actual | tonumber) end)
+              actual: (if $invariant_fee_distributor_delta_actual == "" then null else ($invariant_fee_distributor_delta_actual | tonumber) end),
+              claimed: (if $invariant_fee_distributor_claimed == "" then null else ($invariant_fee_distributor_claimed | tonumber) end)
             },
             bridge: {
               expected: (if $invariant_bridge_delta_expected == "" then null else ($invariant_bridge_delta_expected | tonumber) end),
