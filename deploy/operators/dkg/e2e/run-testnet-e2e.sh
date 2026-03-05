@@ -2857,6 +2857,15 @@ is_withdraw_not_expired_error() {
     [[ "$lowered" == *"withdraw not expired"* ]]
 }
 
+# Returns true if the error indicates the withdrawal was already refunded.
+is_withdrawal_already_refunded_error() {
+  local msg lowered
+  msg="${1:-}"
+  lowered="$(lower "$msg")"
+  [[ "$lowered" == *"withdrawalrefunded"* ]] ||
+    [[ "$lowered" == *"withdrawal refunded"* ]]
+}
+
 inject_operator_endpoint_failure() {
   local endpoint="$1"
   local ssh_key_path="$2"
@@ -8494,6 +8503,8 @@ command_run() {
         if [[ "$scenario_refund_output" =~ (0x[0-9a-fA-F]{64}) ]]; then
           refund_after_expiry_refund_tx_hash="$(normalize_hex_prefixed "${BASH_REMATCH[1]}" || true)"
         fi
+      elif is_withdrawal_already_refunded_error "$scenario_refund_output"; then
+        log "refund-after-expiry scenario refund reverted with WithdrawalRefunded — already refunded, checking on-chain state"
       elif ! is_withdraw_not_expired_error "$scenario_refund_output"; then
         printf 'refund-after-expiry scenario refund tx failed: status=%s output=%s\n' \
           "$scenario_refund_status" \
