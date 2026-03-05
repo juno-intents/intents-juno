@@ -29,14 +29,16 @@ func main() {
 }
 
 // eventPayload is the JSON envelope published for each WithdrawRequested event.
+// Fields match the coordinator's withdrawRequestedV1 struct; extra fields
+// (blockNumber, txHash, logIndex) are harmlessly ignored by the coordinator.
 type eventPayload struct {
 	Version      string `json:"version"`
 	WithdrawalID string `json:"withdrawalId"`
 	Requester    string `json:"requester"`
-	Amount       string `json:"amount"`
+	Amount       uint64 `json:"amount"`
 	RecipientUA  string `json:"recipientUA"`
 	Expiry       uint64 `json:"expiry"`
-	FeeBps       uint64 `json:"feeBps"`
+	FeeBps       uint32 `json:"feeBps"`
 	BlockNumber  uint64 `json:"blockNumber"`
 	TxHash       string `json:"txHash"`
 	LogIndex     uint   `json:"logIndex"`
@@ -55,7 +57,7 @@ func runMain(args []string, stdout io.Writer) error {
 
 	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated Kafka broker addresses")
-	withdrawEventTopic := fs.String("withdraw-event-topic", "withdraw.events.v1", "Kafka topic for withdraw events")
+	withdrawEventTopic := fs.String("withdraw-event-topic", "withdrawals.requested.v1", "Kafka topic for withdraw events")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -132,14 +134,20 @@ func runMain(args []string, stdout io.Writer) error {
 	)
 
 	return scanner.Run(ctx, *startBlock, func(ctx context.Context, event chainscanner.WithdrawRequestedEvent) error {
+		if !event.Amount.IsUint64() {
+			return fmt.Errorf("amount overflows uint64: %s", event.Amount.String())
+		}
+		if event.FeeBps > uint64(^uint32(0)) {
+			return fmt.Errorf("feeBps overflows uint32: %d", event.FeeBps)
+		}
 		payload := eventPayload{
-			Version:      "withdraw.event.v1",
+			Version:      "withdrawals.requested.v1",
 			WithdrawalID: fmt.Sprintf("0x%x", event.WithdrawalID),
 			Requester:    event.Requester.Hex(),
-			Amount:       event.Amount.String(),
+			Amount:       event.Amount.Uint64(),
 			RecipientUA:  fmt.Sprintf("0x%x", event.RecipientUA),
 			Expiry:       event.Expiry,
-			FeeBps:       event.FeeBps,
+			FeeBps:       uint32(event.FeeBps),
 			BlockNumber:  event.BlockNumber,
 			TxHash:       event.TxHash.Hex(),
 			LogIndex:     event.LogIndex,
