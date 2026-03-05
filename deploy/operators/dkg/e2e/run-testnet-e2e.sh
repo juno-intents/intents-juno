@@ -2240,11 +2240,13 @@ stop_local_relayer_binaries() {
     "/usr/local/bin/withdraw-coordinator"
     "/usr/local/bin/withdraw-finalizer"
     "/usr/local/bin/bridge-api"
+    "/usr/local/bin/base-event-scanner"
     "go run ./cmd/base-relayer"
     "go run ./cmd/deposit-relayer"
     "go run ./cmd/withdraw-coordinator"
     "go run ./cmd/withdraw-finalizer"
     "go run ./cmd/bridge-api"
+    "go run ./cmd/[b]ase-event-scanner"
   )
   local cleanup_pattern
   for cleanup_pattern in "${local_cleanup_patterns[@]}"; do
@@ -6013,11 +6015,13 @@ command_run() {
   local withdraw_coordinator_log="$workdir/reports/withdraw-coordinator.log"
   local withdraw_finalizer_log="$workdir/reports/withdraw-finalizer.log"
   local bridge_api_log="$workdir/reports/bridge-api.log"
+  local base_event_scanner_log="$workdir/reports/base-event-scanner.log"
   local base_relayer_pid=""
   local deposit_relayer_pid=""
   local withdraw_coordinator_pid=""
   local withdraw_finalizer_pid=""
   local bridge_api_pid=""
+  local base_event_scanner_pid=""
   local bridge_api_port="$((base_port + 1250))"
   local bridge_api_url="http://127.0.0.1:${bridge_api_port}"
   local deposit_relayer_health_port="$((base_port + 1300))"
@@ -6666,11 +6670,6 @@ command_run() {
         --queue-driver kafka \
         --queue-brokers "$shared_kafka_brokers" \
         --deposit-event-topic "$deposit_event_topic" \
-        --withdraw-request-topic "$withdraw_request_topic" \
-        --withdraw-rpc-url "$base_rpc_url" \
-        --withdraw-chain-id "$base_chain_id" \
-        --withdraw-owner-key-file "$bridge_deployer_key_file" \
-        --wjuno-address "$deployed_wjuno_address" \
         --owallet-ua "$withdraw_coordinator_juno_change_address" \
         --refund-window-seconds "$bridge_refund_window_seconds" \
         --fee-bps "$bridge_fee_bps" \
@@ -6687,6 +6686,31 @@ command_run() {
       if ! wait_for_condition 60 2 "bridge-api health" check_bridge_api_health; then
         relayer_status=1
       fi
+    fi
+  fi
+
+  # ── Launch base-event-scanner ───────────────────────────────────────────
+  if (( relayer_status == 0 )); then
+    (
+      cd "$REPO_ROOT"
+      JUNO_QUEUE_KAFKA_TLS="true" \
+      go run ./cmd/base-event-scanner \
+        --base-rpc-url "$base_rpc_url" \
+        --bridge-address "$deployed_bridge_address" \
+        --postgres-dsn "$shared_postgres_dsn" \
+        --start-block 0 \
+        --poll-interval 3s \
+        --queue-driver kafka \
+        --queue-brokers "$shared_kafka_brokers" \
+        --withdraw-event-topic "$withdraw_request_topic" \
+        >"$base_event_scanner_log" 2>&1
+    ) &
+    base_event_scanner_pid="$!"
+    sleep 3
+    if ! kill -0 "$base_event_scanner_pid" >/dev/null 2>&1; then
+      relayer_status=1
+    else
+      log "base-event-scanner started (pid=$base_event_scanner_pid)"
     fi
   fi
 
@@ -7388,14 +7412,18 @@ command_run() {
     fi
     withdraw_request_payload="$workdir/reports/withdraw-request-event.json"
     if (( relayer_status == 0 )); then
-      local withdraw_submit_body
-      withdraw_submit_body="$(
-        jq -cn \
-          --arg amount "10000" \
-          --arg recipient_raw_address_hex "$withdraw_recipient_raw_hex" \
-          '{amount:$amount,recipientRawAddressHex:$recipient_raw_address_hex}'
-      )"
-      if ! bridge_api_post_json_with_retry "${bridge_api_url}/v1/withdrawals/request" "$withdraw_submit_body" "$withdraw_request_payload" "withdraw_request"; then
+      if ! (
+        cd "$REPO_ROOT"
+        go run ./cmd/withdraw-request \
+          --rpc-url "$base_rpc_url" \
+          --chain-id "$base_chain_id" \
+          --owner-key-file "$bridge_deployer_key_file" \
+          --wjuno-address "$deployed_wjuno_address" \
+          --bridge-address "$deployed_bridge_address" \
+          --amount 10000 \
+          --recipient-raw-address-hex "$withdraw_recipient_raw_hex" \
+          --output "$withdraw_request_payload"
+      ); then
         relayer_status=1
       fi
     fi
@@ -8596,6 +8624,7 @@ command_run() {
   stop_remote_relayer_service "$withdraw_coordinator_pid"
   stop_remote_relayer_service "$withdraw_finalizer_pid"
   stop_remote_relayer_service "$bridge_api_pid"
+  stop_remote_relayer_service "$base_event_scanner_pid"
 
   if (( relayer_status != 0 )); then
     log "relayer service orchestration failed; showing service logs"
@@ -8604,6 +8633,7 @@ command_run() {
     tail -n 200 "$withdraw_coordinator_log" >&2 || true
     tail -n 200 "$withdraw_finalizer_log" >&2 || true
     tail -n 200 "$bridge_api_log" >&2 || true
+    tail -n 200 "$base_event_scanner_log" >&2 || true
     bridge_status=1
   else
     bridge_status=0
