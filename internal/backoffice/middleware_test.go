@@ -6,6 +6,56 @@ import (
 	"testing"
 )
 
+func TestParseDLQFilter_LimitCap(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest("GET", "/dlq/proofs?limit=9999", nil)
+	filter := parseDLQFilter(req)
+	if filter.Limit != 1000 {
+		t.Fatalf("limit should be capped at 1000: got %d", filter.Limit)
+	}
+
+	req2 := httptest.NewRequest("GET", "/dlq/proofs?limit=500", nil)
+	filter2 := parseDLQFilter(req2)
+	if filter2.Limit != 500 {
+		t.Fatalf("limit within range should be preserved: got %d", filter2.Limit)
+	}
+}
+
+func TestExtractClientIP_IgnoresProxyHeaders(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest("GET", "/", nil)
+	req.RemoteAddr = "198.51.100.7:4321"
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("X-Real-IP", "10.0.0.2")
+
+	ip := extractClientIP(req)
+	if ip != "198.51.100.7" {
+		t.Fatalf("extractClientIP should ignore proxy headers: got %q want 198.51.100.7", ip)
+	}
+}
+
+func TestAuthMiddleware_ConstantTimeComparison(t *testing.T) {
+	t.Parallel()
+
+	// Verify that a slightly different token is rejected (basic sanity for
+	// constant-time path; timing analysis is out of scope for unit tests).
+	s := &Server{cfg: ServerConfig{AuthSecret: "correct-secret"}}
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := s.authMiddleware(inner)
+
+	req := httptest.NewRequest("GET", "/api/funds", nil)
+	req.Header.Set("Authorization", "Bearer correct-secre")
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("prefix of secret should not authenticate: got %d", rec.Code)
+	}
+}
+
 func TestAuthMiddleware_UIPathsExempt(t *testing.T) {
 	s := &Server{
 		cfg: ServerConfig{AuthSecret: "test-secret"},

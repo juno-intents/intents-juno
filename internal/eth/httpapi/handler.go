@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -174,5 +175,5 @@ func checkBearer(header string, wantToken string) bool {
 		return false
 	}
 	got := strings.TrimSpace(strings.TrimPrefix(header, prefix))
-	return got == wantToken
+	return subtle.ConstantTimeCompare([]byte(got), []byte(wantToken)) == 1
 }

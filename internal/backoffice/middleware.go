@@ -1,6 +1,7 @@
 package backoffice
 
 import (
+	"crypto/subtle"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -25,7 +26,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != s.cfg.AuthSecret {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.cfg.AuthSecret)) != 1 {
 			writeError(w, http.StatusUnauthorized, "unauthorized")
 			return
 		}
@@ -145,20 +146,10 @@ func (l *backofficeRateLimiter) evictOne() {
 	}
 }
 
-// extractClientIP extracts the client IP from the request, considering
-// X-Forwarded-For, X-Real-IP, and RemoteAddr.
+// extractClientIP extracts the client IP from r.RemoteAddr only. We do not
+// trust X-Forwarded-For or X-Real-IP because the NLB preserves the real
+// client IP at L4, and trusting proxy headers allows rate-limit bypass.
 func extractClientIP(r *http.Request) string {
-	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		ip := strings.TrimSpace(parts[0])
-		if ip != "" {
-			return ip
-		}
-	}
-	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
-		return xrip
-	}
 	remote := strings.TrimSpace(r.RemoteAddr)
 	if remote == "" {
 		return "unknown"

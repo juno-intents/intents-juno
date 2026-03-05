@@ -163,6 +163,9 @@ func parseDLQFilter(r *http.Request) dlq.DLQFilter {
 			filter.Limit = v
 		}
 	}
+	if filter.Limit > 1000 {
+		filter.Limit = 1000
+	}
 	if o := strings.TrimSpace(q.Get("offset")); o != "" {
 		if v, err := strconv.Atoi(o); err == nil && v >= 0 {
 			filter.Offset = v

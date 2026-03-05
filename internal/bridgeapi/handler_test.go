@@ -791,3 +791,62 @@ func TestListWithdrawals_ByBaseTxHash(t *testing.T) {
 		t.Fatalf("bad response: %+v", out)
 	}
 }
+
+func TestHandler_DepositSubmit_OversizedBodyRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.ActionService = &stubActionService{}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// 2 MiB body exceeds the 1 MiB limit.
+	big := strings.Repeat("x", 2<<20)
+	req := httptest.NewRequest(http.MethodPost, "/v1/deposits/submit", strings.NewReader(big))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
+	}
+}
+
+func TestHandler_DepositSubmit_TrailingGarbageRejected(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	cfg.ActionService = &stubActionService{
+		depositResp: depositevent.Payload{
+			Version:   "deposits.event.v1",
+			DepositID: "0x" + strings.Repeat("11", 32),
+			Amount:    100000,
+		},
+	}
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	body := `{"baseRecipient":"0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1","amount":"100000","nonce":"7","proofWitnessItem":"0x0102"}{"extra":"garbage"}`
+	req := httptest.NewRequest(http.MethodPost, "/v1/deposits/submit", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
+	}
+}
+
+func TestClientIP_IgnoresProxyHeaders(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.RemoteAddr = "198.51.100.7:4321"
+	req.Header.Set("X-Forwarded-For", "10.0.0.1")
+	req.Header.Set("X-Real-IP", "10.0.0.2")
+
+	ip := clientIP(req)
+	if ip != "198.51.100.7" {
+		t.Fatalf("clientIP should ignore proxy headers: got %q want 198.51.100.7", ip)
+	}
+}

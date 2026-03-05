@@ -477,9 +477,17 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func decodeJSONBody[T any](w http.ResponseWriter, r *http.Request) (T, bool) {
 	var out T
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB limit
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&out); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_json",
+		})
+		return out, false
+	}
+	if dec.More() {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"version": "v1",
 			"error":   "invalid_json",
@@ -513,18 +521,10 @@ func writeJSONBytes(w http.ResponseWriter, code int, body []byte) {
 	_, _ = w.Write(body)
 }
 
+// clientIP extracts the client IP from r.RemoteAddr only. We do not trust
+// X-Forwarded-For or X-Real-IP because the NLB preserves the real client IP
+// at L4, and trusting proxy headers allows rate-limit bypass via spoofing.
 func clientIP(r *http.Request) string {
-	xff := strings.TrimSpace(r.Header.Get("X-Forwarded-For"))
-	if xff != "" {
-		parts := strings.Split(xff, ",")
-		ip := strings.TrimSpace(parts[0])
-		if ip != "" {
-			return ip
-		}
-	}
-	if xrip := strings.TrimSpace(r.Header.Get("X-Real-IP")); xrip != "" {
-		return xrip
-	}
 	remote := strings.TrimSpace(r.RemoteAddr)
 	if remote == "" {
 		return "unknown"

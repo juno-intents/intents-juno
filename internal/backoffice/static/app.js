@@ -7,10 +7,21 @@
   function $(sel, ctx) { return (ctx || document).querySelector(sel); }
   function $$(sel, ctx) { return Array.from((ctx || document).querySelectorAll(sel)); }
 
+  function escapeHTML(str) {
+    if (str === null || str === undefined) return "";
+    return String(str)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
   function fmtAddr(hex) {
-    if (!hex || hex.length < 12) return hex || "-";
-    return '<span class="addr" title="' + hex + '" onclick="navigator.clipboard.writeText(\'' + hex + '\')" style="cursor:pointer">' +
-      hex.slice(0, 6) + "\u2026" + hex.slice(-4) + '</span>';
+    if (!hex || hex.length < 12) return escapeHTML(hex) || "-";
+    var safe = escapeHTML(hex);
+    return '<span class="addr" title="' + safe + '" onclick="navigator.clipboard.writeText(\'' + safe + '\')" style="cursor:pointer">' +
+      safe.slice(0, 6) + "\u2026" + safe.slice(-4) + '</span>';
   }
 
   function fmtETH(wei) {
@@ -29,7 +40,8 @@
 
   function badge(severity) {
     var cls = { critical: "badge-crit", warning: "badge-warn", ok: "badge-ok", info: "badge-info" };
-    return '<span class="badge ' + (cls[severity] || "badge-info") + '">' + severity + "</span>";
+    var safe = escapeHTML(severity);
+    return '<span class="badge ' + (cls[severity] || "badge-info") + '">' + safe + "</span>";
   }
 
   function dot(ok) { return '<span class="dot ' + (ok ? "dot-ok" : "dot-err") + '"></span>'; }
@@ -124,7 +136,7 @@
       var html = "";
       ops.forEach(function (op) {
         html += '<div>' + dot(op.online) + ' <span class="mono">' + fmtAddr(op.address) + '</span> ' +
-          op.endpoint + ' (' + op.latencyMs + 'ms)</div>';
+          escapeHTML(op.endpoint) + ' (' + escapeHTML(op.latencyMs) + 'ms)</div>';
       });
       setHTML("operator-status-grid", html || '<span class="loading">No operators configured</span>');
     });
@@ -134,7 +146,7 @@
       var html = "";
       var services = (resp && resp.data) || [];
       services.forEach(function (svc) {
-        html += '<div>' + dot(svc.healthy) + svc.url + '</div>';
+        html += '<div>' + dot(svc.healthy) + escapeHTML(svc.url) + '</div>';
       });
       setHTML("svc-health-grid", html || '<span class="loading">No services reported</span>');
     });
@@ -158,12 +170,12 @@
         var id = r.jobId || r.batchId || r.id || "";
         return "<tr>" +
           '<td class="mono">' + fmtAddr(id) + "</td>" +
-          "<td>" + (r.errorCode || "-") + "</td>" +
-          "<td>" + (r.failureStage || r.pipeline || "-") + "</td>" +
-          "<td>" + (r.attemptCount || 0) + "</td>" +
-          "<td>" + fmtTime(r.createdAt) + "</td>" +
+          "<td>" + escapeHTML(r.errorCode || "-") + "</td>" +
+          "<td>" + escapeHTML(r.failureStage || r.pipeline || "-") + "</td>" +
+          "<td>" + escapeHTML(r.attemptCount || 0) + "</td>" +
+          "<td>" + escapeHTML(fmtTime(r.createdAt)) + "</td>" +
           "<td>" + (r.acknowledged ? badge("ok") : badge("warning")) + "</td>" +
-          "<td>" + (r.acknowledged ? "" : '<button class="small" onclick="ackDLQ(\'' + kind + "','" + id + "')\">" + "Ack</button>") + "</td>" +
+          "<td>" + (r.acknowledged ? "" : '<button class="small" onclick="ackDLQ(\'' + escapeHTML(kind) + "','" + escapeHTML(id) + "')\">" + "Ack</button>") + "</td>" +
           "</tr>";
       }).join("");
       setHTML("dlq-tbody-" + kind, rows || '<tr><td colspan="7" class="loading">No records</td></tr>');
@@ -182,7 +194,7 @@
         var st = o.belowThreshold ? badge("crit") : badge("ok");
         return "<tr>" +
           '<td class="mono">' + fmtAddr(o.address) + copyBtn(o.address) + "</td>" +
-          "<td>" + (o.balanceEth || fmtETH(o.balanceWei)) + "</td>" +
+          "<td>" + escapeHTML(o.balanceEth || fmtETH(o.balanceWei)) + "</td>" +
           "<td>" + st + "</td></tr>";
       }).join("");
       setHTML("funds-ops-tbody", ops || '<tr><td colspan="3" class="loading">-</td></tr>');
@@ -209,7 +221,8 @@
   }
 
   function copyBtn(addr) {
-    return ' <button class="copy-btn" onclick="copyAddr(\'' + addr + '\')" title="Copy address">copy</button>';
+    var safe = escapeHTML(addr);
+    return ' <button class="copy-btn" onclick="copyAddr(\'' + safe + '\')" title="Copy address">copy</button>';
   }
 
   window.copyAddr = function (addr) {
@@ -235,9 +248,9 @@
       var html = days.map(function (r) {
         var total = (r.depositCount || 0) + (r.withdrawalCount || 0);
         var pct = Math.round((total / maxVal) * 100);
-        return '<div class="bar-row"><span class="label">' + r.date + '</span>' +
+        return '<div class="bar-row"><span class="label">' + escapeHTML(r.date) + '</span>' +
           '<div class="bar" style="width:' + pct + '%"></div>' +
-          '<span class="bar-val">' + total + '</span></div>';
+          '<span class="bar-val">' + escapeHTML(total) + '</span></div>';
       }).join("");
       setHTML("daily-chart", html || '<span class="loading">No data</span>');
     });
@@ -248,9 +261,9 @@
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.operatorAddress) + "</td>" +
           '<td class="mono">' + fmtAddr(r.feeRecipient) + "</td>" +
-          "<td>" + (r.accumulatedFeesFormatted || r.accumulatedFees || "0") + "</td>" +
-          "<td>" + (r.claimedFeesFormatted || r.claimedFees || "0") + "</td>" +
-          "<td>" + (r.pendingFeesFormatted || r.pendingFees || "0") + "</td></tr>";
+          "<td>" + escapeHTML(r.accumulatedFeesFormatted || r.accumulatedFees || "0") + "</td>" +
+          "<td>" + escapeHTML(r.claimedFeesFormatted || r.claimedFees || "0") + "</td>" +
+          "<td>" + escapeHTML(r.pendingFeesFormatted || r.pendingFees || "0") + "</td></tr>";
       }).join("");
       setHTML("revenue-tbody", rows || '<tr><td colspan="5" class="loading">-</td></tr>');
     });
@@ -266,10 +279,10 @@
       var rows = items.map(function (a) {
         return "<tr>" +
           "<td>" + badge(a.severity) + "</td>" +
-          "<td>" + (a.title || "") + "</td>" +
-          "<td>" + (a.detail || "") + "</td>" +
-          "<td>" + fmtTime(a.fired_at) + "</td>" +
-          "<td>" + (a.acknowledged_at ? "Yes" : '<button class="small" onclick="ackAlert(\'' + a.id + '\')">Ack</button>') + "</td></tr>";
+          "<td>" + escapeHTML(a.title || "") + "</td>" +
+          "<td>" + escapeHTML(a.detail || "") + "</td>" +
+          "<td>" + escapeHTML(fmtTime(a.fired_at)) + "</td>" +
+          "<td>" + (a.acknowledged_at ? "Yes" : '<button class="small" onclick="ackAlert(\'' + escapeHTML(a.id) + '\')">Ack</button>') + "</td></tr>";
       }).join("");
       setHTML("alerts-active-tbody", rows || '<tr><td colspan="5" class="loading">No active alerts</td></tr>');
     });
@@ -279,9 +292,9 @@
       var rows = items.map(function (a) {
         return "<tr>" +
           "<td>" + badge(a.severity) + "</td>" +
-          "<td>" + (a.title || "") + "</td>" +
-          "<td>" + fmtTime(a.fired_at) + "</td>" +
-          "<td>" + fmtTime(a.resolved_at) + "</td></tr>";
+          "<td>" + escapeHTML(a.title || "") + "</td>" +
+          "<td>" + escapeHTML(fmtTime(a.fired_at)) + "</td>" +
+          "<td>" + escapeHTML(fmtTime(a.resolved_at)) + "</td></tr>";
       }).join("");
       setHTML("alerts-history-tbody", rows || '<tr><td colspan="4" class="loading">-</td></tr>');
     });
@@ -298,12 +311,12 @@
       var rows = items.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.depositId) + "</td>" +
-          "<td>" + (r.state || "-") + "</td>" +
+          "<td>" + escapeHTML(r.state || "-") + "</td>" +
           '<td class="mono">' + fmtAddr(r.baseRecipient) + "</td>" +
-          "<td>" + (r.amount || "-") + "</td>" +
+          "<td>" + escapeHTML(r.amount || "-") + "</td>" +
           '<td class="mono">' + (r.txHash ? fmtAddr(r.txHash) : "-") + "</td>" +
-          "<td>" + fmtTime(r.createdAt) + "</td>" +
-          "<td>" + (r.junoHeight || "-") + "</td></tr>";
+          "<td>" + escapeHTML(fmtTime(r.createdAt)) + "</td>" +
+          "<td>" + escapeHTML(r.junoHeight || "-") + "</td></tr>";
       }).join("");
       setHTML("ops-deposits-tbody", rows || '<tr><td colspan="7" class="loading">-</td></tr>');
     });
@@ -313,12 +326,12 @@
       var rows = items.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.withdrawalId) + "</td>" +
-          "<td>" + (r.state || "-") + "</td>" +
+          "<td>" + escapeHTML(r.state || "-") + "</td>" +
           '<td class="mono">' + fmtAddr(r.requester) + "</td>" +
-          "<td>" + (r.amount || "-") + "</td>" +
+          "<td>" + escapeHTML(r.amount || "-") + "</td>" +
           '<td class="mono">' + (r.junoTxId ? fmtAddr(r.junoTxId) : "-") + "</td>" +
           '<td class="mono">' + (r.baseTxHash ? fmtAddr(r.baseTxHash) : "-") + "</td>" +
-          "<td>" + fmtTime(r.createdAt) + "</td></tr>";
+          "<td>" + escapeHTML(fmtTime(r.createdAt)) + "</td></tr>";
       }).join("");
       setHTML("ops-withdrawals-tbody", rows || '<tr><td colspan="7" class="loading">-</td></tr>');
     });
@@ -332,9 +345,9 @@
       var rows = all.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.id) + "</td>" +
-          "<td>" + (r.kind || "-") + "</td>" +
-          "<td>" + (r.state || "-") + "</td>" +
-          "<td>" + (r.age || "-") + "</td></tr>";
+          "<td>" + escapeHTML(r.kind || "-") + "</td>" +
+          "<td>" + escapeHTML(r.state || "-") + "</td>" +
+          "<td>" + escapeHTML(r.age || "-") + "</td></tr>";
       }).join("");
       setHTML("ops-stuck-tbody", rows || '<tr><td colspan="4" class="loading">None</td></tr>');
     });
