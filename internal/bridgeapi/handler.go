@@ -32,6 +32,7 @@ type Config struct {
 	RefundWindowSeconds uint64
 	MinDepositAmount    uint64
 	MinWithdrawAmount   uint64
+	FeeBps              uint32
 	NonceFn             func() (uint64, error)
 	ActionService       ActionService
 
@@ -198,6 +199,7 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"refundWindowSeconds": h.cfg.RefundWindowSeconds,
 		"minDepositAmount":    strconv.FormatUint(h.cfg.MinDepositAmount, 10),
 		"minWithdrawAmount":   strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
+		"feeBps":              h.cfg.FeeBps,
 	})
 }
 

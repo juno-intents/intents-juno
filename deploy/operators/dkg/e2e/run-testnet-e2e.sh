@@ -5987,6 +5987,7 @@ command_run() {
   local backoffice_analytics_responding="false"
   local backoffice_funds_responding="false"
   local backoffice_dlq_responding="false"
+  local bo_pre_chaos_operator_count="0"
   if [[ -n "$backoffice_url" ]]; then
     backoffice_enabled="true"
   fi
@@ -6650,6 +6651,7 @@ command_run() {
         --wjuno-address "$deployed_wjuno_address" \
         --owallet-ua "$withdraw_coordinator_juno_change_address" \
         --refund-window-seconds "$bridge_refund_window_seconds" \
+        --fee-bps "$bridge_fee_bps" \
         >"$bridge_api_log" 2>&1
     ) &
     bridge_api_pid="$!"
@@ -7802,6 +7804,133 @@ command_run() {
       bo_data_ok="false"
     fi
 
+    # Validate operator revenue endpoint — verify total pendingFees >= the
+    # invariant_fee_distributor_delta_expected (deposit + withdrawal fees to distributor).
+    local bo_revenue_resp
+    bo_revenue_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/analytics/operator-revenue" 2>/dev/null || true)"
+    if [[ -n "$bo_revenue_resp" ]] && jq -e '.' <<<"$bo_revenue_resp" >/dev/null 2>&1; then
+      local revenue_count
+      revenue_count="$(jq '[.data[]?] | length' <<<"$bo_revenue_resp" 2>/dev/null || echo "0")"
+      if (( revenue_count > 0 )); then
+        local revenue_all_have_addr revenue_all_have_fees
+        revenue_all_have_addr="$(jq -r '[.data[]? | select(.operatorAddress != null and .operatorAddress != "")] | length' <<<"$bo_revenue_resp" 2>/dev/null || echo "0")"
+        revenue_all_have_fees="$(jq -r '[.data[]? | select(.pendingFeesFormatted != null and (.pendingFeesFormatted | contains("JUNO")))] | length' <<<"$bo_revenue_resp" 2>/dev/null || echo "0")"
+        if (( revenue_all_have_addr == revenue_count && revenue_all_have_fees == revenue_count )); then
+          # Sum pendingFees across all operators and compare to expected fee distributor delta.
+          local total_pending_fees
+          total_pending_fees="$(jq '[.data[]? | .pendingFees | tonumber] | add // 0' <<<"$bo_revenue_resp" 2>/dev/null || echo "0")"
+          if [[ -n "${invariant_fee_distributor_delta_expected:-}" ]] && [[ "$invariant_fee_distributor_delta_expected" =~ ^[0-9]+$ ]] && (( invariant_fee_distributor_delta_expected > 0 )); then
+            if (( total_pending_fees >= invariant_fee_distributor_delta_expected )); then
+              log "backoffice: operator-revenue valid (operators=$revenue_count totalPendingFees=$total_pending_fees >= feeDistributorDelta=$invariant_fee_distributor_delta_expected)"
+            else
+              warn "backoffice: operator-revenue totalPendingFees=$total_pending_fees < expected feeDistributorDelta=$invariant_fee_distributor_delta_expected (non-fatal, may reflect prior runs)"
+            fi
+          else
+            log "backoffice: operator-revenue endpoint valid (operators=$revenue_count totalPendingFees=$total_pending_fees)"
+          fi
+        else
+          warn "backoffice: operator-revenue data missing operatorAddress or pendingFeesFormatted (valid=$revenue_all_have_addr/$revenue_count fees=$revenue_all_have_fees/$revenue_count)"
+          bo_data_ok="false"
+        fi
+      else
+        warn "backoffice: operator-revenue returned empty data"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/analytics/operator-revenue returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate operator status endpoint — all operators must be online before chaos tests.
+    local bo_op_status_resp
+    bo_op_status_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/operators/status" 2>/dev/null || true)"
+    if [[ -n "$bo_op_status_resp" ]] && jq -e '.' <<<"$bo_op_status_resp" >/dev/null 2>&1; then
+      local op_count online_count offline_count
+      op_count="$(jq '[.operators[]?] | length' <<<"$bo_op_status_resp" 2>/dev/null || echo "0")"
+      online_count="$(jq '[.operators[]? | select(.online == true)] | length' <<<"$bo_op_status_resp" 2>/dev/null || echo "0")"
+      offline_count="$(jq '[.operators[]? | select(.online == false)] | length' <<<"$bo_op_status_resp" 2>/dev/null || echo "0")"
+      # All operators must have address and endpoint fields.
+      local op_valid_count
+      op_valid_count="$(jq '[.operators[]? | select(.address != null and .address != "" and .endpoint != null and .endpoint != "")] | length' <<<"$bo_op_status_resp" 2>/dev/null || echo "0")"
+      if (( op_count > 0 && op_valid_count == op_count && online_count == op_count )); then
+        log "backoffice: operator-status valid — all operators online (total=$op_count online=$online_count)"
+        # Stash total operator count for operator-down verification later.
+        bo_pre_chaos_operator_count="$op_count"
+      elif (( op_count > 0 && op_valid_count == op_count )); then
+        warn "backoffice: operator-status shows $offline_count/$op_count offline before chaos tests"
+        bo_data_ok="false"
+      else
+        warn "backoffice: operator-status returned operators=$op_count valid=$op_valid_count online=$online_count (expected all valid and online)"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/ops/operators/status returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate service health endpoint — check response structure, verify each
+    # entry has url/healthy/latencyMs fields, and report any unhealthy services.
+    local bo_svc_health_resp
+    bo_svc_health_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/ops/services/health" 2>/dev/null || true)"
+    if [[ -n "$bo_svc_health_resp" ]] && jq -e '.' <<<"$bo_svc_health_resp" >/dev/null 2>&1; then
+      if jq -e '.version == "v1" and (.data | type) == "array"' <<<"$bo_svc_health_resp" >/dev/null 2>&1; then
+        local svc_total svc_healthy svc_unhealthy svc_valid_schema
+        svc_total="$(jq '[.data[]?] | length' <<<"$bo_svc_health_resp" 2>/dev/null || echo "0")"
+        svc_valid_schema="$(jq '[.data[]? | select(.url != null and (.healthy != null) and (.latencyMs != null))] | length' <<<"$bo_svc_health_resp" 2>/dev/null || echo "0")"
+        svc_healthy="$(jq '[.data[]? | select(.healthy == true)] | length' <<<"$bo_svc_health_resp" 2>/dev/null || echo "0")"
+        svc_unhealthy="$(jq '[.data[]? | select(.healthy == false)] | length' <<<"$bo_svc_health_resp" 2>/dev/null || echo "0")"
+        if (( svc_total == 0 )); then
+          log "backoffice: service-health valid (no services configured — empty data array)"
+        elif (( svc_valid_schema == svc_total )); then
+          if (( svc_unhealthy > 0 )); then
+            local unhealthy_urls
+            unhealthy_urls="$(jq -r '[.data[]? | select(.healthy == false) | .url] | join(", ")' <<<"$bo_svc_health_resp" 2>/dev/null || true)"
+            warn "backoffice: service-health reports $svc_unhealthy/$svc_total unhealthy: $unhealthy_urls"
+            bo_data_ok="false"
+          else
+            log "backoffice: service-health valid (services=$svc_total healthy=$svc_healthy)"
+          fi
+        else
+          warn "backoffice: service-health entries missing required fields (valid=$svc_valid_schema/$svc_total)"
+          bo_data_ok="false"
+        fi
+      else
+        warn "backoffice: /api/ops/services/health response missing version or data array"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/ops/services/health returned invalid response"
+      bo_data_ok="false"
+    fi
+
+    # Validate bridges-over-time endpoint — ensure the E2E deposit and
+    # withdrawal are reflected in the daily aggregated counts.
+    local bo_bridges_time_resp
+    bo_bridges_time_resp="$(curl -fsS -H "$bo_auth_header" "${backoffice_url}/api/analytics/bridges-over-time?period=day&days=7" 2>/dev/null || true)"
+    if [[ -n "$bo_bridges_time_resp" ]] && jq -e '.' <<<"$bo_bridges_time_resp" >/dev/null 2>&1; then
+      if jq -e '.version == "v1" and (.data | type) == "array"' <<<"$bo_bridges_time_resp" >/dev/null 2>&1; then
+        local bot_count bot_total_deposits bot_total_withdrawals
+        bot_count="$(jq '[.data[]?] | length' <<<"$bo_bridges_time_resp" 2>/dev/null || echo "0")"
+        bot_total_deposits="$(jq '[.data[]?.depositCount // 0] | add // 0' <<<"$bo_bridges_time_resp" 2>/dev/null || echo "0")"
+        bot_total_withdrawals="$(jq '[.data[]?.withdrawalCount // 0] | add // 0' <<<"$bo_bridges_time_resp" 2>/dev/null || echo "0")"
+        if (( bot_count > 0 && bot_total_deposits >= 1 && bot_total_withdrawals >= 1 )); then
+          log "backoffice: bridges-over-time valid (periods=$bot_count deposits=$bot_total_deposits withdrawals=$bot_total_withdrawals)"
+        elif (( bot_count > 0 )); then
+          warn "backoffice: bridges-over-time missing E2E activity (deposits=$bot_total_deposits withdrawals=$bot_total_withdrawals, expected >=1 each)"
+          bo_data_ok="false"
+        else
+          warn "backoffice: bridges-over-time returned empty data array (expected E2E deposit+withdrawal)"
+          bo_data_ok="false"
+        fi
+      else
+        warn "backoffice: bridges-over-time response missing version or data array"
+        bo_data_ok="false"
+      fi
+    else
+      warn "backoffice: /api/analytics/bridges-over-time returned invalid response"
+      bo_data_ok="false"
+    fi
+
     # [P2] Validate bridge-api lookup endpoints return test data
     if [[ -n "${bridge_api_url:-}" && -n "${bridge_recipient_address:-}" ]]; then
       local lookup_deposits_resp
@@ -7819,6 +7948,77 @@ command_run() {
         log "bridge-api: /v1/withdrawals lookup returned data for requester=$run_withdraw_requester"
       else
         warn "bridge-api: /v1/withdrawals lookup returned no data for requester=$run_withdraw_requester (non-fatal)"
+      fi
+    fi
+
+    # Validate bridge-api /v1/config endpoint — bridgeAddress, baseChainId, feeBps.
+    if [[ -n "${bridge_api_url:-}" ]]; then
+      local config_resp
+      config_resp="$(curl -fsS "${bridge_api_url}/v1/config" 2>/dev/null || true)"
+      if [[ -n "$config_resp" ]] && jq -e '.' <<<"$config_resp" >/dev/null 2>&1; then
+        local config_bridge_addr config_chain_id config_fee_bps
+        config_bridge_addr="$(jq -r '.bridgeAddress // empty' <<<"$config_resp" 2>/dev/null || true)"
+        config_chain_id="$(jq -r '.baseChainId // "0"' <<<"$config_resp" 2>/dev/null || true)"
+        config_fee_bps="$(jq -r '.feeBps // "0"' <<<"$config_resp" 2>/dev/null || true)"
+        if [[ -n "$config_bridge_addr" ]] && (( config_chain_id > 0 )); then
+          # Cross-check feeBps against bridge contract value.
+          if [[ -n "${bridge_fee_bps:-}" ]] && [[ "$config_fee_bps" =~ ^[0-9]+$ ]] && (( config_fee_bps == bridge_fee_bps )); then
+            log "bridge-api: /v1/config valid (bridgeAddress=$config_bridge_addr chainId=$config_chain_id feeBps=$config_fee_bps)"
+          elif [[ "$config_fee_bps" =~ ^[0-9]+$ ]] && (( config_fee_bps > 0 )); then
+            warn "bridge-api: /v1/config feeBps=$config_fee_bps != on-chain bridge_fee_bps=${bridge_fee_bps:-unknown} (non-fatal)"
+          else
+            warn "bridge-api: /v1/config missing or zero feeBps=$config_fee_bps (non-fatal)"
+          fi
+        else
+          warn "bridge-api: /v1/config missing bridgeAddress or baseChainId (non-fatal)"
+        fi
+      else
+        warn "bridge-api: /v1/config returned invalid response (non-fatal)"
+      fi
+    fi
+
+    # Validate bridge-api deposit lookup by txHash
+    if [[ -n "${bridge_api_url:-}" && -n "${lookup_deposits_resp:-}" ]]; then
+      local deposit_tx_hash
+      deposit_tx_hash="$(jq -r '.data[0].txHash // empty' <<<"$lookup_deposits_resp" 2>/dev/null || true)"
+      if [[ -n "$deposit_tx_hash" && "$deposit_tx_hash" != "null" ]]; then
+        local lookup_by_txhash_resp
+        lookup_by_txhash_resp="$(curl -fsS "${bridge_api_url}/v1/deposits?txHash=${deposit_tx_hash}&limit=1" 2>/dev/null || true)"
+        if [[ -n "$lookup_by_txhash_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_by_txhash_resp" >/dev/null 2>&1; then
+          log "bridge-api: /v1/deposits?txHash= lookup returned data"
+        else
+          warn "bridge-api: /v1/deposits?txHash= lookup returned no data (non-fatal)"
+        fi
+      fi
+    fi
+
+    # Validate bridge-api withdrawal lookup by junoTxId
+    if [[ -n "${bridge_api_url:-}" && -n "${lookup_withdrawals_resp:-}" ]]; then
+      local juno_tx_id
+      juno_tx_id="$(jq -r '.data[0].junoTxId // empty' <<<"$lookup_withdrawals_resp" 2>/dev/null || true)"
+      if [[ -n "$juno_tx_id" && "$juno_tx_id" != "null" ]]; then
+        local lookup_by_junotxid_resp
+        lookup_by_junotxid_resp="$(curl -fsS "${bridge_api_url}/v1/withdrawals?junoTxId=${juno_tx_id}&limit=1" 2>/dev/null || true)"
+        if [[ -n "$lookup_by_junotxid_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_by_junotxid_resp" >/dev/null 2>&1; then
+          log "bridge-api: /v1/withdrawals?junoTxId= lookup returned data"
+        else
+          warn "bridge-api: /v1/withdrawals?junoTxId= lookup returned no data (non-fatal)"
+        fi
+      fi
+    fi
+
+    # Validate bridge-api withdrawal lookup by baseTxHash
+    if [[ -n "${bridge_api_url:-}" && -n "${lookup_withdrawals_resp:-}" ]]; then
+      local base_tx_hash
+      base_tx_hash="$(jq -r '.data[0].baseTxHash // empty' <<<"$lookup_withdrawals_resp" 2>/dev/null || true)"
+      if [[ -n "$base_tx_hash" && "$base_tx_hash" != "null" ]]; then
+        local lookup_by_basetxhash_resp
+        lookup_by_basetxhash_resp="$(curl -fsS "${bridge_api_url}/v1/withdrawals?baseTxHash=${base_tx_hash}&limit=1" 2>/dev/null || true)"
+        if [[ -n "$lookup_by_basetxhash_resp" ]] && jq -e '.data | length > 0' <<<"$lookup_by_basetxhash_resp" >/dev/null 2>&1; then
+          log "bridge-api: /v1/withdrawals?baseTxHash= lookup returned data"
+        else
+          warn "bridge-api: /v1/withdrawals?baseTxHash= lookup returned no data (non-fatal)"
+        fi
       fi
     fi
 
@@ -7951,6 +8151,27 @@ command_run() {
     elif (( target_down_count == 2 )); then
       operator_down_2_signature_count="$scenario_signature_count"
     fi
+
+    # Verify backoffice /api/ops/operators/status reflects the downed operators.
+    if [[ -n "${backoffice_url:-}" && -n "${backoffice_auth_token:-}" && "$bo_pre_chaos_operator_count" != "0" ]]; then
+      local chaos_op_status_resp chaos_online chaos_offline
+      # Allow up to 10s for the backoffice to detect the down operators via TLS probe timeout.
+      sleep 6
+      chaos_op_status_resp="$(curl -fsS -H "Authorization: Bearer ${backoffice_auth_token}" "${backoffice_url}/api/ops/operators/status" 2>/dev/null || true)"
+      if [[ -n "$chaos_op_status_resp" ]] && jq -e '.' <<<"$chaos_op_status_resp" >/dev/null 2>&1; then
+        chaos_online="$(jq '[.operators[]? | select(.online == true)] | length' <<<"$chaos_op_status_resp" 2>/dev/null || echo "0")"
+        chaos_offline="$(jq '[.operators[]? | select(.online == false)] | length' <<<"$chaos_op_status_resp" 2>/dev/null || echo "0")"
+        local expected_online=$(( bo_pre_chaos_operator_count - target_down_count ))
+        if (( chaos_offline >= target_down_count )); then
+          log "backoffice: operator-status during operator-down-$target_down_count correct (online=$chaos_online offline=$chaos_offline expected_offline>=$target_down_count)"
+        else
+          warn "backoffice: operator-status during operator-down-$target_down_count shows offline=$chaos_offline (expected >=$target_down_count) — TLS probe may not have timed out yet (non-fatal)"
+        fi
+      else
+        warn "backoffice: operator-status unreachable during operator-down-$target_down_count (non-fatal)"
+      fi
+    fi
+
     return 0
   }
 

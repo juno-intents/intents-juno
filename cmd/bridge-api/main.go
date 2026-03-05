@@ -34,6 +34,7 @@ func main() {
 		refundWindowSeconds = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
 		minDepositAmount    = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
 		minWithdrawAmount   = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
+		feeBps              = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
 
 		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
@@ -202,6 +203,7 @@ func main() {
 		RefundWindowSeconds:     *refundWindowSeconds,
 		MinDepositAmount:        *minDepositAmount,
 		MinWithdrawAmount:       *minWithdrawAmount,
+		FeeBps:                  uint32(*feeBps),
 		ActionService:           actionSvc,
 		RateLimitPerIPPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:          *rateLimitBurst,
