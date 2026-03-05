@@ -6688,8 +6688,9 @@ command_run() {
     for _arg in "${bo_args[@]:-}"; do [[ "$_arg" == "--service-urls" ]] && bo_has_svc_urls="true"; done
     if [[ "$bo_has_svc_urls" == "false" ]]; then
       # Build service-urls CSV: in local mode all five services run on the runner;
-      # in distributed mode only base-relayer and bridge-api are reachable.
-      local svc_urls_csv="http://127.0.0.1:${base_relayer_port}/healthz"
+      # in distributed mode only base-relayer and bridge-api are reachable from
+      # the runner. Use base_relayer_url which resolves to the correct host.
+      local svc_urls_csv="${base_relayer_url}/healthz"
       if [[ "$relayer_runtime_mode" != "distributed" ]]; then
         svc_urls_csv+=",http://127.0.0.1:${deposit_relayer_health_port}/healthz"
         svc_urls_csv+=",http://127.0.0.1:${withdraw_coordinator_health_port}/healthz"
