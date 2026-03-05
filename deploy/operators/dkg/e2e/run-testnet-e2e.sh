@@ -5640,8 +5640,10 @@ command_run() {
       [[ -n "$bo_op_endpoints_csv" ]] && bo_args+=(--operator-endpoints "$bo_op_endpoints_csv")
     fi
 
-    # Register bridge-api healthz as a monitored service endpoint.
-    bo_args+=(--service-urls "${bridge_api_url}/healthz")
+    # Register bridge-api healthz as a monitored service endpoint (only if bridge-api URL is known).
+    if [[ -n "${bridge_api_url:-}" ]]; then
+      bo_args+=(--service-urls "${bridge_api_url}/healthz")
+    fi
 
     log "restarting backoffice with bridge=$deployed_bridge_address wjuno=$deployed_wjuno_address"
     pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
@@ -6668,6 +6670,21 @@ command_run() {
       if ! wait_for_condition 60 2 "bridge-api health" check_bridge_api_health; then
         relayer_status=1
       fi
+    fi
+  fi
+
+  # ── Restart backoffice with --service-urls now that bridge-api is up ─────
+  if (( relayer_status == 0 )) && [[ "${backoffice_url:-}" != "" ]] && [[ -n "${bridge_api_url:-}" ]]; then
+    # Append --service-urls if not already present.
+    local bo_has_svc_urls="false"
+    for _arg in "${bo_args[@]:-}"; do [[ "$_arg" == "--service-urls" ]] && bo_has_svc_urls="true"; done
+    if [[ "$bo_has_svc_urls" == "false" ]]; then
+      bo_args+=(--service-urls "${bridge_api_url}/healthz")
+      log "restarting backoffice with --service-urls ${bridge_api_url}/healthz"
+      pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
+      sleep 1
+      nohup "$HOME/bin/backoffice" "${bo_args[@]}" > "$HOME/backoffice.log" 2>&1 &
+      sleep 2
     fi
   fi
 
