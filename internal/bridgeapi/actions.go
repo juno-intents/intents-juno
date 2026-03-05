@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/depositevent"
-	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 var ErrActionUnavailable = errors.New("bridgeapi: action unavailable")
@@ -21,14 +20,8 @@ type DepositSubmitInput struct {
 	ProofWitnessItem []byte
 }
 
-type WithdrawalRequestInput struct {
-	Amount      uint64
-	RecipientUA []byte
-}
-
 type ActionService interface {
 	SubmitDeposit(ctx context.Context, req DepositSubmitInput) (depositevent.Payload, error)
-	RequestWithdrawal(ctx context.Context, req WithdrawalRequestInput) (withdrawrequest.Payload, error)
 }
 
 type queuePublisher interface {
@@ -36,13 +29,10 @@ type queuePublisher interface {
 }
 
 type QueueActionServiceConfig struct {
-	BaseChainID       uint32
-	BridgeAddr        common.Address
-	DepositTopic      string
-	WithdrawTopic     string
-	Producer          queuePublisher
-	WithdrawCfg       withdrawrequest.Config
-	RequestWithdrawFn func(context.Context, withdrawrequest.Config, withdrawrequest.Request) (withdrawrequest.Payload, error)
+	BaseChainID  uint32
+	BridgeAddr   common.Address
+	DepositTopic string
+	Producer     queuePublisher
 }
 
 type QueueActionService struct {
@@ -59,14 +49,8 @@ func NewQueueActionService(cfg QueueActionServiceConfig) (*QueueActionService, e
 	if strings.TrimSpace(cfg.DepositTopic) == "" {
 		return nil, errors.New("deposit topic is required")
 	}
-	if strings.TrimSpace(cfg.WithdrawTopic) == "" {
-		return nil, errors.New("withdraw topic is required")
-	}
 	if cfg.Producer == nil {
 		return nil, errors.New("producer is required")
-	}
-	if cfg.RequestWithdrawFn == nil {
-		cfg.RequestWithdrawFn = withdrawrequest.RequestWithdrawal
 	}
 	return &QueueActionService{cfg: cfg}, nil
 }
@@ -103,27 +87,3 @@ func (s *QueueActionService) SubmitDeposit(ctx context.Context, req DepositSubmi
 	return payload, nil
 }
 
-func (s *QueueActionService) RequestWithdrawal(ctx context.Context, req WithdrawalRequestInput) (withdrawrequest.Payload, error) {
-	if req.Amount == 0 {
-		return withdrawrequest.Payload{}, errors.New("amount must be > 0")
-	}
-	if len(req.RecipientUA) == 0 {
-		return withdrawrequest.Payload{}, errors.New("recipient ua is required")
-	}
-
-	payload, err := s.cfg.RequestWithdrawFn(ctx, s.cfg.WithdrawCfg, withdrawrequest.Request{
-		Amount:      req.Amount,
-		RecipientUA: req.RecipientUA,
-	})
-	if err != nil {
-		return withdrawrequest.Payload{}, err
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		return withdrawrequest.Payload{}, fmt.Errorf("marshal withdraw payload: %w", err)
-	}
-	if err := s.cfg.Producer.Publish(ctx, s.cfg.WithdrawTopic, encoded); err != nil {
-		return withdrawrequest.Payload{}, fmt.Errorf("publish withdraw payload: %w", err)
-	}
-	return payload, nil
-}

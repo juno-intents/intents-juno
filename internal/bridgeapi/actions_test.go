@@ -9,7 +9,6 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
-	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 type fakePublisher struct {
@@ -32,11 +31,10 @@ func TestQueueActionService_SubmitDeposit(t *testing.T) {
 	copy(witness[1092:1124], cmBytes)
 	pub := &fakePublisher{}
 	svc, err := NewQueueActionService(QueueActionServiceConfig{
-		BaseChainID:   84532,
-		BridgeAddr:    common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		DepositTopic:  "deposits.event.v1",
-		WithdrawTopic: "withdrawals.requested.v1",
-		Producer:      pub,
+		BaseChainID:  84532,
+		BridgeAddr:   common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		DepositTopic: "deposits.event.v1",
+		Producer:     pub,
 	})
 	if err != nil {
 		t.Fatalf("NewQueueActionService: %v", err)
@@ -62,46 +60,3 @@ func TestQueueActionService_SubmitDeposit(t *testing.T) {
 	}
 }
 
-func TestQueueActionService_RequestWithdrawalUsesInjectedFn(t *testing.T) {
-	t.Parallel()
-
-	pub := &fakePublisher{}
-	svc, err := NewQueueActionService(QueueActionServiceConfig{
-		BaseChainID:   84532,
-		BridgeAddr:    common.HexToAddress("0x1111111111111111111111111111111111111111"),
-		DepositTopic:  "deposits.event.v1",
-		WithdrawTopic: "withdrawals.requested.v1",
-		Producer:      pub,
-		RequestWithdrawFn: func(_ context.Context, _ withdrawrequest.Config, req withdrawrequest.Request) (withdrawrequest.Payload, error) {
-			return withdrawrequest.Payload{
-				Version:      "withdrawals.requested.v1",
-				WithdrawalID: "0x" + strings.Repeat("11", 32),
-				Requester:    "0x" + strings.Repeat("22", 20),
-				Amount:       req.Amount,
-				RecipientUA:  "0x" + hex.EncodeToString(req.RecipientUA),
-				Expiry:       123,
-				FeeBps:       50,
-			}, nil
-		},
-	})
-	if err != nil {
-		t.Fatalf("NewQueueActionService: %v", err)
-	}
-
-	payload, err := svc.RequestWithdrawal(context.Background(), WithdrawalRequestInput{
-		Amount:      1000,
-		RecipientUA: []byte{1, 2, 3},
-	})
-	if err != nil {
-		t.Fatalf("RequestWithdrawal: %v", err)
-	}
-	if payload.WithdrawalID == "" {
-		t.Fatalf("missing withdrawal id")
-	}
-	if pub.topic != "withdrawals.requested.v1" {
-		t.Fatalf("topic: got=%s", pub.topic)
-	}
-	if len(pub.payload) == 0 {
-		t.Fatalf("expected published payload")
-	}
-}

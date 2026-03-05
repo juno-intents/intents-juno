@@ -17,7 +17,6 @@ import (
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/depositevent"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
-	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 type stubDepositReader struct {
@@ -72,22 +71,14 @@ func (s *stubWithdrawalLister) GetByBaseTxHash(_ context.Context, _ string) ([]W
 }
 
 type stubActionService struct {
-	depositReq   DepositSubmitInput
-	depositResp  depositevent.Payload
-	depositErr   error
-	withdrawReq  WithdrawalRequestInput
-	withdrawResp withdrawrequest.Payload
-	withdrawErr  error
+	depositReq  DepositSubmitInput
+	depositResp depositevent.Payload
+	depositErr  error
 }
 
 func (s *stubActionService) SubmitDeposit(_ context.Context, req DepositSubmitInput) (depositevent.Payload, error) {
 	s.depositReq = req
 	return s.depositResp, s.depositErr
-}
-
-func (s *stubActionService) RequestWithdrawal(_ context.Context, req WithdrawalRequestInput) (withdrawrequest.Payload, error) {
-	s.withdrawReq = req
-	return s.withdrawResp, s.withdrawErr
 }
 
 func TestHandler_Config(t *testing.T) {
@@ -533,78 +524,6 @@ func TestHandler_DepositSubmit_InvalidPayload(t *testing.T) {
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/deposits/submit", strings.NewReader(`{"baseRecipient":"0x1","amount":"x","nonce":"1","proofWitnessItem":"0x00"}`))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusBadRequest, rec.Body.String())
-	}
-}
-
-func TestHandler_WithdrawalRequest(t *testing.T) {
-	t.Parallel()
-
-	actionSvc := &stubActionService{
-		withdrawResp: withdrawrequest.Payload{
-			Version:      "withdrawals.requested.v1",
-			WithdrawalID: "0x" + strings.Repeat("22", 32),
-			Requester:    "0x" + strings.Repeat("33", 20),
-			Amount:       1000,
-			RecipientUA:  "0x" + strings.Repeat("44", 43),
-			Expiry:       12345,
-			FeeBps:       50,
-		},
-	}
-	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
-		NonceFn: func() (uint64, error) {
-			return 1, nil
-		},
-		ActionService: actionSvc,
-	}, &stubDepositReader{}, &stubWithdrawalReader{})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
-
-	reqBody := map[string]any{
-		"amount":                 "1000",
-		"recipientRawAddressHex": strings.Repeat("aa", 43),
-	}
-	raw, _ := json.Marshal(reqBody)
-	req := httptest.NewRequest(http.MethodPost, "/v1/withdrawals/request", bytes.NewReader(raw))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
-	}
-	if actionSvc.withdrawReq.Amount != 1000 {
-		t.Fatalf("amount: got=%d", actionSvc.withdrawReq.Amount)
-	}
-	if len(actionSvc.withdrawReq.RecipientUA) != 43 {
-		t.Fatalf("recipient length: got=%d", len(actionSvc.withdrawReq.RecipientUA))
-	}
-}
-
-func TestHandler_WithdrawalRequest_InvalidPayload(t *testing.T) {
-	t.Parallel()
-
-	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
-		NonceFn: func() (uint64, error) {
-			return 1, nil
-		},
-		ActionService: &stubActionService{},
-	}, &stubDepositReader{}, &stubWithdrawalReader{})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/v1/withdrawals/request", strings.NewReader(`{"amount":"0","recipientRawAddressHex":"00"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusBadRequest {

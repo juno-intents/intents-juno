@@ -20,7 +20,6 @@ import (
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/memo"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
-	"github.com/juno-intents/intents-juno/internal/withdrawrequest"
 )
 
 var ErrInvalidConfig = errors.New("bridgeapi: invalid config")
@@ -132,7 +131,6 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /v1/deposit-memo", h.handleDepositMemo)
 	mux.HandleFunc("POST /v1/deposits/submit", h.handleDepositSubmit)
 	mux.HandleFunc("GET /v1/status/deposit/{depositId}", h.handleDepositStatus)
-	mux.HandleFunc("POST /v1/withdrawals/request", h.handleWithdrawalRequest)
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
 	mux.HandleFunc("GET /v1/deposits", h.handleListDeposits)
 	mux.HandleFunc("GET /v1/withdrawals", h.handleListWithdrawals)
@@ -389,74 +387,6 @@ func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
 		"amount":        strconv.FormatUint(job.Deposit.Amount, 10),
 		"baseRecipient": "0x" + hex.EncodeToString(job.Deposit.BaseRecipient[:]),
 		"txHash":        txHash,
-	})
-}
-
-type withdrawalRequestBody struct {
-	Amount                 string `json:"amount"`
-	RecipientRawAddressHex string `json:"recipientRawAddressHex"`
-}
-
-func (h *handler) handleWithdrawalRequest(w http.ResponseWriter, r *http.Request) {
-	if h.actions == nil {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
-			"version": "v1",
-			"error":   "withdraw_request_unavailable",
-		})
-		return
-	}
-
-	body, ok := decodeJSONBody[withdrawalRequestBody](w, r)
-	if !ok {
-		return
-	}
-	amount, err := parseUint64BodyValue(body.Amount)
-	if err != nil || amount == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"version": "v1",
-			"error":   "invalid_amount",
-		})
-		return
-	}
-	if h.cfg.MinWithdrawAmount > 0 && amount < h.cfg.MinWithdrawAmount {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"version":           "v1",
-			"error":             "below_minimum_amount",
-			"minWithdrawAmount": strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
-		})
-		return
-	}
-	recipientUA, err := withdrawrequest.ParseFixedHex(body.RecipientRawAddressHex, 43)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]any{
-			"version": "v1",
-			"error":   "invalid_recipient_raw_address_hex",
-		})
-		return
-	}
-	payload, err := h.actions.RequestWithdrawal(r.Context(), WithdrawalRequestInput{
-		Amount:      amount,
-		RecipientUA: recipientUA,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]any{
-			"version": "v1",
-			"error":   "request_failed",
-		})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{
-		"version":       "v1",
-		"queued":        true,
-		"withdrawalId":  payload.WithdrawalID,
-		"requester":     payload.Requester,
-		"amount":        strconv.FormatUint(payload.Amount, 10),
-		"recipientUA":   payload.RecipientUA,
-		"expiry":        strconv.FormatUint(payload.Expiry, 10),
-		"feeBps":        payload.FeeBps,
-		"approveTxHash": payload.ApproveTxHash,
-		"requestTxHash": payload.RequestTxHash,
-		"event":         payload,
 	})
 }
 
