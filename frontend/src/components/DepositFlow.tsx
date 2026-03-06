@@ -66,7 +66,7 @@ export default function DepositFlow() {
   const cliAmount = amount || '10.0'
 
   const cliCommand = memo
-    ? `FROM=$(junocash-cli -testnet z_listaddresses | jq -r '.[0]')
+    ? `FROM=$(junocash-cli -testnet listaddresses | jq -r '[.[].unified[]?.address // empty] | first')
 TO="${memo.oWalletUA}"
 AMOUNT=${cliAmount}
 MEMO="${compactMemo}"
