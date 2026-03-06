@@ -17,9 +17,9 @@ export default function StatusTracker({ steps, current }: Props) {
         ))}
       </div>
       <div className="progress-labels">
-        {steps.map((s) => (
-          <span key={s}>{s}</span>
-        ))}
+        <span>{steps[0]}</span>
+        {idx > 0 && idx < steps.length - 1 && <span style={{ color: 'var(--accent)' }}>{steps[idx]}</span>}
+        <span>{steps[steps.length - 1]}</span>
       </div>
     </div>
   )

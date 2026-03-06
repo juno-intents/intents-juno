@@ -7,6 +7,7 @@ export interface BridgeConfig {
   refundWindowSeconds: number
   minDepositAmount: string
   minWithdrawAmount: string
+  feeBps: number
 }
 
 export interface DepositMemo {

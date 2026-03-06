@@ -1,8 +1,17 @@
 import { useState } from 'react'
 import { useAccount } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
+import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
 import RecentActivity from './RecentActivity'
+
+function formatJuno(zatoshi: string): string {
+  try {
+    return formatUnits(BigInt(zatoshi), 8)
+  } catch {
+    return zatoshi
+  }
+}
 
 function detectSearchType(q: string): 'address' | 'txhash' | 'unknown' {
   const clean = q.trim().toLowerCase()
@@ -11,6 +20,12 @@ function detectSearchType(q: string): 'address' | 'txhash' | 'unknown' {
     if (clean.length === 66) return 'txhash'
   }
   return 'unknown'
+}
+
+function statusColor(state: string): string {
+  if (state === 'finalized') return 'green'
+  if (state === 'pending' || state === 'unknown') return 'dim'
+  return 'orange'
 }
 
 export default function Explorer() {
@@ -63,15 +78,19 @@ export default function Explorer() {
       {searchTerm && (
         <>
           {deposits.length > 0 && (
-            <div className="card">
-              <h3>Deposits ({depositResults?.total ?? 0})</h3>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, fontWeight: 500 }}>
+                DEPOSITS ({depositResults?.total ?? 0})
+              </div>
               {deposits.map((d) => (
-                <div className="result-item" key={d.depositId}>
-                  <div className="id">{d.depositId}</div>
-                  <div className="meta">
-                    <span className={`status-badge ${d.state === 'finalized' ? 'green' : 'orange'}`}>{d.state}</span>
-                    {' '}{d.amount} zatoshi
-                    {d.txHash && <span> &middot; tx: {d.txHash.slice(0, 10)}...</span>}
+                <div className="tx-item" key={d.depositId}>
+                  <div className="tx-left">
+                    <div className="tx-type">Deposit</div>
+                    <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
+                  </div>
+                  <div className="tx-right">
+                    <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
+                    <span className={`status-pill-sm ${statusColor(d.state)}`}>{d.state}</span>
                   </div>
                 </div>
               ))}
@@ -79,15 +98,19 @@ export default function Explorer() {
           )}
 
           {withdrawals.length > 0 && (
-            <div className="card">
-              <h3>Withdrawals ({withdrawResults?.total ?? 0})</h3>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, fontWeight: 500 }}>
+                WITHDRAWALS ({withdrawResults?.total ?? 0})
+              </div>
               {withdrawals.map((w) => (
-                <div className="result-item" key={w.withdrawalId}>
-                  <div className="id">{w.withdrawalId}</div>
-                  <div className="meta">
-                    <span className={`status-badge ${w.state === 'finalized' ? 'green' : 'orange'}`}>{w.state}</span>
-                    {' '}{w.amount} zatoshi
-                    {w.junoTxId && <span> &middot; juno: {w.junoTxId.slice(0, 10)}...</span>}
+                <div className="tx-item" key={w.withdrawalId}>
+                  <div className="tx-left">
+                    <div className="tx-type">Withdrawal</div>
+                    <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
+                  </div>
+                  <div className="tx-right">
+                    <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
+                    <span className={`status-pill-sm ${statusColor(w.state)}`}>{w.state}</span>
                   </div>
                 </div>
               ))}
@@ -96,8 +119,7 @@ export default function Explorer() {
 
           {deposits.length === 0 && withdrawals.length === 0 && (
             <div className="card">
-              <h3>No results</h3>
-              <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+              <div className="empty-state">
                 No deposits or withdrawals found for this search.
               </div>
             </div>
@@ -106,6 +128,14 @@ export default function Explorer() {
       )}
 
       {!searchTerm && address && <RecentActivity address={address} />}
+
+      {!searchTerm && !address && (
+        <div className="card">
+          <div className="empty-state">
+            Connect your wallet to see recent activity, or search by address / tx hash.
+          </div>
+        </div>
+      )}
     </div>
   )
 }

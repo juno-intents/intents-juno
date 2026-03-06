@@ -1,8 +1,23 @@
 import { useQuery } from '@tanstack/react-query'
+import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
 
 interface Props {
   address: string
+}
+
+function formatJuno(zatoshi: string): string {
+  try {
+    return formatUnits(BigInt(zatoshi), 8)
+  } catch {
+    return zatoshi
+  }
+}
+
+function statusColor(state: string): string {
+  if (state === 'finalized') return 'green'
+  if (state === 'pending' || state === 'unknown') return 'dim'
+  return 'orange'
 }
 
 export default function RecentActivity({ address }: Props) {
@@ -26,8 +41,7 @@ export default function RecentActivity({ address }: Props) {
   if (deps.length === 0 && wds.length === 0) {
     return (
       <div className="card">
-        <h3>Recent Activity</h3>
-        <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>
+        <div className="empty-state">
           No recent activity for connected wallet.
         </div>
       </div>
@@ -37,28 +51,38 @@ export default function RecentActivity({ address }: Props) {
   return (
     <div>
       {deps.length > 0 && (
-        <div className="card">
-          <h3>My Deposits</h3>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, fontWeight: 500 }}>
+            MY DEPOSITS
+          </div>
           {deps.map((d) => (
-            <div className="result-item" key={d.depositId}>
-              <div className="id">{d.depositId}</div>
-              <div className="meta">
-                <span className={`status-badge ${d.state === 'finalized' ? 'green' : 'orange'}`}>{d.state}</span>
-                {' '}{d.amount} zatoshi
+            <div className="tx-item" key={d.depositId}>
+              <div className="tx-left">
+                <div className="tx-type">Deposit</div>
+                <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
+              </div>
+              <div className="tx-right">
+                <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
+                <span className={`status-pill-sm ${statusColor(d.state)}`}>{d.state}</span>
               </div>
             </div>
           ))}
         </div>
       )}
       {wds.length > 0 && (
-        <div className="card">
-          <h3>My Withdrawals</h3>
+        <div style={{ marginBottom: 16 }}>
+          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 8, fontWeight: 500 }}>
+            MY WITHDRAWALS
+          </div>
           {wds.map((w) => (
-            <div className="result-item" key={w.withdrawalId}>
-              <div className="id">{w.withdrawalId}</div>
-              <div className="meta">
-                <span className={`status-badge ${w.state === 'finalized' ? 'green' : 'orange'}`}>{w.state}</span>
-                {' '}{w.amount} zatoshi
+            <div className="tx-item" key={w.withdrawalId}>
+              <div className="tx-left">
+                <div className="tx-type">Withdrawal</div>
+                <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
+              </div>
+              <div className="tx-right">
+                <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
+                <span className={`status-pill-sm ${statusColor(w.state)}`}>{w.state}</span>
               </div>
             </div>
           ))}

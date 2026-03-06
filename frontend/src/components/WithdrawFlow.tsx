@@ -8,6 +8,14 @@ import StatusTracker from './StatusTracker'
 
 const WITHDRAW_STEPS = ['requested', 'planned', 'signing', 'signed', 'broadcasted', 'confirmed', 'finalizing', 'finalized']
 
+function formatJuno(zatoshi: string): string {
+  try {
+    return formatUnits(BigInt(zatoshi), 8)
+  } catch {
+    return zatoshi
+  }
+}
+
 export default function WithdrawFlow() {
   const { address } = useAccount()
   const [amount, setAmount] = useState('')
@@ -61,7 +69,6 @@ export default function WithdrawFlow() {
 
   const { isSuccess: requestConfirmed } = useWaitForTransactionReceipt({ hash: requestTxHash })
 
-  // Once on-chain request is confirmed, move to tracking
   if (step === 'request' && requestConfirmed && requestTxHash && !withdrawalId) {
     setWithdrawalId(requestTxHash)
     setStep('tracking')
@@ -69,22 +76,57 @@ export default function WithdrawFlow() {
 
   return (
     <div>
-      <div className="card">
-        <h3>Withdraw: Base &rarr; Juno</h3>
-        {address && balance !== undefined && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
-            wJUNO Balance: {formatUnits(balance as bigint, 8)} JUNO
+      <div className="network-card">
+        <div className="network-endpoint">
+          <div className="network-icon">B</div>
+          <div>
+            <div className="network-name">Base</div>
+            <div className="network-label">Source</div>
           </div>
-        )}
-        <div className="field">
-          <label className="label">Amount (JUNO)</label>
+        </div>
+        <div className="network-arrow">&rarr;</div>
+        <div className="network-endpoint">
+          <div className="network-icon">J</div>
+          <div>
+            <div className="network-name">Juno</div>
+            <div className="network-label">Destination</div>
+          </div>
+        </div>
+      </div>
+
+      <div className="asset-card">
+        <div className="asset-header">
+          <span className="asset-label">Amount</span>
+          {address && balance !== undefined && (
+            <span className="asset-balance">
+              Balance: {formatUnits(balance as bigint, 8)} JUNO
+            </span>
+          )}
+        </div>
+        <div className="asset-input-row">
           <input
             type="number"
-            placeholder="0.0"
+            placeholder="0.00"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
+          <span className="asset-ticker">JUNO</span>
         </div>
+        {cfg && cfg.feeBps > 0 && (
+          <div className="fee-line">
+            <span>Bridge Fee</span>
+            <span>{(cfg.feeBps / 100).toFixed(2)}%</span>
+          </div>
+        )}
+        {cfg && cfg.minWithdrawAmount !== '0' && (
+          <div className="fee-line">
+            <span>Min Withdrawal</span>
+            <span>{formatJuno(cfg.minWithdrawAmount)} JUNO</span>
+          </div>
+        )}
+      </div>
+
+      <div className="card">
         <div className="field">
           <label className="label">Juno Recipient Address</label>
           <input
