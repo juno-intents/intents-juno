@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
@@ -16,7 +15,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeapi"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
-	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 )
 
@@ -42,10 +40,6 @@ func main() {
 
 		memoCacheTTL        = flag.Duration("memo-cache-ttl", 30*time.Second, "TTL for deposit memo response cache")
 		memoCacheMaxEntries = flag.Int("memo-cache-max-entries", 10000, "maximum cached deposit memo responses")
-
-		queueDriver       = flag.String("queue-driver", queue.DriverKafka, "queue driver for submit endpoints (kafka|stdio)")
-		queueBrokers      = flag.String("queue-brokers", "", "queue brokers (comma-separated); empty disables write endpoints")
-		depositEventTopic = flag.String("deposit-event-topic", "deposits.event.v1", "queue topic for deposit submit events")
 
 		readHeaderTimeout = flag.Duration("read-header-timeout", 5*time.Second, "http.Server ReadHeaderTimeout")
 		readTimeout       = flag.Duration("read-timeout", 10*time.Second, "http.Server ReadTimeout")
@@ -136,31 +130,6 @@ func main() {
 		os.Exit(2)
 	}
 
-	var actionSvc bridgeapi.ActionService
-	if strings.TrimSpace(*queueBrokers) != "" {
-		producer, producerErr := queue.NewProducer(queue.ProducerConfig{
-			Driver:  *queueDriver,
-			Brokers: queue.SplitCommaList(*queueBrokers),
-		})
-		if producerErr != nil {
-			log.Error("init queue producer", "err", producerErr)
-			os.Exit(2)
-		}
-		defer producer.Close()
-
-		actionSvc, err = bridgeapi.NewQueueActionService(bridgeapi.QueueActionServiceConfig{
-			BaseChainID:  uint32(*baseChainID),
-			BridgeAddr:   common.HexToAddress(*bridgeAddr),
-			DepositTopic: *depositEventTopic,
-			Producer:     producer,
-		})
-		if err != nil {
-			log.Error("init action service", "err", err)
-			os.Exit(2)
-		}
-		log.Info("bridge-api write endpoints enabled", "queueDriver", *queueDriver, "depositTopic", *depositEventTopic)
-	}
-
 	var wjunoAddress common.Address
 	if *wjunoAddr != "" {
 		wjunoAddress = common.HexToAddress(*wjunoAddr)
@@ -175,7 +144,6 @@ func main() {
 		MinDepositAmount:        *minDepositAmount,
 		MinWithdrawAmount:       *minWithdrawAmount,
 		FeeBps:                  uint32(*feeBps),
-		ActionService:           actionSvc,
 		RateLimitPerIPPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:          *rateLimitBurst,
 		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,
