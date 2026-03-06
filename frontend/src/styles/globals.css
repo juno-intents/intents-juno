@@ -502,6 +502,39 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .copy-btn:hover { background: var(--accent); color: white; }
 
+/* CLI command block */
+.cli-block {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.cli-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.cli-code {
+  padding: 14px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--text);
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin: 0;
+}
+
 .empty-state {
   text-align: center;
   padding: 32px 16px;

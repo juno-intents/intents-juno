@@ -15,6 +15,28 @@ function formatJuno(zatoshi: string): string {
   }
 }
 
+// The deposit memo is 512 bytes but only the first 68 bytes contain data;
+// bytes 68-511 are zero padding. Zcash/Juno nodes auto-pad short memos to
+// 512 bytes, so we can send just the compact form (136 hex chars) instead
+// of the full 1024 hex chars.  This avoids copy-paste errors.
+function compactMemoHex(hex: string): string {
+  return hex.slice(0, 136)
+}
+
+function CopyButton({ text, label }: { text: string; label?: string }) {
+  const [copied, setCopied] = useState(false)
+  const handleCopy = () => {
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+  return (
+    <button className="copy-btn" onClick={handleCopy}>
+      {copied ? 'Copied!' : (label ?? 'Copy')}
+    </button>
+  )
+}
+
 export default function DepositFlow() {
   const { address } = useAccount()
   const [recipient, setRecipient] = useState('')
@@ -38,6 +60,12 @@ export default function DepositFlow() {
     refetch()
     setGenerated(true)
   }
+
+  const compactMemo = memo ? compactMemoHex(memo.memoHex) : ''
+
+  const cliCommand = memo
+    ? `junocash-cli -testnet z_sendmany "YOUR_JUNO_ADDRESS" '[{"address":"${memo.oWalletUA}","amount":AMOUNT,"memo":"${compactMemo}"}]'`
+    : ''
 
   return (
     <div>
@@ -70,47 +98,68 @@ export default function DepositFlow() {
           />
         </div>
         {cfg && cfg.minDepositAmount !== '0' && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
-            Min deposit: {formatJuno(cfg.minDepositAmount)} JUNO
+          <div className="fee-line" style={{ marginTop: 0 }}>
+            <span>Min deposit</span>
+            <span>{formatJuno(cfg.minDepositAmount)} JUNO</span>
           </div>
         )}
         {cfg && cfg.feeBps > 0 && (
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginBottom: 12 }}>
-            Bridge fee: {(cfg.feeBps / 100).toFixed(2)}%
+          <div className="fee-line" style={{ marginTop: 0 }}>
+            <span>Bridge fee</span>
+            <span>{(cfg.feeBps / 100).toFixed(2)}%</span>
           </div>
         )}
         <button className="primary" onClick={handleGenerate} disabled={!effectiveRecipient || isLoading}>
-          {isLoading ? 'Generating...' : 'Generate Deposit Address'}
+          {isLoading ? 'Generating...' : 'Generate Deposit Instructions'}
         </button>
       </div>
 
       {generated && memo && (
-        <div className="card">
-          <h3>Send JUNO to this address</h3>
-          <div className="field">
-            <label className="label">oWallet Unified Address</label>
-            <div className="copy-field">
-              <span style={{ flex: 1 }}>{memo.oWalletUA}</span>
-              <button className="copy-btn" onClick={() => navigator.clipboard.writeText(memo.oWalletUA)}>Copy</button>
+        <>
+          <div className="card">
+            <h3>Step 1 &mdash; Send JUNO via CLI</h3>
+            <p style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>
+              Copy the command below and replace <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> with
+              your shielded address and <code style={{ color: 'var(--accent)' }}>AMOUNT</code> with the JUNO amount to send.
+            </p>
+            <div className="cli-block">
+              <div className="cli-header">
+                <span>junocash-cli</span>
+                <CopyButton text={cliCommand} label="Copy command" />
+              </div>
+              <pre className="cli-code">{cliCommand}</pre>
             </div>
-          </div>
-          <div className="field">
-            <label className="label">Memo (CRITICAL)</label>
-            <div className="copy-field">
-              <span style={{ flex: 1 }}>{memo.memoHex}</span>
-              <button className="copy-btn" onClick={() => navigator.clipboard.writeText(memo.memoHex)}>Copy</button>
-            </div>
-          </div>
-          <div className="warning-box">
-            You MUST include the memo above in your Juno transaction. Without it, your deposit cannot be processed and funds may be lost.
           </div>
 
-          <h3 style={{ marginTop: 16 }}>Track Status</h3>
-          <StatusTracker steps={DEPOSIT_STEPS} current="pending" />
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
-            Waiting for Juno transaction...
+          <div className="card">
+            <h3>Step 2 &mdash; Or send manually</h3>
+            <div className="field">
+              <label className="label">Destination Address</label>
+              <div className="copy-field">
+                <span style={{ flex: 1 }}>{memo.oWalletUA}</span>
+                <CopyButton text={memo.oWalletUA} />
+              </div>
+            </div>
+            <div className="field">
+              <label className="label">Memo (required)</label>
+              <div className="copy-field">
+                <span style={{ flex: 1 }}>{compactMemo}</span>
+                <CopyButton text={compactMemo} />
+              </div>
+            </div>
+            <div className="warning-box">
+              You MUST include the memo in your Juno transaction. Without it, your deposit cannot be processed and funds may be lost.
+            </div>
           </div>
-        </div>
+
+          <div className="card">
+            <h3>Step 3 &mdash; Track Progress</h3>
+            <StatusTracker steps={DEPOSIT_STEPS} current="pending" />
+            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
+              Waiting for Juno transaction...
+            </div>
+          </div>
+        </>
       )}
     </div>
   )
