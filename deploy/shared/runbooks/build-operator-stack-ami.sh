@@ -406,8 +406,16 @@ DEPOSIT_IMAGE_ID=
 DEPOSIT_OWALLET_IVK=
 DEPOSIT_RELAYER_OWNER=
 DEPOSIT_RELAYER_QUEUE_GROUP=deposit-relayer
-DEPOSIT_RELAYER_QUEUE_TOPICS=deposits.event.v1,checkpoints.packages.v1
+DEPOSIT_RELAYER_QUEUE_TOPICS=checkpoints.packages.v1
 DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP=
+DEPOSIT_SCAN_ENABLED=false
+DEPOSIT_SCAN_JUNO_SCAN_URL=
+DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=
+DEPOSIT_SCAN_JUNO_SCAN_BEARER_ENV=JUNO_SCAN_BEARER_TOKEN
+DEPOSIT_SCAN_JUNO_RPC_URL=
+DEPOSIT_SCAN_JUNO_RPC_USER_ENV=JUNO_RPC_USER
+DEPOSIT_SCAN_JUNO_RPC_PASS_ENV=JUNO_RPC_PASS
+DEPOSIT_SCAN_POLL_INTERVAL=15s
 WITHDRAW_BLOB_BUCKET=
 WITHDRAW_BLOB_PREFIX=withdraw-live
 WITHDRAW_IMAGE_ID=
@@ -1219,6 +1227,30 @@ args=(
 )
 if [[ -n "${DEPOSIT_OWALLET_IVK:-}" ]]; then
   args+=(--owallet-ivk "${DEPOSIT_OWALLET_IVK}")
+fi
+if [[ "${DEPOSIT_SCAN_ENABLED:-false}" == "true" ]]; then
+  [[ -n "${DEPOSIT_SCAN_JUNO_SCAN_URL:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_SCAN_URL in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${DEPOSIT_SCAN_JUNO_RPC_URL:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  args+=(
+    --scan-enabled
+    --juno-scan-url "${DEPOSIT_SCAN_JUNO_SCAN_URL}"
+    --juno-scan-wallet-id "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID}"
+    --juno-scan-bearer-env "${DEPOSIT_SCAN_JUNO_SCAN_BEARER_ENV:-JUNO_SCAN_BEARER_TOKEN}"
+    --juno-rpc-url "${DEPOSIT_SCAN_JUNO_RPC_URL}"
+    --juno-rpc-user-env "${DEPOSIT_SCAN_JUNO_RPC_USER_ENV:-JUNO_RPC_USER}"
+    --juno-rpc-pass-env "${DEPOSIT_SCAN_JUNO_RPC_PASS_ENV:-JUNO_RPC_PASS}"
+    --scan-poll-interval "${DEPOSIT_SCAN_POLL_INTERVAL:-15s}"
+  )
 fi
 
 exec /usr/local/bin/deposit-relayer "${args[@]}"
