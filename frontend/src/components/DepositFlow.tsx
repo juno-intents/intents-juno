@@ -66,7 +66,7 @@ export default function DepositFlow() {
   const cliAmount = amount || '10.0'
 
   const cliCommand = memo
-    ? `FROM=$(junocash-cli -testnet listaddresses | jq -r '[.[].unified[]?.address // empty] | first')
+    ? `FROM="YOUR_JUNO_ADDRESS"
 TO="${memo.oWalletUA}"
 AMOUNT=${cliAmount}
 MEMO="${compactMemo}"
@@ -138,7 +138,7 @@ junocash-cli -testnet z_sendmany "$FROM" \
           <div className="card">
             <h3>Send JUNO via CLI</h3>
             <p style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>
-              Copy and paste this into your terminal. The <code style={{ color: 'var(--text)' }}>FROM</code> address is auto-detected from your wallet.
+              Replace <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> with your shielded address, then paste into your terminal.
             </p>
             <div className="cli-block">
               <div className="cli-header">
