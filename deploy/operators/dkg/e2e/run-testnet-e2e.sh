@@ -9261,7 +9261,7 @@ main() {
   local cmd="${1:-run}"
   case "$cmd" in
     run) command_run "$@" ;;
-    deploy) command_run --deploy-mode "$@" ;;
+    deploy) shift; command_run deploy --deploy-mode "$@" ;;
     -h|--help|"")
       usage
       ;;
