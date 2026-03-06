@@ -5989,7 +5989,6 @@ command_run() {
   local run_deposit_amount=""
   local run_deposit_nonce=""
   local run_deposit_juno_tx_hash=""
-  local run_deposit_witness_file=""
   local run_withdrawal_id=""
   local run_withdraw_requester=""
   local run_withdraw_amount=""
@@ -6462,6 +6461,8 @@ command_run() {
           JUNO_QUEUE_KAFKA_TLS="true" \
           AWS_REGION="$distributed_relayer_aws_region" \
           AWS_DEFAULT_REGION="$distributed_relayer_aws_region" \
+          "$sp1_witness_juno_rpc_user_env=$withdraw_coordinator_juno_rpc_user_value" \
+          "$sp1_witness_juno_rpc_pass_env=$withdraw_coordinator_juno_rpc_pass_value" \
           "$distributed_deposit_relayer_bin_path" \
           --postgres-dsn "$shared_postgres_dsn" \
           --store-driver postgres \
@@ -6482,7 +6483,14 @@ command_run() {
           --queue-driver kafka \
           --queue-brokers "$shared_kafka_brokers" \
           --queue-group "$deposit_relayer_group" \
-          --queue-topics "$deposit_event_topic,$checkpoint_package_topic"
+          --queue-topics "$checkpoint_package_topic" \
+          --scan-enabled \
+          --juno-scan-url "http://127.0.0.1:8080" \
+          --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+          --juno-rpc-url "http://127.0.0.1:18232" \
+          --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
+          --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
+          --scan-poll-interval 10s
       )"
 
       withdraw_coordinator_pid="$(
@@ -6587,6 +6595,8 @@ command_run() {
       (
         cd "$REPO_ROOT"
         BASE_RELAYER_AUTH_TOKEN="$base_relayer_auth_token" \
+        JUNO_RPC_USER="$withdraw_coordinator_juno_rpc_user_value" \
+        JUNO_RPC_PASS="$withdraw_coordinator_juno_rpc_pass_value" \
           go run ./cmd/deposit-relayer \
             --postgres-dsn "$shared_postgres_dsn" \
             --store-driver postgres \
@@ -6607,8 +6617,15 @@ command_run() {
             --queue-driver kafka \
             --queue-brokers "$shared_kafka_brokers" \
             --queue-group "$deposit_relayer_group" \
-            --queue-topics "$deposit_event_topic,$checkpoint_package_topic" \
+            --queue-topics "$checkpoint_package_topic" \
             --health-port "$deposit_relayer_health_port" \
+            --scan-enabled \
+            --juno-scan-url "$sp1_witness_juno_scan_url" \
+            --juno-scan-wallet-id "$withdraw_coordinator_juno_wallet_id" \
+            --juno-rpc-url "$sp1_witness_juno_rpc_url" \
+            --juno-rpc-user-env JUNO_RPC_USER \
+            --juno-rpc-pass-env JUNO_RPC_PASS \
+            --scan-poll-interval 10s \
             >"$deposit_relayer_log" 2>&1
       ) &
       deposit_relayer_pid="$!"
@@ -6710,9 +6727,6 @@ command_run() {
       --postgres-dsn "$shared_postgres_dsn"
       --base-chain-id "$base_chain_id"
       --bridge-address "$deployed_bridge_address"
-      --queue-driver kafka
-      --queue-brokers "$shared_kafka_brokers"
-      --deposit-event-topic "$deposit_event_topic"
       --owallet-ua "$withdraw_coordinator_juno_change_address"
       --refund-window-seconds "$bridge_refund_window_seconds"
       --fee-bps "$bridge_fee_bps"
@@ -6723,14 +6737,12 @@ command_run() {
 
     if [[ "$deploy_mode" == "true" && -n "$bridge_api_binary" ]]; then
       # Deploy mode: use pre-built binary with nohup for persistence
-      JUNO_QUEUE_KAFKA_TLS="true" \
-        nohup "$bridge_api_binary" "${bridge_api_args[@]}" \
+      nohup "$bridge_api_binary" "${bridge_api_args[@]}" \
         >"$bridge_api_log" 2>&1 & disown
       bridge_api_pid="$!"
     else
       (
         cd "$REPO_ROOT"
-        JUNO_QUEUE_KAFKA_TLS="true" \
         go run ./cmd/bridge-api \
           "${bridge_api_args[@]}" \
           >"$bridge_api_log" 2>&1
@@ -6949,30 +6961,8 @@ command_run() {
   fi
 
   if (( relayer_status == 0 )); then
-    local deposit_event_payload run_deposit_memo_json run_deposit_memo_hex
-    local run_deposit_extract_json run_deposit_extract_error_file run_deposit_extract_last_error
+    local run_deposit_memo_json run_deposit_memo_hex
     local run_deposit_amount_zat="100000"
-    local run_deposit_extract_ok="false"
-    local run_deposit_extract_wait_logged="false"
-    local run_deposit_extract_sleep_seconds=5
-    local run_deposit_backfill_retry_interval_seconds=20
-    local run_deposit_last_backfill_epoch=0
-    local run_deposit_extract_deadline_epoch
-    local run_deposit_action_index_selected=""
-    local -a run_deposit_action_indexes=()
-    local -a run_deposit_action_indexes_rpc=()
-    local -a run_deposit_scan_urls=()
-    local -a run_deposit_rpc_urls=()
-    local run_deposit_scan_upsert_count=0
-    local run_deposit_scan_backfill_tx_height=""
-    local run_deposit_scan_backfill_from_height=""
-    local run_deposit_action_candidate
-    local run_deposit_checkpoint_height_before=""
-    local run_deposit_checkpoint_height_latest=""
-    local run_deposit_checkpoint_wait_deadline_epoch=0
-    local run_deposit_submit_min_checkpoint_height=""
-    local run_deposit_anchor_height=""
-    local -a run_deposit_anchor_args=()
 
     [[ -n "$witness_funder_source_address" ]] || relayer_status=1
     [[ -n "$withdraw_coordinator_juno_wallet_id" ]] || relayer_status=1
@@ -7003,251 +6993,6 @@ command_run() {
       [[ "$run_deposit_juno_tx_hash" =~ ^0x[0-9a-f]{64}$ ]] || relayer_status=1
     fi
 
-    if (( relayer_status == 0 )); then
-      run_deposit_action_indexes=("0")
-      mapfile -t run_deposit_action_indexes_rpc < <(
-        witness_rpc_action_index_candidates \
-          "$sp1_witness_juno_rpc_url" \
-          "$withdraw_coordinator_juno_rpc_user_value" \
-          "$withdraw_coordinator_juno_rpc_pass_value" \
-          "$run_deposit_juno_tx_hash" || true
-      )
-      for run_deposit_action_candidate in "${run_deposit_action_indexes_rpc[@]}"; do
-        [[ "$run_deposit_action_candidate" =~ ^[0-9]+$ ]] || continue
-        if [[ ! " ${run_deposit_action_indexes[*]} " =~ " ${run_deposit_action_candidate} " ]]; then
-          run_deposit_action_indexes+=("$run_deposit_action_candidate")
-        fi
-      done
-      for run_deposit_action_candidate in 1 2 3; do
-        if [[ ! " ${run_deposit_action_indexes[*]} " =~ " ${run_deposit_action_candidate} " ]]; then
-          run_deposit_action_indexes+=("$run_deposit_action_candidate")
-        fi
-      done
-      log "run deposit extraction action-index candidates: $(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
-    fi
-
-    if (( relayer_status == 0 )); then
-      local run_deposit_scan_idx run_deposit_scan_url run_deposit_rpc_url
-      if (( ${#witness_healthy_scan_urls[@]} > 0 )); then
-        run_deposit_scan_urls=("${witness_healthy_scan_urls[@]}")
-      else
-        run_deposit_scan_urls=("$sp1_witness_juno_scan_url")
-      fi
-      if (( ${#witness_healthy_rpc_urls[@]} > 0 )); then
-        run_deposit_rpc_urls=("${witness_healthy_rpc_urls[@]}")
-      else
-        run_deposit_rpc_urls=("$sp1_witness_juno_rpc_url")
-      fi
-      while (( ${#run_deposit_rpc_urls[@]} < ${#run_deposit_scan_urls[@]} )); do
-        run_deposit_rpc_urls+=("$sp1_witness_juno_rpc_url")
-      done
-
-      local run_deposit_witness_wallet_id=""
-      run_deposit_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"
-      run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"
-      for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
-        run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-        if ! witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$sp1_witness_recipient_ufvk"; then
-          log "run deposit witness wallet upsert failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id (continuing)"
-        fi
-      done
-
-      run_deposit_scan_backfill_tx_height="$(
-        witness_rpc_tx_height \
-          "$sp1_witness_juno_rpc_url" \
-          "$withdraw_coordinator_juno_rpc_user_value" \
-          "$withdraw_coordinator_juno_rpc_pass_value" \
-          "$run_deposit_juno_tx_hash" || true
-      )"
-      if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
-        run_deposit_scan_backfill_from_height="$run_deposit_scan_backfill_tx_height"
-        if (( run_deposit_scan_backfill_from_height > 32 )); then
-          run_deposit_scan_backfill_from_height=$((run_deposit_scan_backfill_from_height - 32))
-        else
-          run_deposit_scan_backfill_from_height=0
-        fi
-        for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
-          run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-          if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"; then
-            log "run deposit witness backfill best-effort failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id from_height=$run_deposit_scan_backfill_from_height"
-          fi
-        done
-        run_deposit_last_backfill_epoch="$(date +%s)"
-      else
-        log "run deposit witness backfill tx height unknown; skipping proactive backfill txid=$run_deposit_juno_tx_hash"
-      fi
-    fi
-
-    if (( relayer_status == 0 )); then
-      local run_deposit_scan_idx run_deposit_scan_url run_deposit_rpc_url
-      local run_deposit_selected_scan_url=""
-      local run_deposit_indexed_wallet_id=""
-      run_deposit_witness_file="$workdir/reports/witness/run-deposit.witness.bin"
-      run_deposit_extract_json="$workdir/reports/witness/run-deposit-witness.json"
-      run_deposit_extract_error_file="$workdir/reports/witness/run-deposit-witness.extract.err"
-      rm -f "$run_deposit_witness_file" "$run_deposit_extract_json" "$run_deposit_extract_error_file" || true
-      run_deposit_extract_deadline_epoch=$(( $(date +%s) + 900 ))
-      run_deposit_checkpoint_height_before="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
-      if [[ "$run_deposit_checkpoint_height_before" =~ ^[0-9]+$ ]]; then
-        run_deposit_checkpoint_wait_deadline_epoch=$(( $(date +%s) + 120 ))
-        while (( $(date +%s) < run_deposit_checkpoint_wait_deadline_epoch )); do
-          run_deposit_checkpoint_height_latest="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
-          if [[ "$run_deposit_checkpoint_height_latest" =~ ^[0-9]+$ ]] &&
-            (( run_deposit_checkpoint_height_latest > run_deposit_checkpoint_height_before )); then
-            run_deposit_anchor_height="$run_deposit_checkpoint_height_latest"
-            break
-          fi
-          sleep 2
-        done
-      fi
-      if [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
-        run_deposit_anchor_height="$(latest_checkpoint_height_from_log "$deposit_relayer_log" || true)"
-      fi
-      if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]] && (
-        [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
-          (( run_deposit_anchor_height < run_deposit_scan_backfill_tx_height ))
-      ); then
-        run_deposit_anchor_height="$run_deposit_scan_backfill_tx_height"
-        log "run deposit witness extraction raised anchor to tx height=$run_deposit_anchor_height because relayer checkpoint lagged"
-      fi
-      if [[ "$run_deposit_anchor_height" =~ ^[0-9]+$ ]]; then
-        run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
-        log "run deposit witness extraction anchored to relayer checkpoint height=$run_deposit_anchor_height"
-      else
-        run_deposit_anchor_args=()
-        log "run deposit witness extraction proceeding without explicit anchor height (checkpoint height unavailable)"
-      fi
-      while true; do
-        local run_deposit_anchor_height_latest=""
-        run_deposit_anchor_height_latest="$(
-          awk '
-            /updated checkpoint/ {
-              for (i = 1; i <= NF; i++) {
-                if ($i ~ /^height=/) {
-                  sub(/^height=/, "", $i)
-                  h = $i
-                }
-              }
-            }
-            END {
-              if (h != "") {
-                print h
-              }
-            }
-          ' "$deposit_relayer_log" 2>/dev/null || true
-        )"
-        if [[ "$run_deposit_anchor_height_latest" =~ ^[0-9]+$ ]] && (
-          [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
-            (( run_deposit_anchor_height_latest > run_deposit_anchor_height ))
-        ); then
-          run_deposit_anchor_height="$run_deposit_anchor_height_latest"
-          run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
-          run_deposit_extract_wait_logged="false"
-          log "run deposit witness extraction advanced anchor to relayer checkpoint height=$run_deposit_anchor_height"
-        fi
-        local run_deposit_note_pending="false"
-        run_deposit_extract_ok="false"
-        for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < ${#run_deposit_scan_urls[@]}; run_deposit_scan_idx++)); do
-          run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-          run_deposit_rpc_url="${run_deposit_rpc_urls[$run_deposit_scan_idx]:-$sp1_witness_juno_rpc_url}"
-          for run_deposit_action_candidate in "${run_deposit_action_indexes[@]}"; do
-            rm -f "$run_deposit_extract_json"
-            if (
-              cd "$REPO_ROOT"
-              go run ./cmd/juno-witness-extract deposit \
-                --juno-scan-url "$run_deposit_scan_url" \
-                --wallet-id "$run_deposit_witness_wallet_id" \
-                --juno-scan-bearer-token-env "$sp1_witness_juno_scan_bearer_token_env" \
-                --juno-rpc-url "$run_deposit_rpc_url" \
-                --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
-                --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
-                "${run_deposit_anchor_args[@]}" \
-                --txid "$run_deposit_juno_tx_hash" \
-                --action-index "$run_deposit_action_candidate" \
-                --output-witness-item-file "$run_deposit_witness_file" \
-                >"$run_deposit_extract_json" 2>"$run_deposit_extract_error_file"
-            ); then
-              run_deposit_extract_ok="true"
-              run_deposit_action_index_selected="$run_deposit_action_candidate"
-              run_deposit_selected_scan_url="$run_deposit_scan_url"
-              rm -f "$run_deposit_extract_error_file"
-              break
-            fi
-            run_deposit_extract_last_error="$(tail -n 1 "$run_deposit_extract_error_file" 2>/dev/null | tr -d '\r\n')"
-            if grep -qi "note not found" "$run_deposit_extract_error_file"; then
-              run_deposit_note_pending="true"
-            fi
-          done
-          if [[ "$run_deposit_extract_ok" == "true" ]]; then
-            break
-          fi
-          if [[ "$run_deposit_note_pending" == "true" ]]; then
-            run_deposit_indexed_wallet_id="$(
-              witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$run_deposit_witness_wallet_id" || true
-            )"
-            if [[ -n "$run_deposit_indexed_wallet_id" && "$run_deposit_indexed_wallet_id" != "$run_deposit_witness_wallet_id" ]]; then
-              log "run deposit switching witness wallet id during extraction old_wallet_id=$run_deposit_witness_wallet_id indexed_wallet_id=$run_deposit_indexed_wallet_id txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_scan_url"
-              run_deposit_witness_wallet_id="$run_deposit_indexed_wallet_id"
-              run_deposit_extract_wait_logged="false"
-              continue
-            fi
-          fi
-        done
-        if [[ "$run_deposit_extract_ok" == "true" ]]; then
-          break
-        fi
-        if [[ "$run_deposit_note_pending" == "true" && ! "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
-          run_deposit_scan_backfill_tx_height="$(
-            witness_rpc_tx_height \
-              "$sp1_witness_juno_rpc_url" \
-              "$withdraw_coordinator_juno_rpc_user_value" \
-              "$withdraw_coordinator_juno_rpc_pass_value" \
-              "$run_deposit_juno_tx_hash" || true
-          )"
-          if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then
-            run_deposit_scan_backfill_from_height="$run_deposit_scan_backfill_tx_height"
-            if (( run_deposit_scan_backfill_from_height > 32 )); then
-              run_deposit_scan_backfill_from_height=$((run_deposit_scan_backfill_from_height - 32))
-            else
-              run_deposit_scan_backfill_from_height=0
-            fi
-            run_deposit_last_backfill_epoch=0
-            if [[ ! "$run_deposit_anchor_height" =~ ^[0-9]+$ ]] ||
-              (( run_deposit_anchor_height < run_deposit_scan_backfill_tx_height )); then
-              run_deposit_anchor_height="$run_deposit_scan_backfill_tx_height"
-              run_deposit_anchor_args=(--anchor-height "$run_deposit_anchor_height")
-              run_deposit_extract_wait_logged="false"
-              log "run deposit witness extraction raised anchor to tx height=$run_deposit_anchor_height because relayer checkpoint lagged"
-            fi
-            log "run deposit witness resolved tx height during note-pending retry tx_height=$run_deposit_scan_backfill_tx_height backfill_from_height=$run_deposit_scan_backfill_from_height"
-          fi
-        fi
-        if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then
-          local run_deposit_now_epoch
-          run_deposit_now_epoch="$(date +%s)"
-          if (( run_deposit_last_backfill_epoch == 0 || run_deposit_now_epoch - run_deposit_last_backfill_epoch >= run_deposit_backfill_retry_interval_seconds )); then
-            log "run deposit witness note pending; retrying scan backfill from_height=$run_deposit_scan_backfill_from_height"
-            for ((run_deposit_scan_idx = 0; run_deposit_scan_idx < run_deposit_scan_upsert_count; run_deposit_scan_idx++)); do
-              run_deposit_scan_url="${run_deposit_scan_urls[$run_deposit_scan_idx]}"
-              if ! witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"; then
-                log "run deposit witness backfill retry best-effort failed for scan_url=$run_deposit_scan_url wallet=$run_deposit_witness_wallet_id from_height=$run_deposit_scan_backfill_from_height"
-              fi
-            done
-            run_deposit_last_backfill_epoch="$run_deposit_now_epoch"
-          fi
-        fi
-        if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_extract_wait_logged" != "true" ]]; then
-          log "run deposit witness note pending wallet=$run_deposit_witness_wallet_id txid=$run_deposit_juno_tx_hash scan_urls=$(IFS=,; printf '%s' "${run_deposit_scan_urls[*]}") action_index_candidates=$(IFS=,; printf '%s' "${run_deposit_action_indexes[*]}")"
-          run_deposit_extract_wait_logged="true"
-        fi
-        if (( $(date +%s) >= run_deposit_extract_deadline_epoch )); then
-          relayer_status=1
-          break
-        fi
-        sleep "$run_deposit_extract_sleep_seconds"
-      done
-    fi
-
     local proof_jobs_count_before_run_deposit=""
     local proof_jobs_last_update_epoch_before_run_deposit=""
     local proof_retryable_failure_epoch_before_run_deposit=""
@@ -7272,86 +7017,30 @@ command_run() {
       fi
     fi
 
-    deposit_event_payload="$workdir/reports/deposit-event.json"
     if (( relayer_status == 0 )); then
-      local run_deposit_witness_hex run_deposit_submit_body
-      run_deposit_witness_hex="$(od -An -vtx1 "$run_deposit_witness_file" | tr -d '\r\n[:space:]')"
-      [[ -n "$run_deposit_witness_hex" ]] || relayer_status=1
-      if (( relayer_status == 0 )); then
-        run_deposit_submit_min_checkpoint_height="$run_deposit_scan_backfill_tx_height"
-        if [[ ! "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
-          run_deposit_submit_min_checkpoint_height="$(
-            witness_rpc_tx_height \
-              "$sp1_witness_juno_rpc_url" \
-              "$juno_rpc_user" \
-              "$juno_rpc_pass" \
-              "$run_deposit_juno_tx_hash" || true
-          )"
-        fi
-        if [[ "$run_deposit_submit_min_checkpoint_height" =~ ^[0-9]+$ ]]; then
-          log "run deposit waiting for relayer checkpoint catch-up min_height=$run_deposit_submit_min_checkpoint_height txid=$run_deposit_juno_tx_hash"
-          if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300; then
-            if [[ "$disable_checkpoint_replay" != "true" ]]; then
-              if [[ "$shared_enabled" == "true" ]]; then
-                local run_deposit_checkpoint_replay_payload_file
-                run_deposit_checkpoint_replay_payload_file="$workdir/reports/relayer-runtime-checkpoint-package.retry.json"
-                log "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once"
-                if replay_latest_checkpoint_package_to_topic \
-                  "$run_deposit_checkpoint_replay_payload_file" \
-                  "$shared_postgres_dsn" \
-                  "$shared_kafka_brokers" \
-                  "$checkpoint_package_topic" \
-                  "run-deposit-catchup-retry"; then
-                  if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600; then
-                    if [[ -n "$existing_bridge_summary_path" ]]; then
-                      log "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline"
-                    else
-                      relayer_status=1
-                    fi
-                  fi
-                else
-                  relayer_status=1
-                fi
-              else
-                relayer_status=1
-              fi
-            else
-              log "checkpoint replay suppressed; extending catch-up timeout for autonomous delivery"
-              if ! wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 900; then
-                if [[ -n "$existing_bridge_summary_path" ]]; then
-                  log "checkpoint catch-up still below tx height without replay during resume; continuing"
-                else
-                  relayer_status=1
-                fi
-              fi
+      log "waiting for deposit-relayer auto-scanner to detect deposit baseRecipient=$bridge_recipient_address"
+      local run_deposit_poll_deadline_epoch run_deposit_poll_resp run_deposit_poll_data
+      run_deposit_poll_deadline_epoch=$(( $(date +%s) + 900 ))
+      while true; do
+        run_deposit_poll_resp="$(curl -fsS "${bridge_api_url}/v1/deposits?baseRecipient=${bridge_recipient_address}&limit=10&offset=0" 2>/dev/null || true)"
+        if [[ -n "$run_deposit_poll_resp" ]]; then
+          run_deposit_poll_data="$(jq -r '.data[0] // empty' <<<"$run_deposit_poll_resp" 2>/dev/null || true)"
+          if [[ -n "$run_deposit_poll_data" ]]; then
+            run_deposit_id="$(jq -r '.depositId // empty' <<<"$run_deposit_poll_data" 2>/dev/null || true)"
+            run_deposit_amount="$(jq -r '.amount // empty' <<<"$run_deposit_poll_data" 2>/dev/null || true)"
+            if [[ "$run_deposit_id" =~ ^0x[0-9a-fA-F]{64}$ ]] && [[ "$run_deposit_amount" =~ ^[0-9]+$ ]]; then
+              log "deposit auto-detected depositId=$run_deposit_id amount=$run_deposit_amount"
+              break
             fi
           fi
-        else
-          log "run deposit checkpoint catch-up skipped because tx height could not be resolved txid=$run_deposit_juno_tx_hash"
         fi
-      fi
-      if (( relayer_status == 0 )); then
-        run_deposit_submit_body="$(
-          jq -cn \
-            --arg base_recipient "$bridge_recipient_address" \
-            --arg amount "$run_deposit_amount_zat" \
-            --arg nonce "$run_deposit_nonce" \
-            --arg proof_witness_item "0x$run_deposit_witness_hex" \
-            '{baseRecipient:$base_recipient,amount:$amount,nonce:$nonce,proofWitnessItem:$proof_witness_item}'
-        )"
-        if ! bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit" "$run_deposit_submit_body" "$deposit_event_payload" "deposit_submit"; then
+        if (( $(date +%s) >= run_deposit_poll_deadline_epoch )); then
+          log "deposit auto-detection timed out after 900s baseRecipient=$bridge_recipient_address"
           relayer_status=1
+          break
         fi
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      run_deposit_id="$(jq -r '.depositId // empty' "$deposit_event_payload" 2>/dev/null || true)"
-      run_deposit_amount="$(jq -r '.amount // empty' "$deposit_event_payload" 2>/dev/null || true)"
-      [[ "$run_deposit_id" =~ ^0x[0-9a-fA-F]{64}$ ]] || relayer_status=1
-      [[ "$run_deposit_amount" =~ ^[0-9]+$ ]] || relayer_status=1
-      if [[ "$run_deposit_extract_ok" == "true" && -n "$run_deposit_action_index_selected" ]]; then
-        log "run deposit witness extracted action_index=$run_deposit_action_index_selected txid=$run_deposit_juno_tx_hash scan_url=$run_deposit_selected_scan_url"
-      fi
+        sleep 10
+      done
     fi
 
     if (( relayer_status == 0 )); then

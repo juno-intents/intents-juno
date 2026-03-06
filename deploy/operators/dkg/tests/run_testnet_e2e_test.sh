@@ -483,45 +483,6 @@ test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts()
   assert_contains "$script_text" "direct-cli witness backfill best-effort failed" "direct-cli witness extraction path also backfills wallet history before note extraction"
 }
 
-test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id() {
-  local script_text
-  script_text="$(cat "$TARGET_SCRIPT")"
-
-  assert_contains "$script_text" "run_deposit_scan_urls=()" "relayer deposit extraction initializes a scan endpoint pool"
-  assert_contains "$script_text" "run_deposit_rpc_urls=()" "relayer deposit extraction initializes an rpc endpoint pool"
-  assert_contains "$script_text" 'run_deposit_scan_upsert_count="${#run_deposit_scan_urls[@]}"' "relayer deposit extraction computes upsert/backfill fanout from scan pool size"
-  assert_contains "$script_text" 'local run_deposit_witness_wallet_id=""' "relayer deposit extraction tracks a dedicated witness wallet id for tx visibility fallback"
-  assert_contains "$script_text" 'run_deposit_witness_wallet_id="$withdraw_coordinator_juno_wallet_id"' "relayer deposit extraction initializes dedicated witness wallet id from withdraw coordinator planner wallet id"
-  assert_contains "$script_text" 'witness_scan_upsert_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$sp1_witness_recipient_ufvk"' "relayer deposit extraction upserts witness wallet across scan endpoints before extraction"
-  assert_contains "$script_text" 'witness_scan_backfill_wallet "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_witness_wallet_id" "$run_deposit_scan_backfill_from_height"' "relayer deposit extraction proactively backfills witness wallet history from tx-confirmation height"
-  assert_contains "$script_text" "run deposit witness backfill tx height unknown; skipping proactive backfill" "relayer deposit extraction logs missing tx-height fallback"
-  assert_contains "$script_text" "run deposit witness backfill best-effort failed for scan_url=" "relayer deposit extraction tolerates endpoint-specific backfill failures"
-  assert_contains "$script_text" 'witness_scan_find_wallet_for_txid "$run_deposit_scan_url" "$juno_scan_bearer_token" "$run_deposit_juno_tx_hash" "$run_deposit_witness_wallet_id"' "relayer deposit extraction reuses indexed wallet ids when generated wallet id is not visible yet"
-  assert_contains "$script_text" "run deposit switching witness wallet id during extraction" "relayer deposit extraction logs indexed-wallet fallback transitions"
-  assert_contains "$script_text" "run deposit witness note pending wallet=" "relayer deposit extraction still surfaces note-pending waits with context"
-  assert_not_contains "$script_text" 'withdraw_coordinator_juno_wallet_id="$run_deposit_indexed_wallet_id"' "run deposit indexed-wallet fallback must not mutate withdraw coordinator planner wallet id"
-  assert_contains "$script_text" "run_deposit_anchor_height" "relayer deposit extraction tracks a checkpoint anchor height for witness extraction"
-  assert_contains "$script_text" "run_deposit_anchor_height_latest" "relayer deposit extraction samples latest relayer checkpoint height while waiting for note visibility"
-  assert_contains "$script_text" "run deposit witness extraction advanced anchor to relayer checkpoint height=" "relayer deposit extraction refreshes anchor height when relayer checkpoints advance"
-  assert_contains "$script_text" 'rm -f "$run_deposit_witness_file" "$run_deposit_extract_json" "$run_deposit_extract_error_file" || true' "relayer deposit extraction clears stale run-deposit witness artifacts before each extraction run"
-  assert_contains "$script_text" 'if [[ "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]] && (' "relayer deposit extraction ensures anchor selection can compare against run-deposit tx height"
-  assert_contains "$script_text" "run deposit witness extraction raised anchor to tx height=" "relayer deposit extraction logs anchor raises when relayer checkpoint lags below tx height"
-  assert_contains "$script_text" '--anchor-height "$run_deposit_anchor_height"' "relayer deposit extraction pins juno-witness-extract to the relayer checkpoint anchor height"
-  assert_contains "$script_text" "run deposit witness extraction anchored to relayer checkpoint height=" "relayer deposit extraction logs the selected checkpoint anchor height"
-}
-
-test_relayer_deposit_extraction_retries_backfill_while_note_pending() {
-  local script_text
-  script_text="$(cat "$TARGET_SCRIPT")"
-
-  assert_contains "$script_text" "run_deposit_backfill_retry_interval_seconds=20" "relayer deposit extraction defines periodic backfill retry interval while waiting for note visibility"
-  assert_contains "$script_text" "run_deposit_last_backfill_epoch=0" "relayer deposit extraction tracks periodic backfill retry cadence state"
-  assert_contains "$script_text" "run deposit witness note pending; retrying scan backfill" "relayer deposit extraction logs periodic backfill retries during note-pending waits"
-  assert_contains "$script_text" 'if [[ "$run_deposit_note_pending" == "true" && "$run_deposit_scan_backfill_from_height" =~ ^[0-9]+$ ]]; then' "relayer deposit extraction gates periodic backfill retries on note-pending state and known tx height"
-  assert_contains "$script_text" 'if [[ "$run_deposit_note_pending" == "true" && ! "$run_deposit_scan_backfill_tx_height" =~ ^[0-9]+$ ]]; then' "relayer deposit extraction re-queries tx height while note remains pending when initial lookup was unavailable"
-  assert_contains "$script_text" "run deposit witness resolved tx height during note-pending retry" "relayer deposit extraction logs delayed tx-height resolution for backfill retries"
-  assert_contains "$script_text" "run deposit witness extraction raised anchor to tx height=" "relayer deposit extraction raises anchor floor after delayed tx-height resolution"
-}
 
 test_witness_generation_fails_fast_on_funder_insufficient_funds() {
   local script_text
@@ -555,9 +516,10 @@ test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission() {
   assert_contains "$script_text" "z_sendmany" "live bridge flow submits real Juno shielded memo tx"
   assert_contains "$script_text" "z_getoperationstatus" "live bridge flow waits for Juno z_sendmany operation completion"
   assert_contains "$script_text" "juno_wait_tx_confirmed" "live bridge flow waits for mined Juno deposit tx"
-  assert_contains "$script_text" "/v1/deposits/submit" "deposit submit is performed through bridge-api write endpoint"
-  assert_contains "$script_text" "/v1/withdrawals/request" "withdraw request is performed through bridge-api write endpoint"
-  assert_not_contains "$script_text" '"--topic" "$deposit_event_topic"' "runner does not publish deposit events directly; deposit submission stays bridge-api driven"
+  assert_contains "$script_text" "/v1/deposits?baseRecipient=" "deposit auto-detection polls bridge-api deposits listing"
+  assert_contains "$script_text" "deposit auto-detected depositId=" "deposit auto-detection logs detected deposit"
+  assert_contains "$script_text" "go run ./cmd/withdraw-request" "withdraw request is performed through CLI tool"
+  assert_not_contains "$script_text" '"--topic" "$deposit_event_topic"' "runner does not publish deposit events directly"
   assert_not_contains "$script_text" "go run ./cmd/deposit-event" "runner no longer builds deposit queue payload directly"
   assert_contains "$script_text" "/v1/status/deposit/" "live bridge flow checks deposit status through bridge-api"
   assert_contains "$script_text" "/v1/status/withdrawal/" "live bridge flow checks withdrawal status through bridge-api"
@@ -570,8 +532,6 @@ test_live_bridge_flow_retries_transient_bridge_api_write_failures() {
   assert_contains "$script_text" "bridge_api_post_json_with_retry() {" "run-testnet-e2e defines retry helper for bridge-api write endpoints"
   assert_contains "$script_text" "http_status" "bridge-api retry helper captures HTTP status for retry classification"
   assert_contains "$script_text" "bridge-api write retrying" "bridge-api retry helper logs retry context for transient failures"
-  assert_contains "$script_text" 'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' "deposit submit uses bridge-api retry helper"
-  assert_contains "$script_text" 'bridge_api_post_json_with_retry "${bridge_api_url}/v1/withdrawals/request"' "withdraw request uses bridge-api retry helper"
 }
 
 test_bridge_address_prediction_parses_cast_labeled_output() {
@@ -970,8 +930,8 @@ test_live_bridge_flow_self_heals_stalled_proof_requestor_before_failing_deposit_
   assert_contains "$script_text" 'echo "state=$state"' "deposit status wait surfaces current bridge-api state to pending logs"
   assert_order "$script_text" \
     "proof_jobs_count_before_run_deposit" \
-    "bridge_api_post_json_with_retry \"\${bridge_api_url}/v1/deposits/submit\"" \
-    "proof-requestor progress baseline is captured before bridge-api deposit submission"
+    "deposit auto-detected depositId=" \
+    "proof-requestor progress baseline is captured before deposit auto-detection"
   assert_order "$script_text" \
     "proof_jobs_count_before_run_deposit" \
     "wait_for_condition \"\$bridge_api_deposit_wait_timeout_seconds\" 5 \"bridge-api deposit status\" wait_bridge_api_deposit_finalized" \
@@ -1066,26 +1026,17 @@ test_shared_ecs_rollout_accepts_explicit_proof_services_image_override() {
   assert_contains "$script_text" "overriding shared ECS proof services image image=" "run-testnet-e2e logs explicit shared proof services image override usage"
 }
 
-test_run_deposit_submission_waits_for_relayer_checkpoint_catchup() {
+test_run_deposit_auto_detection_polls_bridge_api_deposits_listing() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" "latest_checkpoint_height_from_log() {" "run-testnet-e2e defines helper to parse latest relayer checkpoint height from logs"
-  assert_contains "$script_text" "wait_for_relayer_checkpoint_height_at_least() {" "run-testnet-e2e defines helper to gate on relayer checkpoint catch-up"
-  assert_contains "$script_text" "replay_latest_checkpoint_package_to_topic() {" "run-testnet-e2e defines helper to replay latest checkpoint package onto the relayer topic"
-  assert_contains "$script_text" "run deposit waiting for relayer checkpoint catch-up" "run-testnet-e2e logs explicit relayer checkpoint wait before submitting deposit"
-  assert_contains "$script_text" "run_deposit_submit_min_checkpoint_height" "run-testnet-e2e computes the deposit tx checkpoint floor before submit"
-  assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 300' "run-testnet-e2e enforces relayer checkpoint >= deposit tx height before bridge-api submit"
-  assert_contains "$script_text" "run deposit relayer checkpoint catch-up timed out after initial wait; replaying latest checkpoint package and retrying once" "run-testnet-e2e logs explicit checkpoint replay fallback after initial relayer catch-up timeout"
-  assert_contains "$script_text" 'if replay_latest_checkpoint_package_to_topic \' "run-testnet-e2e invokes checkpoint replay helper before retrying relayer catch-up"
-  assert_contains "$script_text" '"$run_deposit_checkpoint_replay_payload_file" \' "run-testnet-e2e forwards a dedicated run-deposit replay payload path into checkpoint replay helper"
-  assert_contains "$script_text" 'wait_for_relayer_checkpoint_height_at_least "$deposit_relayer_log" "$run_deposit_submit_min_checkpoint_height" 600' "run-testnet-e2e performs a second relayer checkpoint catch-up wait after replay fallback"
-  assert_contains "$script_text" 'if [[ -n "$existing_bridge_summary_path" ]]; then' "run-testnet-e2e has a resume-aware branch when relayer catch-up remains below deposit tx height after replay retry"
-  assert_contains "$script_text" "run deposit relayer checkpoint catch-up still below tx height after retry during resume; continuing and relying on relayer backfill/proof pipeline" "run-testnet-e2e logs explicit resume continuation when checkpoint catch-up stays behind"
-  assert_order "$script_text" \
-    "run_deposit_submit_min_checkpoint_height" \
-    'bridge_api_post_json_with_retry "${bridge_api_url}/v1/deposits/submit"' \
-    "run-testnet-e2e computes checkpoint floor before bridge-api deposit submission"
+  assert_contains "$script_text" "waiting for deposit-relayer auto-scanner to detect deposit" "run-testnet-e2e logs explicit auto-scanner wait before polling deposits listing"
+  assert_contains "$script_text" '/v1/deposits?baseRecipient=' "run-testnet-e2e polls bridge-api deposits listing for auto-detected deposit"
+  assert_contains "$script_text" "deposit auto-detected depositId=" "run-testnet-e2e logs deposit ID once auto-detected"
+  assert_contains "$script_text" "deposit auto-detection timed out" "run-testnet-e2e fails explicitly on auto-detection timeout"
+  assert_contains "$script_text" "--scan-enabled" "deposit-relayer launch enables auto-scanner"
+  assert_contains "$script_text" "--juno-scan-wallet-id" "deposit-relayer launch configures juno-scan wallet ID for auto-scanner"
+  assert_contains "$script_text" "--scan-poll-interval" "deposit-relayer launch configures scan poll interval"
 }
 
 main() {
@@ -1121,8 +1072,6 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_extraction_reuses_existing_indexed_wallet_id
   test_witness_extraction_derives_action_indexes_from_tx_orchard_actions
   test_witness_extraction_backfills_recent_wallet_history_before_quorum_attempts
-  test_relayer_deposit_extraction_backfills_and_reuses_indexed_wallet_id
-  test_relayer_deposit_extraction_retries_backfill_while_note_pending
   test_witness_generation_fails_fast_on_funder_insufficient_funds
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
@@ -1157,7 +1106,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_sp1_credit_guardrail_uses_bump_price_ceiling
   test_sp1_pgu_estimate_defaults_are_conservative_for_live_guardrails
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
-  test_run_deposit_submission_waits_for_relayer_checkpoint_catchup
+  test_run_deposit_auto_detection_polls_bridge_api_deposits_listing
 }
 
 main "$@"
