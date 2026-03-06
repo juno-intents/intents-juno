@@ -22,8 +22,11 @@ import (
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
+	"github.com/juno-intents/intents-juno/internal/depositscanner"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
+	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
+	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -93,6 +96,15 @@ func main() {
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+
+		scanEnabled       = flag.Bool("scan-enabled", false, "enable juno-scan deposit auto-detection")
+		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")
+		junoScanWalletID  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet ID for the oWallet (required when --scan-enabled)")
+		junoScanBearerEnv = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for juno-scan bearer token")
+		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required when --scan-enabled)")
+		junoRPCUserEnv    = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var for junocashd RPC user")
+		junoRPCPassEnv    = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var for junocashd RPC password")
+		scanPollInterval  = flag.Duration("scan-poll-interval", 15*time.Second, "juno-scan poll interval")
 	)
 	flag.Parse()
 
@@ -269,6 +281,41 @@ func main() {
 			log.Error("healthz server", "err", err)
 		}
 	}()
+
+	if *scanEnabled {
+		if *junoScanURL == "" || *junoScanWalletID == "" || *junoRPCURL == "" {
+			fmt.Fprintln(os.Stderr, "error: --juno-scan-url, --juno-scan-wallet-id, and --juno-rpc-url are required when --scan-enabled")
+			os.Exit(2)
+		}
+		rpcUser := os.Getenv(*junoRPCUserEnv)
+		rpcPass := os.Getenv(*junoRPCPassEnv)
+		if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
+			fmt.Fprintf(os.Stderr, "error: missing junocashd RPC credentials in env %s/%s\n", *junoRPCUserEnv, *junoRPCPassEnv)
+			os.Exit(2)
+		}
+		scanBearer := os.Getenv(*junoScanBearerEnv)
+		scanClient := junoscanhttp.New(*junoScanURL, scanBearer)
+		rpcClient, rpcErr := junorpc.New(*junoRPCURL, rpcUser, rpcPass)
+		if rpcErr != nil {
+			log.Error("init junorpc client for scanner", "err", rpcErr)
+			os.Exit(2)
+		}
+		scanner, scanErr := depositscanner.New(depositscanner.Config{
+			WalletID:     *junoScanWalletID,
+			PollInterval: *scanPollInterval,
+			BaseChainID:  uint32(*baseChainID),
+			BridgeAddr:   bridge,
+		}, scanClient, rpcClient, relayer, log.With("component", "deposit-scanner"))
+		if scanErr != nil {
+			log.Error("init deposit scanner", "err", scanErr)
+			os.Exit(2)
+		}
+		go func() {
+			if err := scanner.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("deposit scanner exited", "err", err)
+			}
+		}()
+	}
 
 	log.Info("deposit relayer started",
 		"baseChainID", *baseChainID,

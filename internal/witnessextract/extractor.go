@@ -39,6 +39,8 @@ type WalletNote struct {
 	ActionIndex int32
 	Position    *int64
 	ValueZat    uint64
+	MemoHex     string
+	Height      int64
 }
 
 type WitnessPath struct {
