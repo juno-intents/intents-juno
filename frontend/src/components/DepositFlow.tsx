@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useAccount } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
+import { QRCodeSVG } from 'qrcode.react'
 import { getDepositMemo, getConfig } from '../api/bridge'
 import StatusTracker from './StatusTracker'
 
@@ -137,8 +138,16 @@ junocash-cli -testnet z_sendmany "$FROM" \
         <>
           <div className="card">
             <h3>Send JUNO via CLI</h3>
+            <div style={{ display: 'flex', justifyContent: 'center', margin: '16px 0' }}>
+              <QRCodeSVG
+                value={`${memo.oWalletUA}?amount=${cliAmount}&memo=${compactMemo}`}
+                size={180}
+                level="M"
+                includeMargin
+              />
+            </div>
             <p style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>
-              Replace <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> with your shielded address, then paste into your terminal.
+              Scan the QR code with a Juno wallet, or replace <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> with your shielded address and paste into your terminal.
             </p>
             <div className="cli-block">
               <div className="cli-header">
