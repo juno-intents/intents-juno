@@ -40,6 +40,8 @@ function CopyButton({ text, label }: { text: string; label?: string }) {
 export default function DepositFlow() {
   const { address } = useAccount()
   const [recipient, setRecipient] = useState('')
+  const [amount, setAmount] = useState('')
+  const [fromAddress, setFromAddress] = useState('')
   const [generated, setGenerated] = useState(false)
 
   const effectiveRecipient = recipient || (address ?? '')
@@ -62,9 +64,11 @@ export default function DepositFlow() {
   }
 
   const compactMemo = memo ? compactMemoHex(memo.memoHex) : ''
+  const cliAmount = amount || '10.0'
+  const cliFrom = fromAddress || 'YOUR_JUNO_ADDRESS'
 
   const cliCommand = memo
-    ? `junocash-cli -testnet z_sendmany "YOUR_JUNO_ADDRESS" '[{"address":"${memo.oWalletUA}","amount":AMOUNT,"memo":"${compactMemo}"}]'`
+    ? `junocash-cli -testnet z_sendmany "${cliFrom}" '[{"address":"${memo.oWalletUA}","amount":${cliAmount},"memo":"${compactMemo}"}]'`
     : ''
 
   return (
@@ -97,16 +101,36 @@ export default function DepositFlow() {
             onChange={(e) => setRecipient(e.target.value)}
           />
         </div>
-        {cfg && cfg.minDepositAmount !== '0' && (
-          <div className="fee-line" style={{ marginTop: 0 }}>
-            <span>Min deposit</span>
-            <span>{formatJuno(cfg.minDepositAmount)} JUNO</span>
-          </div>
-        )}
+        <div className="field">
+          <label className="label">Amount (JUNO)</label>
+          <input
+            type="number"
+            step="0.00000001"
+            min="0"
+            placeholder="10.0"
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+          />
+        </div>
+        <div className="field">
+          <label className="label">Your Juno Shielded Address (for CLI command)</label>
+          <input
+            className="mono"
+            placeholder="jtest1... or ztestsapling1..."
+            value={fromAddress}
+            onChange={(e) => setFromAddress(e.target.value)}
+          />
+        </div>
         {cfg && cfg.feeBps > 0 && (
           <div className="fee-line" style={{ marginTop: 0 }}>
             <span>Bridge fee</span>
             <span>{(cfg.feeBps / 100).toFixed(2)}%</span>
+          </div>
+        )}
+        {cfg && cfg.minDepositAmount !== '0' && (
+          <div className="fee-line" style={{ marginTop: 0 }}>
+            <span>Min deposit</span>
+            <span>{formatJuno(cfg.minDepositAmount)} JUNO</span>
           </div>
         )}
         <button className="primary" onClick={handleGenerate} disabled={!effectiveRecipient || isLoading}>
@@ -117,10 +141,12 @@ export default function DepositFlow() {
       {generated && memo && (
         <>
           <div className="card">
-            <h3>Step 1 &mdash; Send JUNO via CLI</h3>
+            <h3>Send JUNO via CLI</h3>
             <p style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>
-              Copy the command below and replace <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> with
-              your shielded address and <code style={{ color: 'var(--accent)' }}>AMOUNT</code> with the JUNO amount to send.
+              {fromAddress
+                ? 'Copy and paste this command into your terminal.'
+                : <>Fill in <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> above or replace it in the command.</>
+              }
             </p>
             <div className="cli-block">
               <div className="cli-header">
@@ -132,7 +158,7 @@ export default function DepositFlow() {
           </div>
 
           <div className="card">
-            <h3>Step 2 &mdash; Or send manually</h3>
+            <h3>Manual Details</h3>
             <div className="field">
               <label className="label">Destination Address</label>
               <div className="copy-field">
@@ -153,7 +179,7 @@ export default function DepositFlow() {
           </div>
 
           <div className="card">
-            <h3>Step 3 &mdash; Track Progress</h3>
+            <h3>Track Progress</h3>
             <StatusTracker steps={DEPOSIT_STEPS} current="pending" />
             <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
               Waiting for Juno transaction...
