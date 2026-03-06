@@ -88,6 +88,9 @@ BACKOFFICE_PORT=8082
 BACKOFFICE_AUTH_TOKEN=""
 BACKOFFICE_SG_RULE_ADDED=false
 
+# Bridge API (deploy mode)
+BRIDGE_API_PORT=8080
+
 # Cleanup globals
 CLEANUP_ENABLED=false
 CLEANUP_SP1_SECRET_ARN=""
@@ -125,6 +128,7 @@ usage() {
 Usage:
   run-e2e-local.sh run     [options]   Full lifecycle: provision → test → teardown
   run-e2e-local.sh resume  [options]   Resume using existing infra + DKG state
+  run-e2e-local.sh deploy  [options]   Provision + deploy persistent testnet (no tests)
   run-e2e-local.sh cleanup [options]   Destroy leftover infrastructure
 
 Options:
@@ -157,9 +161,9 @@ parse_args() {
   COMMAND="$1"; shift
 
   case "$COMMAND" in
-    run|resume|cleanup) ;;
+    run|resume|deploy|cleanup) ;;
     -h|--help) usage ;;
-    *) die "unknown command: $COMMAND (expected: run, resume, cleanup)" ;;
+    *) die "unknown command: $COMMAND (expected: run, resume, deploy, cleanup)" ;;
   esac
 
   while [[ $# -gt 0 ]]; do
@@ -1307,6 +1311,66 @@ ACCESS_EOF
   log "backoffice URL: http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}"
 }
 
+# ── Build and deploy bridge-api + base-event-scanner binaries ────────────────
+
+build_and_deploy_bridge_binaries() {
+  step "Building and deploying bridge-api + base-event-scanner on runner"
+
+  # Build frontend
+  if [[ -d "$REPO_ROOT/frontend" ]]; then
+    log "building frontend..."
+    (cd "$REPO_ROOT/frontend" && npm ci && npm run build)
+    ok "frontend built"
+  else
+    warn "frontend directory not found; bridge-api will serve API only"
+  fi
+
+  # Cross-compile bridge-api for linux/amd64
+  log "building bridge-api for linux/amd64..."
+  (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/bridge-api-linux-amd64" ./cmd/bridge-api/)
+  ok "bridge-api binary built"
+
+  # Cross-compile base-event-scanner for linux/amd64
+  log "building base-event-scanner for linux/amd64..."
+  (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/base-event-scanner-linux-amd64" ./cmd/base-event-scanner/)
+  ok "base-event-scanner binary built"
+
+  # SCP to runner
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p /home/$RUNNER_SSH_USER/bin"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/bridge-api-linux-amd64" "/home/$RUNNER_SSH_USER/bin/bridge-api"
+  run_on_host "$RUNNER_PUBLIC_IP" "chmod +x /home/$RUNNER_SSH_USER/bin/bridge-api"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/base-event-scanner-linux-amd64" "/home/$RUNNER_SSH_USER/bin/base-event-scanner"
+  run_on_host "$RUNNER_PUBLIC_IP" "chmod +x /home/$RUNNER_SSH_USER/bin/base-event-scanner"
+  ok "bridge-api and base-event-scanner deployed to runner"
+}
+
+# ── Add security group rule for bridge-api port ──────────────────────────────
+
+add_bridge_api_sg_rule() {
+  step "Opening bridge-api port on runner SG"
+
+  local runner_sg_id
+  runner_sg_id="$(
+    env AWS_PROFILE="$AWS_PROFILE" aws ec2 describe-instances \
+      --region "$AWS_REGION" \
+      --filters "Name=ip-address,Values=$RUNNER_PUBLIC_IP" \
+      --query 'Reservations[0].Instances[0].SecurityGroups[0].GroupId' \
+      --output text 2>/dev/null || true
+  )"
+  if [[ -n "$runner_sg_id" && "$runner_sg_id" != "None" ]]; then
+    env AWS_PROFILE="$AWS_PROFILE" aws ec2 authorize-security-group-ingress \
+      --region "$AWS_REGION" \
+      --group-id "$runner_sg_id" \
+      --protocol tcp --port "$BRIDGE_API_PORT" \
+      --cidr "0.0.0.0/0" \
+      --tag-specifications "ResourceType=security-group-rule,Tags=[{Key=Name,Value=bridge-api-deploy}]" \
+      >/dev/null 2>&1 || warn "bridge-api SG rule may already exist"
+    ok "security group $runner_sg_id: opened port $BRIDGE_API_PORT (public)"
+  else
+    warn "could not resolve runner security group; bridge-api port may not be accessible"
+  fi
+}
+
 # ── Run the e2e test on the runner ───────────────────────────────────────────
 
 run_e2e_test() {
@@ -1763,6 +1827,312 @@ cmd_resume() {
   return "$test_exit"
 }
 
+cmd_deploy() {
+  mkdir -p "$WORKDIR/logs" "$WORKDIR/reports" "$WORKDIR/local-secrets" "$WORKDIR/bin" "$CHECKPOINT_DIR"
+
+  # Preflight
+  for cmd in terraform aws ssh scp ssh-keygen jq curl gh go npm; do
+    have_cmd "$cmd" || die "missing required command: $cmd"
+  done
+
+  # Validate AWS profile
+  env AWS_PROFILE="$AWS_PROFILE" aws sts get-caller-identity --region "$AWS_REGION" >/dev/null 2>&1 || \
+    die "AWS profile '$AWS_PROFILE' not configured or credentials expired"
+  ok "AWS profile '$AWS_PROFILE' valid"
+
+  auto_discover_secrets
+  resolve_gh_releases
+  setup_ssh_keys
+
+  # Deploy mode always keeps infra
+  KEEP_INFRA=true
+  trap cleanup_trap EXIT
+
+  # Stage 1: Terraform
+  if ! checkpoint_done "terraform"; then
+    terraform_apply
+    checkpoint_mark "terraform"
+  fi
+  read_tf_outputs
+
+  # Load SP1 secret ARN for cleanup
+  if [[ -f "$WORKDIR/local-secrets/sp1-secret-arn.txt" ]]; then
+    CLEANUP_SP1_SECRET_ARN="$(cat "$WORKDIR/local-secrets/sp1-secret-arn.txt")"
+  fi
+
+  # Stage 2: Prepare hosts
+  if ! checkpoint_done "prepare-hosts"; then
+    prepare_runner_host
+    prepare_operator_hosts
+    extract_rpc_credentials
+    checkpoint_mark "prepare-hosts"
+  fi
+
+  # Stage 3: DKG
+  if ! checkpoint_done "dkg"; then
+    run_distributed_dkg
+    derive_owallet_keys
+    checkpoint_mark "dkg"
+  else
+    derive_owallet_keys
+  fi
+
+  # Stage 4: Stage secrets, provision operator config, and scale ECS
+  if ! checkpoint_done "stage-secrets"; then
+    stage_secrets_on_runner
+    provision_operator_stack_config
+    scale_proof_services 1
+    checkpoint_mark "stage-secrets"
+  fi
+
+  # Stage 5: Deploy backoffice
+  if ! checkpoint_done "backoffice"; then
+    deploy_backoffice
+    checkpoint_mark "backoffice"
+  fi
+
+  # Stage 6: Build and deploy bridge-api + base-event-scanner binaries
+  build_and_deploy_bridge_binaries
+
+  # Stage 7: Open bridge-api port on runner SG
+  add_bridge_api_sg_rule
+
+  # Stage 8: Invoke runner-side deploy
+  run_deploy_on_runner
+
+  # Stage 9: Write deployment summary
+  local access_file="$REPO_ROOT/tmp/testnet-access.txt"
+  mkdir -p "$(dirname "$access_file")"
+  cat > "$access_file" <<ACCESS_EOF
+# Testnet Bridge Deployment
+# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+Bridge Frontend: http://${RUNNER_PUBLIC_IP}:${BRIDGE_API_PORT}
+Backoffice:      http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}
+Auth Token:      ${BACKOFFICE_AUTH_TOKEN}
+Base Chain:      Base Sepolia (${BASE_CHAIN_ID})
+SSH:             ssh -i ${SSH_KEY_PRIVATE} ${RUNNER_SSH_USER}@${RUNNER_PUBLIC_IP}
+Cleanup:         ./run-e2e-local.sh cleanup --workdir ${WORKDIR}
+ACCESS_EOF
+  chmod 600 "$access_file"
+
+  echo ""
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo -e "${BOLD} TESTNET DEPLOYMENT COMPLETE${NC}"
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo -e " Bridge Frontend: ${GREEN}http://${RUNNER_PUBLIC_IP}:${BRIDGE_API_PORT}${NC}"
+  echo -e " Backoffice:      ${GREEN}http://${RUNNER_PUBLIC_IP}:${BACKOFFICE_PORT}${NC}"
+  echo -e " Auth Token:      ${BACKOFFICE_AUTH_TOKEN}"
+  echo " Workdir:         $WORKDIR"
+  echo -e " Cleanup:         $0 cleanup --workdir $WORKDIR"
+  echo -e "${BOLD}═══════════════════════════════════════════${NC}"
+  echo ""
+  ok "deployment summary written to tmp/testnet-access.txt"
+}
+
+run_deploy_on_runner() {
+  step "Running deploy on runner"
+
+  local dkg_summary="$WORKDIR/reports/dkg-summary.json"
+  local remote_secrets="/home/$RUNNER_SSH_USER/.ci/secrets"
+  local remote_workdir="/home/$RUNNER_SSH_USER/testnet-e2e-live"
+  local remote_repo="/home/$RUNNER_SSH_USER/intents-juno"
+
+  # Build operator host list (private IPs since runner is in the same VPC)
+  local op_hosts_csv=""
+  for ip in "${OPERATOR_PRIVATE_IPS[@]}"; do
+    op_hosts_csv="${op_hosts_csv:+$op_hosts_csv,}$ip"
+  done
+
+  # SCP DKG summary
+  local remote_dkg_summary="$remote_workdir/dkg-summary.json"
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir"
+  scp_to_host "$RUNNER_PUBLIC_IP" "$dkg_summary" "$remote_dkg_summary"
+
+  # Reuse existing bridge summary if available and operator-consistent
+  local bridge_summary_flag=""
+  local bridge_summary="$WORKDIR/reports/base-bridge-summary.json"
+  if [[ -f "$bridge_summary" ]]; then
+    local bridge_ops dkg_ops
+    bridge_ops="$(jq -r '[.operators[]? | ascii_downcase] | sort | join(",")' "$bridge_summary" 2>/dev/null || true)"
+    dkg_ops="$(jq -r '[.operators[].operator_id | ascii_downcase] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
+    if [[ -n "$bridge_ops" && -n "$dkg_ops" && "$bridge_ops" != "$dkg_ops" ]]; then
+      warn "bridge summary operators do not match DKG summary — forcing bridge redeploy"
+      rm -f "$bridge_summary"
+    fi
+  fi
+  if [[ -f "$bridge_summary" ]]; then
+    local remote_bridge_summary="$remote_workdir/reports/base-bridge-summary.json"
+    run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p $remote_workdir/reports"
+    scp_to_host "$RUNNER_PUBLIC_IP" "$bridge_summary" "$remote_bridge_summary"
+    bridge_summary_flag="--existing-bridge-summary-path $remote_bridge_summary"
+    log "reusing existing bridge summary: $bridge_summary"
+  fi
+
+  # Resolve DKG juno shielded address
+  local witness_recipient_ua
+  witness_recipient_ua="$(jq -r '.juno_shielded_address' "$dkg_summary")"
+  local witness_ufvk
+  witness_ufvk="$(jq -r '.ufvk' "$dkg_summary")"
+
+  # Build SSH tunnel ports for each operator
+  local tunnel_setup_script=""
+  local witness_scan_urls=""
+  local witness_rpc_urls=""
+  local tss_urls=""
+  for i in "${!OPERATOR_PRIVATE_IPS[@]}"; do
+    local op_priv="${OPERATOR_PRIVATE_IPS[$i]}"
+    local scan_port=$((38080 + i))
+    local rpc_port=$((38232 + i))
+    local tss_port=$((39443 + i))
+
+    tunnel_setup_script+="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null "
+    tunnel_setup_script+="-i $remote_secrets/fleet-ssh-key "
+    tunnel_setup_script+="-L ${scan_port}:127.0.0.1:8080 "
+    tunnel_setup_script+="-L ${rpc_port}:127.0.0.1:18232 "
+    tunnel_setup_script+="-L ${tss_port}:127.0.0.1:9443 "
+    tunnel_setup_script+="-N $RUNNER_SSH_USER@$op_priv &"$'\n'
+    tunnel_setup_script+="TUNNEL_PIDS+=(\$!)"$'\n'
+
+    witness_scan_urls="${witness_scan_urls:+$witness_scan_urls,}http://127.0.0.1:${scan_port}"
+    witness_rpc_urls="${witness_rpc_urls:+$witness_rpc_urls,}http://127.0.0.1:${rpc_port}"
+    tss_urls="${tss_urls:+$tss_urls,}https://127.0.0.1:${tss_port}"
+  done
+
+  # Prepare environment variables
+  local juno_rpc_user juno_rpc_pass
+  juno_rpc_user="$(cat "$WORKDIR/local-secrets/juno-rpc-user.txt")"
+  juno_rpc_pass="$(cat "$WORKDIR/local-secrets/juno-rpc-pass.txt")"
+
+  # Build env exports for Juno funder
+  local funder_env=""
+  if [[ -n "$JUNO_FUNDER_SEED_FILE" ]]; then
+    local seed_phrase
+    seed_phrase="$(cat "$JUNO_FUNDER_SEED_FILE")"
+    funder_env="export JUNO_FUNDER_SEED_PHRASE=$(printf '%q' "$seed_phrase")"
+  elif [[ -n "${JUNO_FUNDER_KEY_FILE:-}" ]]; then
+    local juno_key_hex
+    juno_key_hex="$(cat "$JUNO_FUNDER_KEY_FILE")"
+    funder_env="export JUNO_FUNDER_PRIVATE_KEY_HEX=$(printf '%q' "$juno_key_hex")"
+  fi
+  if [[ -n "${JUNO_FUNDER_SOURCE_ADDRESS_FILE:-}" ]]; then
+    local funder_ua
+    funder_ua="$(cat "$JUNO_FUNDER_SOURCE_ADDRESS_FILE")"
+    funder_env+=$'\n'"export JUNO_FUNDER_SOURCE_ADDRESS=$(printf '%q' "$funder_ua")"
+  fi
+
+  # Resolve the TSS CA PEM from an operator
+  local tss_ca_remote="$remote_secrets/tss-ca.pem"
+  run_on_host "$RUNNER_PUBLIC_IP" \
+    "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+     -i $remote_secrets/fleet-ssh-key $RUNNER_SSH_USER@${OPERATOR_PRIVATE_IPS[0]} \
+     'cat /var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem 2>/dev/null || \
+      cat /home/$RUNNER_SSH_USER/operator-runtime/bundle/tls/ca.pem 2>/dev/null || \
+      cat /var/lib/intents-juno/operator-runtime/tls/ca.pem 2>/dev/null || \
+      cat /home/$RUNNER_SSH_USER/operator-runtime/tls/ca.pem 2>/dev/null || \
+      cat /etc/intents-juno/tss-ca.pem 2>/dev/null || true' > $tss_ca_remote" || \
+    warn "could not extract TSS CA PEM; withdraw-coordinator TLS may fail"
+
+  # Build the remote deploy script
+  local remote_run_script
+  remote_run_script="$(cat <<REMOTESCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+export PATH="\$HOME/.foundry/bin:\$PATH:/usr/local/go/bin:\$HOME/go/bin"
+source "\$HOME/.cargo/env" 2>/dev/null || true
+
+export JUNO_RPC_USER=$(printf '%q' "$juno_rpc_user")
+export JUNO_RPC_PASS=$(printf '%q' "$juno_rpc_pass")
+export AWS_REGION="$AWS_REGION"
+$funder_env
+
+# Kill any stale SSH tunnels from previous runs
+for _pid in \$(pgrep -f 'ssh.*-N.*10\\.0\\.0' 2>/dev/null); do kill "\$_pid" 2>/dev/null; done
+sleep 1
+
+# Set up SSH tunnels to operators
+TUNNEL_PIDS=()
+cleanup_tunnels() {
+  for pid in "\${TUNNEL_PIDS[@]}"; do
+    kill "\$pid" 2>/dev/null || true
+  done
+}
+trap cleanup_tunnels EXIT
+
+$tunnel_setup_script
+
+# Wait for tunnels
+sleep 3
+
+cd $remote_repo
+
+deploy/operators/dkg/e2e/run-testnet-e2e.sh deploy \\
+  --workdir "$remote_workdir" \\
+  --base-rpc-url "$BASE_RPC_URL" \\
+  --base-chain-id "$BASE_CHAIN_ID" \\
+  --base-funder-key-file "$remote_secrets/base-funder.key" \\
+  --bridge-verifier-address "$BRIDGE_VERIFIER_ADDRESS" \\
+  --bridge-deposit-image-id "$BRIDGE_DEPOSIT_IMAGE_ID" \\
+  --bridge-withdraw-image-id "$BRIDGE_WITHDRAW_IMAGE_ID" \\
+  --sp1-requestor-key-file "$remote_secrets/sp1-requestor.key" \\
+  --sp1-deposit-program-url "$SP1_DEPOSIT_PROGRAM_URL" \\
+  --sp1-withdraw-program-url "$SP1_WITHDRAW_PROGRAM_URL" \\
+  --sp1-deposit-owallet-ivk-hex "$SP1_DEPOSIT_OWALLET_IVK_HEX" \\
+  --sp1-withdraw-owallet-ovk-hex "$SP1_WITHDRAW_OWALLET_OVK_HEX" \\
+  --sp1-witness-juno-scan-urls "$witness_scan_urls" \\
+  --sp1-witness-juno-rpc-urls "$witness_rpc_urls" \\
+  --sp1-witness-recipient-ua "$witness_recipient_ua" \\
+  --sp1-witness-recipient-ufvk "$witness_ufvk" \\
+  --sp1-input-s3-bucket "$DKG_S3_BUCKET" \\
+  --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
+  --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
+  --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+  --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
+  --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\
+  --shared-proof-funder-service-name "$SHARED_PROOF_FUNDER_SERVICE" \\
+  --dkg-summary-path "$remote_dkg_summary" \\
+  --operator-count "$OPERATOR_COUNT" \\
+  --threshold "$OPERATOR_THRESHOLD" \\
+  --withdraw-coordinator-tss-server-ca-file "$tss_ca_remote" \\
+  --relayer-runtime-mode distributed \\
+  --relayer-runtime-operator-hosts "$op_hosts_csv" \\
+  --relayer-runtime-operator-ssh-user "$RUNNER_SSH_USER" \\
+  --relayer-runtime-operator-ssh-key-file "$remote_secrets/fleet-ssh-key" \\
+  --withdraw-blob-bucket "$DKG_S3_BUCKET" \\
+  --withdraw-blob-prefix "withdraw-live" \\
+  --backoffice-url "http://127.0.0.1:${BACKOFFICE_PORT}" \\
+  --backoffice-auth-token "${BACKOFFICE_AUTH_TOKEN}" \\
+  --bridge-api-binary "/home/$RUNNER_SSH_USER/bin/bridge-api" \\
+  --base-event-scanner-binary "/home/$RUNNER_SSH_USER/bin/base-event-scanner" \\
+  --bridge-api-listen "0.0.0.0:${BRIDGE_API_PORT}" \\
+  --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
+  $bridge_summary_flag \\
+  ${EXTRA_E2E_FLAGS:-} \\
+  --force
+REMOTESCRIPT
+  )"
+
+  # Execute on runner
+  log "executing deploy on runner..."
+  local exit_code=0
+  local encoded_script
+  encoded_script="$(printf '%s' "$remote_run_script" | base64)"
+  ssh "${SSH_OPTS[@]}" "$RUNNER_SSH_USER@$RUNNER_PUBLIC_IP" \
+    "echo '$encoded_script' | base64 -d | bash" \
+    2>&1 | tee "$WORKDIR/logs/deploy.log" || exit_code=$?
+
+  if [[ $exit_code -eq 0 ]]; then
+    ok "Deploy completed successfully"
+  else
+    warn "Deploy FAILED (exit code: $exit_code)"
+  fi
+
+  # Collect bridge summary back locally
+  collect_artifacts
+
+  return "$exit_code"
+}
+
 cmd_cleanup() {
   mkdir -p "$WORKDIR/logs" 2>/dev/null || true
 
@@ -1790,5 +2160,6 @@ log "e2e-local: command=$COMMAND workdir=$WORKDIR aws-profile=$AWS_PROFILE regio
 case "$COMMAND" in
   run)     cmd_run ;;
   resume)  cmd_resume ;;
+  deploy)  cmd_deploy ;;
   cleanup) cmd_cleanup ;;
 esac
