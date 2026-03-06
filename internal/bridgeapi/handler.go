@@ -27,6 +27,7 @@ var ErrInvalidConfig = errors.New("bridgeapi: invalid config")
 type Config struct {
 	BaseChainID         uint32
 	BridgeAddress       common.Address
+	WJunoAddress        common.Address
 	OWalletUA           string
 	RefundWindowSeconds uint64
 	MinDepositAmount    uint64
@@ -189,7 +190,7 @@ func (h *handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+	resp := map[string]any{
 		"version":             "v1",
 		"baseChainId":         h.cfg.BaseChainID,
 		"bridgeAddress":       h.cfg.BridgeAddress.Hex(),
@@ -198,7 +199,11 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 		"minDepositAmount":    strconv.FormatUint(h.cfg.MinDepositAmount, 10),
 		"minWithdrawAmount":   strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
 		"feeBps":              h.cfg.FeeBps,
-	})
+	}
+	if h.cfg.WJunoAddress != (common.Address{}) {
+		resp["wjunoAddress"] = h.cfg.WJunoAddress.Hex()
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {

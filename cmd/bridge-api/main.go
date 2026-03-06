@@ -28,6 +28,7 @@ func main() {
 
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
+		wjunoAddr   = flag.String("wjuno-address", "", "WJuno token contract address (optional, returned by /v1/config)")
 		oWalletUA   = flag.String("owallet-ua", "", "oWallet unified address (required)")
 
 		refundWindowSeconds = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
@@ -61,6 +62,10 @@ func main() {
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
 		fmt.Fprintln(os.Stderr, "error: --bridge-address must be a valid hex address")
+		os.Exit(2)
+	}
+	if *wjunoAddr != "" && !common.IsHexAddress(*wjunoAddr) {
+		fmt.Fprintln(os.Stderr, "error: --wjuno-address must be a valid hex address")
 		os.Exit(2)
 	}
 	if *baseChainID > uint64(^uint32(0)) {
@@ -156,9 +161,15 @@ func main() {
 		log.Info("bridge-api write endpoints enabled", "queueDriver", *queueDriver, "depositTopic", *depositEventTopic)
 	}
 
+	var wjunoAddress common.Address
+	if *wjunoAddr != "" {
+		wjunoAddress = common.HexToAddress(*wjunoAddr)
+	}
+
 	handler, err := bridgeapi.NewHandler(bridgeapi.Config{
 		BaseChainID:             uint32(*baseChainID),
 		BridgeAddress:           common.HexToAddress(*bridgeAddr),
+		WJunoAddress:            wjunoAddress,
 		OWalletUA:               *oWalletUA,
 		RefundWindowSeconds:     *refundWindowSeconds,
 		MinDepositAmount:        *minDepositAmount,

@@ -84,39 +84,77 @@ func (s *stubActionService) SubmitDeposit(_ context.Context, req DepositSubmitIn
 func TestHandler_Config(t *testing.T) {
 	t.Parallel()
 
-	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
-		NonceFn: func() (uint64, error) {
-			return 1, nil
-		},
-	}, &stubDepositReader{}, &stubWithdrawalReader{})
-	if err != nil {
-		t.Fatalf("NewHandler: %v", err)
-	}
+	t.Run("without wjuno", func(t *testing.T) {
+		h, err := NewHandler(Config{
+			BaseChainID:         8453,
+			BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:           "u1example",
+			RefundWindowSeconds: 86400,
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
 
-	req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
-	}
+		req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
+		}
 
-	var out struct {
-		Version             string `json:"version"`
-		BaseChainID         uint32 `json:"baseChainId"`
-		BridgeAddress       string `json:"bridgeAddress"`
-		OWalletUA           string `json:"oWalletUA"`
-		RefundWindowSeconds uint64 `json:"refundWindowSeconds"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if out.Version != "v1" || out.BaseChainID != 8453 || out.RefundWindowSeconds != 86400 {
-		t.Fatalf("bad config response: %+v", out)
-	}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out["version"] != "v1" {
+			t.Fatalf("bad version: %v", out["version"])
+		}
+		if _, exists := out["wjunoAddress"]; exists {
+			t.Fatalf("wjunoAddress should be absent when not configured, got %v", out["wjunoAddress"])
+		}
+	})
+
+	t.Run("with wjuno", func(t *testing.T) {
+		wjuno := common.HexToAddress("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
+		h, err := NewHandler(Config{
+			BaseChainID:         8453,
+			BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			WJunoAddress:        wjuno,
+			OWalletUA:           "u1example",
+			RefundWindowSeconds: 86400,
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
+		}
+
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out["version"] != "v1" {
+			t.Fatalf("bad version: %v", out["version"])
+		}
+		got, ok := out["wjunoAddress"].(string)
+		if !ok {
+			t.Fatalf("wjunoAddress missing from config response")
+		}
+		if !strings.EqualFold(got, wjuno.Hex()) {
+			t.Fatalf("wjunoAddress: got %s want %s", got, wjuno.Hex())
+		}
+	})
 }
 
 func TestHandler_DepositMemo(t *testing.T) {
