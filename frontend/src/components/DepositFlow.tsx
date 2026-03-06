@@ -41,7 +41,6 @@ export default function DepositFlow() {
   const { address } = useAccount()
   const [recipient, setRecipient] = useState('')
   const [amount, setAmount] = useState('')
-  const [fromAddress, setFromAddress] = useState('')
   const [generated, setGenerated] = useState(false)
 
   const effectiveRecipient = recipient || (address ?? '')
@@ -65,10 +64,15 @@ export default function DepositFlow() {
 
   const compactMemo = memo ? compactMemoHex(memo.memoHex) : ''
   const cliAmount = amount || '10.0'
-  const cliFrom = fromAddress || 'YOUR_JUNO_ADDRESS'
 
   const cliCommand = memo
-    ? `junocash-cli -testnet z_sendmany "${cliFrom}" '[{"address":"${memo.oWalletUA}","amount":${cliAmount},"memo":"${compactMemo}"}]'`
+    ? `FROM=$(junocash-cli -testnet z_listaddresses | jq -r '.[0]')
+TO="${memo.oWalletUA}"
+AMOUNT=${cliAmount}
+MEMO="${compactMemo}"
+
+junocash-cli -testnet z_sendmany "$FROM" \
+  '[{"address":"'"$TO"'","amount":'"$AMOUNT"',"memo":"'"$MEMO"'"}]'`
     : ''
 
   return (
@@ -112,15 +116,6 @@ export default function DepositFlow() {
             onChange={(e) => setAmount(e.target.value)}
           />
         </div>
-        <div className="field">
-          <label className="label">Your Juno Shielded Address (for CLI command)</label>
-          <input
-            className="mono"
-            placeholder="jtest1... or ztestsapling1..."
-            value={fromAddress}
-            onChange={(e) => setFromAddress(e.target.value)}
-          />
-        </div>
         {cfg && cfg.feeBps > 0 && (
           <div className="fee-line" style={{ marginTop: 0 }}>
             <span>Bridge fee</span>
@@ -143,10 +138,7 @@ export default function DepositFlow() {
           <div className="card">
             <h3>Send JUNO via CLI</h3>
             <p style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 12 }}>
-              {fromAddress
-                ? 'Copy and paste this command into your terminal.'
-                : <>Fill in <code style={{ color: 'var(--accent)' }}>YOUR_JUNO_ADDRESS</code> above or replace it in the command.</>
-              }
+              Copy and paste this into your terminal. The <code style={{ color: 'var(--text)' }}>FROM</code> address is auto-detected from your wallet.
             </p>
             <div className="cli-block">
               <div className="cli-header">
