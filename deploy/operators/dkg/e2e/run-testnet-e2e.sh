@@ -12,7 +12,8 @@ prepare_script_runtime "$SCRIPT_DIR"
 usage() {
   cat <<'EOF'
 Usage:
-  run-testnet-e2e.sh run [options]
+  run-testnet-e2e.sh run    [options]  Full e2e test lifecycle
+  run-testnet-e2e.sh deploy [options]  Deploy persistent services (no tests)
 
 Options:
   --workdir <path>                 working directory (default: <repo>/tmp/testnet-e2e)
@@ -2086,6 +2087,23 @@ start_remote_relayer_service() {
   remote_joined_args="$(shell_join "$@")"
   [[ -n "$remote_joined_args" ]] || die "remote relayer service command must not be empty (host=$host)"
 
+  # In deploy mode, use nohup on the remote host so the process survives
+  # SSH disconnect. The deploy_mode variable is inherited from the caller
+  # via bash dynamic scoping.
+  if [[ "${deploy_mode:-}" == "true" ]]; then
+    local remote_log="/tmp/relayer-$(date +%s)-$$.log"
+    ssh \
+      -i "$ssh_key_file" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      "$ssh_user@$host" \
+      "bash -lc $(printf '%q' "nohup $remote_joined_args >$remote_log 2>&1 & disown; echo \$!")" \
+      >"$log_path" 2>&1
+    # Return a synthetic PID; the real process runs remotely.
+    printf '%s' "$$"
+    return 0
+  fi
+
   (
     ssh \
       -i "$ssh_key_file" \
@@ -3086,6 +3104,10 @@ command_run() {
   local disable_sp1_progress_guard_bump="false"
   local disable_checkpoint_replay="false"
   local stop_after_stage="full"
+  local deploy_mode="false"
+  local bridge_api_binary=""
+  local base_event_scanner_binary=""
+  local bridge_api_listen=""
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3506,6 +3528,25 @@ command_run() {
       --backoffice-auth-token)
         [[ $# -ge 2 ]] || die "missing value for --backoffice-auth-token"
         backoffice_auth_token="$2"
+        shift 2
+        ;;
+      --deploy-mode)
+        deploy_mode="true"
+        shift
+        ;;
+      --bridge-api-binary)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-api-binary"
+        bridge_api_binary="$2"
+        shift 2
+        ;;
+      --base-event-scanner-binary)
+        [[ $# -ge 2 ]] || die "missing value for --base-event-scanner-binary"
+        base_event_scanner_binary="$2"
+        shift 2
+        ;;
+      --bridge-api-listen)
+        [[ $# -ge 2 ]] || die "missing value for --bridge-api-listen"
+        bridge_api_listen="$2"
         shift 2
         ;;
       --reuse-kafka-topics)
@@ -6023,6 +6064,10 @@ command_run() {
   local bridge_api_pid=""
   local base_event_scanner_pid=""
   local bridge_api_port="$((base_port + 1250))"
+  if [[ -n "$bridge_api_listen" ]]; then
+    # Extract port from addr:port or just port
+    bridge_api_port="${bridge_api_listen##*:}"
+  fi
   local bridge_api_url="http://127.0.0.1:${bridge_api_port}"
   local deposit_relayer_health_port="$((base_port + 1300))"
   local withdraw_coordinator_health_port="$((base_port + 1310))"
@@ -6659,23 +6704,39 @@ command_run() {
   fi
 
   if (( relayer_status == 0 )); then
-    (
-      cd "$REPO_ROOT"
+    local bridge_api_listen_addr="${bridge_api_listen:-127.0.0.1:${bridge_api_port}}"
+    local -a bridge_api_args=(
+      --listen "$bridge_api_listen_addr"
+      --postgres-dsn "$shared_postgres_dsn"
+      --base-chain-id "$base_chain_id"
+      --bridge-address "$deployed_bridge_address"
+      --queue-driver kafka
+      --queue-brokers "$shared_kafka_brokers"
+      --deposit-event-topic "$deposit_event_topic"
+      --owallet-ua "$withdraw_coordinator_juno_change_address"
+      --refund-window-seconds "$bridge_refund_window_seconds"
+      --fee-bps "$bridge_fee_bps"
+    )
+    if [[ -n "${deployed_wjuno_address:-}" ]]; then
+      bridge_api_args+=(--wjuno-address "$deployed_wjuno_address")
+    fi
+
+    if [[ "$deploy_mode" == "true" && -n "$bridge_api_binary" ]]; then
+      # Deploy mode: use pre-built binary with nohup for persistence
       JUNO_QUEUE_KAFKA_TLS="true" \
-      go run ./cmd/bridge-api \
-        --listen "127.0.0.1:${bridge_api_port}" \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --base-chain-id "$base_chain_id" \
-        --bridge-address "$deployed_bridge_address" \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --deposit-event-topic "$deposit_event_topic" \
-        --owallet-ua "$withdraw_coordinator_juno_change_address" \
-        --refund-window-seconds "$bridge_refund_window_seconds" \
-        --fee-bps "$bridge_fee_bps" \
-        >"$bridge_api_log" 2>&1
-    ) &
-    bridge_api_pid="$!"
+        nohup "$bridge_api_binary" "${bridge_api_args[@]}" \
+        >"$bridge_api_log" 2>&1 & disown
+      bridge_api_pid="$!"
+    else
+      (
+        cd "$REPO_ROOT"
+        JUNO_QUEUE_KAFKA_TLS="true" \
+        go run ./cmd/bridge-api \
+          "${bridge_api_args[@]}" \
+          >"$bridge_api_log" 2>&1
+      ) &
+      bridge_api_pid="$!"
+    fi
     sleep 3
     if ! kill -0 "$bridge_api_pid" >/dev/null 2>&1; then
       relayer_status=1
@@ -6691,21 +6752,33 @@ command_run() {
 
   # ── Launch base-event-scanner ───────────────────────────────────────────
   if (( relayer_status == 0 )); then
-    (
-      cd "$REPO_ROOT"
+    local -a scanner_args=(
+      --base-rpc-url "$base_rpc_url"
+      --bridge-address "$deployed_bridge_address"
+      --postgres-dsn "$shared_postgres_dsn"
+      --start-block 0
+      --poll-interval 3s
+      --queue-driver kafka
+      --queue-brokers "$shared_kafka_brokers"
+      --withdraw-event-topic "$withdraw_request_topic"
+    )
+
+    if [[ "$deploy_mode" == "true" && -n "$base_event_scanner_binary" ]]; then
+      # Deploy mode: use pre-built binary with nohup for persistence
       JUNO_QUEUE_KAFKA_TLS="true" \
-      go run ./cmd/base-event-scanner \
-        --base-rpc-url "$base_rpc_url" \
-        --bridge-address "$deployed_bridge_address" \
-        --postgres-dsn "$shared_postgres_dsn" \
-        --start-block 0 \
-        --poll-interval 3s \
-        --queue-driver kafka \
-        --queue-brokers "$shared_kafka_brokers" \
-        --withdraw-event-topic "$withdraw_request_topic" \
-        >"$base_event_scanner_log" 2>&1
-    ) &
-    base_event_scanner_pid="$!"
+        nohup "$base_event_scanner_binary" "${scanner_args[@]}" \
+        >"$base_event_scanner_log" 2>&1 & disown
+      base_event_scanner_pid="$!"
+    else
+      (
+        cd "$REPO_ROOT"
+        JUNO_QUEUE_KAFKA_TLS="true" \
+        go run ./cmd/base-event-scanner \
+          "${scanner_args[@]}" \
+          >"$base_event_scanner_log" 2>&1
+      ) &
+      base_event_scanner_pid="$!"
+    fi
     sleep 3
     if ! kill -0 "$base_event_scanner_pid" >/dev/null 2>&1; then
       relayer_status=1
@@ -6757,6 +6830,45 @@ command_run() {
     else
       warn "backoffice health check failed"
     fi
+  fi
+
+  # ── Deploy mode: skip tests, write summary, and exit ─────────────────────
+  if [[ "$deploy_mode" == "true" ]]; then
+    if (( relayer_status != 0 )); then
+      log "deploy mode: service launch failed"
+      return 1
+    fi
+    log "deploy mode: all services healthy — writing deployment summary"
+
+    local deploy_summary_path="$workdir/reports/deploy-summary.json"
+    local runner_ip
+    runner_ip="$(curl -sf --max-time 5 https://checkip.amazonaws.com 2>/dev/null | tr -d '\r\n' || hostname -I 2>/dev/null | awk '{print $1}' || echo "unknown")"
+
+    jq -n \
+      --arg bridge_frontend_url "http://${runner_ip}:${bridge_api_port}" \
+      --arg backoffice_url "${backoffice_url:-}" \
+      --arg bridge_address "${deployed_bridge_address:-}" \
+      --arg wjuno_address "${deployed_wjuno_address:-}" \
+      --arg fee_distributor_address "$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)" \
+      --arg operator_registry_address "$(jq -r '.contracts.operator_registry // empty' "$bridge_summary" 2>/dev/null || true)" \
+      --arg owallet_ua "$withdraw_coordinator_juno_change_address" \
+      --argjson base_chain_id "$base_chain_id" \
+      --arg base_rpc_url "$base_rpc_url" \
+      '{
+        bridgeFrontendUrl: $bridge_frontend_url,
+        backofficeUrl: (if $backoffice_url == "" then null else $backoffice_url end),
+        bridgeAddress: $bridge_address,
+        wjunoAddress: $wjuno_address,
+        feeDistributorAddress: (if $fee_distributor_address == "" then null else $fee_distributor_address end),
+        operatorRegistryAddress: (if $operator_registry_address == "" then null else $operator_registry_address end),
+        owalletUA: $owallet_ua,
+        baseChainId: $base_chain_id,
+        baseRpcUrl: $base_rpc_url
+      }' > "$deploy_summary_path"
+
+    log "deployment summary written to $deploy_summary_path"
+    cat "$deploy_summary_path"
+    return 0
   fi
 
   if (( relayer_status == 0 )) && [[ "$shared_enabled" == "true" ]]; then
@@ -9149,6 +9261,7 @@ main() {
   local cmd="${1:-run}"
   case "$cmd" in
     run) command_run "$@" ;;
+    deploy) command_run --deploy-mode "$@" ;;
     -h|--help|"")
       usage
       ;;
