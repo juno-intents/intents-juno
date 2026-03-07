@@ -6089,6 +6089,11 @@ command_run() {
   local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
   local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"
   local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"
+  # Health ports for distributed relayer services (on the operator host).
+  local distributed_base_relayer_health_port=18301
+  local distributed_deposit_relayer_health_port=18302
+  local distributed_withdraw_coordinator_health_port=18303
+  local distributed_withdraw_finalizer_health_port=18304
   local distributed_juno_txbuild_bin_path="/tmp/testnet-e2e-bin/juno-txbuild"
   local distributed_bridge_operator_signer_bin=""
   local runner_bridge_operator_signer_bin_path=""
@@ -6491,7 +6496,8 @@ command_run() {
           --juno-rpc-url "http://127.0.0.1:18232" \
           --juno-rpc-user-env "$sp1_witness_juno_rpc_user_env" \
           --juno-rpc-pass-env "$sp1_witness_juno_rpc_pass_env" \
-          --scan-poll-interval 10s
+          --scan-poll-interval 10s \
+          --health-port "$distributed_deposit_relayer_health_port"
       )"
 
       withdraw_coordinator_pid="$(
@@ -6539,7 +6545,8 @@ command_run() {
           --juno-txbuild-bin "$distributed_juno_txbuild_bin_path" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
-          --blob-prefix "$withdraw_blob_prefix"
+          --blob-prefix "$withdraw_blob_prefix" \
+          --health-port "$distributed_withdraw_coordinator_health_port"
       )"
 
       local -a withdraw_finalizer_remote_env=(
@@ -6590,7 +6597,8 @@ command_run() {
           --queue-topics "$checkpoint_package_topic" \
           --blob-driver s3 \
           --blob-bucket "$withdraw_blob_bucket" \
-          --blob-prefix "$withdraw_blob_prefix"
+          --blob-prefix "$withdraw_blob_prefix" \
+          --health-port "$distributed_withdraw_finalizer_health_port"
       )"
     else
       (
@@ -6818,10 +6826,15 @@ command_run() {
     for _arg in "${bo_args[@]:-}"; do [[ "$_arg" == "--service-urls" ]] && bo_has_svc_urls="true"; done
     if [[ "$bo_has_svc_urls" == "false" ]]; then
       # Build service-urls CSV: in local mode all services run on the runner;
-      # in distributed mode relayers run on operator hosts where the healthz ports
-      # are not exposed through the SG, so only monitor bridge-api + scanner.
+      # in distributed mode relayers run on operator hosts (reachable via VPC).
       local svc_urls_csv=""
-      if [[ "$relayer_runtime_mode" != "distributed" ]]; then
+      if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+        svc_urls_csv="base-relayer=http://${base_relayer_host}:${base_relayer_port}/healthz"
+        svc_urls_csv+=",deposit-relayer=http://${deposit_relayer_host}:${distributed_deposit_relayer_health_port}/healthz"
+        svc_urls_csv+=",withdraw-coordinator=http://${withdraw_coordinator_host}:${distributed_withdraw_coordinator_health_port}/healthz"
+        svc_urls_csv+=",withdraw-finalizer=http://${withdraw_finalizer_host}:${distributed_withdraw_finalizer_health_port}/healthz"
+        svc_urls_csv+=","
+      else
         svc_urls_csv="base-relayer=http://127.0.0.1:${base_relayer_port}/healthz"
         svc_urls_csv+=",deposit-relayer=http://127.0.0.1:${deposit_relayer_health_port}/healthz"
         svc_urls_csv+=",withdraw-coordinator=http://127.0.0.1:${withdraw_coordinator_health_port}/healthz"
