@@ -1,7 +1,14 @@
 export default function ApiDocs() {
+  const baseUrl = window.location.origin
+
   return (
     <div className="card api-docs">
       <h3>Bridge API Reference</h3>
+
+      <div style={{ marginBottom: 16, padding: '8px 12px', background: 'var(--bg-card)', borderRadius: 6, border: '1px solid var(--border)' }}>
+        <span style={{ fontSize: 12, color: 'var(--text-dim)' }}>Base URL</span>
+        <div className="mono" style={{ fontSize: 14, marginTop: 2 }}>{baseUrl}</div>
+      </div>
 
       <h4 style={{ marginTop: 16, marginBottom: 8, color: 'var(--accent)' }}>Configuration</h4>
       <p><code>GET /v1/config</code> &mdash; Bridge configuration (chain ID, addresses, limits)</p>

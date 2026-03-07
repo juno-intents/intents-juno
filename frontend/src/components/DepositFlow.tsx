@@ -4,10 +4,6 @@ import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { QRCodeSVG } from 'qrcode.react'
 import { getDepositMemo, getConfig } from '../api/bridge'
-import StatusTracker from './StatusTracker'
-
-const DEPOSIT_STEPS = ['pending', 'seen', 'confirmed', 'proof_requested', 'proof_ready', 'submitted', 'finalized']
-
 function formatJuno(zatoshi: string): string {
   try {
     return formatUnits(BigInt(zatoshi), 8)
@@ -129,6 +125,11 @@ junocash-cli -testnet z_sendmany "$FROM" \
             <span>{formatJuno(cfg.minDepositAmount)} JUNO</span>
           </div>
         )}
+        {cfg && cfg.minDepositAmount !== '0' && (
+          <div className="warning-box" style={{ marginTop: 8, marginBottom: 0 }}>
+            Deposits below {formatJuno(cfg.minDepositAmount)} JUNO will not be processed and funds will be lost.
+          </div>
+        )}
         <button className="primary" onClick={handleGenerate} disabled={!effectiveRecipient || isLoading}>
           {isLoading ? 'Generating...' : 'Generate Deposit Instructions'}
         </button>
@@ -179,13 +180,6 @@ junocash-cli -testnet z_sendmany "$FROM" \
             </div>
           </div>
 
-          <div className="card">
-            <h3>Track Progress</h3>
-            <StatusTracker steps={DEPOSIT_STEPS} current="pending" />
-            <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
-              Waiting for Juno transaction...
-            </div>
-          </div>
         </>
       )}
     </div>

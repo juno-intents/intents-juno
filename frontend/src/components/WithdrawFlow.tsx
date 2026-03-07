@@ -1,12 +1,9 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
-import { parseUnits, formatUnits } from 'viem'
+import { parseUnits, formatUnits, maxUint256, stringToHex } from 'viem'
 import { getConfig } from '../api/bridge'
-import { WJUNO_ABI } from '../config/contracts'
-import StatusTracker from './StatusTracker'
-
-const WITHDRAW_STEPS = ['requested', 'planned', 'signing', 'signed', 'broadcasted', 'confirmed', 'finalizing', 'finalized']
+import { WJUNO_ABI, BRIDGE_ABI } from '../config/contracts'
 
 function formatJuno(zatoshi: string): string {
   try {
@@ -20,7 +17,7 @@ export default function WithdrawFlow() {
   const { address } = useAccount()
   const [amount, setAmount] = useState('')
   const [junoRecipient, setJunoRecipient] = useState('')
-  const [step, setStep] = useState<'input' | 'approve' | 'request' | 'tracking'>('input')
+  const [step, setStep] = useState<'input' | 'approve' | 'request'>('input')
 
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
@@ -38,40 +35,81 @@ export default function WithdrawFlow() {
     query: { enabled: !!address && !!wjunoAddress },
   })
 
-  const { writeContract: approve, data: approveTxHash } = useWriteContract()
-  const { writeContract: requestWithdraw, data: requestTxHash } = useWriteContract()
+  const { data: allowance, refetch: refetchAllowance } = useReadContract({
+    address: wjunoAddress as `0x${string}` | undefined,
+    abi: WJUNO_ABI,
+    functionName: 'allowance',
+    args: address && bridgeAddress ? [address, bridgeAddress] : undefined,
+    query: { enabled: !!address && !!wjunoAddress && !!bridgeAddress },
+  })
+
+  const {
+    writeContract: approve,
+    data: approveTxHash,
+    error: approveError,
+    reset: resetApprove,
+  } = useWriteContract()
+  const {
+    writeContract: requestWithdraw,
+    data: requestTxHash,
+    error: requestError,
+    reset: resetRequest,
+  } = useWriteContract()
 
   const { isSuccess: approveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash })
 
+  // Reset step on approve error (user rejected, tx failed, etc.)
+  useEffect(() => {
+    if (approveError && step === 'approve') {
+      setStep('input')
+      resetApprove()
+    }
+  }, [approveError, step, resetApprove])
+
+  // Reset step on request error
+  useEffect(() => {
+    if (requestError && step === 'request') {
+      setStep('input')
+      resetRequest()
+    }
+  }, [requestError, step, resetRequest])
+
+  // Refetch allowance after approval confirmed
+  useEffect(() => {
+    if (approveConfirmed) {
+      refetchAllowance()
+    }
+  }, [approveConfirmed, refetchAllowance])
+
+  const parsedAmount = amount ? parseUnits(amount, 8) : 0n
+  const hasSufficientAllowance = allowance !== undefined && parsedAmount > 0n && (allowance as bigint) >= parsedAmount
+
   const handleApprove = () => {
-    if (!wjunoAddress || !bridgeAddress || !amount) return
+    if (!wjunoAddress || !bridgeAddress) return
     approve({
       address: wjunoAddress as `0x${string}`,
       abi: WJUNO_ABI,
       functionName: 'approve',
-      args: [bridgeAddress, parseUnits(amount, 8)],
+      args: [bridgeAddress, maxUint256],
     })
     setStep('approve')
   }
-
-  const [withdrawalId, setWithdrawalId] = useState<string | null>(null)
 
   const handleRequestWithdraw = () => {
     if (!bridgeAddress || !amount || !junoRecipient) return
     requestWithdraw({
       address: bridgeAddress as `0x${string}`,
-      abi: [{ name: 'requestWithdraw', type: 'function', stateMutability: 'nonpayable', inputs: [{ name: 'amount', type: 'uint256' }, { name: 'junoRecipient', type: 'bytes' }], outputs: [] }],
+      abi: BRIDGE_ABI,
       functionName: 'requestWithdraw',
-      args: [parseUnits(amount, 8), junoRecipient as `0x${string}`],
+      args: [parseUnits(amount, 8), stringToHex(junoRecipient)],
     })
     setStep('request')
   }
 
   const { isSuccess: requestConfirmed } = useWaitForTransactionReceipt({ hash: requestTxHash })
 
-  if (step === 'request' && requestConfirmed && requestTxHash && !withdrawalId) {
-    setWithdrawalId(requestTxHash)
-    setStep('tracking')
+  if (step === 'request' && requestConfirmed) {
+    setStep('input')
   }
 
   return (
@@ -131,14 +169,19 @@ export default function WithdrawFlow() {
           <label className="label">Juno Recipient Address</label>
           <input
             className="mono"
-            placeholder="Juno unified address hex"
+            placeholder="Juno unified address (jtest1...)"
             value={junoRecipient}
             onChange={(e) => setJunoRecipient(e.target.value)}
           />
         </div>
-        {step === 'input' && (
+        {step === 'input' && !hasSufficientAllowance && (
           <button className="primary" onClick={handleApprove} disabled={!amount || !junoRecipient || !address}>
             Approve wJUNO
+          </button>
+        )}
+        {step === 'input' && hasSufficientAllowance && (
+          <button className="primary" onClick={handleRequestWithdraw} disabled={!amount || !junoRecipient || !address}>
+            Request Withdrawal
           </button>
         )}
         {step === 'approve' && !approveConfirmed && (
@@ -157,16 +200,6 @@ export default function WithdrawFlow() {
           </button>
         )}
       </div>
-
-      {step === 'tracking' && (
-        <div className="card">
-          <h3>Withdrawal Status</h3>
-          <StatusTracker steps={WITHDRAW_STEPS} current="requested" />
-          <div style={{ fontSize: 12, color: 'var(--text-dim)', marginTop: 8 }}>
-            Processing withdrawal...
-          </div>
-        </div>
-      )}
     </div>
   )
 }

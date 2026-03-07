@@ -1,10 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
+import StatusTracker from './StatusTracker'
 
 interface Props {
   address: string
 }
+
+const DEPOSIT_STEPS = ['pending', 'seen', 'confirmed', 'proof_requested', 'proof_ready', 'submitted', 'finalized']
+const WITHDRAW_STEPS = ['requested', 'planned', 'signing', 'signed', 'broadcasted', 'confirmed', 'finalizing', 'finalized']
 
 function formatJuno(zatoshi: string): string {
   try {
@@ -12,12 +16,6 @@ function formatJuno(zatoshi: string): string {
   } catch {
     return zatoshi
   }
-}
-
-function statusColor(state: string): string {
-  if (state === 'finalized') return 'green'
-  if (state === 'pending' || state === 'unknown') return 'dim'
-  return 'orange'
 }
 
 export default function RecentActivity({ address }: Props) {
@@ -57,13 +55,17 @@ export default function RecentActivity({ address }: Props) {
           </div>
           {deps.map((d) => (
             <div className="tx-item" key={d.depositId}>
-              <div className="tx-left">
-                <div className="tx-type">Deposit</div>
-                <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="tx-left">
+                  <div className="tx-type">Deposit</div>
+                  <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
+                </div>
+                <div className="tx-right">
+                  <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
+                </div>
               </div>
-              <div className="tx-right">
-                <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
-                <span className={`status-pill-sm ${statusColor(d.state)}`}>{d.state}</span>
+              <div style={{ marginTop: 8 }}>
+                <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
               </div>
             </div>
           ))}
@@ -76,13 +78,17 @@ export default function RecentActivity({ address }: Props) {
           </div>
           {wds.map((w) => (
             <div className="tx-item" key={w.withdrawalId}>
-              <div className="tx-left">
-                <div className="tx-type">Withdrawal</div>
-                <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="tx-left">
+                  <div className="tx-type">Withdrawal</div>
+                  <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
+                </div>
+                <div className="tx-right">
+                  <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
+                </div>
               </div>
-              <div className="tx-right">
-                <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
-                <span className={`status-pill-sm ${statusColor(w.state)}`}>{w.state}</span>
+              <div style={{ marginTop: 8 }}>
+                <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
               </div>
             </div>
           ))}
