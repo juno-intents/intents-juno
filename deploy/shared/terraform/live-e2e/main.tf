@@ -35,6 +35,10 @@ locals {
   selected_vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_subnet.selected.vpc_id
 }
 
+data "aws_vpc" "selected" {
+  id = local.selected_vpc_id
+}
+
 data "aws_subnets" "shared_vpc" {
   filter {
     name   = "vpc-id"
@@ -42,25 +46,22 @@ data "aws_subnets" "shared_vpc" {
   }
 }
 
-data "aws_subnets" "shared_vpc_private" {
-  filter {
-    name   = "vpc-id"
-    values = [local.selected_vpc_id]
-  }
-
-  filter {
-    name   = "map-public-ip-on-launch"
-    values = ["false"]
-  }
+# Look up each subnet to get its AZ, so we can pick one per AZ.
+data "aws_subnet" "all_vpc" {
+  for_each = toset(data.aws_subnets.shared_vpc.ids)
+  id       = each.value
 }
 
 locals {
-  vpc_subnets         = sort(data.aws_subnets.shared_vpc.ids)
-  private_vpc_subnets = sort(data.aws_subnets.shared_vpc_private.ids)
+  # Group subnets by AZ, pick one per AZ (sorted for determinism).
+  subnets_by_az = {
+    for s in data.aws_subnet.all_vpc :
+    s.availability_zone => s.id...
+  }
+  one_per_az = sort([for az, ids in local.subnets_by_az : sort(ids)[0]])
+
   shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (
-    length(local.private_vpc_subnets) >= 2 ? slice(local.private_vpc_subnets, 0, 2) : (
-      length(local.vpc_subnets) >= 2 ? slice(local.vpc_subnets, 0, 2) : local.vpc_subnets
-    )
+    length(local.one_per_az) >= 2 ? slice(local.one_per_az, 0, 2) : local.one_per_az
   )
 }
 
@@ -306,6 +307,14 @@ resource "aws_security_group" "runner" {
     to_port     = 22
     protocol    = "tcp"
     cidr_blocks = [var.allowed_ssh_cidr]
+  }
+
+  ingress {
+    description = "IPFS API from VPC (runner hosts IPFS container as NLB target)"
+    from_port   = 5001
+    to_port     = 5001
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
   }
 
   egress {
@@ -911,7 +920,10 @@ resource "aws_launch_template" "ipfs" {
     name = local.instance_profile_name
   }
 
-  vpc_security_group_ids = [aws_security_group.ipfs[0].id]
+  network_interfaces {
+    associate_public_ip_address = true
+    security_groups             = [aws_security_group.ipfs[0].id]
+  }
 
   block_device_mappings {
     device_name = "/dev/sda1"

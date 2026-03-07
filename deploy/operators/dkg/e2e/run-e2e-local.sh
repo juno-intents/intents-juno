@@ -298,6 +298,39 @@ resolve_gh_releases() {
     PROOF_SERVICES_IMAGE="$(jq -r '.image_uri // empty' <<<"$manifest")"
   fi
   [[ -n "$PROOF_SERVICES_IMAGE" ]] || die "could not resolve proof services image for region $AWS_REGION"
+
+  # If the image lives in a different AWS account, copy it to the local ECR.
+  local current_account_id
+  current_account_id="$(env AWS_PROFILE="$AWS_PROFILE" aws sts get-caller-identity --region "$AWS_REGION" --query Account --output text 2>/dev/null)"
+  local image_account_id
+  image_account_id="$(echo "$PROOF_SERVICES_IMAGE" | grep -oP '^\d+' || true)"
+  if [[ -n "$image_account_id" && "$image_account_id" != "$current_account_id" ]]; then
+    log "proof services image is in account $image_account_id, copying to $current_account_id..."
+    local image_digest
+    image_digest="$(echo "$PROOF_SERVICES_IMAGE" | grep -oP '@sha256:.+$' || true)"
+    local local_repo="${current_account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com/juno-e2e-local-$(basename "$WORKDIR" | tr -cs '[:alnum:]' '-' | tr '[:upper:]' '[:lower:]' | sed 's/^-//;s/-$//' | head -c 20)-proof-services"
+    local local_tag="${local_repo}:latest"
+
+    # Check if already copied (same digest)
+    local existing_digest=""
+    existing_digest="$(env AWS_PROFILE="$AWS_PROFILE" aws ecr describe-images --region "$AWS_REGION" \
+      --repository-name "$(echo "$local_repo" | sed "s|^[^/]*/||")" \
+      --query 'imageDetails[0].imageDigest' --output text 2>/dev/null || true)"
+    if [[ "$existing_digest" == "sha256:"* && "$image_digest" == "@${existing_digest}" ]]; then
+      log "image already present in local ECR"
+    else
+      # Login to both registries and copy
+      env AWS_PROFILE="$AWS_PROFILE" aws ecr get-login-password --region "$AWS_REGION" | \
+        docker login --username AWS --password-stdin "${current_account_id}.dkr.ecr.${AWS_REGION}.amazonaws.com" >/dev/null 2>&1
+      docker pull --platform linux/amd64 "$PROOF_SERVICES_IMAGE" >/dev/null 2>&1 || \
+        die "failed to pull proof services image from source ECR (ensure cross-account pull is allowed)"
+      docker tag "$PROOF_SERVICES_IMAGE" "$local_tag" >/dev/null 2>&1
+      docker push "$local_tag" >/dev/null 2>&1 || die "failed to push proof services image to local ECR"
+      ok "proof services image copied to local ECR"
+    fi
+    PROOF_SERVICES_IMAGE="${local_tag}"
+  fi
+
   ok "Proof services image: $PROOF_SERVICES_IMAGE"
 }
 
@@ -363,7 +396,7 @@ generate_tfvars() {
     --argjson shared_kafka_port 9094 \
     --argjson runner_associate_public_ip_address true \
     --argjson operator_associate_public_ip_address true \
-    --argjson shared_ecs_assign_public_ip false \
+    --argjson shared_ecs_assign_public_ip true \
     --arg dkg_s3_key_prefix "dkg/keypackages" \
     '{
       aws_region: $aws_region,
@@ -502,8 +535,12 @@ read_tf_outputs() {
   SHARED_KAFKA_BROKERS="$(_tf_out shared_kafka_bootstrap_brokers)"
   ok "Kafka: ${SHARED_KAFKA_BROKERS:0:60}..."
 
-  SHARED_IPFS_API_URL="$(_tf_out shared_ipfs_api_url)"
-  ok "IPFS: $SHARED_IPFS_API_URL"
+  SHARED_IPFS_NLB_URL="$(_tf_out shared_ipfs_api_url)"
+  # Runner hosts the IPFS container; NLB hairpin routing doesn't work (runner
+  # can't reach itself through the NLB). Use localhost for runner-side
+  # validation and the NLB URL for operators.
+  SHARED_IPFS_API_URL="http://127.0.0.1:5001"
+  ok "IPFS (runner): $SHARED_IPFS_API_URL  (NLB: $SHARED_IPFS_NLB_URL)"
 
   SHARED_ECS_CLUSTER_ARN="$(_tf_out shared_ecs_cluster_arn)"
   SHARED_PROOF_REQUESTOR_SERVICE="$(_tf_out shared_proof_requestor_service_name)"
@@ -1335,8 +1372,12 @@ build_and_deploy_bridge_binaries() {
   (cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/base-event-scanner-linux-amd64" ./cmd/base-event-scanner/)
   ok "base-event-scanner binary built"
 
+  # Kill running binaries so the files can be overwritten (Linux holds the
+  # inode open while the process is running, which blocks SCP on some setups).
+  run_on_host "$RUNNER_PUBLIC_IP" "pkill -f '/home/$RUNNER_SSH_USER/bin/bridge-api' || true; pkill -f '/home/$RUNNER_SSH_USER/bin/base-event-scanner' || true; sleep 1"
+
   # SCP to runner
-  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p /home/$RUNNER_SSH_USER/bin"
+  run_on_host "$RUNNER_PUBLIC_IP" "mkdir -p /home/$RUNNER_SSH_USER/bin; rm -f /home/$RUNNER_SSH_USER/bin/bridge-api /home/$RUNNER_SSH_USER/bin/base-event-scanner"
   scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/bridge-api-linux-amd64" "/home/$RUNNER_SSH_USER/bin/bridge-api"
   run_on_host "$RUNNER_PUBLIC_IP" "chmod +x /home/$RUNNER_SSH_USER/bin/bridge-api"
   scp_to_host "$RUNNER_PUBLIC_IP" "$WORKDIR/bin/base-event-scanner-linux-amd64" "/home/$RUNNER_SSH_USER/bin/base-event-scanner"
@@ -1543,6 +1584,7 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
   --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
   --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+  --operator-checkpoint-ipfs-api-url "$SHARED_IPFS_NLB_URL" \\
   --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
   --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\
   --shared-proof-funder-service-name "$SHARED_PROOF_FUNDER_SERVICE" \\
@@ -1558,6 +1600,10 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --withdraw-blob-prefix "withdraw-live" \\
   --backoffice-url "http://127.0.0.1:${BACKOFFICE_PORT}" \\
   --backoffice-auth-token "${BACKOFFICE_AUTH_TOKEN}" \\
+  --deploy-mode \\
+  --bridge-api-binary "/home/$RUNNER_SSH_USER/bin/bridge-api" \\
+  --base-event-scanner-binary "/home/$RUNNER_SSH_USER/bin/base-event-scanner" \\
+  --bridge-api-listen "0.0.0.0:${BRIDGE_API_PORT}" \\
   --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
   $bridge_summary_flag \\
   ${EXTRA_E2E_FLAGS:-} \\
@@ -1784,6 +1830,14 @@ cmd_resume() {
   log "updating runner code to $_current_commit..."
   run_on_host "$RUNNER_PUBLIC_IP" \
     "cd \$HOME/intents-juno && git fetch origin --prune && git checkout $_current_commit 2>/dev/null || git checkout origin/main"
+  # Overlay any uncommitted local changes to the test scripts so that
+  # in-progress fixes are picked up without requiring a commit.
+  local _e2e_script_dir="$REPO_ROOT/deploy/operators/dkg/e2e"
+  if [[ -d "$_e2e_script_dir" ]]; then
+    scp -i "$SSH_KEY_PRIVATE" -o StrictHostKeyChecking=no \
+      "$_e2e_script_dir"/*.sh \
+      "${RUNNER_SSH_USER}@${RUNNER_PUBLIC_IP}:/home/${RUNNER_SSH_USER}/intents-juno/deploy/operators/dkg/e2e/" 2>/dev/null || true
+  fi
   ok "runner code updated"
 
   # Ensure DKG is done
@@ -1810,6 +1864,10 @@ cmd_resume() {
 
   # Deploy backoffice
   deploy_backoffice
+
+  # Build and deploy bridge-api + base-event-scanner binaries
+  mkdir -p "$WORKDIR/bin"
+  build_and_deploy_bridge_binaries
 
   # Run test
   local test_exit=0
@@ -2087,6 +2145,7 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh deploy \\
   --shared-postgres-dsn "$SHARED_POSTGRES_DSN" \\
   --shared-kafka-brokers "$SHARED_KAFKA_BROKERS" \\
   --shared-ipfs-api-url "$SHARED_IPFS_API_URL" \\
+  --operator-checkpoint-ipfs-api-url "$SHARED_IPFS_NLB_URL" \\
   --shared-ecs-cluster-arn "$SHARED_ECS_CLUSTER_ARN" \\
   --shared-proof-requestor-service-name "$SHARED_PROOF_REQUESTOR_SERVICE" \\
   --shared-proof-funder-service-name "$SHARED_PROOF_FUNDER_SERVICE" \\
@@ -2102,6 +2161,7 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh deploy \\
   --withdraw-blob-prefix "withdraw-live" \\
   --backoffice-url "http://127.0.0.1:${BACKOFFICE_PORT}" \\
   --backoffice-auth-token "${BACKOFFICE_AUTH_TOKEN}" \\
+  --deploy-mode \\
   --bridge-api-binary "/home/$RUNNER_SSH_USER/bin/bridge-api" \\
   --base-event-scanner-binary "/home/$RUNNER_SSH_USER/bin/base-event-scanner" \\
   --bridge-api-listen "0.0.0.0:${BRIDGE_API_PORT}" \\

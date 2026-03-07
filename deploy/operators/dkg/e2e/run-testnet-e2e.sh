@@ -2097,7 +2097,7 @@ start_remote_relayer_service() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "$ssh_user@$host" \
-      "bash -lc $(printf '%q' "nohup bash -c 'while true; do $remote_joined_args >>$remote_log 2>&1 || true; echo \"[\$(date -u +%FT%TZ)] process exited, restarting in 5s...\" >>$remote_log; sleep 5; done' & disown; echo \$!")" \
+      "bash -lc $(printf '%q' "nohup bash -c 'while true; do $remote_joined_args >>$remote_log 2>&1 || true; echo \"[\$(date -u +%FT%TZ)] process exited, restarting in 5s...\" >>$remote_log; sleep 5; done' </dev/null >/dev/null 2>&1 & disown; echo \$!")" \
       >"$log_path" 2>&1
     # Return a synthetic PID; the real process runs remotely.
     printf '%s' "$$"
@@ -5701,7 +5701,7 @@ command_run() {
     log "restarting backoffice with bridge=$deployed_bridge_address wjuno=$deployed_wjuno_address"
     pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
     sleep 1
-    nohup "$HOME/bin/backoffice" "${bo_args[@]}" > "$HOME/backoffice.log" 2>&1 &
+    nohup "$HOME/bin/backoffice" "${bo_args[@]}" </dev/null > "$HOME/backoffice.log" 2>&1 &
     log "backoffice (re)started on port $bo_port"
   fi
 
@@ -6745,14 +6745,15 @@ command_run() {
     fi
 
     if [[ "$deploy_mode" == "true" && -n "$bridge_api_binary" ]]; then
-      # Deploy mode: restart loop so bridge-api survives crashes
+      # Deploy mode: restart loop so bridge-api survives crashes.
+      # Redirect subshell stdio to /dev/null so the SSH PTY is released.
       (
         while true; do
           "$bridge_api_binary" "${bridge_api_args[@]}" >>"$bridge_api_log" 2>&1 || true
           echo "[$(date -u +%FT%TZ)] bridge-api exited, restarting in 5s..." >> "$bridge_api_log"
           sleep 5
         done
-      ) & disown
+      ) </dev/null >/dev/null 2>&1 & disown
       bridge_api_pid="$!"
     else
       (
@@ -6791,7 +6792,8 @@ command_run() {
     )
 
     if [[ "$deploy_mode" == "true" && -n "$base_event_scanner_binary" ]]; then
-      # Deploy mode: restart loop so the scanner survives crashes
+      # Deploy mode: restart loop so the scanner survives crashes.
+      # Redirect subshell stdio to /dev/null so the SSH PTY is released.
       (
         while true; do
           JUNO_QUEUE_KAFKA_TLS="true" \
@@ -6799,7 +6801,7 @@ command_run() {
           echo "[$(date -u +%FT%TZ)] base-event-scanner exited, restarting in 5s..." >> "$base_event_scanner_log"
           sleep 5
         done
-      ) & disown
+      ) </dev/null >/dev/null 2>&1 & disown
       base_event_scanner_pid="$!"
     else
       (
@@ -6852,7 +6854,7 @@ command_run() {
       log "restarting backoffice with --service-urls $svc_urls_csv"
       pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
       sleep 1
-      nohup "$HOME/bin/backoffice" "${bo_args[@]}" > "$HOME/backoffice.log" 2>&1 &
+      nohup "$HOME/bin/backoffice" "${bo_args[@]}" </dev/null > "$HOME/backoffice.log" 2>&1 &
       sleep 2
     fi
   fi
