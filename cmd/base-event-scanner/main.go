@@ -149,6 +149,16 @@ func runMain(args []string, stdout io.Writer) error {
 		if event.FeeBps > uint64(^uint32(0)) {
 			return fmt.Errorf("feeBps overflows uint32: %d", event.FeeBps)
 		}
+		// Warn about non-standard recipientUA. The ZK circuit requires exactly
+		// 43 bytes (raw Orchard receiver). Other lengths will be rejected by the
+		// coordinator and the user's funds will be locked until refund expiry.
+		if len(event.RecipientUA) != 43 {
+			slog.Warn("withdrawal has non-standard recipientUA length (will be rejected by coordinator)",
+				"withdrawal_id", fmt.Sprintf("0x%x", event.WithdrawalID),
+				"recipient_ua_len", len(event.RecipientUA),
+				"block", event.BlockNumber,
+			)
+		}
 		payload := eventPayload{
 			Version:      "withdrawals.requested.v1",
 			WithdrawalID: fmt.Sprintf("0x%x", event.WithdrawalID),

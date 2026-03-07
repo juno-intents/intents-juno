@@ -227,12 +227,18 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 		}
 	}
 
+	var lastErr error
 	for _, batchID := range ids {
 		if err := f.finalizeBatch(ctx, batchID); err != nil {
-			return err
+			f.log.Error("finalize batch failed (skipping)",
+				"batch_id", hex.EncodeToString(batchID[:]),
+				"err", err,
+			)
+			lastErr = err
+			continue
 		}
 	}
-	return nil
+	return lastErr
 }
 
 func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {

@@ -524,6 +524,18 @@ func main() {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
+				// The ZK circuit requires exactly 43 bytes (raw Orchard receiver:
+				// 11-byte diversifier + 32-byte pk_d). Reject anything else to
+				// prevent batches that the finalizer cannot process.
+				const orchardRawReceiverLen = 43
+				if len(ua) != orchardRawReceiverLen {
+					log.Error("reject withdrawal: recipientUA must be 43 bytes (raw Orchard receiver)",
+						"got_len", len(ua),
+						"withdrawal_id", reqMsg.WithdrawalID,
+					)
+					ackMessage(qmsg, *ackTimeout, log)
+					continue
+				}
 				proofWitnessItem, err := decodeHexBytesOptional(reqMsg.ProofWitnessItem)
 				if err != nil {
 					log.Error("parse proofWitnessItem", "err", err)

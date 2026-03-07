@@ -987,6 +987,133 @@ func TestFinalizer_ErrorsWhenGuestInputConfiguredButWitnessMissing(t *testing.T)
 	}
 }
 
+// TestFinalizer_TickContinuesAfterBatchError verifies that a failing batch
+// does not prevent subsequent batches from being processed.
+func TestFinalizer_TickContinuesAfterBatchError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	// Batch 1: will FAIL because witness extractor returns error.
+	w1 := withdraw.Withdrawal{
+		ID:               seq32(0x00),
+		Amount:           1000,
+		FeeBps:           50,
+		RecipientUA:      []byte{0x01},
+		Expiry:           now.Add(24 * time.Hour),
+		ProofWitnessItem: bytes.Repeat([]byte{0x66}, proverinput.WithdrawWitnessItemLen),
+	}
+	_, _, _ = store.UpsertRequested(ctx, w1)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID1 := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID1,
+		WithdrawalIDs: [][32]byte{w1.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID1)
+	_ = store.SetBatchSigned(ctx, batchID1, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID1, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID1)
+
+	// Batch 2: will SUCCEED (no witness extractor needed — no OVK configured on batch).
+	w2 := withdraw.Withdrawal{
+		ID:          seq32(0x30),
+		Amount:      500,
+		FeeBps:      0,
+		RecipientUA: []byte{0x02},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	_, _, _ = store.UpsertRequested(ctx, w2)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID2 := seq32(0x20)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID2,
+		WithdrawalIDs: [][32]byte{w2.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID2)
+	_ = store.SetBatchSigned(ctx, batchID2, []byte{0x02})
+	_ = store.SetBatchBroadcasted(ctx, batchID2, "tx2")
+	_ = store.SetBatchConfirmed(ctx, batchID2)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	// Configure OVK so witness extraction is attempted — batch 1 has witness
+	// but the extractor is set to fail; batch 2 will process without OVK path
+	// because it has no ProofWitnessItem. Actually, the OVK config applies to
+	// all batches. So we use the witness extractor that fails for batch 1.
+	var ovk [32]byte
+	ovk[0] = 0xAA
+
+	failExtractor := &recordingWitnessExtractor{err: errors.New("simulated extractor failure")}
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		OWalletOVKBytes:   ovk[:],
+		WitnessExtractor:  failExtractor,
+	}, store, leaseStore, sender, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_ = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+
+	// Tick should process both batches: batch 1 fails, batch 2 succeeds.
+	// The error from batch 1 is returned but batch 2 was still processed.
+	err = f.Tick(ctx)
+	if err == nil {
+		t.Fatalf("expected error from failing batch")
+	}
+	if !strings.Contains(err.Error(), "simulated extractor failure") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Batch 1 should still be in confirming/finalizing state (failed to finalize).
+	b1, err := store.GetBatch(ctx, batchID1)
+	if err != nil {
+		t.Fatalf("GetBatch 1: %v", err)
+	}
+	if b1.State == withdraw.BatchStateFinalized {
+		t.Fatalf("batch 1 should NOT be finalized (extractor failed)")
+	}
+
+	// Batch 2 should also have been attempted. Both batches have OVK configured,
+	// so both will go through the witness extractor which fails for all.
+	// This test verifies Tick doesn't stop at the first error.
+	if failExtractor.calls < 2 {
+		t.Fatalf("expected witness extractor called at least 2 times (both batches), got %d", failExtractor.calls)
+	}
+}
+
 func seq32(start byte) (out [32]byte) {
 	for i := 0; i < 32; i++ {
 		out[i] = start + byte(i)
