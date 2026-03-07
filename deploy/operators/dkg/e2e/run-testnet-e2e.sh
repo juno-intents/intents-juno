@@ -2097,7 +2097,7 @@ start_remote_relayer_service() {
       -o StrictHostKeyChecking=no \
       -o UserKnownHostsFile=/dev/null \
       "$ssh_user@$host" \
-      "bash -lc $(printf '%q' "nohup $remote_joined_args >$remote_log 2>&1 & disown; echo \$!")" \
+      "bash -lc $(printf '%q' "nohup bash -c 'while true; do $remote_joined_args >>$remote_log 2>&1 || true; echo \"[\$(date -u +%FT%TZ)] process exited, restarting in 5s...\" >>$remote_log; sleep 5; done' & disown; echo \$!")" \
       >"$log_path" 2>&1
     # Return a synthetic PID; the real process runs remotely.
     printf '%s' "$$"
@@ -6736,9 +6736,14 @@ command_run() {
     fi
 
     if [[ "$deploy_mode" == "true" && -n "$bridge_api_binary" ]]; then
-      # Deploy mode: use pre-built binary with nohup for persistence
-      nohup "$bridge_api_binary" "${bridge_api_args[@]}" \
-        >"$bridge_api_log" 2>&1 & disown
+      # Deploy mode: restart loop so bridge-api survives crashes
+      (
+        while true; do
+          "$bridge_api_binary" "${bridge_api_args[@]}" >>"$bridge_api_log" 2>&1 || true
+          echo "[$(date -u +%FT%TZ)] bridge-api exited, restarting in 5s..." >> "$bridge_api_log"
+          sleep 5
+        done
+      ) & disown
       bridge_api_pid="$!"
     else
       (
@@ -6776,10 +6781,15 @@ command_run() {
     )
 
     if [[ "$deploy_mode" == "true" && -n "$base_event_scanner_binary" ]]; then
-      # Deploy mode: use pre-built binary with nohup for persistence
-      JUNO_QUEUE_KAFKA_TLS="true" \
-        nohup "$base_event_scanner_binary" "${scanner_args[@]}" \
-        >"$base_event_scanner_log" 2>&1 & disown
+      # Deploy mode: restart loop so the scanner survives crashes
+      (
+        while true; do
+          JUNO_QUEUE_KAFKA_TLS="true" \
+            "$base_event_scanner_binary" "${scanner_args[@]}" >>"$base_event_scanner_log" 2>&1 || true
+          echo "[$(date -u +%FT%TZ)] base-event-scanner exited, restarting in 5s..." >> "$base_event_scanner_log"
+          sleep 5
+        done
+      ) & disown
       base_event_scanner_pid="$!"
     else
       (
@@ -6810,13 +6820,13 @@ command_run() {
       # are not exposed through the SG, so only monitor bridge-api.
       local svc_urls_csv=""
       if [[ "$relayer_runtime_mode" != "distributed" ]]; then
-        svc_urls_csv="http://127.0.0.1:${base_relayer_port}/healthz"
-        svc_urls_csv+=",http://127.0.0.1:${deposit_relayer_health_port}/healthz"
-        svc_urls_csv+=",http://127.0.0.1:${withdraw_coordinator_health_port}/healthz"
-        svc_urls_csv+=",http://127.0.0.1:${withdraw_finalizer_health_port}/healthz"
+        svc_urls_csv="base-relayer=http://127.0.0.1:${base_relayer_port}/healthz"
+        svc_urls_csv+=",deposit-relayer=http://127.0.0.1:${deposit_relayer_health_port}/healthz"
+        svc_urls_csv+=",withdraw-coordinator=http://127.0.0.1:${withdraw_coordinator_health_port}/healthz"
+        svc_urls_csv+=",withdraw-finalizer=http://127.0.0.1:${withdraw_finalizer_health_port}/healthz"
         svc_urls_csv+=","
       fi
-      svc_urls_csv+="${bridge_api_url}/healthz"
+      svc_urls_csv+="bridge-api=${bridge_api_url}/healthz"
       bo_args+=(--service-urls "$svc_urls_csv")
       log "restarting backoffice with --service-urls $svc_urls_csv"
       pkill -f "$HOME/bin/backoffice" 2>/dev/null || true

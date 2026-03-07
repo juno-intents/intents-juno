@@ -298,6 +298,7 @@ install_intents_binaries() {
   go build -o "\$out_dir/deposit-relayer" ./cmd/deposit-relayer
   go build -o "\$out_dir/withdraw-coordinator" ./cmd/withdraw-coordinator
   go build -o "\$out_dir/withdraw-finalizer" ./cmd/withdraw-finalizer
+  go build -o "\$out_dir/base-event-scanner" ./cmd/base-event-scanner
 
   sudo install -m 0755 "\$out_dir/operator-keygen" /usr/local/bin/operator-keygen
   sudo install -m 0755 "\$out_dir/checkpoint-signer" /usr/local/bin/checkpoint-signer
@@ -308,6 +309,7 @@ install_intents_binaries() {
   sudo install -m 0755 "\$out_dir/deposit-relayer" /usr/local/bin/deposit-relayer
   sudo install -m 0755 "\$out_dir/withdraw-coordinator" /usr/local/bin/withdraw-coordinator
   sudo install -m 0755 "\$out_dir/withdraw-finalizer" /usr/local/bin/withdraw-finalizer
+  sudo install -m 0755 "\$out_dir/base-event-scanner" /usr/local/bin/base-event-scanner
 }
 
 install_aws_cli() {
@@ -416,6 +418,12 @@ DEPOSIT_SCAN_JUNO_RPC_URL=
 DEPOSIT_SCAN_JUNO_RPC_USER_ENV=JUNO_RPC_USER
 DEPOSIT_SCAN_JUNO_RPC_PASS_ENV=JUNO_RPC_PASS
 DEPOSIT_SCAN_POLL_INTERVAL=15s
+BASE_EVENT_SCANNER_ENABLED=false
+BASE_EVENT_SCANNER_BASE_RPC_URL=
+BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
+BASE_EVENT_SCANNER_POLL_INTERVAL=3s
+BASE_EVENT_SCANNER_START_BLOCK=0
+BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC=withdrawals.requested.v1
 WITHDRAW_BLOB_BUCKET=
 WITHDRAW_BLOB_PREFIX=withdraw-live
 WITHDRAW_IMAGE_ID=
@@ -1507,6 +1515,47 @@ exec /usr/local/bin/withdraw-finalizer "${args[@]}"
 EOF_WITHDRAW_FINALIZER
   sudo install -m 0755 /tmp/intents-juno-withdraw-finalizer.sh /usr/local/bin/intents-juno-withdraw-finalizer.sh
 
+  cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "base-event-scanner requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_EVENT_SCANNER_BASE_RPC_URL:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "base-event-scanner requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+
+args=(
+  --base-rpc-url "${BASE_EVENT_SCANNER_BASE_RPC_URL}"
+  --bridge-address "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS}"
+  --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
+  --start-block "${BASE_EVENT_SCANNER_START_BLOCK:-0}"
+  --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
+  --queue-driver kafka
+  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v1}"
+)
+
+case "${JUNO_QUEUE_KAFKA_TLS:-}" in
+  true|1|yes) export JUNO_QUEUE_KAFKA_TLS="true" ;;
+esac
+
+exec /usr/local/bin/base-event-scanner "${args[@]}"
+EOF_BASE_EVENT_SCANNER
+  sudo install -m 0755 /tmp/intents-juno-base-event-scanner.sh /usr/local/bin/intents-juno-base-event-scanner.sh
+
   cat > /tmp/junocashd.service <<'EOF_JUNOD'
 [Unit]
 Description=Intents Juno Operator junocashd
@@ -1707,6 +1756,26 @@ LimitNOFILE=65536
 WantedBy=multi-user.target
 EOF_WITHDRAW_FINALIZER_SERVICE
   sudo install -m 0644 /tmp/withdraw-finalizer.service /etc/systemd/system/withdraw-finalizer.service
+
+  cat > /tmp/base-event-scanner.service <<'EOF_BASE_EVENT_SCANNER_SERVICE'
+[Unit]
+Description=Intents Juno base-event-scanner
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/intents-juno-base-event-scanner.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF_BASE_EVENT_SCANNER_SERVICE
+  sudo install -m 0644 /tmp/base-event-scanner.service /etc/systemd/system/base-event-scanner.service
 }
 
 wait_for_sync_and_record_blockstamp() {
@@ -1808,7 +1877,8 @@ write_bootstrap_metadata() {
         "base-relayer.service",
         "deposit-relayer.service",
         "withdraw-coordinator.service",
-        "withdraw-finalizer.service"
+        "withdraw-finalizer.service",
+        "base-event-scanner.service"
       ]
     }' > "\$HOME/operator-stack-bootstrap.json"
 }
@@ -1824,7 +1894,7 @@ install_intents_binaries
 write_stack_config
 
 sudo systemctl daemon-reload
-sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service
+sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
 sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
@@ -1835,7 +1905,7 @@ done
 
 write_bootstrap_metadata
 
-sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service || true
+sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
 rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true
