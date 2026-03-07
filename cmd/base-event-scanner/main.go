@@ -18,6 +18,7 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/chainscanner"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -54,6 +55,8 @@ func runMain(args []string, stdout io.Writer) error {
 	startBlock := fs.Int64("start-block", 0, "starting block number (0 = resume from DB state)")
 	pollInterval := fs.Duration("poll-interval", 5*time.Second, "poll interval")
 	maxBlocksPerPoll := fs.Int64("max-blocks-per-poll", 1000, "maximum blocks per poll")
+
+	healthPort := fs.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
 
 	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated Kafka broker addresses")
@@ -125,6 +128,12 @@ func runMain(args []string, stdout io.Writer) error {
 	if err != nil {
 		return fmt.Errorf("create base scanner: %w", err)
 	}
+
+	go func() {
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "base-event-scanner"); err != nil {
+			slog.Error("healthz server", "err", err)
+		}
+	}()
 
 	slog.Info("starting base-event-scanner",
 		"bridge", *bridgeAddress,

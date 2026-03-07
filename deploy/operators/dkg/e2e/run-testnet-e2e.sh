@@ -6071,6 +6071,7 @@ command_run() {
   local deposit_relayer_health_port="$((base_port + 1300))"
   local withdraw_coordinator_health_port="$((base_port + 1310))"
   local withdraw_finalizer_health_port="$((base_port + 1320))"
+  local base_event_scanner_health_port="$((base_port + 1330))"
   local relayer_status=0
   local base_relayer_host=""
   local deposit_relayer_host=""
@@ -6778,6 +6779,7 @@ command_run() {
       --queue-driver kafka
       --queue-brokers "$shared_kafka_brokers"
       --withdraw-event-topic "$withdraw_request_topic"
+      --health-port "$base_event_scanner_health_port"
     )
 
     if [[ "$deploy_mode" == "true" && -n "$base_event_scanner_binary" ]]; then
@@ -6815,9 +6817,9 @@ command_run() {
     local bo_has_svc_urls="false"
     for _arg in "${bo_args[@]:-}"; do [[ "$_arg" == "--service-urls" ]] && bo_has_svc_urls="true"; done
     if [[ "$bo_has_svc_urls" == "false" ]]; then
-      # Build service-urls CSV: in local mode all five services run on the runner;
+      # Build service-urls CSV: in local mode all services run on the runner;
       # in distributed mode relayers run on operator hosts where the healthz ports
-      # are not exposed through the SG, so only monitor bridge-api.
+      # are not exposed through the SG, so only monitor bridge-api + scanner.
       local svc_urls_csv=""
       if [[ "$relayer_runtime_mode" != "distributed" ]]; then
         svc_urls_csv="base-relayer=http://127.0.0.1:${base_relayer_port}/healthz"
@@ -6827,7 +6829,13 @@ command_run() {
         svc_urls_csv+=","
       fi
       svc_urls_csv+="bridge-api=${bridge_api_url}/healthz"
+      svc_urls_csv+=",base-event-scanner=http://127.0.0.1:${base_event_scanner_health_port}/healthz"
       bo_args+=(--service-urls "$svc_urls_csv")
+
+      # Infrastructure probes: Kafka brokers and IPFS API
+      bo_args+=(--kafka-brokers "$shared_kafka_brokers")
+      [[ -z "${shared_ipfs_api_url:-}" ]] || bo_args+=(--ipfs-api-url "$shared_ipfs_api_url")
+
       log "restarting backoffice with --service-urls $svc_urls_csv"
       pkill -f "$HOME/bin/backoffice" 2>/dev/null || true
       sleep 1

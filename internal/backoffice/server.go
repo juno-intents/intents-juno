@@ -38,6 +38,9 @@ type ServerConfig struct {
 	ServiceEntries    []ServiceEntry
 	OperatorEndpoints []OperatorEndpoint
 
+	KafkaBrokers []string // Kafka broker addresses for health probe
+	IPFSApiURL   string   // IPFS API URL for health probe (e.g. http://host:5001)
+
 	AuthSecret string
 
 	RateLimitPerSecond float64

@@ -424,6 +424,12 @@ BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
 BASE_EVENT_SCANNER_START_BLOCK=0
 BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC=withdrawals.requested.v1
+CHECKPOINT_SIGNER_HEALTH_PORT=18301
+CHECKPOINT_AGGREGATOR_HEALTH_PORT=18302
+DEPOSIT_RELAYER_HEALTH_PORT=18303
+WITHDRAW_COORDINATOR_HEALTH_PORT=18304
+WITHDRAW_FINALIZER_HEALTH_PORT=18305
+BASE_EVENT_SCANNER_HEALTH_PORT=18306
 WITHDRAW_BLOB_BUCKET=
 WITHDRAW_BLOB_PREFIX=withdraw-live
 WITHDRAW_IMAGE_ID=
@@ -826,7 +832,8 @@ exec /usr/local/bin/checkpoint-signer \
   --lease-driver postgres \
   --queue-driver kafka \
   --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
-  --queue-output-topic "\$CHECKPOINT_SIGNATURE_TOPIC"
+  --queue-output-topic "\$CHECKPOINT_SIGNATURE_TOPIC" \
+  --health-port "\${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
 EOF_SIGNER
   sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-signer.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-signer.sh /usr/local/bin/intents-juno-checkpoint-signer.sh
@@ -891,7 +898,8 @@ exec /usr/local/bin/checkpoint-aggregator \
   --queue-driver kafka \
   --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
   --queue-input-topics "\${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
-  --queue-output-topic "\${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}"
+  --queue-output-topic "\${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
+  --health-port "\${CHECKPOINT_AGGREGATOR_HEALTH_PORT:-18302}"
 EOF_AGG
   sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-aggregator.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
@@ -1232,6 +1240,7 @@ args=(
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
   --queue-group "${deposit_queue_group}"
   --queue-topics "${deposit_queue_topics}"
+  --health-port "${DEPOSIT_RELAYER_HEALTH_PORT:-18303}"
 )
 if [[ -n "${DEPOSIT_OWALLET_IVK:-}" ]]; then
   args+=(--owallet-ivk "${DEPOSIT_OWALLET_IVK}")
@@ -1387,7 +1396,8 @@ exec /usr/local/bin/withdraw-coordinator \
   --max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}" \
   --blob-driver s3 \
   --blob-bucket "${WITHDRAW_BLOB_BUCKET}" \
-  --blob-prefix "${WITHDRAW_BLOB_PREFIX:-withdraw-live}"
+  --blob-prefix "${WITHDRAW_BLOB_PREFIX:-withdraw-live}" \
+  --health-port "${WITHDRAW_COORDINATOR_HEALTH_PORT:-18304}"
 EOF_WITHDRAW_COORDINATOR
   sudo install -m 0755 /tmp/intents-juno-withdraw-coordinator.sh /usr/local/bin/intents-juno-withdraw-coordinator.sh
 
@@ -1506,6 +1516,7 @@ args=(
   --blob-driver s3
   --blob-bucket "${WITHDRAW_BLOB_BUCKET}"
   --blob-prefix "${WITHDRAW_BLOB_PREFIX:-withdraw-live}"
+  --health-port "${WITHDRAW_FINALIZER_HEALTH_PORT:-18305}"
 )
 if [[ -n "${WITHDRAW_OWALLET_OVK:-}" ]]; then
   args+=(--owallet-ovk "${WITHDRAW_OWALLET_OVK}")
@@ -1546,6 +1557,7 @@ args=(
   --queue-driver kafka
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
   --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v1}"
+  --health-port "${BASE_EVENT_SCANNER_HEALTH_PORT:-18306}"
 )
 
 case "${JUNO_QUEUE_KAFKA_TLS:-}" in
@@ -1620,7 +1632,8 @@ EOF_CONFIG_HYDRATOR_SERVICE
 [Unit]
 Description=Intents Juno Operator checkpoint-signer
 After=junocashd.service intents-juno-config-hydrator.service
-Requires=junocashd.service intents-juno-config-hydrator.service
+Requires=junocashd.service
+Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1640,7 +1653,8 @@ EOF_SIGNER_SERVICE
 [Unit]
 Description=Intents Juno Operator checkpoint-aggregator
 After=checkpoint-signer.service intents-juno-config-hydrator.service
-Requires=checkpoint-signer.service intents-juno-config-hydrator.service
+Requires=checkpoint-signer.service
+Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1660,8 +1674,7 @@ EOF_AGG_SERVICE
 [Unit]
 Description=Intents Juno Operator tss-host
 After=network-online.target intents-juno-config-hydrator.service
-Wants=network-online.target
-Requires=intents-juno-config-hydrator.service
+Wants=network-online.target intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1701,7 +1714,8 @@ EOF_BASE_RELAYER_SERVICE
 [Unit]
 Description=Intents Juno Operator deposit-relayer
 After=base-relayer.service intents-juno-config-hydrator.service
-Requires=base-relayer.service intents-juno-config-hydrator.service
+Requires=base-relayer.service
+Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1721,7 +1735,8 @@ EOF_DEPOSIT_RELAYER_SERVICE
 [Unit]
 Description=Intents Juno Operator withdraw-coordinator
 After=base-relayer.service junocashd.service tss-host.service intents-juno-config-hydrator.service
-Requires=base-relayer.service junocashd.service tss-host.service intents-juno-config-hydrator.service
+Requires=base-relayer.service junocashd.service tss-host.service
+Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
@@ -1741,7 +1756,8 @@ EOF_WITHDRAW_COORDINATOR_SERVICE
 [Unit]
 Description=Intents Juno Operator withdraw-finalizer
 After=base-relayer.service junocashd.service juno-scan.service intents-juno-config-hydrator.service
-Requires=base-relayer.service junocashd.service juno-scan.service intents-juno-config-hydrator.service
+Requires=base-relayer.service junocashd.service juno-scan.service
+Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple

@@ -287,10 +287,10 @@ func (s *Server) fetchStuckWithdrawalBatches(ctx context.Context, threshold time
 	return items, rows.Err()
 }
 
-// handleServicesHealth polls each configured service healthz URL and returns
-// the results.
+// handleServicesHealth polls each configured service healthz URL and built-in
+// infrastructure probes (Postgres, Kafka, IPFS), returning all results.
 func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
-	results := make([]map[string]any, 0, len(s.cfg.ServiceEntries))
+	results := make([]map[string]any, 0, len(s.cfg.ServiceEntries)+4)
 	client := &http.Client{Timeout: 5 * time.Second}
 
 	for _, entry := range s.cfg.ServiceEntries {
@@ -299,10 +299,94 @@ func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 		results = append(results, result)
 	}
 
+	// Built-in: Postgres
+	results = append(results, s.probePostgres(r.Context()))
+
+	// Built-in: Kafka brokers
+	for _, broker := range s.cfg.KafkaBrokers {
+		results = append(results, probeTCP("kafka", broker))
+	}
+
+	// Built-in: IPFS (API v0 requires POST)
+	if s.cfg.IPFSApiURL != "" {
+		results = append(results, probeIPFS(r.Context(), client, s.cfg.IPFSApiURL))
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
 		"version": "v1",
 		"data":    results,
 	})
+}
+
+// probeIPFS checks IPFS API connectivity using POST /api/v0/version.
+func probeIPFS(ctx context.Context, client *http.Client, baseURL string) map[string]any {
+	start := time.Now()
+	url := strings.TrimRight(baseURL, "/") + "/api/v0/version"
+	result := map[string]any{
+		"label":   "ipfs",
+		"url":     url,
+		"healthy": false,
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, nil)
+	if err != nil {
+		result["error"] = err.Error()
+		result["latencyMs"] = time.Since(start).Milliseconds()
+		return result
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		result["error"] = err.Error()
+		result["latencyMs"] = time.Since(start).Milliseconds()
+		return result
+	}
+	defer resp.Body.Close()
+	_, _ = io.ReadAll(resp.Body)
+
+	result["latencyMs"] = time.Since(start).Milliseconds()
+	if resp.StatusCode == http.StatusOK {
+		result["healthy"] = true
+	} else {
+		result["error"] = fmt.Sprintf("status %d", resp.StatusCode)
+	}
+	return result
+}
+
+// probePostgres checks Postgres connectivity by pinging the pool.
+func (s *Server) probePostgres(ctx context.Context) map[string]any {
+	start := time.Now()
+	err := s.cfg.Pool.Ping(ctx)
+	latency := time.Since(start).Milliseconds()
+	result := map[string]any{
+		"label":     "postgres",
+		"url":       "pgxpool",
+		"healthy":   err == nil,
+		"latencyMs": latency,
+	}
+	if err != nil {
+		result["error"] = err.Error()
+	}
+	return result
+}
+
+// probeTCP checks connectivity to a TCP address (used for Kafka brokers).
+func probeTCP(label, addr string) map[string]any {
+	start := time.Now()
+	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
+	latency := time.Since(start).Milliseconds()
+	result := map[string]any{
+		"label":     label,
+		"url":       addr,
+		"healthy":   err == nil,
+		"latencyMs": latency,
+	}
+	if err != nil {
+		result["error"] = err.Error()
+	} else {
+		_ = conn.Close()
+	}
+	return result
 }
 
 // checkServiceHealth probes a single healthz endpoint and returns the result.

@@ -46,6 +46,8 @@ func main() {
 
 		serviceURLsRaw          = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
 		operatorEndpointsRaw = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
+		kafkaBrokersRaw      = flag.String("kafka-brokers", "", "Comma-separated Kafka broker addresses for health probe")
+		ipfsApiURL           = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
 
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
 
@@ -140,6 +142,17 @@ func main() {
 		}
 	}
 
+	// Parse Kafka brokers.
+	var kafkaBrokers []string
+	if raw := strings.TrimSpace(*kafkaBrokersRaw); raw != "" {
+		for _, b := range strings.Split(raw, ",") {
+			b = strings.TrimSpace(b)
+			if b != "" {
+				kafkaBrokers = append(kafkaBrokers, b)
+			}
+		}
+	}
+
 	// Parse wei thresholds.
 	operatorGasMinWei := new(big.Int)
 	if _, ok := operatorGasMinWei.SetString(*operatorGasMinWeiStr, 10); !ok {
@@ -221,6 +234,8 @@ func main() {
 
 		ServiceEntries:    serviceEntries,
 		OperatorEndpoints: operatorEndpoints,
+		KafkaBrokers:      kafkaBrokers,
+		IPFSApiURL:         strings.TrimSpace(*ipfsApiURL),
 
 		AuthSecret: *authSecret,
 
