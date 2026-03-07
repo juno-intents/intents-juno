@@ -13,6 +13,52 @@ import (
 	"time"
 )
 
+// depositStateLabel maps deposit_jobs.state int16 to a human-readable label.
+func depositStateLabel(s int16) string {
+	switch s {
+	case 0:
+		return "unknown"
+	case 1:
+		return "seen"
+	case 2:
+		return "confirmed"
+	case 3:
+		return "proof_requested"
+	case 4:
+		return "proof_ready"
+	case 5:
+		return "submitted"
+	case 6:
+		return "finalized"
+	default:
+		return fmt.Sprintf("state_%d", s)
+	}
+}
+
+// batchStateLabel maps withdrawal_batches.state int16 to a human-readable label.
+func batchStateLabel(s int16) string {
+	switch s {
+	case 0:
+		return "unknown"
+	case 1:
+		return "planned"
+	case 2:
+		return "signing"
+	case 3:
+		return "signed"
+	case 4:
+		return "broadcasted"
+	case 5:
+		return "confirmed"
+	case 6:
+		return "finalizing"
+	case 7:
+		return "finalized"
+	default:
+		return fmt.Sprintf("state_%d", s)
+	}
+}
+
 // handleRecentDeposits returns the most recent deposit jobs.
 func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 	limit := parseIntParam(r, "limit", 20)
@@ -49,7 +95,7 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 		}
 		entry := map[string]any{
 			"depositId":     "0x" + hex.EncodeToString(depositID),
-			"state":         state,
+			"state":         depositStateLabel(state),
 			"createdAt":     createdAt.Format(time.RFC3339),
 			"junoHeight":    junoHeight,
 			"baseRecipient": "0x" + hex.EncodeToString(baseRecipient),
@@ -80,10 +126,10 @@ func (s *Server) handleRecentWithdrawals(w http.ResponseWriter, r *http.Request)
 	}
 
 	rows, err := s.cfg.Pool.Query(r.Context(), `
-		SELECT wr.withdrawal_id, COALESCE(wr.claimed_by, ''), wr.created_at,
+		SELECT wr.withdrawal_id, wr.created_at,
 		       COALESCE(wr.base_block_number, 0),
 		       wr.requester, wr.amount, wr.recipient_ua,
-		       wb.juno_txid, wb.base_tx_hash
+		       wb.state, wb.juno_txid, wb.base_tx_hash
 		FROM withdrawal_requests wr
 		LEFT JOIN withdrawal_batch_items wbi ON wbi.withdrawal_id = wr.withdrawal_id
 		LEFT JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
@@ -99,23 +145,27 @@ func (s *Server) handleRecentWithdrawals(w http.ResponseWriter, r *http.Request)
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var withdrawalID []byte
-		var state string
 		var createdAt time.Time
 		var baseBlockNumber int64
 		var requester []byte
 		var amount int64
 		var recipientUA []byte
+		var batchState *int16
 		var junoTxID *string
 		var baseTxHash *string
-		if err := rows.Scan(&withdrawalID, &state, &createdAt, &baseBlockNumber,
-			&requester, &amount, &recipientUA, &junoTxID, &baseTxHash); err != nil {
+		if err := rows.Scan(&withdrawalID, &createdAt, &baseBlockNumber,
+			&requester, &amount, &recipientUA, &batchState, &junoTxID, &baseTxHash); err != nil {
 			s.log.Error("scan recent withdrawal", "err", err)
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
 		}
+		stateLabel := "requested"
+		if batchState != nil {
+			stateLabel = batchStateLabel(*batchState)
+		}
 		entry := map[string]any{
 			"withdrawalId":    "0x" + hex.EncodeToString(withdrawalID),
-			"state":           state,
+			"state":           stateLabel,
 			"createdAt":       createdAt.Format(time.RFC3339),
 			"baseBlockNumber": baseBlockNumber,
 			"requester":       "0x" + hex.EncodeToString(requester),
@@ -196,7 +246,7 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 		}
 		items = append(items, map[string]any{
 			"depositId": "0x" + hex.EncodeToString(depositID),
-			"state":     state,
+			"state":     depositStateLabel(state),
 			"createdAt": createdAt.Format(time.RFC3339),
 			"updatedAt": updatedAt.Format(time.RFC3339),
 			"stuckFor":  fmt.Sprintf("%.0fm", time.Since(updatedAt).Minutes()),
@@ -228,7 +278,7 @@ func (s *Server) fetchStuckWithdrawalBatches(ctx context.Context, threshold time
 		}
 		items = append(items, map[string]any{
 			"batchId":   "0x" + hex.EncodeToString(batchID),
-			"state":     state,
+			"state":     batchStateLabel(state),
 			"createdAt": createdAt.Format(time.RFC3339),
 			"updatedAt": updatedAt.Format(time.RFC3339),
 			"stuckFor":  fmt.Sprintf("%.0fm", time.Since(updatedAt).Minutes()),
@@ -240,11 +290,12 @@ func (s *Server) fetchStuckWithdrawalBatches(ctx context.Context, threshold time
 // handleServicesHealth polls each configured service healthz URL and returns
 // the results.
 func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
-	results := make([]map[string]any, 0, len(s.cfg.ServiceURLs))
+	results := make([]map[string]any, 0, len(s.cfg.ServiceEntries))
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	for _, u := range s.cfg.ServiceURLs {
-		result := checkServiceHealth(r.Context(), client, u)
+	for _, entry := range s.cfg.ServiceEntries {
+		result := checkServiceHealth(r.Context(), client, entry.URL)
+		result["label"] = entry.Label
 		results = append(results, result)
 	}
 

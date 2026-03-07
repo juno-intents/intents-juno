@@ -101,14 +101,22 @@ func main() {
 		}
 	}
 
-	// Parse service URLs.
-	var serviceURLs []string
+	// Parse service URLs (format: "label=url" or plain "url").
+	var serviceEntries []backoffice.ServiceEntry
 	if raw := strings.TrimSpace(*serviceURLsRaw); raw != "" {
 		for _, s := range strings.Split(raw, ",") {
 			s = strings.TrimSpace(s)
-			if s != "" {
-				serviceURLs = append(serviceURLs, s)
+			if s == "" {
+				continue
 			}
+			var label, url string
+			parts := strings.SplitN(s, "=", 2)
+			if len(parts) == 2 && !strings.HasPrefix(parts[0], "http") {
+				label, url = parts[0], parts[1]
+			} else {
+				label, url = s, s
+			}
+			serviceEntries = append(serviceEntries, backoffice.ServiceEntry{Label: label, URL: url})
 		}
 	}
 
@@ -211,7 +219,7 @@ func main() {
 		SP1RequestorAddress:     sp1Requestor,
 		OperatorAddresses:       operatorAddresses,
 
-		ServiceURLs:      serviceURLs,
+		ServiceEntries:    serviceEntries,
 		OperatorEndpoints: operatorEndpoints,
 
 		AuthSecret: *authSecret,

@@ -35,7 +35,7 @@ type ServerConfig struct {
 	SP1RequestorAddress     common.Address
 	OperatorAddresses       []common.Address
 
-	ServiceURLs       []string
+	ServiceEntries    []ServiceEntry
 	OperatorEndpoints []OperatorEndpoint
 
 	AuthSecret string
@@ -168,6 +168,12 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 // hex32 returns the 0x-prefixed hex encoding of a [32]byte.
 func hex32(b [32]byte) string {
 	return "0x" + common.Bytes2Hex(b[:])
+}
+
+// ServiceEntry describes a service health endpoint with a human-readable label.
+type ServiceEntry struct {
+	Label string
+	URL   string
 }
 
 // OperatorEndpoint describes an operator's gRPC endpoint for health checking.

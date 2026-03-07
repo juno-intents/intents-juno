@@ -46,6 +46,14 @@
 
   function dot(ok) { return '<span class="dot ' + (ok ? "dot-ok" : "dot-err") + '"></span>'; }
 
+  function stateBadge(state) {
+    if (!state) return badge("info");
+    var s = String(state);
+    if (s === "finalized") return '<span class="badge badge-ok">' + escapeHTML(s) + "</span>";
+    if (s === "unknown") return '<span class="badge badge-info">' + escapeHTML(s) + "</span>";
+    return '<span class="badge badge-warn">' + escapeHTML(s) + "</span>";
+  }
+
   function setHTML(id, html) {
     var el = document.getElementById(id);
     if (el) el.innerHTML = html;
@@ -146,7 +154,12 @@
       var html = "";
       var services = (resp && resp.data) || [];
       services.forEach(function (svc) {
-        html += '<div>' + dot(svc.healthy) + escapeHTML(svc.url) + '</div>';
+        html += '<div class="svc-row">' + dot(svc.healthy) +
+          '<strong>' + escapeHTML(svc.label || svc.url) + '</strong>' +
+          ' <span class="mono dim">' + escapeHTML(svc.url) + '</span>' +
+          (svc.healthy ? ' <span class="dim">(' + svc.latencyMs + 'ms)</span>' :
+           ' <span class="badge-crit">' + escapeHTML(svc.error || 'down') + '</span>') +
+          '</div>';
       });
       setHTML("svc-health-grid", html || '<span class="loading">No services reported</span>');
     });
@@ -311,7 +324,7 @@
       var rows = items.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.depositId) + "</td>" +
-          "<td>" + escapeHTML(r.state || "-") + "</td>" +
+          "<td>" + stateBadge(r.state) + "</td>" +
           '<td class="mono">' + fmtAddr(r.baseRecipient) + "</td>" +
           "<td>" + escapeHTML(r.amount || "-") + "</td>" +
           '<td class="mono">' + (r.txHash ? fmtAddr(r.txHash) : "-") + "</td>" +
@@ -326,7 +339,7 @@
       var rows = items.map(function (r) {
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.withdrawalId) + "</td>" +
-          "<td>" + escapeHTML(r.state || "-") + "</td>" +
+          "<td>" + stateBadge(r.state) + "</td>" +
           '<td class="mono">' + fmtAddr(r.requester) + "</td>" +
           "<td>" + escapeHTML(r.amount || "-") + "</td>" +
           '<td class="mono">' + (r.junoTxId ? fmtAddr(r.junoTxId) : "-") + "</td>" +
@@ -346,7 +359,7 @@
         return "<tr>" +
           '<td class="mono">' + fmtAddr(r.id) + "</td>" +
           "<td>" + escapeHTML(r.kind || "-") + "</td>" +
-          "<td>" + escapeHTML(r.state || "-") + "</td>" +
+          "<td>" + stateBadge(r.state) + "</td>" +
           "<td>" + escapeHTML(r.age || "-") + "</td></tr>";
       }).join("");
       setHTML("ops-stuck-tbody", rows || '<tr><td colspan="4" class="loading">None</td></tr>');
