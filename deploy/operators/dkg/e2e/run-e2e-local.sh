@@ -540,11 +540,11 @@ read_tf_outputs() {
   ok "Kafka: ${SHARED_KAFKA_BROKERS:0:60}..."
 
   SHARED_IPFS_NLB_URL="$(_tf_out shared_ipfs_api_url)"
-  # Runner hosts the IPFS container; NLB hairpin routing doesn't work (runner
-  # can't reach itself through the NLB). Use localhost for runner-side
-  # validation and the NLB URL for operators.
-  SHARED_IPFS_API_URL="http://127.0.0.1:5001"
-  ok "IPFS (runner): $SHARED_IPFS_API_URL  (NLB: $SHARED_IPFS_NLB_URL)"
+  # IPFS runs in a separate ASG behind the NLB, not on the runner.
+  # The runner is not an NLB target, so there is no hairpin routing issue —
+  # use the NLB URL for both runner-side validation and operators.
+  SHARED_IPFS_API_URL="$SHARED_IPFS_NLB_URL"
+  ok "IPFS (runner): $SHARED_IPFS_API_URL"
 
   SHARED_ECS_CLUSTER_ARN="$(_tf_out shared_ecs_cluster_arn)"
   SHARED_PROOF_REQUESTOR_SERVICE="$(_tf_out shared_proof_requestor_service_name)"
@@ -1776,7 +1776,12 @@ cmd_run() {
     checkpoint_mark "backoffice"
   fi
 
-  # Stage 6: Run test
+  # Stage 6: Build and deploy bridge-api + base-event-scanner binaries
+  mkdir -p "$WORKDIR/bin"
+  build_and_deploy_bridge_binaries
+  add_bridge_api_sg_rule
+
+  # Stage 7: Run test
   local test_exit=0
   run_e2e_test || test_exit=$?
 
