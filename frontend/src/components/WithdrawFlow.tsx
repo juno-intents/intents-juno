@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
-import { parseUnits, formatUnits, maxUint256, stringToHex } from 'viem'
-import { getConfig } from '../api/bridge'
+import { parseUnits, formatUnits, maxUint256 } from 'viem'
+import { getConfig, decodeRecipient } from '../api/bridge'
 import { WJUNO_ABI, BRIDGE_ABI } from '../config/contracts'
 
 function formatJuno(zatoshi: string): string {
@@ -17,7 +17,8 @@ export default function WithdrawFlow() {
   const { address } = useAccount()
   const [amount, setAmount] = useState('')
   const [junoRecipient, setJunoRecipient] = useState('')
-  const [step, setStep] = useState<'input' | 'approve' | 'request'>('input')
+  const [step, setStep] = useState<'input' | 'approve' | 'request' | 'success'>('input')
+  const [successTxHash, setSuccessTxHash] = useState<string | null>(null)
 
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
@@ -58,7 +59,6 @@ export default function WithdrawFlow() {
 
   const { isSuccess: approveConfirmed } = useWaitForTransactionReceipt({ hash: approveTxHash })
 
-  // Reset step on approve error (user rejected, tx failed, etc.)
   useEffect(() => {
     if (approveError && step === 'approve') {
       setStep('input')
@@ -66,7 +66,6 @@ export default function WithdrawFlow() {
     }
   }, [approveError, step, resetApprove])
 
-  // Reset step on request error
   useEffect(() => {
     if (requestError && step === 'request') {
       setStep('input')
@@ -74,7 +73,6 @@ export default function WithdrawFlow() {
     }
   }, [requestError, step, resetRequest])
 
-  // Refetch allowance after approval confirmed
   useEffect(() => {
     if (approveConfirmed) {
       refetchAllowance()
@@ -95,21 +93,66 @@ export default function WithdrawFlow() {
     setStep('approve')
   }
 
-  const handleRequestWithdraw = () => {
+  const [decodeError, setDecodeError] = useState<string | null>(null)
+
+  const handleRequestWithdraw = async () => {
     if (!bridgeAddress || !amount || !junoRecipient) return
-    requestWithdraw({
-      address: bridgeAddress as `0x${string}`,
-      abi: BRIDGE_ABI,
-      functionName: 'requestWithdraw',
-      args: [parseUnits(amount, 8), stringToHex(junoRecipient)],
-    })
-    setStep('request')
+    setDecodeError(null)
+    try {
+      const orchardHex = await decodeRecipient(junoRecipient)
+      requestWithdraw({
+        address: bridgeAddress as `0x${string}`,
+        abi: BRIDGE_ABI,
+        functionName: 'requestWithdraw',
+        args: [parseUnits(amount, 8), `0x${orchardHex}`],
+      })
+      setStep('request')
+    } catch (err: any) {
+      setDecodeError(err.message || 'Invalid Juno address')
+    }
   }
 
   const { isSuccess: requestConfirmed } = useWaitForTransactionReceipt({ hash: requestTxHash })
 
-  if (step === 'request' && requestConfirmed) {
+  useEffect(() => {
+    if (step === 'request' && requestConfirmed && requestTxHash) {
+      setSuccessTxHash(requestTxHash)
+      setStep('success')
+    }
+  }, [step, requestConfirmed, requestTxHash])
+
+  const handleDismissSuccess = () => {
     setStep('input')
+    setSuccessTxHash(null)
+    setAmount('')
+    setJunoRecipient('')
+    resetRequest()
+  }
+
+  if (step === 'success') {
+    return (
+      <div className="modal-overlay" onClick={handleDismissSuccess}>
+        <div className="modal-content" onClick={(e) => e.stopPropagation()}>
+          <div className="modal-body" style={{ padding: '32px 24px' }}>
+            <div className="success-icon">&#10003;</div>
+            <div className="success-title">Withdrawal Submitted</div>
+            <div className="success-subtitle">
+              Your withdrawal of {amount} JUNO has been submitted on-chain. The bridge operators will process it shortly.
+            </div>
+            {successTxHash && (
+              <div className="detail-row" style={{ borderBottom: 'none', justifyContent: 'center' }}>
+                <span className="mono" style={{ fontSize: 11, color: 'var(--text-dim)', wordBreak: 'break-all', textAlign: 'center' }}>
+                  Tx: {successTxHash}
+                </span>
+              </div>
+            )}
+            <button className="primary" onClick={handleDismissSuccess} style={{ marginTop: 16 }}>
+              Done
+            </button>
+          </div>
+        </div>
+      </div>
+    )
   }
 
   return (
@@ -171,8 +214,13 @@ export default function WithdrawFlow() {
             className="mono"
             placeholder="Juno unified address (jtest1...)"
             value={junoRecipient}
-            onChange={(e) => setJunoRecipient(e.target.value)}
+            onChange={(e) => { setJunoRecipient(e.target.value); setDecodeError(null) }}
           />
+          {decodeError && (
+            <div style={{ color: 'var(--error, #e53e3e)', fontSize: 12, marginTop: 4 }}>
+              {decodeError}
+            </div>
+          )}
         </div>
         {step === 'input' && !hasSufficientAllowance && (
           <button className="primary" onClick={handleApprove} disabled={!amount || !junoRecipient || !address}>

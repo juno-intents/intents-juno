@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
+import type { DepositStatus, WithdrawalStatus } from '../api/types'
 import StatusTracker from './StatusTracker'
+import TxDetailModal from './TxDetailModal'
 
 interface Props {
   address: string
@@ -19,6 +22,8 @@ function formatJuno(zatoshi: string): string {
 }
 
 export default function RecentActivity({ address }: Props) {
+  const [modalData, setModalData] = useState<{ type: 'deposit' | 'withdrawal'; data: DepositStatus | WithdrawalStatus } | null>(null)
+
   const { data: deposits } = useQuery({
     queryKey: ['my-deposits', address],
     queryFn: () => listDeposits({ baseRecipient: address, limit: '10' }),
@@ -54,8 +59,8 @@ export default function RecentActivity({ address }: Props) {
             MY DEPOSITS
           </div>
           {deps.map((d) => (
-            <div className="tx-item" key={d.depositId}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="tx-item" key={d.depositId} onClick={() => setModalData({ type: 'deposit', data: d })}>
+              <div className="tx-item-header">
                 <div className="tx-left">
                   <div className="tx-type">Deposit</div>
                   <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
@@ -64,9 +69,7 @@ export default function RecentActivity({ address }: Props) {
                   <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
                 </div>
               </div>
-              <div style={{ marginTop: 8 }}>
-                <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
-              </div>
+              <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
             </div>
           ))}
         </div>
@@ -77,8 +80,8 @@ export default function RecentActivity({ address }: Props) {
             MY WITHDRAWALS
           </div>
           {wds.map((w) => (
-            <div className="tx-item" key={w.withdrawalId}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <div className="tx-item" key={w.withdrawalId} onClick={() => setModalData({ type: 'withdrawal', data: w })}>
+              <div className="tx-item-header">
                 <div className="tx-left">
                   <div className="tx-type">Withdrawal</div>
                   <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
@@ -87,12 +90,18 @@ export default function RecentActivity({ address }: Props) {
                   <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
                 </div>
               </div>
-              <div style={{ marginTop: 8 }}>
-                <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
-              </div>
+              <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
             </div>
           ))}
         </div>
+      )}
+
+      {modalData && (
+        <TxDetailModal
+          type={modalData.type}
+          data={modalData.data}
+          onClose={() => setModalData(null)}
+        />
       )}
     </div>
   )

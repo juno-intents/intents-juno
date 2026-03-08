@@ -337,11 +337,14 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   line-height: 1.5;
 }
 
+.tracker-wrap {
+  margin-top: 10px;
+}
+
 .progress-track {
   display: flex;
   align-items: center;
   gap: 4px;
-  margin: 16px 0 8px;
 }
 
 .progress-step {
@@ -350,17 +353,42 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 2px;
   background: var(--border);
   transition: background 0.3s;
+  position: relative;
+  cursor: default;
 }
 
 .progress-step.active { background: var(--accent); }
 .progress-step.done { background: var(--green); }
 
-.progress-labels {
+.step-tooltip {
+  position: absolute;
+  bottom: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 10px;
+  font-family: var(--mono);
+  padding: 3px 8px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.progress-label-row {
   display: flex;
-  justify-content: space-between;
+  justify-content: flex-end;
+  margin-top: 4px;
   font-size: 10px;
   color: var(--text-dim);
   font-family: var(--mono);
+}
+
+.progress-label-done {
+  color: var(--green);
+  font-weight: 600;
 }
 
 .search-bar {
@@ -384,17 +412,23 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 /* Transaction item */
 .tx-item {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
   padding: 14px 16px;
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: 10px;
   margin-bottom: 8px;
   transition: border-color 0.15s;
+  cursor: pointer;
 }
 
 .tx-item:hover { border-color: var(--text-dim); }
+
+.tx-item-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
 
 .tx-left {
   display: flex;
@@ -549,6 +583,108 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   border-radius: 4px;
   font-family: var(--mono);
   font-size: 12px;
+}
+
+/* Modal */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 200;
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  width: 440px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+}
+
+.modal-close:hover { color: var(--text); }
+
+.modal-body {
+  padding: 16px 20px;
+}
+
+.detail-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.detail-row:last-child { border-bottom: none; }
+
+.detail-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.detail-value {
+  font-size: 13px;
+  text-align: right;
+  word-break: break-all;
+  max-width: 60%;
+}
+
+/* Success modal */
+.success-icon {
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(0,200,83,0.15);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 0 auto 16px;
+  font-size: 28px;
+}
+
+.success-title {
+  font-size: 18px;
+  font-weight: 700;
+  text-align: center;
+  margin-bottom: 8px;
+}
+
+.success-subtitle {
+  font-size: 13px;
+  color: var(--text-dim);
+  text-align: center;
+  margin-bottom: 20px;
+  line-height: 1.5;
 }
 
 @media (max-width: 900px) {

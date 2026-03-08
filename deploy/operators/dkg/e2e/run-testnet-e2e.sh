@@ -3108,6 +3108,8 @@ command_run() {
   local bridge_api_binary=""
   local base_event_scanner_binary=""
   local bridge_api_listen=""
+  local bridge_min_deposit_amount="0"
+  local bridge_min_withdraw_amount="0"
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -3547,6 +3549,16 @@ command_run() {
       --bridge-api-listen)
         [[ $# -ge 2 ]] || die "missing value for --bridge-api-listen"
         bridge_api_listen="$2"
+        shift 2
+        ;;
+      --min-deposit-amount)
+        [[ $# -ge 2 ]] || die "missing value for --min-deposit-amount"
+        bridge_min_deposit_amount="$2"
+        shift 2
+        ;;
+      --min-withdraw-amount)
+        [[ $# -ge 2 ]] || die "missing value for --min-withdraw-amount"
+        bridge_min_withdraw_amount="$2"
         shift 2
         ;;
       --reuse-kafka-topics)
@@ -5931,8 +5943,8 @@ command_run() {
         "$bridge_relayer_tip_bps" \
         "$bridge_effective_refund_window_floor_seconds" \
         "$bridge_max_expiry_extension_seconds" \
-        0 \
-        0 \
+        "$bridge_min_deposit_amount" \
+        "$bridge_min_withdraw_amount" \
         "bridge baseline restore"
     )"
     bridge_params_restore_status=$?
@@ -6739,6 +6751,8 @@ command_run() {
       --owallet-ua "$withdraw_coordinator_juno_change_address"
       --refund-window-seconds "$bridge_refund_window_seconds"
       --fee-bps "$bridge_fee_bps"
+      --min-deposit-amount "$bridge_min_deposit_amount"
+      --min-withdraw-amount "$bridge_min_withdraw_amount"
     )
     if [[ -n "${deployed_wjuno_address:-}" ]]; then
       bridge_api_args+=(--wjuno-address "$deployed_wjuno_address")
@@ -8144,8 +8158,8 @@ command_run() {
           "$bridge_relayer_tip_bps" \
           "$bridge_refund_window_seconds" \
           "$bridge_max_expiry_extension_seconds" \
-          0 \
-          0 \
+          "$bridge_min_deposit_amount" \
+          "$bridge_min_withdraw_amount" \
           "refund-after-expiry scenario restore"
       )"
       scenario_restore_status=$?
@@ -8183,8 +8197,8 @@ command_run() {
         "$bridge_relayer_tip_bps" \
         "$scenario_refund_window_seconds" \
         "$bridge_max_expiry_extension_seconds" \
-        0 \
-        0 \
+        "$bridge_min_deposit_amount" \
+        "$bridge_min_withdraw_amount" \
         "refund-after-expiry scenario configure"
     )"
     scenario_refund_status=$?

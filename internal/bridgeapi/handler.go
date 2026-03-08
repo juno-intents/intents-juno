@@ -132,6 +132,7 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	mux.HandleFunc("GET /v1/status/withdrawal/{withdrawalId}", h.handleWithdrawalStatus)
 	mux.HandleFunc("GET /v1/deposits", h.handleListDeposits)
 	mux.HandleFunc("GET /v1/withdrawals", h.handleListWithdrawals)
+	mux.HandleFunc("GET /v1/decode-recipient", h.handleDecodeRecipient)
 
 	// SPA frontend fallback: serve embedded frontend for non-API paths.
 	frontendHandler := FrontendHandler()
@@ -355,6 +356,30 @@ func (h *handler) handleWithdrawalStatus(w http.ResponseWriter, r *http.Request)
 		"batchId":      batchID,
 		"junoTxId":     st.JunoTxID,
 		"baseTxHash":   st.BaseTxHash,
+	})
+}
+
+func (h *handler) handleDecodeRecipient(w http.ResponseWriter, r *http.Request) {
+	ua := strings.TrimSpace(r.URL.Query().Get("ua"))
+	if ua == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "missing_ua_param",
+		})
+		return
+	}
+	raw, err := DecodeOrchardRawFromUA(ua)
+	if err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"version": "v1",
+			"error":   "invalid_unified_address",
+			"detail":  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":         "v1",
+		"orchardReceiver": hex.EncodeToString(raw),
 	})
 }
 

@@ -743,3 +743,70 @@ func TestClientIP_IgnoresProxyHeaders(t *testing.T) {
 		t.Fatalf("clientIP should ignore proxy headers: got %q want 198.51.100.7", ip)
 	}
 }
+
+func TestHandler_DecodeRecipient(t *testing.T) {
+	t.Parallel()
+
+	cfg := testConfig()
+	h, err := NewHandler(cfg, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	// Generate a valid unified address from a known 43-byte receiver.
+	rawBytes := make([]byte, 43)
+	for i := range rawBytes {
+		rawBytes[i] = byte(i + 1)
+	}
+	ua, err := encodeOrchardRawUA(rawBytes, "jtest")
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+
+	t.Run("valid UA", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/decode-recipient?ua="+ua, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+		var out struct {
+			Version         string `json:"version"`
+			OrchardReceiver string `json:"orchardReceiver"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out.Version != "v1" {
+			t.Fatalf("bad version: %v", out.Version)
+		}
+		if out.OrchardReceiver != hex.EncodeToString(rawBytes) {
+			t.Fatalf("orchardReceiver: got %s want %s", out.OrchardReceiver, hex.EncodeToString(rawBytes))
+		}
+	})
+
+	t.Run("missing ua param", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/decode-recipient", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("invalid UA", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/decode-recipient?ua=notavalidaddress1qqqqq", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status: got %d want %d", rec.Code, http.StatusBadRequest)
+		}
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if out["error"] != "invalid_unified_address" {
+			t.Fatalf("expected invalid_unified_address error, got %v", out["error"])
+		}
+	})
+}

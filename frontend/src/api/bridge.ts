@@ -35,3 +35,10 @@ export async function listWithdrawals(params: Record<string, string>): Promise<L
   const qs = new URLSearchParams(params)
   return get(`/v1/withdrawals?${qs}`)
 }
+
+export async function decodeRecipient(ua: string): Promise<string> {
+  const resp = await fetch(`${BASE}/v1/decode-recipient?ua=${encodeURIComponent(ua)}`)
+  const data = await resp.json()
+  if (data.error) throw new Error(data.detail || data.error)
+  return data.orchardReceiver
+}

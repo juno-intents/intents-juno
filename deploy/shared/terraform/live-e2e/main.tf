@@ -470,6 +470,22 @@ resource "aws_security_group" "operator" {
     security_groups = [aws_security_group.runner.id]
   }
 
+  ingress {
+    description     = "Relayer health ports from runner"
+    from_port       = 18301
+    to_port         = 18310
+    protocol        = "tcp"
+    security_groups = [aws_security_group.runner.id]
+  }
+
+  ingress {
+    description     = "Base-relayer listen port from runner"
+    from_port       = var.operator_base_port + 1200
+    to_port         = var.operator_base_port + 1200
+    protocol        = "tcp"
+    security_groups = [aws_security_group.runner.id]
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0

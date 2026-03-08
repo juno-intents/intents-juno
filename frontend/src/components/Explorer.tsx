@@ -3,8 +3,10 @@ import { useAccount } from 'wagmi'
 import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { listDeposits, listWithdrawals } from '../api/bridge'
+import type { DepositStatus, WithdrawalStatus } from '../api/types'
 import RecentActivity from './RecentActivity'
 import StatusTracker from './StatusTracker'
+import TxDetailModal from './TxDetailModal'
 
 const DEPOSIT_STEPS = ['pending', 'seen', 'confirmed', 'proof_requested', 'proof_ready', 'submitted', 'finalized']
 const WITHDRAW_STEPS = ['requested', 'planned', 'signing', 'signed', 'broadcasted', 'confirmed', 'finalizing', 'finalized']
@@ -30,6 +32,7 @@ export default function Explorer() {
   const { address } = useAccount()
   const [query, setQuery] = useState('')
   const [searchTerm, setSearchTerm] = useState('')
+  const [modalData, setModalData] = useState<{ type: 'deposit' | 'withdrawal'; data: DepositStatus | WithdrawalStatus } | null>(null)
 
   const searchType = detectSearchType(searchTerm)
 
@@ -81,8 +84,8 @@ export default function Explorer() {
                 DEPOSITS ({depositResults?.total ?? 0})
               </div>
               {deposits.map((d) => (
-                <div className="tx-item" key={d.depositId}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="tx-item" key={d.depositId} onClick={() => setModalData({ type: 'deposit', data: d })}>
+                  <div className="tx-item-header">
                     <div className="tx-left">
                       <div className="tx-type">Deposit</div>
                       <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
@@ -91,9 +94,7 @@ export default function Explorer() {
                       <div className="tx-amount">{formatJuno(d.amount)} JUNO</div>
                     </div>
                   </div>
-                  <div style={{ marginTop: 8 }}>
-                    <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
-                  </div>
+                  <StatusTracker steps={DEPOSIT_STEPS} current={d.state} />
                 </div>
               ))}
             </div>
@@ -105,8 +106,8 @@ export default function Explorer() {
                 WITHDRAWALS ({withdrawResults?.total ?? 0})
               </div>
               {withdrawals.map((w) => (
-                <div className="tx-item" key={w.withdrawalId}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div className="tx-item" key={w.withdrawalId} onClick={() => setModalData({ type: 'withdrawal', data: w })}>
+                  <div className="tx-item-header">
                     <div className="tx-left">
                       <div className="tx-type">Withdrawal</div>
                       <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
@@ -115,9 +116,7 @@ export default function Explorer() {
                       <div className="tx-amount">{formatJuno(w.amount)} JUNO</div>
                     </div>
                   </div>
-                  <div style={{ marginTop: 8 }}>
-                    <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
-                  </div>
+                  <StatusTracker steps={WITHDRAW_STEPS} current={w.state} />
                 </div>
               ))}
             </div>
@@ -141,6 +140,14 @@ export default function Explorer() {
             Connect your wallet to see recent activity, or search by address / tx hash.
           </div>
         </div>
+      )}
+
+      {modalData && (
+        <TxDetailModal
+          type={modalData.type}
+          data={modalData.data}
+          onClose={() => setModalData(null)}
+        />
       )}
     </div>
   )

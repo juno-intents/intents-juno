@@ -90,6 +90,8 @@ BACKOFFICE_SG_RULE_ADDED=false
 
 # Bridge API (deploy mode)
 BRIDGE_API_PORT=8080
+MIN_DEPOSIT_AMOUNT="${MIN_DEPOSIT_AMOUNT:-0}"
+MIN_WITHDRAW_AMOUNT="${MIN_WITHDRAW_AMOUNT:-0}"
 
 # Cleanup globals
 CLEANUP_ENABLED=false
@@ -178,6 +180,8 @@ parse_args() {
       --base-funder-key-file)   BASE_FUNDER_KEY_FILE="$2"; shift 2 ;;
       --sp1-requestor-key-file) SP1_REQUESTOR_KEY_FILE="$2"; shift 2 ;;
       --keep-infra)             KEEP_INFRA=true; shift ;;
+      --min-deposit-amount)     MIN_DEPOSIT_AMOUNT="$2"; shift 2 ;;
+      --min-withdraw-amount)    MIN_WITHDRAW_AMOUNT="$2"; shift 2 ;;
       -h|--help) usage ;;
       *) die "unknown option: $1" ;;
     esac
@@ -1604,6 +1608,8 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh run \\
   --bridge-api-binary "/home/$RUNNER_SSH_USER/bin/bridge-api" \\
   --base-event-scanner-binary "/home/$RUNNER_SSH_USER/bin/base-event-scanner" \\
   --bridge-api-listen "0.0.0.0:${BRIDGE_API_PORT}" \\
+  --min-deposit-amount "${MIN_DEPOSIT_AMOUNT:-0}" \\
+  --min-withdraw-amount "${MIN_WITHDRAW_AMOUNT:-0}" \\
   --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
   $bridge_summary_flag \\
   ${EXTRA_E2E_FLAGS:-} \\
@@ -2165,6 +2171,8 @@ deploy/operators/dkg/e2e/run-testnet-e2e.sh deploy \\
   --bridge-api-binary "/home/$RUNNER_SSH_USER/bin/bridge-api" \\
   --base-event-scanner-binary "/home/$RUNNER_SSH_USER/bin/base-event-scanner" \\
   --bridge-api-listen "0.0.0.0:${BRIDGE_API_PORT}" \\
+  --min-deposit-amount "${MIN_DEPOSIT_AMOUNT:-0}" \\
+  --min-withdraw-amount "${MIN_WITHDRAW_AMOUNT:-0}" \\
   --output "$remote_workdir/reports/testnet-e2e-summary.json" \\
   $bridge_summary_flag \\
   ${EXTRA_E2E_FLAGS:-} \\
