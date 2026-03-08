@@ -1213,7 +1213,7 @@ deploy_backoffice() {
 
   # Cross-compile backoffice for linux/amd64
   log "building backoffice for linux/amd64..."
-  GOOS=linux GOARCH=amd64 go build -o "$WORKDIR/bin/backoffice-linux-amd64" ./cmd/backoffice/
+  ( cd "$REPO_ROOT" && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$WORKDIR/bin/backoffice-linux-amd64" ./cmd/backoffice/ )
   ok "backoffice binary built"
 
   # Kill any running backoffice so the binary can be replaced.
