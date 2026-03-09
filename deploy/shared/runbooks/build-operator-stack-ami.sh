@@ -278,6 +278,32 @@ install_juno_txsign() {
   sudo install -m 0755 /tmp/juno-txsign /usr/local/bin/juno-txsign
 }
 
+install_juno_txbuild() {
+  local release_json release_tag asset_url archive arch asset_name
+  release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txbuild/releases/latest)"
+  release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
+  case "\$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      echo "unsupported architecture for juno-txbuild install: \$(uname -m)" >&2
+      return 1
+      ;;
+  esac
+  [[ -n "\$release_tag" ]] || { echo "failed to resolve juno-txbuild release tag" >&2; return 1; }
+  asset_name="juno-txbuild_\${release_tag}_linux_\${arch}.tar.gz"
+  asset_url="\$(jq -r --arg name "\$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"\$release_json" | head -n 1)"
+  [[ -n "\$asset_url" ]] || { echo "failed to resolve juno-txbuild linux asset: \$asset_name" >&2; return 1; }
+
+  archive="\$(mktemp)"
+  curl -fsSL "\$asset_url" -o "\$archive"
+  tar -xzf "\$archive" -C /tmp
+  rm -f "\$archive"
+
+  [[ -x /tmp/juno-txbuild ]] || { echo "juno-txbuild archive extraction failed" >&2; return 1; }
+  sudo install -m 0755 /tmp/juno-txbuild /usr/local/bin/juno-txbuild
+}
+
 install_intents_binaries() {
   local repo_dir="\$HOME/intents-juno"
   if [[ ! -d "\$repo_dir/.git" ]]; then
@@ -1906,6 +1932,7 @@ run_with_retry install_aws_cli
 install_junocash
 install_juno_scan
 install_juno_txsign
+install_juno_txbuild
 install_intents_binaries
 write_stack_config
 

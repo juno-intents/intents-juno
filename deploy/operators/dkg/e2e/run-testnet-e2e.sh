@@ -6414,6 +6414,15 @@ command_run() {
             -o TCPKeepAlive=yes \
             "$relayer_runtime_operator_ssh_user@$withdraw_coordinator_host" \
             "chmod 0755 '$distributed_juno_txbuild_bin_path'" >/dev/null
+          ssh \
+            -i "$relayer_runtime_operator_ssh_key_file" \
+            -o StrictHostKeyChecking=no \
+            -o UserKnownHostsFile=/dev/null \
+            -o ServerAliveInterval=30 \
+            -o ServerAliveCountMax=6 \
+            -o TCPKeepAlive=yes \
+            "$relayer_runtime_operator_ssh_user@$withdraw_coordinator_host" \
+            "sudo ln -sf '$distributed_juno_txbuild_bin_path' /usr/local/bin/juno-txbuild"
         fi
       fi
     fi
