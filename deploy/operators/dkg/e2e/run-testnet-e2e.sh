@@ -6792,12 +6792,15 @@ command_run() {
   fi
 
   # ── Launch base-event-scanner ───────────────────────────────────────────
+  local scanner_start_block="0"
   if (( relayer_status == 0 )); then
+    scanner_start_block="$(cast block-number --rpc-url "$base_rpc_url" 2>/dev/null || echo "0")"
+    log "base-event-scanner start block: $scanner_start_block"
     local -a scanner_args=(
       --base-rpc-url "$base_rpc_url"
       --bridge-address "$deployed_bridge_address"
       --postgres-dsn "$shared_postgres_dsn"
-      --start-block 0
+      --start-block "$scanner_start_block"
       --poll-interval 3s
       --queue-driver kafka
       --queue-brokers "$shared_kafka_brokers"
