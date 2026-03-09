@@ -1239,7 +1239,7 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
-export BASE_RELAYER_AUTH_TOKEN
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
@@ -1392,7 +1392,7 @@ command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
   exit 1
 }
-export BASE_RELAYER_AUTH_TOKEN
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
@@ -1506,7 +1506,7 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
-export BASE_RELAYER_AUTH_TOKEN
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
 withdraw_finalizer_queue_group="${WITHDRAW_FINALIZER_QUEUE_GROUP:-withdraw-finalizer}"
