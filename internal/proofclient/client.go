@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -79,6 +81,9 @@ type QueueConfig struct {
 	AckTimeout      time.Duration
 	DefaultDeadline time.Duration
 
+	DLQStore dlq.Store
+	Now      func() time.Time
+
 	Log *slog.Logger
 }
 
@@ -101,6 +106,9 @@ func NewQueueClient(cfg QueueConfig) (*QueueClient, error) {
 	}
 	if cfg.Log == nil {
 		cfg.Log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
 	}
 	return &QueueClient{cfg: cfg}, nil
 }
@@ -146,7 +154,7 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 			if !ok {
 				return Result{}, fmt.Errorf("proofclient: response consumer closed")
 			}
-			result, matched, err := c.handleResponseMessage(msg, req.JobID, requestStartedAt)
+			result, matched, err := c.handleResponseMessage(ctx, msg, req.JobID, requestStartedAt)
 			c.ack(msg)
 			if err != nil {
 				return Result{}, err
@@ -158,7 +166,12 @@ func (c *QueueClient) RequestProof(ctx context.Context, req Request) (Result, er
 	}
 }
 
-func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash, requestStartedAt time.Time) (Result, bool, error) {
+func (c *QueueClient) handleResponseMessage(
+	ctx context.Context,
+	msg queue.Message,
+	jobID common.Hash,
+	requestStartedAt time.Time,
+) (Result, bool, error) {
 	if strings.TrimSpace(string(msg.Value)) == "" {
 		return Result{}, false, nil
 	}
@@ -168,10 +181,30 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 	}
 	if err := json.Unmarshal(msg.Value, &env); err != nil {
 		c.cfg.Log.Warn("proofclient: ignore invalid response payload", "err", err)
+		if dlqErr := c.maybeDLQResponse(ctx, msg, common.Hash{}, "malformed_response", fmt.Sprintf("decode envelope: %v", err)); dlqErr != nil {
+			return Result{}, false, dlqErr
+		}
 		return Result{}, false, nil
 	}
-	gotJobID := common.HexToHash(strings.TrimSpace(env.JobID))
+	gotJobID, ok := parseResponseJobID(env.JobID)
+	if !ok {
+		c.cfg.Log.Warn("proofclient: ignore response payload with invalid job id", "job_id", env.JobID)
+		if dlqErr := c.maybeDLQResponse(ctx, msg, common.Hash{}, "malformed_response", "missing or invalid job_id"); dlqErr != nil {
+			return Result{}, false, dlqErr
+		}
+		return Result{}, false, nil
+	}
 	if gotJobID != jobID {
+		c.cfg.Log.Warn("proofclient: ignore unmatched response payload", "job_id", gotJobID.Hex(), "expected_job_id", jobID.Hex())
+		if dlqErr := c.maybeDLQResponse(
+			ctx,
+			msg,
+			gotJobID,
+			"unmatched_response",
+			fmt.Sprintf("response job_id %s did not match active request %s", gotJobID.Hex(), jobID.Hex()),
+		); dlqErr != nil {
+			return Result{}, false, dlqErr
+		}
 		return Result{}, false, nil
 	}
 
@@ -183,17 +216,29 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 			Metadata map[string]string `json:"metadata"`
 		}
 		if err := json.Unmarshal(msg.Value, &res); err != nil {
+			if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "malformed_response", fmt.Sprintf("decode fulfillment: %v", err)); dlqErr != nil {
+				return Result{}, true, dlqErr
+			}
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment: %w", err)
 		}
 		seal, err := decodeHex(res.Seal)
 		if err != nil {
+			if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "malformed_response", fmt.Sprintf("decode fulfillment seal: %v", err)); dlqErr != nil {
+				return Result{}, true, dlqErr
+			}
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment seal: %w", err)
 		}
 		if strings.TrimSpace(strings.TrimPrefix(res.Journal, "0x")) == "" {
+			if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "malformed_response", "missing fulfillment journal"); dlqErr != nil {
+				return Result{}, true, dlqErr
+			}
 			return Result{}, true, fmt.Errorf("proofclient: missing fulfillment journal")
 		}
 		journal, err := decodeHex(res.Journal)
 		if err != nil {
+			if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "malformed_response", fmt.Sprintf("decode fulfillment journal: %v", err)); dlqErr != nil {
+				return Result{}, true, dlqErr
+			}
 			return Result{}, true, fmt.Errorf("proofclient: decode fulfillment journal: %w", err)
 		}
 		return Result{
@@ -219,6 +264,9 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 			Message   string `json:"message"`
 		}
 		if err := json.Unmarshal(msg.Value, &fail); err != nil {
+			if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "malformed_response", fmt.Sprintf("decode failure: %v", err)); dlqErr != nil {
+				return Result{}, true, dlqErr
+			}
 			return Result{}, true, fmt.Errorf("proofclient: decode failure: %w", err)
 		}
 		return Result{}, true, &FailureError{
@@ -228,8 +276,42 @@ func (c *QueueClient) handleResponseMessage(msg queue.Message, jobID common.Hash
 		}
 	default:
 		c.cfg.Log.Warn("proofclient: ignore unknown response version", "version", env.Version)
+		if dlqErr := c.maybeDLQResponse(ctx, msg, gotJobID, "unknown_response_version", fmt.Sprintf("unsupported version %q", env.Version)); dlqErr != nil {
+			return Result{}, false, dlqErr
+		}
 		return Result{}, false, nil
 	}
+}
+
+func (c *QueueClient) maybeDLQResponse(
+	ctx context.Context,
+	msg queue.Message,
+	jobID common.Hash,
+	errorCode string,
+	errorMessage string,
+) error {
+	if c.cfg.DLQStore == nil {
+		return nil
+	}
+
+	recordJobID := jobID
+	if recordJobID == (common.Hash{}) {
+		recordJobID = crypto.Keccak256Hash([]byte(msg.Topic), msg.Value)
+	}
+	rec := dlq.ProofDLQRecord{
+		JobID:        [32]byte(recordJobID),
+		Pipeline:     "proof-response",
+		State:        4,
+		ErrorCode:    strings.TrimSpace(errorCode),
+		ErrorMessage: strings.TrimSpace(errorMessage),
+		AttemptCount: 1,
+		JobPayload:   append([]byte(nil), msg.Value...),
+		CreatedAt:    c.cfg.Now().UTC(),
+	}
+	if err := c.cfg.DLQStore.InsertProofDLQ(ctx, rec); err != nil {
+		return fmt.Errorf("proofclient: route response to dlq: %w", err)
+	}
+	return nil
 }
 
 func (c *QueueClient) ack(msg queue.Message) {
@@ -302,4 +384,16 @@ func decodeHex(v string) ([]byte, error) {
 		return nil, err
 	}
 	return b, nil
+}
+
+func parseResponseJobID(v string) (common.Hash, bool) {
+	s := strings.TrimSpace(v)
+	if s == "" || !strings.HasPrefix(s, "0x") || len(s) != 66 {
+		return common.Hash{}, false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(s, "0x"))
+	if err != nil || len(decoded) != common.HashLength {
+		return common.Hash{}, false
+	}
+	return common.BytesToHash(decoded), true
 }

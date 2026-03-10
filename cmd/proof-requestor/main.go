@@ -13,7 +13,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
 	"github.com/juno-intents/intents-juno/internal/healthz"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/proof/postgres"
 	"github.com/juno-intents/intents-juno/internal/proofrequestor"
@@ -24,7 +26,14 @@ import (
 
 func main() {
 	var (
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 		storeDriver = flag.String("store-driver", "postgres", "store driver: postgres|memory")
 		owner       = flag.String("owner", "", "unique requestor instance id (required)")
 		chainID     = flag.Uint64("chain-id", 0, "chain id used for deterministic request IDs (required)")
@@ -53,7 +62,7 @@ func main() {
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter binary")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -121,14 +130,27 @@ func main() {
 	}
 	defer func() { _ = producer.Close() }()
 
-	var store proof.Store
+	var (
+		store    proof.Store
+		dlqStore *dlqpg.Store
+		pool     *pgxpool.Pool
+	)
 	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
 	case "postgres":
 		if *postgresDSN == "" {
 			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
 			os.Exit(2)
 		}
-		pool, err := pgxpool.New(ctx, *postgresDSN)
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)
@@ -145,6 +167,16 @@ func main() {
 			os.Exit(2)
 		}
 		store = pgStore
+
+		dlqStore, err = dlqpg.New(pool)
+		if err != nil {
+			log.Error("init proof dlq store", "err", err)
+			os.Exit(2)
+		}
+		if err := dlqStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure proof dlq schema", "err", err)
+			os.Exit(2)
+		}
 	case "memory":
 		store = proof.NewMemoryStore(time.Now)
 	default:
@@ -179,6 +211,7 @@ func main() {
 		FailureTopic: *failureTopic,
 		MaxInflight:  *maxInflight,
 		AckTimeout:   *ackTimeout,
+		DLQStore:     dlqStore,
 	}, svc, consumer, producer, log)
 	if err != nil {
 		log.Error("init proof requestor worker", "err", err)
@@ -186,7 +219,11 @@ func main() {
 	}
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-requestor"); err != nil {
+		opts := []healthz.Option{}
+		if pool != nil {
+			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-requestor", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()

@@ -23,10 +23,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/dlq"
+	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
@@ -56,7 +59,14 @@ const (
 
 func main() {
 	var (
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 
 		baseChainID     = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr      = flag.String("bridge-address", "", "Bridge contract address (required)")
@@ -104,7 +114,7 @@ func main() {
 		blobPrefix     = flag.String("blob-prefix", "withdraw-finalizer", "blob key prefix")
 		blobMaxGetSize = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -213,28 +223,16 @@ func main() {
 	}
 	defer func() { _ = consumer.Close() }()
 
-	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
-		driver:             *proofDriver,
-		queueDriver:        *queueDriver,
-		queueBrokers:       queue.SplitCommaList(*queueBrokers),
-		proofRequestTopic:  *proofRequestTopic,
-		proofResultTopic:   *proofResultTopic,
-		proofFailureTopic:  *proofFailureTopic,
-		proofGroup:         *proofResponseGroup,
-		maxLineBytes:       *maxLineBytes,
-		queueMaxBytes:      *queueMaxBytes,
-		ackTimeout:         *ackTimeout,
-		mockSeal:           *proofMockSeal,
-		log:                log,
-		defaultGroupPrefix: "withdraw-finalizer-proof-",
+	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
 	})
 	if err != nil {
-		log.Error("init proof client", "err", err)
+		log.Error("parse pgx pool config", "err", err)
 		os.Exit(2)
 	}
-	defer proofCleanup()
-
-	pool, err := pgxpool.New(ctx, *postgresDSN)
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Error("init pgx pool", "err", err)
 		os.Exit(2)
@@ -248,6 +246,16 @@ func main() {
 	}
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Error("ensure withdraw schema", "err", err)
+		os.Exit(2)
+	}
+
+	proofDLQStore, err := dlqpg.New(pool)
+	if err != nil {
+		log.Error("init proof dlq store", "err", err)
+		os.Exit(2)
+	}
+	if err := proofDLQStore.EnsureSchema(ctx); err != nil {
+		log.Error("ensure proof dlq schema", "err", err)
 		os.Exit(2)
 	}
 
@@ -266,6 +274,28 @@ func main() {
 		log.Error("ensure lease schema", "err", err)
 		os.Exit(2)
 	}
+
+	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
+		driver:             *proofDriver,
+		queueDriver:        *queueDriver,
+		queueBrokers:       queue.SplitCommaList(*queueBrokers),
+		proofRequestTopic:  *proofRequestTopic,
+		proofResultTopic:   *proofResultTopic,
+		proofFailureTopic:  *proofFailureTopic,
+		proofGroup:         *proofResponseGroup,
+		maxLineBytes:       *maxLineBytes,
+		queueMaxBytes:      *queueMaxBytes,
+		ackTimeout:         *ackTimeout,
+		mockSeal:           *proofMockSeal,
+		dlqStore:           proofDLQStore,
+		log:                log,
+		defaultGroupPrefix: "withdraw-finalizer-proof-",
+	})
+	if err != nil {
+		log.Error("init proof client", "err", err)
+		os.Exit(2)
+	}
+	defer proofCleanup()
 
 	f, err := withdrawfinalizer.New(withdrawfinalizer.Config{
 		Owner:               *owner,
@@ -289,7 +319,12 @@ func main() {
 	f.WithBlobStore(artifactStore)
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "withdraw-finalizer"); err != nil {
+		if err := healthz.ListenAndServe(
+			ctx,
+			healthz.ListenAddr(*healthPort),
+			"withdraw-finalizer",
+			healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)),
+		); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()
@@ -773,6 +808,7 @@ type initProofClientConfig struct {
 	queueMaxBytes      int
 	ackTimeout         time.Duration
 	mockSeal           string
+	dlqStore           dlq.Store
 	log                *slog.Logger
 	defaultGroupPrefix string
 }
@@ -825,6 +861,7 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 			Producer:     producer,
 			Consumer:     consumer,
 			AckTimeout:   cfg.ackTimeout,
+			DLQStore:     cfg.dlqStore,
 			Log:          cfg.log,
 		})
 		if err != nil {

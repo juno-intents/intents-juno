@@ -125,7 +125,9 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	}
 
 	mux := http.NewServeMux()
+	mux.HandleFunc("GET /livez", h.handleHealthz)
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
+	mux.HandleFunc("GET /readyz", h.handleHealthz)
 	mux.HandleFunc("GET /v1/config", h.handleConfig)
 	mux.HandleFunc("GET /v1/deposit-memo", h.handleDepositMemo)
 	mux.HandleFunc("GET /v1/status/deposit/{depositId}", h.handleDepositStatus)
@@ -138,7 +140,7 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 	frontendHandler := FrontendHandler()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// Only serve frontend for paths that don't match API routes.
-		if strings.HasPrefix(r.URL.Path, "/v1/") || r.URL.Path == "/healthz" {
+		if strings.HasPrefix(r.URL.Path, "/v1/") || isProbePath(r.URL.Path) {
 			http.NotFound(w, r)
 			return
 		}
@@ -147,7 +149,7 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Health checks must never be throttled.
-		if r.URL.Path == "/healthz" {
+		if isProbePath(r.URL.Path) {
 			mux.ServeHTTP(w, r)
 			return
 		}
@@ -167,6 +169,10 @@ func NewHandler(cfg Config, deposits DepositReader, withdrawals WithdrawalReader
 
 		mux.ServeHTTP(w, r)
 	}), nil
+}
+
+func isProbePath(path string) bool {
+	return path == "/healthz" || path == "/livez" || path == "/readyz"
 }
 
 type handler struct {

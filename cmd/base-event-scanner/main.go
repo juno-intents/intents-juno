@@ -19,6 +19,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/chainscanner"
 	"github.com/juno-intents/intents-juno/internal/healthz"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -52,11 +53,18 @@ func runMain(args []string, stdout io.Writer) error {
 	baseRPCURL := fs.String("base-rpc-url", "", "Base chain RPC URL (required)")
 	bridgeAddress := fs.String("bridge-address", "", "Bridge contract address (required)")
 	postgresDSN := fs.String("postgres-dsn", "", "Postgres DSN (required)")
+	postgresMinConns := fs.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+	postgresMaxConns := fs.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+	postgresHealthCheckPeriod := fs.Duration(
+		"postgres-health-check-period",
+		pgxpoolutil.DefaultHealthCheckPeriod,
+		"pgxpool health check period",
+	)
 	startBlock := fs.Int64("start-block", 0, "starting block number (0 = resume from DB state)")
 	pollInterval := fs.Duration("poll-interval", 5*time.Second, "poll interval")
 	maxBlocksPerPoll := fs.Int64("max-blocks-per-poll", 1000, "maximum blocks per poll")
 
-	healthPort := fs.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+	healthPort := fs.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
 	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated Kafka broker addresses")
@@ -83,7 +91,15 @@ func runMain(args []string, stdout io.Writer) error {
 	slog.SetDefault(logger)
 
 	// Connect to Postgres.
-	pool, err := pgxpool.New(ctx, strings.TrimSpace(*postgresDSN))
+	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
+	})
+	if err != nil {
+		return fmt.Errorf("parse pgx pool config: %w", err)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		return fmt.Errorf("connect postgres: %w", err)
 	}

@@ -17,6 +17,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/prooffunder"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	sp1 "github.com/juno-intents/intents-juno/internal/sp1network"
@@ -24,7 +25,14 @@ import (
 
 func main() {
 	var (
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 		leaseDriver = flag.String("lease-driver", "postgres", "lease driver: postgres|memory")
 		ownerID     = flag.String("owner-id", "", "unique funder instance id (required)")
 		leaseName   = flag.String("lease-name", "proof-funder", "lease name for active/passive funder")
@@ -81,7 +89,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --lease-driver=postgres")
 			os.Exit(2)
 		}
-		pool, err := pgxpool.New(ctx, *postgresDSN)
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)

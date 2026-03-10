@@ -75,6 +75,16 @@ func TestAuthMiddleware_UIPathsExempt(t *testing.T) {
 		wantCode   int
 	}{
 		{
+			name:     "livez exempt",
+			path:     "/livez",
+			wantCode: http.StatusOK,
+		},
+		{
+			name:     "readyz exempt",
+			path:     "/readyz",
+			wantCode: http.StatusOK,
+		},
+		{
 			name:     "healthz exempt",
 			path:     "/healthz",
 			wantCode: http.StatusOK,

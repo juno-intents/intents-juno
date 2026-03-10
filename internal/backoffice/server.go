@@ -19,7 +19,7 @@ import (
 type ServerConfig struct {
 	Pool       *pgxpool.Pool
 	BaseClient *ethclient.Client
-	SP1RPCURL string // Succinct prover network gRPC URL (e.g. rpc.mainnet.succinct.xyz)
+	SP1RPCURL  string // Succinct prover network gRPC URL (e.g. rpc.mainnet.succinct.xyz)
 
 	JunoRPCURL  string
 	JunoRPCUser string
@@ -94,7 +94,9 @@ func New(cfg ServerConfig) (*Server, error) {
 	}
 
 	// Register routes.
+	s.mux.HandleFunc("GET /livez", s.handleHealthz)
 	s.mux.HandleFunc("GET /healthz", s.handleHealthz)
+	s.mux.HandleFunc("GET /readyz", s.handleHealthz)
 
 	// DLQ routes
 	s.mux.HandleFunc("GET /api/dlq/proofs", s.handleDLQListProofs)
@@ -183,4 +185,8 @@ type ServiceEntry struct {
 type OperatorEndpoint struct {
 	Address  common.Address
 	Endpoint string // host:port for gRPC TLS probe
+}
+
+func isProbePath(path string) bool {
+	return path == "/healthz" || path == "/livez" || path == "/readyz"
 }

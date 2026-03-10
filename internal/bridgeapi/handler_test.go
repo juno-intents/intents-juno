@@ -144,6 +144,60 @@ func TestHandler_Config(t *testing.T) {
 	})
 }
 
+func TestHandler_ProbeAliases(t *testing.T) {
+	t.Parallel()
+
+	h, err := NewHandler(Config{
+		BaseChainID:         8453,
+		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:           "u1example",
+		RefundWindowSeconds: 86400,
+		NonceFn: func() (uint64, error) {
+			return 1, nil
+		},
+	}, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	for _, path := range []string{"/healthz", "/livez", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d body=%s", path, rec.Code, http.StatusOK, rec.Body.String())
+		}
+	}
+}
+
+func TestHandler_ProbePathsBypassFrontendAndRateLimiting(t *testing.T) {
+	t.Parallel()
+
+	h, err := NewHandler(Config{
+		BaseChainID:             8453,
+		BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:               "u1example",
+		RefundWindowSeconds:     86400,
+		RateLimitPerIPPerSecond: 0.0001,
+		RateLimitBurst:          1,
+		NonceFn: func() (uint64, error) {
+			return 1, nil
+		},
+	}, &stubDepositReader{}, &stubWithdrawalReader{})
+	if err != nil {
+		t.Fatalf("NewHandler: %v", err)
+	}
+
+	for _, path := range []string{"/livez", "/readyz", "/healthz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d", path, rec.Code, http.StatusOK)
+		}
+	}
+}
+
 func TestHandler_DepositMemo(t *testing.T) {
 	t.Parallel()
 

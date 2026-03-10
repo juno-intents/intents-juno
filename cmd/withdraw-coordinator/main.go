@@ -27,6 +27,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/tss"
@@ -59,9 +60,16 @@ const (
 
 func main() {
 	var (
-		postgresDSN    = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
-		postgresDSNEnv = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
-		runtimeMode    = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode (production binary supports only: full)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
+		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
+		runtimeMode = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode (production binary supports only: full)")
 
 		maxItems             = flag.Int("max-items", 50, "maximum withdrawals per Juno payout tx")
 		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
@@ -138,7 +146,7 @@ func main() {
 		extendSignerBin     = flag.String("extend-signer-bin", "", "path to external extend signer binary (required; must support `sign-digest --digest <0x..> --json`)")
 		extendSignerMaxResp = flag.Int("extend-signer-max-response-bytes", 1<<20, "max extend signer response size (bytes)")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 	mode, err := normalizeRuntimeMode(*runtimeMode)
@@ -279,7 +287,16 @@ func main() {
 	}
 	defer func() { _ = consumer.Close() }()
 
-	pool, err := pgxpool.New(ctx, postgresDSNValue)
+	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(postgresDSNValue), pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
+	})
+	if err != nil {
+		log.Error("parse pgx pool config", "err", err)
+		os.Exit(2)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Error("init pgx pool", "err", err)
 		os.Exit(2)
@@ -449,7 +466,12 @@ func main() {
 	coord.WithBlobStore(artifactStore)
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "withdraw-coordinator"); err != nil {
+		if err := healthz.ListenAndServe(
+			ctx,
+			healthz.ListenAddr(*healthPort),
+			"withdraw-coordinator",
+			healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)),
+		); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()

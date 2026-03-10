@@ -48,7 +48,7 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	mux := http.NewServeMux()
 
 	startTime := time.Now()
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	handleHealth := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		uptime := time.Since(startTime).Truncate(time.Second).String()
@@ -57,7 +57,10 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			"uptime":  uptime,
 			"service": "base-relayer",
 		})
-	})
+	}
+	mux.HandleFunc("GET /livez", handleHealth)
+	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("GET /readyz", handleHealth)
 
 	mux.HandleFunc("POST /v1/send", func(w http.ResponseWriter, r *http.Request) {
 		if cfg.AuthToken != "" && !checkBearer(r.Header.Get("Authorization"), cfg.AuthToken) {

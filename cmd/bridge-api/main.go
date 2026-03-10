@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -15,6 +16,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeapi"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 )
 
@@ -22,7 +24,14 @@ func main() {
 	var (
 		listenAddr = flag.String("listen", "127.0.0.1:8082", "HTTP listen address")
 
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
@@ -85,7 +94,16 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	pool, err := pgxpool.New(ctx, *postgresDSN)
+	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
+	})
+	if err != nil {
+		log.Error("parse pgx pool config", "err", err)
+		os.Exit(2)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Error("init pgx pool", "err", err)
 		os.Exit(2)

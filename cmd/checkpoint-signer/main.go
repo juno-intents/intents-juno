@@ -23,6 +23,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -79,7 +80,14 @@ func main() {
 		pollInterval = flag.Duration("poll-interval", 2*time.Second, "poll interval for tip height")
 		rpcTimeout   = flag.Duration("rpc-timeout", 10*time.Second, "HTTP client timeout for junocashd RPC calls")
 
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required when --lease-driver=postgres)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required when --lease-driver=postgres)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 		leaseDriver = flag.String("lease-driver", "postgres", "lease driver: postgres|memory")
 		ownerID     = flag.String("owner-id", "", "unique signer instance id (required)")
 		leaseName   = flag.String("lease-name", "checkpoint-signer", "lease name used for active signer selection")
@@ -89,7 +97,7 @@ func main() {
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 		queueOutTopic = flag.String("queue-output-topic", "checkpoints.signatures.v1", "queue output topic")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -143,14 +151,26 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var leaseStore leases.Store
+	var (
+		leaseStore leases.Store
+		pool       *pgxpool.Pool
+	)
 	switch strings.ToLower(strings.TrimSpace(*leaseDriver)) {
 	case "postgres":
 		if strings.TrimSpace(*postgresDSN) == "" {
 			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --lease-driver=postgres")
 			os.Exit(2)
 		}
-		pool, err := pgxpool.New(ctx, *postgresDSN)
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)
@@ -208,7 +228,11 @@ func main() {
 	}
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-signer"); err != nil {
+		opts := []healthz.Option{}
+		if pool != nil {
+			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-signer", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()

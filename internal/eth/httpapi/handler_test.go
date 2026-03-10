@@ -79,3 +79,34 @@ func TestHandler_SendParsesRequestAndReturnsResult(t *testing.T) {
 		t.Fatalf("GasLimit: got %d want %d", sender.gotReq.GasLimit, 55555)
 	}
 }
+
+func TestHandler_ProbeAliases(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(&stubSender{}, Config{})
+	for _, path := range []string{"/healthz", "/livez", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d body=%s", path, rr.Code, http.StatusOK, rr.Body.String())
+		}
+	}
+}
+
+func TestHandler_ProbePathsRemainUnauthenticated(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{AuthToken: "secret", MaxBodyBytes: 1024, MaxWaitSeconds: 60})
+
+	for _, path := range []string{"/livez", "/readyz", "/healthz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rr := httptest.NewRecorder()
+		h.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d", path, rr.Code, http.StatusOK)
+		}
+	}
+}

@@ -3,6 +3,7 @@ package queue
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"io"
 	"strings"
 	"testing"
@@ -196,6 +197,18 @@ func TestQueueKafkaTLSEnabled(t *testing.T) {
 				t.Fatalf("queueKafkaTLSEnabled(%q) = %t, want %t", tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestKafkaTLSConfigUsesTLS13Minimum(t *testing.T) {
+	t.Parallel()
+
+	cfg := kafkaTLSConfig()
+	if cfg == nil {
+		t.Fatal("expected tls config")
+	}
+	if cfg.MinVersion != tls.VersionTLS13 {
+		t.Fatalf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS13)
 	}
 }
 

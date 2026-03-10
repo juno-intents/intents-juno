@@ -10,12 +10,12 @@ import (
 )
 
 // authMiddleware checks the Authorization: Bearer <token> header against the
-// configured auth secret. Health checks, the dashboard UI, and static assets
+// configured auth secret. Probe endpoints, the dashboard UI, and static assets
 // are exempt so the browser can load the page and prompt for a token.
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip auth for healthz, dashboard root, and static assets.
-		if r.URL.Path == "/healthz" || r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") {
+		// Skip auth for probes, dashboard root, and static assets.
+		if isProbePath(r.URL.Path) || r.URL.Path == "/" || strings.HasPrefix(r.URL.Path, "/static/") {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -36,7 +36,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 }
 
 // rateLimitMiddleware applies per-IP token bucket rate limiting.
-// Health checks (GET /healthz) are exempt.
+// Probe endpoints are exempt.
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	limiter := newBackofficeRateLimiter(
 		s.cfg.RateLimitPerSecond,
@@ -45,8 +45,8 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Skip rate limiting for healthz.
-		if r.URL.Path == "/healthz" {
+		// Skip rate limiting for probes.
+		if isProbePath(r.URL.Path) {
 			next.ServeHTTP(w, r)
 			return
 		}

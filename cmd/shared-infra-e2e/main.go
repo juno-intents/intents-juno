@@ -66,15 +66,15 @@ type kafkaReport struct {
 }
 
 type checkpointReport struct {
-	Digest              string `json:"digest"`
-	CID                 string `json:"cid"`
-	SignerCount         int    `json:"signer_count"`
-	Threshold           int    `json:"threshold"`
-	PublishRoundTripMS  int64  `json:"publish_round_trip_ms"`
-	FetchRoundTripMS    int64  `json:"fetch_round_trip_ms"`
-	GatewayReachable    bool   `json:"gateway_reachable,omitempty"`
-	GatewayRoundTripMS  int64  `json:"gateway_round_trip_ms,omitempty"`
-	GatewayWarning      string `json:"gateway_warning,omitempty"`
+	Digest             string `json:"digest"`
+	CID                string `json:"cid"`
+	SignerCount        int    `json:"signer_count"`
+	Threshold          int    `json:"threshold"`
+	PublishRoundTripMS int64  `json:"publish_round_trip_ms"`
+	FetchRoundTripMS   int64  `json:"fetch_round_trip_ms"`
+	GatewayReachable   bool   `json:"gateway_reachable,omitempty"`
+	GatewayRoundTripMS int64  `json:"gateway_round_trip_ms,omitempty"`
+	GatewayWarning     string `json:"gateway_warning,omitempty"`
 }
 
 type checkpointPackageV1 struct {
@@ -479,7 +479,7 @@ func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error
 	dialer := &kafka.Dialer{Timeout: 10 * time.Second}
 	if kafkaTLSEnabledFromEnv() {
 		dialer.TLS = &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion: tls.VersionTLS13,
 		}
 	}
 	var lastErr error

@@ -19,13 +19,21 @@ import (
 	"github.com/juno-intents/intents-juno/internal/backoffice"
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 )
 
 func main() {
 	var (
-		listenAddr  = flag.String("listen", ":8090", "HTTP listen address")
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
-		baseRPCURL  = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
+		listenAddr                = flag.String("listen", ":8090", "HTTP listen address")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
+		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
 
 		junoRPCURL  = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, for MPC wallet balance)")
 		junoRPCUser = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
@@ -36,15 +44,15 @@ func main() {
 		rateLimitPerSecond = flag.Float64("rate-limit-per-second", 5, "Per-IP rate limit refill rate")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 10, "Per-IP rate limit burst capacity")
 
-		bridgeAddr      = flag.String("bridge-address", "", "Bridge contract address on Base (required)")
-		wjunoAddr       = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")
-		opRegistryAddr  = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
-		feeDistAddr     = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
-		sp1RequestorStr = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
-		sp1RPCURL       = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
+		bridgeAddr       = flag.String("bridge-address", "", "Bridge contract address on Base (required)")
+		wjunoAddr        = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")
+		opRegistryAddr   = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
+		feeDistAddr      = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
+		sp1RequestorStr  = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
+		sp1RPCURL        = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
 		operatorAddrsRaw = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
 
-		serviceURLsRaw          = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
+		serviceURLsRaw       = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
 		operatorEndpointsRaw = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
 		kafkaBrokersRaw      = flag.String("kafka-brokers", "", "Comma-separated Kafka broker addresses for health probe")
 		ipfsApiURL           = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
@@ -179,7 +187,16 @@ func main() {
 	defer stop()
 
 	// Connect to Postgres.
-	pool, err := pgxpool.New(ctx, *postgresDSN)
+	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
+	})
+	if err != nil {
+		log.Error("parse pgx pool config", "err", err)
+		os.Exit(2)
+	}
+	pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
 	if err != nil {
 		log.Error("init pgx pool", "err", err)
 		os.Exit(2)
@@ -235,7 +252,7 @@ func main() {
 		ServiceEntries:    serviceEntries,
 		OperatorEndpoints: operatorEndpoints,
 		KafkaBrokers:      kafkaBrokers,
-		IPFSApiURL:         strings.TrimSpace(*ipfsApiURL),
+		IPFSApiURL:        strings.TrimSpace(*ipfsApiURL),
 
 		AuthSecret: *authSecret,
 

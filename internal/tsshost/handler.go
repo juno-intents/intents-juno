@@ -94,11 +94,14 @@ func NewHandler(signer Signer, cfg Config) http.Handler {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
+	handleHealth := func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
-	})
+	}
+	mux.HandleFunc("GET /livez", handleHealth)
+	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("GET /readyz", handleHealth)
 
 	mux.HandleFunc("POST /v1/sign", h.handleSign)
 	return mux

@@ -23,10 +23,13 @@ import (
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/depositscanner"
+	"github.com/juno-intents/intents-juno/internal/dlq"
+	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
-	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -56,7 +59,14 @@ type depositEventV1 struct {
 
 func main() {
 	var (
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 		storeDriver = flag.String("store-driver", "postgres", "deposit store driver: postgres|memory")
 
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required; must fit uint32 for deposit memo domain separation)")
@@ -95,7 +105,7 @@ func main() {
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
 		scanEnabled       = flag.Bool("scan-enabled", false, "enable juno-scan deposit auto-detection")
 		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")
@@ -187,8 +197,9 @@ func main() {
 	defer stop()
 
 	var (
-		pool  *pgxpool.Pool
-		store deposit.Store
+		pool          *pgxpool.Pool
+		store         deposit.Store
+		proofDLQStore dlq.Store
 	)
 	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
 	case "postgres":
@@ -196,7 +207,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
 			os.Exit(2)
 		}
-		pool, err = pgxpool.New(ctx, *postgresDSN)
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)
@@ -213,6 +233,16 @@ func main() {
 			os.Exit(2)
 		}
 		store = pgStore
+
+		proofDLQStore, err = dlqpg.New(pool)
+		if err != nil {
+			log.Error("init proof dlq store", "err", err)
+			os.Exit(2)
+		}
+		if err := proofDLQStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure proof dlq schema", "err", err)
+			os.Exit(2)
+		}
 	case "memory":
 		store = deposit.NewMemoryStore()
 	default:
@@ -246,6 +276,7 @@ func main() {
 		queueMaxBytes:     *queueMaxBytes,
 		ackTimeout:        *ackTimeout,
 		mockSeal:          *proofMockSeal,
+		dlqStore:          proofDLQStore,
 		log:               log,
 	})
 	if err != nil {
@@ -268,6 +299,7 @@ func main() {
 		GasLimit:            *gasLimit,
 		ProofRequestTimeout: *submitTimeout,
 		ProofPriority:       *proofPriority,
+		DLQStore:            proofDLQStore,
 		Now:                 time.Now,
 		OWalletIVKBytes:     owalletIVKBytes,
 	}, store, baseClient, proofRequester, log)
@@ -277,7 +309,11 @@ func main() {
 	}
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "deposit-relayer"); err != nil {
+		opts := []healthz.Option{}
+		if pool != nil {
+			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "deposit-relayer", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()
@@ -518,6 +554,7 @@ type initProofClientConfig struct {
 	queueMaxBytes     int
 	ackTimeout        time.Duration
 	mockSeal          string
+	dlqStore          dlq.Store
 	log               *slog.Logger
 }
 
@@ -569,6 +606,7 @@ func initProofClient(ctx context.Context, cfg initProofClientConfig) (proofclien
 			Producer:     producer,
 			Consumer:     consumer,
 			AckTimeout:   cfg.ackTimeout,
+			DLQStore:     cfg.dlqStore,
 			Log:          cfg.log,
 		})
 		if err != nil {

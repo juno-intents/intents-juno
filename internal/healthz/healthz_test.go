@@ -3,6 +3,7 @@ package healthz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -47,6 +48,24 @@ func TestHandler(t *testing.T) {
 	}
 }
 
+func TestRegisterAddsLiveReadyAndLegacyHealthPaths(t *testing.T) {
+	t.Parallel()
+
+	startTime := time.Now().Add(-time.Minute)
+	mux := http.NewServeMux()
+	Register(mux, "test-service", startTime)
+
+	for _, path := range []string{"/livez", "/readyz", "/healthz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d", path, w.Code, http.StatusOK)
+		}
+	}
+}
+
 func TestListenAddr(t *testing.T) {
 	t.Parallel()
 
@@ -76,5 +95,59 @@ func TestListenAndServe_DisabledPort(t *testing.T) {
 	err := ListenAndServe(ctx, "", "test")
 	if err != nil {
 		t.Fatalf("expected nil error for disabled port, got %v", err)
+	}
+}
+
+func TestRegister_ReadyzReflectsDependencyHealth(t *testing.T) {
+	t.Parallel()
+
+	startTime := time.Now().Add(-time.Minute)
+	mux := http.NewServeMux()
+	Register(mux, "test-service", startTime, WithReadinessCheck(func(context.Context) error {
+		return errors.New("db unavailable")
+	}))
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503, got %d", w.Code)
+	}
+
+	var resp struct {
+		Status  string `json:"status"`
+		Service string `json:"service"`
+		Error   string `json:"error"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Status != "not_ready" {
+		t.Fatalf("expected status=not_ready, got %q", resp.Status)
+	}
+	if resp.Service != "test-service" {
+		t.Fatalf("expected service=test-service, got %q", resp.Service)
+	}
+	if resp.Error != "db unavailable" {
+		t.Fatalf("expected readiness error, got %q", resp.Error)
+	}
+}
+
+func TestRegister_LivezAndHealthzShareLivenessHandler(t *testing.T) {
+	t.Parallel()
+
+	startTime := time.Now().Add(-time.Minute)
+	mux := http.NewServeMux()
+	Register(mux, "test-service", startTime)
+
+	for _, path := range []string{"/livez", "/healthz", "/readyz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("%s expected 200, got %d", path, w.Code)
+		}
 	}
 }

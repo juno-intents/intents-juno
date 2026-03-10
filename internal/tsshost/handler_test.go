@@ -31,6 +31,26 @@ func seq32(start byte) (out [32]byte) {
 	return out
 }
 
+func TestHandler_ProbePaths(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(&stubSigner{ret: []byte("signed")}, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    16,
+		Now:            time.Now,
+	})
+
+	for _, path := range []string{"/livez", "/readyz", "/healthz"} {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s status: got %d want %d", path, rec.Code, http.StatusOK)
+		}
+	}
+}
+
 func TestHandler_Sign_IdempotentPerSession(t *testing.T) {
 	t.Parallel()
 

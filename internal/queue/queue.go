@@ -152,6 +152,12 @@ func queueKafkaTLSEnabled() bool {
 	}
 }
 
+func kafkaTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS13,
+	}
+}
+
 type kafkaConsumer struct {
 	reader *kafka.Reader
 
@@ -203,9 +209,7 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 	if queueKafkaTLSEnabled() {
 		readerCfg.Dialer = &kafka.Dialer{
 			Timeout: 10 * time.Second,
-			TLS: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
+			TLS:     kafkaTLSConfig(),
 		}
 	}
 	if cfg.KafkaLogger != nil {
@@ -368,9 +372,7 @@ func newKafkaProducer(cfg ProducerConfig) (Producer, error) {
 	}
 	if queueKafkaTLSEnabled() {
 		writer.Transport = &kafka.Transport{
-			TLS: &tls.Config{
-				MinVersion: tls.VersionTLS12,
-			},
+			TLS: kafkaTLSConfig(),
 		}
 	}
 

@@ -20,6 +20,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
 	"github.com/juno-intents/intents-juno/internal/healthz"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -54,7 +55,14 @@ func main() {
 		maxOpen      = flag.Int("max-open", 4, "maximum distinct checkpoint digests tracked concurrently")
 		maxEmitted   = flag.Int("max-emitted", 128, "maximum emitted digests remembered for dedupe")
 
-		postgresDSN    = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration(
+			"postgres-health-check-period",
+			pgxpoolutil.DefaultHealthCheckPeriod,
+			"pgxpool health check period",
+		)
 		storeDriver    = flag.String("store-driver", "postgres", "checkpoint package metadata store driver: postgres|memory")
 		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "checkpoint mirror blobstore driver: s3|memory")
 		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for checkpoint package mirror (required for s3)")
@@ -72,7 +80,7 @@ func main() {
 		queueMaxBytes   = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		queueAckTimeout = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /healthz endpoint (0 = disabled)")
+		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -130,7 +138,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
 			os.Exit(2)
 		}
-		pool, err = pgxpool.New(ctx, *postgresDSN)
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)
@@ -232,7 +249,11 @@ func main() {
 	}
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator"); err != nil {
+		opts := []healthz.Option{}
+		if pool != nil {
+			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
 	}()
