@@ -2,10 +2,10 @@
 
 ## Scope
 
-Rotate centralized keys used by shared proof infrastructure:
+Rotate centralized keys used by the `production-shared` stack:
 
-- `proof-requestor` key (`requestor_key_secret_arn`)
-- `proof-funder` key (`owner_key_secret_arn`)
+- `proof-requestor` key (`shared_sp1_requestor_secret_arn`)
+- `proof-funder` key (`shared_sp1_funder_secret_arn`)
 
 No per-operator keys are used for SP1 proof funding.
 
@@ -13,27 +13,30 @@ No per-operator keys are used for SP1 proof funding.
 
 1. New keys are generated and funded as required.
 2. New secrets are stored in AWS Secrets Manager.
-3. Access policy for ECS task roles allows reading new secret ARNs.
-4. `proof-requestor` and `proof-funder` deployments are healthy.
+3. The new Terraform inputs reference distinct secret ARNs. Reusing one ARN for both services is not allowed.
+4. Access policy for the proof-requestor and proof-funder execution roles allows reading only the corresponding new secret ARN.
+5. `proof-requestor` and `proof-funder` deployments are healthy in the `production-shared` ECS cluster.
 
 ## Rotation Procedure
 
 1. Create new secret versions:
    - requestor private key secret
-   - funder owner private key secret
-2. Update runtime config:
-   - `requestor_key_secret_arn` -> new ARN/version
-   - `owner_key_secret_arn` -> new ARN/version
-3. Roll `proof-requestor` service:
-   - deploy with new secret reference
+   - funder private key secret
+2. Update the `production-shared` Terraform inputs:
+   - `shared_sp1_requestor_secret_arn` -> new requestor ARN/version
+   - `shared_sp1_funder_secret_arn` -> new funder ARN/version
+3. Apply the shared stack and confirm the new task definitions reference the new secret ARNs.
+4. Roll `proof-requestor` first:
+   - keep `deployment_minimum_healthy_percent = 100`
+   - wait for the new task to pass health checks before the old task drains
    - verify successful SP1 network submissions
-4. Roll `proof-funder` service:
-   - deploy with new secret reference
+5. Roll `proof-funder` second:
+   - keep `deployment_minimum_healthy_percent = 100`
    - verify low-balance alerting remains healthy
-5. Keep old key enabled until:
+6. Keep old key enabled until:
    - no tasks reference old secret
    - no pending transactions require old signer
-6. Revoke/decommission old key and secret value.
+7. Revoke/decommission old key and secret value.
 
 ## Validation Checklist
 
@@ -41,9 +44,10 @@ No per-operator keys are used for SP1 proof funding.
 2. `proof_jobs` records continue updating (no stalled submissions).
 3. Requestor balance polling and critical alerts continue.
 4. No increase in auth/signing errors from SP1 operations.
+5. The proof-requestor execution role cannot read the funder secret ARN, and the proof-funder execution role cannot read the requestor secret ARN.
 
 ## Emergency Rollback
 
-1. Revert secret ARNs to previous known-good values.
-2. Redeploy `proof-requestor` and `proof-funder`.
-3. Confirm submission and balance-alert health recovered.
+1. Revert the Terraform inputs to the previous known-good secret ARNs.
+2. Re-apply the `production-shared` stack.
+3. Confirm both ECS services rolled back cleanly and submission/balance-alert health recovered.

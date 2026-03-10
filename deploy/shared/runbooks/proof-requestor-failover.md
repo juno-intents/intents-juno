@@ -2,7 +2,7 @@
 
 ## Scope
 
-This runbook covers failover of the shared `proof-requestor` and `proof-funder` services between primary and DR regions while preserving:
+This runbook covers failover of the `production-shared` `proof-requestor` and `proof-funder` services between primary and DR regions while preserving:
 
 - one requestor identity per chain
 - one centralized funding source
@@ -15,8 +15,9 @@ This runbook covers failover of the shared `proof-requestor` and `proof-funder` 
    - `proof-funder`
    - Kafka topics `proof.requests.v1`, `proof.fulfillments.v1`, `proof.failures.v1`
 2. Aurora Global Database replication is healthy.
-3. Shared requestor and funder keys are present in Secrets Manager in both regions.
+3. Distinct requestor and funder secrets are present in Secrets Manager in both regions and wired through `shared_sp1_requestor_secret_arn` and `shared_sp1_funder_secret_arn`.
 4. DR deployment points to the same `requestor_address` and `chain_id`.
+5. The DR `production-shared` stack already uses overlapping ECS deploy settings (`deployment_minimum_healthy_percent = 100`, `deployment_maximum_percent = 200`).
 
 ## Failover Steps
 
@@ -24,9 +25,9 @@ This runbook covers failover of the shared `proof-requestor` and `proof-funder` 
    - Scale primary `proof-requestor` ECS service to 0.
    - Scale primary `proof-funder` ECS task/Lambda concurrency to 0.
 2. Promote Aurora writer in DR region.
-3. Update DR service configs:
+3. Update DR stack inputs if the failover changes any regional endpoints:
    - `postgres-dsn` to DR writer endpoint.
-   - Kafka bootstrap servers to DR cluster.
+   - Kafka bootstrap servers to the DR IAM-authenticated brokers.
    - `order_stream_url` if region-specific.
 4. Start DR requestor/funder:
    - Scale DR `proof-requestor` to desired count.
@@ -45,6 +46,7 @@ This runbook covers failover of the shared `proof-requestor` and `proof-funder` 
    - only one active `proof-funder` lease holder.
 3. Verify balance guardrails:
    - requestor balance stays above `min_balance_wei`.
+4. Verify the DR proof-requestor task definition still references only the requestor secret ARN and the DR proof-funder task definition still references only the funder secret ARN.
 
 ## Rollback
 
