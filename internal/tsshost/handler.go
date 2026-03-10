@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -32,6 +34,13 @@ type Config struct {
 	// Defaults to 1024.
 	MaxSessions int
 
+	// SessionTTL evicts completed sessions after the configured age.
+	// Defaults to 15 minutes.
+	SessionTTL time.Duration
+
+	// Log emits audit records for sign requests. Defaults to a discard logger.
+	Log *slog.Logger
+
 	Now func() time.Time
 }
 
@@ -51,6 +60,7 @@ type session struct {
 
 	signedTx []byte
 	lastErr  error
+	lastSeen time.Time
 }
 
 func NewHandler(signer Signer, cfg Config) http.Handler {
@@ -65,6 +75,12 @@ func NewHandler(signer Signer, cfg Config) http.Handler {
 	}
 	if cfg.MaxSessions <= 0 {
 		cfg.MaxSessions = 1024
+	}
+	if cfg.SessionTTL <= 0 {
+		cfg.SessionTTL = 15 * time.Minute
+	}
+	if cfg.Log == nil {
+		cfg.Log = slog.New(slog.NewTextHandler(io.Discard, nil))
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -89,43 +105,65 @@ func NewHandler(signer Signer, cfg Config) http.Handler {
 }
 
 func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
+	startedAt := h.cfg.Now().UTC()
+	sessionIDForLog := ""
+
 	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
 
 	var req tss.SignRequest
 	if err := dec.Decode(&req); err != nil {
+		h.audit("", "invalid_json", startedAt)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 		return
 	}
 	// Reject trailing garbage.
 	if dec.More() {
+		h.audit("", "invalid_json", startedAt)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 		return
 	}
 
 	if req.Version != tss.SignRequestVersion {
+		h.audit("", "invalid_version", startedAt)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_version"})
 		return
 	}
 	sid, err := tss.ParseSessionID(req.SessionID)
 	if err != nil {
+		h.audit(req.SessionID, "invalid_session_id", startedAt)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_session_id"})
 		return
 	}
+	sessionIDForLog = tss.FormatSessionID(sid)
 	if len(req.TxPlan) == 0 {
+		h.audit(sessionIDForLog, "missing_tx_plan", startedAt)
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing_tx_plan"})
 		return
 	}
 	if len(req.TxPlan) > h.cfg.MaxTxPlanBytes {
+		h.audit(sessionIDForLog, "tx_plan_too_large", startedAt)
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "tx_plan_too_large"})
 		return
 	}
 
 	txPlanHash := sha256.Sum256(req.TxPlan)
 
-	signedTx, err := h.signOnce(r.Context(), sid, txPlanHash, req.TxPlan)
+	signedTx, outcome, err := h.signOnce(r.Context(), sid, txPlanHash, req.TxPlan)
 	if err != nil {
+		switch {
+		case errors.Is(err, errConflict):
+			h.audit(sessionIDForLog, "session_conflict", startedAt)
+		case errors.Is(err, errTooManySessions):
+			h.audit(sessionIDForLog, "too_many_sessions", startedAt)
+		case errors.Is(err, context.Canceled):
+			h.audit(sessionIDForLog, "canceled", startedAt)
+		case errors.Is(err, context.DeadlineExceeded):
+			h.audit(sessionIDForLog, "timeout", startedAt)
+		default:
+			h.audit(sessionIDForLog, "internal_error", startedAt)
+		}
 		if errors.Is(err, errConflict) {
 			writeJSON(w, http.StatusConflict, map[string]any{"error": "session_conflict"})
 			return
@@ -145,6 +183,7 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
 		return
 	}
+	h.audit(sessionIDForLog, outcome, startedAt)
 
 	resp := tss.SignResponse{
 		Version:   tss.SignResponseVersion,
@@ -155,23 +194,26 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 }
 
 var (
-	errConflict       = errors.New("tsshost: session conflict")
+	errConflict        = errors.New("tsshost: session conflict")
 	errTooManySessions = errors.New("tsshost: too many sessions")
 )
 
-func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byte, txPlan []byte) ([]byte, error) {
+func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byte, txPlan []byte) ([]byte, string, error) {
 	for {
 		h.mu.Lock()
+		now := h.cfg.Now().UTC()
+		h.evictExpiredSessions(now)
 		sess, ok := h.sessions[sid]
 		if ok {
+			sess.lastSeen = now
 			if sess.txPlanHash != txPlanHash {
 				h.mu.Unlock()
-				return nil, errConflict
+				return nil, "", errConflict
 			}
 			if len(sess.signedTx) > 0 {
 				out := append([]byte(nil), sess.signedTx...)
 				h.mu.Unlock()
-				return out, nil
+				return out, "cached_session", nil
 			}
 			if sess.signing {
 				done := sess.done
@@ -180,7 +222,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 				case <-done:
 					continue
 				case <-ctx.Done():
-					return nil, ctx.Err()
+					return nil, "", ctx.Err()
 				}
 			}
 
@@ -194,6 +236,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 			h.mu.Lock()
 			sess.signing = false
 			sess.lastErr = err
+			sess.lastSeen = h.cfg.Now().UTC()
 			if err == nil {
 				sess.signedTx = append([]byte(nil), signedTx...)
 			}
@@ -201,20 +244,21 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 			h.mu.Unlock()
 
 			if err != nil {
-				return nil, err
+				return nil, "", err
 			}
-			return append([]byte(nil), signedTx...), nil
+			return append([]byte(nil), signedTx...), "retried_session", nil
 		}
 
 		if len(h.sessions) >= h.cfg.MaxSessions {
 			h.mu.Unlock()
-			return nil, errTooManySessions
+			return nil, "", errTooManySessions
 		}
 
 		sess = &session{
 			txPlanHash: txPlanHash,
 			signing:    true,
 			done:       make(chan struct{}),
+			lastSeen:   now,
 		}
 		h.sessions[sid] = sess
 		h.mu.Unlock()
@@ -224,6 +268,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 		h.mu.Lock()
 		sess.signing = false
 		sess.lastErr = err
+		sess.lastSeen = h.cfg.Now().UTC()
 		if err == nil {
 			sess.signedTx = append([]byte(nil), signedTx...)
 		}
@@ -231,10 +276,40 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 		h.mu.Unlock()
 
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		return append([]byte(nil), signedTx...), nil
+		return append([]byte(nil), signedTx...), "new_session", nil
 	}
+}
+
+func (h *handler) evictExpiredSessions(now time.Time) {
+	if h.cfg.SessionTTL <= 0 {
+		return
+	}
+	for sid, sess := range h.sessions {
+		if sess.signing {
+			continue
+		}
+		if now.Sub(sess.lastSeen) <= h.cfg.SessionTTL {
+			continue
+		}
+		delete(h.sessions, sid)
+	}
+}
+
+func (h *handler) audit(sessionID string, result string, startedAt time.Time) {
+	if h.cfg.Log == nil {
+		return
+	}
+	duration := h.cfg.Now().UTC().Sub(startedAt)
+	if duration < 0 {
+		duration = 0
+	}
+	h.cfg.Log.Info("tsshost sign request",
+		"session_id", sessionID,
+		"result", result,
+		"duration_ms", duration.Milliseconds(),
+	)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

@@ -7,15 +7,15 @@ import (
 	"testing"
 )
 
-func TestEnsurePrivateKeyFile_CreatesAndReuses(t *testing.T) {
+func TestGeneratePrivateKeyFile_PlaintextCreatesAndReuses(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "operator.key")
 
-	key1, created1, err := EnsurePrivateKeyFile(path)
+	key1, created1, err := GeneratePrivateKeyFile(path, GenerateOptions{Format: FormatPlaintext})
 	if err != nil {
-		t.Fatalf("EnsurePrivateKeyFile create: %v", err)
+		t.Fatalf("GeneratePrivateKeyFile create: %v", err)
 	}
 	if !created1 {
 		t.Fatalf("created1: got false want true")
@@ -25,9 +25,9 @@ func TestEnsurePrivateKeyFile_CreatesAndReuses(t *testing.T) {
 		t.Fatalf("operator id format invalid: %q", addr1)
 	}
 
-	key2, created2, err := EnsurePrivateKeyFile(path)
+	key2, created2, err := LoadOrGeneratePlaintextPrivateKeyFile(path)
 	if err != nil {
-		t.Fatalf("EnsurePrivateKeyFile reuse: %v", err)
+		t.Fatalf("LoadOrGeneratePlaintextPrivateKeyFile reuse: %v", err)
 	}
 	if created2 {
 		t.Fatalf("created2: got true want false")
@@ -48,6 +48,68 @@ func TestEnsurePrivateKeyFile_CreatesAndReuses(t *testing.T) {
 	}
 }
 
+func TestLoadPrivateKeyFile_MissingFails(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing.key")
+	if _, err := LoadPrivateKeyFile(path, LoadOptions{}); err == nil {
+		t.Fatalf("expected missing file error")
+	}
+}
+
+func TestGeneratePrivateKeyFile_EncryptedAndLoad(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "operator.key")
+	passphrase := "correct horse battery staple"
+
+	key, created, err := GeneratePrivateKeyFile(path, GenerateOptions{
+		Format:     FormatEncrypted,
+		Passphrase: passphrase,
+	})
+	if err != nil {
+		t.Fatalf("GeneratePrivateKeyFile encrypted: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected encrypted file to be created")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if bytesContains(raw, []byte(OperatorIDFromPrivateKey(key))) {
+		t.Fatalf("expected encrypted file not to contain plaintext operator id")
+	}
+	if bytesContains(raw, []byte("0x")) {
+		t.Fatalf("expected encrypted file not to look like plaintext hex")
+	}
+
+	loaded, err := LoadPrivateKeyFile(path, LoadOptions{Passphrase: passphrase})
+	if err != nil {
+		t.Fatalf("LoadPrivateKeyFile encrypted: %v", err)
+	}
+	if OperatorIDFromPrivateKey(loaded) != OperatorIDFromPrivateKey(key) {
+		t.Fatalf("loaded key mismatch")
+	}
+}
+
+func TestLoadPrivateKeyFile_EncryptedRequiresPassphrase(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "operator.key")
+	if _, _, err := GeneratePrivateKeyFile(path, GenerateOptions{
+		Format:     FormatEncrypted,
+		Passphrase: "secret",
+	}); err != nil {
+		t.Fatalf("GeneratePrivateKeyFile encrypted: %v", err)
+	}
+
+	if _, err := LoadPrivateKeyFile(path, LoadOptions{}); err == nil {
+		t.Fatalf("expected missing passphrase error")
+	}
+}
+
 func TestNormalizeAddress(t *testing.T) {
 	t.Parallel()
 
@@ -65,3 +127,11 @@ func TestNormalizeAddress(t *testing.T) {
 	}
 }
 
+func bytesContains(haystack []byte, needle []byte) bool {
+	for i := 0; i+len(needle) <= len(haystack); i++ {
+		if string(haystack[i:i+len(needle)]) == string(needle) {
+			return true
+		}
+	}
+	return false
+}

@@ -5,8 +5,10 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 )
@@ -220,4 +222,137 @@ func TestHandler_Sign_BadRequestOnTrailingJSON(t *testing.T) {
 	if signer.calls != 0 {
 		t.Fatalf("expected 0 signer calls, got %d", signer.calls)
 	}
+}
+
+func TestHandler_Sign_EvictsExpiredCompletedSessions(t *testing.T) {
+	t.Parallel()
+
+	var now time.Time
+	signer := &stubSigner{ret: []byte("signed")}
+	h := NewHandler(signer, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    1,
+		SessionTTL:     time.Second,
+		Now:            func() time.Time { return now },
+	})
+
+	now = time.Unix(100, 0).UTC()
+	sessionIDA := seq32(0x50)
+	bodyA, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": "0x" + hex.EncodeToString(sessionIDA[:]),
+		"txPlan":    []byte("plan-a"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal A: %v", err)
+	}
+	recA := httptest.NewRecorder()
+	h.ServeHTTP(recA, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(bodyA)))
+	if recA.Code != http.StatusOK {
+		t.Fatalf("expected first request to succeed, got %d: %s", recA.Code, recA.Body.String())
+	}
+
+	now = now.Add(2 * time.Second)
+	sessionIDB := seq32(0x60)
+	bodyB, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": "0x" + hex.EncodeToString(sessionIDB[:]),
+		"txPlan":    []byte("plan-b"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal B: %v", err)
+	}
+	recB := httptest.NewRecorder()
+	h.ServeHTTP(recB, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(bodyB)))
+	if recB.Code != http.StatusOK {
+		t.Fatalf("expected second request to succeed after eviction, got %d: %s", recB.Code, recB.Body.String())
+	}
+	if signer.calls != 2 {
+		t.Fatalf("expected 2 signer calls, got %d", signer.calls)
+	}
+}
+
+func TestHandler_Sign_AuditLogsRequests(t *testing.T) {
+	t.Parallel()
+
+	handler := &captureHandler{}
+	log := slog.New(handler)
+	signer := &stubSigner{ret: []byte("signed")}
+	h := NewHandler(signer, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    16,
+		Now:            func() time.Time { return time.Unix(200, 0).UTC() },
+		Log:            log,
+	})
+
+	sessionID := seq32(0x70)
+	body, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"txPlan":    []byte("plan-a"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	records := handler.records()
+	if len(records) == 0 {
+		t.Fatalf("expected at least one audit record")
+	}
+	got := records[len(records)-1]
+	if got.msg != "tsshost sign request" {
+		t.Fatalf("unexpected log message: %q", got.msg)
+	}
+	if got.attrs["result"] != "new_session" {
+		t.Fatalf("result: got %q want %q", got.attrs["result"], "new_session")
+	}
+	if got.attrs["session_id"] == "" {
+		t.Fatalf("expected session_id in audit log")
+	}
+}
+
+type captureHandler struct {
+	mu   sync.Mutex
+	recs []capturedRecord
+}
+
+type capturedRecord struct {
+	msg   string
+	attrs map[string]string
+}
+
+func (h *captureHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *captureHandler) Handle(_ context.Context, record slog.Record) error {
+	out := capturedRecord{
+		msg:   record.Message,
+		attrs: map[string]string{},
+	}
+	record.Attrs(func(attr slog.Attr) bool {
+		out.attrs[attr.Key] = attr.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.recs = append(h.recs, out)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *captureHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
+func (h *captureHandler) WithGroup(string) slog.Handler        { return h }
+
+func (h *captureHandler) records() []capturedRecord {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]capturedRecord, len(h.recs))
+	copy(out, h.recs)
+	return out
 }

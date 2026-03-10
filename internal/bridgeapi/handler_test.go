@@ -808,5 +808,8 @@ func TestHandler_DecodeRecipient(t *testing.T) {
 		if out["error"] != "invalid_unified_address" {
 			t.Fatalf("expected invalid_unified_address error, got %v", out["error"])
 		}
+		if _, ok := out["detail"]; ok {
+			t.Fatalf("expected internal detail to be omitted, got %v", out["detail"])
+		}
 	})
 }

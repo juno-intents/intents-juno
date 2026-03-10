@@ -69,7 +69,7 @@ func (r *fakeRows) Scan(dest ...any) error {
 }
 
 func (r *fakeRows) Close() error { return nil }
-func (r *fakeRows) Err() error  { return nil }
+func (r *fakeRows) Err() error   { return nil }
 
 func TestPartitionName(t *testing.T) {
 	tests := []struct {
@@ -206,6 +206,8 @@ func TestEnsurePartitions_InvalidConfig(t *testing.T) {
 	}{
 		{"empty table name", TableConfig{PartitionKey: "created_at"}},
 		{"empty partition key", TableConfig{TableName: "proof_events"}},
+		{"invalid table name characters", TableConfig{TableName: "proof-events", PartitionKey: "created_at"}},
+		{"sql injection table name", TableConfig{TableName: "proof_events;drop table users", PartitionKey: "created_at"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -217,6 +219,20 @@ func TestEnsurePartitions_InvalidConfig(t *testing.T) {
 	}
 }
 
+func TestCleanupPartitions_InvalidTableNameFails(t *testing.T) {
+	db := &fakeDB{}
+	m := NewManager(db, nil)
+
+	err := m.CleanupPartitions(context.Background(), TableConfig{
+		TableName:     "proof-events",
+		PartitionKey:  "created_at",
+		RetentionDays: 7,
+	}, time.Now())
+	if err == nil {
+		t.Fatalf("expected invalid table name error")
+	}
+}
+
 func TestCleanupPartitions_DropsOldPartitions(t *testing.T) {
 	// Simulate existing partitions: some old, some current
 	db := &fakeDB{
@@ -225,7 +241,7 @@ func TestCleanupPartitions_DropsOldPartitions(t *testing.T) {
 			{relname: "proof_events_y2026_m02_d15"}, // old, should be dropped
 			{relname: "proof_events_y2026_m02_d28"}, // recent, keep (within 7 day retention from Mar 1)
 			{relname: "proof_events_y2026_m03_d01"}, // current, keep
-			{relname: "proof_events_default"},        // default partition, never drop
+			{relname: "proof_events_default"},       // default partition, never drop
 		},
 	}
 	m := NewManager(db, nil)

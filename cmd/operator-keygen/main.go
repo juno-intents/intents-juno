@@ -16,6 +16,7 @@ type output struct {
 	FeeRecipient      string `json:"fee_recipient"`
 	PrivateKeyPath    string `json:"private_key_path"`
 	PrivateKeyCreated bool   `json:"private_key_created"`
+	StorageFormat     string `json:"storage_format"`
 }
 
 func main() {
@@ -26,11 +27,37 @@ func main() {
 }
 
 func run(args []string, stdout io.Writer) error {
+	command := "generate"
+	legacyMode := true
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		command = strings.TrimSpace(args[0])
+		args = args[1:]
+		legacyMode = false
+	}
+
+	switch command {
+	case "generate":
+		return runGenerate(args, stdout, legacyMode)
+	case "inspect":
+		return runInspect(args, stdout)
+	default:
+		return fmt.Errorf("unknown command %q", command)
+	}
+}
+
+func runGenerate(args []string, stdout io.Writer, legacyMode bool) error {
 	fs := flag.NewFlagSet("operator-keygen", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	privateKeyPath := fs.String("private-key-path", "", "path for operator secp256k1 private key (created if missing)")
+	defaultFormat := string(operatorkey.FormatEncrypted)
+	if legacyMode {
+		defaultFormat = string(operatorkey.FormatPlaintext)
+	}
+	privateKeyPath := fs.String("private-key-path", "", "path for operator secp256k1 private key")
 	feeRecipient := fs.String("fee-recipient", "", "optional fee recipient address; defaults to operator address")
+	storageFormat := fs.String("storage-format", defaultFormat, "key storage format: plaintext|encrypted")
+	passphrase := fs.String("passphrase", "", "encryption passphrase for encrypted key generation")
+	passphraseEnv := fs.String("passphrase-env", "", "env var containing encryption passphrase")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -39,7 +66,15 @@ func run(args []string, stdout io.Writer) error {
 		return fmt.Errorf("private-key-path is required")
 	}
 
-	key, created, err := operatorkey.EnsurePrivateKeyFile(*privateKeyPath)
+	keyPassphrase, err := resolvePassphrase(*passphrase, *passphraseEnv)
+	if err != nil {
+		return err
+	}
+
+	key, created, err := operatorkey.GeneratePrivateKeyFile(*privateKeyPath, operatorkey.GenerateOptions{
+		Format:     operatorkey.StorageFormat(strings.TrimSpace(*storageFormat)),
+		Passphrase: keyPassphrase,
+	})
 	if err != nil {
 		return err
 	}
@@ -58,8 +93,70 @@ func run(args []string, stdout io.Writer) error {
 		FeeRecipient:      fee,
 		PrivateKeyPath:    *privateKeyPath,
 		PrivateKeyCreated: created,
+		StorageFormat:     strings.TrimSpace(*storageFormat),
 	}
 	enc := json.NewEncoder(stdout)
 	enc.SetIndent("", "  ")
 	return enc.Encode(payload)
+}
+
+func runInspect(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("operator-keygen inspect", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	privateKeyPath := fs.String("private-key-path", "", "path for operator secp256k1 private key")
+	feeRecipient := fs.String("fee-recipient", "", "optional fee recipient address; defaults to operator address")
+	passphrase := fs.String("passphrase", "", "decryption passphrase for encrypted key loading")
+	passphraseEnv := fs.String("passphrase-env", "", "env var containing decryption passphrase")
+
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*privateKeyPath) == "" {
+		return fmt.Errorf("private-key-path is required")
+	}
+
+	keyPassphrase, err := resolvePassphrase(*passphrase, *passphraseEnv)
+	if err != nil {
+		return err
+	}
+	key, err := operatorkey.LoadPrivateKeyFile(*privateKeyPath, operatorkey.LoadOptions{Passphrase: keyPassphrase})
+	if err != nil {
+		return err
+	}
+	operatorID := operatorkey.OperatorIDFromPrivateKey(key)
+
+	fee := operatorID
+	if strings.TrimSpace(*feeRecipient) != "" {
+		fee, err = operatorkey.NormalizeAddress(*feeRecipient)
+		if err != nil {
+			return fmt.Errorf("invalid fee recipient: %w", err)
+		}
+	}
+
+	payload := output{
+		OperatorID:        operatorID,
+		FeeRecipient:      fee,
+		PrivateKeyPath:    *privateKeyPath,
+		PrivateKeyCreated: false,
+		StorageFormat:     "existing",
+	}
+	enc := json.NewEncoder(stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(payload)
+}
+
+func resolvePassphrase(literal string, envName string) (string, error) {
+	if strings.TrimSpace(literal) != "" {
+		return literal, nil
+	}
+	envName = strings.TrimSpace(envName)
+	if envName == "" {
+		return "", nil
+	}
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return "", fmt.Errorf("passphrase env %s is empty", envName)
+	}
+	return value, nil
 }

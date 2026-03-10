@@ -33,7 +33,7 @@ type Config struct {
 	MinDepositAmount    uint64
 	MinWithdrawAmount   uint64
 	FeeBps              uint32
-	NonceFn func() (uint64, error)
+	NonceFn             func() (uint64, error)
 
 	RateLimitPerIPPerSecond float64
 	RateLimitBurst          int
@@ -373,7 +373,6 @@ func (h *handler) handleDecodeRecipient(w http.ResponseWriter, r *http.Request) 
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"version": "v1",
 			"error":   "invalid_unified_address",
-			"detail":  err.Error(),
 		})
 		return
 	}

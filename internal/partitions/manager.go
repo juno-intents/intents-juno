@@ -93,8 +93,8 @@ func (m *Manager) EnsurePartitions(ctx context.Context, cfg TableConfig, now tim
 // now - RetentionDays. If RetentionDays is 0, nothing is dropped.
 // The default partition is never dropped.
 func (m *Manager) CleanupPartitions(ctx context.Context, cfg TableConfig, now time.Time) error {
-	if cfg.TableName == "" {
-		return fmt.Errorf("partitions: empty table name")
+	if err := validateConfig(cfg); err != nil {
+		return err
 	}
 	if cfg.RetentionDays <= 0 {
 		return nil
@@ -163,6 +163,7 @@ func partitionName(table string, day time.Time) string {
 
 // partitionDateRe matches the suffix _yYYYY_mMM_dDD.
 var partitionDateRe = regexp.MustCompile(`^(.+)_y(\d{4})_m(\d{2})_d(\d{2})$`)
+var tableNameRe = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
 
 // parsePartitionDate extracts the date from a partition name.
 // Returns false for default partitions or names that don't match
@@ -200,6 +201,9 @@ func truncateDay(t time.Time) time.Time {
 func validateConfig(cfg TableConfig) error {
 	if cfg.TableName == "" {
 		return fmt.Errorf("partitions: empty table name")
+	}
+	if !tableNameRe.MatchString(cfg.TableName) {
+		return fmt.Errorf("partitions: invalid table name %q", cfg.TableName)
 	}
 	if cfg.PartitionKey == "" {
 		return fmt.Errorf("partitions: empty partition key")
