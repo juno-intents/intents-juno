@@ -90,7 +90,7 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     }
 
     /// @notice OperatorRegistry hook to update operator weights/recipients.
-    /// @dev This function harvests any pending rewards to the *new* fee recipient.
+    /// @dev This function harvests any pending rewards to the previous fee recipient before switching.
     function onOperatorUpdated(address operator, address feeRecipient, uint96 newWeight, bool active)
         external
         nonReentrant
@@ -102,12 +102,13 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
 
         // Harvest pending rewards before mutating weight/recipient.
         uint96 oldWeight = op.weight;
+        address oldFeeRecipient = op.feeRecipient;
         if (oldWeight != 0) {
             uint256 accrued = (uint256(oldWeight) * accFeePerWeight) / ACC_SCALE;
             uint256 pending = accrued - op.rewardDebt;
             if (pending != 0) {
-                token.safeTransfer(feeRecipient, pending);
-                emit Claimed(operator, feeRecipient, pending);
+                token.safeTransfer(oldFeeRecipient, pending);
+                emit Claimed(operator, oldFeeRecipient, pending);
             }
         }
 

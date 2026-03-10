@@ -91,17 +91,18 @@ contract FeeDistributorTest is Test {
         vm.stopPrank();
     }
 
-    function test_operatorUpdate_harvestsPendingToNewRecipient() public {
+    function test_operatorUpdate_harvestsPendingToOldRecipientBeforeSwitch() public {
         vm.startPrank(bridge);
         token.mint(address(distributor), 400);
         distributor.depositFees(400);
         vm.stopPrank();
 
         address newRecipient = makeAddr("op2FeeNew");
-        // Update operator fee recipient; should harvest to the new recipient.
+        // Update operator fee recipient; pending rewards should go to the old recipient.
         registry.setOperator(op2, newRecipient, 3, true);
 
-        assertEq(token.balanceOf(newRecipient), 300);
+        assertEq(token.balanceOf(op2Fee), 300);
+        assertEq(token.balanceOf(newRecipient), 0);
         assertEq(distributor.pendingReward(op2), 0);
     }
 }
