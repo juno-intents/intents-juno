@@ -211,16 +211,56 @@ wait_for_service_active() {
   done
 }
 
+sha256_hex_file() {
+  local path="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$path" | awk '{print $1}'
+    return 0
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$path" | awk '{print $1}'
+    return 0
+  fi
+  echo "missing sha256 tool" >&2
+  return 1
+}
+
+download_release_asset_with_checksum() {
+  local release_json="$1"
+  local asset_name="$2"
+  local archive_path="$3"
+  local asset_url checksum_url checksum_path expected actual
+
+  asset_url="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json" | head -n 1)"
+  checksum_url="$(jq -r --arg name "${asset_name}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json" | head -n 1)"
+  [[ -n "$asset_url" ]] || { echo "failed to resolve release asset: $asset_name" >&2; return 1; }
+  [[ -n "$checksum_url" ]] || { echo "failed to resolve checksum asset: ${asset_name}.sha256" >&2; return 1; }
+
+  checksum_path="$(mktemp)"
+  curl -fsSL "$asset_url" -o "$archive_path"
+  curl -fsSL "$checksum_url" -o "$checksum_path"
+
+  expected="$(awk '{print $1}' "$checksum_path" | head -n 1)"
+  actual="$(sha256_hex_file "$archive_path")"
+  rm -f "$checksum_path"
+
+  [[ -n "$expected" ]] || { echo "empty checksum for $asset_name" >&2; return 1; }
+  [[ "$expected" == "$actual" ]] || {
+    echo "checksum mismatch for $asset_name" >&2
+    return 1
+  }
+}
+
 install_junocash() {
-  local release_json release_tag asset_url archive root_dir
+  local release_json release_tag asset_name archive root_dir
   release_json="\$(curl -fsSL https://api.github.com/repos/juno-cash/junocash/releases/latest)"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
-  asset_url="\$(jq -r '.assets[] | select((.name | endswith("linux64.tar.gz")) and (.name | contains("debug") | not)) | .browser_download_url' <<<"\$release_json" | head -n 1)"
+  asset_name="\$(jq -r '.assets[] | select((.name | endswith("linux64.tar.gz")) and (.name | contains("debug") | not)) | .name' <<<"\$release_json" | head -n 1)"
   [[ -n "\$release_tag" ]] || { echo "failed to resolve junocash release tag" >&2; return 1; }
-  [[ -n "\$asset_url" ]] || { echo "failed to resolve junocash linux asset" >&2; return 1; }
+  [[ -n "\$asset_name" ]] || { echo "failed to resolve junocash linux asset" >&2; return 1; }
 
   archive="\$(mktemp)"
-  curl -fsSL "\$asset_url" -o "\$archive"
+  download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"
   tar -xzf "\$archive" -C /tmp
   rm -f "\$archive"
 
@@ -234,15 +274,15 @@ install_junocash() {
 }
 
 install_juno_scan() {
-  local release_json release_tag asset_url archive
+  local release_json release_tag asset_name archive
   release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-scan/releases/latest)"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
-  asset_url="\$(jq -r '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .browser_download_url' <<<"\$release_json" | head -n 1)"
+  asset_name="\$(jq -r '.assets[] | select(.name | endswith("linux_amd64.tar.gz")) | .name' <<<"\$release_json" | head -n 1)"
   [[ -n "\$release_tag" ]] || { echo "failed to resolve juno-scan release tag" >&2; return 1; }
-  [[ -n "\$asset_url" ]] || { echo "failed to resolve juno-scan linux asset" >&2; return 1; }
+  [[ -n "\$asset_name" ]] || { echo "failed to resolve juno-scan linux asset" >&2; return 1; }
 
   archive="\$(mktemp)"
-  curl -fsSL "\$asset_url" -o "\$archive"
+  download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"
   tar -xzf "\$archive" -C /tmp
   rm -f "\$archive"
 
@@ -253,7 +293,7 @@ install_juno_scan() {
 }
 
 install_juno_txsign() {
-  local release_json release_tag asset_url archive arch asset_name
+  local release_json release_tag archive arch asset_name
   release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   case "\$(uname -m)" in
@@ -266,11 +306,9 @@ install_juno_txsign() {
   esac
   [[ -n "\$release_tag" ]] || { echo "failed to resolve juno-txsign release tag" >&2; return 1; }
   asset_name="juno-txsign_\${release_tag}_linux_\${arch}.tar.gz"
-  asset_url="\$(jq -r --arg name "\$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"\$release_json" | head -n 1)"
-  [[ -n "\$asset_url" ]] || { echo "failed to resolve juno-txsign linux asset: \$asset_name" >&2; return 1; }
 
   archive="\$(mktemp)"
-  curl -fsSL "\$asset_url" -o "\$archive"
+  download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"
   tar -xzf "\$archive" -C /tmp
   rm -f "\$archive"
 
@@ -279,7 +317,7 @@ install_juno_txsign() {
 }
 
 install_juno_txbuild() {
-  local release_json release_tag asset_url archive arch asset_name
+  local release_json release_tag archive arch asset_name
   release_json="\$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txbuild/releases/latest)"
   release_tag="\$(jq -r '.tag_name // empty' <<<"\$release_json")"
   case "\$(uname -m)" in
@@ -292,11 +330,9 @@ install_juno_txbuild() {
   esac
   [[ -n "\$release_tag" ]] || { echo "failed to resolve juno-txbuild release tag" >&2; return 1; }
   asset_name="juno-txbuild_\${release_tag}_linux_\${arch}.tar.gz"
-  asset_url="\$(jq -r --arg name "\$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"\$release_json" | head -n 1)"
-  [[ -n "\$asset_url" ]] || { echo "failed to resolve juno-txbuild linux asset: \$asset_name" >&2; return 1; }
 
   archive="\$(mktemp)"
-  curl -fsSL "\$asset_url" -o "\$archive"
+  download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"
   tar -xzf "\$archive" -C /tmp
   rm -f "\$archive"
 
@@ -376,9 +412,18 @@ write_stack_config() {
   rpc_user="juno"
   rpc_pass="\$(openssl rand -hex 16)"
 
-  sudo mkdir -p /etc/intents-juno
-  sudo mkdir -p /var/lib/intents-juno/junocashd /var/lib/intents-juno/juno-scan /var/lib/intents-juno/operator-runtime /var/lib/intents-juno/tss-signer
-  sudo chown -R ubuntu:ubuntu /var/lib/intents-juno
+  if ! id -u intents-juno >/dev/null 2>&1; then
+    sudo groupadd --system intents-juno
+    sudo useradd --system --gid intents-juno --home-dir /var/lib/intents-juno --shell /usr/sbin/nologin intents-juno
+  fi
+
+  sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno
+  sudo install -d -m 0750 -o intents-juno -g intents-juno /var/lib/intents-juno
+  sudo install -d -m 0750 -o intents-juno -g intents-juno \
+    /var/lib/intents-juno/junocashd \
+    /var/lib/intents-juno/juno-scan \
+    /var/lib/intents-juno/operator-runtime \
+    /var/lib/intents-juno/tss-signer
 
   cat > /tmp/junocashd.conf <<CFG
  testnet=1
@@ -392,12 +437,12 @@ write_stack_config() {
  rpcuser=\${rpc_user}
  rpcpassword=\${rpc_pass}
 CFG
-  sudo install -m 0600 /tmp/junocashd.conf /etc/intents-juno/junocashd.conf
-  sudo chown ubuntu:ubuntu /etc/intents-juno/junocashd.conf
+  sudo install -m 0640 /tmp/junocashd.conf /etc/intents-juno/junocashd.conf
+  sudo chown root:intents-juno /etc/intents-juno/junocashd.conf
 
   sudo /usr/local/bin/operator-keygen --private-key-path /etc/intents-juno/checkpoint-signer.key >/tmp/operator-meta.json
-  sudo chown ubuntu:ubuntu /etc/intents-juno/checkpoint-signer.key
-  sudo chmod 0600 /etc/intents-juno/checkpoint-signer.key
+  sudo chown root:intents-juno /etc/intents-juno/checkpoint-signer.key
+  sudo chmod 0640 /etc/intents-juno/checkpoint-signer.key
   operator_address="\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)"
   [[ -n "\$operator_address" ]] || { echo "failed to resolve operator address" >&2; return 1; }
   checkpoint_key="\$(tr -d '\r\n' < /etc/intents-juno/checkpoint-signer.key)"
@@ -420,6 +465,7 @@ CHECKPOINT_BLOB_BUCKET=
 CHECKPOINT_BLOB_PREFIX=checkpoint-packages
 CHECKPOINT_IPFS_API_URL=
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_DEV_MODE=false
 BASE_CHAIN_ID=__BOOTSTRAP_BASE_CHAIN_ID__
 BRIDGE_ADDRESS=__BOOTSTRAP_BRIDGE_ADDRESS__
 BASE_RELAYER_RPC_URL=
@@ -469,8 +515,11 @@ WITHDRAW_COORDINATOR_TXBUILD_BIN=juno-txbuild
 WITHDRAW_COORDINATOR_JUNO_WALLET_ID=
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=
 WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV=CHECKPOINT_POSTGRES_DSN
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
+WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
+WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
 WITHDRAW_FINALIZER_OWNER=
 WITHDRAW_FINALIZER_QUEUE_GROUP=withdraw-finalizer
@@ -492,11 +541,13 @@ TSS_NITRO_EXPECTED_PCR1=
 TSS_NITRO_EXPECTED_PCR2=
 TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS=300
 TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
+TSS_LISTEN_ADDR=127.0.0.1:9443
 TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
 TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
+TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 ENV
-  sudo install -m 0600 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
-  sudo chown ubuntu:ubuntu /etc/intents-juno/operator-stack.env
+  sudo install -m 0640 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
+  sudo chown root:intents-juno /etc/intents-juno/operator-stack.env
 
   cat > /tmp/operator-stack-hydrator.env <<'EOF_HYDRATOR_ENV'
 OPERATOR_STACK_CONFIG_JSON_PATH=/etc/intents-juno/operator-stack-config.json
@@ -951,6 +1002,13 @@ parse_epoch() {
   date -u -d "$raw" +%s 2>/dev/null
 }
 
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 validate_nitro_attestation() {
   local attestation_file="$1"
   local expected_pcr0="$2"
@@ -1061,6 +1119,10 @@ case "$runtime_mode" in
     exec "${TSS_NITRO_SPENDAUTH_SIGNER_BIN}" "$@"
     ;;
   host-process)
+    if ! dev_mode_enabled; then
+      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
+      exit 1
+    fi
     [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
       echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
       exit 1
@@ -1096,6 +1158,18 @@ source /etc/intents-juno/operator-stack.env
   echo "tss-host TLS key is missing or empty: ${TSS_TLS_KEY_FILE:-unset}" >&2
   exit 1
 }
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if ! dev_mode_enabled; then
+  [[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {
+    echo "tss-host production mode requires TSS_CLIENT_CA_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
+fi
 runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
 case "$runtime_mode" in
   nitro-enclave)
@@ -1129,6 +1203,10 @@ case "$runtime_mode" in
     }
     ;;
   host-process)
+    if ! dev_mode_enabled; then
+      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
+      exit 1
+    fi
     [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
       echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
       exit 1
@@ -1140,20 +1218,25 @@ case "$runtime_mode" in
     ;;
 esac
 mkdir -p "${TSS_SIGNER_WORK_DIR}"
-exec /usr/local/bin/tss-host \
-  --listen-addr 127.0.0.1:9443 \
-  --tls-cert-file "${TSS_TLS_CERT_FILE}" \
-  --tls-key-file "${TSS_TLS_KEY_FILE}" \
-  --read-timeout 120s \
-  --write-timeout 120s \
-  --idle-timeout 120s \
-  --signer-bin /usr/local/bin/tss-signer \
-  --signer-arg --ufvk-file \
-  --signer-arg "${TSS_SIGNER_UFVK_FILE}" \
-  --signer-arg --spendauth-signer-bin \
-  --signer-arg /usr/local/bin/intents-juno-spendauth-signer.sh \
-  --signer-arg --work-dir \
+args=(
+  --listen-addr "${TSS_LISTEN_ADDR:-127.0.0.1:9443}"
+  --tls-cert-file "${TSS_TLS_CERT_FILE}"
+  --tls-key-file "${TSS_TLS_KEY_FILE}"
+  --read-timeout 120s
+  --write-timeout 120s
+  --idle-timeout 120s
+  --signer-bin /usr/local/bin/tss-signer
+  --signer-arg --ufvk-file
+  --signer-arg "${TSS_SIGNER_UFVK_FILE}"
+  --signer-arg --spendauth-signer-bin
+  --signer-arg /usr/local/bin/intents-juno-spendauth-signer.sh
+  --signer-arg --work-dir
   --signer-arg "${TSS_SIGNER_WORK_DIR}"
+)
+if [[ -n "${TSS_CLIENT_CA_FILE:-}" ]]; then
+  args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")
+fi
+exec /usr/local/bin/tss-host "${args[@]}"
 EOF_TSS
   sudo install -m 0755 /tmp/intents-juno-tss-host.sh /usr/local/bin/intents-juno-tss-host.sh
 
@@ -1322,6 +1405,12 @@ EOF_DEPOSIT_RELAYER
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1378,6 +1467,16 @@ source /etc/intents-juno/operator-stack.env
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE to reference a readable PEM file" >&2
   exit 1
 }
+if ! dev_mode_enabled; then
+  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE:-}" ]] || {
+    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
+  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE:-}" ]] || {
+    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
+fi
 [[ -n "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN:-}" ]] || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1416,7 +1515,7 @@ withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordin
 withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v1}"
 
 exec /usr/local/bin/withdraw-coordinator \
-  --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}" \
+  --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
   --owner "${withdraw_coord_owner}" \
   --queue-driver kafka \
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}" \
@@ -1430,6 +1529,8 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
+  --tss-client-cert-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE}" \
+  --tss-client-key-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE}" \
   --tss-timeout 120s \
   --base-chain-id "${BASE_CHAIN_ID}" \
   --bridge-address "${BRIDGE_ADDRESS}" \
@@ -1620,12 +1721,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/junocashd -conf=/etc/intents-juno/junocashd.conf -datadir=/var/lib/intents-juno/junocashd
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=8G
+CPUQuota=300%
 
 [Install]
 WantedBy=multi-user.target
@@ -1640,12 +1757,28 @@ Requires=junocashd.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-juno-scan.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=2G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1666,6 +1799,22 @@ Group=root
 EnvironmentFile=-/etc/intents-juno/operator-stack-hydrator.env
 ExecStart=/usr/local/bin/intents-juno-config-hydrator.sh
 RemainAfterExit=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/etc/intents-juno /var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=512M
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
@@ -1681,12 +1830,28 @@ Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-checkpoint-signer.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1702,12 +1867,28 @@ Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-checkpoint-aggregator.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=2G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1723,12 +1904,28 @@ ConditionPathExists=/var/lib/intents-juno/operator-runtime/bundle/admin-config.j
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-dkg-admin-serve.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
@@ -1743,12 +1940,28 @@ Wants=network-online.target intents-juno-config-hydrator.service dkg-admin-serve
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-tss-host.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
@@ -1763,12 +1976,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-base-relayer.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
@@ -1784,12 +2013,28 @@ Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-deposit-relayer.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=2G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1805,12 +2050,28 @@ Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-withdraw-coordinator.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=2G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1826,12 +2087,28 @@ Wants=intents-juno-config-hydrator.service
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-withdraw-finalizer.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=3G
+CPUQuota=150%
 
 [Install]
 WantedBy=multi-user.target
@@ -1846,12 +2123,28 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-Group=ubuntu
+User=intents-juno
+Group=intents-juno
 ExecStart=/usr/local/bin/intents-juno-base-event-scanner.sh
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=100%
 
 [Install]
 WantedBy=multi-user.target
