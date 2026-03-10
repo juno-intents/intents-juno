@@ -286,6 +286,7 @@ func main() {
 		broadcaster withdrawcoordinator.Broadcaster
 		confirmer   withdrawcoordinator.Confirmer
 		extender    withdrawcoordinator.ExpiryExtender
+		paidMarker  withdrawcoordinator.PaidMarker
 	)
 	planner, err = withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
 		Binary:           *txbuildBin,
@@ -371,6 +372,15 @@ func main() {
 		log.Error("init expiry extender", "err", err)
 		os.Exit(2)
 	}
+	paidMarker, err = withdrawcoordinator.NewBasePaidMarker(withdrawcoordinator.BasePaidMarkerConfig{
+		BaseChainID:   *baseChainID,
+		BridgeAddress: common.HexToAddress(*bridgeAddr),
+		GasLimit:      *extendGasLimit,
+	}, baseClient, extendSigner)
+	if err != nil {
+		log.Error("init paid marker", "err", err)
+		os.Exit(2)
+	}
 
 	var elector *withdrawcoordinator.LeaderElector
 	if *leaderElection {
@@ -403,7 +413,7 @@ func main() {
 			MaxBatch:     *maxExtendBatch,
 		},
 		Now: time.Now,
-	}, store, planner, signer, broadcaster, confirmer, log)
+	}, store, planner, signer, broadcaster, confirmer, junoConfirmer, log)
 	if err != nil {
 		log.Error("init coordinator", "err", err)
 		os.Exit(2)
@@ -411,8 +421,10 @@ func main() {
 	if extender != nil {
 		coord.WithExpiryExtender(extender)
 	}
+	if paidMarker != nil {
+		coord.WithPaidMarker(paidMarker)
+	}
 	coord.WithBlobStore(artifactStore)
-	coord.WithTxChecker(junoConfirmer)
 
 	go func() {
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "withdraw-coordinator"); err != nil {
@@ -559,9 +571,14 @@ func main() {
 				cancel()
 				if err != nil {
 					log.Error("ingest withdrawal", "err", err)
-				} else {
-					log.Info("withdrawal ingested", "id", reqMsg.WithdrawalID, "amount", reqMsg.Amount)
+					if shouldAckWithdrawIngestError(err) {
+						ackMessage(qmsg, *ackTimeout, log)
+					} else {
+						log.Warn("leaving withdrawal message unacked for retry", "id", reqMsg.WithdrawalID, "err", err)
+					}
+					continue
 				}
+				log.Info("withdrawal ingested", "id", reqMsg.WithdrawalID, "amount", reqMsg.Amount)
 				ackMessage(qmsg, *ackTimeout, log)
 
 			default:
@@ -584,6 +601,19 @@ func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
 	defer cancel()
 	if err := msg.Ack(ctx); err != nil {
 		log.Error("ack queue message", "topic", msg.Topic, "err", err)
+	}
+}
+
+func shouldAckWithdrawIngestError(err error) bool {
+	switch {
+	case err == nil:
+		return false
+	case errors.Is(err, withdraw.ErrInvalidConfig):
+		return true
+	case errors.Is(err, withdraw.ErrWithdrawalMismatch):
+		return true
+	default:
+		return false
 	}
 }
 

@@ -65,7 +65,7 @@ func TestCoordinator_Integration_PostgresStore(t *testing.T) {
 
 	now := time.Now().UTC()
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 2,
 		MaxAge:   3 * time.Minute,

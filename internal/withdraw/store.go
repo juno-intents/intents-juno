@@ -48,6 +48,31 @@ func (s BatchState) String() string {
 	}
 }
 
+type WithdrawalStatus uint8
+
+const (
+	WithdrawalStatusUnknown WithdrawalStatus = iota
+	WithdrawalStatusRequested
+	WithdrawalStatusBatched
+	WithdrawalStatusPaid
+	WithdrawalStatusRefunded
+)
+
+func (s WithdrawalStatus) String() string {
+	switch s {
+	case WithdrawalStatusRequested:
+		return "requested"
+	case WithdrawalStatusBatched:
+		return "batched"
+	case WithdrawalStatusPaid:
+		return "paid"
+	case WithdrawalStatusRefunded:
+		return "refunded"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(s))
+	}
+}
+
 // Batch is the durable coordination unit for grouped withdrawals.
 type Batch struct {
 	ID            [32]byte
@@ -79,6 +104,7 @@ type Store interface {
 	CreatePlannedBatch(ctx context.Context, owner string, b Batch) error
 
 	GetWithdrawal(ctx context.Context, id [32]byte) (Withdrawal, error)
+	GetWithdrawalStatus(ctx context.Context, id [32]byte) (WithdrawalStatus, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
 

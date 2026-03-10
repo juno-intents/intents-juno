@@ -146,6 +146,71 @@ func TestMemoryStore_ClaimAndBatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_WithdrawalStatusTransitions(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	s := NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := Withdrawal{ID: seq32(0x90), Amount: 7, FeeBps: 10, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if _, _, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+
+	status, err := s.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus requested: %v", err)
+	}
+	if status != WithdrawalStatusRequested {
+		t.Fatalf("requested status: got %s want %s", status, WithdrawalStatusRequested)
+	}
+
+	if _, err := s.ClaimUnbatched(ctx, "owner-a", 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+	batchID := seq32(0x91)
+	if err := s.CreatePlannedBatch(ctx, "owner-a", Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+
+	status, err = s.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus batched: %v", err)
+	}
+	if status != WithdrawalStatusBatched {
+		t.Fatalf("batched status: got %s want %s", status, WithdrawalStatusBatched)
+	}
+
+	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	if err := s.SetBatchBroadcasted(ctx, batchID, "tx-paid"); err != nil {
+		t.Fatalf("SetBatchBroadcasted: %v", err)
+	}
+	if err := s.SetBatchConfirmed(ctx, batchID); err != nil {
+		t.Fatalf("SetBatchConfirmed: %v", err)
+	}
+
+	status, err = s.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus paid: %v", err)
+	}
+	if status != WithdrawalStatusPaid {
+		t.Fatalf("paid status: got %s want %s", status, WithdrawalStatusPaid)
+	}
+}
+
 func TestMemoryStore_CreatePlannedBatch_AllowsExpiredClaimForSameOwner(t *testing.T) {
 	t.Parallel()
 

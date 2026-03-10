@@ -59,6 +59,13 @@ type ExpiryExtender interface {
 	Extend(ctx context.Context, ids [][32]byte, newExpiry time.Time) error
 }
 
+// PaidMarker marks Base-side withdrawals paid/irrevocable after Juno confirmation.
+//
+// Implementations must be idempotent so retries are safe if the durable store write fails.
+type PaidMarker interface {
+	MarkPaid(ctx context.Context, ids [][32]byte) error
+}
+
 type Config struct {
 	Owner string
 
@@ -88,6 +95,7 @@ type Coordinator struct {
 	confirmer   Confirmer
 	txChecker   TxChecker
 	extender    ExpiryExtender
+	paidMarker  PaidMarker
 	blobStore   blobstore.Store
 
 	log *slog.Logger
@@ -99,8 +107,8 @@ type Coordinator struct {
 	pendingIDs map[[32]byte]struct{}
 }
 
-func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, log *slog.Logger) (*Coordinator, error) {
-	if store == nil || planner == nil || signer == nil || broadcaster == nil || confirmer == nil {
+func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, txChecker TxChecker, log *slog.Logger) (*Coordinator, error) {
+	if store == nil || planner == nil || signer == nil || broadcaster == nil || confirmer == nil || txChecker == nil {
 		return nil, fmt.Errorf("%w: nil dependency", ErrInvalidConfig)
 	}
 	if cfg.Owner == "" {
@@ -166,6 +174,7 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 		signer:      signer,
 		broadcaster: broadcaster,
 		confirmer:   confirmer,
+		txChecker:   txChecker,
 		log:         log,
 		batcher:     b,
 		pendingIDs:  make(map[[32]byte]struct{}),
@@ -178,9 +187,9 @@ func (c *Coordinator) WithExpiryExtender(ext ExpiryExtender) *Coordinator {
 	return c
 }
 
-// WithTxChecker configures an optional TxChecker for double-spend prevention.
-func (c *Coordinator) WithTxChecker(tc TxChecker) *Coordinator {
-	c.txChecker = tc
+// WithPaidMarker configures the Base-side mark-paid hook required before durable paid status is written.
+func (c *Coordinator) WithPaidMarker(marker PaidMarker) *Coordinator {
+	c.paidMarker = marker
 	return c
 }
 
@@ -403,9 +412,9 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			return nil
 		}
 		if errors.Is(err, ErrConfirmationMissing) {
-			// Double-spend prevention: if TxChecker is configured, verify the tx
-			// is truly missing from both mempool and chain before rebroadcasting.
-			if c.txChecker != nil && b.JunoTxID != "" {
+			// Double-spend prevention: verify the tx is truly missing from both
+			// mempool and chain before rebroadcasting.
+			if b.JunoTxID != "" {
 				status, txErr := c.txChecker.TxStatus(ctx, b.JunoTxID)
 				if txErr != nil {
 					c.log.Error("tx status check failed, skipping rebroadcast", "txid", b.JunoTxID, "err", txErr)
@@ -414,7 +423,7 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 				switch status {
 				case TxStatusConfirmed:
 					// Tx is confirmed on-chain; advance directly.
-					return c.store.SetBatchConfirmed(ctx, batchID)
+					return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
 				case TxStatusMempool:
 					// Tx is in mempool; wait — do not rebroadcast.
 					return nil
@@ -426,7 +435,7 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 						return nil
 					} else if recheck != TxStatusMissing {
 						if recheck == TxStatusConfirmed {
-							return c.store.SetBatchConfirmed(ctx, batchID)
+							return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
 						}
 						// Back in mempool after the new block; keep waiting.
 						return nil
@@ -450,10 +459,20 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 		}
 		return err
 	}
+	return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+}
+
+func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, withdrawalIDs [][32]byte, junoTxID string) error {
+	if c.paidMarker == nil {
+		return fmt.Errorf("%w: nil paid marker", ErrInvalidConfig)
+	}
+	if err := c.paidMarker.MarkPaid(ctx, withdrawalIDs); err != nil {
+		return err
+	}
 	if err := c.store.SetBatchConfirmed(ctx, batchID); err != nil {
 		return err
 	}
-	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
+	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", junoTxID)
 	return nil
 }
 

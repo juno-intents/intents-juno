@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	recipient_ua BYTEA NOT NULL,
 	proof_witness_item BYTEA,
 	expiry TIMESTAMPTZ NOT NULL,
+	status SMALLINT NOT NULL DEFAULT 1,
 
 	claimed_by TEXT,
 	claim_expires_at TIMESTAMPTZ,
@@ -20,6 +21,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	CONSTRAINT requester_len CHECK (octet_length(requester) = 20),
 	CONSTRAINT amount_positive CHECK (amount > 0),
 	CONSTRAINT fee_bps_range CHECK (fee_bps >= 0 AND fee_bps <= 10000),
+	CONSTRAINT withdrawal_status_range CHECK (status >= 1 AND status <= 4),
 	CONSTRAINT recipient_ua_nonempty CHECK (octet_length(recipient_ua) > 0),
 	CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923),
 	CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
@@ -27,10 +29,14 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 
 CREATE INDEX IF NOT EXISTS withdrawal_requests_claim_idx ON withdrawal_requests (claim_expires_at);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_expiry_idx ON withdrawal_requests (expiry);
+CREATE INDEX IF NOT EXISTS withdrawal_requests_status_idx ON withdrawal_requests (status);
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
 ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE withdrawal_requests ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923);
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_block_number BIGINT;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS status SMALLINT NOT NULL DEFAULT 1;
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS withdrawal_status_range;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT withdrawal_status_range CHECK (status >= 1 AND status <= 4);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_base_block_number_idx ON withdrawal_requests (base_block_number);
 
 CREATE TABLE IF NOT EXISTS withdrawal_batches (
@@ -83,6 +89,23 @@ CREATE TABLE IF NOT EXISTS withdrawal_batch_items (
 
 CREATE UNIQUE INDEX IF NOT EXISTS withdrawal_batch_items_withdrawal_uniq ON withdrawal_batch_items (withdrawal_id);
 CREATE INDEX IF NOT EXISTS withdrawal_batch_items_batch_idx ON withdrawal_batch_items (batch_id, position);
+UPDATE withdrawal_requests
+SET status = 3
+WHERE EXISTS (
+	SELECT 1
+	FROM withdrawal_batch_items wbi
+	JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
+	WHERE wbi.withdrawal_id = withdrawal_requests.withdrawal_id
+	  AND wb.state >= 5
+);
+UPDATE withdrawal_requests
+SET status = 2
+WHERE status < 2
+  AND EXISTS (
+	SELECT 1
+	FROM withdrawal_batch_items wbi
+	WHERE wbi.withdrawal_id = withdrawal_requests.withdrawal_id
+);
 CREATE INDEX IF NOT EXISTS withdrawal_requests_requester_idx ON withdrawal_requests (requester);
 CREATE INDEX IF NOT EXISTS withdrawal_batches_juno_txid_idx ON withdrawal_batches (juno_txid) WHERE juno_txid IS NOT NULL AND juno_txid <> '';
 CREATE INDEX IF NOT EXISTS withdrawal_batches_base_tx_hash_idx ON withdrawal_batches (base_tx_hash) WHERE base_tx_hash IS NOT NULL AND base_tx_hash <> '';

@@ -100,6 +100,15 @@ func seq32(start byte) (out [32]byte) {
 	return out
 }
 
+func newCoordinatorForTest(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, log *slog.Logger) (*Coordinator, error) {
+	c, err := New(cfg, store, planner, signer, broadcaster, confirmer, &stubTxChecker{}, log)
+	if err != nil {
+		return nil, err
+	}
+	c.WithPaidMarker(&stubPaidMarker{})
+	return c, nil
+}
+
 func TestCoordinator_BuildsSignsBroadcastsAndConfirms_OnMaxItems(t *testing.T) {
 	t.Parallel()
 
@@ -112,7 +121,7 @@ func TestCoordinator_BuildsSignsBroadcastsAndConfirms_OnMaxItems(t *testing.T) {
 	broadcaster := &stubBroadcaster{}
 	confirmer := &stubConfirmer{}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 2,
 		MaxAge:   3 * time.Minute,
@@ -181,7 +190,7 @@ func TestCoordinator_ResumeFromPlannedBatch(t *testing.T) {
 	broadcaster := &stubBroadcaster{}
 	confirmer := &stubConfirmer{}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -226,7 +235,7 @@ func TestCoordinator_BroadcastedPendingDoesNotFailTick(t *testing.T) {
 	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending, ErrConfirmationPending}}
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -279,7 +288,7 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	signer := &stubSigner{}
 	broadcaster := &stubBroadcaster{}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationPending}}
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -360,7 +369,7 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 			ErrConfirmationMissing, // second tick should skip due backoff
 		},
 	}
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -399,7 +408,7 @@ func TestCoordinator_PersistsTxPlanAndSignedTxArtifacts(t *testing.T) {
 	confirmer := &stubConfirmer{}
 	artifacts := &recordingBlobStore{}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 1,
 		MaxAge:   3 * time.Minute,
@@ -466,7 +475,7 @@ func TestCoordinator_DedupesReclaimedWithdrawalBeforeFlush(t *testing.T) {
 	broadcaster := &stubBroadcaster{}
 	confirmer := &stubConfirmer{}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -529,7 +538,7 @@ func TestCoordinator_FailsWhenTxPlanArtifactPersistenceFails(t *testing.T) {
 	confirmer := &stubConfirmer{}
 	artifacts := &recordingBlobStore{putErr: errors.New("s3 unavailable")}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 1,
 		MaxAge:   3 * time.Minute,
@@ -566,6 +575,20 @@ type stubTxChecker struct {
 	tipHeight uint64
 }
 
+type stubPaidMarker struct {
+	calls int
+	got   [][][32]byte
+	err   error
+}
+
+func (m *stubPaidMarker) MarkPaid(_ context.Context, withdrawalIDs [][32]byte) error {
+	m.calls++
+	cp := make([][32]byte, len(withdrawalIDs))
+	copy(cp, withdrawalIDs)
+	m.got = append(m.got, cp)
+	return m.err
+}
+
 func (c *stubTxChecker) TxStatus(_ context.Context, txid string) (string, error) {
 	_ = txid
 	c.calls++
@@ -582,6 +605,21 @@ func (c *stubTxChecker) TxStatus(_ context.Context, txid string) (string, error)
 func (c *stubTxChecker) TipHeight(_ context.Context) (uint64, error) {
 	c.tipHeight++
 	return c.tipHeight, nil
+}
+
+func TestCoordinator_NewRequiresTxChecker(t *testing.T) {
+	t.Parallel()
+
+	_, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   time.Minute,
+		ClaimTTL: time.Second,
+		Now:      time.Now,
+	}, withdraw.NewMemoryStore(time.Now), &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, &stubConfirmer{}, nil, nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
 }
 
 func TestCoordinator_DoubleSpendPrevention_TxConfirmed(t *testing.T) {
@@ -612,6 +650,7 @@ func TestCoordinator_DoubleSpendPrevention_TxConfirmed(t *testing.T) {
 	broadcaster := &stubBroadcaster{}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 	txChecker := &stubTxChecker{statuses: []string{TxStatusConfirmed}}
+	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
 		Owner:    "a",
@@ -619,11 +658,11 @@ func TestCoordinator_DoubleSpendPrevention_TxConfirmed(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-	}, store, planner, signer, broadcaster, confirmer, nil)
+	}, store, planner, signer, broadcaster, confirmer, txChecker, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithTxChecker(txChecker)
+	c.WithPaidMarker(paidMarker)
 
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -640,6 +679,16 @@ func TestCoordinator_DoubleSpendPrevention_TxConfirmed(t *testing.T) {
 	}
 	if b.State != withdraw.BatchStateConfirmed {
 		t.Fatalf("expected batch confirmed, got %s", b.State)
+	}
+	if paidMarker.calls != 1 {
+		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
+	}
+	status, err := store.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus: %v", err)
+	}
+	if status != withdraw.WithdrawalStatusPaid {
+		t.Fatalf("status: got %s want %s", status, withdraw.WithdrawalStatusPaid)
 	}
 }
 
@@ -678,11 +727,10 @@ func TestCoordinator_DoubleSpendPrevention_TxInMempool(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, nil)
+	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, txChecker, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithTxChecker(txChecker)
 
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -729,7 +777,7 @@ func TestCoordinator_MaxRebroadcastAttempts(t *testing.T) {
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:                  "a",
 		MaxItems:               10,
 		MaxAge:                 3 * time.Minute,
@@ -782,6 +830,7 @@ func TestCoordinator_WaitOneBlock_TxAppearsInMempool(t *testing.T) {
 	}}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationMissing}}
 	broadcaster := &stubBroadcaster{}
+	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
 		Owner:    "a",
@@ -789,11 +838,11 @@ func TestCoordinator_WaitOneBlock_TxAppearsInMempool(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, nil)
+	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, txChecker, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithTxChecker(txChecker)
+	c.WithPaidMarker(paidMarker)
 
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -810,6 +859,9 @@ func TestCoordinator_WaitOneBlock_TxAppearsInMempool(t *testing.T) {
 	}
 	if b.State != withdraw.BatchStateBroadcasted {
 		t.Fatalf("expected batch to remain broadcasted, got %s", b.State)
+	}
+	if paidMarker.calls != 0 {
+		t.Fatalf("expected no paid marker calls while tx stays in mempool, got %d", paidMarker.calls)
 	}
 }
 
@@ -841,6 +893,7 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 	txChecker := &stubTxChecker{statuses: []string{TxStatusMissing, TxStatusConfirmed}}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 	broadcaster := &stubBroadcaster{}
+	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
 		Owner:    "a",
@@ -848,11 +901,11 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, nil)
+	}, store, &stubPlanner{}, &stubSigner{}, broadcaster, confirmer, txChecker, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithTxChecker(txChecker)
+	c.WithPaidMarker(paidMarker)
 
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick: %v", err)
@@ -869,6 +922,68 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 	}
 	if b.State != withdraw.BatchStateConfirmed {
 		t.Fatalf("expected batch confirmed, got %s", b.State)
+	}
+	if paidMarker.calls != 1 {
+		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
+	}
+}
+
+func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x12), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x85)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-paid-marker-fail")
+
+	txChecker := &stubTxChecker{statuses: []string{TxStatusConfirmed}}
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
+	paidMarker := &stubPaidMarker{err: errors.New("base relay unavailable")}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, txChecker, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.WithPaidMarker(paidMarker)
+
+	if err := c.Tick(ctx); err == nil {
+		t.Fatal("expected error")
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected batch to remain broadcasted, got %s", b.State)
+	}
+	status, err := store.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus: %v", err)
+	}
+	if status != withdraw.WithdrawalStatusBatched {
+		t.Fatalf("status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
 	}
 }
 
@@ -900,7 +1015,7 @@ func TestCoordinator_DLQ_RebroadcastExhausted(t *testing.T) {
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 	dlqStore := dlq.NewMemoryStore(nil)
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:                  "a",
 		MaxItems:               10,
 		MaxAge:                 3 * time.Minute,
@@ -980,7 +1095,7 @@ func TestCoordinator_DLQ_SigningFailed(t *testing.T) {
 
 	dlqStore := dlq.NewMemoryStore(nil)
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
@@ -1050,7 +1165,7 @@ func TestCoordinator_DLQ_NilStoreSkipsDLQ(t *testing.T) {
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 
 	// No DLQStore configured — should not panic.
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:                  "a",
 		MaxItems:               10,
 		MaxAge:                 3 * time.Minute,
@@ -1084,7 +1199,7 @@ func TestCoordinator_LogsBatchLifecycle(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	c, err := New(Config{
+	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
 		MaxItems: 1,
 		MaxAge:   3 * time.Minute,

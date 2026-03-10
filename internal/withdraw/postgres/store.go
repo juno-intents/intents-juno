@@ -79,12 +79,13 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 			recipient_ua,
 			proof_witness_item,
 			expiry,
+			status,
 			base_block_number,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
 		ON CONFLICT (withdrawal_id) DO NOTHING
-	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, baseBlockNumber)
+	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, int16(withdraw.WithdrawalStatusRequested), baseBlockNumber)
 	if err != nil {
 		return withdraw.Withdrawal{}, false, fmt.Errorf("withdraw/postgres: insert requested: %w", err)
 	}
@@ -119,6 +120,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			WHERE NOT EXISTS (
 				SELECT 1 FROM withdrawal_batch_items wbi WHERE wbi.withdrawal_id = wr.withdrawal_id
 			)
+			AND wr.status = $4
 			AND (wr.claimed_by IS NULL OR wr.claim_expires_at <= now())
 			ORDER BY wr.withdrawal_id ASC
 			LIMIT $1
@@ -131,7 +133,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 		FROM cte
 		WHERE wr.withdrawal_id = cte.withdrawal_id
 		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry, wr.base_block_number
-	`, max, owner, ttlMS)
+	`, max, owner, ttlMS, int16(withdraw.WithdrawalStatusRequested))
 	if err != nil {
 		return nil, fmt.Errorf("withdraw/postgres: claim unbatched: %w", err)
 	}
@@ -221,11 +223,12 @@ func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw
 		tag, err := tx.Exec(ctx, `
 			UPDATE withdrawal_requests
 			SET claimed_by = NULL,
+				status = $3,
 				claim_expires_at = NULL,
 				updated_at = now()
 			WHERE withdrawal_id = $1
 				AND claimed_by = $2
-		`, id[:], owner)
+		`, id[:], owner, int16(withdraw.WithdrawalStatusBatched))
 		if err != nil {
 			return fmt.Errorf("withdraw/postgres: clear claim: %w", err)
 		}
@@ -260,6 +263,26 @@ func (s *Store) GetWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 		return withdraw.Withdrawal{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
 	return s.getWithdrawal(ctx, id)
+}
+
+func (s *Store) GetWithdrawalStatus(ctx context.Context, id [32]byte) (withdraw.WithdrawalStatus, error) {
+	if s == nil || s.pool == nil {
+		return withdraw.WithdrawalStatusUnknown, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	var status int16
+	err := s.pool.QueryRow(ctx, `
+		SELECT status
+		FROM withdrawal_requests
+		WHERE withdrawal_id = $1
+	`, id[:]).Scan(&status)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return withdraw.WithdrawalStatusUnknown, withdraw.ErrNotFound
+		}
+		return withdraw.WithdrawalStatusUnknown, fmt.Errorf("withdraw/postgres: get withdrawal status: %w", err)
+	}
+	return withdraw.WithdrawalStatus(status), nil
 }
 
 func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch, error) {
@@ -501,7 +524,13 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 		return nil
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: begin confirm tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	tag, err := tx.Exec(ctx, `
 		UPDATE withdrawal_batches
 		SET state = $2, next_rebroadcast_at = NULL, updated_at = now()
 		WHERE batch_id = $1 AND state = $3
@@ -519,6 +548,21 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 			return nil
 		}
 		return withdraw.ErrInvalidTransition
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE withdrawal_requests wr
+		SET status = $2, updated_at = now()
+		FROM withdrawal_batch_items wbi
+		WHERE wbi.batch_id = $1
+		  AND wr.withdrawal_id = wbi.withdrawal_id
+		  AND wr.status < $2
+	`, batchID[:], int16(withdraw.WithdrawalStatusPaid)); err != nil {
+		return fmt.Errorf("withdraw/postgres: set withdrawal paid status: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("withdraw/postgres: commit confirm tx: %w", err)
 	}
 	return nil
 }

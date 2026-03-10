@@ -18,7 +18,8 @@ type MemoryStore struct {
 }
 
 type withdrawalRec struct {
-	w Withdrawal
+	w      Withdrawal
+	status WithdrawalStatus
 
 	claimedBy      string
 	claimExpiresAt time.Time
@@ -48,7 +49,7 @@ func (s *MemoryStore) UpsertRequested(_ context.Context, w Withdrawal) (Withdraw
 	rec, ok := s.withdrawals[w.ID]
 	if !ok {
 		w.RecipientUA = append([]byte(nil), w.RecipientUA...)
-		s.withdrawals[w.ID] = withdrawalRec{w: w}
+		s.withdrawals[w.ID] = withdrawalRec{w: w, status: WithdrawalStatusRequested}
 		return w, true, nil
 	}
 
@@ -158,6 +159,7 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 	for _, id := range ids {
 		rec := s.withdrawals[id]
 		rec.batchID = b.ID
+		rec.status = WithdrawalStatusBatched
 		rec.claimedBy = ""
 		rec.claimExpiresAt = time.Time{}
 		s.withdrawals[id] = rec
@@ -174,6 +176,17 @@ func (s *MemoryStore) GetWithdrawal(_ context.Context, id [32]byte) (Withdrawal,
 		return Withdrawal{}, ErrNotFound
 	}
 	return cloneWithdrawal(rec.w), nil
+}
+
+func (s *MemoryStore) GetWithdrawalStatus(_ context.Context, id [32]byte) (WithdrawalStatus, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.withdrawals[id]
+	if !ok {
+		return WithdrawalStatusUnknown, ErrNotFound
+	}
+	return rec.status, nil
 }
 
 func (s *MemoryStore) GetBatch(_ context.Context, batchID [32]byte) (Batch, error) {
@@ -329,6 +342,11 @@ func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) err
 
 	b.State = BatchStateConfirmed
 	s.batches[batchID] = b
+	for _, id := range b.WithdrawalIDs {
+		rec := s.withdrawals[id]
+		rec.status = WithdrawalStatusPaid
+		s.withdrawals[id] = rec
+	}
 	return nil
 }
 

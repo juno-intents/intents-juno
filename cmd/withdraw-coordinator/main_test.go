@@ -1,10 +1,13 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
 func TestNormalizeRuntimeMode(t *testing.T) {
@@ -65,5 +68,30 @@ func TestNewTSSHTTPClient_ServerName(t *testing.T) {
 	}
 	if transport.TLSClientConfig.ServerName != "10.0.0.141" {
 		t.Fatalf("server name mismatch: got=%q want=%q", transport.TLSClientConfig.ServerName, "10.0.0.141")
+	}
+}
+
+func TestShouldAckWithdrawIngestError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "permanent invalid config", err: withdraw.ErrInvalidConfig, want: true},
+		{name: "permanent mismatch", err: withdraw.ErrWithdrawalMismatch, want: true},
+		{name: "transient other", err: errors.New("db unavailable"), want: false},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := shouldAckWithdrawIngestError(tc.err); got != tc.want {
+				t.Fatalf("shouldAckWithdrawIngestError(%v) = %v want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }

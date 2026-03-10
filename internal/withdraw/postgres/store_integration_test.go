@@ -53,6 +53,11 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if _, created, err := s.UpsertRequested(ctx, w0); err != nil || !created {
 		t.Fatalf("UpsertRequested w0: created=%v err=%v", created, err)
 	}
+	if status, err := s.GetWithdrawalStatus(ctx, w0.ID); err != nil {
+		t.Fatalf("GetWithdrawalStatus requested: %v", err)
+	} else if status != withdraw.WithdrawalStatusRequested {
+		t.Fatalf("requested status: got %s want %s", status, withdraw.WithdrawalStatusRequested)
+	}
 	if _, created, err := s.UpsertRequested(ctx, w1); err != nil || !created {
 		t.Fatalf("UpsertRequested w1: created=%v err=%v", created, err)
 	}
@@ -85,6 +90,11 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 		TxPlan:        []byte(`{"v":1}`),
 	}); err != nil {
 		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if status, err := s.GetWithdrawalStatus(ctx, w0.ID); err != nil {
+		t.Fatalf("GetWithdrawalStatus batched: %v", err)
+	} else if status != withdraw.WithdrawalStatusBatched {
+		t.Fatalf("batched status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
 	}
 
 	// Remaining withdrawal should still be claimable.
@@ -136,6 +146,11 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 
 	if err := s.SetBatchConfirmed(ctx, batchID); err != nil {
 		t.Fatalf("SetBatchConfirmed: %v", err)
+	}
+	if status, err := s.GetWithdrawalStatus(ctx, w0.ID); err != nil {
+		t.Fatalf("GetWithdrawalStatus paid: %v", err)
+	} else if status != withdraw.WithdrawalStatusPaid {
+		t.Fatalf("paid status: got %s want %s", status, withdraw.WithdrawalStatusPaid)
 	}
 	if err := s.MarkBatchFinalizing(ctx, batchID); err != nil {
 		t.Fatalf("MarkBatchFinalizing: %v", err)
