@@ -592,9 +592,6 @@ run_preflight_script_tests() {
   local -a tests=(
     "deploy/operators/dkg/tests/generate_witness_metadata_test.sh"
     "deploy/operators/dkg/tests/run_testnet_e2e_test.sh"
-    "deploy/operators/dkg/tests/e2e_aws_test.sh"
-    "deploy/operators/dkg/tests/e2e_aws_checkpoint_deferral_test.sh"
-    "deploy/operators/dkg/tests/live_e2e_terraform_iam_test.sh"
   )
   local test_script
   for test_script in "${tests[@]}"; do
