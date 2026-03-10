@@ -42,6 +42,7 @@ Commands:
   run:
     Provisions an AWS runner via Terraform, executes the live testnet e2e flow
     on the runner, collects artifacts locally, and tears down infra by default.
+    Frozen for direct use unless JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW=1 is set.
 
   cleanup:
     Idempotent fallback destroy for previously created infra state in workdir.
@@ -834,7 +835,7 @@ sanitize_dkg_summary_file() {
   jq '
     del(.workdir, .coordinator_workdir, .completion_report)
     | if (.operators? | type) == "array" then
-        .operators |= map(del(.operator_key_file, .backup_package, .runtime_dir, .registration_file))
+        .operators |= map(del(.operator_key_file, .runtime_dir, .registration_file))
       else
         .
       end
@@ -2141,6 +2142,7 @@ EOF
       --arg endpoint "https://${op_private_ip}:${op_port}" \
       --arg runtime_dir "$remote_workdir/dkg-distributed/operators/op${op_index}/runtime" \
       --arg backup_package "$remote_workdir/dkg-distributed/operators/op${op_index}/backup-packages/dkg-backup.zip" \
+      --arg restore_report "$remote_workdir/dkg-distributed/operators/op${op_index}/runtime/restore-report.json" \
       --arg kms_receipt "$remote_workdir/dkg-distributed/operators/op${op_index}/exports/kms-export-receipt.json" \
       --argjson status "$status_json" \
       '{
@@ -2151,6 +2153,7 @@ EOF
         endpoint: $endpoint,
         runtime_dir: $runtime_dir,
         backup_package: $backup_package,
+        restore_report: $restore_report,
         kms_receipt: $kms_receipt,
         status: $status
       }')"

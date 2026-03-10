@@ -33,6 +33,7 @@ Current behavior:
   - Derives Juno witness extraction endpoints from the deployed operator stack (runner-local SSH tunnel to operator-local `juno-scan` + `junocashd`), not from external txid/endpoint inputs.
   - Exports each restored operator key package to an e2e-scoped KMS+S3 backend and records receipts in the distributed DKG summary.
   - Collects artifacts and destroys infra by default.
+  - Direct `run` is frozen behind `JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW=1`; `preflight` and `canary` are the supported entrypoints.
 ## AWS Live E2E
 
 - Terraform stack:
@@ -44,12 +45,13 @@ Current behavior:
 - Shared proof-services image release workflow:
   - `.github/workflows/release-shared-proof-services-image.yml`
 
-The AWS wrapper is designed for high-fidelity live runs and includes teardown on both success and failure paths:
+The AWS wrapper remains available for emergency/manual legacy runs, but the durable gate is now:
 
-1. `run-testnet-e2e-aws.sh run ...` provisions EC2 and executes e2e remotely.
-2. `run-testnet-e2e-aws.sh` trap performs destroy on exit.
-3. When `operator_ami_id` is empty, callers should resolve `operator-stack-ami-latest` release metadata and pass `--operator-ami-id` explicitly.
-4. Shared proof-services image should be resolved from `shared-proof-services-image-latest` release metadata and passed via `--shared-proof-services-image` (or overridden explicitly).
+1. `run-testnet-e2e-aws.sh preflight ...` for deterministic hard-block checks.
+2. `run-testnet-e2e-aws.sh canary ...` for the replacement checkpoint-stage canary.
+3. `run-testnet-e2e-aws.sh` trap performs destroy on exit unless `--keep-infra` is set.
+4. When `operator_ami_id` is empty, callers should resolve `operator-stack-ami-latest` release metadata and pass `--operator-ami-id` explicitly.
+5. Shared proof-services image should be resolved from `shared-proof-services-image-latest` release metadata and passed via `--shared-proof-services-image` (or overridden explicitly).
 
 To bake and release the full operator AMI (synced `junocashd` + `juno-scan` + checkpoint services + `tss-host`), run:
 
@@ -63,7 +65,7 @@ Release artifacts used by this flow:
 Local invocation example:
 
 ```bash
-./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh run \
+./deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh canary \
   --aws-region us-east-1 \
   --base-funder-key-file ./tmp/funders/base-funder.key \
   --juno-funder-key-file ./tmp/funders/juno-funder.key \

@@ -135,38 +135,41 @@ JUNO_DKG_ALLOW_INSECURE_NETWORK=1 ./operator.sh run \
   --daemon
 ```
 
-### 2.7) Render deployment handoff directories from local DKG artifacts
+### 2.7) Render deployment handoff directories from DKG artifacts
 
-Once each operator has a local `dkg-backup.zip`, render the per-operator handoff directories that the production rollout consumes:
+Once the DKG summary includes per-operator `backup_package` paths, render the per-operator handoff directories that the production rollout consumes:
 
 ```bash
 ./render-handoff.sh \
-  --inventory ./deploy/production/inventory-alpha.json \
+  --inventory ./deploy/production/schema/deployment-inventory.example.json \
   --dkg-summary ./dkg-mainnet-2026-02-11/reports/dkg-summary.json \
-  --output-dir ./production-output
+  --shared-manifest-path ./production-output/alpha/shared-manifest.json \
+  --output-dir ./production-output \
+  --validate
 ```
 
 This writes:
 
+- `production-output/<env>/handoff-manifest.json`
 - `production-output/<env>/operators/<operator-id>/dkg-backup.zip`
-- `production-output/<env>/operators/<operator-id>/backup-manifest.json`
-- `production-output/<env>/operators/<operator-id>/admin-config.json`
-- `production-output/<env>/operators/<operator-id>/test-completiton.json` when the backup package included it
-- `production-output/<env>/operators/<operator-id>/operator-secrets.env` or `operator-secrets.env.age`
+- `production-output/<env>/operators/<operator-id>/restore-report.json`
+- `production-output/<env>/operators/<operator-id>/known_hosts`
+- `production-output/<env>/operators/<operator-id>/operator-secrets.env`
+- `production-output/<env>/operators/<operator-id>/operator-deploy.json`
 - `production-output/<env>/operators/<operator-id>/dkg-handoff.json`
+- `production-output/<env>/operators/<operator-id>/handoff-validation.json`
 
-For test deployments you can emit an encrypted secret contract instead of plaintext:
+`operator-deploy.json` matches the production rollout contract. `handoff-validation.json` records whether the bundle is merely structurally valid or fully `ready_for_deploy`.
+
+If the inventory does not point at a real `known_hosts` file or `operator-secrets.env`, the renderer writes placeholders and leaves `ready_for_deploy=false`. The first hard validation step remains restore-from-zip, and `--validate` reruns `backup-package.sh restore` against the copied bundle before any remote deployment.
+
+`run-dkg-backup-restore.sh` can emit the same handoff bundle directly:
 
 ```bash
-./render-handoff.sh \
-  --inventory ./deploy/production/inventory-alpha.json \
-  --dkg-summary ./dkg-mainnet-2026-02-11/reports/dkg-summary.json \
-  --output-dir ./production-output \
-  --secret-mode age \
-  --age-recipient age1...
+./e2e/run-dkg-backup-restore.sh run \
+  --inventory ./deploy/production/schema/deployment-inventory.example.json \
+  --handoff-output-dir ./production-output
 ```
-
-The first validation step stays the same: restore from the copied `dkg-backup.zip` locally before any remote deployment.
 
 ### 3) Later, export to each operator's own KMS+S3 target
 
