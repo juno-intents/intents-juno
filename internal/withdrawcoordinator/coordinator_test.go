@@ -1,8 +1,10 @@
 package withdrawcoordinator
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
@@ -1065,4 +1067,65 @@ func TestCoordinator_DLQ_NilStoreSkipsDLQ(t *testing.T) {
 		t.Fatalf("expected ErrRebroadcastExhausted, got %v", err)
 	}
 	// No panic, no DLQ store interaction — backwards compatible.
+}
+
+func TestCoordinator_LogsBatchLifecycle(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{}
+
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, log)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if err := c.IngestWithdrawRequested(ctx, w); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	output := buf.String()
+
+	wantMessages := []string{
+		"batch planned",
+		"batch signing",
+		"batch signed",
+		"batch broadcasting",
+		"batch broadcasted",
+		"batch confirming",
+		"batch confirmed",
+	}
+	for _, msg := range wantMessages {
+		if !strings.Contains(output, msg) {
+			t.Errorf("expected log output to contain %q, got:\n%s", msg, output)
+		}
+	}
+
+	batchID := batching.WithdrawalBatchIDV1([][32]byte{w.ID})
+	_ = batchID
+	if !strings.Contains(output, "batch_id=") {
+		t.Errorf("expected log output to contain batch_id attribute, got:\n%s", output)
+	}
 }
