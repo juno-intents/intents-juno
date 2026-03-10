@@ -311,6 +311,7 @@ func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[
 	}); err != nil {
 		return err
 	}
+	c.log.Info("batch planned", "batch_id", hex.EncodeToString(batchID[:]), "withdrawals", len(batch.Items))
 	if err := c.persistTxPlanArtifact(ctx, batchID, plan); err != nil {
 		return err
 	}
@@ -338,6 +339,7 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 		return err
 	}
 
+	c.log.Info("batch signing", "batch_id", hex.EncodeToString(batchID[:]))
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
 		c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error())
@@ -346,7 +348,11 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
 		return err
 	}
-	return c.store.SetBatchSigned(ctx, batchID, rawTx)
+	if err := c.store.SetBatchSigned(ctx, batchID, rawTx); err != nil {
+		return err
+	}
+	c.log.Info("batch signed", "batch_id", hex.EncodeToString(batchID[:]), "raw_tx_len", len(rawTx))
+	return nil
 }
 
 func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) error {
@@ -365,11 +371,16 @@ func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) erro
 		return err
 	}
 
+	c.log.Info("batch broadcasting", "batch_id", hex.EncodeToString(batchID[:]))
 	txid, err := c.broadcaster.Broadcast(ctx, b.SignedTx)
 	if err != nil {
 		return err
 	}
-	return c.store.SetBatchBroadcasted(ctx, batchID, txid)
+	if err := c.store.SetBatchBroadcasted(ctx, batchID, txid); err != nil {
+		return err
+	}
+	c.log.Info("batch broadcasted", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", txid)
+	return nil
 }
 
 func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error {
@@ -386,6 +397,7 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 	if err := c.ensureExpirySafety(ctx, b.WithdrawalIDs); err != nil {
 		return err
 	}
+	c.log.Info("batch confirming", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
 	if err := c.confirmer.WaitConfirmed(ctx, b.JunoTxID); err != nil {
 		if errors.Is(err, ErrConfirmationPending) {
 			return nil
@@ -438,7 +450,11 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 		}
 		return err
 	}
-	return c.store.SetBatchConfirmed(ctx, batchID)
+	if err := c.store.SetBatchConfirmed(ctx, batchID); err != nil {
+		return err
+	}
+	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
+	return nil
 }
 
 // waitOneBlockAndRecheck waits for the Juno chain to advance by at least one
@@ -515,6 +531,7 @@ func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32
 		}
 		return err
 	}
+	c.log.Info("batch replanned for rebroadcast", "batch_id", hex.EncodeToString(batchID[:]), "attempt", b.RebroadcastAttempts+1)
 	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
 		return err
 	}
