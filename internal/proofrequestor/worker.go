@@ -2,6 +2,7 @@ package proofrequestor
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -134,6 +135,7 @@ func (w *Worker) Run(ctx context.Context) error {
 func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 	job, err := proof.DecodeJobRequest(msg.Value)
 	if err != nil {
+		w.maybeDLQMalformedRequest(ctx, msg, err)
 		failPayload, ferr := proof.EncodeFailureMessage(proof.FailureMessage{
 			JobID:     common.Hash{},
 			ErrorCode: "invalid_payload",
@@ -236,6 +238,27 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 
 	ackMessage(msg, w.cfg.AckTimeout, w.log)
 	return nil
+}
+
+func (w *Worker) maybeDLQMalformedRequest(ctx context.Context, msg queue.Message, decodeErr error) {
+	if w.cfg.DLQStore == nil {
+		return
+	}
+
+	sum := sha256.Sum256([]byte(msg.Topic + "\x00" + string(msg.Value)))
+	rec := dlq.ProofDLQRecord{
+		JobID:        sum,
+		Pipeline:     "proof-request",
+		State:        4,
+		ErrorCode:    "invalid_payload",
+		ErrorMessage: decodeErr.Error(),
+		AttemptCount: 1,
+		JobPayload:   append([]byte(nil), msg.Value...),
+		CreatedAt:    time.Now().UTC(),
+	}
+	if err := w.cfg.DLQStore.InsertProofDLQ(ctx, rec); err != nil {
+		w.log.Error("proof-requestor failed to insert malformed request into DLQ", "err", err)
+	}
 }
 
 // maybeDLQProof inserts a failed proof job into the dead-letter queue.

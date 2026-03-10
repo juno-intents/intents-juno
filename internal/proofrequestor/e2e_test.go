@@ -399,3 +399,67 @@ func TestWorker_E2E_NilDLQStoreSkipsDLQ(t *testing.T) {
 		t.Fatalf("expected one failure message, got %d", len(lines))
 	}
 }
+
+func TestWorker_E2E_InvalidPayloadInsertsDLQ(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 15, 12, 0, 0, 0, time.UTC)
+	store := proof.NewMemoryStore(func() time.Time { return now })
+	submitter := &stubProver{}
+	dlqStore := dlq.NewMemoryStore(func() time.Time { return now })
+
+	svc, err := New(Config{
+		Owner:                  "requestor-invalid-payload",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Second,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, submitter, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	consumer, err := queue.NewConsumer(context.Background(), queue.ConsumerConfig{
+		Driver: queue.DriverStdio,
+		Reader: strings.NewReader("{invalid}\n"),
+	})
+	if err != nil {
+		t.Fatalf("NewConsumer: %v", err)
+	}
+	defer func() { _ = consumer.Close() }()
+
+	var out bytes.Buffer
+	producer, err := queue.NewProducer(queue.ProducerConfig{
+		Driver: queue.DriverStdio,
+		Writer: &out,
+	})
+	if err != nil {
+		t.Fatalf("NewProducer: %v", err)
+	}
+	defer func() { _ = producer.Close() }()
+
+	worker, err := NewWorker(WorkerConfig{
+		InputTopic:   "proof.requests.v1",
+		ResultTopic:  "proof.fulfillments.v1",
+		FailureTopic: "proof.failures.v1",
+		MaxInflight:  1,
+		AckTimeout:   time.Second,
+		DLQStore:     dlqStore,
+	}, svc, consumer, producer, nil)
+	if err != nil {
+		t.Fatalf("NewWorker: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := worker.Run(ctx); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.Proofs != 1 {
+		t.Fatalf("expected 1 proof dlq entry, got %d", counts.Proofs)
+	}
+}

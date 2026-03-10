@@ -261,6 +261,7 @@ func main() {
 
 		OperatorGasMinWei: operatorGasMinWei,
 		ProverFundsMinWei: proverFundsMinWei,
+		ReadinessCheck:    pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 
 		Log: log,
 	})

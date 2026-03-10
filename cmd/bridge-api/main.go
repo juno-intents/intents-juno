@@ -169,6 +169,7 @@ func main() {
 		MemoCacheMaxEntries:     *memoCacheMaxEntries,
 		DepositLister:           depositLister,
 		WithdrawalLister:        withdrawalLister,
+		ReadinessCheck:          pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 		Now:                     time.Now,
 	}, depositStore, withdrawReader)
 	if err != nil {

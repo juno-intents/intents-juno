@@ -146,7 +146,12 @@ func runMain(args []string, stdout io.Writer) error {
 	}
 
 	go func() {
-		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "base-event-scanner"); err != nil {
+		if err := healthz.ListenAndServe(
+			ctx,
+			healthz.ListenAddr(*healthPort),
+			"base-event-scanner",
+			healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)),
+		); err != nil {
 			slog.Error("healthz server", "err", err)
 		}
 	}()

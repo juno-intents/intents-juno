@@ -1,6 +1,7 @@
 package backoffice
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -48,6 +49,7 @@ type ServerConfig struct {
 
 	OperatorGasMinWei *big.Int
 	ProverFundsMinWei *big.Int
+	ReadinessCheck    func(context.Context) error
 
 	Log *slog.Logger
 }
@@ -145,7 +147,19 @@ func (s *Server) Close() {
 }
 
 // handleHealthz returns a simple health check response.
-func (s *Server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/readyz" && s.cfg.ReadinessCheck != nil {
+		if err := s.cfg.ReadinessCheck(r.Context()); err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"version": "v1",
+				"status":  "not_ready",
+				"time":    time.Now().UTC().Format(time.RFC3339),
+			})
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(map[string]any{

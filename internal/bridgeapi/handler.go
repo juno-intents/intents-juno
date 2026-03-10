@@ -44,6 +44,7 @@ type Config struct {
 
 	DepositLister    DepositLister
 	WithdrawalLister WithdrawalLister
+	ReadinessCheck   func(context.Context) error
 
 	Now func() time.Time
 }
@@ -186,7 +187,15 @@ type handler struct {
 	memoCache        *memoResponseCache
 }
 
-func (h *handler) handleHealthz(w http.ResponseWriter, _ *http.Request) {
+func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/readyz" && h.cfg.ReadinessCheck != nil {
+		if err := h.cfg.ReadinessCheck(r.Context()); err != nil {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte("not_ready\n"))
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte("ok\n"))
