@@ -1157,6 +1157,20 @@ exec /usr/local/bin/tss-host \
 EOF_TSS
   sudo install -m 0755 /tmp/intents-juno-tss-host.sh /usr/local/bin/intents-juno-tss-host.sh
 
+  cat > /tmp/intents-juno-dkg-admin-serve.sh <<'EOF_DKG_SERVE'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+admin_config="${DKG_ADMIN_CONFIG_FILE:-/var/lib/intents-juno/operator-runtime/bundle/admin-config.json}"
+[[ -s "$admin_config" ]] || {
+  echo "dkg-admin serve requires admin-config.json: $admin_config" >&2
+  exit 1
+}
+exec /usr/local/bin/dkg-admin serve --config "$admin_config"
+EOF_DKG_SERVE
+  sudo install -m 0755 /tmp/intents-juno-dkg-admin-serve.sh /usr/local/bin/intents-juno-dkg-admin-serve.sh
+
   cat > /tmp/intents-juno-base-relayer.sh <<'EOF_BASE_RELAYER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -1700,11 +1714,32 @@ WantedBy=multi-user.target
 EOF_AGG_SERVICE
   sudo install -m 0644 /tmp/checkpoint-aggregator.service /etc/systemd/system/checkpoint-aggregator.service
 
+  cat > /tmp/dkg-admin-serve.service <<'EOF_DKG_SERVE_SERVICE'
+[Unit]
+Description=Intents Juno DKG Admin Serve (FROST gRPC)
+After=network-online.target intents-juno-config-hydrator.service
+Wants=network-online.target intents-juno-config-hydrator.service
+ConditionPathExists=/var/lib/intents-juno/operator-runtime/bundle/admin-config.json
+
+[Service]
+Type=simple
+User=ubuntu
+Group=ubuntu
+ExecStart=/usr/local/bin/intents-juno-dkg-admin-serve.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
+EOF_DKG_SERVE_SERVICE
+  sudo install -m 0644 /tmp/dkg-admin-serve.service /etc/systemd/system/dkg-admin-serve.service
+
   cat > /tmp/tss-host.service <<'EOF_TSS_SERVICE'
 [Unit]
 Description=Intents Juno Operator tss-host
-After=network-online.target intents-juno-config-hydrator.service
-Wants=network-online.target intents-juno-config-hydrator.service
+After=network-online.target intents-juno-config-hydrator.service dkg-admin-serve.service
+Wants=network-online.target intents-juno-config-hydrator.service dkg-admin-serve.service
 
 [Service]
 Type=simple
@@ -1941,7 +1976,7 @@ install_intents_binaries
 write_stack_config
 
 sudo systemctl daemon-reload
-sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
+sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
 sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
@@ -1952,7 +1987,7 @@ done
 
 write_bootstrap_metadata
 
-sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
+sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
 rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true

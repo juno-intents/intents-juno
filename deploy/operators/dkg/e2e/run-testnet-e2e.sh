@@ -2547,6 +2547,15 @@ sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer
   exit 1
 }
 
+sudo systemctl daemon-reload
+sudo systemctl restart dkg-admin-serve.service
+sleep 2
+if ! sudo systemctl is-active --quiet dkg-admin-serve.service; then
+  echo "dkg-admin-serve failed to start" >&2
+  sudo journalctl -u dkg-admin-serve.service --no-pager -n 20 || true
+  exit 1
+fi
+
 sudo systemctl restart tss-host.service
 if ! sudo systemctl is-active --quiet tss-host.service; then
   echo "tss-host failed to restart after signer update" >&2
