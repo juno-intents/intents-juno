@@ -37,9 +37,9 @@ func main() {
 		maxSessions    = flag.Int("max-sessions", 1024, "max in-memory sessions for idempotency")
 
 		readHeaderTimeout = flag.Duration("read-header-timeout", 5*time.Second, "http.Server ReadHeaderTimeout")
-		readTimeout       = flag.Duration("read-timeout", 10*time.Second, "http.Server ReadTimeout")
-		writeTimeout      = flag.Duration("write-timeout", 10*time.Second, "http.Server WriteTimeout")
-		idleTimeout       = flag.Duration("idle-timeout", 60*time.Second, "http.Server IdleTimeout")
+		readTimeout       = flag.Duration("read-timeout", 120*time.Second, "http.Server ReadTimeout")
+		writeTimeout      = flag.Duration("write-timeout", 120*time.Second, "http.Server WriteTimeout")
+		idleTimeout       = flag.Duration("idle-timeout", 120*time.Second, "http.Server IdleTimeout")
 	)
 	flag.Var(&signerArgs, "signer-arg", "argument passed to signer binary (repeatable)")
 	flag.Parse()

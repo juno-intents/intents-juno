@@ -120,7 +120,7 @@ func main() {
 		// Signer (tss-host)
 		tssURL            = flag.String("tss-url", "", "tss-host base url (required; must be https unless --tss-insecure-http)")
 		tssInsecureHTTP   = flag.Bool("tss-insecure-http", false, "allow tss-url over plain http (DANGEROUS; dev only)")
-		tssTimeout        = flag.Duration("tss-timeout", 10*time.Second, "tss request timeout")
+		tssTimeout        = flag.Duration("tss-timeout", 120*time.Second, "tss request timeout")
 		tssMaxRespBytes   = flag.Int64("tss-max-response-bytes", 1<<20, "max tss response size (bytes)")
 		tssServerCAFile   = flag.String("tss-server-ca-file", "", "server root CA PEM file (optional; defaults to system roots)")
 		tssServerName     = flag.String("tss-server-name", "", "optional TLS server name override for tss-url certificate validation")

@@ -1144,6 +1144,9 @@ exec /usr/local/bin/tss-host \
   --listen-addr 127.0.0.1:9443 \
   --tls-cert-file "${TSS_TLS_CERT_FILE}" \
   --tls-key-file "${TSS_TLS_KEY_FILE}" \
+  --read-timeout 120s \
+  --write-timeout 120s \
+  --idle-timeout 120s \
   --signer-bin /usr/local/bin/tss-signer \
   --signer-arg --ufvk-file \
   --signer-arg "${TSS_SIGNER_UFVK_FILE}" \
@@ -1413,6 +1416,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
+  --tss-timeout 120s \
   --base-chain-id "${BASE_CHAIN_ID}" \
   --bridge-address "${BRIDGE_ADDRESS}" \
   --base-relayer-url "${BASE_RELAYER_URL}" \
