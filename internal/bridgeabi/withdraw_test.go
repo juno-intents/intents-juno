@@ -30,9 +30,9 @@ func TestEncodeWithdrawJournal_RoundTrip(t *testing.T) {
 		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
 		Items: []FinalizeItem{
 			{
-				WithdrawalId:     wid,
-				RecipientUAHash:  uaHash,
-				NetAmount:        big.NewInt(999),
+				WithdrawalId:    wid,
+				RecipientUAHash: uaHash,
+				NetAmount:       big.NewInt(999),
 			},
 		},
 	}
@@ -206,3 +206,44 @@ func TestPackExtendWithdrawExpiryBatchCalldata_UnpackMatches(t *testing.T) {
 	}
 }
 
+func TestPackMarkWithdrawPaidBatchCalldata_UnpackMatches(t *testing.T) {
+	t.Parallel()
+
+	ids := []common.Hash{
+		common.HexToHash("0x0100000000000000000000000000000000000000000000000000000000000000"),
+		common.HexToHash("0x0200000000000000000000000000000000000000000000000000000000000000"),
+	}
+	operatorSigs := [][]byte{[]byte{0x01}, []byte{0x02, 0x03}}
+
+	calldata, err := PackMarkWithdrawPaidBatchCalldata(ids, operatorSigs)
+	if err != nil {
+		t.Fatalf("PackMarkWithdrawPaidBatchCalldata: %v", err)
+	}
+
+	a, err := abi.JSON(strings.NewReader(bridgeABIJSON))
+	if err != nil {
+		t.Fatalf("parse abi json: %v", err)
+	}
+	vals, err := a.Methods["markWithdrawPaidBatch"].Inputs.Unpack(calldata[4:])
+	if err != nil {
+		t.Fatalf("unpack calldata: %v", err)
+	}
+	if len(vals) != 2 {
+		t.Fatalf("unpack len: got %d want %d", len(vals), 2)
+	}
+
+	gotIDs := vals[0].([][32]byte)
+	if len(gotIDs) != len(ids) {
+		t.Fatalf("ids len: got %d want %d", len(gotIDs), len(ids))
+	}
+	for i := range ids {
+		if common.Hash(gotIDs[i]) != ids[i] {
+			t.Fatalf("id[%d] mismatch", i)
+		}
+	}
+
+	gotSigs := vals[1].([][]byte)
+	if len(gotSigs) != len(operatorSigs) {
+		t.Fatalf("sigs len: got %d want %d", len(gotSigs), len(operatorSigs))
+	}
+}

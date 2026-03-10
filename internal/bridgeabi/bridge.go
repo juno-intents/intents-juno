@@ -234,6 +234,21 @@ func PackExtendWithdrawExpiryBatchCalldata(withdrawalIDs []common.Hash, newExpir
 	return b, nil
 }
 
+func PackMarkWithdrawPaidBatchCalldata(withdrawalIDs []common.Hash, operatorSigs [][]byte) ([]byte, error) {
+	if err := initABI(); err != nil {
+		return nil, err
+	}
+	if len(withdrawalIDs) == 0 {
+		return nil, fmt.Errorf("%w: empty withdrawalIDs", ErrInvalidInput)
+	}
+
+	b, err := bridgeABI.Pack("markWithdrawPaidBatch", withdrawalIDs, operatorSigs)
+	if err != nil {
+		return nil, fmt.Errorf("bridgeabi: pack markWithdrawPaidBatch calldata: %w", err)
+	}
+	return b, nil
+}
+
 const bridgeABIJSON = `[
   {
     "inputs": [
@@ -288,6 +303,16 @@ const bridgeABIJSON = `[
       {"internalType":"bytes[]","name":"operatorSigs","type":"bytes[]"}
     ],
     "name":"extendWithdrawExpiryBatch",
+    "outputs":[],
+    "stateMutability":"nonpayable",
+    "type":"function"
+  },
+  {
+    "inputs": [
+      {"internalType":"bytes32[]","name":"withdrawalIds","type":"bytes32[]"},
+      {"internalType":"bytes[]","name":"operatorSigs","type":"bytes[]"}
+    ],
+    "name":"markWithdrawPaidBatch",
     "outputs":[],
     "stateMutability":"nonpayable",
     "type":"function"
