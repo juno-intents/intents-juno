@@ -481,6 +481,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         }
     }
 
+    /// @notice Refund remains callable while paused so expired withdrawals can still be recovered
+    /// during operational incidents. Pausing blocks new bridge-side progress, not user recovery.
     function refund(bytes32 withdrawalId) external nonReentrant {
         Withdrawal storage w = _withdrawals[withdrawalId];
         if (w.requester == address(0)) revert WithdrawalNotFound();

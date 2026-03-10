@@ -25,11 +25,11 @@ contract WJunoTest is Test {
         token.setBridge(bridge);
     }
 
-    function test_setBridge_once() public {
+    function test_setBridge_allowsOwnerUpdate() public {
         token.setBridge(bridge);
-
-        vm.expectRevert(WJuno.BridgeAlreadySet.selector);
-        token.setBridge(makeAddr("bridge2"));
+        address bridge2 = makeAddr("bridge2");
+        token.setBridge(bridge2);
+        assertEq(token.bridge(), bridge2);
     }
 
     function test_mintBurn_onlyBridge() public {
@@ -82,4 +82,3 @@ contract WJunoTest is Test {
         assertEq(token.balanceOf(bob), 25);
     }
 }
-

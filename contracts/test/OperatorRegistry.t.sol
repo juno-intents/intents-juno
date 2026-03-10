@@ -34,5 +34,44 @@ contract OperatorRegistryTest is Test {
         vm.expectRevert(OperatorRegistry.InvalidThreshold.selector);
         registry.setThreshold(3);
     }
-}
 
+    function test_setFeeDistributor_onlyOwner() public {
+        vm.prank(other);
+        vm.expectRevert();
+        registry.setFeeDistributor(makeAddr("feeDistributor"));
+    }
+
+    function test_setFeeDistributor_once() public {
+        registry.setFeeDistributor(makeAddr("feeDistributor"));
+
+        vm.expectRevert(OperatorRegistry.FeeDistributorAlreadySet.selector);
+        registry.setFeeDistributor(makeAddr("feeDistributor2"));
+    }
+
+    function test_deactivate_requires_threshold_lowered_first() public {
+        address op1 = makeAddr("op1");
+        address op2 = makeAddr("op2");
+
+        registry.setOperator(op1, makeAddr("fee1"), 1, true);
+        registry.setOperator(op2, makeAddr("fee2"), 1, true);
+        registry.setThreshold(2);
+
+        vm.expectRevert(OperatorRegistry.InvalidThreshold.selector);
+        registry.setOperator(op2, makeAddr("fee2"), 0, false);
+    }
+
+    function test_lowerThreshold_thenDeactivate_succeeds() public {
+        address op1 = makeAddr("op1");
+        address op2 = makeAddr("op2");
+
+        registry.setOperator(op1, makeAddr("fee1"), 1, true);
+        registry.setOperator(op2, makeAddr("fee2"), 1, true);
+        registry.setThreshold(2);
+
+        registry.setThreshold(1);
+        registry.setOperator(op2, makeAddr("fee2"), 0, false);
+
+        assertEq(registry.operatorCount(), 1);
+        assertEq(registry.threshold(), 1);
+    }
+}

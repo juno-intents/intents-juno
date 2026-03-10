@@ -47,6 +47,7 @@ EOF
   assert_file_exists "$output_dir/alpha/rollout-state.json" "rollout state"
   assert_file_exists "$operator_dir/operator-deploy.json" "operator manifest"
   assert_eq "$(jq -r '.environment' "$manifest")" "alpha" "manifest environment"
+  assert_eq "$(jq -r '.governance.timelock.address' "$manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
   assert_eq "$(jq -r '.dns.record_name' "$operator_dir/operator-deploy.json")" "op1.alpha.intents-testing.thejunowallet.com" "operator dns record"
   rm -rf "$workdir"
 }

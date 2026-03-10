@@ -5,6 +5,22 @@
     "operator_registry": "0x4444444444444444444444444444444444444444",
     "fee_distributor": "0x5555555555555555555555555555555555555555"
   },
+  "governance": {
+    "timelock": {
+      "address": "0x8888888888888888888888888888888888888888",
+      "min_delay_seconds": 0,
+      "proposers": [
+        "0x9999999999999999999999999999999999999999"
+      ],
+      "executors": [
+        "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "bridge_update_steps": [
+        "schedule WJuno.setBridge(newBridge)",
+        "schedule FeeDistributor.setBridge(newBridge)"
+      ]
+    }
+  },
   "owallet_ua": "u1alphaexample",
   "operators": [
     "0x1111111111111111111111111111111111111111",

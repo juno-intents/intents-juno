@@ -80,6 +80,8 @@ EOF
   assert_eq "$(jq -r '.contracts.bridge' "$shared_manifest")" "0x2222222222222222222222222222222222222222" "bridge address"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
+  assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
+  assert_eq "$(jq -r '.governance.timelock.min_delay_seconds' "$shared_manifest")" "0" "timelock delay"
 
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"

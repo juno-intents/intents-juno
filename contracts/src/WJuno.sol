@@ -9,7 +9,6 @@ import {ERC20Permit} from "@openzeppelin/contracts/token/ERC20/extensions/ERC20P
 /// @notice Wrapped Juno asset on Base.
 /// @dev Minting/burning is restricted to the Bridge contract.
 contract WJuno is ERC20, ERC20Permit, Ownable2Step {
-    error BridgeAlreadySet();
     error ZeroAddress();
     error NotBridge();
 
@@ -29,7 +28,6 @@ contract WJuno is ERC20, ERC20Permit, Ownable2Step {
     }
 
     function setBridge(address newBridge) external onlyOwner {
-        if (bridge != address(0)) revert BridgeAlreadySet();
         if (newBridge == address(0)) revert ZeroAddress();
         bridge = newBridge;
         emit BridgeSet(newBridge);

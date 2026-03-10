@@ -67,6 +67,18 @@ contract FeeDistributorTest is Test {
         distributor.depositFees(1);
     }
 
+    function test_setBridge_onlyOwner() public {
+        vm.prank(makeAddr("notOwner"));
+        vm.expectRevert();
+        distributor.setBridge(makeAddr("otherBridge"));
+    }
+
+    function test_setBridge_allowsOwnerUpdate() public {
+        address newBridge = makeAddr("newBridge");
+        distributor.setBridge(newBridge);
+        assertEq(distributor.bridge(), newBridge);
+    }
+
     function test_depositFees_revertsWhenNoWeight() public {
         // Remove both operators (weight -> 0).
         registry.setOperator(op1, op1Fee, 0, false);

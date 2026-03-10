@@ -208,6 +208,16 @@ type report struct {
 		Bridge           string `json:"bridge"`
 	} `json:"contracts"`
 
+	Governance struct {
+		Timelock struct {
+			Address            string   `json:"address,omitempty"`
+			MinDelaySeconds    uint64   `json:"min_delay_seconds,omitempty"`
+			Proposers          []string `json:"proposers,omitempty"`
+			Executors          []string `json:"executors,omitempty"`
+			BridgeUpdateSteps  []string `json:"bridge_update_steps,omitempty"`
+		} `json:"timelock,omitempty"`
+	} `json:"governance,omitempty"`
+
 	Operators []string `json:"operators"`
 	Threshold int      `json:"threshold"`
 
@@ -1137,6 +1147,10 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, err
 	}
+	timelockABI, timelockBin, err := loadFoundryArtifact(filepath.Join(cfg.ContractsOut, "ProtocolTimelock.sol", "ProtocolTimelock.json"))
+	if err != nil {
+		return nil, err
+	}
 
 	verifierAddr := cfg.VerifierAddress
 	depositImageID := cfg.DepositImageID
@@ -1145,11 +1159,13 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	const tipBps uint64 = 1000
 	const refundWindowSeconds uint64 = 24 * 60 * 60
 	const maxExtendSeconds uint64 = 12 * 60 * 60
+	const timelockDelaySeconds uint64 = 0
 
 	var wjunoAddr common.Address
 	var regAddr common.Address
 	var fdAddr common.Address
 	var bridgeAddr common.Address
+	var timelockAddr common.Address
 	var setFeeDistributorTx common.Hash
 	var setThresholdTx common.Hash
 	var setBridgeWJunoTx common.Hash
@@ -1240,6 +1256,75 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
 		}
 		logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
+
+		timelockProposers := []common.Address{owner}
+		timelockExecutors := []common.Address{owner}
+		timelockAddr, _, err = deployContract(
+			ctx,
+			client,
+			auth,
+			timelockABI,
+			timelockBin,
+			new(big.Int).SetUint64(timelockDelaySeconds),
+			timelockProposers,
+			timelockExecutors,
+			owner,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("deploy timelock: %w", err)
+		}
+		logProgress("deployed timelock=%s", timelockAddr.Hex())
+		timelock := bind.NewBoundContract(timelockAddr, timelockABI, client, client, client)
+
+		if _, err := transactAndWait(ctx, client, auth, wjuno, "transferOwnership", timelockAddr); err != nil {
+			return nil, fmt.Errorf("wjuno.transferOwnership: %w", err)
+		}
+		if _, err := transactAndWait(ctx, client, auth, fd, "transferOwnership", timelockAddr); err != nil {
+			return nil, fmt.Errorf("feeDistributor.transferOwnership: %w", err)
+		}
+		if _, err := transactAndWait(ctx, client, auth, reg, "transferOwnership", timelockAddr); err != nil {
+			return nil, fmt.Errorf("operatorRegistry.transferOwnership: %w", err)
+		}
+		if _, err := transactAndWait(ctx, client, auth, bridge, "transferOwnership", timelockAddr); err != nil {
+			return nil, fmt.Errorf("bridge.transferOwnership: %w", err)
+		}
+
+		acceptWJunoData, err := wjunoABI.Pack("acceptOwnership")
+		if err != nil {
+			return nil, fmt.Errorf("pack wjuno.acceptOwnership: %w", err)
+		}
+		if _, _, err := timelockScheduleAndExecute(
+			ctx, client, auth, timelock, wjunoAddr, acceptWJunoData, "wjuno-accept-ownership",
+		); err != nil {
+			return nil, fmt.Errorf("wjuno acceptOwnership via timelock: %w", err)
+		}
+		acceptFeeData, err := fdABI.Pack("acceptOwnership")
+		if err != nil {
+			return nil, fmt.Errorf("pack feeDistributor.acceptOwnership: %w", err)
+		}
+		if _, _, err := timelockScheduleAndExecute(
+			ctx, client, auth, timelock, fdAddr, acceptFeeData, "fee-accept-ownership",
+		); err != nil {
+			return nil, fmt.Errorf("feeDistributor acceptOwnership via timelock: %w", err)
+		}
+		acceptRegistryData, err := regABI.Pack("acceptOwnership")
+		if err != nil {
+			return nil, fmt.Errorf("pack operatorRegistry.acceptOwnership: %w", err)
+		}
+		if _, _, err := timelockScheduleAndExecute(
+			ctx, client, auth, timelock, regAddr, acceptRegistryData, "registry-accept-ownership",
+		); err != nil {
+			return nil, fmt.Errorf("operatorRegistry acceptOwnership via timelock: %w", err)
+		}
+		acceptBridgeData, err := bridgeABI.Pack("acceptOwnership")
+		if err != nil {
+			return nil, fmt.Errorf("pack bridge.acceptOwnership: %w", err)
+		}
+		if _, _, err := timelockScheduleAndExecute(
+			ctx, client, auth, timelock, bridgeAddr, acceptBridgeData, "bridge-accept-ownership",
+		); err != nil {
+			return nil, fmt.Errorf("bridge acceptOwnership via timelock: %w", err)
+		}
 	}
 
 	const (
@@ -1262,6 +1347,32 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	}
 	if registryOperatorCount != wantOperatorCount {
 		return nil, fmt.Errorf("operatorCount mismatch: got=%d want=%d", registryOperatorCount, wantOperatorCount)
+	}
+	if !cfg.ReuseDeployedContracts {
+		if currentOwner, err := callAddress(ctx, wjuno, "owner"); err != nil || currentOwner != timelockAddr {
+			if err != nil {
+				return nil, fmt.Errorf("wjuno owner: %w", err)
+			}
+			return nil, fmt.Errorf("wjuno owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
+		}
+		if currentOwner, err := callAddress(ctx, fd, "owner"); err != nil || currentOwner != timelockAddr {
+			if err != nil {
+				return nil, fmt.Errorf("fee distributor owner: %w", err)
+			}
+			return nil, fmt.Errorf("fee distributor owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
+		}
+		if currentOwner, err := callAddress(ctx, reg, "owner"); err != nil || currentOwner != timelockAddr {
+			if err != nil {
+				return nil, fmt.Errorf("operator registry owner: %w", err)
+			}
+			return nil, fmt.Errorf("operator registry owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
+		}
+		if currentOwner, err := callAddress(ctx, bridge, "owner"); err != nil || currentOwner != timelockAddr {
+			if err != nil {
+				return nil, fmt.Errorf("bridge owner: %w", err)
+			}
+			return nil, fmt.Errorf("bridge owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
+		}
 	}
 	wantThreshold := uint64(cfg.Threshold)
 	registryThreshold, err := waitUint64AtLeastAttempts(
@@ -1324,6 +1435,16 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Contracts.OperatorRegistry = regAddr.Hex()
 		rep.Contracts.FeeDistributor = fdAddr.Hex()
 		rep.Contracts.Bridge = bridgeAddr.Hex()
+		if timelockAddr != (common.Address{}) {
+			rep.Governance.Timelock.Address = timelockAddr.Hex()
+			rep.Governance.Timelock.MinDelaySeconds = timelockDelaySeconds
+			rep.Governance.Timelock.Proposers = []string{owner.Hex()}
+			rep.Governance.Timelock.Executors = []string{owner.Hex()}
+			rep.Governance.Timelock.BridgeUpdateSteps = []string{
+				"schedule WJuno.setBridge(newBridge)",
+				"schedule FeeDistributor.setBridge(newBridge)",
+			}
+		}
 		rep.Checkpoint.Height = cfg.DepositCheckpointHeight
 		rep.Checkpoint.BlockHash = cfg.DepositCheckpointBlockHash.Hex()
 		rep.Checkpoint.FinalOrchardRoot = cfg.DepositFinalOrchardRoot.Hex()
@@ -1804,6 +1925,16 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Contracts.OperatorRegistry = regAddr.Hex()
 	rep.Contracts.FeeDistributor = fdAddr.Hex()
 	rep.Contracts.Bridge = bridgeAddr.Hex()
+	if timelockAddr != (common.Address{}) {
+		rep.Governance.Timelock.Address = timelockAddr.Hex()
+		rep.Governance.Timelock.MinDelaySeconds = timelockDelaySeconds
+		rep.Governance.Timelock.Proposers = []string{owner.Hex()}
+		rep.Governance.Timelock.Executors = []string{owner.Hex()}
+		rep.Governance.Timelock.BridgeUpdateSteps = []string{
+			"schedule WJuno.setBridge(newBridge)",
+			"schedule FeeDistributor.setBridge(newBridge)",
+		}
+	}
 
 	rep.Operators = make([]string, 0, len(operatorAddrs))
 	for _, op := range operatorAddrs {
@@ -2520,6 +2651,56 @@ func transactAndWaitWithReceipt(ctx context.Context, backend txBackend, auth *bi
 		return tx.Hash(), rcpt, nil
 	}
 	return common.Hash{}, nil, fmt.Errorf("%s retries exhausted", method)
+}
+
+func timelockScheduleAndExecute(
+	ctx context.Context,
+	backend txBackend,
+	auth *bind.TransactOpts,
+	timelock *bind.BoundContract,
+	target common.Address,
+	data []byte,
+	label string,
+) (common.Hash, common.Hash, error) {
+	if timelock == nil {
+		return common.Hash{}, common.Hash{}, errors.New("nil timelock")
+	}
+
+	var predecessor [32]byte
+	salt := crypto.Keccak256Hash([]byte(label))
+	scheduleTx, err := transactAndWait(
+		ctx,
+		backend,
+		auth,
+		timelock,
+		"schedule",
+		target,
+		big.NewInt(0),
+		data,
+		predecessor,
+		salt,
+		big.NewInt(0),
+	)
+	if err != nil {
+		return common.Hash{}, common.Hash{}, err
+	}
+
+	executeTx, err := transactAndWait(
+		ctx,
+		backend,
+		auth,
+		timelock,
+		"execute",
+		target,
+		big.NewInt(0),
+		data,
+		predecessor,
+		salt,
+	)
+	if err != nil {
+		return common.Hash{}, common.Hash{}, err
+	}
+	return scheduleTx, executeTx, nil
 }
 
 func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *bind.TransactOpts {

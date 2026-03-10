@@ -154,6 +154,25 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
+    function test_refund_allowed_whilePaused_afterExpiry() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 50_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        vm.stopPrank();
+
+        bridge.pause();
+        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        bridge.refund(wid);
+
+        assertEq(token.balanceOf(alice), amount);
+    }
+
     function test_markWithdrawPaidBatch_blocksRefund_andAllowsLateFinalize() public {
         address alice = makeAddr("alice");
         uint256 amount = 100_000;

@@ -12,7 +12,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    error BridgeAlreadySet();
     error NotBridge();
     error NotRegistry();
     error NoOperators();
@@ -49,7 +48,6 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     }
 
     function setBridge(address newBridge) external onlyOwner {
-        if (bridge != address(0)) revert BridgeAlreadySet();
         if (newBridge == address(0)) revert ZeroAddress();
         bridge = newBridge;
         emit BridgeSet(newBridge);
@@ -128,4 +126,3 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
         emit OperatorUpdated(operator, feeRecipient, effectiveNewWeight, active);
     }
 }
-

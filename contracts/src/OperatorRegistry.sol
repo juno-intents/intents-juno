@@ -14,6 +14,7 @@ contract OperatorRegistry is Ownable2Step {
     error InvalidThreshold();
     error ZeroAddress();
     error InvalidWeight();
+    error FeeDistributorAlreadySet();
 
     struct Operator {
         address feeRecipient;
@@ -35,11 +36,14 @@ contract OperatorRegistry is Ownable2Step {
     constructor(address initialOwner) Ownable(initialOwner) {}
 
     function setFeeDistributor(address newFeeDistributor) external onlyOwner {
+        if (feeDistributor != address(0)) revert FeeDistributorAlreadySet();
         if (newFeeDistributor == address(0)) revert ZeroAddress();
         feeDistributor = newFeeDistributor;
         emit FeeDistributorSet(newFeeDistributor);
     }
 
+    /// @notice Lower threshold before deactivating operators when the current threshold would
+    /// exceed the post-update active set.
     function setThreshold(uint256 newThreshold) external onlyOwner {
         if (newThreshold == 0 || newThreshold > operatorCount) revert InvalidThreshold();
         threshold = newThreshold;
@@ -79,4 +83,3 @@ contract OperatorRegistry is Ownable2Step {
         return _operators[operator].active;
     }
 }
-

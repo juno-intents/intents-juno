@@ -185,7 +185,7 @@ production_render_shared_manifest() {
   local env_slug base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
-  local operator_ids_csv threshold operators_json roster_json secret_keys_json
+  local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
@@ -214,6 +214,7 @@ production_render_shared_manifest() {
   operators_json="$(jq -c '[.operators[].operator_id]' "$dkg_summary")"
   roster_json="$(jq -c '.operators | map({index, operator_id, aws_profile, aws_region, account_id, public_dns_label})' "$inventory")"
   secret_keys_json="$(production_secret_keys_json "$inventory" "$inventory_dir")"
+  governance_json="$(jq -c '.governance // null' "$bridge_summary")"
 
   jq -n \
     --arg version "1" \
@@ -246,6 +247,7 @@ production_render_shared_manifest() {
     --argjson checkpoint_operators "$operators_json" \
     --argjson operator_roster "$roster_json" \
     --argjson secret_reference_names "$secret_keys_json" \
+    --argjson governance "$governance_json" \
     '{
       version: $version,
       environment: $environment,
@@ -296,6 +298,7 @@ production_render_shared_manifest() {
         public_subdomain: $public_subdomain,
         ttl_seconds: $ttl_seconds
       },
+      governance: $governance,
       secret_reference_names: $secret_reference_names
     }' >"$output_file"
 }
