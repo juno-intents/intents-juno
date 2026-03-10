@@ -18,8 +18,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
-	"github.com/juno-intents/intents-juno/internal/healthz"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
 
@@ -226,6 +226,10 @@ func main() {
 		log.Error("init aggregator", "err", err)
 		os.Exit(2)
 	}
+	if err := replayOpenCheckpointPackages(ctx, persist, agg, producer, *queueOutTopic, log); err != nil {
+		log.Error("replay open checkpoint packages", "err", err)
+		os.Exit(2)
+	}
 
 	go func() {
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator"); err != nil {
@@ -305,44 +309,123 @@ func main() {
 				continue
 			}
 
-			out := checkpointPackageV1{
-				Version:         "checkpoints.package.v1",
-				Digest:          pkg.Digest,
-				Checkpoint:      pkg.Checkpoint,
-				OperatorSetHash: pkg.OperatorSetHash,
-				Signers:         pkg.Signers,
-				Signatures:      make([]string, 0, len(pkg.Signatures)),
-				CreatedAt:       pkg.CreatedAt.UTC(),
-			}
-			for _, s := range pkg.Signatures {
-				out.Signatures = append(out.Signatures, "0x"+hex.EncodeToString(s))
-			}
-
-			payload, err := json.Marshal(out)
-			if err != nil {
-				log.Error("marshal output", "err", err)
-				ackMessage(msg, *queueAckTimeout, log)
-				continue
-			}
 			pctx, pcancel := context.WithTimeout(ctx, *persistTimeout)
-			_, err = persist.Persist(pctx, checkpoint.PackageEnvelope{
-				Digest:          out.Digest,
-				Checkpoint:      out.Checkpoint,
-				OperatorSetHash: out.OperatorSetHash,
-				Payload:         payload,
-			})
+			err = publishCheckpointPackage(pctx, persist, agg, producer, *queueOutTopic, *pkg)
 			pcancel()
 			if err != nil {
-				log.Error("persist checkpoint package", "err", err, "digest", out.Digest)
-				continue
-			}
-			if err := producer.Publish(ctx, *queueOutTopic, payload); err != nil {
-				log.Error("publish output", "err", err, "topic", *queueOutTopic)
+				log.Error("publish checkpoint package", "err", err, "digest", pkg.Digest, "topic", *queueOutTopic)
 				continue
 			}
 			ackMessage(msg, *queueAckTimeout, log)
 		}
 	}
+}
+
+func publishCheckpointPackage(
+	ctx context.Context,
+	persist *checkpoint.PackagePersistence,
+	agg *checkpoint.Aggregator,
+	producer queue.Producer,
+	topic string,
+	pkg checkpoint.CheckpointPackageV1,
+) error {
+	payload, err := marshalCheckpointPackage(pkg)
+	if err != nil {
+		return err
+	}
+	rec, err := persist.Persist(ctx, checkpoint.PackageEnvelope{
+		Digest:          pkg.Digest,
+		Checkpoint:      pkg.Checkpoint,
+		OperatorSetHash: pkg.OperatorSetHash,
+		Payload:         payload,
+	})
+	if err != nil {
+		return err
+	}
+	if err := producer.Publish(ctx, topic, payload); err != nil {
+		return err
+	}
+	if _, err := persist.MarkEmitted(ctx, rec.Digest); err != nil {
+		return err
+	}
+	agg.MarkEmitted(rec.Digest)
+	return nil
+}
+
+func replayOpenCheckpointPackages(
+	ctx context.Context,
+	persist *checkpoint.PackagePersistence,
+	agg *checkpoint.Aggregator,
+	producer queue.Producer,
+	topic string,
+	log *slog.Logger,
+) error {
+	recs, err := persist.ListByState(ctx, checkpoint.PackageStateOpen)
+	if err != nil {
+		return err
+	}
+	for _, rec := range recs {
+		pkg, err := unmarshalCheckpointPackage(rec.Payload)
+		if err != nil {
+			return fmt.Errorf("decode open checkpoint package %s: %w", rec.Digest, err)
+		}
+		if err := agg.RestorePendingPackage(pkg); err != nil {
+			return fmt.Errorf("restore open checkpoint package %s: %w", rec.Digest, err)
+		}
+		if err := publishCheckpointPackage(ctx, persist, agg, producer, topic, pkg); err != nil {
+			return err
+		}
+		if log != nil {
+			log.Info("replayed open checkpoint package", "digest", rec.Digest, "topic", topic)
+		}
+	}
+	return nil
+}
+
+func marshalCheckpointPackage(pkg checkpoint.CheckpointPackageV1) ([]byte, error) {
+	out := checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          pkg.Digest,
+		Checkpoint:      pkg.Checkpoint,
+		OperatorSetHash: pkg.OperatorSetHash,
+		Signers:         append([]common.Address(nil), pkg.Signers...),
+		Signatures:      make([]string, 0, len(pkg.Signatures)),
+		CreatedAt:       pkg.CreatedAt.UTC(),
+	}
+	for _, s := range pkg.Signatures {
+		out.Signatures = append(out.Signatures, "0x"+hex.EncodeToString(s))
+	}
+	payload, err := json.Marshal(out)
+	if err != nil {
+		return nil, fmt.Errorf("marshal output: %w", err)
+	}
+	return payload, nil
+}
+
+func unmarshalCheckpointPackage(payload []byte) (checkpoint.CheckpointPackageV1, error) {
+	var in checkpointPackageV1
+	if err := json.Unmarshal(payload, &in); err != nil {
+		return checkpoint.CheckpointPackageV1{}, err
+	}
+	if in.Version != "checkpoints.package.v1" {
+		return checkpoint.CheckpointPackageV1{}, fmt.Errorf("unexpected version %q", in.Version)
+	}
+	sigs := make([][]byte, 0, len(in.Signatures))
+	for i, s := range in.Signatures {
+		decoded, err := decodeHexSignature(s)
+		if err != nil {
+			return checkpoint.CheckpointPackageV1{}, fmt.Errorf("decode signature[%d]: %w", i, err)
+		}
+		sigs = append(sigs, decoded)
+	}
+	return checkpoint.CheckpointPackageV1{
+		Digest:          in.Digest,
+		Checkpoint:      in.Checkpoint,
+		OperatorSetHash: in.OperatorSetHash,
+		Signers:         append([]common.Address(nil), in.Signers...),
+		Signatures:      sigs,
+		CreatedAt:       in.CreatedAt.UTC(),
+	}, nil
 }
 
 func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {

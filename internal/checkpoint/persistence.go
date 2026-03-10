@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +22,8 @@ var (
 // PackageStore persists checkpoint package metadata and payload references.
 type PackageStore interface {
 	UpsertPackage(ctx context.Context, rec PackageRecord) error
+	Get(ctx context.Context, digest common.Hash) (PackageRecord, error)
+	ListByState(ctx context.Context, state PackageState) ([]PackageRecord, error)
 }
 
 // IPFSPinner pins a package payload and returns the resulting CID.
@@ -44,7 +47,28 @@ type PackageRecord struct {
 	Payload         []byte
 	IPFSCID         string
 	BlobKey         string
+	State           PackageState
 	PersistedAt     time.Time
+	EmittedAt       time.Time
+}
+
+type PackageState uint8
+
+const (
+	PackageStateUnknown PackageState = iota
+	PackageStateOpen
+	PackageStateEmitted
+)
+
+func (s PackageState) String() string {
+	switch s {
+	case PackageStateOpen:
+		return "open"
+	case PackageStateEmitted:
+		return "emitted"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(s))
+	}
 }
 
 type PackagePersistenceConfig struct {
@@ -96,6 +120,7 @@ func (p *PackagePersistence) Persist(ctx context.Context, env PackageEnvelope) (
 		Checkpoint:      env.Checkpoint,
 		OperatorSetHash: env.OperatorSetHash,
 		Payload:         append([]byte(nil), env.Payload...),
+		State:           PackageStateOpen,
 		PersistedAt:     p.now().UTC(),
 	}
 
@@ -128,6 +153,29 @@ func (p *PackagePersistence) Persist(ctx context.Context, env PackageEnvelope) (
 		}
 	}
 	return rec, nil
+}
+
+func (p *PackagePersistence) MarkEmitted(ctx context.Context, digest common.Hash) (PackageRecord, error) {
+	if p == nil || p.store == nil {
+		return PackageRecord{}, fmt.Errorf("%w: package store required to mark emitted", ErrInvalidPersistenceConfig)
+	}
+	rec, err := p.store.Get(ctx, digest)
+	if err != nil {
+		return PackageRecord{}, err
+	}
+	rec.State = PackageStateEmitted
+	rec.EmittedAt = p.now().UTC()
+	if err := p.store.UpsertPackage(ctx, rec); err != nil {
+		return PackageRecord{}, err
+	}
+	return rec, nil
+}
+
+func (p *PackagePersistence) ListByState(ctx context.Context, state PackageState) ([]PackageRecord, error) {
+	if p == nil || p.store == nil {
+		return nil, fmt.Errorf("%w: package store required to list by state", ErrInvalidPersistenceConfig)
+	}
+	return p.store.ListByState(ctx, state)
 }
 
 func packageBlobKey(prefix string, baseChainID uint64, digest common.Hash) string {
@@ -168,6 +216,25 @@ func (s *MemoryPackageStore) Get(_ context.Context, digest common.Hash) (Package
 		return PackageRecord{}, ErrPackageNotFound
 	}
 	return clonePackageRecord(rec), nil
+}
+
+func (s *MemoryPackageStore) ListByState(_ context.Context, state PackageState) ([]PackageRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]PackageRecord, 0, len(s.records))
+	for _, rec := range s.records {
+		if rec.State == state {
+			out = append(out, clonePackageRecord(rec))
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].PersistedAt.Equal(out[j].PersistedAt) {
+			return out[i].Digest.Hex() < out[j].Digest.Hex()
+		}
+		return out[i].PersistedAt.Before(out[j].PersistedAt)
+	})
+	return out, nil
 }
 
 func clonePackageRecord(rec PackageRecord) PackageRecord {

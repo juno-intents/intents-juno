@@ -43,10 +43,17 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 	if rec.Digest == (common.Hash{}) || len(rec.Payload) == 0 {
 		return fmt.Errorf("%w: missing digest/payload", checkpoint.ErrInvalidPackageEnvelope)
 	}
+	if rec.State != checkpoint.PackageStateOpen && rec.State != checkpoint.PackageStateEmitted {
+		return fmt.Errorf("%w: invalid state %s", checkpoint.ErrInvalidPackageEnvelope, rec.State)
+	}
 
 	persistedAt := rec.PersistedAt
 	if persistedAt.IsZero() {
 		persistedAt = time.Now().UTC()
+	}
+	var emittedAt any
+	if !rec.EmittedAt.IsZero() {
+		emittedAt = rec.EmittedAt.UTC()
 	}
 
 	_, err := s.pool.Exec(ctx, `
@@ -61,9 +68,11 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			ipfs_cid,
 			s3_key,
 			package_json,
+			state,
 			persisted_at,
+			emitted_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
 		ON CONFLICT (digest) DO UPDATE
 		SET
 			checkpoint_height = EXCLUDED.checkpoint_height,
@@ -75,7 +84,9 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			ipfs_cid = EXCLUDED.ipfs_cid,
 			s3_key = EXCLUDED.s3_key,
 			package_json = EXCLUDED.package_json,
+			state = EXCLUDED.state,
 			persisted_at = EXCLUDED.persisted_at,
+			emitted_at = EXCLUDED.emitted_at,
 			updated_at = now()
 	`,
 		rec.Digest[:],
@@ -88,7 +99,9 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 		nullableString(rec.IPFSCID),
 		nullableString(rec.BlobKey),
 		rec.Payload,
+		int16(rec.State),
 		persistedAt,
+		emittedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("checkpoint/postgres: upsert package: %w", err)
@@ -115,7 +128,9 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		ipfsCID      *string
 		blobKey      *string
 		payload      []byte
+		state        int16
 		persistedAt  time.Time
+		emittedAt    *time.Time
 	)
 
 	err := s.pool.QueryRow(ctx, `
@@ -130,7 +145,9 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 			ipfs_cid,
 			s3_key,
 			package_json,
-			persisted_at
+			state,
+			persisted_at,
+			emitted_at
 		FROM checkpoint_packages
 		WHERE digest = $1
 	`, digest[:]).Scan(
@@ -144,7 +161,9 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		&ipfsCID,
 		&blobKey,
 		&payload,
+		&state,
 		&persistedAt,
+		&emittedAt,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -188,6 +207,7 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		},
 		OperatorSetHash: opSetHash,
 		Payload:         append([]byte(nil), payload...),
+		State:           checkpoint.PackageState(state),
 		PersistedAt:     persistedAt.UTC(),
 	}
 	if ipfsCID != nil {
@@ -196,7 +216,47 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 	if blobKey != nil {
 		rec.BlobKey = *blobKey
 	}
+	if emittedAt != nil {
+		rec.EmittedAt = (*emittedAt).UTC()
+	}
 	return rec, nil
+}
+
+func (s *Store) ListByState(ctx context.Context, state checkpoint.PackageState) ([]checkpoint.PackageRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT digest
+		FROM checkpoint_packages
+		WHERE state = $1
+		ORDER BY persisted_at ASC, digest ASC
+	`, int16(state))
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: list packages by state: %w", err)
+	}
+	defer rows.Close()
+
+	var out []checkpoint.PackageRecord
+	for rows.Next() {
+		var digestRaw []byte
+		if err := rows.Scan(&digestRaw); err != nil {
+			return nil, fmt.Errorf("checkpoint/postgres: scan package digest: %w", err)
+		}
+		digest, err := toHash(digestRaw)
+		if err != nil {
+			return nil, err
+		}
+		rec, err := s.Get(ctx, digest)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: list packages by state rows: %w", err)
+	}
+	return out, nil
 }
 
 func nullableString(v string) any {

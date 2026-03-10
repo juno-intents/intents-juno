@@ -65,6 +65,8 @@ type Aggregator struct {
 	maxEmitted int
 
 	open map[common.Hash]*openState
+	// pending holds threshold-complete packages that are not yet marked emitted.
+	pending map[common.Hash]*CheckpointPackageV1
 
 	emitted      map[common.Hash]struct{}
 	emittedOrder []common.Hash
@@ -137,6 +139,7 @@ func NewAggregator(cfg AggregatorConfig) (*Aggregator, error) {
 		maxOpen:         maxOpen,
 		maxEmitted:      maxEmitted,
 		open:            make(map[common.Hash]*openState),
+		pending:         make(map[common.Hash]*CheckpointPackageV1),
 		emitted:         make(map[common.Hash]struct{}),
 	}, nil
 }
@@ -177,6 +180,9 @@ func (a *Aggregator) AddSignature(msg SignatureMessageV1) (*CheckpointPackageV1,
 	// If already emitted, ignore (idempotent).
 	if _, ok := a.emitted[d]; ok {
 		return nil, false, nil
+	}
+	if pkg, ok := a.pending[d]; ok {
+		return cloneCheckpointPackage(pkg), true, nil
 	}
 
 	st, ok := a.open[d]
@@ -229,9 +235,37 @@ func (a *Aggregator) AddSignature(msg SignatureMessageV1) (*CheckpointPackageV1,
 	}
 
 	delete(a.open, d)
-	a.markEmitted(d)
+	a.pending[d] = cloneCheckpointPackage(out)
 
-	return out, true, nil
+	return cloneCheckpointPackage(out), true, nil
+}
+
+func (a *Aggregator) RestorePendingPackage(pkg CheckpointPackageV1) error {
+	if pkg.Digest == (common.Hash{}) {
+		return fmt.Errorf("%w: empty digest", ErrDigestMismatch)
+	}
+	if pkg.Checkpoint.BaseChainID != a.baseChainID || pkg.Checkpoint.BridgeContract != a.bridgeContract {
+		return fmt.Errorf("%w: want chainID=%d bridge=%s got chainID=%d bridge=%s",
+			ErrBadCheckpointDomain,
+			a.baseChainID, a.bridgeContract,
+			pkg.Checkpoint.BaseChainID, pkg.Checkpoint.BridgeContract,
+		)
+	}
+	if got := Digest(pkg.Checkpoint); got != pkg.Digest {
+		return fmt.Errorf("%w: computed %s got %s", ErrDigestMismatch, got, pkg.Digest)
+	}
+	if _, ok := a.emitted[pkg.Digest]; ok {
+		return nil
+	}
+	delete(a.open, pkg.Digest)
+	a.pending[pkg.Digest] = cloneCheckpointPackage(&pkg)
+	return nil
+}
+
+func (a *Aggregator) MarkEmitted(d common.Hash) {
+	delete(a.open, d)
+	delete(a.pending, d)
+	a.markEmitted(d)
 }
 
 func (a *Aggregator) evictOldestOpen() {
@@ -263,6 +297,19 @@ func (a *Aggregator) markEmitted(d common.Hash) {
 		a.emittedOrder = a.emittedOrder[1:]
 		delete(a.emitted, evict)
 	}
+}
+
+func cloneCheckpointPackage(pkg *CheckpointPackageV1) *CheckpointPackageV1 {
+	if pkg == nil {
+		return nil
+	}
+	out := *pkg
+	out.Signers = append([]common.Address(nil), pkg.Signers...)
+	out.Signatures = make([][]byte, 0, len(pkg.Signatures))
+	for _, sig := range pkg.Signatures {
+		out.Signatures = append(out.Signatures, append([]byte(nil), sig...))
+	}
+	return &out
 }
 
 func normalizeSignatureV(sig []byte) ([]byte, error) {

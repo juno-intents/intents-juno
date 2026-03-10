@@ -122,15 +122,27 @@ func TestAggregator_EmitsPackageAtThreshold_SortedUnique(t *testing.T) {
 		}
 	}
 
-	// Duplicate messages for an emitted digest should not re-emit.
+	// Duplicate messages should return the pending package again until explicitly marked emitted.
 	if pkg2, ok2, err := a.AddSignature(SignatureMessageV1{
 		Operator:   op1,
 		Digest:     digest,
 		Signature:  sig1,
 		Checkpoint: cp,
 		SignedAt:   time.Unix(0, 0),
-	}); err != nil || ok2 || pkg2 != nil {
-		t.Fatalf("expected no re-emit after already emitted: pkg=%v ok=%v err=%v", pkg2, ok2, err)
+	}); err != nil || !ok2 || pkg2 == nil {
+		t.Fatalf("expected pending package retry before emitted: pkg=%v ok=%v err=%v", pkg2, ok2, err)
+	}
+
+	a.MarkEmitted(digest)
+
+	if pkg3, ok3, err := a.AddSignature(SignatureMessageV1{
+		Operator:   op1,
+		Digest:     digest,
+		Signature:  sig1,
+		Checkpoint: cp,
+		SignedAt:   time.Unix(0, 0),
+	}); err != nil || ok3 || pkg3 != nil {
+		t.Fatalf("expected no re-emit after MarkEmitted: pkg=%v ok=%v err=%v", pkg3, ok3, err)
 	}
 }
 
@@ -246,5 +258,66 @@ func TestNewAggregator_RejectsInvalidConfig(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("expected error for threshold > operator count")
+	}
+}
+
+func TestAggregator_RestorePendingPackage(t *testing.T) {
+	t.Parallel()
+
+	k1 := mustKey(t, "4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	op1 := crypto.PubkeyToAddress(k1.PublicKey)
+
+	cp := Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x64afe1a0c6c050e37d936aa20cb82b08bb8815baed208e7634d6df26fc37b091"),
+		FinalOrchardRoot: common.HexToHash("0xd6c66cad06fe14fdb6ce9297d80d32f24d7428996d0045cbf90cc345c677ba16"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := Digest(cp)
+
+	sig1, err := SignDigest(k1, digest)
+	if err != nil {
+		t.Fatalf("SignDigest: %v", err)
+	}
+
+	a, err := NewAggregator(AggregatorConfig{
+		BaseChainID:    cp.BaseChainID,
+		BridgeContract: cp.BridgeContract,
+		Operators:      []common.Address{op1},
+		Threshold:      1,
+		Now:            time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewAggregator: %v", err)
+	}
+
+	pkg := CheckpointPackageV1{
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Signers:         []common.Address{op1},
+		Signatures:      [][]byte{sig1},
+		CreatedAt:       time.Unix(1_700_000_000, 0).UTC(),
+	}
+	if err := a.RestorePendingPackage(pkg); err != nil {
+		t.Fatalf("RestorePendingPackage: %v", err)
+	}
+
+	got, ok, err := a.AddSignature(SignatureMessageV1{
+		Operator:   op1,
+		Digest:     digest,
+		Signature:  sig1,
+		Checkpoint: cp,
+		SignedAt:   time.Unix(0, 0),
+	})
+	if err != nil {
+		t.Fatalf("AddSignature: %v", err)
+	}
+	if !ok || got == nil {
+		t.Fatalf("expected restored package to be returned")
+	}
+	if got.Digest != digest {
+		t.Fatalf("digest: got %s want %s", got.Digest, digest)
 	}
 }
