@@ -9,6 +9,7 @@ This folder contains reusable scripts for online `dkg-ceremony` / `dkg-admin` op
 - `operator-export-kms.sh`: operator-side key package export workflows (age backup first, KMS+S3 later).
 - `backup-package.sh`: operator-side backup zipper for external storage/escrow.
 - `backup-package.sh restore`: restores operator runtime from `dkg-backup.zip` only.
+- `render-handoff.sh`: renders per-operator deployment handoff directories from the inventory plus local DKG backup zips.
 - `coordinator.sh`: coordinator-side ceremony initialization, preflight, and online run/resume.
 - `test-completiton.sh`: completion verifier that checks smoke-signature phases and outputs UFVK + Juno shielded address.
 - `common.sh`: shared helpers (dependency install, binary install, validation, Tailscale checks).
@@ -133,6 +134,39 @@ JUNO_DKG_ALLOW_INSECURE_NETWORK=1 ./operator.sh run \
   --workdir ~/.juno-dkg/operator-runtime \
   --daemon
 ```
+
+### 2.7) Render deployment handoff directories from local DKG artifacts
+
+Once each operator has a local `dkg-backup.zip`, render the per-operator handoff directories that the production rollout consumes:
+
+```bash
+./render-handoff.sh \
+  --inventory ./deploy/production/inventory-alpha.json \
+  --dkg-summary ./dkg-mainnet-2026-02-11/reports/dkg-summary.json \
+  --output-dir ./production-output
+```
+
+This writes:
+
+- `production-output/<env>/operators/<operator-id>/dkg-backup.zip`
+- `production-output/<env>/operators/<operator-id>/backup-manifest.json`
+- `production-output/<env>/operators/<operator-id>/admin-config.json`
+- `production-output/<env>/operators/<operator-id>/test-completiton.json` when the backup package included it
+- `production-output/<env>/operators/<operator-id>/operator-secrets.env` or `operator-secrets.env.age`
+- `production-output/<env>/operators/<operator-id>/dkg-handoff.json`
+
+For test deployments you can emit an encrypted secret contract instead of plaintext:
+
+```bash
+./render-handoff.sh \
+  --inventory ./deploy/production/inventory-alpha.json \
+  --dkg-summary ./dkg-mainnet-2026-02-11/reports/dkg-summary.json \
+  --output-dir ./production-output \
+  --secret-mode age \
+  --age-recipient age1...
+```
+
+The first validation step stays the same: restore from the copied `dkg-backup.zip` locally before any remote deployment.
 
 ### 3) Later, export to each operator's own KMS+S3 target
 

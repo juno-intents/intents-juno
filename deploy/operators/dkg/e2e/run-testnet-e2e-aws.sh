@@ -600,6 +600,21 @@ run_preflight_script_tests() {
   done
 }
 
+require_legacy_runner_flow_opt_in() {
+  local preflight_only="${1:-false}"
+  if [[ "$preflight_only" == "true" ]]; then
+    return 0
+  fi
+  if [[ "${JUNO_E2E_INTERNAL_CANARY_RUN:-0}" == "1" ]]; then
+    return 0
+  fi
+  if [[ "${JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW:-0}" == "1" ]]; then
+    return 0
+  fi
+
+  die "direct 'run' is frozen; use 'preflight' or 'canary'. Set JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW=1 to execute the legacy runner flow intentionally."
+}
+
 validate_sp1_credit_guardrail_preflight() {
   local sp1_requestor_key_file="$1"
   local sp1_rpc_url="$2"
@@ -2882,6 +2897,8 @@ command_run() {
     die "bridge summary reuse file not found: $reuse_bridge_summary_path"
   fi
 
+  require_legacy_runner_flow_opt_in "$preflight_only"
+
   ensure_base_dependencies
   ensure_local_command terraform
   ensure_local_command aws
@@ -4495,7 +4512,7 @@ command_canary() {
 
   local run_status=0
   set +e
-  "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \
+  JUNO_E2E_INTERNAL_CANARY_RUN=1 "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \
     "${wrapper_args[@]}" \
     -- "${canary_e2e_args[@]}" 2>&1 | tee "$canary_log"
   run_status="${PIPESTATUS[0]}"

@@ -1039,6 +1039,18 @@ test_run_deposit_auto_detection_polls_bridge_api_deposits_listing() {
   assert_contains "$script_text" "--scan-poll-interval" "deposit-relayer launch configures scan poll interval"
 }
 
+test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run() {
+  local aws_script script_text
+  aws_script="$SCRIPT_DIR/../e2e/run-testnet-e2e-aws.sh"
+  script_text="$(cat "$aws_script")"
+
+  assert_contains "$script_text" "require_legacy_runner_flow_opt_in() {" "aws wrapper defines runner-flow opt-in guard"
+  assert_contains "$script_text" 'JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW' "aws wrapper uses explicit env gate for legacy runner flow"
+  assert_contains "$script_text" "direct 'run' is frozen; use 'preflight' or 'canary'" "aws wrapper directs callers to replacement canaries"
+  assert_contains "$script_text" 'if [[ "${JUNO_E2E_INTERNAL_CANARY_RUN:-0}" == "1" ]]; then' "aws wrapper exempts internal canary launch from run freeze"
+  assert_contains "$script_text" 'JUNO_E2E_INTERNAL_CANARY_RUN=1 "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \' "canary subcommand re-enters run with internal override"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -1107,6 +1119,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_sp1_pgu_estimate_defaults_are_conservative_for_live_guardrails
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_auto_detection_polls_bridge_api_deposits_listing
+  test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run
 }
 
 main "$@"
