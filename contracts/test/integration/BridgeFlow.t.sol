@@ -139,6 +139,52 @@ contract BridgeFlowIntegrationTest is Test {
         assertEq(token.balanceOf(op1), pending1);
     }
 
+    function test_markPaid_allowsFinalizeAfterExpiry_and_blocksRefund() public {
+        address alice = makeAddr("alice");
+        address relayer = makeAddr("relayer");
+        uint256 amount = 50_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        bytes memory ua = bytes("uaddr1...");
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
+        vm.stopPrank();
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = wid;
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
+        bridge.markWithdrawPaidBatch(ids, paidSigs);
+
+        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+
+        vm.expectRevert(Bridge.WithdrawalPaid.selector);
+        bridge.refund(wid);
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+        uint256 net = amount - ((amount * FEE_BPS) / 10_000);
+        Bridge.FinalizeItem[] memory finals = new Bridge.FinalizeItem[](1);
+        finals[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256(ua), netAmount: net});
+
+        bytes memory withdrawJournal = abi.encode(
+            Bridge.WithdrawJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: finals
+            })
+        );
+
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"03", withdrawJournal);
+
+        assertEq(token.balanceOf(address(bridge)), 0);
+    }
+
     function _checkpoint() private view returns (Bridge.Checkpoint memory) {
         return Bridge.Checkpoint({
             height: 1,

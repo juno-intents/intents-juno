@@ -25,6 +25,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error InvalidWithdrawalRecipient();
     error WithdrawalNotFound();
     error WithdrawalFinalized();
+    error WithdrawalPaid();
     error WithdrawalRefunded();
     error WithdrawalExpired();
     error WithdrawNotExpired();
@@ -101,6 +102,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     bytes32 private constant EXTEND_TYPEHASH = keccak256(
         "ExtendWithdrawExpiry(bytes32 withdrawalIdsHash,uint64 newExpiry,uint256 baseChainId,address bridgeContract)"
     );
+    bytes32 private constant MARK_WITHDRAW_PAID_TYPEHASH =
+        keccak256("MarkWithdrawPaid(bytes32 withdrawalIdsHash,uint256 baseChainId,address bridgeContract)");
 
     // -------- State --------
     WJuno public immutable wjuno;
@@ -121,6 +124,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     uint256 public withdrawNonce;
 
     mapping(bytes32 => bool) public depositUsed;
+    mapping(bytes32 => bool) public withdrawalPaid;
     mapping(bytes32 => Withdrawal) private _withdrawals;
 
     // -------- Events --------
@@ -150,6 +154,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId);
     event WithdrawRefunded(bytes32 indexed withdrawalId);
     event WithdrawExpiryExtended(bytes32 indexed withdrawalId, uint64 oldExpiry, uint64 newExpiry);
+    event WithdrawPaidMarked(bytes32 indexed withdrawalId);
 
     constructor(
         address initialOwner,
@@ -189,7 +194,14 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         minDepositAmount = minDepositAmount_;
         minWithdrawAmount = minWithdrawAmount_;
 
-        emit ParamsUpdated(feeBps_, relayerTipBps_, refundWindowSeconds_, maxExpiryExtensionSeconds_, minDepositAmount_, minWithdrawAmount_);
+        emit ParamsUpdated(
+            feeBps_,
+            relayerTipBps_,
+            refundWindowSeconds_,
+            maxExpiryExtensionSeconds_,
+            minDepositAmount_,
+            minWithdrawAmount_
+        );
         emit VerifierUpdated(address(verifier_));
         emit ImageIdsUpdated(depositImageId_, withdrawImageId_);
     }
@@ -215,7 +227,14 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         minDepositAmount = newMinDepositAmount;
         minWithdrawAmount = newMinWithdrawAmount;
 
-        emit ParamsUpdated(newFeeBps, newRelayerTipBps, newRefundWindowSeconds, newMaxExpiryExtensionSeconds, newMinDepositAmount, newMinWithdrawAmount);
+        emit ParamsUpdated(
+            newFeeBps,
+            newRelayerTipBps,
+            newRefundWindowSeconds,
+            newMaxExpiryExtensionSeconds,
+            newMinDepositAmount,
+            newMinWithdrawAmount
+        );
     }
 
     function setVerifier(ISP1Verifier newVerifier) external onlyOwner {
@@ -259,6 +278,12 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     function extendWithdrawDigest(bytes32 withdrawalIdsHash, uint64 newExpiry) public view returns (bytes32) {
         bytes32 structHash =
             keccak256(abi.encode(EXTEND_TYPEHASH, withdrawalIdsHash, newExpiry, block.chainid, address(this)));
+        return _hashTypedDataV4(structHash);
+    }
+
+    function markWithdrawPaidDigest(bytes32 withdrawalIdsHash) public view returns (bytes32) {
+        bytes32 structHash =
+            keccak256(abi.encode(MARK_WITHDRAW_PAID_TYPEHASH, withdrawalIdsHash, block.chainid, address(this)));
         return _hashTypedDataV4(structHash);
     }
 
@@ -382,6 +407,29 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         }
     }
 
+    function markWithdrawPaidBatch(bytes32[] calldata withdrawalIds, bytes[] calldata operatorSigs) external {
+        uint256 n = withdrawalIds.length;
+        if (n == 0 || n > MAX_EXTEND_BATCH) revert InvalidExtendBatch();
+
+        for (uint256 i = 1; i < n; i++) {
+            if (withdrawalIds[i] <= withdrawalIds[i - 1]) revert SignaturesNotSortedOrUnique();
+        }
+
+        bytes32 idsHash = keccak256(abi.encodePacked(withdrawalIds));
+        _verifyOperatorSigs(markWithdrawPaidDigest(idsHash), operatorSigs);
+
+        for (uint256 i = 0; i < n; i++) {
+            bytes32 withdrawalId = withdrawalIds[i];
+            Withdrawal storage w = _withdrawals[withdrawalId];
+            if (w.requester == address(0)) revert WithdrawalNotFound();
+            if (w.finalized || withdrawalPaid[withdrawalId]) continue;
+            if (w.refunded) revert WithdrawalRefunded();
+
+            withdrawalPaid[withdrawalId] = true;
+            emit WithdrawPaidMarked(withdrawalId);
+        }
+    }
+
     function finalizeWithdrawBatch(
         Checkpoint calldata checkpoint,
         bytes[] calldata operatorSigs,
@@ -410,7 +458,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 continue;
             }
             if (w.refunded) revert WithdrawalRefunded();
-            if (block.timestamp >= w.expiry) revert WithdrawalExpired();
+            if (!withdrawalPaid[it.withdrawalId] && block.timestamp >= w.expiry) revert WithdrawalExpired();
 
             if (it.recipientUAHash != keccak256(w.recipientUA)) revert WithdrawalRecipientMismatch();
 
@@ -437,6 +485,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         Withdrawal storage w = _withdrawals[withdrawalId];
         if (w.requester == address(0)) revert WithdrawalNotFound();
         if (w.finalized) revert WithdrawalFinalized();
+        if (withdrawalPaid[withdrawalId]) revert WithdrawalPaid();
         if (w.refunded) revert WithdrawalRefunded();
         if (block.timestamp < w.expiry) revert WithdrawNotExpired();
 
@@ -489,7 +538,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     function _verifySeal(bytes calldata seal, bytes32 imageId, bytes calldata journal) internal view {
-        try verifier.verifyProof(imageId, journal, seal) {} catch {
+        try verifier.verifyProof(imageId, journal, seal) {}
+        catch {
             revert InvalidProof();
         }
     }

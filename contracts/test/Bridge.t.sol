@@ -154,6 +154,81 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
+    function test_markWithdrawPaidBatch_blocksRefund_andAllowsLateFinalize() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 100_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        bytes memory ua = bytes("uaddr1...");
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, ua);
+        vm.stopPrank();
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = wid;
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
+
+        bridge.markWithdrawPaidBatch(ids, paidSigs);
+        assertTrue(bridge.withdrawalPaid(wid));
+
+        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+
+        vm.expectRevert(Bridge.WithdrawalPaid.selector);
+        bridge.refund(wid);
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 tip = (fee * TIP_BPS) / 10_000;
+        uint256 feeToDist = fee - tip;
+        uint256 net = amount - fee;
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
+        items[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256(ua), netAmount: net});
+        bytes memory journal = abi.encode(
+            Bridge.WithdrawJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: items
+            })
+        );
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
+
+        bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"05", journal);
+
+        assertEq(token.balanceOf(relayer), tip);
+        assertEq(token.balanceOf(address(distributor)), feeToDist);
+        assertEq(token.balanceOf(address(bridge)), 0);
+    }
+
+    function test_markWithdrawPaidBatch_requiresQuorumSignatures() public {
+        address alice = makeAddr("alice");
+        uint256 amount = 10_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
+        vm.stopPrank();
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = wid;
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory sigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(2));
+
+        vm.expectRevert(Bridge.InsufficientSignatures.selector);
+        bridge.markWithdrawPaidBatch(ids, sigs);
+    }
+
     function test_finalizeWithdrawBatch_burnsAndDistributesFees_andIdempotent() public {
         address alice = makeAddr("alice");
         uint256 amount = 100_000;
@@ -227,11 +302,7 @@ contract BridgeTest is Test {
         Bridge.Checkpoint memory cp = _checkpoint();
 
         Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
-        items[0] = Bridge.FinalizeItem({
-            withdrawalId: wid,
-            recipientUAHash: keccak256("wrong-ua"),
-            netAmount: net
-        });
+        items[0] = Bridge.FinalizeItem({withdrawalId: wid, recipientUAHash: keccak256("wrong-ua"), netAmount: net});
         Bridge.WithdrawJournal memory wj = Bridge.WithdrawJournal({
             finalOrchardRoot: cp.finalOrchardRoot,
             baseChainId: cp.baseChainId,
