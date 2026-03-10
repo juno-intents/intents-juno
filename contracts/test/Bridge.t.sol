@@ -31,6 +31,20 @@ contract MockVerifierRouter is ISP1Verifier {
     }
 }
 
+contract MockStringVerifier is ISP1Verifier {
+    function verifyProof(bytes32, bytes calldata, bytes calldata) external pure {
+        revert("string verifier failure");
+    }
+}
+
+contract MockPanicVerifier is ISP1Verifier {
+    function verifyProof(bytes32, bytes calldata, bytes calldata) external pure {
+        uint256 zero = 0;
+        uint256 value = 1 / zero;
+        value;
+    }
+}
+
 contract BridgeTest is Test {
     WJuno private token;
     OperatorRegistry private registry;
@@ -592,6 +606,30 @@ contract BridgeTest is Test {
                 Bridge.VerifierReverted.selector, abi.encodeWithSelector(MockVerifierRouter.VerifyFailed.selector)
             )
         );
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
+    function test_mintBatch_surfacesVerifierStringError() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes memory journal = _depositJournal(cp, 1);
+        bridge.setVerifier(new MockStringVerifier());
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(Bridge.VerifierStringError.selector, "string verifier failure")
+        );
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
+    function test_mintBatch_surfacesVerifierPanic() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes memory journal = _depositJournal(cp, 1);
+        bridge.setVerifier(new MockPanicVerifier());
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(abi.encodeWithSelector(Bridge.VerifierPanic.selector, uint256(0x12)));
         bridge.mintBatch(cp, sigs, hex"01", journal);
     }
 
