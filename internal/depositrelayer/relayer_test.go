@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
+	"math"
 	"math/big"
 	"reflect"
 	"strings"
@@ -155,6 +156,55 @@ func mustType(t *testing.T, typ string, comps []abi.ArgumentMarshaling) abi.Type
 	return ty
 }
 
+func TestRelayer_IngestDeposit_RejectsLeafIndexOverflow(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	operatorKey := mustOperatorKey(t)
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = r.IngestDeposit(context.Background(), DepositEvent{
+		Commitment: common.HexToHash("0x01"),
+		LeafIndex:  math.MaxUint32 + 1,
+		Amount:     1000,
+		Memo:       memoBytes[:],
+	})
+	if !errors.Is(err, ErrInvalidEvent) {
+		t.Fatalf("expected ErrInvalidEvent, got %v", err)
+	}
+	if !errors.Is(err, idempotency.ErrDepositLeafIndexOverflow) {
+		t.Fatalf("expected ErrDepositLeafIndexOverflow, got %v", err)
+	}
+}
+
 func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	t.Parallel()
 
@@ -289,7 +339,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 		t.Fatalf("amount mismatch: got %s", gotAmt.String())
 	}
 	gotDepID := it.FieldByName("DepositId").Interface().([32]byte)
-	wantDepID := idempotency.DepositIDV1(cm, 7)
+	wantDepID := idempotency.MustDepositIDV1(cm, 7)
 	if gotDepID != wantDepID {
 		t.Fatalf("depositId mismatch: got %x want %x", gotDepID, wantDepID)
 	}
@@ -394,7 +444,7 @@ func TestRelayer_ProcessesConfirmedDepositsFromStore(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
-	depositID := idempotency.DepositIDV1(cm, 7)
+	depositID := idempotency.MustDepositIDV1(cm, 7)
 
 	store := deposit.NewMemoryStore()
 	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
@@ -674,7 +724,7 @@ func TestRelayer_FinalizeStoreFailureLeavesDepositSubmitted(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
-	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	baseStore := deposit.NewMemoryStore()
@@ -744,7 +794,7 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
 	var cm common.Hash
 	cm[0] = 0xaa
-	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
 
 	store := deposit.NewMemoryStore()
 
@@ -855,7 +905,7 @@ func TestRelayer_RetriesSubmittedDepositsOnLaterFlush(t *testing.T) {
 
 	var cm common.Hash
 	cm[0] = 0xaa
-	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	store := deposit.NewMemoryStore()
@@ -961,7 +1011,7 @@ func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) 
 
 	var cm common.Hash
 	cm[0] = 0xaa
-	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
 	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
 
 	store := deposit.NewMemoryStore()
@@ -1350,7 +1400,7 @@ func TestRelayer_DLQ_BridgeTxReverted(t *testing.T) {
 	sender := &stubSender{
 		res: httpapi.SendResponse{
 			TxHash:  "0xdeadbeef",
-			Receipt: &httpapi.ReceiptResponse{Status: 0},
+			Receipt: &httpapi.ReceiptResponse{Status: 0, RevertReason: "bridge paused"},
 		},
 	}
 	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
@@ -1406,5 +1456,8 @@ func TestRelayer_DLQ_BridgeTxReverted(t *testing.T) {
 	}
 	if recs[0].FailureStage != "bridge_tx" {
 		t.Fatalf("failure_stage: got %q want %q", recs[0].FailureStage, "bridge_tx")
+	}
+	if !strings.Contains(recs[0].ErrorMessage, "bridge paused") {
+		t.Fatalf("expected revert reason in DLQ error message, got %q", recs[0].ErrorMessage)
 	}
 }

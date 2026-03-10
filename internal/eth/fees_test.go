@@ -1,6 +1,7 @@
 package eth
 
 import (
+	"errors"
 	"math/big"
 	"testing"
 )
@@ -44,5 +45,12 @@ func TestBump1559Fees_BumpsWithMinIncrementAndKeepsFeeAboveTip(t *testing.T) {
 	}
 	if newFee.Cmp(newTip) < 0 {
 		t.Fatalf("feeCap must be >= tipCap: fee=%s tip=%s", newFee, newTip)
+	}
+}
+
+func TestEnsureFeeCap_RejectsWhenDerivedFeeExceedsCap(t *testing.T) {
+	err := EnsureFeeCap(bi(205), bi(200))
+	if !errors.Is(err, ErrFeeCapReached) {
+		t.Fatalf("expected ErrFeeCapReached, got %v", err)
 	}
 }

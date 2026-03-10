@@ -15,6 +15,7 @@ import (
 )
 
 var ErrInvalidClientConfig = errors.New("httpapi: invalid client config")
+var ErrFeeCapReached = errors.New("httpapi: fee cap reached")
 
 type ClientOption func(*Client) error
 
@@ -113,6 +114,7 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (SendResponse, error
 
 	if resp.StatusCode != http.StatusOK {
 		msg := strings.TrimSpace(string(body))
+		code := ""
 		if msg == "" {
 			msg = resp.Status
 		} else {
@@ -120,8 +122,12 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (SendResponse, error
 				Error string `json:"error"`
 			}
 			if json.Unmarshal(body, &er) == nil && er.Error != "" {
+				code = er.Error
 				msg = er.Error
 			}
+		}
+		if code == "fee_cap_reached" {
+			return SendResponse{}, fmt.Errorf("%w: status %d", ErrFeeCapReached, resp.StatusCode)
 		}
 		return SendResponse{}, fmt.Errorf("httpapi: status %d: %s", resp.StatusCode, msg)
 	}
@@ -151,4 +157,3 @@ func readAllLimited(r io.Reader, maxBytes int64) ([]byte, error) {
 	}
 	return b, nil
 }
-

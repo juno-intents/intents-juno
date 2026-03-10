@@ -237,7 +237,7 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 	cm[0] = 0xaa
 	const amount = uint64(100_000)
 
-	depositIDBytes := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositIDBytes := idempotency.MustDepositIDV1([32]byte(cm), 7)
 	if err := r.IngestDeposit(ctx, DepositEvent{
 		Commitment: cm,
 		LeafIndex:  7,

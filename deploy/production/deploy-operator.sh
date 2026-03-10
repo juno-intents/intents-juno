@@ -97,8 +97,153 @@ SCP_OPTS=("${SSH_OPTS[@]}")
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
+generated_base_relayer_tls_files=()
 success="false"
 reserved="false"
+
+env_has_key() {
+  local file="$1"
+  local key="$2"
+  grep -q "^${key}=" "$file"
+}
+
+env_get_value() {
+  local file="$1"
+  local key="$2"
+  awk -F= -v key="$key" '
+    index($0, key "=") == 1 {
+      print substr($0, length(key) + 2)
+      exit
+    }
+  ' "$file"
+}
+
+set_env_value_local() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    index($0, key "=") == 1 {
+      print key "=" value
+      updated = 1
+      next
+    }
+    { print }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+delete_env_key_local() {
+  local file="$1"
+  local key="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" 'index($0, key "=") != 1 { print }' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+derive_base_relayer_allowlist() {
+  local shared_manifest="$1"
+  jq -r '
+    [
+      .contracts.bridge,
+      .contracts.wjuno,
+      .contracts.operator_registry,
+      .contracts.fee_distributor
+    ]
+    | map(select(type == "string" and test("^0x[0-9a-fA-F]{40}$")))
+    | unique
+    | join(",")
+  ' "$shared_manifest"
+}
+
+derive_base_relayer_url() {
+  local listen_addr="$1"
+  local scheme="$2"
+  if [[ "$listen_addr" == :* ]]; then
+    printf '%s://127.0.0.1%s\n' "$scheme" "$listen_addr"
+    return 0
+  fi
+  printf '%s://%s\n' "$scheme" "$listen_addr"
+}
+
+decode_base64_to_file() {
+  local value="$1"
+  local output_file="$2"
+  if printf '%s' "$value" | base64 --decode >"$output_file" 2>/dev/null; then
+    return 0
+  fi
+  printf '%s' "$value" | base64 -D >"$output_file"
+}
+
+prepare_base_relayer_env() {
+  local shared_manifest="$1"
+  local env_file="$2"
+  local staging_dir="$3"
+  local cert_b64 key_b64 cert_file key_file listen_addr scheme allowlist
+
+  if ! env_has_key "$env_file" "BASE_RELAYER_LISTEN_ADDR"; then
+    set_env_value_local "$env_file" "BASE_RELAYER_LISTEN_ADDR" "127.0.0.1:18081"
+  fi
+  listen_addr="$(env_get_value "$env_file" "BASE_RELAYER_LISTEN_ADDR")"
+  if [[ -z "$listen_addr" ]]; then
+    listen_addr="127.0.0.1:18081"
+    set_env_value_local "$env_file" "BASE_RELAYER_LISTEN_ADDR" "$listen_addr"
+  fi
+
+  if ! env_has_key "$env_file" "BASE_RELAYER_ALLOWED_CONTRACTS"; then
+    allowlist="$(derive_base_relayer_allowlist "$shared_manifest")"
+    if [[ -n "$allowlist" ]]; then
+      set_env_value_local "$env_file" "BASE_RELAYER_ALLOWED_CONTRACTS" "$allowlist"
+    fi
+  fi
+  if ! env_has_key "$env_file" "BASE_RELAYER_RATE_LIMIT_PER_SECOND"; then
+    set_env_value_local "$env_file" "BASE_RELAYER_RATE_LIMIT_PER_SECOND" "20"
+  fi
+  if ! env_has_key "$env_file" "BASE_RELAYER_RATE_LIMIT_BURST"; then
+    set_env_value_local "$env_file" "BASE_RELAYER_RATE_LIMIT_BURST" "40"
+  fi
+  if ! env_has_key "$env_file" "BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS"; then
+    set_env_value_local "$env_file" "BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS" "10000"
+  fi
+
+  cert_b64="$(env_get_value "$env_file" "BASE_RELAYER_TLS_CERT_PEM_B64")"
+  key_b64="$(env_get_value "$env_file" "BASE_RELAYER_TLS_KEY_PEM_B64")"
+  if [[ -n "$cert_b64" || -n "$key_b64" ]]; then
+    [[ -n "$cert_b64" && -n "$key_b64" ]] || die "BASE_RELAYER_TLS_CERT_PEM_B64 and BASE_RELAYER_TLS_KEY_PEM_B64 must be set together"
+    cert_file="$staging_dir/base-relayer-server.pem"
+    key_file="$staging_dir/base-relayer-server.key"
+    decode_base64_to_file "$cert_b64" "$cert_file"
+    decode_base64_to_file "$key_b64" "$key_file"
+    chmod 0600 "$key_file"
+    generated_base_relayer_tls_files=("$cert_file" "$key_file")
+    set_env_value_local "$env_file" "BASE_RELAYER_TLS_CERT_FILE" "/etc/intents-juno/base-relayer/server.pem"
+    set_env_value_local "$env_file" "BASE_RELAYER_TLS_KEY_FILE" "/etc/intents-juno/base-relayer/server.key"
+    delete_env_key_local "$env_file" "BASE_RELAYER_TLS_CERT_PEM_B64"
+    delete_env_key_local "$env_file" "BASE_RELAYER_TLS_KEY_PEM_B64"
+  fi
+
+  cert_file="$(env_get_value "$env_file" "BASE_RELAYER_TLS_CERT_FILE")"
+  key_file="$(env_get_value "$env_file" "BASE_RELAYER_TLS_KEY_FILE")"
+  if [[ -n "$cert_file" || -n "$key_file" ]]; then
+    [[ -n "$cert_file" && -n "$key_file" ]] || die "BASE_RELAYER_TLS_CERT_FILE and BASE_RELAYER_TLS_KEY_FILE must be set together"
+    scheme="https"
+  else
+    scheme="http"
+  fi
+
+  if ! env_has_key "$env_file" "BASE_RELAYER_URL"; then
+    set_env_value_local "$env_file" "BASE_RELAYER_URL" "$(derive_base_relayer_url "$listen_addr" "$scheme")"
+  fi
+}
 
 cleanup() {
   if [[ "$reserved" == "true" && "$success" != "true" ]]; then
@@ -110,6 +255,7 @@ trap cleanup EXIT
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
 production_render_operator_stack_env "$shared_manifest_path" "$resolved_secret_env" "$merged_env"
+prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
 reserved="true"
@@ -123,6 +269,9 @@ files_to_copy=(
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
   "$REPO_ROOT/deploy/operators/dkg/common.sh"
 )
+for tls_file in "${generated_base_relayer_tls_files[@]}"; do
+  files_to_copy+=("$tls_file")
+done
 
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
@@ -163,7 +312,15 @@ set_env_value() {
 }
 
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno || true
+sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno/base-relayer || true
 sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir" || true
+
+if [[ -f "$remote_stage_dir/base-relayer-server.pem" ]]; then
+  sudo install -m 0640 "$remote_stage_dir/base-relayer-server.pem" /etc/intents-juno/base-relayer/server.pem
+fi
+if [[ -f "$remote_stage_dir/base-relayer-server.key" ]]; then
+  sudo install -m 0640 "$remote_stage_dir/base-relayer-server.key" /etc/intents-juno/base-relayer/server.key
+fi
 
 while IFS= read -r line || [[ -n "$line" ]]; do
   [[ -n "$line" ]] || continue

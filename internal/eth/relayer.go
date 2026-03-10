@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 var ErrInvalidRelayerConfig = errors.New("eth: invalid relayer config")
@@ -23,12 +25,14 @@ type Backend interface {
 	EstimateGas(ctx context.Context, msg ethereum.CallMsg) (uint64, error)
 	SendTransaction(ctx context.Context, tx *types.Transaction) error
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 }
 
 type RelayerConfig struct {
 	ChainID            *big.Int
 	GasLimitMultiplier float64
 	MinTipCap          *big.Int
+	MaxFeeCap          *big.Int
 
 	ReceiptPollInterval time.Duration
 
@@ -64,6 +68,8 @@ type SendResult struct {
 	TxHash       common.Hash
 	Receipt      *types.Receipt
 	Replacements int
+	RevertReason string
+	RevertData   []byte
 }
 
 func NewRelayer(backend Backend, signers []Signer, cfg RelayerConfig) (*Relayer, error) {
@@ -77,6 +83,9 @@ func NewRelayer(backend Backend, signers []Signer, cfg RelayerConfig) (*Relayer,
 		return nil, ErrInvalidRelayerConfig
 	}
 	if cfg.MinTipCap == nil || cfg.MinTipCap.Sign() < 0 {
+		return nil, ErrInvalidRelayerConfig
+	}
+	if cfg.MaxFeeCap != nil && cfg.MaxFeeCap.Sign() < 0 {
 		return nil, ErrInvalidRelayerConfig
 	}
 	if cfg.ReceiptPollInterval <= 0 {
@@ -175,6 +184,9 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 	if err != nil {
 		return SendResult{}, err
 	}
+	if err := EnsureFeeCap(feeCap, r.cfg.MaxFeeCap); err != nil {
+		return SendResult{}, err
+	}
 
 	nonce, err := nm.Next(ctx)
 	if err != nil {
@@ -203,28 +215,32 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 		return signed, signed.Hash(), nil
 	}
 
-	signed, h, err := makeSigned(tipCap, feeCap)
+	signed, _, err := makeSigned(tipCap, feeCap)
 	if err != nil {
 		return SendResult{}, err
 	}
 	if err := r.backend.SendTransaction(ctx, signed); err != nil {
-		return SendResult{}, err
+		return SendResult{}, syncNonceOnSendFailure(ctx, nm, err)
 	}
 
-	sent := []common.Hash{h}
+	sent := []*types.Transaction{signed}
 	lastSentAt := r.cfg.Now()
 	replacements := 0
 
 	for {
-		for _, txh := range sent {
+		for _, sentTx := range sent {
+			txh := sentTx.Hash()
 			receipt, err := r.backend.TransactionReceipt(ctx, txh)
 			if err == nil {
+				revertReason, revertData := r.decodeRevert(ctx, from, sentTx, receipt)
 				return SendResult{
 					From:         from,
 					Nonce:        nonce,
 					TxHash:       txh,
 					Receipt:      receipt,
 					Replacements: replacements,
+					RevertReason: revertReason,
+					RevertData:   revertData,
 				}, nil
 			}
 			if !errors.Is(err, ethereum.NotFound) {
@@ -238,15 +254,18 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 			if err != nil {
 				return SendResult{}, err
 			}
+			if err := EnsureFeeCap(feeCap, r.cfg.MaxFeeCap); err != nil {
+				return SendResult{}, err
+			}
 
-			signed, h, err := makeSigned(tipCap, feeCap)
+			signed, _, err := makeSigned(tipCap, feeCap)
 			if err != nil {
 				return SendResult{}, err
 			}
 			if err := r.backend.SendTransaction(ctx, signed); err != nil {
-				return SendResult{}, err
+				return SendResult{}, syncNonceOnSendFailure(ctx, nm, err)
 			}
-			sent = append(sent, h)
+			sent = append(sent, signed)
 			lastSentAt = r.cfg.Now()
 			replacements++
 			continue
@@ -256,6 +275,44 @@ func (r *Relayer) SendAndWaitMined(ctx context.Context, req TxRequest) (SendResu
 			return SendResult{}, err
 		}
 	}
+}
+
+func syncNonceOnSendFailure(ctx context.Context, nm *NonceManager, sendErr error) error {
+	if _, err := nm.Sync(ctx); err != nil {
+		return fmt.Errorf("%w (nonce sync: %v)", sendErr, err)
+	}
+	return sendErr
+}
+
+func (r *Relayer) decodeRevert(ctx context.Context, from common.Address, tx *types.Transaction, receipt *types.Receipt) (string, []byte) {
+	if receipt == nil || receipt.Status == types.ReceiptStatusSuccessful || tx == nil || tx.To() == nil {
+		return "", nil
+	}
+
+	msg := ethereum.CallMsg{
+		From:       from,
+		To:         tx.To(),
+		Gas:        tx.Gas(),
+		GasFeeCap:  tx.GasFeeCap(),
+		GasTipCap:  tx.GasTipCap(),
+		Value:      tx.Value(),
+		Data:       tx.Data(),
+		AccessList: tx.AccessList(),
+	}
+	_, err := r.backend.CallContract(ctx, msg, receipt.BlockNumber)
+	if err == nil {
+		return "", nil
+	}
+
+	revertData, ok := ethclient.RevertErrorData(err)
+	if !ok {
+		return "", nil
+	}
+	reason, decodeErr := abi.UnpackRevert(revertData)
+	if decodeErr != nil {
+		return "", append([]byte(nil), revertData...)
+	}
+	return reason, append([]byte(nil), revertData...)
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) error {

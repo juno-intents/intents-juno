@@ -210,11 +210,11 @@ type report struct {
 
 	Governance struct {
 		Timelock struct {
-			Address            string   `json:"address,omitempty"`
-			MinDelaySeconds    uint64   `json:"min_delay_seconds,omitempty"`
-			Proposers          []string `json:"proposers,omitempty"`
-			Executors          []string `json:"executors,omitempty"`
-			BridgeUpdateSteps  []string `json:"bridge_update_steps,omitempty"`
+			Address           string   `json:"address,omitempty"`
+			MinDelaySeconds   uint64   `json:"min_delay_seconds,omitempty"`
+			Proposers         []string `json:"proposers,omitempty"`
+			Executors         []string `json:"executors,omitempty"`
+			BridgeUpdateSteps []string `json:"bridge_update_steps,omitempty"`
 		} `json:"timelock,omitempty"`
 	} `json:"governance,omitempty"`
 
@@ -1016,7 +1016,10 @@ func deriveDepositIDFromWitnessItem(item []byte) (common.Hash, error) {
 	leafIndex := binary.LittleEndian.Uint32(item[depositWitnessLeafIndexOffset : depositWitnessLeafIndexOffset+4])
 	var cm [32]byte
 	copy(cm[:], item[depositWitnessCMXOffset:depositWitnessCMXOffset+32])
-	depositID := idempotency.DepositIDV1(cm, uint64(leafIndex))
+	depositID, err := idempotency.DepositIDV1(cm, uint64(leafIndex))
+	if err != nil {
+		return common.Hash{}, err
+	}
 	return common.Hash(depositID), nil
 }
 

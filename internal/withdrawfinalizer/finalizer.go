@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -393,6 +394,13 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return fmt.Errorf("withdrawfinalizer: base-relayer did not return a receipt")
 	}
 	if res.Receipt.Status != 1 {
+		revertDetail := strings.TrimSpace(res.Receipt.RevertReason)
+		if revertDetail == "" {
+			revertDetail = strings.TrimSpace(res.Receipt.RevertData)
+		}
+		if revertDetail != "" {
+			return fmt.Errorf("withdrawfinalizer: finalizeWithdrawBatch tx reverted: %s", revertDetail)
+		}
 		return fmt.Errorf("withdrawfinalizer: finalizeWithdrawBatch tx reverted")
 	}
 

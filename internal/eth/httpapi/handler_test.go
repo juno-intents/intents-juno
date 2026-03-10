@@ -4,9 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -17,9 +19,11 @@ type stubSender struct {
 	gotReq eth.TxRequest
 	res    eth.SendResult
 	err    error
+	calls  int
 }
 
 func (s *stubSender) SendAndWaitMined(_ context.Context, req eth.TxRequest) (eth.SendResult, error) {
+	s.calls++
 	s.gotReq = req
 	return s.res, s.err
 }
@@ -108,5 +112,146 @@ func TestHandler_ProbePathsRemainUnauthenticated(t *testing.T) {
 		if rr.Code != http.StatusOK {
 			t.Fatalf("%s status: got %d want %d", path, rr.Code, http.StatusOK)
 		}
+	}
+}
+
+func TestHandler_RejectsSendOutsideAllowlist(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000002")},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
+	}
+}
+
+func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{
+		res: eth.SendResult{
+			From:   common.HexToAddress("0x0000000000000000000000000000000000000002"),
+			Nonce:  9,
+			TxHash: common.HexToHash("0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
+			Receipt: &types.Receipt{
+				Status: types.ReceiptStatusSuccessful,
+			},
+		},
+	}
+	now := time.Unix(1_700_000_000, 0)
+	h := NewHandler(sender, Config{
+		AuthToken:          "secret",
+		MaxBodyBytes:       1024,
+		MaxWaitSeconds:     60,
+		IdempotencyTTL:     time.Minute,
+		IdempotencyMaxKeys: 8,
+		Now: func() time.Time {
+			return now
+		},
+	})
+
+	body := []byte(`{"to":"0x0000000000000000000000000000000000000001","gas_limit":21000}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req1.Header.Set("Authorization", "Bearer secret")
+	req1.Header.Set("Idempotency-Key", "abc123")
+	rr1 := httptest.NewRecorder()
+	h.ServeHTTP(rr1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req2.Header.Set("Authorization", "Bearer secret")
+	req2.Header.Set("Idempotency-Key", "abc123")
+	rr2 := httptest.NewRecorder()
+	h.ServeHTTP(rr2, req2)
+
+	if rr1.Code != http.StatusOK || rr2.Code != http.StatusOK {
+		t.Fatalf("statuses: got %d and %d want 200", rr1.Code, rr2.Code)
+	}
+	if rr1.Body.String() != rr2.Body.String() {
+		t.Fatalf("replayed body mismatch: %s != %s", rr1.Body.String(), rr2.Body.String())
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender calls: got %d want 1", sender.calls)
+	}
+}
+
+func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{
+		err: errors.New("boom"),
+	}
+	now := time.Unix(1_700_000_000, 0)
+	hToken := NewHandler(sender, Config{
+		AuthToken:                  "secret",
+		MaxBodyBytes:               1024,
+		MaxWaitSeconds:             60,
+		RateLimitPerSecond:         1,
+		RateLimitBurst:             1,
+		RateLimitMaxTrackedClients: 4,
+		Now: func() time.Time {
+			return now
+		},
+	})
+
+	body := []byte(`{"to":"0x0000000000000000000000000000000000000001"}`)
+	req1 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req1.Header.Set("Authorization", "Bearer secret")
+	req1.RemoteAddr = "203.0.113.9:1234"
+	rr1 := httptest.NewRecorder()
+	hToken.ServeHTTP(rr1, req1)
+
+	req2 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req2.Header.Set("Authorization", "Bearer secret")
+	req2.RemoteAddr = "198.51.100.7:5555"
+	rr2 := httptest.NewRecorder()
+	hToken.ServeHTTP(rr2, req2)
+
+	if rr1.Code != http.StatusInternalServerError {
+		t.Fatalf("first status: got %d want %d", rr1.Code, http.StatusInternalServerError)
+	}
+	if rr2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second status: got %d want %d body=%s", rr2.Code, http.StatusTooManyRequests, rr2.Body.String())
+	}
+
+	hIP := NewHandler(sender, Config{
+		MaxBodyBytes:               1024,
+		MaxWaitSeconds:             60,
+		RateLimitPerSecond:         1,
+		RateLimitBurst:             1,
+		RateLimitMaxTrackedClients: 4,
+		Now: func() time.Time {
+			return now
+		},
+	})
+
+	now = now.Add(time.Second)
+	req3 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req3.RemoteAddr = "203.0.113.10:3333"
+	rr3 := httptest.NewRecorder()
+	hIP.ServeHTTP(rr3, req3)
+	if rr3.Code != http.StatusInternalServerError {
+		t.Fatalf("ip fallback status: got %d want %d", rr3.Code, http.StatusInternalServerError)
+	}
+
+	req4 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
+	req4.RemoteAddr = "203.0.113.10:4444"
+	rr4 := httptest.NewRecorder()
+	hIP.ServeHTTP(rr4, req4)
+	if rr4.Code != http.StatusTooManyRequests {
+		t.Fatalf("ip fallback throttled status: got %d want %d body=%s", rr4.Code, http.StatusTooManyRequests, rr4.Body.String())
 	}
 }

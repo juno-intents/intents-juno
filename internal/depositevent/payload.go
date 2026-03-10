@@ -48,7 +48,10 @@ func BuildPayload(baseChainID uint32, bridge, recipient common.Address, amount, 
 		Flags:         0,
 	}
 	memoBytes := memoValue.Encode()
-	depositID := idempotency.DepositIDV1([32]byte(cm), leafIndex)
+	depositID, err := idempotency.DepositIDV1([32]byte(cm), leafIndex)
+	if err != nil {
+		return Payload{}, err
+	}
 
 	return Payload{
 		Version:          "deposits.event.v1",

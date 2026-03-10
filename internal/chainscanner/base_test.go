@@ -20,6 +20,8 @@ type mockEthClient struct {
 	logs           []types.Log
 	filterLogsErr  error
 	filterCalls    []ethereum.FilterQuery
+	headers        map[uint64]*types.Header
+	headerErr      error
 }
 
 func (m *mockEthClient) BlockNumber(_ context.Context) (uint64, error) {
@@ -29,6 +31,37 @@ func (m *mockEthClient) BlockNumber(_ context.Context) (uint64, error) {
 func (m *mockEthClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
 	m.filterCalls = append(m.filterCalls, q)
 	return m.logs, m.filterLogsErr
+}
+
+func (m *mockEthClient) HeaderByNumber(_ context.Context, number *big.Int) (*types.Header, error) {
+	if m.headerErr != nil {
+		return nil, m.headerErr
+	}
+	if number == nil {
+		return nil, errors.New("nil header number")
+	}
+	if m.headers == nil {
+		m.headers = make(map[uint64]*types.Header)
+	}
+	height := number.Uint64()
+	hdr, ok := m.headers[height]
+	if !ok {
+		var parent common.Hash
+		if height > 0 {
+			prev, err := m.HeaderByNumber(context.Background(), new(big.Int).SetUint64(height-1))
+			if err != nil {
+				return nil, err
+			}
+			parent = prev.Hash()
+		}
+		hdr = &types.Header{
+			Number:     new(big.Int).SetUint64(height),
+			ParentHash: parent,
+			Extra:      common.LeftPadBytes(new(big.Int).SetUint64(height).Bytes(), 8),
+		}
+		m.headers[height] = hdr
+	}
+	return hdr, nil
 }
 
 func TestNewBaseScanner_Validation(t *testing.T) {
@@ -496,5 +529,93 @@ func TestBaseScanner_StartBlockUsedWhenNoState(t *testing.T) {
 	from := client.filterCalls[0].FromBlock.Int64()
 	if from != 150 {
 		t.Fatalf("expected from=150 (startBlock), got %d", from)
+	}
+}
+
+func TestBaseScanner_RewindsOnStoredHashMismatch(t *testing.T) {
+	t.Parallel()
+
+	makeHeader := func(number uint64, parent common.Hash, extra byte) *types.Header {
+		return &types.Header{
+			Number:     new(big.Int).SetUint64(number),
+			ParentHash: parent,
+			Extra:      []byte{extra},
+		}
+	}
+
+	stateStore := NewMemoryStateStore()
+	ctx := context.Background()
+
+	header10 := makeHeader(10, common.HexToHash("0x10"), 0x10)
+	old11 := makeHeader(11, header10.Hash(), 0x11)
+	new11 := makeHeader(11, header10.Hash(), 0x21)
+	new12 := makeHeader(12, new11.Hash(), 0x22)
+
+	if err := stateStore.StoreBlockRef(ctx, "test-scanner", BlockRef{
+		Height:     10,
+		Hash:       header10.Hash(),
+		ParentHash: header10.ParentHash,
+	}); err != nil {
+		t.Fatalf("StoreBlockRef(10): %v", err)
+	}
+	if err := stateStore.StoreBlockRef(ctx, "test-scanner", BlockRef{
+		Height:     11,
+		Hash:       old11.Hash(),
+		ParentHash: old11.ParentHash,
+	}); err != nil {
+		t.Fatalf("StoreBlockRef(11): %v", err)
+	}
+	if err := stateStore.SetLastHeight(ctx, "test-scanner", 11); err != nil {
+		t.Fatalf("SetLastHeight: %v", err)
+	}
+
+	client := &mockEthClient{
+		blockNumber: 12,
+		headers: map[uint64]*types.Header{
+			10: header10,
+			11: new11,
+			12: new12,
+		},
+	}
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:           client,
+		BridgeAddr:       common.HexToAddress("0x1234"),
+		StateStore:       stateStore,
+		ServiceName:      "test-scanner",
+		MaxBlocksPerPoll: 100,
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	if err := scanner.poll(ctx, 1, func(_ context.Context, _ WithdrawRequestedEvent) error { return nil }); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if len(client.filterCalls) != 1 {
+		t.Fatalf("expected 1 filter call, got %d", len(client.filterCalls))
+	}
+	if got := client.filterCalls[0].FromBlock.Int64(); got != 11 {
+		t.Fatalf("filter from block: got=%d want=11", got)
+	}
+	if got := client.filterCalls[0].ToBlock.Int64(); got != 12 {
+		t.Fatalf("filter to block: got=%d want=12", got)
+	}
+
+	if got, err := stateStore.GetLastHeight(ctx, "test-scanner"); err != nil {
+		t.Fatalf("GetLastHeight: %v", err)
+	} else if got != 12 {
+		t.Fatalf("last height: got=%d want=12", got)
+	}
+
+	if ref, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 11); err != nil {
+		t.Fatalf("GetBlockRef(11): %v", err)
+	} else if !ok || ref.Hash != new11.Hash() {
+		t.Fatalf("block 11 not rewound to replacement hash")
+	}
+	if ref, ok, err := stateStore.GetBlockRef(ctx, "test-scanner", 12); err != nil {
+		t.Fatalf("GetBlockRef(12): %v", err)
+	} else if !ok || ref.Hash != new12.Hash() {
+		t.Fatalf("block 12 not stored after rewind")
 	}
 }

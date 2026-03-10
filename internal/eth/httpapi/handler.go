@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
@@ -24,14 +26,34 @@ type Config struct {
 	// AuthToken enables bearer-token auth on every request when set.
 	AuthToken string
 
+	// AllowedContracts limits /v1/send targets. Empty means allow any address.
+	AllowedContracts []common.Address
+
 	// MaxBodyBytes limits request sizes to prevent memory DoS. Defaults to 1 MiB.
 	MaxBodyBytes int64
 
 	// MaxWaitSeconds bounds per-request execution time (server-side). Defaults to 300s.
 	MaxWaitSeconds int
 
+	// IdempotencyTTL bounds how long completed send outcomes stay replayable.
+	IdempotencyTTL time.Duration
+
+	// IdempotencyMaxKeys bounds in-memory idempotency state.
+	IdempotencyMaxKeys int
+
+	// RateLimitPerSecond is the per-client token-bucket refill rate.
+	RateLimitPerSecond float64
+
+	// RateLimitBurst is the per-client token-bucket burst size.
+	RateLimitBurst int
+
+	// RateLimitMaxTrackedClients bounds in-memory client limiter state.
+	RateLimitMaxTrackedClients int
+
 	// Log is used to log internal errors. If nil, errors are logged to slog.Default().
 	Log *slog.Logger
+
+	Now func() time.Time
 }
 
 func NewHandler(sender Sender, cfg Config) http.Handler {
@@ -41,17 +63,41 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	if cfg.MaxWaitSeconds <= 0 {
 		cfg.MaxWaitSeconds = 300
 	}
+	if cfg.IdempotencyTTL <= 0 {
+		cfg.IdempotencyTTL = 15 * time.Minute
+	}
+	if cfg.IdempotencyMaxKeys <= 0 {
+		cfg.IdempotencyMaxKeys = 10_000
+	}
+	if cfg.RateLimitPerSecond <= 0 {
+		cfg.RateLimitPerSecond = 20
+	}
+	if cfg.RateLimitBurst <= 0 {
+		cfg.RateLimitBurst = 40
+	}
+	if cfg.RateLimitMaxTrackedClients <= 0 {
+		cfg.RateLimitMaxTrackedClients = 10_000
+	}
 	if cfg.Log == nil {
 		cfg.Log = slog.Default()
 	}
+	if cfg.Now == nil {
+		cfg.Now = time.Now
+	}
 
 	mux := http.NewServeMux()
+	allowedContracts := make(map[common.Address]struct{}, len(cfg.AllowedContracts))
+	for _, addr := range cfg.AllowedContracts {
+		allowedContracts[addr] = struct{}{}
+	}
+	limiter := newClientRateLimiter(cfg.RateLimitPerSecond, cfg.RateLimitBurst, cfg.RateLimitMaxTrackedClients)
+	idempotency := newIdempotencyCache(cfg.IdempotencyTTL, cfg.IdempotencyMaxKeys)
 
-	startTime := time.Now()
-	handleHealth := func(w http.ResponseWriter, r *http.Request) {
+	startTime := cfg.Now()
+	handleHealth := func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		uptime := time.Since(startTime).Truncate(time.Second).String()
+		uptime := cfg.Now().Sub(startTime).Truncate(time.Second).String()
 		_ = json.NewEncoder(w).Encode(map[string]string{
 			"status":  "ok",
 			"uptime":  uptime,
@@ -63,13 +109,31 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	mux.HandleFunc("GET /readyz", handleHealth)
 
 	mux.HandleFunc("POST /v1/send", func(w http.ResponseWriter, r *http.Request) {
-		if cfg.AuthToken != "" && !checkBearer(r.Header.Get("Authorization"), cfg.AuthToken) {
+		bearerToken, authorized := parseBearer(r.Header.Get("Authorization"), cfg.AuthToken)
+		if cfg.AuthToken != "" && !authorized {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
 			return
 		}
 
+		if !limiter.Allow(clientKey(r, bearerToken), cfg.Now().UTC()) {
+			w.Header().Set("Retry-After", "1")
+			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate_limited"})
+			return
+		}
+
 		r.Body = http.MaxBytesReader(w, r.Body, cfg.MaxBodyBytes)
-		dec := json.NewDecoder(r.Body)
+		bodyBytes, err := io.ReadAll(r.Body)
+		if err != nil {
+			var maxBytesErr *http.MaxBytesError
+			if errors.As(err, &maxBytesErr) {
+				writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"error": "request_too_large"})
+				return
+			}
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
+			return
+		}
+
+		dec := json.NewDecoder(bytes.NewReader(bodyBytes))
 		dec.DisallowUnknownFields()
 
 		var req SendRequest
@@ -77,9 +141,7 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 			return
 		}
-
-		// Reject trailing garbage.
-		if dec.More() {
+		if err := dec.Decode(&struct{}{}); err != io.EOF {
 			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_json"})
 			return
 		}
@@ -110,15 +172,51 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			value = v
 		}
 
+		if len(allowedContracts) > 0 {
+			if _, ok := allowedContracts[to]; !ok {
+				writeJSON(w, http.StatusForbidden, map[string]any{"error": "contract_not_allowed"})
+				return
+			}
+		}
+
 		timeout := time.Duration(cfg.MaxWaitSeconds) * time.Second
 		if req.TimeoutSeconds > 0 {
-			rt := time.Duration(req.TimeoutSeconds) * time.Second
-			if rt < timeout {
-				timeout = rt
+			requestTimeout := time.Duration(req.TimeoutSeconds) * time.Second
+			if requestTimeout < timeout {
+				timeout = requestTimeout
 			}
 		}
 		ctx, cancel := context.WithTimeout(r.Context(), timeout)
 		defer cancel()
+
+		var reservation *idempotencyReservation
+		if key := strings.TrimSpace(r.Header.Get("Idempotency-Key")); key != "" {
+			status, body, res, err := idempotency.Start(ctx, key, canonicalRequestHash(to, data, value, req.GasLimit, req.TimeoutSeconds), cfg.Now().UTC())
+			if err != nil {
+				switch {
+				case errors.Is(err, errIdempotencyKeyConflict):
+					writeJSON(w, http.StatusConflict, map[string]any{"error": "idempotency_key_reused"})
+				case errors.Is(err, context.Canceled):
+					writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "canceled"})
+				case errors.Is(err, context.DeadlineExceeded):
+					writeJSON(w, http.StatusGatewayTimeout, map[string]any{"error": "timeout"})
+				default:
+					cfg.Log.Error("idempotency reservation failed", "err", err)
+					writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
+				}
+				return
+			}
+			if res == nil {
+				writeJSONBytes(w, status, body)
+				return
+			}
+			reservation = res
+			defer func() {
+				if reservation != nil {
+					reservation.Complete(http.StatusInternalServerError, mustJSON(map[string]any{"error": "internal"}), cfg.Now().UTC())
+				}
+			}()
+		}
 
 		res, err := sender.SendAndWaitMined(ctx, eth.TxRequest{
 			To:       to,
@@ -127,17 +225,25 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			GasLimit: req.GasLimit,
 		})
 		if err != nil {
-			if errors.Is(err, context.DeadlineExceeded) {
+			switch {
+			case errors.Is(err, context.DeadlineExceeded):
+				completeReservation(reservation, http.StatusGatewayTimeout, mustJSON(map[string]any{"error": "timeout"}), cfg.Now().UTC())
+				reservation = nil
 				writeJSON(w, http.StatusGatewayTimeout, map[string]any{"error": "timeout"})
-				return
-			}
-			if errors.Is(err, context.Canceled) {
+			case errors.Is(err, context.Canceled):
+				completeReservation(reservation, http.StatusRequestTimeout, mustJSON(map[string]any{"error": "canceled"}), cfg.Now().UTC())
+				reservation = nil
 				writeJSON(w, http.StatusRequestTimeout, map[string]any{"error": "canceled"})
-				return
+			case errors.Is(err, eth.ErrFeeCapReached):
+				completeReservation(reservation, http.StatusConflict, mustJSON(map[string]any{"error": "fee_cap_reached"}), cfg.Now().UTC())
+				reservation = nil
+				writeJSON(w, http.StatusConflict, map[string]any{"error": "fee_cap_reached"})
+			default:
+				cfg.Log.Error("send transaction failed", "to", req.To, "err", err)
+				completeReservation(reservation, http.StatusInternalServerError, mustJSON(map[string]any{"error": "internal"}), cfg.Now().UTC())
+				reservation = nil
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
 			}
-			cfg.Log.Error("send transaction failed", "to", req.To, "err", err)
-			// Avoid leaking internal details by default.
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
 			return
 		}
 
@@ -157,26 +263,57 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			if res.Receipt.GasUsed != 0 {
 				out.Receipt.GasUsed = res.Receipt.GasUsed
 			}
+			if res.RevertReason != "" {
+				out.Receipt.RevertReason = res.RevertReason
+			}
+			if len(res.RevertData) > 0 {
+				out.Receipt.RevertData = hexutil.Encode(res.RevertData)
+			}
 		}
 
-		writeJSON(w, http.StatusOK, out)
+		body := mustJSON(out)
+		completeReservation(reservation, http.StatusOK, body, cfg.Now().UTC())
+		reservation = nil
+		writeJSONBytes(w, http.StatusOK, body)
 	})
 
 	return mux
 }
 
-func writeJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+func completeReservation(reservation *idempotencyReservation, status int, body []byte, now time.Time) {
+	if reservation == nil {
+		return
+	}
+	reservation.Complete(status, body, now)
 }
 
-func checkBearer(header string, wantToken string) bool {
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	writeJSONBytes(w, status, mustJSON(v))
+}
+
+func writeJSONBytes(w http.ResponseWriter, status int, body []byte) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_, _ = w.Write(body)
+}
+
+func mustJSON(v any) []byte {
+	body, err := json.Marshal(v)
+	if err != nil {
+		return []byte("{\"error\":\"internal\"}\n")
+	}
+	return append(body, '\n')
+}
+
+func parseBearer(header string, wantToken string) (string, bool) {
 	// Conservative parsing: exact "Bearer <token>" with single space.
 	const prefix = "Bearer "
 	if !strings.HasPrefix(header, prefix) {
-		return false
+		return "", false
 	}
 	got := strings.TrimSpace(strings.TrimPrefix(header, prefix))
-	return subtle.ConstantTimeCompare([]byte(got), []byte(wantToken)) == 1
+	if wantToken == "" {
+		return got, true
+	}
+	return got, subtle.ConstantTimeCompare([]byte(got), []byte(wantToken)) == 1
 }

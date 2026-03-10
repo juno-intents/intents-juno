@@ -44,6 +44,7 @@ type BaseScannerConfig struct {
 // EthClient is the subset of ethclient.Client used by the scanner.
 type EthClient interface {
 	BlockNumber(ctx context.Context) (uint64, error)
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
@@ -131,19 +132,19 @@ func (s *BaseScanner) Run(ctx context.Context, startBlock int64, publish func(ct
 }
 
 func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(ctx context.Context, event WithdrawRequestedEvent) error) error {
-	lastHeight, err := s.stateStore.GetLastHeight(ctx, s.serviceName)
+	currentBlock, err := s.client.BlockNumber(ctx)
 	if err != nil {
-		return fmt.Errorf("get last height: %w", err)
+		return fmt.Errorf("get block number: %w", err)
+	}
+
+	lastHeight, err := s.rewindToCanonicalHeight(ctx, int64(currentBlock))
+	if err != nil {
+		return err
 	}
 
 	fromBlock := lastHeight + 1
 	if lastHeight == 0 && startBlock > 0 {
 		fromBlock = startBlock
-	}
-
-	currentBlock, err := s.client.BlockNumber(ctx)
-	if err != nil {
-		return fmt.Errorf("get block number: %w", err)
 	}
 
 	if fromBlock > int64(currentBlock) {
@@ -153,6 +154,11 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 	toBlock := fromBlock + s.maxBlocksPerPoll - 1
 	if toBlock > int64(currentBlock) {
 		toBlock = int64(currentBlock)
+	}
+
+	headers, err := s.loadHeaders(ctx, lastHeight, fromBlock, toBlock)
+	if err != nil {
+		return err
 	}
 
 	events, err := s.fetchAndParse(ctx, fromBlock, toBlock)
@@ -166,11 +172,114 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 		}
 	}
 
+	for _, hdr := range headers {
+		if err := s.stateStore.StoreBlockRef(ctx, s.serviceName, BlockRef{
+			Height:     hdr.Number.Int64(),
+			Hash:       hdr.Hash(),
+			ParentHash: hdr.ParentHash,
+		}); err != nil {
+			return fmt.Errorf("store block ref: %w", err)
+		}
+	}
+
 	if err := s.stateStore.SetLastHeight(ctx, s.serviceName, toBlock); err != nil {
 		return fmt.Errorf("set last height: %w", err)
 	}
 
 	return nil
+}
+
+func (s *BaseScanner) rewindToCanonicalHeight(ctx context.Context, currentBlock int64) (int64, error) {
+	lastHeight, err := s.stateStore.GetLastHeight(ctx, s.serviceName)
+	if err != nil {
+		return 0, fmt.Errorf("get last height: %w", err)
+	}
+	if lastHeight <= 0 {
+		return 0, nil
+	}
+	if _, ok, err := s.stateStore.GetBlockRef(ctx, s.serviceName, lastHeight); err != nil {
+		return 0, fmt.Errorf("get latest block ref: %w", err)
+	} else if !ok {
+		return lastHeight, nil
+	}
+
+	probeHeight := lastHeight
+	if probeHeight > currentBlock {
+		probeHeight = currentBlock
+	}
+
+	for probeHeight > 0 {
+		ref, ok, err := s.stateStore.GetBlockRef(ctx, s.serviceName, probeHeight)
+		if err != nil {
+			return 0, fmt.Errorf("get stored block ref: %w", err)
+		}
+		if !ok {
+			probeHeight--
+			continue
+		}
+
+		header, err := s.client.HeaderByNumber(ctx, big.NewInt(probeHeight))
+		if err != nil {
+			return 0, fmt.Errorf("get header %d: %w", probeHeight, err)
+		}
+		if header.Hash() == ref.Hash {
+			if probeHeight != lastHeight {
+				if err := s.stateStore.DeleteBlockRefsFromHeight(ctx, s.serviceName, probeHeight+1); err != nil {
+					return 0, fmt.Errorf("delete rewound block refs: %w", err)
+				}
+				if err := s.stateStore.SetLastHeight(ctx, s.serviceName, probeHeight); err != nil {
+					return 0, fmt.Errorf("rewind last height: %w", err)
+				}
+			}
+			return probeHeight, nil
+		}
+
+		probeHeight--
+	}
+
+	if err := s.stateStore.DeleteBlockRefsFromHeight(ctx, s.serviceName, 1); err != nil {
+		return 0, fmt.Errorf("clear block refs after reorg: %w", err)
+	}
+	if err := s.stateStore.SetLastHeight(ctx, s.serviceName, 0); err != nil {
+		return 0, fmt.Errorf("reset last height after reorg: %w", err)
+	}
+	return 0, nil
+}
+
+func (s *BaseScanner) loadHeaders(ctx context.Context, lastHeight, fromBlock, toBlock int64) ([]*types.Header, error) {
+	headers := make([]*types.Header, 0, toBlock-fromBlock+1)
+
+	var lastHash common.Hash
+	hasLastHash := false
+	if lastHeight > 0 {
+		ref, ok, err := s.stateStore.GetBlockRef(ctx, s.serviceName, lastHeight)
+		if err != nil {
+			return nil, fmt.Errorf("get prior block ref: %w", err)
+		}
+		if ok {
+			lastHash = ref.Hash
+			hasLastHash = true
+		}
+	}
+
+	for height := fromBlock; height <= toBlock; height++ {
+		header, err := s.client.HeaderByNumber(ctx, big.NewInt(height))
+		if err != nil {
+			return nil, fmt.Errorf("get header %d: %w", height, err)
+		}
+		if height == fromBlock && hasLastHash && header.ParentHash != lastHash {
+			return nil, fmt.Errorf("header continuity mismatch at height %d", height)
+		}
+		if len(headers) > 0 {
+			prev := headers[len(headers)-1]
+			if header.ParentHash != prev.Hash() {
+				return nil, fmt.Errorf("header continuity mismatch at height %d", height)
+			}
+		}
+		headers = append(headers, header)
+	}
+
+	return headers, nil
 }
 
 func (s *BaseScanner) fetchAndParse(ctx context.Context, fromBlock, toBlock int64) ([]WithdrawRequestedEvent, error) {

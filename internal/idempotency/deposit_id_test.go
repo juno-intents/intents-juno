@@ -2,6 +2,7 @@ package idempotency
 
 import (
 	"encoding/hex"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -49,10 +50,22 @@ func TestDepositIDV1_Vectors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := DepositIDV1(cm, tt.leafIndex)
+			got, err := DepositIDV1(cm, tt.leafIndex)
+			if err != nil {
+				t.Fatalf("DepositIDV1: %v", err)
+			}
 			if got != tt.want {
 				t.Fatalf("DepositIDV1 mismatch: got %x want %x", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestDepositIDV1_RejectsLeafIndexOverflow(t *testing.T) {
+	t.Parallel()
+
+	_, err := DepositIDV1([32]byte{0x01}, uint64(^uint32(0))+1)
+	if !errors.Is(err, ErrDepositLeafIndexOverflow) {
+		t.Fatalf("expected ErrDepositLeafIndexOverflow, got %v", err)
 	}
 }

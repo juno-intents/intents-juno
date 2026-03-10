@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"math/big"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -241,7 +242,10 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 		return fmt.Errorf("%w: recipient must be non-zero", ErrInvalidEvent)
 	}
 
-	idBytes := idempotency.DepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
+	idBytes, err := idempotency.DepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
+	}
 	job, _, err := r.store.UpsertConfirmed(ctx, deposit.Deposit{
 		DepositID:        idBytes,
 		Commitment:       [32]byte(ev.Commitment),
@@ -540,8 +544,19 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return fmt.Errorf("depositrelayer: base-relayer did not return a receipt")
 	}
 	if res.Receipt.Status != 1 {
+		revertDetail := strings.TrimSpace(res.Receipt.RevertReason)
+		if revertDetail == "" {
+			revertDetail = strings.TrimSpace(res.Receipt.RevertData)
+		}
+		errorMessage := fmt.Sprintf("mintBatch tx reverted: %s", res.TxHash)
+		if revertDetail != "" {
+			errorMessage = fmt.Sprintf("%s (%s)", errorMessage, revertDetail)
+		}
 		r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "bridge_tx", "tx_reverted",
-			fmt.Sprintf("mintBatch tx reverted: %s", res.TxHash), 0)
+			errorMessage, 0)
+		if revertDetail != "" {
+			return fmt.Errorf("depositrelayer: mintBatch tx reverted: %s", revertDetail)
+		}
 		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
 	}
 

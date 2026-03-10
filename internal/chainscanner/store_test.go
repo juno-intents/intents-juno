@@ -105,3 +105,42 @@ func TestMemoryStateStore_IsolatedServices(t *testing.T) {
 		t.Fatalf("svc-2: got=%d want=222", h2)
 	}
 }
+
+func TestMemoryStateStore_BlockRefs(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStateStore()
+	ctx := context.Background()
+	ref1 := BlockRef{Height: 10, Hash: [32]byte{0x10}, ParentHash: [32]byte{0x09}}
+	ref2 := BlockRef{Height: 11, Hash: [32]byte{0x11}, ParentHash: [32]byte{0x10}}
+
+	if err := s.StoreBlockRef(ctx, "svc", ref1); err != nil {
+		t.Fatalf("StoreBlockRef(10): %v", err)
+	}
+	if err := s.StoreBlockRef(ctx, "svc", ref2); err != nil {
+		t.Fatalf("StoreBlockRef(11): %v", err)
+	}
+
+	got, ok, err := s.GetBlockRef(ctx, "svc", 11)
+	if err != nil {
+		t.Fatalf("GetBlockRef(11): %v", err)
+	}
+	if !ok || got.Hash != ref2.Hash || got.ParentHash != ref2.ParentHash {
+		t.Fatalf("GetBlockRef(11): got=%+v ok=%v", got, ok)
+	}
+
+	if err := s.DeleteBlockRefsFromHeight(ctx, "svc", 11); err != nil {
+		t.Fatalf("DeleteBlockRefsFromHeight: %v", err)
+	}
+
+	if _, ok, err := s.GetBlockRef(ctx, "svc", 11); err != nil {
+		t.Fatalf("GetBlockRef(11) after delete: %v", err)
+	} else if ok {
+		t.Fatal("expected block ref at height 11 to be deleted")
+	}
+	if got, ok, err := s.GetBlockRef(ctx, "svc", 10); err != nil {
+		t.Fatalf("GetBlockRef(10): %v", err)
+	} else if !ok || got.Hash != ref1.Hash {
+		t.Fatalf("expected block ref at height 10 to remain")
+	}
+}

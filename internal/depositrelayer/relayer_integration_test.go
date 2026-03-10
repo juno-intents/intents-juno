@@ -185,7 +185,7 @@ func TestRelayer_Integration_SubmitsMintBatchTx(t *testing.T) {
 		t.Fatalf("tx to mismatch: got %v want %s", tx.To(), bridge.Hex())
 	}
 
-	depositIDBytes := idempotency.DepositIDV1([32]byte(cm), 7)
+	depositIDBytes := idempotency.MustDepositIDV1([32]byte(cm), 7)
 	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
 		FinalOrchardRoot: cp.FinalOrchardRoot,
 		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),

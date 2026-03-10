@@ -473,6 +473,12 @@ BASE_RELAYER_LISTEN_ADDR=127.0.0.1:18081
 BASE_RELAYER_URL=http://127.0.0.1:18081
 BASE_RELAYER_PRIVATE_KEYS=
 BASE_RELAYER_AUTH_TOKEN=
+BASE_RELAYER_ALLOWED_CONTRACTS=__BOOTSTRAP_BRIDGE_ADDRESS__
+BASE_RELAYER_RATE_LIMIT_PER_SECOND=20
+BASE_RELAYER_RATE_LIMIT_BURST=40
+BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS=10000
+BASE_RELAYER_TLS_CERT_FILE=
+BASE_RELAYER_TLS_KEY_FILE=
 PROOF_REQUEST_TOPIC=proof.requests.v1
 PROOF_RESULT_TOPIC=proof.fulfillments.v1
 PROOF_FAILURE_TOPIC=proof.failures.v1
@@ -1277,10 +1283,35 @@ source /etc/intents-juno/operator-stack.env
 }
 export BASE_RELAYER_PRIVATE_KEYS
 export BASE_RELAYER_AUTH_TOKEN
-exec /usr/local/bin/base-relayer \
-  --rpc-url "${BASE_RELAYER_RPC_URL}" \
-  --chain-id "${BASE_CHAIN_ID}" \
+[[ -n "${BASE_RELAYER_TLS_CERT_FILE:-}" || -n "${BASE_RELAYER_TLS_KEY_FILE:-}" ]] && {
+  [[ -n "${BASE_RELAYER_TLS_CERT_FILE:-}" && -n "${BASE_RELAYER_TLS_KEY_FILE:-}" ]] || {
+    echo "base-relayer requires BASE_RELAYER_TLS_CERT_FILE and BASE_RELAYER_TLS_KEY_FILE together" >&2
+    exit 1
+  }
+  [[ -s "${BASE_RELAYER_TLS_CERT_FILE}" ]] || {
+    echo "base-relayer TLS cert is missing or empty: ${BASE_RELAYER_TLS_CERT_FILE}" >&2
+    exit 1
+  }
+  [[ -s "${BASE_RELAYER_TLS_KEY_FILE}" ]] || {
+    echo "base-relayer TLS key is missing or empty: ${BASE_RELAYER_TLS_KEY_FILE}" >&2
+    exit 1
+  }
+}
+args=(
+  --rpc-url "${BASE_RELAYER_RPC_URL}"
+  --chain-id "${BASE_CHAIN_ID}"
   --listen "${BASE_RELAYER_LISTEN_ADDR:-127.0.0.1:18081}"
+  --rate-limit-per-second "${BASE_RELAYER_RATE_LIMIT_PER_SECOND:-20}"
+  --rate-limit-burst "${BASE_RELAYER_RATE_LIMIT_BURST:-40}"
+  --rate-limit-max-tracked-clients "${BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS:-10000}"
+)
+if [[ -n "${BASE_RELAYER_ALLOWED_CONTRACTS:-}" ]]; then
+  args+=(--allowed-contracts "${BASE_RELAYER_ALLOWED_CONTRACTS}")
+fi
+if [[ -n "${BASE_RELAYER_TLS_CERT_FILE:-}" ]]; then
+  args+=(--tls-cert-file "${BASE_RELAYER_TLS_CERT_FILE}" --tls-key-file "${BASE_RELAYER_TLS_KEY_FILE}")
+fi
+exec /usr/local/bin/base-relayer "${args[@]}"
 EOF_BASE_RELAYER
   sudo install -m 0755 /tmp/intents-juno-base-relayer.sh /usr/local/bin/intents-juno-base-relayer.sh
 

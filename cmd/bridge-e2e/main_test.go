@@ -2085,7 +2085,7 @@ func TestDeriveDepositIDFromWitnessItem(t *testing.T) {
 	if err != nil {
 		t.Fatalf("deriveDepositIDFromWitnessItem: %v", err)
 	}
-	want := idempotency.DepositIDV1(cm, uint64(leafIndex))
+	want := idempotency.MustDepositIDV1(cm, uint64(leafIndex))
 	if got != common.Hash(want) {
 		t.Fatalf("deposit id mismatch: got=%s want=%s", got.Hex(), common.Hash(want).Hex())
 	}

@@ -4,53 +4,63 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 )
 
+type config struct {
+	RPCURL                     string
+	ChainID                    uint64
+	ListenAddr                 string
+	KeysEnv                    string
+	TokenEnv                   string
+	MinTipGwei                 int64
+	GasMult                    float64
+	PollInterval               time.Duration
+	ReplaceAfter               time.Duration
+	MaxReplacements            int
+	BumpPercent                int
+	MaxFeeCapGwei              int64
+	AllowedContracts           []common.Address
+	TLSCertFile                string
+	TLSKeyFile                 string
+	RateLimitPerSecond         float64
+	RateLimitBurst             int
+	RateLimitMaxTrackedClients int
+	IdempotencyTTL             time.Duration
+	IdempotencyMaxKeys         int
+}
+
 func main() {
-	var (
-		rpcURL      = flag.String("rpc-url", "", "Base/EVM JSON-RPC URL (required)")
-		chainIDFlag = flag.Uint64("chain-id", 0, "EVM chain id (required)")
-		listenAddr  = flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
-
-		keysEnv  = flag.String("keys-env", "BASE_RELAYER_PRIVATE_KEYS", "env var containing comma-separated hex private keys")
-		tokenEnv = flag.String("auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing bearer auth token (required)")
-
-		minTipGwei   = flag.Int64("min-tip-gwei", 1, "minimum priority fee (gwei)")
-		gasMult      = flag.Float64("gas-mult", 1.2, "gas limit multiplier when estimating")
-		pollInterval = flag.Duration("poll-interval", 2*time.Second, "receipt poll interval")
-		replaceAfter = flag.Duration("replace-after", 15*time.Second, "send replacement after this long without a receipt")
-		maxReplace   = flag.Int("max-replacements", 3, "maximum number of replacement transactions")
-		bumpPercent  = flag.Int("bump-percent", 15, "replacement fee bump percentage")
-	)
-	flag.Parse()
-
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *rpcURL == "" || *chainIDFlag == 0 {
-		fmt.Fprintln(os.Stderr, "error: --rpc-url and --chain-id are required")
+	cfg, err := parseConfig(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
 
-	authToken := os.Getenv(*tokenEnv)
+	authToken := os.Getenv(cfg.TokenEnv)
 	if authToken == "" {
-		fmt.Fprintf(os.Stderr, "error: missing auth token in env %s\n", *tokenEnv)
+		fmt.Fprintf(os.Stderr, "error: missing auth token in env %s\n", cfg.TokenEnv)
 		os.Exit(2)
 	}
 
-	keysRaw := os.Getenv(*keysEnv)
+	keysRaw := os.Getenv(cfg.KeysEnv)
 	if keysRaw == "" {
-		fmt.Fprintf(os.Stderr, "error: missing private keys in env %s\n", *keysEnv)
+		fmt.Fprintf(os.Stderr, "error: missing private keys in env %s\n", cfg.KeysEnv)
 		os.Exit(2)
 	}
 	keys, err := eth.ParsePrivateKeysHexList(keysRaw)
@@ -60,8 +70,8 @@ func main() {
 	}
 
 	signers := make([]eth.Signer, 0, len(keys))
-	for _, k := range keys {
-		signers = append(signers, eth.NewLocalSigner(k))
+	for _, key := range keys {
+		signers = append(signers, eth.NewLocalSigner(key))
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -70,14 +80,14 @@ func main() {
 	startupCtx, cancelStartup := context.WithTimeout(ctx, 10*time.Second)
 	defer cancelStartup()
 
-	client, err := ethclient.DialContext(startupCtx, *rpcURL)
+	client, err := ethclient.DialContext(startupCtx, cfg.RPCURL)
 	if err != nil {
 		log.Error("dial rpc", "err", err)
 		os.Exit(1)
 	}
 	defer client.Close()
 
-	chainID := new(big.Int).SetUint64(*chainIDFlag)
+	chainID := new(big.Int).SetUint64(cfg.ChainID)
 	gotChainID, err := client.ChainID(startupCtx)
 	if err != nil {
 		log.Error("fetch chain id", "err", err)
@@ -88,16 +98,20 @@ func main() {
 		os.Exit(2)
 	}
 
-	minTipWei := new(big.Int).Mul(big.NewInt(*minTipGwei), big.NewInt(1_000_000_000))
-
+	minTipWei := new(big.Int).Mul(big.NewInt(cfg.MinTipGwei), big.NewInt(1_000_000_000))
+	var maxFeeCap *big.Int
+	if cfg.MaxFeeCapGwei > 0 {
+		maxFeeCap = new(big.Int).Mul(big.NewInt(cfg.MaxFeeCapGwei), big.NewInt(1_000_000_000))
+	}
 	relayer, err := eth.NewRelayer(client, signers, eth.RelayerConfig{
 		ChainID:                chainID,
-		GasLimitMultiplier:     *gasMult,
+		GasLimitMultiplier:     cfg.GasMult,
 		MinTipCap:              minTipWei,
-		ReceiptPollInterval:    *pollInterval,
-		ReplaceAfter:           *replaceAfter,
-		MaxReplacements:        *maxReplace,
-		ReplacementBumpPercent: *bumpPercent,
+		MaxFeeCap:              maxFeeCap,
+		ReceiptPollInterval:    cfg.PollInterval,
+		ReplaceAfter:           cfg.ReplaceAfter,
+		MaxReplacements:        cfg.MaxReplacements,
+		ReplacementBumpPercent: cfg.BumpPercent,
 		MinReplacementTipBump:  big.NewInt(1_000_000_000),
 		MinReplacementFeeBump:  big.NewInt(1_000_000_000),
 		Now:                    time.Now,
@@ -109,13 +123,20 @@ func main() {
 	}
 
 	handler := httpapi.NewHandler(relayer, httpapi.Config{
-		AuthToken:      authToken,
-		MaxBodyBytes:   1 << 20,
-		MaxWaitSeconds: 300,
+		AuthToken:                  authToken,
+		AllowedContracts:           cfg.AllowedContracts,
+		MaxBodyBytes:               1 << 20,
+		MaxWaitSeconds:             300,
+		IdempotencyTTL:             cfg.IdempotencyTTL,
+		IdempotencyMaxKeys:         cfg.IdempotencyMaxKeys,
+		RateLimitPerSecond:         cfg.RateLimitPerSecond,
+		RateLimitBurst:             cfg.RateLimitBurst,
+		RateLimitMaxTrackedClients: cfg.RateLimitMaxTrackedClients,
+		Now:                        time.Now,
 	})
 
 	srv := &http.Server{
-		Addr:              *listenAddr,
+		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       10 * time.Second,
@@ -127,6 +148,10 @@ func main() {
 	errCh := make(chan error, 1)
 	go func() {
 		log.Info("listening", "addr", srv.Addr)
+		if cfg.TLSCertFile != "" {
+			errCh <- srv.ListenAndServeTLS(cfg.TLSCertFile, cfg.TLSKeyFile)
+			return
+		}
 		errCh <- srv.ListenAndServe()
 	}()
 
@@ -143,4 +168,77 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(shutdownCtx)
+}
+
+func parseConfig(args []string) (config, error) {
+	fs := flag.NewFlagSet("base-relayer", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+
+	var (
+		cfg                 config
+		allowedContractsRaw string
+	)
+	fs.StringVar(&cfg.RPCURL, "rpc-url", "", "Base/EVM JSON-RPC URL (required)")
+	fs.Uint64Var(&cfg.ChainID, "chain-id", 0, "EVM chain id (required)")
+	fs.StringVar(&cfg.ListenAddr, "listen", "127.0.0.1:8080", "HTTP listen address")
+	fs.StringVar(&cfg.KeysEnv, "keys-env", "BASE_RELAYER_PRIVATE_KEYS", "env var containing comma-separated hex private keys")
+	fs.StringVar(&cfg.TokenEnv, "auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing bearer auth token (required)")
+	fs.Int64Var(&cfg.MinTipGwei, "min-tip-gwei", 1, "minimum priority fee (gwei)")
+	fs.Float64Var(&cfg.GasMult, "gas-mult", 1.2, "gas limit multiplier when estimating")
+	fs.DurationVar(&cfg.PollInterval, "poll-interval", 2*time.Second, "receipt poll interval")
+	fs.DurationVar(&cfg.ReplaceAfter, "replace-after", 15*time.Second, "send replacement after this long without a receipt")
+	fs.IntVar(&cfg.MaxReplacements, "max-replacements", 3, "maximum number of replacement transactions")
+	fs.IntVar(&cfg.BumpPercent, "bump-percent", 15, "replacement fee bump percentage")
+	fs.Int64Var(&cfg.MaxFeeCapGwei, "max-fee-cap-gwei", 0, "maximum gas fee cap in gwei (0 disables the cap)")
+	fs.StringVar(&allowedContractsRaw, "allowed-contracts", "", "comma-separated list of allowed contract addresses")
+	fs.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "PEM certificate for HTTPS listener")
+	fs.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "PEM private key for HTTPS listener")
+	fs.Float64Var(&cfg.RateLimitPerSecond, "rate-limit-per-second", 20, "per-client refill rate for ingress rate limiting")
+	fs.IntVar(&cfg.RateLimitBurst, "rate-limit-burst", 40, "per-client burst capacity for ingress rate limiting")
+	fs.IntVar(&cfg.RateLimitMaxTrackedClients, "rate-limit-max-tracked-clients", 10_000, "maximum tracked client entries in the ingress rate limiter")
+	fs.DurationVar(&cfg.IdempotencyTTL, "idempotency-ttl", 15*time.Minute, "retention window for completed idempotent send requests")
+	fs.IntVar(&cfg.IdempotencyMaxKeys, "idempotency-max-keys", 10_000, "maximum tracked idempotency keys")
+
+	if err := fs.Parse(args); err != nil {
+		return config{}, err
+	}
+	if cfg.RPCURL == "" || cfg.ChainID == 0 {
+		return config{}, fmt.Errorf("--rpc-url and --chain-id are required")
+	}
+	if cfg.ListenAddr == "" {
+		return config{}, fmt.Errorf("--listen must be non-empty")
+	}
+	if (cfg.TLSCertFile == "") != (cfg.TLSKeyFile == "") {
+		return config{}, fmt.Errorf("--tls-cert-file and --tls-key-file must be provided together")
+	}
+	if cfg.MinTipGwei < 0 || cfg.GasMult <= 0 || cfg.PollInterval <= 0 || cfg.ReplaceAfter <= 0 {
+		return config{}, fmt.Errorf("relayer settings must be positive")
+	}
+	if cfg.MaxReplacements < 0 || cfg.BumpPercent <= 0 {
+		return config{}, fmt.Errorf("replacement settings must be valid")
+	}
+	if cfg.MaxFeeCapGwei < 0 {
+		return config{}, fmt.Errorf("--max-fee-cap-gwei must be >= 0")
+	}
+	if cfg.RateLimitPerSecond <= 0 || cfg.RateLimitBurst <= 0 || cfg.RateLimitMaxTrackedClients <= 0 {
+		return config{}, fmt.Errorf("rate limit settings must be > 0")
+	}
+	if cfg.IdempotencyTTL <= 0 || cfg.IdempotencyMaxKeys <= 0 {
+		return config{}, fmt.Errorf("idempotency settings must be > 0")
+	}
+
+	if raw := strings.TrimSpace(allowedContractsRaw); raw != "" {
+		for _, item := range strings.Split(raw, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !common.IsHexAddress(item) {
+				return config{}, fmt.Errorf("invalid allowed contract address %q", item)
+			}
+			cfg.AllowedContracts = append(cfg.AllowedContracts, common.HexToAddress(item))
+		}
+	}
+
+	return cfg, nil
 }

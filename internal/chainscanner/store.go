@@ -5,17 +5,28 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 var ErrInvalidConfig = errors.New("chainscanner: invalid config")
 
+// BlockRef captures canonical chain continuity for a processed height.
+type BlockRef struct {
+	Height     int64
+	Hash       common.Hash
+	ParentHash common.Hash
+}
+
 // StateStore persists the last-processed block height for each scanner service.
 type StateStore interface {
 	EnsureSchema(ctx context.Context) error
 	GetLastHeight(ctx context.Context, serviceName string) (int64, error)
 	SetLastHeight(ctx context.Context, serviceName string, height int64) error
+	GetBlockRef(ctx context.Context, serviceName string, height int64) (BlockRef, bool, error)
+	StoreBlockRef(ctx context.Context, serviceName string, ref BlockRef) error
+	DeleteBlockRefsFromHeight(ctx context.Context, serviceName string, height int64) error
 }
 
 // PgStateStore implements StateStore backed by Postgres.
@@ -85,6 +96,80 @@ func (s *PgStateStore) SetLastHeight(ctx context.Context, serviceName string, he
 	`, serviceName, height)
 	if err != nil {
 		return fmt.Errorf("chainscanner: set last height: %w", err)
+	}
+	return nil
+}
+
+func (s *PgStateStore) GetBlockRef(ctx context.Context, serviceName string, height int64) (BlockRef, bool, error) {
+	if s == nil || s.pool == nil {
+		return BlockRef{}, false, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if serviceName == "" {
+		return BlockRef{}, false, fmt.Errorf("%w: empty service name", ErrInvalidConfig)
+	}
+
+	var hashBytes, parentBytes []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT block_hash, parent_hash
+		FROM event_scanner_block_refs
+		WHERE service_name = $1 AND height = $2
+	`, serviceName, height).Scan(&hashBytes, &parentBytes)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return BlockRef{}, false, nil
+		}
+		return BlockRef{}, false, fmt.Errorf("chainscanner: get block ref: %w", err)
+	}
+	if len(hashBytes) != common.HashLength || len(parentBytes) != common.HashLength {
+		return BlockRef{}, false, fmt.Errorf("chainscanner: invalid block ref hash length")
+	}
+
+	var ref BlockRef
+	ref.Height = height
+	copy(ref.Hash[:], hashBytes)
+	copy(ref.ParentHash[:], parentBytes)
+	return ref, true, nil
+}
+
+func (s *PgStateStore) StoreBlockRef(ctx context.Context, serviceName string, ref BlockRef) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if serviceName == "" {
+		return fmt.Errorf("%w: empty service name", ErrInvalidConfig)
+	}
+	if ref.Height <= 0 {
+		return fmt.Errorf("%w: invalid block height", ErrInvalidConfig)
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO event_scanner_block_refs (service_name, height, block_hash, parent_hash, processed_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (service_name, height) DO UPDATE
+		SET block_hash = EXCLUDED.block_hash,
+		    parent_hash = EXCLUDED.parent_hash,
+		    processed_at = EXCLUDED.processed_at
+	`, serviceName, ref.Height, ref.Hash[:], ref.ParentHash[:])
+	if err != nil {
+		return fmt.Errorf("chainscanner: store block ref: %w", err)
+	}
+	return nil
+}
+
+func (s *PgStateStore) DeleteBlockRefsFromHeight(ctx context.Context, serviceName string, height int64) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if serviceName == "" {
+		return fmt.Errorf("%w: empty service name", ErrInvalidConfig)
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		DELETE FROM event_scanner_block_refs
+		WHERE service_name = $1 AND height >= $2
+	`, serviceName, height)
+	if err != nil {
+		return fmt.Errorf("chainscanner: delete block refs: %w", err)
 	}
 	return nil
 }

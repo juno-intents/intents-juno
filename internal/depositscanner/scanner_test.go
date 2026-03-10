@@ -39,9 +39,9 @@ func testMemoHex(recipient common.Address, nonce uint64) string {
 }
 
 type stubScan struct {
-	notes     []witnessextract.WalletNote
-	notesErr  error
-	wallets   []string
+	notes       []witnessextract.WalletNote
+	notesErr    error
+	wallets     []string
 	witnessResp witnessextract.WitnessResponse
 	witnessErr  error
 }
@@ -59,12 +59,25 @@ func (s *stubScan) OrchardWitness(_ context.Context, _ *int64, _ []uint32) (witn
 }
 
 type stubRPC struct {
-	action    junorpc.OrchardAction
-	actionErr error
+	action       junorpc.OrchardAction
+	actionErr    error
+	blockHashes  map[uint64]common.Hash
+	blockHashErr error
 }
 
 func (s *stubRPC) GetOrchardAction(_ context.Context, _ string, _ uint32) (junorpc.OrchardAction, error) {
 	return s.action, s.actionErr
+}
+
+func (s *stubRPC) GetBlockHash(_ context.Context, height uint64) (common.Hash, error) {
+	if s.blockHashErr != nil {
+		return common.Hash{}, s.blockHashErr
+	}
+	h, ok := s.blockHashes[height]
+	if !ok {
+		return common.Hash{}, errors.New("block hash not found")
+	}
+	return h, nil
 }
 
 type stubIngester struct {
@@ -391,5 +404,51 @@ func TestScanner_ListNotesError_NoProcessing(t *testing.T) {
 
 	if len(ingester.events) != 0 {
 		t.Fatalf("expected 0 events, got %d", len(ingester.events))
+	}
+}
+
+func TestScanner_ReorgClearsSeenEntriesAtForkHeight(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x6666666666666666666666666666666666666666")
+	memoHex := testMemoHex(recipient, 5)
+	txid := strings.Repeat("12", 32)
+	var pos int64 = 13
+
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 0, Position: &pos, ValueZat: 600000, MemoHex: memoHex, Height: 100},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	rpc := &stubRPC{
+		blockHashes: map[uint64]common.Hash{
+			100: common.HexToHash("0x100"),
+		},
+	}
+	ingester := &stubIngester{}
+
+	s, err := New(testConfig(), scan, rpc, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	s.poll(ctx)
+	if len(ingester.events) != 1 {
+		t.Fatalf("expected 1 event after first poll, got %d", len(ingester.events))
+	}
+
+	scan.notes = []witnessextract.WalletNote{
+		{TxID: txid, ActionIndex: 0, Position: &pos, ValueZat: 700000, MemoHex: memoHex, Height: 100},
+	}
+	rpc.blockHashes[100] = common.HexToHash("0x200")
+
+	s.poll(ctx)
+	if len(ingester.events) != 2 {
+		t.Fatalf("expected note to be replayed after reorg, got %d events", len(ingester.events))
+	}
+	if got := ingester.events[1].Amount; got != 700000 {
+		t.Fatalf("replayed event amount: got=%d want=700000", got)
 	}
 }

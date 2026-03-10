@@ -76,7 +76,10 @@ func TestBuildDepositEventPayload(t *testing.T) {
 		t.Fatalf("memo nonce mismatch: got=%d want=99", parsedMemo.Nonce)
 	}
 
-	expectedDepositID := idempotency.DepositIDV1([32]byte(common.HexToHash(payload.CM)), payload.LeafIndex)
+	expectedDepositID, err := idempotency.DepositIDV1([32]byte(common.HexToHash(payload.CM)), payload.LeafIndex)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
 	if payload.DepositID != "0x"+hex.EncodeToString(expectedDepositID[:]) {
 		t.Fatalf("deposit id mismatch: got=%s", payload.DepositID)
 	}

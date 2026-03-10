@@ -20,8 +20,9 @@ type SendResponse struct {
 
 // ReceiptResponse is an optional mined receipt summary returned by /v1/send.
 type ReceiptResponse struct {
-	Status      uint64 `json:"status"`
-	BlockNumber string `json:"block_number,omitempty"`
-	GasUsed     uint64 `json:"gas_used,omitempty"`
+	Status       uint64 `json:"status"`
+	BlockNumber  string `json:"block_number,omitempty"`
+	GasUsed      uint64 `json:"gas_used,omitempty"`
+	RevertReason string `json:"revert_reason,omitempty"`
+	RevertData   string `json:"revert_data,omitempty"`
 }
-

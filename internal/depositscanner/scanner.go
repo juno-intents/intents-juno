@@ -28,13 +28,19 @@ type DepositIngester interface {
 }
 
 type Scanner struct {
-	cfg     Config
-	scan    witnessextract.ScanClient
-	rpc     witnessextract.RPCClient
-	ingest  DepositIngester
-	log     *slog.Logger
-	builder *witnessextract.Builder
-	seen    map[string]struct{}
+	cfg         Config
+	scan        witnessextract.ScanClient
+	rpc         witnessextract.RPCClient
+	ingest      DepositIngester
+	log         *slog.Logger
+	builder     *witnessextract.Builder
+	seen        map[string]struct{}
+	seenHeights map[string]int64
+	blockHashes map[int64]common.Hash
+}
+
+type blockHashGetter interface {
+	GetBlockHash(ctx context.Context, height uint64) (common.Hash, error)
 }
 
 func New(cfg Config, scan witnessextract.ScanClient, rpc witnessextract.RPCClient, ingest DepositIngester, log *slog.Logger) (*Scanner, error) {
@@ -63,13 +69,15 @@ func New(cfg Config, scan witnessextract.ScanClient, rpc witnessextract.RPCClien
 		log = slog.Default()
 	}
 	return &Scanner{
-		cfg:     cfg,
-		scan:    scan,
-		rpc:     rpc,
-		ingest:  ingest,
-		log:     log,
-		builder: witnessextract.New(scan, rpc),
-		seen:    make(map[string]struct{}),
+		cfg:         cfg,
+		scan:        scan,
+		rpc:         rpc,
+		ingest:      ingest,
+		log:         log,
+		builder:     witnessextract.New(scan, rpc),
+		seen:        make(map[string]struct{}),
+		seenHeights: make(map[string]int64),
+		blockHashes: make(map[int64]common.Hash),
 	}, nil
 }
 
@@ -107,6 +115,7 @@ func (s *Scanner) poll(ctx context.Context) {
 		s.log.Error("deposit scanner: list wallet notes", "err", err)
 		return
 	}
+	s.reconcileReorg(ctx, notes)
 
 	var bridgeAddr20 [20]byte
 	copy(bridgeAddr20[:], s.cfg.BridgeAddr.Bytes())
@@ -122,36 +131,89 @@ func (s *Scanner) poll(ctx context.Context) {
 		}
 
 		if strings.TrimSpace(note.MemoHex) == "" {
-			s.seen[key] = struct{}{}
+			s.markSeen(key, note.Height)
 			continue
 		}
 
 		memoBytes, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(note.MemoHex), "0x"))
 		if err != nil {
 			s.log.Warn("deposit scanner: decode memo hex", "key", key, "err", err)
-			s.seen[key] = struct{}{}
+			s.markSeen(key, note.Height)
 			continue
 		}
 
 		_, memoErr := memo.ParseDepositMemoV1(memoBytes, s.cfg.BaseChainID, bridgeAddr20)
 		if memoErr != nil {
 			// Not a valid deposit for our domain — skip permanently.
-			s.seen[key] = struct{}{}
+			s.markSeen(key, note.Height)
 			continue
 		}
 
 		if err := s.processNote(ctx, note, memoBytes); err != nil {
 			if isPermanent(err) {
 				s.log.Warn("deposit scanner: permanent error, skipping note", "key", key, "err", err)
-				s.seen[key] = struct{}{}
+				s.markSeen(key, note.Height)
 			} else {
 				s.log.Error("deposit scanner: transient error, will retry", "key", key, "err", err)
 			}
 			continue
 		}
 
-		s.seen[key] = struct{}{}
+		s.markSeen(key, note.Height)
 	}
+}
+
+func (s *Scanner) reconcileReorg(ctx context.Context, notes []witnessextract.WalletNote) {
+	getter, ok := s.rpc.(blockHashGetter)
+	if !ok {
+		return
+	}
+
+	currentHashes := make(map[int64]common.Hash)
+	forkHeight := int64(0)
+	for _, note := range notes {
+		if note.Height <= 0 {
+			continue
+		}
+		if _, seen := currentHashes[note.Height]; seen {
+			continue
+		}
+		hash, err := getter.GetBlockHash(ctx, uint64(note.Height))
+		if err != nil {
+			s.log.Error("deposit scanner: get block hash", "height", note.Height, "err", err)
+			return
+		}
+		currentHashes[note.Height] = hash
+		if prev, seen := s.blockHashes[note.Height]; seen && prev != hash {
+			if forkHeight == 0 || note.Height < forkHeight {
+				forkHeight = note.Height
+			}
+		}
+	}
+
+	if forkHeight > 0 {
+		for key, height := range s.seenHeights {
+			if height >= forkHeight {
+				delete(s.seen, key)
+				delete(s.seenHeights, key)
+			}
+		}
+		for height := range s.blockHashes {
+			if height >= forkHeight {
+				delete(s.blockHashes, height)
+			}
+		}
+		s.log.Warn("deposit scanner: detected juno reorg, rewinding seen notes", "fork_height", forkHeight)
+	}
+
+	for height, hash := range currentHashes {
+		s.blockHashes[height] = hash
+	}
+}
+
+func (s *Scanner) markSeen(key string, height int64) {
+	s.seen[key] = struct{}{}
+	s.seenHeights[key] = height
 }
 
 func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNote, memoBytes []byte) error {

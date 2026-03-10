@@ -2,10 +2,12 @@ package eth
 
 import (
 	"errors"
+	"fmt"
 	"math/big"
 )
 
 var ErrInvalidFeeArgs = errors.New("eth: invalid fee args")
+var ErrFeeCapReached = errors.New("eth: fee cap reached")
 
 // Calc1559Fees returns conservative EIP-1559 fee caps based on the latest block base fee.
 //
@@ -80,4 +82,20 @@ func Bump1559Fees(tipCap, feeCap *big.Int, bumpPercent int, minTipBump, minFeeCa
 	}
 
 	return newTip, newFee, nil
+}
+
+func EnsureFeeCap(feeCap, maxFeeCap *big.Int) error {
+	if feeCap == nil {
+		return ErrInvalidFeeArgs
+	}
+	if maxFeeCap == nil {
+		return nil
+	}
+	if feeCap.Sign() < 0 || maxFeeCap.Sign() < 0 {
+		return ErrInvalidFeeArgs
+	}
+	if feeCap.Cmp(maxFeeCap) > 0 {
+		return fmt.Errorf("%w: required %s exceeds max %s", ErrFeeCapReached, feeCap, maxFeeCap)
+	}
+	return nil
 }
