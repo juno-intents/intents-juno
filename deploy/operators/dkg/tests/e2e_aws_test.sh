@@ -872,20 +872,6 @@ test_local_e2e_supports_shared_infra_validation() {
   assert_contains "$e2e_script_text" "dr_region: (if \$aws_dr_region == \"\" then null else \$aws_dr_region end)" "summary stores aws dr region passthrough"
 }
 
-test_e2e_workflows_exclude_sensitive_artifact_paths() {
-  local aws_workflow_text local_workflow_text
-  aws_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
-  local_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy.yml")"
-
-  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/artifacts' "aws workflow uploads artifact directory"
-  assert_contains "$aws_workflow_text" "e2e-testnet-deploy-aws-resume-state" "aws workflow uploads canary resume-state artifact"
-  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/infra' "aws workflow includes terraform infra state in resume bundle"
-  assert_contains "$aws_workflow_text" '${{ runner.temp }}/aws-live-e2e/ssh' "aws workflow includes ssh material in resume bundle for full_run handoff"
-  assert_contains "$aws_workflow_text" "Download Canary Resume State" "aws workflow downloads canary resume bundle before full_run"
-  assert_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/reports' "local workflow uploads reports"
-  assert_not_contains "$local_workflow_text" '${{ runner.temp }}/testnet-e2e/dkg' "local workflow no longer uploads raw dkg directory"
-}
-
 test_local_e2e_supports_external_dkg_summary_path() {
   local e2e_script_text
   e2e_script_text="$(cat "$REPO_ROOT/deploy/operators/dkg/e2e/run-testnet-e2e.sh")"
@@ -952,49 +938,6 @@ test_local_e2e_uses_managed_nonce_for_funding() {
   assert_contains "$e2e_script_text" "ensure_recipient_min_balance \"\$base_rpc_url\" \"\$base_key\" \"\$funding_sender_address\" \"\$operator\" \"\$base_operator_fund_wei\" \"operator pre-fund\"" "operator prefund uses min-balance helper"
 }
 
-test_non_aws_workflow_wires_shared_ipfs_for_local_e2e() {
-  local workflow_text
-  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy.yml")"
-
-  assert_contains "$workflow_text" "Start Shared Infra (Postgres + Kafka + IPFS)" "non-aws workflow shared infra step includes ipfs"
-  assert_contains "$workflow_text" "docker rm -f intents-shared-postgres intents-shared-kafka intents-shared-ipfs" "non-aws workflow removes stale ipfs container"
-  assert_contains "$workflow_text" "--name intents-shared-ipfs" "non-aws workflow starts shared ipfs container"
-  assert_contains "$workflow_text" "ipfs/kubo:v0.32.1" "non-aws workflow pins shared ipfs image"
-  assert_contains "$workflow_text" "E2E_SHARED_IPFS_API_URL=http://127.0.0.1:5001" "non-aws workflow exports shared ipfs api url"
-  assert_contains "$workflow_text" "sp1_deposit_owallet_ivk_hex" "non-aws workflow exposes deposit ivk input"
-  assert_contains "$workflow_text" "sp1_withdraw_owallet_ovk_hex" "non-aws workflow exposes withdraw ovk input"
-  assert_contains "$workflow_text" 'default: "https://rpc.mainnet.succinct.xyz"' "non-aws workflow defaults sp1 rpc to succinct mainnet network rpc"
-  assert_not_contains "$workflow_text" 'default: "https://mainnet.base.org"' "non-aws workflow no longer defaults sp1 rpc to base chain endpoint"
-  assert_contains "$workflow_text" "sp1_witness_juno_scan_url" "non-aws workflow exposes juno-scan witness input"
-  assert_contains "$workflow_text" "sp1_witness_juno_rpc_url" "non-aws workflow exposes junocashd witness input"
-  assert_not_contains "$workflow_text" "sp1_witness_config_json" "non-aws workflow no longer uses witness config blob"
-  assert_not_contains "$workflow_text" "--sp1-deposit-witness-wallet-id" "non-aws workflow no longer forwards external witness wallet ids"
-  assert_not_contains "$workflow_text" "--sp1-deposit-witness-txid" "non-aws workflow no longer forwards external witness txids"
-  assert_not_contains "$workflow_text" "--sp1-withdraw-witness-txid" "non-aws workflow no longer forwards external withdraw txids"
-  assert_not_contains "$workflow_text" "go run ./cmd/checkpoint-aggregator" "non-aws workflow no longer starts synthetic checkpoint aggregator"
-  assert_not_contains "$workflow_text" "go run ./cmd/checkpoint-signer" "non-aws workflow no longer starts synthetic checkpoint signer"
-  assert_contains "$workflow_text" "--shared-ipfs-api-url \"\$E2E_SHARED_IPFS_API_URL\"" "non-aws workflow forwards shared ipfs api url to local e2e script"
-}
-
-test_aws_workflow_dispatch_input_count_within_limit() {
-  local workflow
-  workflow="$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml"
-
-  local count
-  count="$(awk '
-    /workflow_dispatch:/ { in_dispatch=1; next }
-    in_dispatch && /inputs:/ { in_inputs=1; next }
-    in_dispatch && in_inputs && /^[^[:space:]]/ { in_inputs=0; in_dispatch=0 }
-    in_inputs && /^      [a-zA-Z0-9_]+:$/ { count++ }
-    END { print count+0 }
-  ' "$workflow")"
-
-  if (( count > 25 )); then
-    printf 'workflow_dispatch input count exceeds github limit: got=%s max=25\n' "$count" >&2
-    exit 1
-  fi
-}
-
 test_operator_stack_ami_release_workflow_exists() {
   local workflow_text
   workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
@@ -1038,13 +981,11 @@ test_operator_stack_ami_release_workflow_supports_explicit_network_inputs() {
   assert_contains "$workflow_text" "--source-ami-id" "operator stack ami workflow forwards resolved source ami id when available"
 }
 
-test_long_running_aws_workflows_request_extended_oidc_session() {
-  local ami_workflow_text aws_e2e_workflow_text
+test_operator_stack_ami_workflow_requests_extended_oidc_session() {
+  local ami_workflow_text
   ami_workflow_text="$(cat "$REPO_ROOT/.github/workflows/release-operator-stack-ami.yml")"
-  aws_e2e_workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
 
   assert_contains "$ami_workflow_text" "role-duration-seconds: 21600" "operator stack ami workflow requests extended oidc session duration"
-  assert_contains "$aws_e2e_workflow_text" "role-duration-seconds: 21600" "aws e2e workflow requests extended oidc session duration"
 }
 
 test_bridge_guest_release_workflow_exists() {
@@ -1182,36 +1123,6 @@ test_operator_stack_ami_runbook_builds_full_stack_and_records_blockstamp() {
   assert_contains "$runbook_text" 'rpc_password: \$junocash_rpc_pass' "runbook bootstrap metadata records junocash rpc password"
   assert_contains "$runbook_text" "create-image" "runbook creates ami"
   assert_contains "$runbook_text" "operator-ami-manifest.json" "runbook writes operator ami manifest"
-}
-
-test_aws_e2e_workflow_resolves_operator_ami_from_release_when_unset() {
-  local workflow_text
-  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
-
-  assert_contains "$workflow_text" "Resolve Operator AMI" "aws e2e workflow has operator ami resolve step"
-  assert_contains "$workflow_text" "gh release download" "aws e2e workflow downloads operator ami manifest from release"
-  assert_contains "$workflow_text" "operator-ami-manifest.json" "aws e2e workflow references operator ami manifest"
-  assert_contains "$workflow_text" "operator-stack-ami-latest" "aws e2e workflow resolves latest operator stack ami release tag"
-  assert_contains "$workflow_text" "--operator-ami-id" "aws e2e workflow forwards resolved operator ami id"
-  assert_contains "$workflow_text" "sp1_deposit_owallet_ivk_hex" "aws workflow exposes deposit ivk input"
-  assert_contains "$workflow_text" "sp1_withdraw_owallet_ovk_hex" "aws workflow exposes withdraw ovk input"
-  assert_contains "$workflow_text" 'default: "https://rpc.mainnet.succinct.xyz"' "aws workflow defaults sp1 rpc to succinct mainnet network rpc"
-  assert_not_contains "$workflow_text" 'default: "https://mainnet.base.org"' "aws workflow no longer defaults sp1 rpc to base chain endpoint"
-  assert_not_contains "$workflow_text" "sp1_witness_config_json" "aws workflow no longer uses witness config blob"
-  assert_not_contains "$workflow_text" "--sp1-witness-juno-scan-url" "aws workflow does not pass external witness scan endpoint"
-  assert_not_contains "$workflow_text" "--sp1-witness-juno-rpc-url" "aws workflow does not pass external witness rpc endpoint"
-  assert_not_contains "$workflow_text" "--sp1-deposit-witness-txid" "aws workflow no longer forwards external deposit txid"
-  assert_not_contains "$workflow_text" "--sp1-withdraw-witness-txid" "aws workflow no longer forwards external withdraw txid"
-}
-
-test_aws_e2e_workflow_resolves_shared_proof_services_image_from_release() {
-  local workflow_text
-  workflow_text="$(cat "$REPO_ROOT/.github/workflows/e2e-testnet-deploy-aws.yml")"
-
-  assert_contains "$workflow_text" "Resolve Shared Proof Services Image" "aws e2e workflow has shared proof services image resolve step"
-  assert_contains "$workflow_text" "shared-proof-services-image-manifest.json" "aws e2e workflow downloads shared proof services image manifest from release"
-  assert_contains "$workflow_text" "shared-proof-services-image-latest" "aws e2e workflow resolves latest shared proof services image release tag"
-  assert_contains "$workflow_text" "--shared-proof-services-image" "aws e2e workflow forwards resolved shared proof services image override to wrapper"
 }
 
 test_proof_services_dockerfile_limits_cargo_memory() {

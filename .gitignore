@@ -1,5 +1,6 @@
 # Local-only scratch
 /tmp/
+/deploy/operators/tmp/
 
 # Secrets (defense-in-depth)
 .env
@@ -12,6 +13,10 @@
 
 # Go
 /bin/
+/backoffice
+/bridge-api
+/tss-host
+/withdraw-coordinator
 *.exe
 *.out
 *.test

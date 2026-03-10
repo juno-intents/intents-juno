@@ -39,38 +39,26 @@ Current behavior:
   - `deploy/shared/terraform/live-e2e`
 - Wrapper:
   - `deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh`
-- GitHub workflow:
-  - `.github/workflows/e2e-testnet-deploy-aws.yml`
 - Operator AMI release workflow:
   - `.github/workflows/release-operator-stack-ami.yml`
 - Shared proof-services image release workflow:
   - `.github/workflows/release-shared-proof-services-image.yml`
 
-The AWS workflow is designed for high-fidelity live runs and includes teardown on both success and failure paths:
+The AWS wrapper is designed for high-fidelity live runs and includes teardown on both success and failure paths:
 
 1. `run-testnet-e2e-aws.sh run ...` provisions EC2 and executes e2e remotely.
 2. `run-testnet-e2e-aws.sh` trap performs destroy on exit.
-3. Workflow fallback step always invokes `run-testnet-e2e-aws.sh cleanup ...` as a second destroy guard.
-4. When `operator_ami_id` input is empty, `.github/workflows/e2e-testnet-deploy-aws.yml` resolves `operator-stack-ami-latest` release metadata and injects `--operator-ami-id` automatically.
-5. Shared proof-services image is resolved from `shared-proof-services-image-latest` release metadata and injected as `--shared-proof-services-image` (or can be overridden explicitly).
+3. When `operator_ami_id` is empty, callers should resolve `operator-stack-ami-latest` release metadata and pass `--operator-ami-id` explicitly.
+4. Shared proof-services image should be resolved from `shared-proof-services-image-latest` release metadata and passed via `--shared-proof-services-image` (or overridden explicitly).
 
 To bake and release the full operator AMI (synced `junocashd` + `juno-scan` + checkpoint services + `tss-host`), run:
 
 - `.github/workflows/release-operator-stack-ami.yml`
 
-The workflow uses:
+Release artifacts used by this flow:
 
 - `deploy/shared/runbooks/build-operator-stack-ami.sh`
 - `deploy/shared/docker/proof-services.Dockerfile` (built and released by `.github/workflows/release-shared-proof-services-image.yml`)
-
-GitHub secrets expected by `.github/workflows/e2e-testnet-deploy-aws.yml`:
-
-- AWS auth:
-  - Either `AWS_ROLE_TO_ASSUME` (OIDC) or static creds (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, optional `AWS_SESSION_TOKEN`).
-- Funding keys:
-  - `BASE_FUNDER_PRIVATE_KEY_HEX`
-  - `JUNO_FUNDER_PRIVATE_KEY_HEX`
-  - `SP1_REQUESTOR_PRIVATE_KEY_HEX`
 
 Local invocation example:
 
