@@ -330,8 +330,21 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 		return err
 	}
 
+	// Always try to parse the JSON-RPC body first — even for non-200 status.
+	// Juno returns HTTP 500 for application-level JSON-RPC errors (e.g. code
+	// -5 "No such mempool or blockchain transaction") that callers must be
+	// able to match via errors.As(*RPCError).
+	var rr rpcResponse
+	jsonErr := json.Unmarshal(body, &rr)
+
+	if jsonErr == nil && rr.Error != nil {
+		return &RPCError{
+			Code:    rr.Error.Code,
+			Message: rr.Error.Message,
+		}
+	}
+
 	if resp.StatusCode != http.StatusOK {
-		// Sanitize: do not include any request body (could contain sensitive params in future).
 		msg := strings.TrimSpace(string(body))
 		if msg == "" {
 			msg = resp.Status
@@ -339,15 +352,8 @@ func (c *Client) call(ctx context.Context, method string, params []any, out any)
 		return fmt.Errorf("junorpc: http status %d: %s", resp.StatusCode, msg)
 	}
 
-	var rr rpcResponse
-	if err := json.Unmarshal(body, &rr); err != nil {
-		return fmt.Errorf("junorpc: unmarshal response: %w", err)
-	}
-	if rr.Error != nil {
-		return &RPCError{
-			Code:    rr.Error.Code,
-			Message: rr.Error.Message,
-		}
+	if jsonErr != nil {
+		return fmt.Errorf("junorpc: unmarshal response: %w", jsonErr)
 	}
 	if out == nil {
 		return nil

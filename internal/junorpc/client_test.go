@@ -308,6 +308,45 @@ func TestClient_GetRawTransaction_MapsNotFound(t *testing.T) {
 	}
 }
 
+func TestClient_GetRawTransaction_MapsNotFoundHTTP500(t *testing.T) {
+	t.Parallel()
+
+	const (
+		user = "rpcuser"
+		pass = "rpcpass"
+	)
+
+	// Juno returns HTTP 500 with a JSON-RPC error body for application-level
+	// errors like "No such mempool or blockchain transaction" (code -5).
+	// The client must still surface this as ErrTxNotFound.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req rpcRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"result": nil,
+			"error": map[string]any{
+				"code":    -5,
+				"message": "No such mempool or blockchain transaction. Use gettransaction for wallet transactions.",
+			},
+			"id": req.ID,
+		})
+	}))
+	defer srv.Close()
+
+	c, err := New(srv.URL, user, pass, WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.GetRawTransaction(context.Background(), "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e")
+	if !errors.Is(err, ErrTxNotFound) {
+		t.Fatalf("expected ErrTxNotFound, got %v", err)
+	}
+}
+
 func TestClient_GetOrchardAction_DecodesFromDecodeRawTransaction(t *testing.T) {
 	t.Parallel()
 
