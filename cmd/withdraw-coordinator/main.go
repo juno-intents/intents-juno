@@ -59,8 +59,9 @@ const (
 
 func main() {
 	var (
-		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
-		runtimeMode = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode (production binary supports only: full)")
+		postgresDSN    = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
+		postgresDSNEnv = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
+		runtimeMode    = flag.String("runtime-mode", runtimeModeFull, "coordinator runtime mode (production binary supports only: full)")
 
 		maxItems             = flag.Int("max-items", 50, "maximum withdrawals per Juno payout tx")
 		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
@@ -148,8 +149,15 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *postgresDSN == "" || *owner == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn and --owner are required")
+	postgresDSNValue, err := resolveRequiredFlagOrEnv("--postgres-dsn", *postgresDSN, *postgresDSNEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
+		os.Exit(2)
+	}
+	devMode := devModeEnabled()
+
+	if *owner == "" {
+		fmt.Fprintln(os.Stderr, "error: --owner is required")
 		os.Exit(2)
 	}
 	if mode == runtimeModeFull {
@@ -207,6 +215,20 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --extend-signer-bin is required and --extend-signer-max-response-bytes must be > 0")
 			os.Exit(2)
 		}
+		if *tssInsecureHTTP && !devMode {
+			fmt.Fprintln(os.Stderr, "error: --tss-insecure-http requires JUNO_DEV_MODE=true")
+			os.Exit(2)
+		}
+		if !devMode {
+			if strings.TrimSpace(*tssServerCAFile) == "" {
+				fmt.Fprintln(os.Stderr, "error: --tss-server-ca-file is required in production mode")
+				os.Exit(2)
+			}
+			if strings.TrimSpace(*tssClientCertFile) == "" || strings.TrimSpace(*tssClientKeyFile) == "" {
+				fmt.Fprintln(os.Stderr, "error: --tss-client-cert-file and --tss-client-key-file are required in production mode")
+				os.Exit(2)
+			}
+		}
 	}
 	if *ackTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --queue-ack-timeout must be > 0")
@@ -257,7 +279,7 @@ func main() {
 	}
 	defer func() { _ = consumer.Close() }()
 
-	pool, err := pgxpool.New(ctx, *postgresDSN)
+	pool, err := pgxpool.New(ctx, postgresDSNValue)
 	if err != nil {
 		log.Error("init pgx pool", "err", err)
 		os.Exit(2)
@@ -687,6 +709,34 @@ func normalizeBlobDriver(v string) string {
 		return blobstore.DriverS3
 	}
 	return s
+}
+
+func resolveRequiredFlagOrEnv(flagName string, flagValue string, envName string) (string, error) {
+	flagValue = strings.TrimSpace(flagValue)
+	envName = strings.TrimSpace(envName)
+	if flagValue != "" {
+		if envName != "" {
+			return "", fmt.Errorf("%s and --postgres-dsn-env are mutually exclusive", flagName)
+		}
+		return flagValue, nil
+	}
+	if envName == "" {
+		return "", fmt.Errorf("%s or --postgres-dsn-env is required", flagName)
+	}
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return "", fmt.Errorf("missing %s in env %s", flagName, envName)
+	}
+	return value, nil
+}
+
+func devModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("JUNO_DEV_MODE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 func newBlobStore(ctx context.Context, driver string, bucket string, prefix string, maxGetSize int64) (blobstore.Store, error) {

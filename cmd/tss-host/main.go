@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -61,6 +62,21 @@ func main() {
 	if *signerBin == "" {
 		log.Error("missing --signer-bin")
 		os.Exit(2)
+	}
+	devMode := devModeEnabled()
+	if *insecureHTTP && !devMode {
+		log.Error("--insecure-http requires JUNO_DEV_MODE=true")
+		os.Exit(2)
+	}
+	if !devMode {
+		if strings.TrimSpace(*clientCAFile) == "" {
+			log.Error("missing --client-ca-file; production mode requires client mTLS")
+			os.Exit(2)
+		}
+		if err := validatePrivateListenAddr(*listenAddr); err != nil {
+			log.Error("invalid --listen-addr for production mode", "err", err)
+			os.Exit(2)
+		}
 	}
 
 	signer, err := tsshost.NewExecSigner(*signerBin, signerArgs.Values(), *signerMaxRespBytes)
@@ -150,6 +166,36 @@ func buildTLSConfig(certFile string, keyFile string, clientCAFile string) (*tls.
 	}
 
 	return cfg, nil
+}
+
+func validatePrivateListenAddr(addr string) error {
+	host, _, err := net.SplitHostPort(strings.TrimSpace(addr))
+	if err != nil {
+		return fmt.Errorf("parse listen addr: %w", err)
+	}
+	switch host {
+	case "", "0.0.0.0", "::":
+		return fmt.Errorf("listen host %q must not be wildcard", host)
+	case "localhost":
+		return nil
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("listen host %q must be localhost or an IP literal", host)
+	}
+	if ip.IsLoopback() || ip.IsPrivate() {
+		return nil
+	}
+	return fmt.Errorf("listen host %q must be loopback or private", host)
+}
+
+func devModeEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("JUNO_DEV_MODE"))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 type multiValueFlag struct {
