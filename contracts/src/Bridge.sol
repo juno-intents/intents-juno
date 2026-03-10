@@ -31,7 +31,11 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error WithdrawNotExpired();
     error NetAmountMismatch();
     error WithdrawalRecipientMismatch();
-    error InvalidProof();
+    error ZeroImageId();
+    error InvalidBatchSize(uint256 size, uint256 maxSize);
+    error VerifierStringError(string reason);
+    error VerifierPanic(uint256 code);
+    error VerifierReverted(bytes reason);
     error BadCheckpointDomain();
     error InsufficientSignatures();
     error SignaturesNotSortedOrUnique();
@@ -94,6 +98,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     // -------- Constants --------
     uint256 public constant BPS_DENOMINATOR = 10_000;
     uint256 public constant MAX_UA_BYTES = 256;
+    uint256 public constant MAX_BATCH_SIZE = 200;
     uint256 public constant MAX_EXTEND_BATCH = 200;
 
     bytes32 private constant CHECKPOINT_TYPEHASH = keccak256(
@@ -175,6 +180,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             address(wjuno_) == address(0) || address(feeDistributor_) == address(0)
                 || address(operatorRegistry_) == address(0) || address(verifier_) == address(0)
         ) revert ZeroAddress();
+        if (depositImageId_ == bytes32(0) || withdrawImageId_ == bytes32(0)) revert ZeroImageId();
 
         if (feeBps_ > BPS_DENOMINATOR || relayerTipBps_ > BPS_DENOMINATOR) revert InvalidBps();
         if (refundWindowSeconds_ == 0 || maxExpiryExtensionSeconds_ == 0) revert InvalidExtendBatch();
@@ -244,6 +250,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     function setImageIds(bytes32 newDepositImageId, bytes32 newWithdrawImageId) external onlyOwner {
+        if (newDepositImageId == bytes32(0) || newWithdrawImageId == bytes32(0)) revert ZeroImageId();
         depositImageId = newDepositImageId;
         withdrawImageId = newWithdrawImageId;
         emit ImageIdsUpdated(newDepositImageId, newWithdrawImageId);
@@ -295,14 +302,17 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         bytes calldata journal
     ) external whenNotPaused nonReentrant {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
-        _verifySeal(seal, depositImageId, journal);
 
         DepositJournal memory dj = abi.decode(journal, (DepositJournal));
+        MintItem[] memory items = dj.items;
+        uint256 itemsLength = items.length;
+        if (itemsLength > MAX_BATCH_SIZE) revert InvalidBatchSize(itemsLength, MAX_BATCH_SIZE);
+
+        _verifySeal(seal, depositImageId, journal);
         if (
             dj.finalOrchardRoot != checkpoint.finalOrchardRoot || dj.baseChainId != checkpoint.baseChainId
                 || dj.bridgeContract != checkpoint.bridgeContract
         ) revert BadJournalDomain();
-        MintItem[] memory items = dj.items;
 
         uint96 fbps = feeBps;
         uint96 tipBps = relayerTipBps;
@@ -437,14 +447,17 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         bytes calldata journal
     ) external whenNotPaused nonReentrant {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
-        _verifySeal(seal, withdrawImageId, journal);
 
         WithdrawJournal memory wj = abi.decode(journal, (WithdrawJournal));
+        FinalizeItem[] memory items = wj.items;
+        uint256 itemsLength = items.length;
+        if (itemsLength > MAX_BATCH_SIZE) revert InvalidBatchSize(itemsLength, MAX_BATCH_SIZE);
+
+        _verifySeal(seal, withdrawImageId, journal);
         if (
             wj.finalOrchardRoot != checkpoint.finalOrchardRoot || wj.baseChainId != checkpoint.baseChainId
                 || wj.bridgeContract != checkpoint.bridgeContract
         ) revert BadJournalDomain();
-        FinalizeItem[] memory items = wj.items;
 
         uint96 tipBps = relayerTipBps;
 
@@ -540,9 +553,16 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     function _verifySeal(bytes calldata seal, bytes32 imageId, bytes calldata journal) internal view {
+        if (imageId == bytes32(0)) revert ZeroImageId();
         try verifier.verifyProof(imageId, journal, seal) {}
-        catch {
-            revert InvalidProof();
+        catch Error(string memory reason) {
+            revert VerifierStringError(reason);
+        }
+        catch Panic(uint256 code) {
+            revert VerifierPanic(code);
+        }
+        catch (bytes memory reason) {
+            revert VerifierReverted(reason);
         }
     }
 

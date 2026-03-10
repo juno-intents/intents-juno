@@ -87,6 +87,50 @@ contract BridgeTest is Test {
         distributor.setBridge(address(bridge));
     }
 
+    function test_constructor_revertsOnZeroImageId() public {
+        vm.expectRevert(Bridge.ZeroImageId.selector);
+        new Bridge(
+            owner,
+            token,
+            distributor,
+            registry,
+            verifier,
+            bytes32(0),
+            WITHDRAW_IMAGE_ID,
+            FEE_BPS,
+            TIP_BPS,
+            REFUND_WINDOW,
+            MAX_EXTEND,
+            0,
+            0
+        );
+
+        vm.expectRevert(Bridge.ZeroImageId.selector);
+        new Bridge(
+            owner,
+            token,
+            distributor,
+            registry,
+            verifier,
+            DEPOSIT_IMAGE_ID,
+            bytes32(0),
+            FEE_BPS,
+            TIP_BPS,
+            REFUND_WINDOW,
+            MAX_EXTEND,
+            0,
+            0
+        );
+    }
+
+    function test_setImageIds_revertsOnZeroImageId() public {
+        vm.expectRevert(Bridge.ZeroImageId.selector);
+        bridge.setImageIds(bytes32(0), WITHDRAW_IMAGE_ID);
+
+        vm.expectRevert(Bridge.ZeroImageId.selector);
+        bridge.setImageIds(DEPOSIT_IMAGE_ID, bytes32(0));
+    }
+
     function test_mintBatch_mintsNetAndFees_andIsIdempotent() public {
         Bridge.Checkpoint memory cp = _checkpoint();
 
@@ -302,6 +346,26 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
+    function test_mintBatch_revertsOnTooManyItems() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        uint256 itemCount = bridge.MAX_BATCH_SIZE() + 1;
+        bytes memory journal = _depositJournal(cp, itemCount);
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(abi.encodeWithSelector(Bridge.InvalidBatchSize.selector, itemCount, bridge.MAX_BATCH_SIZE()));
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
+    function test_finalizeWithdrawBatch_revertsOnTooManyItems() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        uint256 itemCount = bridge.MAX_BATCH_SIZE() + 1;
+        bytes memory journal = _withdrawJournal(cp, itemCount);
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(abi.encodeWithSelector(Bridge.InvalidBatchSize.selector, itemCount, bridge.MAX_BATCH_SIZE()));
+        bridge.finalizeWithdrawBatch(cp, sigs, hex"01", journal);
+    }
+
     function test_finalizeWithdrawBatch_revertsOnRecipientHashMismatch() public {
         address alice = makeAddr("alice");
         uint256 amount = 100_000;
@@ -507,6 +571,30 @@ contract BridgeTest is Test {
         bridge.finalizeWithdrawBatch(cp, sigs, hex"01", journal);
     }
 
+    function test_mintBatch_surfacesVerifierRevertData() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+
+        Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
+        items[0] = Bridge.MintItem({depositId: keccak256("verify-fail"), recipient: makeAddr("alice"), amount: 1});
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, false);
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Bridge.VerifierReverted.selector, abi.encodeWithSelector(MockVerifierRouter.VerifyFailed.selector)
+            )
+        );
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+    }
+
     function test_mintBatch_revertsIfThresholdUnset() public {
         MockVerifierRouter v = new MockVerifierRouter();
 
@@ -557,6 +645,46 @@ contract BridgeTest is Test {
             baseChainId: block.chainid,
             bridgeContract: address(bridge)
         });
+    }
+
+    function _depositJournal(Bridge.Checkpoint memory cp, uint256 itemCount) private pure returns (bytes memory) {
+        Bridge.MintItem[] memory items = new Bridge.MintItem[](itemCount);
+        for (uint256 i = 0; i < itemCount; i++) {
+            items[i] = Bridge.MintItem({
+                depositId: keccak256(abi.encodePacked("deposit", i)),
+                recipient: address(uint160(i + 1)),
+                amount: i + 1
+            });
+        }
+
+        return abi.encode(
+            Bridge.DepositJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: items
+            })
+        );
+    }
+
+    function _withdrawJournal(Bridge.Checkpoint memory cp, uint256 itemCount) private pure returns (bytes memory) {
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](itemCount);
+        for (uint256 i = 0; i < itemCount; i++) {
+            items[i] = Bridge.FinalizeItem({
+                withdrawalId: keccak256(abi.encodePacked("withdrawal", i)),
+                recipientUAHash: keccak256(abi.encodePacked("ua", i)),
+                netAmount: i + 1
+            });
+        }
+
+        return abi.encode(
+            Bridge.WithdrawJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: items
+            })
+        );
     }
 
     function _firstN(uint256 n) private view returns (uint256[] memory pks) {
