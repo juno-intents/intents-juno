@@ -1,0 +1,18 @@
+{
+  "threshold": 3,
+  "ufvk": "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+  "operators": [
+    {
+      "index": 1,
+      "operator_id": "0x1111111111111111111111111111111111111111"
+    },
+    {
+      "index": 2,
+      "operator_id": "0x6666666666666666666666666666666666666666"
+    },
+    {
+      "index": 3,
+      "operator_id": "0x7777777777777777777777777777777777777777"
+    }
+  ]
+}

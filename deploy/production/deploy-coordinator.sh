@@ -1,185 +1,132 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
-#
-# deploy-coordinator.sh — Deploy shared infrastructure and bridge contracts for
-# a production Juno Bridge coordinator.
-#
-# Usage:
-#   deploy-coordinator.sh [options]
-#
-# Options:
-#   --terraform-dir DIR      Path to Terraform live directory (required)
-#   --bridge-deploy-binary   Path to bridge-deploy binary (required)
-#   --dkg-summary PATH       Path to DKG summary JSON (required)
-#   --base-rpc-url URL       Base chain RPC URL (required)
-#   --base-chain-id ID       Base chain ID (required)
-#   --deployer-key-file PATH Private key file for contract deployer (required)
-#   --output-dir DIR         Output directory for shared-config.json (default: ./production-output)
-#   --existing-bridge-summary PATH  Reuse existing bridge contracts (skip deploy)
-#   --aws-profile PROFILE    AWS CLI profile (default: juno)
-#   --dry-run                Print actions without executing
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# shellcheck source=../operators/dkg/common.sh
-source "$REPO_ROOT/deploy/operators/dkg/common.sh"
+# shellcheck source=./lib.sh
+source "$SCRIPT_DIR/lib.sh"
 
-# ── Defaults ──────────────────────────────────────────────────────────────────
-terraform_dir=""
-bridge_deploy_binary=""
+usage() {
+  cat <<'EOF'
+Usage:
+  deploy-coordinator.sh [options]
+
+Options:
+  --inventory PATH             Deployment inventory JSON (required)
+  --dkg-summary PATH           DKG summary JSON (required)
+  --bridge-deploy-binary PATH  Bridge deploy binary (required unless reusing bridge summary)
+  --deployer-key-file PATH     Deployer key file (required when deploying bridge)
+  --existing-bridge-summary PATH
+                               Reuse an existing bridge summary instead of deploying
+  --terraform-output-json PATH Use a precomputed terraform output -json file
+  --skip-terraform-apply       Do not run terraform init/apply
+  --output-dir DIR             Output root (default: ./production-output)
+  --dry-run                    Skip external mutations; requires existing bridge summary
+EOF
+}
+
+inventory=""
 dkg_summary=""
-base_rpc_url=""
-base_chain_id=""
+bridge_deploy_binary=""
 deployer_key_file=""
-output_dir="./production-output"
 existing_bridge_summary=""
-aws_profile="juno"
+terraform_output_json=""
+skip_terraform_apply="false"
+output_root="./production-output"
 dry_run="false"
 
-# ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --terraform-dir)        terraform_dir="$2"; shift 2 ;;
+    --inventory) inventory="$2"; shift 2 ;;
+    --dkg-summary) dkg_summary="$2"; shift 2 ;;
     --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
-    --dkg-summary)          dkg_summary="$2"; shift 2 ;;
-    --base-rpc-url)         base_rpc_url="$2"; shift 2 ;;
-    --base-chain-id)        base_chain_id="$2"; shift 2 ;;
-    --deployer-key-file)    deployer_key_file="$2"; shift 2 ;;
-    --output-dir)           output_dir="$2"; shift 2 ;;
+    --deployer-key-file) deployer_key_file="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
-    --aws-profile)          aws_profile="$2"; shift 2 ;;
-    --dry-run)              dry_run="true"; shift ;;
+    --terraform-output-json) terraform_output_json="$2"; shift 2 ;;
+    --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
+    --output-dir) output_root="$2"; shift 2 ;;
+    --dry-run) dry_run="true"; shift ;;
+    --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
 
-# ── Validate ──────────────────────────────────────────────────────────────────
-[[ -n "$terraform_dir" ]]       || die "--terraform-dir is required"
-[[ -d "$terraform_dir" ]]       || die "terraform-dir does not exist: $terraform_dir"
-[[ -n "$dkg_summary" ]]         || die "--dkg-summary is required"
-[[ -f "$dkg_summary" ]]         || die "dkg-summary not found: $dkg_summary"
-[[ -n "$base_rpc_url" ]]        || die "--base-rpc-url is required"
-[[ -n "$base_chain_id" ]]       || die "--base-chain-id is required"
+[[ -n "$inventory" ]] || die "--inventory is required"
+[[ -f "$inventory" ]] || die "inventory not found: $inventory"
+[[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
+[[ -f "$dkg_summary" ]] || die "dkg summary not found: $dkg_summary"
+if [[ -z "$existing_bridge_summary" ]]; then
+  [[ -n "$bridge_deploy_binary" ]] || die "--bridge-deploy-binary is required when bridge summary is not reused"
+  [[ -f "$bridge_deploy_binary" ]] || die "bridge deploy binary not found: $bridge_deploy_binary"
+  [[ "$dry_run" != "true" ]] || die "--dry-run requires --existing-bridge-summary"
+  [[ -n "$deployer_key_file" ]] || die "--deployer-key-file is required when deploying bridge"
+  [[ -f "$deployer_key_file" ]] || die "deployer key file not found: $deployer_key_file"
+else
+  [[ -f "$existing_bridge_summary" ]] || die "bridge summary not found: $existing_bridge_summary"
+fi
 
-for cmd in terraform jq aws; do
+for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
+inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
+env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+terraform_dir="$(production_abs_path "$REPO_ROOT" "$terraform_dir_rel")"
+[[ -d "$terraform_dir" ]] || die "terraform dir not found: $terraform_dir"
+output_dir="$output_root/$env_slug"
 mkdir -p "$output_dir"
 
-# ── Step 1: Terraform apply for shared services ──────────────────────────────
-log "Step 1: Provisioning shared infrastructure via Terraform"
-if [[ "$dry_run" == "true" ]]; then
-  log "[DRY RUN] would run: terraform -chdir=$terraform_dir init && apply"
-else
-  (
-    cd "$terraform_dir"
-    terraform init -input=false
-    terraform apply -auto-approve -input=false
-  )
-  log "Terraform apply complete"
-fi
-
-# Extract shared infra outputs
-log "Extracting Terraform outputs..."
-shared_postgres_dsn=""
-shared_kafka_brokers=""
-shared_ipfs_api_url=""
-
-if [[ "$dry_run" != "true" ]]; then
-  shared_postgres_dsn="$(cd "$terraform_dir" && terraform output -raw postgres_dsn 2>/dev/null || true)"
-  shared_kafka_brokers="$(cd "$terraform_dir" && terraform output -raw kafka_brokers 2>/dev/null || true)"
-  shared_ipfs_api_url="$(cd "$terraform_dir" && terraform output -raw ipfs_api_url 2>/dev/null || true)"
-fi
-
-# ── Step 2: Deploy bridge contracts ──────────────────────────────────────────
-bridge_summary=""
-
-if [[ -n "$existing_bridge_summary" ]]; then
-  log "Step 2: Reusing existing bridge contracts from $existing_bridge_summary"
-  bridge_summary="$existing_bridge_summary"
-else
-  log "Step 2: Deploying bridge contracts"
-  [[ -n "$bridge_deploy_binary" ]] || die "--bridge-deploy-binary required when not using --existing-bridge-summary"
-  [[ -f "$bridge_deploy_binary" ]] || die "bridge deploy binary not found: $bridge_deploy_binary"
-  [[ -n "$deployer_key_file" ]]    || die "--deployer-key-file required for bridge deployment"
-  [[ -f "$deployer_key_file" ]]    || die "deployer key file not found: $deployer_key_file"
-
-  bridge_summary="$output_dir/bridge-summary.json"
-
-  if [[ "$dry_run" == "true" ]]; then
-    log "[DRY RUN] would deploy bridge contracts"
+if [[ "$skip_terraform_apply" != "true" ]]; then
+  for cmd in terraform; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+  log "Applying shared-services terraform in $terraform_dir"
+  if [[ "$dry_run" != "true" ]]; then
+    (
+      cd "$terraform_dir"
+      terraform init -input=false
+      terraform apply -auto-approve -input=false
+    )
   else
-    "$bridge_deploy_binary" deploy \
-      --rpc-url "$base_rpc_url" \
-      --chain-id "$base_chain_id" \
-      --deployer-key-file "$deployer_key_file" \
-      --dkg-summary "$dkg_summary" \
-      --output "$bridge_summary"
-
-    log "Bridge contracts deployed, summary at: $bridge_summary"
+    log "[DRY RUN] skipped terraform apply"
   fi
 fi
 
-# ── Step 3: Generate shared-config.json ──────────────────────────────────────
-log "Step 3: Generating shared-config.json"
-shared_config="$output_dir/shared-config.json"
-
-if [[ "$dry_run" == "true" ]]; then
-  log "[DRY RUN] would generate $shared_config"
+if [[ -n "$terraform_output_json" ]]; then
+  [[ -f "$terraform_output_json" ]] || die "terraform output json not found: $terraform_output_json"
+  tf_output_json="$terraform_output_json"
 else
-  bridge_address="$(jq -r '.contracts.bridge // empty' "$bridge_summary" 2>/dev/null || true)"
-  wjuno_address="$(jq -r '.contracts.wjuno // empty' "$bridge_summary" 2>/dev/null || true)"
-  operator_registry="$(jq -r '.contracts.operator_registry // empty' "$bridge_summary" 2>/dev/null || true)"
-  fee_distributor="$(jq -r '.contracts.fee_distributor // empty' "$bridge_summary" 2>/dev/null || true)"
-  owallet_ua="$(jq -r '.owallet_ua // empty' "$bridge_summary" 2>/dev/null || true)"
-  operators_json="$(jq -c '[.operators[]?]' "$bridge_summary" 2>/dev/null || echo '[]')"
-
-  jq -n \
-    --arg base_rpc_url "$base_rpc_url" \
-    --arg base_chain_id "$base_chain_id" \
-    --arg postgres_dsn "$shared_postgres_dsn" \
-    --arg kafka_brokers "$shared_kafka_brokers" \
-    --arg ipfs_api_url "$shared_ipfs_api_url" \
-    --arg bridge_address "$bridge_address" \
-    --arg wjuno_address "$wjuno_address" \
-    --arg operator_registry "$operator_registry" \
-    --arg fee_distributor "$fee_distributor" \
-    --arg owallet_ua "$owallet_ua" \
-    --argjson operators "$operators_json" \
-    '{
-      version: "1",
-      base_rpc_url: $base_rpc_url,
-      base_chain_id: ($base_chain_id | tonumber),
-      postgres_dsn: $postgres_dsn,
-      kafka_brokers: $kafka_brokers,
-      ipfs_api_url: $ipfs_api_url,
-      contracts: {
-        bridge: $bridge_address,
-        wjuno: $wjuno_address,
-        operator_registry: $operator_registry,
-        fee_distributor: $fee_distributor
-      },
-      owallet_ua: $owallet_ua,
-      operators: $operators
-    }' > "$shared_config"
-
-  log "shared-config.json written to: $shared_config"
+  for cmd in terraform; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+  tf_output_json="$output_dir/terraform-output.json"
+  (
+    cd "$terraform_dir"
+    terraform output -json >"$tf_output_json"
+  )
 fi
 
-# ── Step 4: Output onboarding instructions ───────────────────────────────────
-log ""
-log "=== Coordinator deployment complete ==="
-log ""
-log "Shared config: $shared_config"
-if [[ -n "$bridge_summary" && -f "$bridge_summary" ]]; then
-  log "Bridge summary: $bridge_summary"
+bridge_summary="$output_dir/bridge-summary.json"
+if [[ -n "$existing_bridge_summary" ]]; then
+  cp "$existing_bridge_summary" "$bridge_summary"
+else
+  log "Deploying bridge contracts"
+  "$bridge_deploy_binary" deploy \
+    --rpc-url "$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')" \
+    --chain-id "$(production_json_required "$inventory" '.contracts.base_chain_id')" \
+    --deployer-key-file "$deployer_key_file" \
+    --dkg-summary "$dkg_summary" \
+    --output "$bridge_summary"
 fi
-log ""
-log "Operator onboarding:"
-log "  1. Distribute shared-config.json to each operator"
-log "  2. Each operator runs: deploy-operator.sh --shared-config $shared_config --dkg-backup <backup>"
-log "  3. Verify operator health with: curl <operator-host>:8080/healthz"
+
+shared_manifest="$output_dir/shared-manifest.json"
+production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir"
+production_render_operator_handoffs "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
+
+log "shared manifest: $shared_manifest"
+log "rollout state: $output_dir/rollout-state.json"
+log "operator handoffs: $output_dir/operators"

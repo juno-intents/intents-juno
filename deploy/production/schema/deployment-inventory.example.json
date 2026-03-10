@@ -1,0 +1,39 @@
+{
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "terraform_dir": "deploy/shared/terraform/production-shared",
+    "route53_zone_id": "Z01169511CVMQJAD7T3TJ",
+    "public_zone_name": "thejunowallet.com",
+    "public_subdomain": "alpha.intents-testing.thejunowallet.com"
+  },
+  "contracts": {
+    "base_rpc_url": "https://base-sepolia.example.invalid",
+    "base_chain_id": 84532,
+    "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",
+    "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02"
+  },
+  "operators": [
+    {
+      "index": 1,
+      "operator_id": "0x1111111111111111111111111111111111111111",
+      "aws_profile": "juno",
+      "aws_region": "us-east-1",
+      "account_id": "021490342184",
+      "operator_host": "203.0.113.11",
+      "operator_user": "ubuntu",
+      "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+      "public_dns_label": "op1",
+      "public_endpoint": "203.0.113.11",
+      "known_hosts_file": "operators/op1/known_hosts",
+      "dkg_backup_zip": "operators/op1/dkg-backup.zip",
+      "secret_contract_file": "operators/op1/operator-secrets.env"
+    }
+  ],
+  "dns": {
+    "mode": "public-zone",
+    "write_role_arn": "",
+    "ttl_seconds": 60
+  }
+}

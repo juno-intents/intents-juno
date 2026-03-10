@@ -1,0 +1,69 @@
+{
+  "version": "1",
+  "environment": "alpha",
+  "generated_at": "2026-03-10T00:00:00Z",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "terraform_dir": "deploy/shared/terraform/production-shared",
+    "postgres": {
+      "endpoint": "alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com",
+      "port": 5432
+    },
+    "kafka": {
+      "bootstrap_brokers": "b-1.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094,b-2.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094",
+      "tls": true,
+      "min_insync_replicas": 2
+    },
+    "ipfs": {
+      "api_url": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001"
+    },
+    "artifacts": {
+      "checkpoint_blob_bucket": "alpha-dkg-keypackages",
+      "checkpoint_blob_prefix": "dkg/keypackages"
+    }
+  },
+  "contracts": {
+    "base_rpc_url": "https://base-sepolia.example.invalid",
+    "base_chain_id": 84532,
+    "bridge": "0x2222222222222222222222222222222222222222",
+    "wjuno": "0x3333333333333333333333333333333333333333",
+    "operator_registry": "0x4444444444444444444444444444444444444444",
+    "fee_distributor": "0x5555555555555555555555555555555555555555",
+    "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",
+    "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02",
+    "owallet_ua": "u1alphaexample"
+  },
+  "checkpoint": {
+    "operators": [
+      "0x1111111111111111111111111111111111111111",
+      "0x6666666666666666666666666666666666666666",
+      "0x7777777777777777777777777777777777777777"
+    ],
+    "threshold": 3,
+    "signature_topic": "checkpoints.signatures.v1",
+    "package_topic": "checkpoints.packages.v1"
+  },
+  "operator_roster": [
+    {
+      "index": 1,
+      "operator_id": "0x1111111111111111111111111111111111111111",
+      "aws_profile": "juno",
+      "aws_region": "us-east-1",
+      "account_id": "021490342184",
+      "public_dns_label": "op1"
+    }
+  ],
+  "dns": {
+    "mode": "public-zone",
+    "zone_id": "Z01169511CVMQJAD7T3TJ",
+    "zone_name": "thejunowallet.com",
+    "public_subdomain": "alpha.intents-testing.thejunowallet.com",
+    "ttl_seconds": 60
+  },
+  "secret_reference_names": [
+    "CHECKPOINT_POSTGRES_DSN",
+    "BASE_RELAYER_PRIVATE_KEYS",
+    "BASE_RELAYER_AUTH_TOKEN"
+  ]
+}
