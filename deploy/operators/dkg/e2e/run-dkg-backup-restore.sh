@@ -22,6 +22,10 @@ Options:
   --base-port <port>          first operator grpc port (default: 18443)
   --release-tag <tag>         DKG tool release tag (default: v0.1.0)
   --output <path>             summary json output (default: <workdir>/reports/dkg-summary.json)
+  --inventory <path>          optional deployment inventory used to render handoff bundles
+  --handoff-output-dir <path> optional handoff output root (default: <workdir>/handoff when --inventory is set)
+  --shared-manifest-path <p>  shared-manifest path recorded in rendered operator-deploy.json
+  --rollout-state-file <p>    rollout-state path recorded in rendered operator-deploy.json
   --force                     remove existing workdir before starting
   --leave-running             leave restored operators running at the end
 
@@ -54,6 +58,10 @@ command_run() {
   local base_port=18443
   local release_tag="$JUNO_DKG_VERSION_DEFAULT"
   local output_path=""
+  local inventory_path=""
+  local handoff_output_dir=""
+  local shared_manifest_path="shared-manifest.json"
+  local rollout_state_file="rollout-state.json"
   local force="false"
   local leave_running="false"
 
@@ -92,6 +100,26 @@ command_run() {
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output_path="$2"
+        shift 2
+        ;;
+      --inventory)
+        [[ $# -ge 2 ]] || die "missing value for --inventory"
+        inventory_path="$2"
+        shift 2
+        ;;
+      --handoff-output-dir)
+        [[ $# -ge 2 ]] || die "missing value for --handoff-output-dir"
+        handoff_output_dir="$2"
+        shift 2
+        ;;
+      --shared-manifest-path)
+        [[ $# -ge 2 ]] || die "missing value for --shared-manifest-path"
+        shared_manifest_path="$2"
+        shift 2
+        ;;
+      --rollout-state-file)
+        [[ $# -ge 2 ]] || die "missing value for --rollout-state-file"
+        rollout_state_file="$2"
         shift 2
         ;;
       --force)
@@ -147,6 +175,7 @@ command_run() {
   local -a operator_endpoints=()
   local -a operator_runtime_dirs=()
   local -a operator_backup_packages=()
+  local -a operator_restore_reports=()
   local -a operator_status_json=()
   local -a started_runtimes=()
   local cleanup_enabled="true"
@@ -289,15 +318,17 @@ command_run() {
   done
 
   for ((i = 1; i <= operator_count; i++)); do
-    local runtime_dir backup_zip status_json
+    local runtime_dir backup_zip status_json restore_report
     runtime_dir="$workdir/operators/op${i}/runtime"
     backup_zip="$workdir/operators/op${i}/backup-packages/dkg-backup.zip"
+    restore_report="$runtime_dir/restore-report.json"
 
     (
       cd "$REPO_ROOT"
       deploy/operators/dkg/backup-package.sh restore \
         --package "$backup_zip" \
         --workdir "$runtime_dir" \
+        --report "$restore_report" \
         --force
 
       deploy/operators/dkg/operator.sh run \
@@ -316,6 +347,7 @@ command_run() {
       die "restored operator is not running: op${i}"
     fi
     operator_status_json+=("$status_json")
+    operator_restore_reports+=("$restore_report")
   done
 
   local operators_json='[]'
@@ -330,6 +362,7 @@ command_run() {
       --arg endpoint "${operator_endpoints[$idx]}" \
       --arg runtime_dir "${operator_runtime_dirs[$idx]}" \
       --arg backup_package "${operator_backup_packages[$idx]}" \
+      --arg restore_report "${operator_restore_reports[$idx]}" \
       --argjson status "${operator_status_json[$idx]}" \
       '{
         index: $index,
@@ -339,6 +372,7 @@ command_run() {
         endpoint: $endpoint,
         runtime_dir: $runtime_dir,
         backup_package: $backup_package,
+        restore_report: $restore_report,
         status: $status
       }')"
     operators_json="$(jq --argjson op "$op_json" '. + [$op]' <<<"$operators_json")"
@@ -364,6 +398,31 @@ command_run() {
       threshold: $threshold,
       operators: $operators
     }' >"$output_path"
+
+  if [[ -n "$inventory_path" ]]; then
+    if [[ -z "$handoff_output_dir" ]]; then
+      handoff_output_dir="$workdir/handoff"
+    fi
+    (
+      cd "$REPO_ROOT"
+      deploy/operators/dkg/render-handoff.sh \
+        --inventory "$inventory_path" \
+        --dkg-summary "$output_path" \
+        --output-dir "$handoff_output_dir" \
+        --shared-manifest-path "$shared_manifest_path" \
+        --rollout-state-file "$rollout_state_file" \
+        --validate \
+        --force
+    )
+
+    local handoff_manifest_path summary_tmp
+    handoff_manifest_path="$handoff_output_dir/$(jq -r '.environment' "$inventory_path")/handoff-manifest.json"
+    if [[ -f "$handoff_manifest_path" ]]; then
+      summary_tmp="$(mktemp)"
+      jq --arg handoff_manifest "$handoff_manifest_path" '. + {handoff_manifest: $handoff_manifest}' "$output_path" >"$summary_tmp"
+      mv "$summary_tmp" "$output_path"
+    fi
+  fi
 
   if [[ "$leave_running" != "true" ]]; then
     cleanup_started_runtimes started_runtimes

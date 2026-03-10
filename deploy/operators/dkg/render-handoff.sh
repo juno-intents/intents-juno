@@ -22,6 +22,7 @@ Render options:
   --secret-mode <mode>            auto|plain|age|none (default: auto)
   --age-recipient <age1..>        repeatable override used with --secret-mode age
   --shared-manifest-path <path>   optional shared-manifest path recorded in handoff json
+  --rollout-state-file <path>     optional rollout-state path recorded in operator-deploy.json
   --validate                      run local restore validation for rendered bundles
   --force                         overwrite an existing operator handoff dir
 
@@ -194,7 +195,7 @@ write_operator_deploy() {
   local bundle_backup="$7"
   local operator_id="$8"
   local operator_index="$9"
-  local env_dir="${10}"
+  local rollout_state_file="${10}"
 
   local bundle_rel known_hosts_rel secret_rel dns_mode dns_record_name ttl_seconds
   bundle_rel="operators/$operator_id"
@@ -214,6 +215,7 @@ write_operator_deploy() {
     --arg version "1" \
     --arg environment "$environment" \
     --arg shared_manifest_path "$shared_manifest_path" \
+    --arg rollout_state_file "$rollout_state_file" \
     --arg operator_id "$operator_id" \
     --argjson operator_index "$operator_index" \
     --arg aws_profile "$(json_optional_from_string "$operator_json" '.aws_profile')" \
@@ -233,6 +235,7 @@ write_operator_deploy() {
       version: $version,
       environment: $environment,
       shared_manifest_path: (if $shared_manifest_path == "" then null else $shared_manifest_path end),
+      rollout_state_file: (if $rollout_state_file == "" then null else $rollout_state_file end),
       operator_id: $operator_id,
       operator_index: $operator_index,
       aws_profile: (if $aws_profile == "" then null else $aws_profile end),
@@ -333,6 +336,7 @@ render_command() {
   local operator_filter=""
   local secret_mode="auto"
   local shared_manifest_path=""
+  local rollout_state_file=""
   local do_validate="false"
   local force="false"
   local -a age_recipients=()
@@ -365,6 +369,10 @@ render_command() {
         ;;
       --shared-manifest-path)
         shared_manifest_path="$2"
+        shift 2
+        ;;
+      --rollout-state-file)
+        rollout_state_file="$2"
         shift 2
         ;;
       --validate)
@@ -509,7 +517,7 @@ render_command() {
       "$bundle_dir/dkg-backup.zip" \
       "$operator_id" \
       "$operator_index" \
-      "$env_dir"
+      "$rollout_state_file"
 
     restore_status="skipped"
     restore_detail="rendered without local restore validation"

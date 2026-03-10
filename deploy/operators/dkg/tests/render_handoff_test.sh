@@ -132,13 +132,14 @@ EOF
 }
 
 test_render_handoff_bundle_renders_operator_deploy_and_placeholder_inputs() {
-  local tmp backup_zip inventory shared_manifest dkg_summary output_dir
+  local tmp backup_zip inventory shared_manifest dkg_summary output_dir rollout_state_file
   tmp="$(mktemp -d)"
   backup_zip="$(build_fixture_backup_zip "$tmp")"
   inventory="$tmp/deployment-inventory.json"
   shared_manifest="$tmp/shared-manifest.json"
   dkg_summary="$tmp/dkg-summary.json"
   output_dir="$tmp/handoff"
+  rollout_state_file="$tmp/rollout-state.json"
 
   cat >"$inventory" <<'JSON'
 {
@@ -204,6 +205,7 @@ JSON
       --inventory "$inventory" \
       --dkg-summary "$dkg_summary" \
       --shared-manifest-path "$shared_manifest" \
+      --rollout-state-file "$rollout_state_file" \
       --output-dir "$output_dir"
   )
 
@@ -232,6 +234,9 @@ JSON
   assert_eq "$(jq -r '.secret_contract_file' "$deploy_json")" \
     "operators/0x1111111111111111111111111111111111111111/operator-secrets.env" \
     "operator-deploy secret contract path"
+  assert_eq "$(jq -r '.rollout_state_file' "$deploy_json")" \
+    "$rollout_state_file" \
+    "operator-deploy rollout state path"
   assert_eq "$(jq -r '.dns.record_name' "$deploy_json")" \
     "op1.alpha" \
     "operator-deploy dns record name"
