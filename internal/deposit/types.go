@@ -63,3 +63,18 @@ type Job struct {
 	ProofSeal []byte
 	TxHash    [32]byte
 }
+
+type SubmittedBatchAttempt struct {
+	BatchID [32]byte
+
+	DepositIDs [][32]byte
+
+	Owner string
+	Epoch uint64
+
+	Checkpoint         checkpoint.Checkpoint
+	OperatorSignatures [][]byte
+
+	ProofSeal []byte
+	TxHash    [32]byte
+}

@@ -933,6 +933,129 @@ func TestRelayer_RetriesSubmittedDepositsOnLaterFlush(t *testing.T) {
 	}
 }
 
+func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.DepositIDV1([32]byte(cm), 7)
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	store := deposit.NewMemoryStore()
+	initialSender := &scriptedSender{
+		plan: []scriptedSenderStep{{err: errors.New("temporary send error")}},
+	}
+	initialProver := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r1, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-1",
+		Now:               time.Now,
+	}, store, initialSender, initialProver, nil)
+	if err != nil {
+		t.Fatalf("New worker 1: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r1.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("r1 IngestCheckpoint: %v", err)
+	}
+	err = r1.IngestDeposit(ctx, DepositEvent{
+		Commitment: cm,
+		LeafIndex:  7,
+		Amount:     1000,
+		Memo:       memoBytes[:],
+	})
+	if err == nil {
+		t.Fatalf("expected initial submit error")
+	}
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get after first attempt: %v", err)
+	}
+	if got, want := job.State, deposit.StateSubmitted; got != want {
+		t.Fatalf("state after first attempt: got %v want %v", got, want)
+	}
+
+	resumeSender := &scriptedSender{
+		plan: []scriptedSenderStep{{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}},
+	}
+	resumeProver := &stubProofRequester{err: errors.New("proof should not be requested on resume")}
+
+	r2, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-2",
+		Now:               time.Now,
+	}, store, resumeSender, resumeProver, nil)
+	if err != nil {
+		t.Fatalf("New worker 2: %v", err)
+	}
+
+	if err := r2.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("r2 IngestCheckpoint: %v", err)
+	}
+	if err := r2.Flush(ctx); err != nil {
+		t.Fatalf("r2 Flush: %v", err)
+	}
+	if resumeSender.calls != 1 {
+		t.Fatalf("resume sender calls: got %d want 1", resumeSender.calls)
+	}
+	if initialProver.gotReq.JobID == (common.Hash{}) {
+		t.Fatalf("expected initial proof request to occur")
+	}
+	if resumeProver.gotReq.JobID != (common.Hash{}) {
+		t.Fatalf("resume relayer should not request a new proof")
+	}
+
+	job, err = store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get after resume: %v", err)
+	}
+	if got, want := job.State, deposit.StateFinalized; got != want {
+		t.Fatalf("state after resume: got %v want %v", got, want)
+	}
+}
+
 func TestRelayer_UsesBinaryGuestInputWhenConfigured(t *testing.T) {
 	t.Parallel()
 

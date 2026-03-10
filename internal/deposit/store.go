@@ -19,11 +19,13 @@ type Store interface {
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
 	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
 	ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Job, error)
+	ClaimSubmittedAttempts(ctx context.Context, owner string, ttl time.Duration, limit int) ([]SubmittedBatchAttempt, error)
 
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error
 	MarkFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
-	MarkBatchSubmitted(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte) error
+	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
+	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error
 	// FinalizeBatch atomically transitions the provided deposits to finalized.
 	// Implementations must ensure all-or-nothing behavior for this batch call.
 	FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error

@@ -260,6 +260,9 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 }
 
 func (r *Relayer) FlushDue(ctx context.Context) error {
+	if err := r.recoverSubmittedAttempts(ctx); err != nil {
+		return err
+	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
@@ -279,6 +282,9 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 }
 
 func (r *Relayer) Flush(ctx context.Context) error {
+	if err := r.recoverSubmittedAttempts(ctx); err != nil {
+		return err
+	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
@@ -338,21 +344,112 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	return nil
 }
 
+func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
+	limit := r.cfg.MaxItems * 4
+	if limit < r.cfg.MaxItems {
+		limit = r.cfg.MaxItems
+	}
+	attempts, err := r.store.ClaimSubmittedAttempts(ctx, r.cfg.Owner, r.cfg.ClaimTTL, limit)
+	if err != nil {
+		return err
+	}
+
+	for _, attempt := range attempts {
+		if attempt.TxHash != ([32]byte{}) {
+			if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, attempt.TxHash); err != nil {
+				return fmt.Errorf("depositrelayer: finalize recovered batch: %w", err)
+			}
+			delete(r.proofAttempts, common.Hash(attempt.BatchID))
+			continue
+		}
+		if err := r.resubmitSubmittedAttempt(ctx, attempt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Relayer) resubmitSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {
+	if err := r.checkBridgePause(ctx); err != nil {
+		return err
+	}
+
+	items, err := r.loadMintItems(ctx, attempt.DepositIDs)
+	if err != nil {
+		return err
+	}
+
+	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
+		FinalOrchardRoot: attempt.Checkpoint.FinalOrchardRoot,
+		BaseChainId:      new(big.Int).SetUint64(attempt.Checkpoint.BaseChainID),
+		BridgeContract:   attempt.Checkpoint.BridgeContract,
+		Items:            items,
+	})
+	if err != nil {
+		return err
+	}
+	calldata, err := bridgeabi.PackMintBatchCalldata(attempt.Checkpoint, attempt.OperatorSignatures, attempt.ProofSeal, journal)
+	if err != nil {
+		return err
+	}
+
+	req := httpapi.SendRequest{
+		To:       attempt.Checkpoint.BridgeContract.Hex(),
+		Data:     hexutil.Encode(calldata),
+		GasLimit: r.cfg.GasLimit,
+	}
+
+	res, err := r.sender.Send(ctx, req)
+	if err != nil {
+		return err
+	}
+	if res.Receipt == nil {
+		return fmt.Errorf("depositrelayer: base-relayer did not return a receipt")
+	}
+	if res.Receipt.Status != 1 {
+		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
+	}
+
+	txHash := common.HexToHash(res.TxHash)
+	if err := r.store.SetBatchSubmissionTxHash(ctx, attempt.BatchID, [32]byte(txHash)); err != nil {
+		return fmt.Errorf("depositrelayer: set batch tx hash: %w", err)
+	}
+	if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, [32]byte(txHash)); err != nil {
+		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
+	}
+
+	delete(r.proofAttempts, common.Hash(attempt.BatchID))
+	r.log.Info("resubmitted mintBatch",
+		"checkpointHeight", attempt.Checkpoint.Height,
+		"items", len(items),
+		"txHash", res.TxHash,
+	)
+	return nil
+}
+
+func (r *Relayer) loadMintItems(ctx context.Context, depositIDs [][32]byte) ([]bridgeabi.MintItem, error) {
+	items := make([]bridgeabi.MintItem, 0, len(depositIDs))
+	for _, depositID := range depositIDs {
+		job, err := r.store.Get(ctx, depositID)
+		if err != nil {
+			return nil, fmt.Errorf("depositrelayer: load submitted deposit %x: %w", depositID[:8], err)
+		}
+		items = append(items, bridgeabi.MintItem{
+			DepositId: common.Hash(job.Deposit.DepositID),
+			Recipient: common.Address(job.Deposit.BaseRecipient),
+			Amount:    new(big.Int).SetUint64(job.Deposit.Amount),
+		})
+	}
+	return items, nil
+}
+
 func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opSigs [][]byte, batch batching.Batch[mintBatchItem]) error {
 	if len(batch.Items) == 0 {
 		return nil
 	}
 
-	// Bridge pause check: if paused, skip submission (items stay staged for next tick).
-	if r.pauseChecker != nil {
-		paused, err := r.pauseChecker.IsPaused(ctx)
-		if err != nil {
-			r.log.Warn("bridge pause check error (fail-safe: skipping submit)", "err", err)
-		}
-		if paused {
-			r.log.Warn("bridge is paused, skipping batch submission")
-			return fmt.Errorf("depositrelayer: bridge is paused, skipping submit")
-		}
+	if err := r.checkBridgePause(ctx); err != nil {
+		return err
 	}
 
 	// Check per-batch proof attempt limits.
@@ -431,7 +528,7 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	for _, it := range batch.Items {
 		finalizeIDs = append(finalizeIDs, it.ID)
 	}
-	if err := r.store.MarkBatchSubmitted(ctx, finalizeIDs, cp, seal); err != nil {
+	if _, err := r.store.MarkBatchSubmitted(ctx, r.cfg.Owner, [32]byte(batchID), finalizeIDs, cp, opSigs, seal); err != nil {
 		return fmt.Errorf("depositrelayer: mark batch submitted: %w", err)
 	}
 
@@ -449,6 +546,9 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	}
 
 	txHash := common.HexToHash(res.TxHash)
+	if err := r.store.SetBatchSubmissionTxHash(ctx, [32]byte(batchID), [32]byte(txHash)); err != nil {
+		return fmt.Errorf("depositrelayer: set batch tx hash: %w", err)
+	}
 	if err := r.store.FinalizeBatch(ctx, finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
 		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
 	}
@@ -461,6 +561,21 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		"items", len(items),
 		"txHash", res.TxHash,
 	)
+	return nil
+}
+
+func (r *Relayer) checkBridgePause(ctx context.Context) error {
+	if r.pauseChecker == nil {
+		return nil
+	}
+	paused, err := r.pauseChecker.IsPaused(ctx)
+	if err != nil {
+		r.log.Warn("bridge pause check error (fail-safe: skipping submit)", "err", err)
+	}
+	if paused {
+		r.log.Warn("bridge is paused, skipping batch submission")
+		return fmt.Errorf("depositrelayer: bridge is paused, skipping submit")
+	}
 	return nil
 }
 

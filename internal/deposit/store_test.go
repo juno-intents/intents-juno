@@ -1,6 +1,7 @@
 package deposit
 
 import (
+	"bytes"
 	"context"
 	"testing"
 	"time"
@@ -341,11 +342,47 @@ func TestMemoryStore_MarkBatchSubmitted(t *testing.T) {
 		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
 	}
 	seal := []byte{0x99}
+	batchID := [32]byte{0x42}
+	operatorSigs := [][]byte{{0xaa}, {0xbb}}
 
-	if err := s.MarkBatchSubmitted(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal); err != nil {
+	attempt, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{d1.DepositID, d2.DepositID}, cp, operatorSigs, seal)
+	if err != nil {
 		t.Fatalf("MarkBatchSubmitted: %v", err)
 	}
-	if err := s.MarkBatchSubmitted(ctx, [][32]byte{d1.DepositID, d2.DepositID}, cp, seal); err != nil {
+	if attempt.BatchID != batchID {
+		t.Fatalf("batch id: got %x want %x", attempt.BatchID, batchID)
+	}
+	if attempt.Owner != "worker-a" {
+		t.Fatalf("owner: got %q want %q", attempt.Owner, "worker-a")
+	}
+	if attempt.Epoch != 1 {
+		t.Fatalf("epoch: got %d want 1", attempt.Epoch)
+	}
+	if attempt.Checkpoint != cp {
+		t.Fatalf("checkpoint mismatch")
+	}
+	if !bytes.Equal(attempt.ProofSeal, seal) {
+		t.Fatalf("proof seal mismatch")
+	}
+	if len(attempt.OperatorSignatures) != len(operatorSigs) {
+		t.Fatalf("operator signatures len: got %d want %d", len(attempt.OperatorSignatures), len(operatorSigs))
+	}
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, [32]byte{0x77}); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	claimed, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed attempts len: got %d want 1", len(claimed))
+	}
+	if claimed[0].TxHash != ([32]byte{0x77}) {
+		t.Fatalf("tx hash mismatch")
+	}
+
+	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{d1.DepositID, d2.DepositID}, cp, operatorSigs, seal); err != nil {
 		t.Fatalf("MarkBatchSubmitted replay: %v", err)
 	}
 
@@ -365,6 +402,95 @@ func TestMemoryStore_MarkBatchSubmitted(t *testing.T) {
 	}
 	if string(j1.ProofSeal) != string(seal) || string(j2.ProofSeal) != string(seal) {
 		t.Fatalf("proof seal mismatch")
+	}
+
+	confirmed, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed after submit: %v", err)
+	}
+	if len(confirmed) != 0 {
+		t.Fatalf("expected submitted deposits to be excluded from ClaimConfirmed")
+	}
+}
+
+func TestMemoryStore_SubmittedAttemptsHonorClaimTTLAndClearOnFinalize(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x01
+	var cm [32]byte
+	cm[0] = 0xaa
+	var recip [20]byte
+	recip[0] = 0x11
+
+	if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x55}
+	seal := []byte{0x99}
+
+	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{id}, cp, [][]byte{{0xaa}}, seal); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	first, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts worker-a: %v", err)
+	}
+	if len(first) != 1 || first[0].BatchID != batchID {
+		t.Fatalf("unexpected first claim result")
+	}
+
+	other, err := s.ClaimSubmittedAttempts(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts worker-b: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("expected worker-b exclusion while attempt lease active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	afterExpiry, err := s.ClaimSubmittedAttempts(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts worker-b after expiry: %v", err)
+	}
+	if len(afterExpiry) != 1 || afterExpiry[0].BatchID != batchID {
+		t.Fatalf("expected worker-b to claim after expiry")
+	}
+
+	var txHash [32]byte
+	txHash[0] = 0x77
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+	if err := s.FinalizeBatch(ctx, [][32]byte{id}, cp, seal, txHash); err != nil {
+		t.Fatalf("FinalizeBatch: %v", err)
+	}
+
+	attempts, err := s.ClaimSubmittedAttempts(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts after finalize: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected submitted attempts to clear after finalize")
 	}
 }
 

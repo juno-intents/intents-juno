@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 	amount BIGINT NOT NULL,
 	base_recipient BYTEA NOT NULL,
 	proof_witness_item BYTEA,
+	juno_height BIGINT,
 
 	state SMALLINT NOT NULL,
 
@@ -19,6 +20,7 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 
 	proof_seal BYTEA,
 	tx_hash BYTEA,
+	submit_batch_id BYTEA,
 	claimed_by TEXT,
 	claim_expires_at TIMESTAMPTZ,
 
@@ -36,20 +38,65 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 	CONSTRAINT checkpoint_root_len CHECK (checkpoint_final_orchard_root IS NULL OR octet_length(checkpoint_final_orchard_root) = 32),
 	CONSTRAINT checkpoint_bridge_len CHECK (checkpoint_bridge_contract IS NULL OR octet_length(checkpoint_bridge_contract) = 20),
 	CONSTRAINT tx_hash_len CHECK (tx_hash IS NULL OR octet_length(tx_hash) = 32),
+	CONSTRAINT submit_batch_id_len CHECK (submit_batch_id IS NULL OR octet_length(submit_batch_id) = 32),
 	CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
+);
+
+CREATE TABLE IF NOT EXISTS deposit_batch_attempts (
+	batch_id BYTEA PRIMARY KEY,
+	owner TEXT NOT NULL,
+	epoch BIGINT NOT NULL,
+	deposit_ids_json JSONB NOT NULL,
+
+	checkpoint_height BIGINT NOT NULL,
+	checkpoint_block_hash BYTEA NOT NULL,
+	checkpoint_final_orchard_root BYTEA NOT NULL,
+	checkpoint_base_chain_id BIGINT NOT NULL,
+	checkpoint_bridge_contract BYTEA NOT NULL,
+
+	operator_signatures_json JSONB NOT NULL,
+	proof_seal BYTEA NOT NULL,
+	tx_hash BYTEA,
+	claimed_by TEXT,
+	claim_expires_at TIMESTAMPTZ,
+
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+	CONSTRAINT deposit_batch_attempts_batch_id_len CHECK (octet_length(batch_id) = 32),
+	CONSTRAINT deposit_batch_attempts_owner_nonempty CHECK (owner <> ''),
+	CONSTRAINT deposit_batch_attempts_epoch_positive CHECK (epoch > 0),
+	CONSTRAINT deposit_batch_attempts_block_hash_len CHECK (octet_length(checkpoint_block_hash) = 32),
+	CONSTRAINT deposit_batch_attempts_root_len CHECK (octet_length(checkpoint_final_orchard_root) = 32),
+	CONSTRAINT deposit_batch_attempts_bridge_len CHECK (octet_length(checkpoint_bridge_contract) = 20),
+	CONSTRAINT deposit_batch_attempts_tx_hash_len CHECK (tx_hash IS NULL OR octet_length(tx_hash) = 32),
+	CONSTRAINT deposit_batch_attempts_claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
 );
 
 CREATE INDEX IF NOT EXISTS deposit_jobs_state_idx ON deposit_jobs (state);
 CREATE INDEX IF NOT EXISTS deposit_jobs_claim_idx ON deposit_jobs (claim_expires_at);
+CREATE INDEX IF NOT EXISTS deposit_jobs_submit_batch_idx ON deposit_jobs (submit_batch_id) WHERE submit_batch_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS deposit_jobs_juno_height_idx ON deposit_jobs (juno_height);
+CREATE INDEX IF NOT EXISTS deposit_jobs_base_recipient_idx ON deposit_jobs (base_recipient);
+CREATE INDEX IF NOT EXISTS deposit_jobs_tx_hash_idx ON deposit_jobs (tx_hash) WHERE tx_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS deposit_batch_attempts_claim_idx ON deposit_batch_attempts (claim_expires_at);
+CREATE INDEX IF NOT EXISTS deposit_batch_attempts_tx_hash_idx ON deposit_batch_attempts (tx_hash) WHERE tx_hash IS NOT NULL;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
+ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS submit_batch_id BYTEA;
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS claim_owner_nonempty;
 ALTER TABLE deposit_jobs ADD CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE deposit_jobs ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848);
+ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS submit_batch_id_len;
+ALTER TABLE deposit_jobs ADD CONSTRAINT submit_batch_id_len CHECK (submit_batch_id IS NULL OR octet_length(submit_batch_id) = 32);
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS juno_height BIGINT;
-CREATE INDEX IF NOT EXISTS deposit_jobs_juno_height_idx ON deposit_jobs (juno_height);
-CREATE INDEX IF NOT EXISTS deposit_jobs_base_recipient_idx ON deposit_jobs (base_recipient);
-CREATE INDEX IF NOT EXISTS deposit_jobs_tx_hash_idx ON deposit_jobs (tx_hash) WHERE tx_hash IS NOT NULL;
+ALTER TABLE deposit_batch_attempts ADD COLUMN IF NOT EXISTS tx_hash BYTEA;
+ALTER TABLE deposit_batch_attempts ADD COLUMN IF NOT EXISTS claimed_by TEXT;
+ALTER TABLE deposit_batch_attempts ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
+ALTER TABLE deposit_batch_attempts DROP CONSTRAINT IF EXISTS deposit_batch_attempts_claim_owner_nonempty;
+ALTER TABLE deposit_batch_attempts ADD CONSTRAINT deposit_batch_attempts_claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
+ALTER TABLE deposit_batch_attempts DROP CONSTRAINT IF EXISTS deposit_batch_attempts_tx_hash_len;
+ALTER TABLE deposit_batch_attempts ADD CONSTRAINT deposit_batch_attempts_tx_hash_len CHECK (tx_hash IS NULL OR octet_length(tx_hash) = 32);
 `

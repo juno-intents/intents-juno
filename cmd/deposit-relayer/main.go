@@ -425,6 +425,11 @@ func main() {
 				cancel()
 				if err != nil {
 					log.Error("ingest checkpoint", "err", err)
+					if isCheckpointPermanentError(err) {
+						log.Warn("permanent checkpoint error, acking unprocessable message", "err", err)
+						ackMessage(qmsg, *ackTimeout, log)
+					}
+					continue
 				}
 				ackMessage(qmsg, *ackTimeout, log)
 
@@ -616,6 +621,13 @@ func isDepositPermanentError(err error) bool {
 		return true
 	}
 	return false
+}
+
+func isCheckpointPermanentError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, depositrelayer.ErrInvalidCheckpoint)
 }
 
 func decodeHexBytesOptional(s string) ([]byte, error) {

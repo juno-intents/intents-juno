@@ -10,10 +10,16 @@ import (
 )
 
 type MemoryStore struct {
-	mu    sync.Mutex
+	mu sync.Mutex
+
 	jobs  map[[32]byte]Job
 	order [][32]byte
 	claim map[[32]byte]claimLease
+
+	attempts         map[[32]byte]SubmittedBatchAttempt
+	attemptOrder     [][32]byte
+	attemptClaim     map[[32]byte]claimLease
+	attemptByDeposit map[[32]byte][32]byte
 }
 
 type claimLease struct {
@@ -23,8 +29,11 @@ type claimLease struct {
 
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
-		jobs:  make(map[[32]byte]Job),
-		claim: make(map[[32]byte]claimLease),
+		jobs:             make(map[[32]byte]Job),
+		claim:            make(map[[32]byte]claimLease),
+		attempts:         make(map[[32]byte]SubmittedBatchAttempt),
+		attemptClaim:     make(map[[32]byte]claimLease),
+		attemptByDeposit: make(map[[32]byte][32]byte),
 	}
 }
 
@@ -112,7 +121,7 @@ func (s *MemoryStore) ClaimConfirmed(_ context.Context, owner string, ttl time.D
 	out := make([]Job, 0, limit)
 	for _, id := range s.order {
 		j := s.jobs[id]
-		if j.State != StateConfirmed && j.State != StateSubmitted {
+		if j.State != StateConfirmed {
 			continue
 		}
 		lease, claimed := s.claim[id]
@@ -128,6 +137,39 @@ func (s *MemoryStore) ClaimConfirmed(_ context.Context, owner string, ttl time.D
 			j.ProofSeal = append([]byte(nil), j.ProofSeal...)
 		}
 		out = append(out, j)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+func (s *MemoryStore) ClaimSubmittedAttempts(_ context.Context, owner string, ttl time.Duration, limit int) ([]SubmittedBatchAttempt, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if owner == "" || ttl <= 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	now := time.Now().UTC()
+	expiresAt := now.Add(ttl)
+
+	out := make([]SubmittedBatchAttempt, 0, limit)
+	for _, batchID := range s.attemptOrder {
+		attempt, ok := s.attempts[batchID]
+		if !ok {
+			continue
+		}
+		lease, claimed := s.attemptClaim[batchID]
+		if claimed && lease.owner != owner && lease.expiresAt.After(now) {
+			continue
+		}
+		s.attemptClaim[batchID] = claimLease{
+			owner:     owner,
+			expiresAt: expiresAt,
+		}
+		out = append(out, cloneSubmittedBatchAttempt(attempt))
 		if len(out) >= limit {
 			break
 		}
@@ -207,12 +249,15 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 	return nil
 }
 
-func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte) error {
+func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	if len(depositIDs) == 0 {
-		return nil
+		return SubmittedBatchAttempt{}, nil
+	}
+	if owner == "" {
+		return SubmittedBatchAttempt{}, ErrInvalidTransition
 	}
 
 	ids := uniqueDepositIDs(depositIDs)
@@ -220,27 +265,62 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, depositIDs [][32]byt
 	for _, id := range ids {
 		j, ok := s.jobs[id]
 		if !ok {
-			return ErrNotFound
-		}
-		if j.State == StateFinalized {
-			continue
+			return SubmittedBatchAttempt{}, ErrNotFound
 		}
 		if j.State < StateConfirmed {
-			return ErrInvalidTransition
+			return SubmittedBatchAttempt{}, ErrInvalidTransition
 		}
 	}
 
+	if existing, ok := s.attempts[batchID]; ok {
+		if !submittedBatchAttemptEqual(existing, owner, ids, cp, operatorSignatures, seal) {
+			return SubmittedBatchAttempt{}, ErrDepositMismatch
+		}
+		for _, id := range ids {
+			s.attemptByDeposit[id] = batchID
+		}
+		return cloneSubmittedBatchAttempt(existing), nil
+	}
+
+	attempt := SubmittedBatchAttempt{
+		BatchID:             batchID,
+		DepositIDs:          cloneDepositIDs(ids),
+		Owner:               owner,
+		Epoch:               1,
+		Checkpoint:          cp,
+		OperatorSignatures:  clone2DBytes(operatorSignatures),
+		ProofSeal:           append([]byte(nil), seal...),
+	}
+	s.attempts[batchID] = attempt
+	s.attemptOrder = append(s.attemptOrder, batchID)
+
 	for _, id := range ids {
 		j := s.jobs[id]
-		if j.State >= StateSubmitted {
-			continue
-		}
-		j.State = StateSubmitted
 		j.Checkpoint = cp
 		j.ProofSeal = append([]byte(nil), seal...)
+		if j.State != StateFinalized {
+			j.State = StateSubmitted
+		}
 		s.jobs[id] = j
 		delete(s.claim, id)
+		s.attemptByDeposit[id] = batchID
 	}
+	return cloneSubmittedBatchAttempt(attempt), nil
+}
+
+func (s *MemoryStore) SetBatchSubmissionTxHash(_ context.Context, batchID [32]byte, txHash [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	attempt, ok := s.attempts[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if attempt.TxHash != ([32]byte{}) && attempt.TxHash != txHash {
+		return ErrDepositMismatch
+	}
+	attempt.TxHash = txHash
+	s.attempts[batchID] = attempt
 	return nil
 }
 
@@ -253,6 +333,7 @@ func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp
 	}
 
 	ids := uniqueDepositIDs(depositIDs)
+	batchIDs := make(map[[32]byte]struct{}, len(ids))
 
 	// Validate first so the operation is all-or-nothing.
 	for _, id := range ids {
@@ -269,11 +350,16 @@ func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp
 		if j.State < StateConfirmed {
 			return ErrInvalidTransition
 		}
+		if batchID, ok := s.attemptByDeposit[id]; ok {
+			batchIDs[batchID] = struct{}{}
+		}
 	}
 
 	for _, id := range ids {
 		j := s.jobs[id]
 		if j.State == StateFinalized {
+			delete(s.claim, id)
+			delete(s.attemptByDeposit, id)
 			continue
 		}
 		j.State = StateFinalized
@@ -282,6 +368,11 @@ func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp
 		j.TxHash = txHash
 		s.jobs[id] = j
 		delete(s.claim, id)
+		delete(s.attemptByDeposit, id)
+	}
+	for batchID := range batchIDs {
+		delete(s.attempts, batchID)
+		delete(s.attemptClaim, batchID)
 	}
 	return nil
 }
@@ -302,6 +393,56 @@ func uniqueDepositIDs(ids [][32]byte) [][32]byte {
 func cloneDeposit(d Deposit) Deposit {
 	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
 	return d
+}
+
+func cloneSubmittedBatchAttempt(a SubmittedBatchAttempt) SubmittedBatchAttempt {
+	a.DepositIDs = cloneDepositIDs(a.DepositIDs)
+	a.OperatorSignatures = clone2DBytes(a.OperatorSignatures)
+	a.ProofSeal = append([]byte(nil), a.ProofSeal...)
+	return a
+}
+
+func cloneDepositIDs(ids [][32]byte) [][32]byte {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([][32]byte, len(ids))
+	copy(out, ids)
+	return out
+}
+
+func clone2DBytes(in [][]byte) [][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, len(in))
+	for _, item := range in {
+		out = append(out, append([]byte(nil), item...))
+	}
+	return out
+}
+
+func submittedBatchAttemptEqual(existing SubmittedBatchAttempt, owner string, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) bool {
+	if existing.Owner != owner || existing.Checkpoint != cp {
+		return false
+	}
+	if !bytes.Equal(existing.ProofSeal, seal) {
+		return false
+	}
+	if len(existing.DepositIDs) != len(depositIDs) || len(existing.OperatorSignatures) != len(operatorSignatures) {
+		return false
+	}
+	for i := range existing.DepositIDs {
+		if existing.DepositIDs[i] != depositIDs[i] {
+			return false
+		}
+	}
+	for i := range existing.OperatorSignatures {
+		if !bytes.Equal(existing.OperatorSignatures[i], operatorSignatures[i]) {
+			return false
+		}
+	}
+	return true
 }
 
 func depositEqual(a, b Deposit) bool {

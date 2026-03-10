@@ -3,6 +3,8 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -308,22 +310,22 @@ func (s *Store) ClaimConfirmed(ctx context.Context, owner string, ttl time.Durat
 			SELECT deposit_id
 			FROM deposit_jobs
 			WHERE
-				(state = $1 OR state = $2)
+				state = $1
 				AND (
 					claim_expires_at IS NULL
 					OR claim_expires_at <= now()
-					OR claimed_by = $3
+					OR claimed_by = $2
 				)
-			ORDER BY state DESC, created_at ASC, deposit_id ASC
+			ORDER BY created_at ASC, deposit_id ASC
 			FOR UPDATE SKIP LOCKED
-			LIMIT $4
+			LIMIT $3
 		)
 		UPDATE deposit_jobs dj
-		SET claimed_by = $3, claim_expires_at = $5, updated_at = now()
+		SET claimed_by = $2, claim_expires_at = $4, updated_at = now()
 		FROM picked
 		WHERE dj.deposit_id = picked.deposit_id
 		RETURNING dj.deposit_id
-	`, int16(deposit.StateConfirmed), int16(deposit.StateSubmitted), owner, limit, expiresAt)
+	`, int16(deposit.StateConfirmed), owner, limit, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("deposit/postgres: claim confirmed: %w", err)
 	}
@@ -352,6 +354,64 @@ func (s *Store) ClaimConfirmed(ctx context.Context, owner string, ttl time.Durat
 			return nil, err
 		}
 		out = append(out, job)
+	}
+	return out, nil
+}
+
+func (s *Store) ClaimSubmittedAttempts(ctx context.Context, owner string, ttl time.Duration, limit int) ([]deposit.SubmittedBatchAttempt, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if owner == "" || ttl <= 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	expiresAt := time.Now().UTC().Add(ttl)
+	rows, err := s.pool.Query(ctx, `
+		WITH picked AS (
+			SELECT batch_id
+			FROM deposit_batch_attempts
+			WHERE
+				claim_expires_at IS NULL
+				OR claim_expires_at <= now()
+				OR claimed_by = $1
+			ORDER BY created_at ASC, batch_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE deposit_batch_attempts dba
+		SET claimed_by = $1, claim_expires_at = $3, updated_at = now()
+		FROM picked
+		WHERE dba.batch_id = picked.batch_id
+		RETURNING
+			dba.batch_id,
+			dba.owner,
+			dba.epoch,
+			dba.deposit_ids_json,
+			dba.checkpoint_height,
+			dba.checkpoint_block_hash,
+			dba.checkpoint_final_orchard_root,
+			dba.checkpoint_base_chain_id,
+			dba.checkpoint_bridge_contract,
+			dba.operator_signatures_json,
+			dba.proof_seal,
+			dba.tx_hash
+	`, owner, limit, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: claim submitted attempts: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]deposit.SubmittedBatchAttempt, 0, limit)
+	for rows.Next() {
+		attempt, err := scanSubmittedBatchAttempt(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, attempt)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: claim submitted attempts rows: %w", err)
 	}
 	return out, nil
 }
@@ -455,13 +515,16 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 	return nil
 }
 
-func (s *Store) MarkBatchSubmitted(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte) error {
+func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (deposit.SubmittedBatchAttempt, error) {
 	if s == nil || s.pool == nil {
-		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
 	ids := uniqueDepositIDs(depositIDs)
 	if len(ids) == 0 {
-		return nil
+		return deposit.SubmittedBatchAttempt{}, nil
+	}
+	if owner == "" {
+		return deposit.SubmittedBatchAttempt{}, deposit.ErrInvalidTransition
 	}
 
 	rawIDs := make([][]byte, 0, len(ids))
@@ -473,7 +536,7 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, depositIDs [][32]byte, c
 
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
-		return fmt.Errorf("deposit/postgres: begin submit batch tx: %w", err)
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: begin submit batch tx: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
@@ -484,7 +547,7 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, depositIDs [][32]byte, c
 		FOR UPDATE
 	`, rawIDs)
 	if err != nil {
-		return fmt.Errorf("deposit/postgres: lock submit batch rows: %w", err)
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: lock submit batch rows: %w", err)
 	}
 	defer rows.Close()
 
@@ -495,67 +558,126 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, depositIDs [][32]byte, c
 			state int16
 		)
 		if err := rows.Scan(&idRaw, &state); err != nil {
-			return fmt.Errorf("deposit/postgres: scan submit batch row: %w", err)
+			return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: scan submit batch row: %w", err)
 		}
 		id, err := to32(idRaw)
 		if err != nil {
-			return err
+			return deposit.SubmittedBatchAttempt{}, err
 		}
 		found[id] = state
 	}
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("deposit/postgres: submit batch rows: %w", err)
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: submit batch rows: %w", err)
 	}
 
-	updatable := make([][]byte, 0, len(ids))
 	for _, id := range ids {
 		state, ok := found[id]
 		if !ok {
-			return deposit.ErrNotFound
-		}
-		if deposit.State(state) == deposit.StateFinalized || deposit.State(state) >= deposit.StateSubmitted {
-			continue
+			return deposit.SubmittedBatchAttempt{}, deposit.ErrNotFound
 		}
 		if deposit.State(state) < deposit.StateConfirmed {
-			return deposit.ErrInvalidTransition
+			return deposit.SubmittedBatchAttempt{}, deposit.ErrInvalidTransition
 		}
-		rawID := make([]byte, 32)
-		copy(rawID, id[:])
-		updatable = append(updatable, rawID)
 	}
 
-	if len(updatable) > 0 {
-		_, err := tx.Exec(ctx, `
-			UPDATE deposit_jobs
-			SET
-				state = $2,
-				checkpoint_height = $3,
-				checkpoint_block_hash = $4,
-				checkpoint_final_orchard_root = $5,
-				checkpoint_base_chain_id = $6,
-				checkpoint_bridge_contract = $7,
-				proof_seal = $8,
-				claimed_by = NULL,
-				claim_expires_at = NULL,
-				updated_at = now()
-			WHERE deposit_id = ANY($1)
-		`,
-			updatable,
-			int16(deposit.StateSubmitted),
-			int64(cp.Height),
-			cp.BlockHash[:],
-			cp.FinalOrchardRoot[:],
-			int64(cp.BaseChainID),
-			cp.BridgeContract[:],
-			seal,
-		)
-		if err != nil {
-			return fmt.Errorf("deposit/postgres: update submit batch rows: %w", err)
+	attempt, foundExisting, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	if foundExisting {
+		if !submittedBatchAttemptMatches(attempt, owner, ids, cp, operatorSignatures, seal) {
+			return deposit.SubmittedBatchAttempt{}, deposit.ErrDepositMismatch
 		}
+	} else {
+		attempt = deposit.SubmittedBatchAttempt{
+			BatchID:             batchID,
+			DepositIDs:          cloneDepositIDs(ids),
+			Owner:               owner,
+			Epoch:               1,
+			Checkpoint:          cp,
+			OperatorSignatures:  clone2DBytes(operatorSignatures),
+			ProofSeal:           append([]byte(nil), seal...),
+		}
+		if err := insertSubmittedBatchAttemptTx(ctx, tx, attempt); err != nil {
+			return deposit.SubmittedBatchAttempt{}, err
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET
+			state = CASE
+				WHEN state = $10 THEN state
+				WHEN state = $2 THEN state
+				ELSE $2
+			END,
+			checkpoint_height = $3,
+			checkpoint_block_hash = $4,
+			checkpoint_final_orchard_root = $5,
+			checkpoint_base_chain_id = $6,
+			checkpoint_bridge_contract = $7,
+			proof_seal = $8,
+			submit_batch_id = $9,
+			claimed_by = NULL,
+			claim_expires_at = NULL,
+			updated_at = now()
+		WHERE deposit_id = ANY($1)
+	`,
+		rawIDs,
+		int16(deposit.StateSubmitted),
+		int64(cp.Height),
+		cp.BlockHash[:],
+		cp.FinalOrchardRoot[:],
+		int64(cp.BaseChainID),
+		cp.BridgeContract[:],
+		seal,
+		batchID[:],
+		int16(deposit.StateFinalized),
+	)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: update submit batch rows: %w", err)
 	}
 
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("deposit/postgres: commit submit batch tx: %w", err)
+		return deposit.SubmittedBatchAttempt{}, fmt.Errorf("deposit/postgres: commit submit batch tx: %w", err)
+	}
+	return cloneSubmittedBatchAttempt(attempt), nil
+}
+
+func (s *Store) SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	var existing []byte
+	err := s.pool.QueryRow(ctx, `
+		SELECT tx_hash
+		FROM deposit_batch_attempts
+		WHERE batch_id = $1
+	`, batchID[:]).Scan(&existing)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return deposit.ErrNotFound
+		}
+		return fmt.Errorf("deposit/postgres: read submitted batch tx hash: %w", err)
+	}
+	if len(existing) > 0 {
+		if len(existing) != 32 || !bytes.Equal(existing, txHash[:]) {
+			return deposit.ErrDepositMismatch
+		}
+		return nil
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE deposit_batch_attempts
+		SET tx_hash = $2, updated_at = now()
+		WHERE batch_id = $1
+	`, batchID[:], txHash[:])
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: set submitted batch tx hash: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return deposit.ErrNotFound
 	}
 	return nil
 }
@@ -583,7 +705,7 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	rows, err := tx.Query(ctx, `
-		SELECT deposit_id, state, tx_hash
+		SELECT deposit_id, state, tx_hash, submit_batch_id
 		FROM deposit_jobs
 		WHERE deposit_id = ANY($1)
 		FOR UPDATE
@@ -594,17 +716,19 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 	defer rows.Close()
 
 	type rowState struct {
-		state  int16
-		txHash []byte
+		state         int16
+		txHash        []byte
+		submitBatchID []byte
 	}
 	found := make(map[[32]byte]rowState, len(ids))
 	for rows.Next() {
 		var (
-			idRaw     []byte
-			state     int16
-			txHashRaw []byte
+			idRaw            []byte
+			state            int16
+			txHashRaw        []byte
+			submitBatchIDRaw []byte
 		)
-		if err := rows.Scan(&idRaw, &state, &txHashRaw); err != nil {
+		if err := rows.Scan(&idRaw, &state, &txHashRaw, &submitBatchIDRaw); err != nil {
 			return fmt.Errorf("deposit/postgres: scan finalize batch row: %w", err)
 		}
 		id, err := to32(idRaw)
@@ -612,8 +736,9 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 			return err
 		}
 		found[id] = rowState{
-			state:  state,
-			txHash: append([]byte(nil), txHashRaw...),
+			state:         state,
+			txHash:        append([]byte(nil), txHashRaw...),
+			submitBatchID: append([]byte(nil), submitBatchIDRaw...),
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -621,6 +746,8 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 	}
 
 	updatable := make([][]byte, 0, len(ids))
+	batchIDsToDelete := make([][]byte, 0, len(ids))
+	seenBatchIDs := make(map[[32]byte]struct{}, len(ids))
 	for _, id := range ids {
 		st, ok := found[id]
 		if !ok {
@@ -634,6 +761,18 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 		}
 		if deposit.State(st.state) < deposit.StateConfirmed {
 			return deposit.ErrInvalidTransition
+		}
+		if len(st.submitBatchID) > 0 {
+			submitBatchID, err := to32(st.submitBatchID)
+			if err != nil {
+				return err
+			}
+			if _, ok := seenBatchIDs[submitBatchID]; !ok {
+				seenBatchIDs[submitBatchID] = struct{}{}
+				rawBatchID := make([]byte, 32)
+				copy(rawBatchID, submitBatchID[:])
+				batchIDsToDelete = append(batchIDsToDelete, rawBatchID)
+			}
 		}
 		rawID := make([]byte, 32)
 		copy(rawID, id[:])
@@ -652,6 +791,7 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 				checkpoint_bridge_contract = $7,
 				proof_seal = $8,
 				tx_hash = $9,
+				submit_batch_id = NULL,
 				claimed_by = NULL,
 				claim_expires_at = NULL,
 				updated_at = now()
@@ -669,6 +809,25 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 		)
 		if err != nil {
 			return fmt.Errorf("deposit/postgres: update finalize batch rows: %w", err)
+		}
+	}
+
+	_, err = tx.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET submit_batch_id = NULL, updated_at = now()
+		WHERE deposit_id = ANY($1)
+	`, rawIDs)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: clear finalize batch ids: %w", err)
+	}
+
+	if len(batchIDsToDelete) > 0 {
+		_, err = tx.Exec(ctx, `
+			DELETE FROM deposit_batch_attempts
+			WHERE batch_id = ANY($1)
+		`, batchIDsToDelete)
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: delete finalize batch attempts: %w", err)
 		}
 	}
 
@@ -712,6 +871,259 @@ func to20(b []byte) ([20]byte, error) {
 func cloneDeposit(d deposit.Deposit) deposit.Deposit {
 	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
 	return d
+}
+
+func cloneSubmittedBatchAttempt(a deposit.SubmittedBatchAttempt) deposit.SubmittedBatchAttempt {
+	a.DepositIDs = cloneDepositIDs(a.DepositIDs)
+	a.OperatorSignatures = clone2DBytes(a.OperatorSignatures)
+	a.ProofSeal = append([]byte(nil), a.ProofSeal...)
+	return a
+}
+
+func cloneDepositIDs(ids [][32]byte) [][32]byte {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([][32]byte, len(ids))
+	copy(out, ids)
+	return out
+}
+
+func clone2DBytes(in [][]byte) [][]byte {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, len(in))
+	for _, item := range in {
+		out = append(out, append([]byte(nil), item...))
+	}
+	return out
+}
+
+func loadSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, batchID [32]byte) (deposit.SubmittedBatchAttempt, bool, error) {
+	row := tx.QueryRow(ctx, `
+		SELECT
+			batch_id,
+			owner,
+			epoch,
+			deposit_ids_json,
+			checkpoint_height,
+			checkpoint_block_hash,
+			checkpoint_final_orchard_root,
+			checkpoint_base_chain_id,
+			checkpoint_bridge_contract,
+			operator_signatures_json,
+			proof_seal,
+			tx_hash
+		FROM deposit_batch_attempts
+		WHERE batch_id = $1
+		FOR UPDATE
+	`, batchID[:])
+
+	attempt, err := scanSubmittedBatchAttempt(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return deposit.SubmittedBatchAttempt{}, false, nil
+		}
+		return deposit.SubmittedBatchAttempt{}, false, err
+	}
+	return attempt, true, nil
+}
+
+func insertSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, attempt deposit.SubmittedBatchAttempt) error {
+	depositIDsJSON, err := marshalDepositIDs(attempt.DepositIDs)
+	if err != nil {
+		return err
+	}
+	operatorSignaturesJSON, err := marshalOperatorSignatures(attempt.OperatorSignatures)
+	if err != nil {
+		return err
+	}
+
+	_, err = tx.Exec(ctx, `
+		INSERT INTO deposit_batch_attempts (
+			batch_id,
+			owner,
+			epoch,
+			deposit_ids_json,
+			checkpoint_height,
+			checkpoint_block_hash,
+			checkpoint_final_orchard_root,
+			checkpoint_base_chain_id,
+			checkpoint_bridge_contract,
+			operator_signatures_json,
+			proof_seal,
+			created_at,
+			updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+	`,
+		attempt.BatchID[:],
+		attempt.Owner,
+		int64(attempt.Epoch),
+		depositIDsJSON,
+		int64(attempt.Checkpoint.Height),
+		attempt.Checkpoint.BlockHash[:],
+		attempt.Checkpoint.FinalOrchardRoot[:],
+		int64(attempt.Checkpoint.BaseChainID),
+		attempt.Checkpoint.BridgeContract[:],
+		operatorSignaturesJSON,
+		attempt.ProofSeal,
+	)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: insert submitted batch attempt: %w", err)
+	}
+	return nil
+}
+
+type scanRow interface {
+	Scan(dest ...any) error
+}
+
+func scanSubmittedBatchAttempt(row scanRow) (deposit.SubmittedBatchAttempt, error) {
+	var (
+		batchIDRaw             []byte
+		owner                  string
+		epoch                  int64
+		depositIDsJSON         []byte
+		checkpointHeight       int64
+		checkpointBlockHashRaw []byte
+		checkpointRootRaw      []byte
+		checkpointBaseChainID  int64
+		checkpointBridgeRaw    []byte
+		operatorSignaturesJSON []byte
+		proofSeal              []byte
+		txHashRaw              []byte
+	)
+
+	if err := row.Scan(
+		&batchIDRaw,
+		&owner,
+		&epoch,
+		&depositIDsJSON,
+		&checkpointHeight,
+		&checkpointBlockHashRaw,
+		&checkpointRootRaw,
+		&checkpointBaseChainID,
+		&checkpointBridgeRaw,
+		&operatorSignaturesJSON,
+		&proofSeal,
+		&txHashRaw,
+	); err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+
+	batchID, err := to32(batchIDRaw)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	blockHash, err := to32(checkpointBlockHashRaw)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	root, err := to32(checkpointRootRaw)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	bridge, err := to20(checkpointBridgeRaw)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	depositIDs, err := unmarshalDepositIDs(depositIDsJSON)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	operatorSignatures, err := unmarshalOperatorSignatures(operatorSignaturesJSON)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+
+	attempt := deposit.SubmittedBatchAttempt{
+		BatchID:             batchID,
+		DepositIDs:          depositIDs,
+		Owner:               owner,
+		Epoch:               uint64(epoch),
+		Checkpoint:          checkpoint.Checkpoint{Height: uint64(checkpointHeight), BlockHash: blockHash, FinalOrchardRoot: root, BaseChainID: uint64(checkpointBaseChainID), BridgeContract: bridge},
+		OperatorSignatures:  operatorSignatures,
+		ProofSeal:           append([]byte(nil), proofSeal...),
+	}
+	if len(txHashRaw) > 0 {
+		attempt.TxHash, err = to32(txHashRaw)
+		if err != nil {
+			return deposit.SubmittedBatchAttempt{}, err
+		}
+	}
+	return attempt, nil
+}
+
+func submittedBatchAttemptMatches(attempt deposit.SubmittedBatchAttempt, owner string, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) bool {
+	if attempt.Owner != owner || attempt.Checkpoint != cp {
+		return false
+	}
+	if !bytes.Equal(attempt.ProofSeal, seal) {
+		return false
+	}
+	if len(attempt.DepositIDs) != len(depositIDs) || len(attempt.OperatorSignatures) != len(operatorSignatures) {
+		return false
+	}
+	for i := range attempt.DepositIDs {
+		if attempt.DepositIDs[i] != depositIDs[i] {
+			return false
+		}
+	}
+	for i := range attempt.OperatorSignatures {
+		if !bytes.Equal(attempt.OperatorSignatures[i], operatorSignatures[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+func marshalDepositIDs(ids [][32]byte) ([]byte, error) {
+	encoded := make([]string, 0, len(ids))
+	for _, id := range ids {
+		encoded = append(encoded, hex.EncodeToString(id[:]))
+	}
+	b, err := json.Marshal(encoded)
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: marshal deposit ids: %w", err)
+	}
+	return b, nil
+}
+
+func unmarshalDepositIDs(b []byte) ([][32]byte, error) {
+	var encoded []string
+	if err := json.Unmarshal(b, &encoded); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: unmarshal deposit ids: %w", err)
+	}
+	out := make([][32]byte, 0, len(encoded))
+	for _, item := range encoded {
+		raw, err := hex.DecodeString(item)
+		if err != nil {
+			return nil, fmt.Errorf("deposit/postgres: decode deposit id: %w", err)
+		}
+		id, err := to32(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, nil
+}
+
+func marshalOperatorSignatures(sigs [][]byte) ([]byte, error) {
+	b, err := json.Marshal(sigs)
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: marshal operator signatures: %w", err)
+	}
+	return b, nil
+}
+
+func unmarshalOperatorSignatures(b []byte) ([][]byte, error) {
+	var sigs [][]byte
+	if err := json.Unmarshal(b, &sigs); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: unmarshal operator signatures: %w", err)
+	}
+	return clone2DBytes(sigs), nil
 }
 
 func depositEqual(a, b deposit.Deposit) bool {

@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"net"
 	"os/exec"
@@ -57,7 +58,7 @@ func TestStore_StateMachine(t *testing.T) {
 		LeafIndex:        7,
 		Amount:           1000,
 		BaseRecipient:    recip,
-		ProofWitnessItem: []byte{0x01, 0x02, 0x03},
+		ProofWitnessItem: bytes.Repeat([]byte{0x01}, 1848),
 	}
 
 	job, created, err := s.UpsertConfirmed(ctx, d)
@@ -242,6 +243,119 @@ func TestStore_FinalizeBatch_IsAtomic(t *testing.T) {
 	}
 	if j1.TxHash != txHash || j2.TxHash != txHash {
 		t.Fatalf("tx hash mismatch")
+	}
+}
+
+func TestStore_SubmittedAttemptsPersistAndResumeDeterministically(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var id [32]byte
+	id[0] = 0x01
+	var cm [32]byte
+	cm[0] = 0xaa
+	var recip [20]byte
+	recip[0] = 0x11
+
+	if _, _, err := s.UpsertConfirmed(ctx, deposit.Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x55}
+	seal := []byte{0x99}
+	operatorSigs := [][]byte{{0xaa}, {0xbb}}
+
+	attempt, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{id}, cp, operatorSigs, seal)
+	if err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	if attempt.BatchID != batchID {
+		t.Fatalf("batch id: got %x want %x", attempt.BatchID, batchID)
+	}
+	if attempt.Owner != "worker-a" {
+		t.Fatalf("owner: got %q want %q", attempt.Owner, "worker-a")
+	}
+	if attempt.Epoch != 1 {
+		t.Fatalf("epoch: got %d want 1", attempt.Epoch)
+	}
+	if len(attempt.DepositIDs) != 1 || attempt.DepositIDs[0] != id {
+		t.Fatalf("unexpected deposit ids: %#v", attempt.DepositIDs)
+	}
+	if len(attempt.OperatorSignatures) != len(operatorSigs) {
+		t.Fatalf("operator sig len: got %d want %d", len(attempt.OperatorSignatures), len(operatorSigs))
+	}
+
+	claimedConfirmed, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed after submit: %v", err)
+	}
+	if len(claimedConfirmed) != 0 {
+		t.Fatalf("expected submitted deposits to be excluded from ClaimConfirmed")
+	}
+
+	var txHash [32]byte
+	txHash[0] = 0x77
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	claimedAttempts, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(claimedAttempts) != 1 {
+		t.Fatalf("submitted attempts len: got %d want 1", len(claimedAttempts))
+	}
+	if claimedAttempts[0].TxHash != txHash {
+		t.Fatalf("tx hash mismatch")
+	}
+
+	if err := s.FinalizeBatch(ctx, [][32]byte{id}, cp, seal, txHash); err != nil {
+		t.Fatalf("FinalizeBatch: %v", err)
+	}
+
+	claimedAttempts, err = s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts after finalize: %v", err)
+	}
+	if len(claimedAttempts) != 0 {
+		t.Fatalf("expected finalized batch attempt to be cleared")
 	}
 }
 
