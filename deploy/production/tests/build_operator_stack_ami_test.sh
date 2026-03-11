@@ -102,6 +102,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   assert_contains "$script_text" 'sudo chown root:intents-juno /etc/intents-juno/operator-stack.env' "builder seeds operator env with intents-juno group access"
   assert_contains "$script_text" 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "hydrator preserves intents-juno group access to operator env"
   assert_contains "$script_text" "checkpoint_key=\"\\\$(sudo cat /etc/intents-juno/checkpoint-signer.key | tr -d '\\r\\n')\"" "builder reads the checkpoint signer key through sudo before stripping newlines"
+  assert_contains "$script_text" 'sudo rm -f /home/$builder_user/.ssh/authorized_keys' "builder scrubs temporary SSH authorized keys before imaging"
 
   for unit in \
     junocashd.service \

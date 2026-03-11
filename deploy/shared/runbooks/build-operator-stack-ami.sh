@@ -2647,6 +2647,10 @@ command_create() {
   mkdir -p "$(dirname "$metadata_out")" "$(dirname "$manifest_out")"
   scp "${ssh_opts[@]}" "$builder_user@$builder_public_ip:/home/$builder_user/operator-stack-bootstrap.json" "$metadata_out"
 
+  log "scrubbing builder SSH authorized_keys before imaging"
+  ssh "${ssh_opts[@]}" "$builder_user@$builder_public_ip" \
+    "sudo rm -f /home/$builder_user/.ssh/authorized_keys /home/$builder_user/bootstrap-operator-stack.sh"
+
   local synced_block_height synced_block_hash junocash_release_tag juno_scan_release_tag
   synced_block_height="$(jq -r '.junocashd.synced_block_height // empty' "$metadata_out")"
   synced_block_hash="$(jq -r '.junocashd.synced_block_hash // empty' "$metadata_out")"
