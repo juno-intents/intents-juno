@@ -339,9 +339,11 @@ sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tm
 sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
 sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
+# shellcheck source=/dev/null
+source "$remote_stage_dir/common.sh"
+dkg_release_tag="${JUNO_DKG_RELEASE_TAG:-$JUNO_DKG_VERSION_DEFAULT}"
+dkg_admin_runtime_bin="$(ensure_dkg_binary "dkg-admin" "$dkg_release_tag" "$runtime_dir/bin")"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
-
-dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
 sudo test -x "$dkg_admin_runtime_bin" || {
   echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
   exit 1
