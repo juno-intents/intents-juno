@@ -11,6 +11,7 @@ cleanup_security_group_id=""
 cleanup_instance_id=""
 cleanup_aws_profile=""
 cleanup_aws_region=""
+readonly GO_TOOLCHAIN_PIN="go1.24.13+auto"
 
 usage() {
   cat <<'HELP'
@@ -177,6 +178,7 @@ report_bootstrap_error() {
 trap 'report_bootstrap_error "$?" "$LINENO" "$BASH_COMMAND"' ERR
 
 export DEBIAN_FRONTEND=noninteractive
+export GOTOOLCHAIN="${GOTOOLCHAIN:-__BOOTSTRAP_GO_TOOLCHAIN__}"
 
 run_with_retry() {
   local attempt
@@ -2368,6 +2370,7 @@ REMOTE_SCRIPT
   script="${script//__BOOTSTRAP_BRIDGE_ADDRESS__/$bridge_address}"
   script="${script//__BOOTSTRAP_SYNC_TIMEOUT_SECONDS__/$sync_timeout_seconds}"
   script="${script//__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__/$tss_signer_runtime_mode}"
+  script="${script//__BOOTSTRAP_GO_TOOLCHAIN__/$GO_TOOLCHAIN_PIN}"
   script="${script//\\\$/\$}"
 
   printf '%s\n' "$script"

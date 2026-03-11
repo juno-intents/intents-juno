@@ -632,7 +632,7 @@ sudo apt-get install -y \
 
 # Install Go if not present
 if ! command -v go >/dev/null 2>&1; then
-  GO_VERSION="1.22.8"
+  GO_VERSION="1.24.13"
   curl -sfL "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz" | sudo tar -C /usr/local -xzf -
   echo 'export PATH=$PATH:/usr/local/go/bin:$HOME/go/bin' >> ~/.bashrc
   export PATH="$PATH:/usr/local/go/bin:$HOME/go/bin"
