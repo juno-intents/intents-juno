@@ -40,6 +40,10 @@ func TestSigner_SignTipMinusConfirmations(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HexToECDSA: %v", err)
 	}
+	digestSigner, err := NewLocalDigestSigner(key)
+	if err != nil {
+		t.Fatalf("NewLocalDigestSigner: %v", err)
+	}
 	wantOperator := crypto.PubkeyToAddress(key.PublicKey)
 
 	baseChainID := uint64(8453)
@@ -56,7 +60,7 @@ func TestSigner_SignTipMinusConfirmations(t *testing.T) {
 		},
 	}
 
-	s, err := NewSigner(src, key, SignerConfig{
+	s, err := NewSigner(src, digestSigner, SignerConfig{
 		BaseChainID:    baseChainID,
 		BridgeContract: bridge,
 		Now:            time.Now,
@@ -99,13 +103,17 @@ func TestSigner_SignTipMinusConfirmations_RejectsWhenTipTooLow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("HexToECDSA: %v", err)
 	}
+	digestSigner, err := NewLocalDigestSigner(key)
+	if err != nil {
+		t.Fatalf("NewLocalDigestSigner: %v", err)
+	}
 
 	src := &fakeChainSource{
 		tip:    50,
 		blocks: map[uint64]ChainCheckpoint{},
 	}
 
-	s, err := NewSigner(src, key, SignerConfig{
+	s, err := NewSigner(src, digestSigner, SignerConfig{
 		BaseChainID:    8453,
 		BridgeContract: common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
 		Now:            time.Now,

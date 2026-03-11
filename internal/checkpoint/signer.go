@@ -2,13 +2,11 @@ package checkpoint
 
 import (
 	"context"
-	"crypto/ecdsa"
 	"errors"
 	"fmt"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 )
 
 var (
@@ -44,19 +42,19 @@ type SignatureMessageV1 struct {
 
 type Signer struct {
 	src         ChainSource
-	key         *ecdsa.PrivateKey
+	signer      DigestSigner
 	operator    common.Address
 	baseChainID uint64
 	bridge      common.Address
 	now         func() time.Time
 }
 
-func NewSigner(src ChainSource, key *ecdsa.PrivateKey, cfg SignerConfig) (*Signer, error) {
+func NewSigner(src ChainSource, signer DigestSigner, cfg SignerConfig) (*Signer, error) {
 	if src == nil {
 		return nil, errors.New("checkpoint: nil chain source")
 	}
-	if key == nil {
-		return nil, errors.New("checkpoint: nil private key")
+	if signer == nil {
+		return nil, errors.New("checkpoint: nil digest signer")
 	}
 	if cfg.BaseChainID == 0 {
 		return nil, errors.New("checkpoint: base chain id must be non-zero")
@@ -71,8 +69,8 @@ func NewSigner(src ChainSource, key *ecdsa.PrivateKey, cfg SignerConfig) (*Signe
 
 	return &Signer{
 		src:         src,
-		key:         key,
-		operator:    crypto.PubkeyToAddress(key.PublicKey),
+		signer:      signer,
+		operator:    signer.Address(),
 		baseChainID: cfg.BaseChainID,
 		bridge:      cfg.BridgeContract,
 		now:         nowFn,
@@ -108,7 +106,7 @@ func (s *Signer) SignHeight(ctx context.Context, height uint64) (SignatureMessag
 	}
 
 	digest := Digest(cp)
-	sig, err := SignDigest(s.key, digest)
+	sig, err := s.signer.SignDigest(ctx, digest)
 	if err != nil {
 		return SignatureMessageV1{}, err
 	}

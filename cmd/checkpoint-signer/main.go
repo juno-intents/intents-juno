@@ -14,8 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	awskms "github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/eth"
@@ -71,8 +72,9 @@ func main() {
 		rpcUserEnv = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var containing junocashd RPC username")
 		rpcPassEnv = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var containing junocashd RPC password")
 
+		signerDriver  = flag.String("signer-driver", "local-env", "checkpoint signer backend: local-env|aws-kms")
+		kmsKeyID      = flag.String("kms-key-id", "", "AWS KMS asymmetric key id/arn (required when --signer-driver=aws-kms)")
 		operatorKeyEnv = flag.String("operator-key-env", "CHECKPOINT_SIGNER_PRIVATE_KEY", "env var containing operator ECDSA private key (32-byte hex)")
-
 		baseChainID   = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr    = flag.String("bridge-address", "", "Bridge contract address (required)")
 		confirmations = flag.Uint64("confirmations", 100, "confirmations (k) for checkpoint height h = tip - k")
@@ -128,28 +130,14 @@ func main() {
 		os.Exit(2)
 	}
 
-	keyRaw := os.Getenv(*operatorKeyEnv)
-	if keyRaw == "" {
-		fmt.Fprintf(os.Stderr, "error: missing operator private key in env %s\n", *operatorKeyEnv)
-		os.Exit(2)
-	}
-	// Reuse eth key parser to keep errors sanitized (never include key material).
-	keys, err := eth.ParsePrivateKeysHexList(keyRaw)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: parse operator key: %v\n", err)
-		os.Exit(2)
-	}
-	if len(keys) != 1 {
-		fmt.Fprintln(os.Stderr, "error: operator key env must contain exactly one private key")
-		os.Exit(2)
-	}
-
-	// Ensure key is valid up-front (crypto.HexToECDSA already did), but keep a local copy typed as ecdsa key.
-	key := keys[0]
-	operator := crypto.PubkeyToAddress(key.PublicKey)
-
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+
+	digestSigner, operator, err := loadDigestSigner(ctx, strings.TrimSpace(*signerDriver), strings.TrimSpace(*kmsKeyID), strings.TrimSpace(*operatorKeyEnv))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: init digest signer: %v\n", err)
+		os.Exit(2)
+	}
 
 	var (
 		leaseStore leases.Store
@@ -217,7 +205,7 @@ func main() {
 	}
 
 	src := &junoChainSource{c: rpc}
-	signer, err := checkpoint.NewSigner(src, key, checkpoint.SignerConfig{
+	signer, err := checkpoint.NewSigner(src, digestSigner, checkpoint.SignerConfig{
 		BaseChainID:    *baseChainID,
 		BridgeContract: bridge,
 		Now:            time.Now,
@@ -310,6 +298,53 @@ func main() {
 			continue
 		}
 		lastDigest = msg.Digest
+	}
+}
+
+func loadDigestSigner(ctx context.Context, driver, kmsKeyID, operatorKeyEnv string) (checkpoint.DigestSigner, common.Address, error) {
+	switch strings.ToLower(strings.TrimSpace(driver)) {
+	case "", "local-env":
+		keyRaw := os.Getenv(operatorKeyEnv)
+		if keyRaw == "" {
+			return nil, common.Address{}, fmt.Errorf("missing operator private key in env %s", operatorKeyEnv)
+		}
+		keys, err := eth.ParsePrivateKeysHexList(keyRaw)
+		if err != nil {
+			return nil, common.Address{}, fmt.Errorf("parse operator key: %w", err)
+		}
+		if len(keys) != 1 {
+			return nil, common.Address{}, errors.New("operator key env must contain exactly one private key")
+		}
+		signer, err := checkpoint.NewLocalDigestSigner(keys[0])
+		if err != nil {
+			return nil, common.Address{}, err
+		}
+		return signer, signer.Address(), nil
+	case "aws-kms":
+		expectedOperatorRaw := strings.TrimSpace(os.Getenv("OPERATOR_ADDRESS"))
+		if expectedOperatorRaw == "" {
+			return nil, common.Address{}, errors.New("OPERATOR_ADDRESS is required when --signer-driver=aws-kms")
+		}
+		if !common.IsHexAddress(expectedOperatorRaw) {
+			return nil, common.Address{}, fmt.Errorf("OPERATOR_ADDRESS must be a valid hex address, got %q", expectedOperatorRaw)
+		}
+		if kmsKeyID == "" {
+			return nil, common.Address{}, errors.New("--kms-key-id is required when --signer-driver=aws-kms")
+		}
+		awsCfg, err := awsconfig.LoadDefaultConfig(ctx)
+		if err != nil {
+			return nil, common.Address{}, fmt.Errorf("load aws config: %w", err)
+		}
+		signer, err := checkpoint.NewKMSDigestSigner(ctx, awskms.NewFromConfig(awsCfg), checkpoint.KMSDigestSignerConfig{
+			KeyID:           kmsKeyID,
+			ExpectedAddress: common.HexToAddress(expectedOperatorRaw),
+		})
+		if err != nil {
+			return nil, common.Address{}, err
+		}
+		return signer, signer.Address(), nil
+	default:
+		return nil, common.Address{}, fmt.Errorf("unsupported signer driver %q", driver)
 	}
 }
 
