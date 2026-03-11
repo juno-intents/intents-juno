@@ -382,9 +382,8 @@ fi
 if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_aggregator_script"; then
   sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
 fi
-if ! grep -Fq 'exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_config" serve' "$dkg_admin_serve_script"; then
-  dkg_admin_tmp="$(mktemp)"
-  cat >"$dkg_admin_tmp" <<'EOF_DKG_WRAPPER'
+dkg_admin_tmp="$(mktemp)"
+cat >"$dkg_admin_tmp" <<'EOF_DKG_WRAPPER'
 #!/usr/bin/env bash
 set -euo pipefail
 # shellcheck disable=SC1091
@@ -398,9 +397,8 @@ admin_config_dir="$(dirname "$admin_config")"
 cd "$admin_config_dir"
 exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_config" serve
 EOF_DKG_WRAPPER
-  sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"
-  rm -f "$dkg_admin_tmp"
-fi
+sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"
+rm -f "$dkg_admin_tmp"
 
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
 if [[ -f "$config_hydrator_script" ]] && {
