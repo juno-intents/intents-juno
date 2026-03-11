@@ -9,6 +9,16 @@ source "$SCRIPT_DIR/common_test.sh"
 # shellcheck source=../lib.sh
 source "$REPO_ROOT/deploy/production/lib.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -73,7 +83,7 @@ printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
 fi
-cat >/dev/null || true
+cat >>"$log_dir/ssh.stdin" || true
 exit 0
 EOF
   cat >"$fake_bin/aws" <<EOF
@@ -90,6 +100,15 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "base-relayer-server.pem" "tls cert copied"
   assert_contains "$(cat "$log_dir/scp.log")" "base-relayer-server.key" "tls key copied"
   assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/known_hosts" "ssh uses known_hosts file"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "remote deploy updates checkpoint signer wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "remote deploy updates checkpoint aggregator wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"' "remote deploy can patch legacy config hydrator"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -Fq '\''install -m 0600 "$tmp" "$file"'\''' "remote deploy detects legacy hydrator env rewrites"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$hydrator_tmp" "$config_hydrator_script"' "remote deploy replaces the legacy hydrator script before restarting services"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo awk -v key="$key" -v value="$value"' "remote deploy edits protected operator env through sudo"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$tmp" "$file"' "remote deploy preserves intents-juno group access on operator env"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force' "remote deploy forces backup restore for retry-safe rollout"
+  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart intents-juno-config-hydrator.service' "remote deploy does not hard-fail on broken config hydrator"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_PER_SECOND=20" "rate limit refill default"

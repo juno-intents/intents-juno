@@ -23,7 +23,7 @@ test_backup_package_contains_required_files() {
   workdir="$tmp/ceremony-workdir"
   output="$tmp/operator-backup.zip"
 
-  mkdir -p "$runtime/bundle" "$tmp/backup" "$tmp/exports" "$workdir/reports"
+  mkdir -p "$runtime/bundle" "$tmp/backup" "$tmp/exports" "$workdir/reports" "$workdir/tls"
   cat >"$runtime/bundle/admin-config.json" <<'JSON'
 {
   "operator_id": "0x1111111111111111111111111111111111111111",
@@ -41,6 +41,9 @@ JSON
   printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$tmp/exports/keypackage-backup.json"
   printf '{"receipt_version":"key_import_receipt_v1"}\n' >"$tmp/exports/keypackage-backup.json.KeyImportReceipt.json"
   printf '{"report_version":1}\n' >"$workdir/reports/test-completiton.json"
+  printf 'test-ufvk\n' >"$workdir/ufvk.txt"
+  printf 'coord-cert\n' >"$workdir/tls/coordinator-client.pem"
+  printf 'coord-key\n' >"$workdir/tls/coordinator-client.key"
 
   (
     cd "$REPO_ROOT"
@@ -50,6 +53,9 @@ JSON
       --age-backup-file "$tmp/exports/keypackage-backup.json" \
       --admin-config "$runtime/bundle/admin-config.json" \
       --completion-report "$workdir/reports/test-completiton.json" \
+      --ufvk-file "$workdir/ufvk.txt" \
+      --coordinator-client-cert "$workdir/tls/coordinator-client.pem" \
+      --coordinator-client-key "$workdir/tls/coordinator-client.key" \
       --output "$output"
   )
 
@@ -61,6 +67,9 @@ JSON
   assert_contains_line "$listing" "payload/keypackage-backup.json.KeyImportReceipt.json" "backup zip age receipt"
   assert_contains_line "$listing" "payload/admin-config.json" "backup zip admin config"
   assert_contains_line "$listing" "payload/test-completiton.json" "backup zip completion report"
+  assert_contains_line "$listing" "payload/ufvk.txt" "backup zip ufvk"
+  assert_contains_line "$listing" "payload/tls/coordinator-client.pem" "backup zip coordinator cert"
+  assert_contains_line "$listing" "payload/tls/coordinator-client.key" "backup zip coordinator key"
 
   rm -rf "$tmp"
 }
@@ -72,7 +81,7 @@ test_backup_package_restore_reconstructs_runtime() {
   output="$tmp/operator-backup.zip"
   fake_bin="$tmp/fake-bin"
 
-  mkdir -p "$runtime/bundle/tls" "$tmp/backup" "$tmp/exports" "$fake_bin"
+  mkdir -p "$runtime/bundle/tls" "$tmp/backup" "$tmp/exports" "$fake_bin" "$tmp/ceremony-tls"
   cat >"$runtime/bundle/admin-config.json" <<'JSON'
 {
   "operator_id": "0x1111111111111111111111111111111111111111",
@@ -97,6 +106,9 @@ JSON
   printf 'FAKE-SERVER\n' >"$runtime/bundle/tls/server.pem"
   printf 'FAKE-KEY\n' >"$runtime/bundle/tls/server.key"
   chmod 0600 "$runtime/bundle/tls/server.key"
+  printf 'test-ufvk\n' >"$tmp/ufvk.txt"
+  printf 'coord-cert\n' >"$tmp/ceremony-tls/coordinator-client.pem"
+  printf 'coord-key\n' >"$tmp/ceremony-tls/coordinator-client.key"
 
   printf 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n' >"$tmp/backup/age-identity.txt"
   printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$tmp/exports/keypackage-backup.json"
@@ -131,6 +143,9 @@ EOF
       --age-identity-file "$tmp/backup/age-identity.txt" \
       --age-backup-file "$tmp/exports/keypackage-backup.json" \
       --admin-config "$runtime/bundle/admin-config.json" \
+      --ufvk-file "$tmp/ufvk.txt" \
+      --coordinator-client-cert "$tmp/ceremony-tls/coordinator-client.pem" \
+      --coordinator-client-key "$tmp/ceremony-tls/coordinator-client.key" \
       --output "$output"
   )
 
@@ -168,6 +183,18 @@ EOF
     printf 'expected restored tls server.key\n' >&2
     exit 1
   }
+  [[ -f "$runtime/ufvk.txt" ]] || {
+    printf 'expected restored ufvk.txt\n' >&2
+    exit 1
+  }
+  [[ -f "$runtime/bundle/tls/coordinator-client.pem" ]] || {
+    printf 'expected restored coordinator-client.pem\n' >&2
+    exit 1
+  }
+  [[ -f "$runtime/bundle/tls/coordinator-client.key" ]] || {
+    printf 'expected restored coordinator-client.key\n' >&2
+    exit 1
+  }
 
   local got_kp got_pkp
   got_kp="$(cat "$runtime/bundle/state/key_package.bin")"
@@ -178,6 +205,18 @@ EOF
   fi
   if [[ "$got_pkp" != "pkpbytes" ]]; then
     printf 'unexpected public_key_package.bin contents: %q\n' "$got_pkp" >&2
+    exit 1
+  fi
+  if [[ "$(cat "$runtime/ufvk.txt")" != "test-ufvk" ]]; then
+    printf 'unexpected ufvk.txt contents: %q\n' "$(cat "$runtime/ufvk.txt")" >&2
+    exit 1
+  fi
+  if [[ "$(cat "$runtime/bundle/tls/coordinator-client.pem")" != "coord-cert" ]]; then
+    printf 'unexpected coordinator-client.pem contents: %q\n' "$(cat "$runtime/bundle/tls/coordinator-client.pem")" >&2
+    exit 1
+  fi
+  if [[ "$(cat "$runtime/bundle/tls/coordinator-client.key")" != "coord-key" ]]; then
+    printf 'unexpected coordinator-client.key contents: %q\n' "$(cat "$runtime/bundle/tls/coordinator-client.key")" >&2
     exit 1
   fi
 

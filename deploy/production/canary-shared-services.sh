@@ -96,7 +96,7 @@ else
     fi
   done
 
-  if ! curl -fsS "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
+  if ! curl -fsS -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
     ipfs_status="failed"
     ipfs_detail="ipfs api unreachable"
   fi

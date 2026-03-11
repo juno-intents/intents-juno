@@ -105,7 +105,12 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   assert_contains "$script_text" '/var/lib/intents-juno/operator-runtime \' "builder reowns operator runtime state recursively"
   assert_contains "$script_text" '/var/lib/intents-juno/tss-signer' "builder reowns tss signer state recursively"
   assert_contains "$script_text" 'sudo chown root:intents-juno /etc/intents-juno/operator-stack.env' "builder seeds operator env with intents-juno group access"
-  assert_contains "$script_text" 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "hydrator preserves intents-juno group access to operator env"
+  assert_contains "$script_text" 'cat "$tmp" > "$file"' "hydrator rewrites temp env updates in place"
+  assert_contains "$script_text" 'chmod 0640 "$file"' "hydrator restores shared-read permissions after temp env updates"
+  assert_contains "$script_text" 'cat "$tmp_env" > "$stack_env_file"' "hydrator rewrites operator env in place"
+  assert_contains "$script_text" 'chmod 0640 "$stack_env_file"' "hydrator restores shared-read permissions on operator env"
+  assert_not_contains "$script_text" 'install -m 0600 "$tmp" "$file"' "hydrator no longer replaces env files with install"
+  assert_not_contains "$script_text" 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "hydrator does not require chown-capable install inside the service"
   assert_contains "$script_text" "checkpoint_key=\"\\\$(sudo cat /etc/intents-juno/checkpoint-signer.key | tr -d '\\r\\n')\"" "builder reads the checkpoint signer key through sudo before stripping newlines"
   assert_contains "$script_text" 'sudo rm -f /home/$builder_user/.ssh/authorized_keys' "builder scrubs temporary SSH authorized keys before imaging"
 
@@ -138,7 +143,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
 }
 
 test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
-  local script_text withdraw_wrapper tss_wrapper
+  local script_text withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
   script_text="$(cat "$RUNBOOK_PATH")"
 
   assert_contains "$script_text" 'download_release_asset_with_checksum()' "runbook defines checksum downloader"
@@ -165,6 +170,20 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$tss_wrapper" '[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {' "tss wrapper requires client CA in production"
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
   assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires JUNO_DEV_MODE=true"' "tss wrapper blocks host-process outside dev mode"
+
+  signer_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER")"
+  assert_contains "$signer_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint signer requires base chain id in operator env"
+  assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"
+  assert_contains "$signer_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint signer reads base chain id from operator env"
+  assert_contains "$signer_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint signer reads bridge address from operator env"
+  assert_not_contains "$signer_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint signer does not bake bootstrap bridge address into wrapper"
+
+  aggregator_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "EOF_AGG")"
+  assert_contains "$aggregator_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint aggregator requires base chain id in operator env"
+  assert_contains "$aggregator_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint aggregator requires bridge address in operator env"
+  assert_contains "$aggregator_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint aggregator reads base chain id from operator env"
+  assert_contains "$aggregator_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint aggregator reads bridge address from operator env"
+  assert_not_contains "$aggregator_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint aggregator does not bake bootstrap bridge address into wrapper"
 
   assert_not_contains "$script_text" 'rpc_user: $junocash_rpc_user' "bootstrap metadata does not publish RPC username"
   assert_not_contains "$script_text" 'rpc_password: $junocash_rpc_pass' "bootstrap metadata does not publish RPC password"

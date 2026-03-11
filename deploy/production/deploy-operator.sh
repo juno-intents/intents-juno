@@ -51,6 +51,8 @@ allow_local_resolvers="false"
 
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
+base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
+bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
 
 rollout_state_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.rollout_state_file | select(type == "string" and length > 0)')")"
 [[ -f "$rollout_state_file" ]] || die "rollout state file not found: $rollout_state_file"
@@ -281,11 +283,13 @@ else
     scp "${SCP_OPTS[@]}" "$source_path" "$ssh_target:$remote_stage_dir/$(basename "$source_path")"
   done
 
-  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$remote_stage_dir" "$runtime_dir" <<'REMOTE_EOF'
+  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$remote_stage_dir" "$runtime_dir" "$base_chain_id" "$bridge_address" <<'REMOTE_EOF'
 set -euo pipefail
 
 remote_stage_dir="$1"
 runtime_dir="$2"
+base_chain_id="$3"
+bridge_address="$4"
 
 set_env_value() {
   local file="$1"
@@ -293,7 +297,7 @@ set_env_value() {
   local value="$3"
   local tmp
   tmp="$(mktemp)"
-  awk -v key="$key" -v value="$value" '
+  sudo awk -v key="$key" -v value="$value" '
     BEGIN { updated = 0 }
     index($0, key "=") == 1 {
       print key "=" value
@@ -307,7 +311,7 @@ set_env_value() {
       }
     }
   ' "$file" >"$tmp"
-  sudo install -m 0640 "$tmp" "$file"
+  sudo install -m 0640 -o root -g intents-juno "$tmp" "$file"
   rm -f "$tmp"
 }
 
@@ -333,10 +337,56 @@ sudo install -m 0640 "$remote_stage_dir/shared-manifest.json" /etc/intents-juno/
 sudo install -m 0640 "$remote_stage_dir/operator-deploy.json" /etc/intents-juno/operator-deploy.json
 sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tmp/intents-juno-dkg-backup.zip 2>/dev/null || true
 sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
-sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir"
+sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
 
-sudo systemctl restart intents-juno-config-hydrator.service
+checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
+checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
+[[ -f "$checkpoint_signer_script" ]] || {
+  echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
+  exit 1
+}
+[[ -f "$checkpoint_aggregator_script" ]] || {
+  echo "checkpoint aggregator wrapper is missing: $checkpoint_aggregator_script" >&2
+  exit 1
+}
+
+if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_signer_script"; then
+  sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"
+fi
+if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_signer_script"; then
+  sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"
+fi
+if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_aggregator_script"; then
+  sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"
+fi
+if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_aggregator_script"; then
+  sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
+fi
+
+config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
+if [[ -f "$config_hydrator_script" ]] && {
+  grep -Fq 'install -m 0600 "$tmp" "$file"' "$config_hydrator_script" ||
+  grep -Fq 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "$config_hydrator_script"
+}; then
+  hydrator_tmp="$(mktemp)"
+  awk '
+    $0 == "  install -m 0600 \"$tmp\" \"$file\"" {
+      print "  cat \"$tmp\" > \"$file\""
+      print "  chmod 0640 \"$file\""
+      next
+    }
+    $0 == "install -m 0640 -o root -g intents-juno \"$tmp_env\" \"$stack_env_file\"" {
+      print "cat \"$tmp_env\" > \"$stack_env_file\""
+      print "chmod 0640 \"$stack_env_file\""
+      next
+    }
+    { print }
+  ' "$config_hydrator_script" >"$hydrator_tmp"
+  sudo install -m 0755 "$hydrator_tmp" "$config_hydrator_script"
+  rm -f "$hydrator_tmp"
+fi
+
 for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
 done

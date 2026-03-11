@@ -62,7 +62,7 @@ EOF
   assert_contains "$(cat "$log_file")" "pg_isready -h postgres.alpha.internal -p 5432" "postgres canary check"
   assert_contains "$(cat "$log_file")" "nc -z broker-1.alpha.internal 9094" "first kafka broker canary check"
   assert_contains "$(cat "$log_file")" "nc -z broker-2.alpha.internal 9094" "second kafka broker canary check"
-  assert_contains "$(cat "$log_file")" "curl -fsS https://ipfs.alpha.internal/api/v0/version" "ipfs canary check"
+  assert_contains "$(cat "$log_file")" "curl -fsS -X POST https://ipfs.alpha.internal/api/v0/version" "ipfs canary check"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "shared canary ready flag"
   assert_eq "$(jq -r '.checks.postgres.status' "$output_json")" "passed" "shared canary postgres status"
   assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "shared canary kafka status"

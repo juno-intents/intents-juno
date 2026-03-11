@@ -22,6 +22,9 @@ Options:
   --age-backup-receipt <path>       default <age-backup-file>.KeyImportReceipt.json
   --admin-config <path>             default <workdir>/bundle/admin-config.json
   --completion-report <path>        optional test-completiton.json path
+  --ufvk-file <path>                optional UFVK file staged to <workdir>/ufvk.txt on restore
+  --coordinator-client-cert <path>  optional coordinator client cert staged to bundle/tls on restore
+  --coordinator-client-key <path>   optional coordinator client key staged to bundle/tls on restore
   --output <path>                   default ~/.juno-dkg/backup-packages/dkg-backup-<operator>-<ts>.zip
   --force                           overwrite --output when it already exists
 
@@ -37,6 +40,9 @@ Notes:
       <workdir>/bundle/state/key_package.bin
       <workdir>/bundle/state/public_key_package.bin
       <workdir>/bundle/tls/{ca.pem,server.pem,server.key}
+      <workdir>/ufvk.txt                         (when payload/ufvk.txt is present)
+      <workdir>/bundle/tls/{coordinator-client.pem,coordinator-client.key}
+                                                (when payload/tls/coordinator-client.* are present)
   - if TLS files are absent in the backup zip, restore generates fresh self-signed TLS certs.
 EOF
 }
@@ -116,6 +122,9 @@ command_create() {
   local age_backup_receipt=""
   local admin_config_path=""
   local completion_report=""
+  local ufvk_file=""
+  local coordinator_client_cert=""
+  local coordinator_client_key=""
   local tls_ca_path=""
   local tls_server_cert_path=""
   local tls_server_key_path=""
@@ -154,6 +163,21 @@ command_create() {
         completion_report="$2"
         shift 2
         ;;
+      --ufvk-file)
+        [[ $# -ge 2 ]] || die "missing value for --ufvk-file"
+        ufvk_file="$2"
+        shift 2
+        ;;
+      --coordinator-client-cert)
+        [[ $# -ge 2 ]] || die "missing value for --coordinator-client-cert"
+        coordinator_client_cert="$2"
+        shift 2
+        ;;
+      --coordinator-client-key)
+        [[ $# -ge 2 ]] || die "missing value for --coordinator-client-key"
+        coordinator_client_key="$2"
+        shift 2
+        ;;
       --output)
         [[ $# -ge 2 ]] || die "missing value for --output"
         output="$2"
@@ -186,6 +210,15 @@ command_create() {
   [[ -f "$admin_config_path" ]] || die "admin config not found: $admin_config_path"
   if [[ -n "$completion_report" ]]; then
     [[ -f "$completion_report" ]] || die "completion report not found: $completion_report"
+  fi
+  if [[ -n "$ufvk_file" ]]; then
+    [[ -f "$ufvk_file" ]] || die "ufvk file not found: $ufvk_file"
+  fi
+  if [[ -n "$coordinator_client_cert" || -n "$coordinator_client_key" ]]; then
+    [[ -n "$coordinator_client_cert" && -n "$coordinator_client_key" ]] || \
+      die "--coordinator-client-cert and --coordinator-client-key must be set together"
+    [[ -f "$coordinator_client_cert" ]] || die "coordinator client cert not found: $coordinator_client_cert"
+    [[ -f "$coordinator_client_key" ]] || die "coordinator client key not found: $coordinator_client_key"
   fi
   tls_ca_path="$workdir/bundle/tls/ca.pem"
   tls_server_cert_path="$workdir/bundle/tls/server.pem"
@@ -224,11 +257,19 @@ command_create() {
   if [[ -n "$completion_report" ]]; then
     cp "$completion_report" "$tmp_dir/payload/test-completiton.json"
   fi
+  if [[ -n "$ufvk_file" ]]; then
+    cp "$ufvk_file" "$tmp_dir/payload/ufvk.txt"
+  fi
 
   local completion_included="false"
   local tls_included="false"
+  local ufvk_included="false"
+  local coordinator_client_tls_included="false"
   if [[ -n "$completion_report" ]]; then
     completion_included="true"
+  fi
+  if [[ -n "$ufvk_file" ]]; then
+    ufvk_included="true"
   fi
   if [[ -f "$tls_ca_path" && -f "$tls_server_cert_path" && -f "$tls_server_key_path" ]]; then
     tls_included="true"
@@ -237,6 +278,13 @@ command_create() {
     cp "$tls_server_cert_path" "$tmp_dir/payload/tls/server.pem"
     cp "$tls_server_key_path" "$tmp_dir/payload/tls/server.key"
     chmod 0600 "$tmp_dir/payload/tls/server.key" || true
+  fi
+  if [[ -n "$coordinator_client_cert" && -n "$coordinator_client_key" ]]; then
+    coordinator_client_tls_included="true"
+    ensure_dir "$tmp_dir/payload/tls"
+    cp "$coordinator_client_cert" "$tmp_dir/payload/tls/coordinator-client.pem"
+    cp "$coordinator_client_key" "$tmp_dir/payload/tls/coordinator-client.key"
+    chmod 0600 "$tmp_dir/payload/tls/coordinator-client.key" || true
   fi
 
   jq -n \
@@ -250,6 +298,11 @@ command_create() {
     --arg admin_config "$admin_config_path" \
     --arg completion_report "$completion_report" \
     --arg completion_included "$completion_included" \
+    --arg ufvk_file "$ufvk_file" \
+    --arg ufvk_included "$ufvk_included" \
+    --arg coordinator_client_cert "$coordinator_client_cert" \
+    --arg coordinator_client_key "$coordinator_client_key" \
+    --arg coordinator_client_tls_included "$coordinator_client_tls_included" \
     --arg tls_ca_path "$tls_ca_path" \
     --arg tls_server_cert_path "$tls_server_cert_path" \
     --arg tls_server_key_path "$tls_server_key_path" \
@@ -268,6 +321,9 @@ command_create() {
         completion_report: (
           if $completion_included == "true" then "payload/test-completiton.json" else null end
         ),
+        ufvk_file: (
+          if $ufvk_included == "true" then "payload/ufvk.txt" else null end
+        ),
         tls_ca_cert: (
           if $tls_included == "true" then "payload/tls/ca.pem" else null end
         ),
@@ -276,6 +332,12 @@ command_create() {
         ),
         tls_server_key: (
           if $tls_included == "true" then "payload/tls/server.key" else null end
+        ),
+        coordinator_client_cert: (
+          if $coordinator_client_tls_included == "true" then "payload/tls/coordinator-client.pem" else null end
+        ),
+        coordinator_client_key: (
+          if $coordinator_client_tls_included == "true" then "payload/tls/coordinator-client.key" else null end
         )
       },
       source_paths: {
@@ -286,6 +348,9 @@ command_create() {
         completion_report: (
           if $completion_included == "true" then $completion_report else null end
         ),
+        ufvk_file: (
+          if $ufvk_included == "true" then $ufvk_file else null end
+        ),
         tls_ca_cert: (
           if $tls_included == "true" then $tls_ca_path else null end
         ),
@@ -294,6 +359,12 @@ command_create() {
         ),
         tls_server_key: (
           if $tls_included == "true" then $tls_server_key_path else null end
+        ),
+        coordinator_client_cert: (
+          if $coordinator_client_tls_included == "true" then $coordinator_client_cert else null end
+        ),
+        coordinator_client_key: (
+          if $coordinator_client_tls_included == "true" then $coordinator_client_key else null end
         )
       }
     }' >"$tmp_dir/manifest.json"
@@ -518,11 +589,32 @@ command_restore() {
   else
     write_self_signed_tls_material "$tls_dir"
   fi
+  if [[ -f "$payload_dir/ufvk.txt" ]]; then
+    cp "$payload_dir/ufvk.txt" "$workdir/ufvk.txt"
+    chmod 0600 "$workdir/ufvk.txt" || true
+  fi
+  if [[ -f "$payload_dir/tls/coordinator-client.pem" && -f "$payload_dir/tls/coordinator-client.key" ]]; then
+    cp "$payload_dir/tls/coordinator-client.pem" "$tls_dir/coordinator-client.pem"
+    cp "$payload_dir/tls/coordinator-client.key" "$tls_dir/coordinator-client.key"
+    chmod 0600 "$tls_dir/coordinator-client.key" || true
+  fi
 
   if [[ -z "$report_path" ]]; then
     report_path="$workdir/restore-report.json"
   fi
   ensure_dir "$(dirname "$report_path")"
+  local restored_ufvk_path=""
+  local restored_coordinator_client_cert_path=""
+  local restored_coordinator_client_key_path=""
+  if [[ -f "$workdir/ufvk.txt" ]]; then
+    restored_ufvk_path="$workdir/ufvk.txt"
+  fi
+  if [[ -f "$tls_dir/coordinator-client.pem" ]]; then
+    restored_coordinator_client_cert_path="$tls_dir/coordinator-client.pem"
+  fi
+  if [[ -f "$tls_dir/coordinator-client.key" ]]; then
+    restored_coordinator_client_key_path="$tls_dir/coordinator-client.key"
+  fi
   jq -n \
     --arg restored_at "$(timestamp_utc)" \
     --arg workdir "$workdir" \
@@ -530,6 +622,9 @@ command_restore() {
     --arg operator_id "$c_operator_id" \
     --arg ceremony_id "$c_ceremony_id" \
     --arg tls_source "$tls_source" \
+    --arg ufvk_path "$restored_ufvk_path" \
+    --arg coordinator_client_cert_path "$restored_coordinator_client_cert_path" \
+    --arg coordinator_client_key_path "$restored_coordinator_client_key_path" \
     --arg admin_config_path "$config_path" \
     --arg state_dir "$state_dir" \
     '{
@@ -540,6 +635,9 @@ command_restore() {
       operator_id: $operator_id,
       ceremony_id: $ceremony_id,
       tls_source: $tls_source,
+      ufvk_path: (if $ufvk_path == "" then null else $ufvk_path end),
+      coordinator_client_cert_path: (if $coordinator_client_cert_path == "" then null else $coordinator_client_cert_path end),
+      coordinator_client_key_path: (if $coordinator_client_key_path == "" then null else $coordinator_client_key_path end),
       admin_config_path: $admin_config_path,
       state_dir: $state_dir
     }' >"$report_path"

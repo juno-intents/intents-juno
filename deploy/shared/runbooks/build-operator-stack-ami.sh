@@ -655,7 +655,8 @@ set_env_value() {
       }
     }
   ' "$file" > "$tmp"
-  install -m 0600 "$tmp" "$file"
+  cat "$tmp" > "$file"
+  chmod 0640 "$file"
   rm -f "$tmp"
 }
 
@@ -862,7 +863,8 @@ if [[ "$runtime_mode" == "nitro-enclave" ]]; then
   set_env_value "$tmp_env" TSS_NITRO_EXPECTED_PCR2 "$pcr2"
 fi
 
-install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"
+cat "$tmp_env" > "$stack_env_file"
+chmod 0640 "$stack_env_file"
 rm -f "$tmp_env"
 
 if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_ID:-}" ]]; then
@@ -899,28 +901,36 @@ set -euo pipefail
 set -a
 source /etc/intents-juno/operator-stack.env
 set +a
-[[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_SIGNATURE_TOPIC:-}" ]] || {
+[[ -n "${CHECKPOINT_SIGNATURE_TOPIC:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_SIGNATURE_TOPIC in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_THRESHOLD:-}" ]] || {
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "checkpoint-signer requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "checkpoint-signer requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-if [[ "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
   echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="\${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "\${kafka_tls_value,,}" in
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
   1|true|yes|on)
     export JUNO_QUEUE_KAFKA_TLS=true
     ;;
@@ -931,19 +941,18 @@ case "\${kafka_tls_value,,}" in
 esac
 exec /usr/local/bin/checkpoint-signer \
   --juno-rpc-url http://127.0.0.1:18232 \
-  --base-chain-id __BASE_CHAIN_ID__ \
-  --bridge-address __BRIDGE_ADDRESS__ \
+  --base-chain-id "${BASE_CHAIN_ID}" \
+  --bridge-address "${BRIDGE_ADDRESS}" \
   --confirmations 1 \
   --poll-interval 15s \
-  --owner-id "\$(hostname -s)" \
-  --postgres-dsn "\$CHECKPOINT_POSTGRES_DSN" \
+  --owner-id "$(hostname -s)" \
+  --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
   --lease-driver postgres \
   --queue-driver kafka \
-  --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
-  --queue-output-topic "\$CHECKPOINT_SIGNATURE_TOPIC" \
-  --health-port "\${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
+  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-output-topic "$CHECKPOINT_SIGNATURE_TOPIC" \
+  --health-port "${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
 EOF_SIGNER
-  sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-signer.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-signer.sh /usr/local/bin/intents-juno-checkpoint-signer.sh
 
   cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'
@@ -953,36 +962,44 @@ set -euo pipefail
 set -a
 source /etc/intents-juno/operator-stack.env
 set +a
-[[ -n "\${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_BLOB_BUCKET:-}" ]] || {
+[[ -n "${CHECKPOINT_BLOB_BUCKET:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_IPFS_API_URL:-}" ]] || {
+[[ -n "${CHECKPOINT_IPFS_API_URL:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_IPFS_API_URL in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_OPERATORS:-}" ]] || {
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "checkpoint-aggregator requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "checkpoint-aggregator requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-[[ -n "\${CHECKPOINT_THRESHOLD:-}" ]] || {
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-if [[ "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "\${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
   echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
   exit 1
 fi
-kafka_tls_value="\${JUNO_QUEUE_KAFKA_TLS:-true}"
-case "\${kafka_tls_value,,}" in
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
   1|true|yes|on)
     export JUNO_QUEUE_KAFKA_TLS=true
     ;;
@@ -992,24 +1009,23 @@ case "\${kafka_tls_value,,}" in
     ;;
 esac
 exec /usr/local/bin/checkpoint-aggregator \
-  --base-chain-id __BASE_CHAIN_ID__ \
-  --bridge-address __BRIDGE_ADDRESS__ \
-  --operators "\$CHECKPOINT_OPERATORS" \
-  --threshold "\$CHECKPOINT_THRESHOLD" \
+  --base-chain-id "${BASE_CHAIN_ID}" \
+  --bridge-address "${BRIDGE_ADDRESS}" \
+  --operators "$CHECKPOINT_OPERATORS" \
+  --threshold "$CHECKPOINT_THRESHOLD" \
   --store-driver postgres \
-  --postgres-dsn "\$CHECKPOINT_POSTGRES_DSN" \
+  --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
   --blob-driver s3 \
-  --blob-bucket "\$CHECKPOINT_BLOB_BUCKET" \
-  --blob-prefix "\${CHECKPOINT_BLOB_PREFIX:-checkpoint-packages}" \
+  --blob-bucket "$CHECKPOINT_BLOB_BUCKET" \
+  --blob-prefix "${CHECKPOINT_BLOB_PREFIX:-checkpoint-packages}" \
   --ipfs-enabled=true \
-  --ipfs-api-url "\$CHECKPOINT_IPFS_API_URL" \
+  --ipfs-api-url "$CHECKPOINT_IPFS_API_URL" \
   --queue-driver kafka \
-  --queue-brokers "\$CHECKPOINT_KAFKA_BROKERS" \
-  --queue-input-topics "\${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
-  --queue-output-topic "\${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
-  --health-port "\${CHECKPOINT_AGGREGATOR_HEALTH_PORT:-18302}"
+  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
+  --queue-output-topic "${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
+  --health-port "${CHECKPOINT_AGGREGATOR_HEALTH_PORT:-18302}"
 EOF_AGG
-  sed -i "s/__BASE_CHAIN_ID__/__BOOTSTRAP_BASE_CHAIN_ID__/g; s/__BRIDGE_ADDRESS__/__BOOTSTRAP_BRIDGE_ADDRESS__/g" /tmp/intents-juno-checkpoint-aggregator.sh
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
 
   cat > /tmp/intents-juno-spendauth-signer.sh <<'EOF_TSS_SPENDAUTH'
