@@ -123,6 +123,20 @@ variable "iam_instance_profile" {
   default     = ""
 }
 
+variable "allowed_checkpoint_signer_kms_key_arns" {
+  description = "KMS key ARNs that the Terraform-managed live e2e instance role may use for checkpoint signing. Ignored when iam_instance_profile is set."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.allowed_checkpoint_signer_kms_key_arns :
+      trimspace(arn) != "" && can(regex("^arn:[^:]+:kms:[^:]+:[0-9]{12}:key/.+$", trimspace(arn)))
+    ])
+    error_message = "allowed_checkpoint_signer_kms_key_arns must contain only non-empty AWS KMS key ARNs."
+  }
+}
+
 variable "provision_shared_services" {
   description = "Whether to provision managed shared services (Aurora + MSK + ECS + IPFS)."
   type        = bool

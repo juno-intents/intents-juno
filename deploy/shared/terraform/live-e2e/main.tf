@@ -99,6 +99,9 @@ locals {
 
   managed_instance_profile_enabled = var.iam_instance_profile == ""
   instance_profile_name            = local.managed_instance_profile_enabled ? aws_iam_instance_profile.live_e2e[0].name : var.iam_instance_profile
+  allowed_checkpoint_signer_kms_key_arns = sort(distinct([
+    for arn in var.allowed_checkpoint_signer_kms_key_arns : trimspace(arn)
+  ]))
 
   resource_slug           = trim(replace(lower(local.resource_name), "_", "-"), "-")
   ipfs_lb_name            = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
@@ -220,6 +223,19 @@ data "aws_iam_policy_document" "live_e2e_inline" {
     resources = [
       aws_kms_key.dkg.arn
     ]
+  }
+
+  dynamic "statement" {
+    for_each = length(local.allowed_checkpoint_signer_kms_key_arns) > 0 ? [1] : []
+    content {
+      sid    = "AllowCheckpointSignerKMS"
+      effect = "Allow"
+      actions = [
+        "kms:GetPublicKey",
+        "kms:Sign"
+      ]
+      resources = local.allowed_checkpoint_signer_kms_key_arns
+    }
   }
 
   dynamic "statement" {
@@ -669,7 +685,7 @@ resource "aws_ecr_repository" "proof_services" {
 }
 
 locals {
-  shared_proof_service_image            = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
+  shared_proof_service_image      = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
   shared_sp1_requestor_secret_arn = trimspace(var.shared_sp1_requestor_secret_arn)
 }
 
