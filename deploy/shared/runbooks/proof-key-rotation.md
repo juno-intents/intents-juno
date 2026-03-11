@@ -14,7 +14,7 @@ No per-operator keys are used for SP1 proof funding.
 1. New keys are generated and funded as required.
 2. New secrets are stored in AWS Secrets Manager.
 3. The new Terraform inputs reference distinct secret ARNs. Reusing one ARN for both services is not allowed.
-4. Access policy for the proof-requestor and proof-funder execution roles allows reading only the corresponding new secret ARN.
+4. Access policy for the proof-requestor and proof-funder execution roles allows reading only the corresponding new secret ARN, writing only to the corresponding CloudWatch log group, and pulling only from the configured proof-services ECR repository. The only wildcard left in the execution role policy should be `ecr:GetAuthorizationToken`.
 5. `proof-requestor` and `proof-funder` deployments are healthy in the `production-shared` ECS cluster.
 
 ## Rotation Procedure
@@ -28,10 +28,12 @@ No per-operator keys are used for SP1 proof funding.
 3. Apply the shared stack and confirm the new task definitions reference the new secret ARNs.
 4. Roll `proof-requestor` first:
    - keep `deployment_minimum_healthy_percent = 100`
+   - keep `deployment_maximum_percent = 200`
    - wait for the new task to pass health checks before the old task drains
    - verify successful SP1 network submissions
 5. Roll `proof-funder` second:
    - keep `deployment_minimum_healthy_percent = 100`
+   - keep `deployment_maximum_percent = 200`
    - verify low-balance alerting remains healthy
 6. Keep old key enabled until:
    - no tasks reference old secret
@@ -45,6 +47,7 @@ No per-operator keys are used for SP1 proof funding.
 3. Requestor balance polling and critical alerts continue.
 4. No increase in auth/signing errors from SP1 operations.
 5. The proof-requestor execution role cannot read the funder secret ARN, and the proof-funder execution role cannot read the requestor secret ARN.
+6. The execution roles remain scoped to the proof-services repository and their own CloudWatch log groups after the rollout.
 
 ## Emergency Rollback
 

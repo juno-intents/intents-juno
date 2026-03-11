@@ -18,6 +18,7 @@ This runbook covers failover of the `production-shared` `proof-requestor` and `p
 3. Distinct requestor and funder secrets are present in Secrets Manager in both regions and wired through `shared_sp1_requestor_secret_arn` and `shared_sp1_funder_secret_arn`.
 4. DR deployment points to the same `requestor_address` and `chain_id`.
 5. The DR `production-shared` stack already uses overlapping ECS deploy settings (`deployment_minimum_healthy_percent = 100`, `deployment_maximum_percent = 200`).
+6. The shared IPFS NLB in the target region has at least two healthy targets, and the IPFS ASG is using ELB health checks rather than EC2-only liveness.
 
 ## Failover Steps
 
@@ -37,6 +38,7 @@ This runbook covers failover of the `production-shared` `proof-requestor` and `p
    - `proof.failures.v1` contains only expected retryables.
    - request-id sequence continues without resets (`proof_request_ids` table).
    - balance alerts continue from the centralized funder monitor.
+   - the shared IPFS API remains reachable through the regional NLB during the cutover.
 
 ## Post-Failover Checks
 
@@ -47,6 +49,7 @@ This runbook covers failover of the `production-shared` `proof-requestor` and `p
 3. Verify balance guardrails:
    - requestor balance stays above `min_balance_wei`.
 4. Verify the DR proof-requestor task definition still references only the requestor secret ARN and the DR proof-funder task definition still references only the funder secret ARN.
+5. Verify the DR proof-service execution roles still point only at their own log groups and the configured proof-services repository.
 
 ## Rollback
 

@@ -44,8 +44,12 @@ locals {
   shared_ipfs_ingress_cidrs = distinct(concat(local.shared_subnet_cidrs, var.shared_ipfs_client_cidr_blocks))
   ipfs_ami_id               = var.shared_ipfs_ami_id != "" ? var.shared_ipfs_ami_id : data.aws_ami.ubuntu.id
 
-  aurora_final_snapshot_identifier = trimspace(var.shared_postgres_final_snapshot_identifier) != "" ? trimspace(var.shared_postgres_final_snapshot_identifier) : "${local.resource_slug}-shared-aurora-final"
-  shared_proof_service_image       = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : "${aws_ecr_repository.proof_services.repository_url}:latest"
+  aurora_final_snapshot_identifier             = trimspace(var.shared_postgres_final_snapshot_identifier) != "" ? trimspace(var.shared_postgres_final_snapshot_identifier) : "${local.resource_slug}-shared-aurora-final"
+  shared_proof_service_image_override          = trimspace(var.shared_proof_service_image)
+  shared_proof_service_image                   = local.shared_proof_service_image_override != "" ? local.shared_proof_service_image_override : "${aws_ecr_repository.proof_services.repository_url}:latest"
+  shared_proof_service_image_uses_ecr          = local.shared_proof_service_image_override == "" || can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[^.]+\\.amazonaws\\.com/.+", local.shared_proof_service_image_override))
+  shared_proof_service_image_requires_ecr_pull = local.shared_proof_service_image_uses_ecr
+  shared_proof_service_ecr_repository_arn      = local.shared_proof_service_image_override == "" ? aws_ecr_repository.proof_services.arn : trimspace(var.shared_proof_service_image_ecr_repository_arn)
 
   ipfs_lb_name            = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
   ipfs_target_group_name  = trim(substr("${local.resource_slug}-ipfs-api", 0, 32), "-")
@@ -56,6 +60,13 @@ check "distinct_proof_secret_arns" {
   assert {
     condition     = var.shared_sp1_requestor_secret_arn != var.shared_sp1_funder_secret_arn
     error_message = "shared_sp1_requestor_secret_arn and shared_sp1_funder_secret_arn must differ."
+  }
+}
+
+check "proof_service_image_ecr_scope" {
+  assert {
+    condition     = local.shared_proof_service_image_override == "" || !local.shared_proof_service_image_uses_ecr || trimspace(var.shared_proof_service_image_ecr_repository_arn) != ""
+    error_message = "shared_proof_service_image_ecr_repository_arn must be set when shared_proof_service_image points at an explicit ECR repository."
   }
 }
 
@@ -306,17 +317,44 @@ resource "aws_iam_role" "proof_funder_execution" {
   tags               = local.common_tags
 }
 
-resource "aws_iam_role_policy_attachment" "proof_requestor_execution" {
-  role       = aws_iam_role.proof_requestor_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
+data "aws_iam_policy_document" "proof_requestor_execution_access" {
+  dynamic "statement" {
+    for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
+    content {
+      sid = "AllowECRAuthorizationToken"
+      actions = [
+        "ecr:GetAuthorizationToken",
+      ]
+      resources = ["*"]
+    }
+  }
 
-resource "aws_iam_role_policy_attachment" "proof_funder_execution" {
-  role       = aws_iam_role.proof_funder_execution.name
-  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-}
+  dynamic "statement" {
+    for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
+    content {
+      sid = "AllowProofRequestorImagePull"
+      actions = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+      ]
+      resources = [local.shared_proof_service_ecr_repository_arn]
+    }
+  }
 
-data "aws_iam_policy_document" "proof_requestor_secret_access" {
+  statement {
+    sid = "AllowProofRequestorLogWrite"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents",
+    ]
+    resources = [
+      trimsuffix(aws_cloudwatch_log_group.proof_requestor.arn, ":*"),
+      "${trimsuffix(aws_cloudwatch_log_group.proof_requestor.arn, ":*")}:log-stream:*",
+    ]
+  }
+
   statement {
     sid = "AllowProofRequestorSecretRead"
     actions = [
@@ -327,7 +365,44 @@ data "aws_iam_policy_document" "proof_requestor_secret_access" {
   }
 }
 
-data "aws_iam_policy_document" "proof_funder_secret_access" {
+data "aws_iam_policy_document" "proof_funder_execution_access" {
+  dynamic "statement" {
+    for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
+    content {
+      sid = "AllowECRAuthorizationToken"
+      actions = [
+        "ecr:GetAuthorizationToken",
+      ]
+      resources = ["*"]
+    }
+  }
+
+  dynamic "statement" {
+    for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
+    content {
+      sid = "AllowProofFunderImagePull"
+      actions = [
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+      ]
+      resources = [local.shared_proof_service_ecr_repository_arn]
+    }
+  }
+
+  statement {
+    sid = "AllowProofFunderLogWrite"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:DescribeLogStreams",
+      "logs:PutLogEvents",
+    ]
+    resources = [
+      trimsuffix(aws_cloudwatch_log_group.proof_funder.arn, ":*"),
+      "${trimsuffix(aws_cloudwatch_log_group.proof_funder.arn, ":*")}:log-stream:*",
+    ]
+  }
+
   statement {
     sid = "AllowProofFunderSecretRead"
     actions = [
@@ -338,16 +413,16 @@ data "aws_iam_policy_document" "proof_funder_secret_access" {
   }
 }
 
-resource "aws_iam_role_policy" "proof_requestor_secret_access" {
-  name   = "${local.resource_name}-proof-requestor-secrets"
+resource "aws_iam_role_policy" "proof_requestor_execution_access" {
+  name   = "${local.resource_name}-proof-requestor-exec"
   role   = aws_iam_role.proof_requestor_execution.id
-  policy = data.aws_iam_policy_document.proof_requestor_secret_access.json
+  policy = data.aws_iam_policy_document.proof_requestor_execution_access.json
 }
 
-resource "aws_iam_role_policy" "proof_funder_secret_access" {
-  name   = "${local.resource_name}-proof-funder-secrets"
+resource "aws_iam_role_policy" "proof_funder_execution_access" {
+  name   = "${local.resource_name}-proof-funder-exec"
   role   = aws_iam_role.proof_funder_execution.id
-  policy = data.aws_iam_policy_document.proof_funder_secret_access.json
+  policy = data.aws_iam_policy_document.proof_funder_execution_access.json
 }
 
 resource "aws_ecr_repository" "proof_services" {
@@ -495,7 +570,7 @@ resource "aws_ecs_service" "proof_requestor" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy_attachment.proof_requestor_execution]
+  depends_on = [aws_iam_role_policy.proof_requestor_execution_access]
   tags       = local.common_tags
 }
 
@@ -520,7 +595,7 @@ resource "aws_ecs_service" "proof_funder" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy_attachment.proof_funder_execution]
+  depends_on = [aws_iam_role_policy.proof_funder_execution_access]
   tags       = local.common_tags
 }
 
@@ -657,7 +732,7 @@ resource "aws_autoscaling_group" "ipfs" {
   vpc_zone_identifier = local.shared_subnets
   target_group_arns   = [aws_lb_target_group.ipfs_api.arn]
 
-  health_check_type         = "EC2"
+  health_check_type         = "ELB"
   health_check_grace_period = 120
   default_cooldown          = 120
 

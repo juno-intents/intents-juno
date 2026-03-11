@@ -168,6 +168,12 @@ variable "shared_proof_service_image" {
   default     = ""
 }
 
+variable "shared_proof_service_image_ecr_repository_arn" {
+  description = "Optional ECR repository ARN backing shared_proof_service_image when it points at an explicit ECR image. Leave empty when using the Terraform-managed default image or a non-ECR image."
+  type        = string
+  default     = ""
+}
+
 variable "shared_sp1_requestor_secret_arn" {
   description = "Secrets Manager ARN containing the proof-requestor private key."
   type        = string
