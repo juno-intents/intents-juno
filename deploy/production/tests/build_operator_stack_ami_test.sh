@@ -173,6 +173,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   local dkg_wrapper
   dkg_wrapper="$(extract_block "cat > /tmp/intents-juno-dkg-admin-serve.sh <<'EOF_DKG_SERVE'" "EOF_DKG_SERVE")"
+  assert_contains "$dkg_wrapper" 'admin_config_dir="$(dirname "$admin_config")"' "dkg-admin wrapper derives the admin-config directory"
+  assert_contains "$dkg_wrapper" 'cd "$admin_config_dir"' "dkg-admin wrapper runs from the bundle directory"
   assert_contains "$dkg_wrapper" 'exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_config" serve' "dkg-admin wrapper uses restored runtime binary with the expected CLI order"
   assert_not_contains "$dkg_wrapper" 'exec /usr/local/bin/dkg-admin serve --config "$admin_config"' "dkg-admin wrapper does not assume a host-installed binary"
 
