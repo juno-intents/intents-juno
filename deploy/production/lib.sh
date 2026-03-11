@@ -350,6 +350,7 @@ production_render_operator_handoffs() {
   for ((index = 0; index < operator_count; index++)); do
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
+    local checkpoint_signer_driver checkpoint_signer_kms_key_id
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     handoff_dir="$(production_operator_dir "$output_dir" "$operator_id")"
@@ -360,7 +361,19 @@ production_render_operator_handoffs() {
     backup_zip_src="$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")"
     public_endpoint="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
+    checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "local-env"' <<<"$operator_json")"
+    checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
+
+    case "$checkpoint_signer_driver" in
+      local-env) ;;
+      aws-kms)
+        [[ -n "$checkpoint_signer_kms_key_id" ]] || die "operator $operator_id uses checkpoint_signer_driver=aws-kms but checkpoint_signer_kms_key_id is empty"
+        ;;
+      *)
+        die "operator $operator_id has unsupported checkpoint_signer_driver: $checkpoint_signer_driver"
+        ;;
+    esac
 
     known_hosts_dst=""
     if [[ -n "$known_hosts_src" ]]; then
@@ -387,6 +400,8 @@ production_render_operator_handoffs() {
       --arg environment "$env_slug" \
       --arg shared_manifest_path "$shared_manifest" \
       --arg rollout_state_file "$rollout_state" \
+      --arg checkpoint_signer_driver "$checkpoint_signer_driver" \
+      --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
       --arg known_hosts_file "$known_hosts_dst" \
       --arg secret_contract_file "$secrets_dst" \
       --arg dkg_backup_zip "$backup_zip_src" \
@@ -402,6 +417,8 @@ production_render_operator_handoffs() {
         shared_manifest_path: $shared_manifest_path,
         rollout_state_file: $rollout_state_file,
         operator_id: $operator.operator_id,
+        checkpoint_signer_driver: $checkpoint_signer_driver,
+        checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end),
         operator_index: $operator.index,
         aws_profile: $operator.aws_profile,
         aws_region: $operator.aws_region,
@@ -425,27 +442,50 @@ production_render_operator_handoffs() {
 
 production_render_operator_stack_env() {
   local shared_manifest="$1"
-  local resolved_secret_env="$2"
-  local output_file="$3"
+  local operator_deploy="$2"
+  local resolved_secret_env="$3"
+  local output_file="$4"
 
-  local checkpoint_operators
+  local checkpoint_operators signer_driver signer_kms_key_id operator_address
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
+  signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
+  signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
+  operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+
+  case "$signer_driver" in
+    local-env) ;;
+    aws-kms)
+      [[ -n "$signer_kms_key_id" ]] || die "operator deploy manifest is missing checkpoint_signer_kms_key_id for aws-kms signer"
+      if grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$resolved_secret_env"; then
+        die "resolved secret env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=aws-kms"
+      fi
+      ;;
+    *)
+      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver"
+      ;;
+  esac
 
   cat >"$output_file" <<EOF
 CHECKPOINT_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 CHECKPOINT_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
+CHECKPOINT_SIGNER_DRIVER=$signer_driver
 CHECKPOINT_OPERATORS=$checkpoint_operators
 CHECKPOINT_THRESHOLD=$(jq -r '.checkpoint.threshold' "$shared_manifest")
 CHECKPOINT_SIGNATURE_TOPIC=$(jq -r '.checkpoint.signature_topic' "$shared_manifest")
 CHECKPOINT_PACKAGE_TOPIC=$(jq -r '.checkpoint.package_topic' "$shared_manifest")
 JUNO_QUEUE_KAFKA_TLS=true
+OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 EOF
+
+  if [[ -n "$signer_kms_key_id" ]]; then
+    printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
+  fi
 
   local checkpoint_blob_bucket checkpoint_blob_prefix deposit_image_id withdraw_image_id
   checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
@@ -466,7 +506,12 @@ EOF
     printf 'WITHDRAW_IMAGE_ID=%s\n' "$withdraw_image_id" >>"$output_file"
   fi
 
-  cat "$resolved_secret_env" >>"$output_file"
+  awk -F= '
+    $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
+    $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
+    $1 == "OPERATOR_ADDRESS" { next }
+    { print }
+  ' "$resolved_secret_env" >>"$output_file"
 }
 
 production_rollout_reserve() {

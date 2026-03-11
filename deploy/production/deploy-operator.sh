@@ -263,7 +263,7 @@ cleanup() {
 trap cleanup EXIT
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
-production_render_operator_stack_env "$shared_manifest_path" "$resolved_secret_env" "$merged_env"
+production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
@@ -298,30 +298,6 @@ runtime_dir="$2"
 base_chain_id="$3"
 bridge_address="$4"
 
-set_env_value() {
-  local file="$1"
-  local key="$2"
-  local value="$3"
-  local tmp
-  tmp="$(mktemp)"
-  sudo awk -v key="$key" -v value="$value" '
-    BEGIN { updated = 0 }
-    index($0, key "=") == 1 {
-      print key "=" value
-      updated = 1
-      next
-    }
-    { print }
-    END {
-      if (updated == 0) {
-        print key "=" value
-      }
-    }
-  ' "$file" >"$tmp"
-  sudo install -m 0640 -o root -g intents-juno "$tmp" "$file"
-  rm -f "$tmp"
-}
-
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno || true
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno/base-relayer || true
 sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir" || true
@@ -333,13 +309,11 @@ if [[ -f "$remote_stage_dir/base-relayer-server.key" ]]; then
   sudo install -m 0640 "$remote_stage_dir/base-relayer-server.key" /etc/intents-juno/base-relayer/server.key
 fi
 
-while IFS= read -r line || [[ -n "$line" ]]; do
-  [[ -n "$line" ]] || continue
-  key="${line%%=*}"
-  value="${line#*=}"
-  set_env_value /etc/intents-juno/operator-stack.env "$key" "$value"
-done <"$remote_stage_dir/operator-stack.env"
-
+if sudo test -f /etc/intents-juno/operator-stack.env; then
+  sudo sed -i '/^CHECKPOINT_SIGNER_PRIVATE_KEY=/d' /etc/intents-juno/operator-stack.env
+fi
+sudo rm -f /etc/intents-juno/checkpoint-signer.key
+sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
 sudo install -m 0640 "$remote_stage_dir/shared-manifest.json" /etc/intents-juno/shared-manifest.json
 sudo install -m 0640 "$remote_stage_dir/operator-deploy.json" /etc/intents-juno/operator-deploy.json
 sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tmp/intents-juno-dkg-backup.zip 2>/dev/null || true
@@ -444,6 +418,7 @@ if [[ -f "$config_hydrator_script" ]] && {
   rm -f "$hydrator_tmp"
 fi
 
+sudo systemctl restart intents-juno-config-hydrator.service
 for svc in juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
 done

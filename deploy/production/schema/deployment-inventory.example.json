@@ -18,6 +18,8 @@
     {
       "index": 1,
       "operator_id": "0x1111111111111111111111111111111111111111",
+      "checkpoint_signer_driver": "aws-kms",
+      "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
       "aws_profile": "juno",
       "aws_region": "us-east-1",
       "account_id": "021490342184",
