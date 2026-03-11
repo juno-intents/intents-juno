@@ -2255,13 +2255,11 @@ STAMP
 }
 
 write_bootstrap_metadata() {
-  local juno_release_tag juno_scan_release_tag block_height block_hash rpc_user rpc_pass
+  local juno_release_tag juno_scan_release_tag block_height block_hash
   juno_release_tag="\$(cat "\$HOME/.junocash-release-tag")"
   juno_scan_release_tag="\$(cat "\$HOME/.juno-scan-release-tag")"
   block_height="\$(sed -n '1p' "\$HOME/.junocash-blockstamp")"
   block_hash="\$(sed -n '2p' "\$HOME/.junocash-blockstamp")"
-  rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-  rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 
   jq -n \
     --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -2270,8 +2268,6 @@ write_bootstrap_metadata() {
     --arg tss_signer_runtime_mode "__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__" \
     --arg junocash_release_tag "\$juno_release_tag" \
     --arg juno_scan_release_tag "\$juno_scan_release_tag" \
-    --arg junocash_rpc_user "\$rpc_user" \
-    --arg junocash_rpc_pass "\$rpc_pass" \
     --argjson synced_block_height "\$block_height" \
     --arg synced_block_hash "\$block_hash" \
     --arg operator_address "\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)" \
@@ -2284,9 +2280,7 @@ write_bootstrap_metadata() {
       junocashd: {
         release_tag: \$junocash_release_tag,
         synced_block_height: \$synced_block_height,
-        synced_block_hash: \$synced_block_hash,
-        rpc_user: \$junocash_rpc_user,
-        rpc_password: \$junocash_rpc_pass
+        synced_block_hash: \$synced_block_hash
       },
       juno_scan: {
         release_tag: \$juno_scan_release_tag
