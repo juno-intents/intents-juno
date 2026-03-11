@@ -351,7 +351,9 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 	c.log.Info("batch signing", "batch_id", hex.EncodeToString(batchID[:]))
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
-		c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error())
+		if dlqErr := c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error()); dlqErr != nil {
+			return dlqErr
+		}
 		return err
 	}
 	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
@@ -446,8 +448,10 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 
 			// Check max rebroadcast attempts.
 			if c.cfg.MaxRebroadcastAttempts > 0 && int(b.RebroadcastAttempts) >= c.cfg.MaxRebroadcastAttempts {
-				c.maybeDLQWithdrawalBatch(ctx, b, "confirm", "rebroadcast_exhausted",
-					fmt.Sprintf("exceeded max rebroadcast attempts (%d)", c.cfg.MaxRebroadcastAttempts))
+				if err := c.maybeDLQWithdrawalBatch(ctx, b, "confirm", "rebroadcast_exhausted",
+					fmt.Sprintf("exceeded max rebroadcast attempts (%d)", c.cfg.MaxRebroadcastAttempts)); err != nil {
+					return err
+				}
 				return fmt.Errorf("%w: batch %x after %d attempts", ErrRebroadcastExhausted, b.ID[:8], b.RebroadcastAttempts)
 			}
 
@@ -664,9 +668,9 @@ func (c *Coordinator) persistTxPlanArtifact(ctx context.Context, batchID [32]byt
 
 // maybeDLQWithdrawalBatch inserts a withdrawal batch into the dead-letter queue.
 // If DLQStore is nil, this is a no-op.
-func (c *Coordinator) maybeDLQWithdrawalBatch(ctx context.Context, b withdraw.Batch, failureStage, errorCode, errorMessage string) {
+func (c *Coordinator) maybeDLQWithdrawalBatch(ctx context.Context, b withdraw.Batch, failureStage, errorCode, errorMessage string) error {
 	if c.cfg.DLQStore == nil {
-		return
+		return nil
 	}
 
 	rec := dlq.WithdrawalBatchDLQRecord{
@@ -687,13 +691,14 @@ func (c *Coordinator) maybeDLQWithdrawalBatch(ctx context.Context, b withdraw.Ba
 			"failure_stage", failureStage,
 			"err", err,
 		)
-	} else {
-		c.log.Info("withdrawcoordinator: inserted batch into DLQ",
-			"batch_id", fmt.Sprintf("%x", b.ID[:8]),
-			"failure_stage", failureStage,
-			"items", len(b.WithdrawalIDs),
-		)
+		return fmt.Errorf("withdrawcoordinator: insert withdrawal batch DLQ: %w", err)
 	}
+	c.log.Info("withdrawcoordinator: inserted batch into DLQ",
+		"batch_id", fmt.Sprintf("%x", b.ID[:8]),
+		"failure_stage", failureStage,
+		"items", len(b.WithdrawalIDs),
+	)
+	return nil
 }
 
 func (c *Coordinator) persistSignedTxArtifact(ctx context.Context, batchID [32]byte, signedTx []byte) error {

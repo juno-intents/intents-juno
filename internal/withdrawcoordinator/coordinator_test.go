@@ -48,6 +48,62 @@ func (b *stubBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, er
 	return "tx1", nil
 }
 
+type flakyDLQStore struct {
+	inner         dlq.Store
+	depositErrs   []error
+	withdrawErrs  []error
+	depositCalls  int
+	withdrawCalls int
+}
+
+func newFlakyDLQStore() *flakyDLQStore {
+	return &flakyDLQStore{inner: dlq.NewMemoryStore(nil)}
+}
+
+func (s *flakyDLQStore) EnsureSchema(ctx context.Context) error {
+	return s.inner.EnsureSchema(ctx)
+}
+
+func (s *flakyDLQStore) InsertProofDLQ(ctx context.Context, rec dlq.ProofDLQRecord) error {
+	return s.inner.InsertProofDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) InsertDepositBatchDLQ(ctx context.Context, rec dlq.DepositBatchDLQRecord) error {
+	s.depositCalls++
+	if idx := s.depositCalls - 1; idx < len(s.depositErrs) && s.depositErrs[idx] != nil {
+		return s.depositErrs[idx]
+	}
+	return s.inner.InsertDepositBatchDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) InsertWithdrawalBatchDLQ(ctx context.Context, rec dlq.WithdrawalBatchDLQRecord) error {
+	s.withdrawCalls++
+	if idx := s.withdrawCalls - 1; idx < len(s.withdrawErrs) && s.withdrawErrs[idx] != nil {
+		return s.withdrawErrs[idx]
+	}
+	return s.inner.InsertWithdrawalBatchDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) ListProofDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.ProofDLQRecord, error) {
+	return s.inner.ListProofDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) ListDepositBatchDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.DepositBatchDLQRecord, error) {
+	return s.inner.ListDepositBatchDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) ListWithdrawalBatchDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.WithdrawalBatchDLQRecord, error) {
+	return s.inner.ListWithdrawalBatchDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) CountUnacknowledged(ctx context.Context) (dlq.DLQCounts, error) {
+	return s.inner.CountUnacknowledged(ctx)
+}
+
+func (s *flakyDLQStore) Acknowledge(ctx context.Context, table string, id []byte) error {
+	return s.inner.Acknowledge(ctx, table, id)
+}
+
 type stubConfirmer struct {
 	calls int
 	errs  []error
@@ -1062,6 +1118,95 @@ func TestCoordinator_DLQ_RebroadcastExhausted(t *testing.T) {
 	}
 	if recs[0].RebroadcastAttempts != 2 {
 		t.Fatalf("rebroadcast_attempts: got %d want 2", recs[0].RebroadcastAttempts)
+	}
+}
+
+func TestCoordinator_DLQInsertFailureKeepsRebroadcastRetryable(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x92)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 2, now.Add(-1*time.Hour))
+
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationMissing}}
+	dlqStore := newFlakyDLQStore()
+	dlqStore.withdrawErrs = []error{errors.New("withdraw dlq unavailable")}
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:                  "a",
+		MaxItems:               10,
+		MaxAge:                 3 * time.Minute,
+		ClaimTTL:               10 * time.Second,
+		MaxRebroadcastAttempts: 2,
+		DLQStore:               dlqStore,
+		Now:                    nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected dlq persistence error")
+	}
+	if errors.Is(err, ErrRebroadcastExhausted) {
+		t.Fatalf("expected retryable DLQ error, got terminal exhaustion: %v", err)
+	}
+	if !strings.Contains(err.Error(), "withdrawal batch DLQ") {
+		t.Fatalf("expected withdrawal DLQ error, got %v", err)
+	}
+
+	counts, cerr := dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged: %v", cerr)
+	}
+	if counts.WithdrawalBatches != 0 {
+		t.Fatalf("expected no DLQ record after failed insert, got %d", counts.WithdrawalBatches)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected batch to remain broadcasted, got %s", b.State)
+	}
+	if b.RebroadcastAttempts != 2 {
+		t.Fatalf("rebroadcast attempts: got %d want 2", b.RebroadcastAttempts)
+	}
+
+	dlqStore.withdrawErrs = nil
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected ErrRebroadcastExhausted after DLQ recovery")
+	}
+	if !errors.Is(err, ErrRebroadcastExhausted) {
+		t.Fatalf("expected ErrRebroadcastExhausted, got %v", err)
+	}
+
+	counts, cerr = dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged after retry: %v", cerr)
+	}
+	if counts.WithdrawalBatches != 1 {
+		t.Fatalf("expected 1 withdrawal batch DLQ entry after retry, got %d", counts.WithdrawalBatches)
 	}
 }
 

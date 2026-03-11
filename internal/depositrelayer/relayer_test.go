@@ -78,6 +78,62 @@ func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Req
 	return p.res, p.err
 }
 
+type flakyDLQStore struct {
+	inner         dlq.Store
+	depositErrs   []error
+	withdrawErrs  []error
+	depositCalls  int
+	withdrawCalls int
+}
+
+func newFlakyDLQStore() *flakyDLQStore {
+	return &flakyDLQStore{inner: dlq.NewMemoryStore(nil)}
+}
+
+func (s *flakyDLQStore) EnsureSchema(ctx context.Context) error {
+	return s.inner.EnsureSchema(ctx)
+}
+
+func (s *flakyDLQStore) InsertProofDLQ(ctx context.Context, rec dlq.ProofDLQRecord) error {
+	return s.inner.InsertProofDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) InsertDepositBatchDLQ(ctx context.Context, rec dlq.DepositBatchDLQRecord) error {
+	s.depositCalls++
+	if idx := s.depositCalls - 1; idx < len(s.depositErrs) && s.depositErrs[idx] != nil {
+		return s.depositErrs[idx]
+	}
+	return s.inner.InsertDepositBatchDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) InsertWithdrawalBatchDLQ(ctx context.Context, rec dlq.WithdrawalBatchDLQRecord) error {
+	s.withdrawCalls++
+	if idx := s.withdrawCalls - 1; idx < len(s.withdrawErrs) && s.withdrawErrs[idx] != nil {
+		return s.withdrawErrs[idx]
+	}
+	return s.inner.InsertWithdrawalBatchDLQ(ctx, rec)
+}
+
+func (s *flakyDLQStore) ListProofDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.ProofDLQRecord, error) {
+	return s.inner.ListProofDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) ListDepositBatchDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.DepositBatchDLQRecord, error) {
+	return s.inner.ListDepositBatchDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) ListWithdrawalBatchDLQ(ctx context.Context, filter dlq.DLQFilter) ([]dlq.WithdrawalBatchDLQRecord, error) {
+	return s.inner.ListWithdrawalBatchDLQ(ctx, filter)
+}
+
+func (s *flakyDLQStore) CountUnacknowledged(ctx context.Context) (dlq.DLQCounts, error) {
+	return s.inner.CountUnacknowledged(ctx)
+}
+
+func (s *flakyDLQStore) Acknowledge(ctx context.Context, table string, id []byte) error {
+	return s.inner.Acknowledge(ctx, table, id)
+}
+
 type blockingProofRequester struct {
 	res proofclient.Result
 
@@ -1362,6 +1418,119 @@ func TestRelayer_DLQ_ProofAttemptsExhausted(t *testing.T) {
 	}
 	if recs[0].FailureStage != "proof" {
 		t.Fatalf("failure_stage: got %q want %q", recs[0].FailureStage, "proof")
+	}
+}
+
+func TestRelayer_DLQInsertFailureKeepsProofAttemptsRetryable(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	prover := &stubProofRequester{err: errors.New("sp1 unavailable")}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	dlqStore := newFlakyDLQStore()
+	dlqStore.depositErrs = []error{errors.New("deposit dlq unavailable")}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		MaxProofAttempts:  1,
+		DLQStore:          dlqStore,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	err = r.IngestDeposit(ctx, DepositEvent{
+		Commitment: cm,
+		LeafIndex:  7,
+		Amount:     1000,
+		Memo:       memoBytes[:],
+	})
+	if err == nil {
+		t.Fatal("expected dlq persistence error")
+	}
+	if errors.Is(err, ErrProofAttemptsExhausted) {
+		t.Fatalf("expected retryable DLQ error, got terminal exhaustion: %v", err)
+	}
+	if !strings.Contains(err.Error(), "deposit batch DLQ") {
+		t.Fatalf("expected deposit DLQ error, got %v", err)
+	}
+	if len(r.proofAttempts) != 1 {
+		t.Fatalf("expected proofAttempts to be retained, got %d entries", len(r.proofAttempts))
+	}
+	for _, attempts := range r.proofAttempts {
+		if attempts != 1 {
+			t.Fatalf("expected retained attempt count 1, got %d", attempts)
+		}
+	}
+
+	counts, cerr := dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged: %v", cerr)
+	}
+	if counts.DepositBatches != 0 {
+		t.Fatalf("expected no DLQ record after failed insert, got %d", counts.DepositBatches)
+	}
+
+	dlqStore.depositErrs = nil
+	err = r.Flush(ctx)
+	if err == nil {
+		t.Fatal("expected ErrProofAttemptsExhausted after DLQ recovery")
+	}
+	if !errors.Is(err, ErrProofAttemptsExhausted) {
+		t.Fatalf("expected ErrProofAttemptsExhausted, got %v", err)
+	}
+	if len(r.proofAttempts) != 0 {
+		t.Fatalf("expected proofAttempts cleared after durable DLQ insert, got %d entries", len(r.proofAttempts))
+	}
+
+	counts, cerr = dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged after retry: %v", cerr)
+	}
+	if counts.DepositBatches != 1 {
+		t.Fatalf("expected 1 deposit batch DLQ entry after retry, got %d", counts.DepositBatches)
 	}
 }
 

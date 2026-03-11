@@ -466,8 +466,10 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		r.proofAttempts[batchID]++
 		attempts := r.proofAttempts[batchID]
 		if attempts >= r.cfg.MaxProofAttempts {
-			r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "proof", "proof_attempts_exhausted",
-				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts)
+			if err := r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "proof", "proof_attempts_exhausted",
+				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
+				return err
+			}
 			delete(r.proofAttempts, batchID)
 			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, batchID[:8], attempts)
 		}
@@ -552,8 +554,10 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		if revertDetail != "" {
 			errorMessage = fmt.Sprintf("%s (%s)", errorMessage, revertDetail)
 		}
-		r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "bridge_tx", "tx_reverted",
-			errorMessage, 0)
+		if err := r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "bridge_tx", "tx_reverted",
+			errorMessage, 0); err != nil {
+			return err
+		}
 		if revertDetail != "" {
 			return fmt.Errorf("depositrelayer: mintBatch tx reverted: %s", revertDetail)
 		}
@@ -596,9 +600,9 @@ func (r *Relayer) checkBridgePause(ctx context.Context) error {
 
 // maybeDLQDepositBatch inserts a deposit batch into the dead-letter queue.
 // If DLQStore is nil, this is a no-op.
-func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, batch batching.Batch[mintBatchItem], failureStage, errorCode, errorMessage string, attemptCount int) {
+func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, batch batching.Batch[mintBatchItem], failureStage, errorCode, errorMessage string, attemptCount int) error {
 	if r.cfg.DLQStore == nil {
-		return
+		return nil
 	}
 
 	ids := make([][32]byte, 0, len(batch.Items))
@@ -623,13 +627,14 @@ func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, ba
 			"failure_stage", failureStage,
 			"err", err,
 		)
-	} else {
-		r.log.Info("depositrelayer: inserted batch into DLQ",
-			"batch_id", fmt.Sprintf("%x", batchID[:8]),
-			"failure_stage", failureStage,
-			"items", len(ids),
-		)
+		return fmt.Errorf("depositrelayer: insert deposit batch DLQ: %w", err)
 	}
+	r.log.Info("depositrelayer: inserted batch into DLQ",
+		"batch_id", fmt.Sprintf("%x", batchID[:8]),
+		"failure_stage", failureStage,
+		"items", len(ids),
+	)
+	return nil
 }
 
 func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {
