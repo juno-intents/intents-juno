@@ -465,7 +465,7 @@ CFG
   sudo chmod 0640 /etc/intents-juno/checkpoint-signer.key
   operator_address="\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)"
   [[ -n "\$operator_address" ]] || { echo "failed to resolve operator address" >&2; return 1; }
-  checkpoint_key="\$(tr -d '\r\n' < /etc/intents-juno/checkpoint-signer.key)"
+  checkpoint_key="\$(sudo tr -d '\r\n' < /etc/intents-juno/checkpoint-signer.key)"
   [[ -n "\$checkpoint_key" ]] || { echo "failed to load checkpoint signer key" >&2; return 1; }
 
   cat > /tmp/operator-stack.env <<ENV
