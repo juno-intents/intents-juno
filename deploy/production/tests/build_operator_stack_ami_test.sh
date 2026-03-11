@@ -159,7 +159,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
-  assert_contains "$withdraw_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "withdraw wrapper exports secret env vars"
+  assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "withdraw wrapper exports DSN and secret env vars"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper passes RPC username env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper passes RPC password env name"
@@ -381,6 +381,7 @@ EOF
   assert_not_contains "$(cat "$output_file")" 'actual-base-relayer-secret-token' "withdraw wrapper does not pass base relayer secret in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-rpc-username-secret' "withdraw wrapper does not pass RPC username in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-rpc-password-secret' "withdraw wrapper does not pass RPC password in argv"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'CHECKPOINT_POSTGRES_DSN=postgres://coordinator?sslmode=require' "withdraw wrapper exports Postgres DSN"
   assert_contains "$(cat "$tmp/withdraw.env")" 'BASE_RELAYER_AUTH_TOKEN=actual-base-relayer-secret-token' "withdraw wrapper exports base relayer auth token"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_USER=actual-rpc-username-secret' "withdraw wrapper exports RPC user"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_PASS=actual-rpc-password-secret' "withdraw wrapper exports RPC pass"

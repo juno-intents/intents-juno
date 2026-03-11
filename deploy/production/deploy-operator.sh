@@ -357,6 +357,7 @@ sudo test -x "$dkg_admin_runtime_bin" || {
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
 dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
+withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
 [[ -f "$checkpoint_signer_script" ]] || {
   echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
   exit 1
@@ -367,6 +368,10 @@ dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
 }
 [[ -f "$dkg_admin_serve_script" ]] || {
   echo "dkg-admin wrapper is missing: $dkg_admin_serve_script" >&2
+  exit 1
+}
+[[ -f "$withdraw_coordinator_script" ]] || {
+  echo "withdraw-coordinator wrapper is missing: $withdraw_coordinator_script" >&2
   exit 1
 }
 
@@ -399,6 +404,11 @@ exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_confi
 EOF_DKG_WRAPPER
 sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"
 rm -f "$dkg_admin_tmp"
+
+if grep -Fq 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script" && \
+  ! grep -Fq 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script"; then
+  sudo sed -i 's|^export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS$|export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS|' "$withdraw_coordinator_script"
+fi
 
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
 if [[ -f "$config_hydrator_script" ]] && {

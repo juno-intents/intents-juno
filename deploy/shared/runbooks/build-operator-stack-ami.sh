@@ -1582,7 +1582,7 @@ command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
   exit 1
 }
-export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
