@@ -229,22 +229,36 @@ download_release_asset_with_checksum() {
   local release_json="$1"
   local asset_name="$2"
   local archive_path="$3"
-  local asset_url checksum_url checksum_path expected actual
+  local asset_url checksum_url checksum_manifest_url checksum_path expected actual escaped_asset_name
 
   asset_url="$(jq -r --arg name "$asset_name" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json" | head -n 1)"
   checksum_url="$(jq -r --arg name "${asset_name}.sha256" '.assets[] | select(.name == $name) | .browser_download_url' <<<"$release_json" | head -n 1)"
+  checksum_manifest_url="$(jq -r '.assets[] | select(.name == "SHA256SUMS" or .name == "SHA256SUMS.txt" or .name == "sha256sums.txt" or .name == "checksums.txt" or .name == "checksums" or .name == "CHECKSUMS") | .browser_download_url' <<<"$release_json" | head -n 1)"
   [[ -n "$asset_url" ]] || { echo "failed to resolve release asset: $asset_name" >&2; return 1; }
-  [[ -n "$checksum_url" ]] || { echo "failed to resolve checksum asset: ${asset_name}.sha256" >&2; return 1; }
 
   checksum_path="$(mktemp)"
   curl -fsSL "$asset_url" -o "$archive_path"
-  curl -fsSL "$checksum_url" -o "$checksum_path"
+  if [[ -n "$checksum_url" ]]; then
+    curl -fsSL "$checksum_url" -o "$checksum_path"
+    expected="$(awk '{print $1}' "$checksum_path" | head -n 1)"
+  elif [[ -n "$checksum_manifest_url" ]]; then
+    curl -fsSL "$checksum_manifest_url" -o "$checksum_path"
+    escaped_asset_name="$(printf '%s' "$asset_name" | sed 's/[][(){}.^$*+?|\\/]/\\&/g')"
+    expected="$(
+      grep -E "(^|[[:space:]\*])${escaped_asset_name}$" "$checksum_path" \
+        | awk '{print $1}' \
+        | head -n 1
+    )"
+  else
+    rm -f "$checksum_path"
+    echo "failed to resolve checksum asset: ${asset_name}.sha256 or release checksum manifest" >&2
+    return 1
+  fi
 
-  expected="$(awk '{print $1}' "$checksum_path" | head -n 1)"
   actual="$(sha256_hex_file "$archive_path")"
   rm -f "$checksum_path"
 
-  [[ -n "$expected" ]] || { echo "empty checksum for $asset_name" >&2; return 1; }
+  [[ -n "$expected" ]] || { echo "failed to resolve checksum entry for $asset_name" >&2; return 1; }
   [[ "$expected" == "$actual" ]] || {
     echo "checksum mismatch for $asset_name" >&2
     return 1

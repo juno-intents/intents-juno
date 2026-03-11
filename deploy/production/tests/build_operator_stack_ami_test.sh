@@ -137,6 +137,9 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'download_release_asset_with_checksum()' "runbook defines checksum downloader"
   assert_contains "$script_text" 'checksum mismatch for $asset_name' "checksum mismatch aborts build"
   assert_contains "$script_text" 'download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"' "binary installers verify checksums before use"
+  assert_contains "$script_text" 'SHA256SUMS' "runbook supports release-wide SHA256SUMS manifests"
+  assert_contains "$script_text" 'escaped_asset_name="$(printf '\''%s'\'' "$asset_name" | sed '\''s/[][(){}.^$*+?|\\/]/\\&/g'\'')"' "runbook escapes asset names before SHA256SUMS lookup"
+  assert_contains "$script_text" 'grep -E "(^|[[:space:]\*])${escaped_asset_name}$"' "runbook can extract an asset checksum from SHA256SUMS"
 
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
