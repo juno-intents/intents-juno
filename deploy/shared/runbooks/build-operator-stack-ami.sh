@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # shellcheck shell=bash
 
-set -euo pipefail
+set -Eeuo pipefail
 
 cleanup_enabled="false"
 cleanup_keep_builder="false"
@@ -157,7 +157,7 @@ build_remote_bootstrap_script() {
   local script
 script="$(cat <<'REMOTE_SCRIPT'
 #!/usr/bin/env bash
-set -euo pipefail
+set -Eeuo pipefail
 
 report_bootstrap_error() {
   local exit_code="$1"
@@ -248,7 +248,8 @@ download_release_asset_with_checksum() {
     expected="$(
       grep -E "(^|[[:space:]\*])${escaped_asset_name}$" "$checksum_path" \
         | awk '{print $1}' \
-        | head -n 1
+        | head -n 1 \
+        || true
     )"
   else
     rm -f "$checksum_path"

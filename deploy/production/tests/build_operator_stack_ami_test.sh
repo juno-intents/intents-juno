@@ -135,11 +135,13 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   script_text="$(cat "$RUNBOOK_PATH")"
 
   assert_contains "$script_text" 'download_release_asset_with_checksum()' "runbook defines checksum downloader"
+  assert_contains "$script_text" 'set -Eeuo pipefail' "runbook enables ERR trap inheritance for bootstrap failures"
   assert_contains "$script_text" 'checksum mismatch for $asset_name' "checksum mismatch aborts build"
   assert_contains "$script_text" 'download_release_asset_with_checksum "\$release_json" "\$asset_name" "\$archive"' "binary installers verify checksums before use"
   assert_contains "$script_text" 'SHA256SUMS' "runbook supports release-wide SHA256SUMS manifests"
   assert_contains "$script_text" 'escaped_asset_name="$(printf '\''%s'\'' "$asset_name" | sed '\''s/[][(){}.^$*+?|\\/]/\\&/g'\'')"' "runbook escapes asset names before SHA256SUMS lookup"
   assert_contains "$script_text" 'grep -E "(^|[[:space:]\*])${escaped_asset_name}$"' "runbook can extract an asset checksum from SHA256SUMS"
+  assert_contains "$script_text" '|| true' "runbook tolerates missing SHA256SUMS matches so digest fallback can run"
   assert_contains "$script_text" '.assets[] | select(.name == $name) | .digest' "runbook reads GitHub asset digests as a checksum fallback"
   assert_contains "$script_text" 'expected="${asset_digest#sha256:}"' "runbook falls back to the asset digest when checksum files omit the asset"
 
@@ -156,6 +158,102 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$tss_wrapper" '[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {' "tss wrapper requires client CA in production"
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
   assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires JUNO_DEV_MODE=true"' "tss wrapper blocks host-process outside dev mode"
+}
+
+test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry() {
+  local tmp helper_text wrapper script_text asset_fixture manifest_fixture release_json_fixture archive_output asset_sha output
+  tmp="$(mktemp -d)"
+  helper_text="$(extract_block "download_release_asset_with_checksum() {" "install_junocash() {")"
+  helper_text="${helper_text//\\\$/\$}"
+  helper_text=$'download_release_asset_with_checksum() {\n'"$helper_text"
+  wrapper="$tmp/download_release_asset_with_checksum.sh"
+  asset_fixture="$tmp/junocash-0.9.9-linux64.tar.gz"
+  manifest_fixture="$tmp/SHA256SUMS"
+  release_json_fixture="$tmp/release.json"
+  archive_output="$tmp/archive.out"
+
+  printf 'archive-bytes\n' >"$asset_fixture"
+  printf 'deadbeef  junocash-0.9.9-darwin.zip\n' >"$manifest_fixture"
+  asset_sha="$(sha256sum "$asset_fixture" | awk '{print $1}')"
+  jq -n \
+    --arg asset_name "junocash-0.9.9-linux64.tar.gz" \
+    --arg asset_url "https://example.test/junocash-0.9.9-linux64.tar.gz" \
+    --arg asset_digest "sha256:$asset_sha" \
+    --arg manifest_url "https://example.test/SHA256SUMS" \
+    '{
+      assets: [
+        {
+          name: $asset_name,
+          browser_download_url: $asset_url,
+          digest: $asset_digest
+        },
+        {
+          name: "SHA256SUMS",
+          browser_download_url: $manifest_url
+        }
+      ]
+    }' >"$release_json_fixture"
+
+  cat >"$wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+sha256_hex_file() {
+  sha256sum "$1" | awk '{print $1}'
+}
+
+curl() {
+  local out="" url=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -fsSL)
+        shift
+        ;;
+      -o)
+        out="$2"
+        shift 2
+        ;;
+      *)
+        url="$1"
+        shift
+        ;;
+    esac
+  done
+
+  case "$url" in
+    https://example.test/junocash-0.9.9-linux64.tar.gz)
+      cp "__ASSET_FIXTURE__" "$out"
+      ;;
+    https://example.test/SHA256SUMS)
+      cp "__MANIFEST_FIXTURE__" "$out"
+      ;;
+    *)
+      printf 'unexpected curl url: %s\n' "$url" >&2
+      return 1
+      ;;
+  esac
+}
+EOF
+  printf '%s\n' "$helper_text" >>"$wrapper"
+  cat >>"$wrapper" <<'EOF'
+
+release_json="$(cat "__RELEASE_JSON_FIXTURE__")"
+download_release_asset_with_checksum "$release_json" "junocash-0.9.9-linux64.tar.gz" "__ARCHIVE_OUTPUT__"
+cat "__ARCHIVE_OUTPUT__"
+EOF
+
+  script_text="$(cat "$wrapper")"
+  script_text="${script_text//__ASSET_FIXTURE__/$asset_fixture}"
+  script_text="${script_text//__MANIFEST_FIXTURE__/$manifest_fixture}"
+  script_text="${script_text//__RELEASE_JSON_FIXTURE__/$release_json_fixture}"
+  script_text="${script_text//__ARCHIVE_OUTPUT__/$archive_output}"
+  printf '%s\n' "$script_text" >"$wrapper"
+  chmod 0755 "$wrapper"
+
+  output="$("$wrapper")"
+  assert_eq "$output" "archive-bytes" "digest fallback continues when SHA256SUMS omits the asset entry"
+
+  rm -rf "$tmp"
 }
 
 test_build_operator_stack_ami_wrapper_smoke() {
@@ -257,6 +355,7 @@ EOF
 main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
+  test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_wrapper_smoke
 }
 
