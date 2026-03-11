@@ -33,7 +33,7 @@ Current behavior:
   - Derives Juno witness extraction endpoints from the deployed operator stack (runner-local SSH tunnel to operator-local `juno-scan` + `junocashd`), not from external txid/endpoint inputs.
   - Exports each restored operator key package to an e2e-scoped KMS+S3 backend and records receipts in the distributed DKG summary.
   - Collects artifacts and destroys infra by default.
-  - Direct `run` is frozen behind `JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW=1`; `preflight` and `canary` are the supported entrypoints.
+  - Direct `run` is frozen behind `JUNO_E2E_ALLOW_LEGACY_RUNNER_FLOW=1`; `preflight` and `canary` remain available only for manual/regression use.
 ## AWS Live E2E
 
 - Terraform stack:
@@ -45,7 +45,7 @@ Current behavior:
 - Shared proof-services image release workflow:
   - `.github/workflows/release-shared-proof-services-image.yml`
 
-The AWS wrapper remains available for emergency/manual legacy runs, but the durable gate is now:
+The AWS wrapper remains available only for emergency/manual legacy runs and regression drills. Deployment gating no longer triggers this path. When the legacy AWS flow is exercised intentionally, use:
 
 1. `run-testnet-e2e-aws.sh preflight ...` for deterministic hard-block checks.
 2. `run-testnet-e2e-aws.sh canary ...` for the replacement checkpoint-stage canary.

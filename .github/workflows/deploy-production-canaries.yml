@@ -4,16 +4,12 @@ on:
   pull_request:
     paths:
       - "deploy/production/**"
-      - "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
-      - "deploy/operators/dkg/tests/run_testnet_e2e_test.sh"
       - ".github/workflows/deploy-production-canaries.yml"
   push:
     branches:
       - main
     paths:
       - "deploy/production/**"
-      - "deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"
-      - "deploy/operators/dkg/tests/run_testnet_e2e_test.sh"
       - ".github/workflows/deploy-production-canaries.yml"
 
 jobs:

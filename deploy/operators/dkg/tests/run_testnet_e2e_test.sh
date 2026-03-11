@@ -1051,6 +1051,18 @@ test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run() {
   assert_contains "$script_text" 'JUNO_E2E_INTERNAL_CANARY_RUN=1 "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \' "canary subcommand re-enters run with internal override"
 }
 
+test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
+  local workflow_text workflow_file
+  workflow_file="$SCRIPT_DIR/../../../../.github/workflows/deploy-production-canaries.yml"
+  workflow_text="$(cat "$workflow_file")"
+
+  assert_contains "$workflow_text" 'name: deploy-production-canaries' "deploy-production-canaries workflow file is loaded"
+  assert_contains "$workflow_text" '"deploy/production/**"' "deploy-production-canaries still watches production deploy paths"
+  assert_contains "$workflow_text" '".github/workflows/deploy-production-canaries.yml"' "deploy-production-canaries still self-triggers on workflow changes"
+  assert_not_contains "$workflow_text" '"deploy/operators/dkg/e2e/run-testnet-e2e-aws.sh"' "legacy aws e2e wrapper is no longer part of deployment gating paths"
+  assert_not_contains "$workflow_text" '"deploy/operators/dkg/tests/run_testnet_e2e_test.sh"' "legacy aws e2e regression test changes do not trigger deployment gating"
+}
+
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
@@ -1120,6 +1132,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_shared_ecs_rollout_accepts_explicit_proof_services_image_override
   test_run_deposit_auto_detection_polls_bridge_api_deposits_listing
   test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run
+  test_deploy_production_canaries_excludes_legacy_aws_e2e_paths
 }
 
 main "$@"
