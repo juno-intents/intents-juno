@@ -134,9 +134,9 @@ variable "shared_msk_broker_ebs_volume_size_gb" {
 }
 
 variable "shared_ecs_desired_count" {
-  description = "Desired task count for each shared proof service."
+  description = "Desired task count for each shared proof service. Defaults to 0 so the base shared stack provisions idle ECS services; live rollout injects the full runtime contract later."
   type        = number
-  default     = 1
+  default     = 0
 
   validation {
     condition     = var.shared_ecs_desired_count >= 0

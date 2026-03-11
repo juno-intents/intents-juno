@@ -26,6 +26,11 @@ main() {
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/variables.tf")"
+  shared_ecs_desired_count_block="$(awk '
+    /variable "shared_ecs_desired_count" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/variables.tf")"
   key_rotation="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-key-rotation.md")"
   failover="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-requestor-failover.md")"
 
@@ -67,6 +72,7 @@ main() {
 
   assert_not_contains "$password_block" 'default' "shared postgres password has no default"
   assert_contains "$variables_tf" 'variable "shared_proof_service_image_ecr_repository_arn"' "explicit proof-service ECR repository ARN input"
+  assert_contains "$shared_ecs_desired_count_block" 'default     = 0' "shared proof services stay idle until runtime rollout"
 
   assert_contains "$key_rotation" 'configured proof-services ECR repository' "rotation runbook documents scoped repository access"
   assert_contains "$key_rotation" 'deployment_maximum_percent = 200' "rotation runbook documents overlapping rollout"
