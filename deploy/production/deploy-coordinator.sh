@@ -24,6 +24,7 @@ Options:
   --terraform-output-json PATH Use a precomputed terraform output -json file
   --skip-terraform-apply       Do not run terraform init/apply
   --output-dir DIR             Output root (default: ./production-output)
+  --run-label LABEL            Optional subdirectory under <output-dir>/<environment> (example: run-20260311T120000Z)
   --dry-run                    Skip external mutations; requires existing bridge summary
 EOF
 }
@@ -36,6 +37,7 @@ existing_bridge_summary=""
 terraform_output_json=""
 skip_terraform_apply="false"
 output_root="./production-output"
+run_label=""
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -48,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --terraform-output-json) terraform_output_json="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
     --output-dir) output_root="$2"; shift 2 ;;
+    --run-label) run_label="$2"; shift 2 ;;
     --dry-run) dry_run="true"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -77,7 +80,11 @@ env_slug="$(production_json_required "$inventory" '.environment | select(type ==
 terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
 terraform_dir="$(production_abs_path "$REPO_ROOT" "$terraform_dir_rel")"
 [[ -d "$terraform_dir" ]] || die "terraform dir not found: $terraform_dir"
-output_dir="$output_root/$env_slug"
+if [[ -n "$run_label" ]]; then
+  output_dir="$output_root/$env_slug/$(production_safe_slug "$run_label")"
+else
+  output_dir="$output_root/$env_slug"
+fi
 mkdir -p "$output_dir"
 
 if [[ "$skip_terraform_apply" != "true" ]]; then
@@ -98,7 +105,8 @@ fi
 
 if [[ -n "$terraform_output_json" ]]; then
   [[ -f "$terraform_output_json" ]] || die "terraform output json not found: $terraform_output_json"
-  tf_output_json="$terraform_output_json"
+  tf_output_json="$output_dir/terraform-output.json"
+  cp "$terraform_output_json" "$tf_output_json"
 else
   for cmd in terraform; do
     have_cmd "$cmd" || die "required command not found: $cmd"
