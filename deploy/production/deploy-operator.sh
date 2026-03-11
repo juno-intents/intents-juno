@@ -356,8 +356,9 @@ sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"
 rm -rf "$dkg_stage_dir"
 dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
-if [[ -e /var/lib/intents-juno/juno-scan.db ]]; then
-  sudo chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db
+if sudo test -e /var/lib/intents-juno/juno-scan.db; then
+  sudo systemctl stop juno-scan || true
+  sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'
 fi
 sudo test -x "$dkg_admin_runtime_bin" || {
   echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
@@ -443,12 +444,12 @@ if [[ -f "$config_hydrator_script" ]] && {
   rm -f "$hydrator_tmp"
 fi
 
-for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+for svc in juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
 done
 REMOTE_EOF
 
-  for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+  for svc in juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
     status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
     [[ "$status" == "active" ]] || die "service $svc is not active on $operator_host"
   done
