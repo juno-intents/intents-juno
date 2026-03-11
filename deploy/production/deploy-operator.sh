@@ -18,6 +18,7 @@ Options:
   --operator-deploy PATH      Operator deploy manifest (required)
   --known-hosts PATH          Override known_hosts path from manifest
   --secret-contract-file PATH Override operator-secrets.env path from manifest
+  --force                     Redeploy even when rollout-state already marks this operator done
   --dry-run                   Print actions without mutating remote state
 EOF
 }
@@ -25,6 +26,7 @@ EOF
 operator_deploy=""
 known_hosts_override=""
 secret_contract_override=""
+force="false"
 dry_run="false"
 
 while [[ $# -gt 0 ]]; do
@@ -32,6 +34,7 @@ while [[ $# -gt 0 ]]; do
     --operator-deploy) operator_deploy="$2"; shift 2 ;;
     --known-hosts) known_hosts_override="$2"; shift 2 ;;
     --secret-contract-file) secret_contract_override="$2"; shift 2 ;;
+    --force) force="true"; shift ;;
     --dry-run) dry_run="true"; shift ;;
     --help|-h) usage; exit 0 ;;
     *) die "unknown option: $1" ;;
@@ -88,8 +91,12 @@ dns_ttl="$(production_json_optional "$operator_deploy" '.dns.ttl_seconds')"
 
 current_status="$(jq -r --arg operator_id "$operator_id" '.operators[] | select(.operator_id == $operator_id) | .status' "$rollout_state_file")"
 if [[ "$current_status" == "done" ]]; then
-  log "operator $operator_id already marked done in rollout state"
-  exit 0
+  if [[ "$force" == "true" ]]; then
+    log "operator $operator_id already marked done in rollout state; forcing redeploy"
+  else
+    log "operator $operator_id already marked done in rollout state"
+    exit 0
+  fi
 fi
 
 ssh_target="${operator_user}@${operator_host}"
