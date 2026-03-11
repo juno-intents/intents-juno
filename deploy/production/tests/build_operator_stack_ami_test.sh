@@ -171,6 +171,11 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
   assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires JUNO_DEV_MODE=true"' "tss wrapper blocks host-process outside dev mode"
 
+  local dkg_wrapper
+  dkg_wrapper="$(extract_block "cat > /tmp/intents-juno-dkg-admin-serve.sh <<'EOF_DKG_SERVE'" "EOF_DKG_SERVE")"
+  assert_contains "$dkg_wrapper" 'exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin serve --config "$admin_config"' "dkg-admin wrapper uses restored runtime binary"
+  assert_not_contains "$dkg_wrapper" 'exec /usr/local/bin/dkg-admin serve --config "$admin_config"' "dkg-admin wrapper does not assume a host-installed binary"
+
   signer_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER")"
   assert_contains "$signer_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint signer requires base chain id in operator env"
   assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"

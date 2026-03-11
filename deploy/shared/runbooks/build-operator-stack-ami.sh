@@ -1297,7 +1297,7 @@ admin_config="${DKG_ADMIN_CONFIG_FILE:-/var/lib/intents-juno/operator-runtime/bu
   echo "dkg-admin serve requires admin-config.json: $admin_config" >&2
   exit 1
 }
-exec /usr/local/bin/dkg-admin serve --config "$admin_config"
+exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin serve --config "$admin_config"
 EOF_DKG_SERVE
   sudo install -m 0755 /tmp/intents-juno-dkg-admin-serve.sh /usr/local/bin/intents-juno-dkg-admin-serve.sh
 

@@ -340,14 +340,25 @@ sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
 sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
 
+dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
+[[ -x "$dkg_admin_runtime_bin" ]] || {
+  echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
+  exit 1
+}
+
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
+dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
 [[ -f "$checkpoint_signer_script" ]] || {
   echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
   exit 1
 }
 [[ -f "$checkpoint_aggregator_script" ]] || {
   echo "checkpoint aggregator wrapper is missing: $checkpoint_aggregator_script" >&2
+  exit 1
+}
+[[ -f "$dkg_admin_serve_script" ]] || {
+  echo "dkg-admin wrapper is missing: $dkg_admin_serve_script" >&2
   exit 1
 }
 
@@ -362,6 +373,9 @@ if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_aggregator_scr
 fi
 if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_aggregator_script"; then
   sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
+fi
+if grep -Fq 'exec /usr/local/bin/dkg-admin serve --config "$admin_config"' "$dkg_admin_serve_script"; then
+  sudo sed -i 's|^exec /usr/local/bin/dkg-admin serve --config "$admin_config"$|exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin serve --config "$admin_config"|' "$dkg_admin_serve_script"
 fi
 
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"

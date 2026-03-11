@@ -39,6 +39,7 @@ Notes:
       <workdir>/bundle/admin-config.json
       <workdir>/bundle/state/key_package.bin
       <workdir>/bundle/state/public_key_package.bin
+      <workdir>/bin/dkg-admin
       <workdir>/bundle/tls/{ca.pem,server.pem,server.key}
       <workdir>/ufvk.txt                         (when payload/ufvk.txt is present)
       <workdir>/bundle/tls/{coordinator-client.pem,coordinator-client.key}
@@ -125,6 +126,7 @@ command_create() {
   local ufvk_file=""
   local coordinator_client_cert=""
   local coordinator_client_key=""
+  local dkg_admin_bin_path=""
   local tls_ca_path=""
   local tls_server_cert_path=""
   local tls_server_key_path=""
@@ -220,10 +222,12 @@ command_create() {
     [[ -f "$coordinator_client_cert" ]] || die "coordinator client cert not found: $coordinator_client_cert"
     [[ -f "$coordinator_client_key" ]] || die "coordinator client key not found: $coordinator_client_key"
   fi
+  dkg_admin_bin_path="$workdir/bin/dkg-admin"
   tls_ca_path="$workdir/bundle/tls/ca.pem"
   tls_server_cert_path="$workdir/bundle/tls/server.pem"
   tls_server_key_path="$workdir/bundle/tls/server.key"
 
+  [[ -x "$dkg_admin_bin_path" ]] || die "dkg-admin binary not found or not executable: $dkg_admin_bin_path"
   ensure_base_dependencies
   ensure_zip_command
 
@@ -254,6 +258,9 @@ command_create() {
   cp "$age_backup_file" "$tmp_dir/payload/keypackage-backup.json"
   cp "$age_backup_receipt" "$tmp_dir/payload/keypackage-backup.json.KeyImportReceipt.json"
   cp "$admin_config_path" "$tmp_dir/payload/admin-config.json"
+  ensure_dir "$tmp_dir/payload/bin"
+  cp "$dkg_admin_bin_path" "$tmp_dir/payload/bin/dkg-admin"
+  chmod 0755 "$tmp_dir/payload/bin/dkg-admin" || true
   if [[ -n "$completion_report" ]]; then
     cp "$completion_report" "$tmp_dir/payload/test-completiton.json"
   fi
@@ -296,6 +303,7 @@ command_create() {
     --arg age_backup_file "$age_backup_file" \
     --arg age_backup_receipt "$age_backup_receipt" \
     --arg admin_config "$admin_config_path" \
+    --arg dkg_admin_bin "$dkg_admin_bin_path" \
     --arg completion_report "$completion_report" \
     --arg completion_included "$completion_included" \
     --arg ufvk_file "$ufvk_file" \
@@ -318,6 +326,7 @@ command_create() {
         age_backup_file: "payload/keypackage-backup.json",
         age_backup_receipt: "payload/keypackage-backup.json.KeyImportReceipt.json",
         admin_config: "payload/admin-config.json",
+        dkg_admin_bin: "payload/bin/dkg-admin",
         completion_report: (
           if $completion_included == "true" then "payload/test-completiton.json" else null end
         ),
@@ -345,6 +354,7 @@ command_create() {
         age_backup_file: $age_backup_file,
         age_backup_receipt: $age_backup_receipt,
         admin_config: $admin_config,
+        dkg_admin_bin: $dkg_admin_bin,
         completion_report: (
           if $completion_included == "true" then $completion_report else null end
         ),
@@ -578,6 +588,11 @@ command_restore() {
 
   decode_base64_to_file "$p_key_package_b64" "$state_dir/key_package.bin"
   decode_base64_to_file "$p_public_key_package_b64" "$state_dir/public_key_package.bin"
+  if [[ -f "$payload_dir/bin/dkg-admin" ]]; then
+    ensure_dir "$workdir/bin"
+    cp "$payload_dir/bin/dkg-admin" "$workdir/bin/dkg-admin"
+    chmod 0755 "$workdir/bin/dkg-admin" || true
+  fi
 
   local tls_source="generated"
   if [[ -f "$payload_dir/tls/ca.pem" && -f "$payload_dir/tls/server.pem" && -f "$payload_dir/tls/server.key" ]]; then
@@ -604,10 +619,14 @@ command_restore() {
   fi
   ensure_dir "$(dirname "$report_path")"
   local restored_ufvk_path=""
+  local restored_dkg_admin_bin_path=""
   local restored_coordinator_client_cert_path=""
   local restored_coordinator_client_key_path=""
   if [[ -f "$workdir/ufvk.txt" ]]; then
     restored_ufvk_path="$workdir/ufvk.txt"
+  fi
+  if [[ -f "$workdir/bin/dkg-admin" ]]; then
+    restored_dkg_admin_bin_path="$workdir/bin/dkg-admin"
   fi
   if [[ -f "$tls_dir/coordinator-client.pem" ]]; then
     restored_coordinator_client_cert_path="$tls_dir/coordinator-client.pem"
@@ -623,6 +642,7 @@ command_restore() {
     --arg ceremony_id "$c_ceremony_id" \
     --arg tls_source "$tls_source" \
     --arg ufvk_path "$restored_ufvk_path" \
+    --arg dkg_admin_bin_path "$restored_dkg_admin_bin_path" \
     --arg coordinator_client_cert_path "$restored_coordinator_client_cert_path" \
     --arg coordinator_client_key_path "$restored_coordinator_client_key_path" \
     --arg admin_config_path "$config_path" \
@@ -636,6 +656,7 @@ command_restore() {
       ceremony_id: $ceremony_id,
       tls_source: $tls_source,
       ufvk_path: (if $ufvk_path == "" then null else $ufvk_path end),
+      dkg_admin_bin_path: (if $dkg_admin_bin_path == "" then null else $dkg_admin_bin_path end),
       coordinator_client_cert_path: (if $coordinator_client_cert_path == "" then null else $coordinator_client_cert_path end),
       coordinator_client_key_path: (if $coordinator_client_key_path == "" then null else $coordinator_client_key_path end),
       admin_config_path: $admin_config_path,

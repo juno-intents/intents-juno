@@ -23,7 +23,7 @@ test_backup_package_contains_required_files() {
   workdir="$tmp/ceremony-workdir"
   output="$tmp/operator-backup.zip"
 
-  mkdir -p "$runtime/bundle" "$tmp/backup" "$tmp/exports" "$workdir/reports" "$workdir/tls"
+  mkdir -p "$runtime/bundle" "$runtime/bin" "$tmp/backup" "$tmp/exports" "$workdir/reports" "$workdir/tls"
   cat >"$runtime/bundle/admin-config.json" <<'JSON'
 {
   "operator_id": "0x1111111111111111111111111111111111111111",
@@ -44,6 +44,11 @@ JSON
   printf 'test-ufvk\n' >"$workdir/ufvk.txt"
   printf 'coord-cert\n' >"$workdir/tls/coordinator-client.pem"
   printf 'coord-key\n' >"$workdir/tls/coordinator-client.key"
+  cat >"$runtime/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$runtime/bin/dkg-admin"
 
   (
     cd "$REPO_ROOT"
@@ -68,6 +73,7 @@ JSON
   assert_contains_line "$listing" "payload/admin-config.json" "backup zip admin config"
   assert_contains_line "$listing" "payload/test-completiton.json" "backup zip completion report"
   assert_contains_line "$listing" "payload/ufvk.txt" "backup zip ufvk"
+  assert_contains_line "$listing" "payload/bin/dkg-admin" "backup zip dkg-admin binary"
   assert_contains_line "$listing" "payload/tls/coordinator-client.pem" "backup zip coordinator cert"
   assert_contains_line "$listing" "payload/tls/coordinator-client.key" "backup zip coordinator key"
 
@@ -81,7 +87,7 @@ test_backup_package_restore_reconstructs_runtime() {
   output="$tmp/operator-backup.zip"
   fake_bin="$tmp/fake-bin"
 
-  mkdir -p "$runtime/bundle/tls" "$tmp/backup" "$tmp/exports" "$fake_bin" "$tmp/ceremony-tls"
+  mkdir -p "$runtime/bundle/tls" "$runtime/bin" "$tmp/backup" "$tmp/exports" "$fake_bin" "$tmp/ceremony-tls"
   cat >"$runtime/bundle/admin-config.json" <<'JSON'
 {
   "operator_id": "0x1111111111111111111111111111111111111111",
@@ -109,6 +115,11 @@ JSON
   printf 'test-ufvk\n' >"$tmp/ufvk.txt"
   printf 'coord-cert\n' >"$tmp/ceremony-tls/coordinator-client.pem"
   printf 'coord-key\n' >"$tmp/ceremony-tls/coordinator-client.key"
+  cat >"$runtime/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+printf 'fake-dkg-admin\n'
+EOF
+  chmod 0755 "$runtime/bin/dkg-admin"
 
   printf 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n' >"$tmp/backup/age-identity.txt"
   printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$tmp/exports/keypackage-backup.json"
@@ -187,6 +198,10 @@ EOF
     printf 'expected restored ufvk.txt\n' >&2
     exit 1
   }
+  [[ -x "$runtime/bin/dkg-admin" ]] || {
+    printf 'expected restored bin/dkg-admin\n' >&2
+    exit 1
+  }
   [[ -f "$runtime/bundle/tls/coordinator-client.pem" ]] || {
     printf 'expected restored coordinator-client.pem\n' >&2
     exit 1
@@ -209,6 +224,10 @@ EOF
   fi
   if [[ "$(cat "$runtime/ufvk.txt")" != "test-ufvk" ]]; then
     printf 'unexpected ufvk.txt contents: %q\n' "$(cat "$runtime/ufvk.txt")" >&2
+    exit 1
+  fi
+  if ! grep -Fq "fake-dkg-admin" "$runtime/bin/dkg-admin"; then
+    printf 'unexpected dkg-admin contents: %q\n' "$(cat "$runtime/bin/dkg-admin")" >&2
     exit 1
   fi
   if [[ "$(cat "$runtime/bundle/tls/coordinator-client.pem")" != "coord-cert" ]]; then
