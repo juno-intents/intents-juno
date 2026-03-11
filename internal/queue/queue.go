@@ -154,7 +154,7 @@ func queueKafkaTLSEnabled() bool {
 
 func kafkaTLSConfig() *tls.Config {
 	return &tls.Config{
-		MinVersion: tls.VersionTLS13,
+		MinVersion: tls.VersionTLS12,
 	}
 }
 

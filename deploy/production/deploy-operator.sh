@@ -349,6 +349,9 @@ sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"
 rm -rf "$dkg_stage_dir"
 dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
+if [[ -e /var/lib/intents-juno/juno-scan.db ]]; then
+  sudo chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db
+fi
 sudo test -x "$dkg_admin_runtime_bin" || {
   echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
   exit 1
