@@ -83,9 +83,39 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_normalizes_relative_output_paths() {
+  local workdir inventory_path operator_dir
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  inventory_path="$workdir/inventory.json"
+
+  (
+    cd "$workdir"
+    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$inventory_path" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --output-dir output >/dev/null
+  )
+
+  operator_dir="$workdir/output/alpha/operators/0x1111111111111111111111111111111111111111"
+  assert_eq "$(jq -r '.shared_manifest_path' "$operator_dir/operator-deploy.json")" "$workdir/output/alpha/shared-manifest.json" "relative output path shared manifest path"
+  assert_eq "$(jq -r '.rollout_state_file' "$operator_dir/operator-deploy.json")" "$workdir/output/alpha/rollout-state.json" "relative output path rollout state path"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
+  test_deploy_coordinator_normalizes_relative_output_paths
 }
 
 main "$@"

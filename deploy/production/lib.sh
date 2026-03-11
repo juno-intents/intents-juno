@@ -332,6 +332,9 @@ production_render_operator_handoffs() {
   local output_dir="$3"
   local inventory_dir="$4"
 
+  shared_manifest="$(production_abs_path "$(pwd)" "$shared_manifest")"
+  output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
+
   local env_slug public_subdomain zone_id dns_mode ttl_seconds
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
