@@ -444,6 +444,11 @@ write_stack_config() {
     /var/lib/intents-juno/juno-scan \
     /var/lib/intents-juno/operator-runtime \
     /var/lib/intents-juno/tss-signer
+  sudo chown -R intents-juno:intents-juno \
+    /var/lib/intents-juno/junocashd \
+    /var/lib/intents-juno/juno-scan \
+    /var/lib/intents-juno/operator-runtime \
+    /var/lib/intents-juno/tss-signer
 
   cat > /tmp/junocashd.conf <<CFG
  testnet=1
