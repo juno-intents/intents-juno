@@ -41,6 +41,7 @@ render_wrapper() {
   text="${text//\/etc\/intents-juno\/operator-stack.env/$env_file}"
   text="${text//\/usr\/local\/bin\/withdraw-coordinator/withdraw-coordinator}"
   text="${text//\/usr\/local\/bin\/tss-host/tss-host}"
+  text="${text//\/usr\/local\/bin\/checkpoint-signer/checkpoint-signer}"
   printf '%s\n' "$text" >"$target"
   chmod 0755 "$target"
 }
@@ -111,7 +112,6 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   assert_contains "$script_text" 'chmod 0640 "$stack_env_file"' "hydrator restores shared-read permissions on operator env"
   assert_not_contains "$script_text" 'install -m 0600 "$tmp" "$file"' "hydrator no longer replaces env files with install"
   assert_not_contains "$script_text" 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "hydrator does not require chown-capable install inside the service"
-  assert_contains "$script_text" "checkpoint_key=\"\\\$(sudo cat /etc/intents-juno/checkpoint-signer.key | tr -d '\\r\\n')\"" "builder reads the checkpoint signer key through sudo before stripping newlines"
   assert_contains "$script_text" 'sudo rm -f /home/$builder_user/.ssh/authorized_keys' "builder scrubs temporary SSH authorized keys before imaging"
 
   for unit in \
@@ -143,7 +143,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
 }
 
 test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
-  local script_text withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
+  local script_text hydrator_script withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
   script_text="$(cat "$RUNBOOK_PATH")"
 
   assert_contains "$script_text" 'download_release_asset_with_checksum()' "runbook defines checksum downloader"
@@ -156,6 +156,22 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" '|| true' "runbook tolerates missing SHA256SUMS matches so digest fallback can run"
   assert_contains "$script_text" '.assets[] | select(.name == $name) | .digest' "runbook reads GitHub asset digests as a checksum fallback"
   assert_contains "$script_text" 'expected="${asset_digest#sha256:}"' "runbook falls back to the asset digest when checksum files omit the asset"
+  assert_not_contains "$script_text" '/etc/intents-juno/checkpoint-signer.key' "runbook no longer bakes a checkpoint signer key file into production AMIs"
+  assert_not_contains "$script_text" 'CHECKPOINT_SIGNER_PRIVATE_KEY=' "runbook no longer bakes checkpoint signer private keys into operator env"
+  assert_contains "$script_text" 'CHECKPOINT_SIGNER_DRIVER=aws-kms' "runbook defaults the baked operator env to aws-kms signer mode"
+  assert_contains "$script_text" 'CHECKPOINT_SIGNER_KMS_KEY_ID=' "runbook reserves a kms key id slot in operator env"
+  assert_contains "$script_text" 'OPERATOR_ADDRESS=' "runbook reserves operator address in operator env"
+  assert_contains "$script_text" 'CHECKPOINT_OPERATORS=' "runbook leaves checkpoint operators to deployment-time hydration"
+
+  hydrator_script="$(extract_block "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" "EOF_CONFIG_HYDRATOR")"
+  assert_contains "$hydrator_script" 'checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER"' "config hydrator resolves checkpoint signer driver"
+  assert_contains "$hydrator_script" 'checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID"' "config hydrator resolves checkpoint signer kms key id"
+  assert_contains "$hydrator_script" 'operator_address="$(resolve_value "OPERATOR_ADDRESS"' "config hydrator resolves operator address"
+  assert_contains "$hydrator_script" 'required_key "CHECKPOINT_SIGNER_KMS_KEY_ID when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$checkpoint_signer_kms_key_id"' "config hydrator requires KMS key id for aws-kms mode"
+  assert_contains "$hydrator_script" 'required_key "OPERATOR_ADDRESS when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$operator_address"' "config hydrator requires operator address for aws-kms mode"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"' "config hydrator persists checkpoint signer driver"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"' "config hydrator persists checkpoint signer kms key id"
+  assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
 
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
@@ -181,6 +197,11 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   signer_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER")"
   assert_contains "$signer_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint signer requires base chain id in operator env"
   assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"
+  assert_contains "$signer_wrapper" 'CHECKPOINT_SIGNER_DRIVER:-local-env' "checkpoint signer defaults to local-env when signer driver is unset"
+  assert_contains "$signer_wrapper" 'checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer requires kms key id for aws-kms mode"
+  assert_contains "$signer_wrapper" 'checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer requires operator address for aws-kms mode"
+  assert_contains "$signer_wrapper" '--signer-driver "${signer_driver}"' "checkpoint signer passes signer driver through to the binary"
+  assert_contains "$signer_wrapper" '--kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"' "checkpoint signer passes kms key id through to the binary"
   assert_contains "$signer_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint signer reads base chain id from operator env"
   assert_contains "$signer_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint signer reads bridge address from operator env"
   assert_not_contains "$signer_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint signer does not bake bootstrap bridge address into wrapper"
@@ -293,12 +314,14 @@ EOF
 }
 
 test_build_operator_stack_ami_wrapper_smoke() {
-  local tmp env_file fake_bin output_file stderr_file
+  local tmp env_file fake_bin output_file stderr_file signer_output_file signer_stderr_file
   tmp="$(mktemp -d)"
   env_file="$tmp/operator-stack.env"
   fake_bin="$tmp/bin"
   output_file="$tmp/withdraw.args"
   stderr_file="$tmp/tss.stderr"
+  signer_output_file="$tmp/signer.args"
+  signer_stderr_file="$tmp/signer.stderr"
   mkdir -p "$fake_bin"
 
   render_wrapper \
@@ -385,6 +408,72 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'BASE_RELAYER_AUTH_TOKEN=actual-base-relayer-secret-token' "withdraw wrapper exports base relayer auth token"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_USER=actual-rpc-username-secret' "withdraw wrapper exports RPC user"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_PASS=actual-rpc-password-secret' "withdraw wrapper exports RPC pass"
+
+  cat >"$fake_bin/checkpoint-signer" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$signer_output_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/checkpoint-signer"
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" \
+    "EOF_SIGNER" \
+    "$tmp/intents-juno-checkpoint-signer.sh" \
+    "$env_file"
+
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_THRESHOLD=1
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
+OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+JUNO_QUEUE_KAFKA_TLS=true
+EOF
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
+  assert_contains "$(cat "$signer_output_file")" '--signer-driver aws-kms' "checkpoint signer wrapper forwards aws-kms signer driver"
+  assert_contains "$(cat "$signer_output_file")" '--kms-key-id arn:aws:kms:us-east-1:111111111111:key/abc' "checkpoint signer wrapper forwards kms key id"
+
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_THRESHOLD=1
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+CHECKPOINT_SIGNER_DRIVER=local-env
+CHECKPOINT_SIGNER_PRIVATE_KEY=4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a
+JUNO_QUEUE_KAFKA_TLS=true
+EOF
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
+  assert_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper preserves local-env compatibility"
+  assert_not_contains "$(cat "$signer_output_file")" '--kms-key-id' "checkpoint signer wrapper omits kms key id outside aws-kms mode"
+
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_THRESHOLD=1
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+JUNO_QUEUE_KAFKA_TLS=true
+EOF
+
+  if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
+    printf 'expected checkpoint-signer wrapper to reject missing kms env in aws-kms mode\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$signer_stderr_file")" "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID" "checkpoint signer wrapper rejects missing kms key id in aws-kms mode"
 
   rm -rf "$tmp"
 }

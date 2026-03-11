@@ -430,7 +430,7 @@ install_aws_cli() {
 }
 
 write_stack_config() {
-  local rpc_user rpc_pass checkpoint_key operator_address
+  local rpc_user rpc_pass
   rpc_user="juno"
   rpc_pass="\$(openssl rand -hex 16)"
 
@@ -467,22 +467,15 @@ CFG
   sudo install -m 0640 /tmp/junocashd.conf /etc/intents-juno/junocashd.conf
   sudo chown root:intents-juno /etc/intents-juno/junocashd.conf
 
-  sudo /usr/local/bin/operator-keygen --private-key-path /etc/intents-juno/checkpoint-signer.key >/tmp/operator-meta.json
-  sudo chown root:intents-juno /etc/intents-juno/checkpoint-signer.key
-  sudo chmod 0640 /etc/intents-juno/checkpoint-signer.key
-  operator_address="\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)"
-  [[ -n "\$operator_address" ]] || { echo "failed to resolve operator address" >&2; return 1; }
-  checkpoint_key="\$(sudo cat /etc/intents-juno/checkpoint-signer.key | tr -d '\r\n')"
-  [[ -n "\$checkpoint_key" ]] || { echo "failed to load checkpoint signer key" >&2; return 1; }
-
   cat > /tmp/operator-stack.env <<ENV
 JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
 JUNO_SCAN_UA_HRP=jtest
 JUNO_SCAN_CONFIRMATIONS=1
-CHECKPOINT_SIGNER_PRIVATE_KEY=\${checkpoint_key}
-OPERATOR_ADDRESS=\${operator_address}
-CHECKPOINT_OPERATORS=\${operator_address}
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=
+OPERATOR_ADDRESS=
+CHECKPOINT_OPERATORS=
 CHECKPOINT_THRESHOLD=1
 CHECKPOINT_POSTGRES_DSN=
 CHECKPOINT_KAFKA_BROKERS=
@@ -736,6 +729,9 @@ json_lookup() {
       // (if $key == "CHECKPOINT_IPFS_API_URL" then (.checkpoint.ipfs_api_url // empty) else empty end)
       // (if $key == "CHECKPOINT_SIGNATURE_TOPIC" then (.checkpoint.signature_topic // empty) else empty end)
       // (if $key == "CHECKPOINT_PACKAGE_TOPIC" then (.checkpoint.package_topic // empty) else empty end)
+      // (if $key == "CHECKPOINT_SIGNER_DRIVER" then (.checkpoint.signer_driver // empty) else empty end)
+      // (if $key == "CHECKPOINT_SIGNER_KMS_KEY_ID" then (.checkpoint.signer_kms_key_id // .checkpoint.kms_key_id // empty) else empty end)
+      // (if $key == "OPERATOR_ADDRESS" then (.checkpoint.operator_address // .operator.operator_id // empty) else empty end)
       // (if $key == "CHECKPOINT_OPERATORS" then ((.checkpoint.operators // empty) | if type == "array" then join(",") else tostring end) else empty end)
       // (if $key == "CHECKPOINT_THRESHOLD" then (.checkpoint.threshold // empty | tostring) else empty end)
       // (if $key == "JUNO_QUEUE_KAFKA_TLS" then (.checkpoint.kafka_tls // empty | tostring) else empty end)
@@ -792,6 +788,9 @@ checkpoint_blob_prefix="$(resolve_value "CHECKPOINT_BLOB_PREFIX" "$(read_env_val
 checkpoint_ipfs_api_url="$(resolve_value "CHECKPOINT_IPFS_API_URL" "$(read_env_value CHECKPOINT_IPFS_API_URL || true)" || true)"
 checkpoint_signature_topic="$(resolve_value "CHECKPOINT_SIGNATURE_TOPIC" "$(read_env_value CHECKPOINT_SIGNATURE_TOPIC || true)" || true)"
 checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env_value CHECKPOINT_PACKAGE_TOPIC || true)" || true)"
+checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env_value CHECKPOINT_SIGNER_DRIVER || true)" || true)"
+checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
+operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
 checkpoint_operators="$(resolve_value "CHECKPOINT_OPERATORS" "$(read_env_value CHECKPOINT_OPERATORS || true)" || true)"
 checkpoint_threshold="$(resolve_value "CHECKPOINT_THRESHOLD" "$(read_env_value CHECKPOINT_THRESHOLD || true)" || true)"
 kafka_tls="$(resolve_value "JUNO_QUEUE_KAFKA_TLS" "$(read_env_value JUNO_QUEUE_KAFKA_TLS || true)" || true)"
@@ -824,6 +823,21 @@ case "${kafka_tls,,}" in
     ;;
 esac
 
+checkpoint_signer_driver="$(printf '%s' "${checkpoint_signer_driver:-local-env}" | tr '[:upper:]' '[:lower:]')"
+case "$checkpoint_signer_driver" in
+  ""|local-env)
+    checkpoint_signer_driver="local-env"
+    ;;
+  aws-kms)
+    required_key "CHECKPOINT_SIGNER_KMS_KEY_ID when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$checkpoint_signer_kms_key_id"
+    required_key "OPERATOR_ADDRESS when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$operator_address"
+    [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "requires OPERATOR_ADDRESS as 20-byte hex when CHECKPOINT_SIGNER_DRIVER=aws-kms"
+    ;;
+  *)
+    fail "requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms"
+    ;;
+esac
+
 [[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
 
 if [[ "$runtime_mode" == "nitro-enclave" ]]; then
@@ -846,6 +860,9 @@ set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
+set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
+set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
+set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
 set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "$kafka_tls"
@@ -941,8 +958,34 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
+signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-local-env}" | tr '[:upper:]' '[:lower:]')"
+case "${signer_driver}" in
+  ""|local-env)
+    signer_driver="local-env"
+    signer_args=(--signer-driver "${signer_driver}")
+    ;;
+  aws-kms)
+    [[ -n "${CHECKPOINT_SIGNER_KMS_KEY_ID:-}" ]] || {
+      echo "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
+      exit 1
+    }
+    [[ -n "${OPERATOR_ADDRESS:-}" ]] || {
+      echo "checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
+      exit 1
+    }
+    signer_args=(
+      --signer-driver "${signer_driver}"
+      --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"
+    )
+    ;;
+  *)
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+    ;;
+esac
 exec /usr/local/bin/checkpoint-signer \
   --juno-rpc-url http://127.0.0.1:18232 \
+  "${signer_args[@]}" \
   --base-chain-id "${BASE_CHAIN_ID}" \
   --bridge-address "${BRIDGE_ADDRESS}" \
   --confirmations 1 \
@@ -2275,11 +2318,12 @@ STAMP
 }
 
 write_bootstrap_metadata() {
-  local juno_release_tag juno_scan_release_tag block_height block_hash
+  local juno_release_tag juno_scan_release_tag block_height block_hash operator_address
   juno_release_tag="\$(cat "\$HOME/.junocash-release-tag")"
   juno_scan_release_tag="\$(cat "\$HOME/.juno-scan-release-tag")"
   block_height="\$(sed -n '1p' "\$HOME/.junocash-blockstamp")"
   block_hash="\$(sed -n '2p' "\$HOME/.junocash-blockstamp")"
+  operator_address="\$(awk -F= '/^OPERATOR_ADDRESS=/{print substr(\$0, index(\$0, "=") + 1); exit}' /etc/intents-juno/operator-stack.env 2>/dev/null || true)"
 
   jq -n \
     --arg generated_at "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
@@ -2290,7 +2334,7 @@ write_bootstrap_metadata() {
     --arg juno_scan_release_tag "\$juno_scan_release_tag" \
     --argjson synced_block_height "\$block_height" \
     --arg synced_block_hash "\$block_hash" \
-    --arg operator_address "\$(jq -r '.operator_id // empty' /tmp/operator-meta.json)" \
+    --arg operator_address "\$operator_address" \
     '{
       generated_at: \$generated_at,
       repo: {
