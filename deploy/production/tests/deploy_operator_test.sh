@@ -161,6 +161,7 @@ EOF
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"' "remote deploy no longer fabricates coordinator client certs from the server cert"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_key" "$coord_client_key"' "remote deploy no longer fabricates coordinator client keys from the server key"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_peer_hosts_file="$remote_stage_dir/dkg-peer-hosts.json"' "remote deploy stages a distributed dkg peer host map"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo cat "$admin_config_path" | jq --slurpfile peer_hosts' "remote deploy reads the protected admin-config through sudo before rewriting the distributed roster"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '.roster.operators |= map(' "remote deploy rewrites admin-config roster endpoints from the staged peer map"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'capture("^(?<scheme>https?)://(?<host>[^:/]+)(?::(?<port>[0-9]+))?$")' "remote deploy preserves grpc endpoint scheme and port while replacing the host"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"' "remote deploy can patch legacy config hydrator"

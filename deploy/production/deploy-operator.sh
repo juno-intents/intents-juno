@@ -477,7 +477,7 @@ if [[ -f "$dkg_peer_hosts_file" ]]; then
   admin_config_path="$runtime_dir/bundle/admin-config.json"
   dkg_roster_tmp="$(mktemp)"
   dkg_roster_hash_tmp="$(mktemp)"
-  jq --slurpfile peer_hosts "$dkg_peer_hosts_file" '
+  sudo cat "$admin_config_path" | jq --slurpfile peer_hosts "$dkg_peer_hosts_file" '
     .roster.operators |= map(
       . as $op
       | (($peer_hosts[0][] | select(.operator_id == $op.operator_id))
