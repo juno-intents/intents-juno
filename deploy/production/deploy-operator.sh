@@ -56,6 +56,8 @@ shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_r
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
 bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
+peer_manifests_dir="$(cd "$manifest_dir/.." && pwd)"
+[[ -d "$peer_manifests_dir" ]] || die "peer operator manifests directory not found: $peer_manifests_dir"
 
 rollout_state_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.rollout_state_file | select(type == "string" and length > 0)')")"
 [[ -f "$rollout_state_file" ]] || die "rollout state file not found: $rollout_state_file"
@@ -110,6 +112,7 @@ resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
 junocashd_conf="$tmp_dir/junocashd.conf"
 signer_ufvk_file="$tmp_dir/ufvk.txt"
+dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
 generated_base_relayer_tls_files=()
 success="false"
 reserved="false"
@@ -398,6 +401,18 @@ production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" 
 production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 printf '%s\n' "$(production_json_required "$shared_manifest_path" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')" >"$signer_ufvk_file"
+mapfile -t peer_operator_manifests < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
+(( ${#peer_operator_manifests[@]} > 0 )) || die "no peer operator manifests found under $peer_manifests_dir"
+jq -s '
+  map({
+    operator_id: (.operator_id // error("peer operator manifest missing operator_id")),
+    host: (
+      (.operator_host // .public_endpoint)
+      // error("peer operator manifest missing operator_host/public_endpoint")
+    )
+  })
+  | sort_by(.operator_id)
+' "${peer_operator_manifests[@]}" >"$dkg_peer_hosts_file"
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
 reserved="true"
@@ -408,6 +423,7 @@ files_to_copy=(
   "$merged_env"
   "$junocashd_conf"
   "$signer_ufvk_file"
+  "$dkg_peer_hosts_file"
   "$shared_manifest_path"
   "$operator_deploy"
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
@@ -456,6 +472,60 @@ sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tm
 sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
 sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
+dkg_peer_hosts_file="$remote_stage_dir/dkg-peer-hosts.json"
+if [[ -f "$dkg_peer_hosts_file" ]]; then
+  admin_config_path="$runtime_dir/bundle/admin-config.json"
+  dkg_roster_tmp="$(mktemp)"
+  dkg_roster_hash_tmp="$(mktemp)"
+  jq --slurpfile peer_hosts "$dkg_peer_hosts_file" '
+    .roster.operators |= map(
+      . as $op
+      | (($peer_hosts[0][] | select(.operator_id == $op.operator_id))
+        // error("missing distributed dkg peer host for operator_id " + ($op.operator_id | tostring))) as $peer
+      | .grpc_endpoint = (
+          ($op.grpc_endpoint | capture("^(?<scheme>https?)://(?<host>[^:/]+)(?::(?<port>[0-9]+))?$")) as $endpoint
+          | "\($endpoint.scheme)://\($peer.host):\($endpoint.port)"
+        )
+    )
+  ' "$admin_config_path" >"$dkg_roster_tmp"
+  jq -c '
+    {
+      roster_version: .roster_version,
+      operators: (
+        .operators
+        | map({
+            operator_id: (.operator_id | tostring | gsub("^\\s+|\\s+$"; "")),
+            grpc_endpoint: (
+              if .grpc_endpoint == null then null
+              else (.grpc_endpoint | tostring | gsub("^\\s+|\\s+$"; ""))
+              end
+            ),
+            age_recipient: (
+              if .age_recipient == null then null
+              else (.age_recipient | tostring | gsub("^\\s+|\\s+$"; ""))
+              end
+            )
+          })
+        | sort_by(.operator_id)
+        | map(with_entries(select(.value != null)))
+      ),
+      coordinator_age_recipient: (
+        if .coordinator_age_recipient == null then null
+        else (.coordinator_age_recipient | tostring | gsub("^\\s+|\\s+$"; ""))
+        end
+      )
+    }
+    | with_entries(select(.value != null))
+  ' "$dkg_roster_tmp" >"$dkg_roster_hash_tmp"
+  if command -v sha256sum >/dev/null 2>&1; then
+    dkg_roster_hash="$(sha256sum "$dkg_roster_hash_tmp" | awk '{print $1}')"
+  else
+    dkg_roster_hash="$(shasum -a 256 "$dkg_roster_hash_tmp" | awk '{print $1}')"
+  fi
+  jq --arg roster_hash "$dkg_roster_hash" '.roster_hash_hex = $roster_hash' "$dkg_roster_tmp" >"${dkg_roster_tmp}.final"
+  sudo install -m 0640 -o intents-juno -g intents-juno "${dkg_roster_tmp}.final" "$admin_config_path"
+  rm -f "$dkg_roster_tmp" "${dkg_roster_tmp}.final" "$dkg_roster_hash_tmp"
+fi
 
 env_get_value_remote() {
   local key="$1"
