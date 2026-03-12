@@ -445,8 +445,53 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WJUNO_ADDRESS=0x3333333333333333333333333333333333333333" "bridge env wjuno"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env juno rpc user"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
+  rm -rf "$workdir"
+}
+
+test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url() {
+  local workdir shared_manifest app_manifest resolved_env backoffice_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.app_host.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  assert_eq "$(jq -r '.juno_rpc_url' "$app_manifest")" "null" "app manifest omits juno rpc url"
+
+  resolved_env="$workdir/resolved-app.env"
+  production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
+  backoffice_env="$workdir/backoffice.env"
+  production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
   rm -rf "$workdir"
 }
 
@@ -540,6 +585,7 @@ main() {
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
+  test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
 }

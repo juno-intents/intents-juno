@@ -448,7 +448,7 @@ production_render_app_handoff() {
   backoffice_listen_addr="$(jq -r '.backoffice_listen // "0.0.0.0:8090"' <<<"$app_json")"
   production_require_loopback_listen_addr "$bridge_listen_addr" "app_host.bridge_api_listen"
   production_require_loopback_listen_addr "$backoffice_listen_addr" "app_host.backoffice_listen"
-  juno_rpc_url="$(jq -r '.juno_rpc_url // "http://127.0.0.1:18232"' <<<"$app_json")"
+  juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
@@ -527,7 +527,7 @@ production_render_app_handoff() {
       account_id: (if $account_id == "" then null else $account_id end),
       security_group_id: (if $security_group_id == "" then null else $security_group_id end),
       public_scheme: $public_scheme,
-      juno_rpc_url: $juno_rpc_url,
+      juno_rpc_url: (if $juno_rpc_url == "" then null else $juno_rpc_url end),
       operator_addresses: $operator_addresses,
       service_urls: $service_urls,
       operator_endpoints: $operator_endpoints,
@@ -852,7 +852,7 @@ production_render_backoffice_env() {
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
   auth_secret="$(production_env_first_value "$resolved_secret_env" BACKOFFICE_AUTH_SECRET APP_BACKOFFICE_AUTH_SECRET || true)"
   [[ -n "$auth_secret" ]] || die "resolved secret env is missing BACKOFFICE_AUTH_SECRET or APP_BACKOFFICE_AUTH_SECRET"
-  juno_rpc_url="$(production_json_required "$app_deploy" '.juno_rpc_url | select(type == "string" and length > 0)')"
+  juno_rpc_url="$(production_json_optional "$app_deploy" '.juno_rpc_url')"
   juno_rpc_user="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_USER APP_JUNO_RPC_USER || true)"
   juno_rpc_pass="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_PASS APP_JUNO_RPC_PASS || true)"
   listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
@@ -870,12 +870,14 @@ BACKOFFICE_AUTH_SECRET=$auth_secret
 BACKOFFICE_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BACKOFFICE_WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$shared_manifest")
 BACKOFFICE_OPERATOR_REGISTRY_ADDRESS=$(jq -r '.contracts.operator_registry' "$shared_manifest")
-BACKOFFICE_JUNO_RPC_URL=$juno_rpc_url
 BACKOFFICE_OPERATOR_ADDRESSES=$operator_addresses
 BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 EOF
 
+  if [[ -n "$juno_rpc_url" ]]; then
+    printf 'BACKOFFICE_JUNO_RPC_URL=%s\n' "$juno_rpc_url" >>"$output_file"
+  fi
   local fee_distributor
   fee_distributor="$(production_json_optional "$shared_manifest" '.contracts.fee_distributor')"
   if [[ -n "$fee_distributor" ]]; then

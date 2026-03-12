@@ -168,6 +168,115 @@ EOF
   assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
+  rm -rf "$workdir"
+}
+
+test_deploy_app_host_allows_missing_backoffice_juno_rpc_url() {
+  local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  assets_dir="$workdir/assets"
+  mkdir -p "$fake_bin" "$log_dir" "$assets_dir"
+  release_tag="app-binaries-v0.1.0-testnet"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.app_host.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
+  printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
+  (
+    cd "$assets_dir"
+    sha256sum bridge-api_linux_amd64 >bridge-api_linux_amd64.sha256
+    sha256sum backoffice_linux_amd64 >backoffice_linux_amd64.sha256
+  )
+
+  cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gh %s\n' "$*" >>"$TEST_LOG_DIR/gh.log"
+pattern=""
+dir=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pattern)
+      pattern="$2"
+      shift 2
+      ;;
+    --dir)
+      dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cp "$TEST_ASSETS_DIR/$pattern" "$dir/$pattern"
+EOF
+  cat >"$fake_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+printf 'scp %s\n' "$*" >>"$TEST_LOG_DIR/scp.log"
+for arg in "$@"; do
+  if [[ -f "$arg" ]]; then
+    cp "$arg" "$TEST_LOG_DIR/$(basename "$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+fi
+cat >>"$TEST_LOG_DIR/ssh.stdin" || true
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
+exit 0
+EOF
+  chmod +x "$fake_bin/gh" "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  TEST_LOG_DIR="$log_dir" TEST_ASSETS_DIR="$assets_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
+      --app-deploy "$app_manifest" \
+      --release-tag "$release_tag" >/dev/null
+
+  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
+  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
+  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then' "backoffice wrapper guards juno rpc flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_USER:-}" ]]; then' "backoffice wrapper guards juno rpc user flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_PASS:-}" ]]; then' "backoffice wrapper guards juno rpc pass flag"
   rm -rf "$workdir"
 }
 
@@ -263,6 +372,7 @@ EOF
 
 main() {
   test_deploy_app_host_uses_release_assets_and_updates_remote_runtime
+  test_deploy_app_host_allows_missing_backoffice_juno_rpc_url
   test_deploy_app_host_rejects_non_https_manifest
   test_deploy_app_host_rejects_non_loopback_listeners
 }

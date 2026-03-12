@@ -240,11 +240,13 @@ args=(
   --bridge-address "\$BACKOFFICE_BRIDGE_ADDRESS"
   --wjuno-address "\$BACKOFFICE_WJUNO_ADDRESS"
   --operator-registry-address "\$BACKOFFICE_OPERATOR_REGISTRY_ADDRESS"
-  --juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL"
   --operator-addresses "\$BACKOFFICE_OPERATOR_ADDRESSES"
   --kafka-brokers "\$BACKOFFICE_KAFKA_BROKERS"
   --ipfs-api-url "\$BACKOFFICE_IPFS_API_URL"
 )
+if [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
+  args+=(--juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL")
+fi
 if [[ -n "\${BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS:-}" ]]; then
   args+=(--fee-distributor-address "\$BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS")
 fi
