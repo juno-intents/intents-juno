@@ -139,7 +139,7 @@ fi
 
 shared_manifest="$output_dir/shared-manifest.json"
 production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
-production_render_operator_handoffs "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
+production_render_operator_handoffs "$inventory" "$shared_manifest" "$dkg_summary" "$output_dir" "$inventory_dir"
 production_render_app_handoff "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
 
 log "shared manifest: $shared_manifest"

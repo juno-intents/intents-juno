@@ -205,6 +205,61 @@ production_env_first_value() {
   return 1
 }
 
+production_normalize_ecdsa_private_key() {
+  local value="$1"
+  value="${value//$'\r'/}"
+  value="${value//$'\n'/}"
+  value="${value//$'\t'/}"
+  value="${value// /}"
+  value="${value#0x}"
+  [[ "$value" =~ ^[0-9a-fA-F]{64}$ ]] || die "invalid 32-byte hex private key"
+  printf '0x%s\n' "$value"
+}
+
+production_secret_contract_upsert_literal() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" '
+    index($0, key "=") != 1 { print }
+  ' "$file" >"$tmp"
+  printf '%s=literal:%s\n' "$key" "$value" >>"$tmp"
+  mv "$tmp" "$file"
+}
+
+production_dkg_operator_key_file() {
+  local dkg_summary="$1"
+  local operator_id="$2"
+  jq -er --arg operator_id "${operator_id,,}" '
+    .operators[]
+    | select((.operator_id | ascii_downcase) == $operator_id)
+    | .operator_key_file // empty
+  ' "$dkg_summary" 2>/dev/null || true
+}
+
+production_seed_local_checkpoint_signer_secret() {
+  local secret_contract_file="$1"
+  local dkg_summary="$2"
+  local operator_id="$3"
+
+  if grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$secret_contract_file"; then
+    return 0
+  fi
+
+  local operator_key_file dkg_dir checkpoint_signer_private_key
+  operator_key_file="$(production_dkg_operator_key_file "$dkg_summary" "$operator_id")"
+  [[ -n "$operator_key_file" ]] || return 1
+
+  dkg_dir="$(cd "$(dirname "$dkg_summary")" && pwd)"
+  operator_key_file="$(production_abs_path "$dkg_dir" "$operator_key_file")"
+  [[ -f "$operator_key_file" ]] || die "operator key file not found for $operator_id: $operator_key_file"
+
+  checkpoint_signer_private_key="$(production_normalize_ecdsa_private_key "$(cat "$operator_key_file")")"
+  production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_SIGNER_PRIVATE_KEY "$checkpoint_signer_private_key"
+}
+
 production_port_from_listen_addr() {
   local listen_addr="$1"
   local port="${listen_addr##*:}"
@@ -611,8 +666,9 @@ production_write_rollout_state() {
 production_render_operator_handoffs() {
   local inventory="$1"
   local shared_manifest="$2"
-  local output_dir="$3"
-  local inventory_dir="$4"
+  local dkg_summary="$3"
+  local output_dir="$4"
+  local inventory_dir="$5"
 
   shared_manifest="$(production_abs_path "$(pwd)" "$shared_manifest")"
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
@@ -678,6 +734,14 @@ production_render_operator_handoffs() {
       backup_zip_src="$(production_abs_path "$inventory_dir" "$backup_zip_src")"
     fi
 
+    if [[ "$checkpoint_signer_driver" == "local-env" ]]; then
+      [[ -n "$secrets_dst" ]] || die "operator $operator_id uses local-env checkpoint signer but secret_contract_file is missing"
+      if ! production_seed_local_checkpoint_signer_secret "$secrets_dst" "$dkg_summary" "$operator_id"; then
+        grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$secrets_dst" \
+          || die "operator $operator_id uses local-env checkpoint signer but no CHECKPOINT_SIGNER_PRIVATE_KEY is available in the secret contract or dkg summary"
+      fi
+    fi
+
     jq -n \
       --arg version "1" \
       --arg environment "$env_slug" \
@@ -733,9 +797,8 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id
-  local checkpoint_signer_private_key base_relayer_private_keys
+  local checkpoint_signer_private_key
   checkpoint_signer_private_key=""
-  base_relayer_private_keys=""
   deposit_scan_wallet_id=""
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
@@ -750,13 +813,7 @@ production_render_operator_stack_env() {
   case "$signer_driver" in
     local-env)
       checkpoint_signer_private_key="$(production_env_first_value "$resolved_secret_env" CHECKPOINT_SIGNER_PRIVATE_KEY || true)"
-      if [[ -z "$checkpoint_signer_private_key" ]]; then
-        base_relayer_private_keys="$(production_env_first_value "$resolved_secret_env" BASE_RELAYER_PRIVATE_KEYS || true)"
-        if [[ -n "$base_relayer_private_keys" ]]; then
-          checkpoint_signer_private_key="${base_relayer_private_keys%%,*}"
-        fi
-      fi
-      [[ -n "$checkpoint_signer_private_key" ]] || die "resolved secret env is missing CHECKPOINT_SIGNER_PRIVATE_KEY or BASE_RELAYER_PRIVATE_KEYS for local-env checkpoint signer"
+      [[ -n "$checkpoint_signer_private_key" ]] || die "resolved secret env is missing CHECKPOINT_SIGNER_PRIVATE_KEY for local-env checkpoint signer"
       ;;
     aws-kms)
       [[ -n "$signer_kms_key_id" ]] || die "operator deploy manifest is missing checkpoint_signer_kms_key_id for aws-kms signer"

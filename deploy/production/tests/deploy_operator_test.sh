@@ -79,7 +79,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$workdir/shared-manifest.json" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$output_dir/alpha" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
 
   manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
   state_file="$output_dir/alpha/rollout-state.json"
@@ -225,7 +225,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$workdir/shared-manifest.json" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$output_dir/alpha" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
 
   manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
   state_file="$output_dir/alpha/rollout-state.json"
@@ -293,7 +293,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$workdir/shared-manifest.json" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$output_dir/alpha" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
 
   manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
   state_file="$output_dir/alpha/rollout-state.json"

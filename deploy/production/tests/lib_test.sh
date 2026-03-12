@@ -43,6 +43,16 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_dkg_summary_with_operator_key() {
+  local target="$1"
+  local operator_key_file="$2"
+  jq \
+    --arg operator_key_file "$operator_key_file" \
+    '
+      .operators[0].operator_key_file = $operator_key_file
+    ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$target"
+}
+
 test_resolve_secret_contract_allows_alpha_literals() {
   local workdir inventory resolved file_secret
   workdir="$(mktemp -d)"
@@ -113,7 +123,7 @@ EOF
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
   assert_eq "$(jq -r '.governance.timelock.min_delay_seconds' "$shared_manifest")" "0" "timelock delay"
 
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
   assert_file_exists "$handoff_dir/operator-deploy.json" "operator manifest"
   assert_file_exists "$handoff_dir/operator-secrets.env" "secret contract copy"
@@ -313,7 +323,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
 
   resolved_env="$workdir/resolved.env"
@@ -352,13 +362,13 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_derives_local_checkpoint_key_from_base_relayer_key() {
-  local workdir shared_manifest handoff_dir resolved_env output_env
+test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary() {
+  local workdir shared_manifest handoff_dir dkg_summary_with_key
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
+  printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
-BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -378,6 +388,44 @@ EOF
     | .operators[0].operator_address = null
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary_with_key="$workdir/dkg-summary.with-key.json"
+  write_dkg_summary_with_operator_key "$dkg_summary_with_key" "$workdir/operator.key"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary_with_key" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary_with_key" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x0123456789012345678901234567890123456789012345678901234567890123" "handoff injects checkpoint signer key from dkg summary"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_requires_explicit_local_checkpoint_key() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
@@ -387,17 +435,22 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  jq '
+    .checkpoint_signer_driver = "local-env"
+    | .checkpoint_signer_kms_key_id = null
+    | .operator_address = null
+  ' "$handoff_dir/operator-deploy.json" >"$handoff_dir/operator-deploy.json.next"
+  mv "$handoff_dir/operator-deploy.json.next" "$handoff_dir/operator-deploy.json"
 
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
-  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
-
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "rendered env signer driver"
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=0x1111111111111111111111111111111111111111111111111111111111111111" "rendered env derives checkpoint signer private key from first base relayer key"
-  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=" "rendered env omits kms key id for local-env signer"
+  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
+    printf 'expected production_render_operator_stack_env to require CHECKPOINT_SIGNER_PRIVATE_KEY for local-env signer\n' >&2
+    exit 1
+  fi
   rm -rf "$workdir"
 }
 
@@ -431,7 +484,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
 
   resolved_env="$workdir/resolved.env"
@@ -470,7 +523,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
 
   resolved_env="$workdir/resolved.env"
@@ -512,7 +565,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
 
   resolved_env="$workdir/resolved.env"
@@ -765,7 +818,8 @@ main() {
   test_render_shared_manifest_requires_signer_ufvk
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract
-  test_render_operator_stack_env_derives_local_checkpoint_key_from_base_relayer_key
+  test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary
+  test_render_operator_stack_env_requires_explicit_local_checkpoint_key
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract

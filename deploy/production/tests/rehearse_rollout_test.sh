@@ -73,6 +73,7 @@ write_operator_inputs() {
     cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/operators/$op/known_hosts"
     cat >"$workdir/operators/$op/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   done
