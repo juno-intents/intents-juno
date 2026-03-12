@@ -12,7 +12,30 @@
     "base_rpc_url": "https://base-sepolia.example.invalid",
     "base_chain_id": 84532,
     "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",
-    "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02"
+    "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02",
+    "owallet_ua": "u1alphaexample"
+  },
+  "app_host": {
+    "host": "203.0.113.21",
+    "user": "ubuntu",
+    "runtime_dir": "/var/lib/intents-juno/app-runtime",
+    "public_endpoint": "203.0.113.21",
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "account_id": "021490342184",
+    "security_group_id": "sg-0123456789abcdef0",
+    "known_hosts_file": "app/known_hosts",
+    "secret_contract_file": "app/app-secrets.env",
+    "bridge_public_dns_label": "bridge",
+    "ops_public_dns_label": "ops",
+    "public_scheme": "http",
+    "bridge_api_listen": "0.0.0.0:8082",
+    "backoffice_listen": "0.0.0.0:8090",
+    "juno_rpc_url": "http://127.0.0.1:18232",
+    "service_urls": [
+      "bridge-api=http://127.0.0.1:8082/readyz"
+    ],
+    "operator_endpoints": []
   },
   "operators": [
     {

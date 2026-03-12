@@ -60,6 +60,7 @@ write_inventory_fixture() {
           secret_contract_file: ($base_dir + "/op3/operator-secrets.env")
         }
       ]
+      | .app_host = null
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 

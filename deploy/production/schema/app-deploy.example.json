@@ -1,0 +1,42 @@
+{
+  "version": "1",
+  "environment": "alpha",
+  "shared_manifest_path": "production-output/alpha/shared-manifest.json",
+  "known_hosts_file": "production-output/alpha/app/known_hosts",
+  "secret_contract_file": "production-output/alpha/app/app-secrets.env",
+  "app_host": "203.0.113.21",
+  "app_user": "ubuntu",
+  "runtime_dir": "/var/lib/intents-juno/app-runtime",
+  "public_endpoint": "203.0.113.21",
+  "aws_profile": "juno",
+  "aws_region": "us-east-1",
+  "account_id": "021490342184",
+  "security_group_id": "sg-0123456789abcdef0",
+  "juno_rpc_url": "http://127.0.0.1:18232",
+  "operator_addresses": [
+    "0x9999999999999999999999999999999999999999"
+  ],
+  "service_urls": [
+    "bridge-api=http://127.0.0.1:8082/readyz"
+  ],
+  "operator_endpoints": [],
+  "services": {
+    "bridge_api": {
+      "listen_addr": "0.0.0.0:8082",
+      "public_url": "http://bridge.alpha.intents-testing.thejunowallet.com:8082",
+      "probe_url": "http://203.0.113.21:8082",
+      "record_name": "bridge.alpha.intents-testing.thejunowallet.com"
+    },
+    "backoffice": {
+      "listen_addr": "0.0.0.0:8090",
+      "public_url": "http://ops.alpha.intents-testing.thejunowallet.com:8090",
+      "probe_url": "http://203.0.113.21:8090",
+      "record_name": "ops.alpha.intents-testing.thejunowallet.com"
+    }
+  },
+  "dns": {
+    "mode": "public-zone",
+    "zone_id": "Z01169511CVMQJAD7T3TJ",
+    "ttl_seconds": 60
+  }
+}

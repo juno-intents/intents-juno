@@ -1,0 +1,85 @@
+name: release-app-binaries
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create/update (example: app-binaries-v0.1.0-testnet)"
+        required: true
+        type: string
+  push:
+    tags:
+      - "app-binaries-v*-testnet"
+      - "app-binaries-v*-mainnet"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24.13"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build embedded frontend and linux amd64 binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+
+          pushd frontend >/dev/null
+          npm ci
+          npm run build
+          popd >/dev/null
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/bridge-api_linux_amd64 ./cmd/bridge-api
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/backoffice_linux_amd64 ./cmd/backoffice
+
+          (
+            cd .ci/out
+            sha256sum bridge-api_linux_amd64 > bridge-api_linux_amd64.sha256
+            sha256sum backoffice_linux_amd64 > backoffice_linux_amd64.sha256
+          )
+
+      - name: Resolve release tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${{ github.event.inputs.release_tag }}"
+          if [[ -z "$release_tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          fi
+          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
+
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              .ci/out/bridge-api_linux_amd64 \
+              .ci/out/bridge-api_linux_amd64.sha256 \
+              .ci/out/backoffice_linux_amd64 \
+              .ci/out/backoffice_linux_amd64.sha256 \
+              --clobber
+          else
+            gh release create "$tag" \
+              .ci/out/bridge-api_linux_amd64 \
+              .ci/out/bridge-api_linux_amd64.sha256 \
+              .ci/out/backoffice_linux_amd64 \
+              .ci/out/backoffice_linux_amd64.sha256 \
+              --title "$tag" \
+              --notes "Release ${tag}"
+          fi

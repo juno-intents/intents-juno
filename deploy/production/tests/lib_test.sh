@@ -24,14 +24,22 @@ write_inventory_fixture() {
   local workdir="$2"
   jq \
     --arg kh "$workdir/known_hosts" \
+    --arg app_kh "$workdir/app-known_hosts" \
     --arg backup "$workdir/dkg-backup.zip" \
     --arg secrets "$workdir/operator-secrets.env" \
+    --arg app_secrets "$workdir/app-secrets.env" \
     --arg operator_address "0x9999999999999999999999999999999999999999" \
+    --arg app_host "203.0.113.21" \
+    --arg app_public_endpoint "203.0.113.21" \
     '
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
       | .operators[0].operator_address = $operator_address
+      | .app_host.known_hosts_file = $app_kh
+      | .app_host.secret_contract_file = $app_secrets
+      | .app_host.host = $app_host
+      | .app_host.public_endpoint = $app_public_endpoint
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -81,6 +89,13 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -109,6 +124,39 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_prefers_inventory_owallet_ua() {
+  local workdir shared_manifest bridge_summary_no_ua
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  bridge_summary_no_ua="$workdir/bridge-summary-no-ua.json"
+  jq 'del(.owallet_ua)' "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" >"$bridge_summary_no_ua"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$bridge_summary_no_ua" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  assert_eq "$(jq -r '.contracts.owallet_ua' "$shared_manifest")" "u1alphaexample" "inventory owallet ua fallback"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_uses_kms_contract() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -120,6 +168,13 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -178,6 +233,11 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -213,6 +273,13 @@ JUNO_RPC_PASS=literal:rpcpass
 CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -266,6 +333,11 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   jq '.operators += [{"index":2,"operator_id":"0x6666666666666666666666666666666666666666","aws_profile":"juno","aws_region":"us-east-1","account_id":"021490342184","operator_host":"203.0.113.12","operator_user":"ubuntu","runtime_dir":"/var/lib/intents-juno/operator-runtime","public_dns_label":"op2","public_endpoint":"203.0.113.12","known_hosts_file":"known_hosts","dkg_backup_zip":"dkg-backup.zip","secret_contract_file":"operator-secrets.env"}]' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
@@ -282,15 +354,72 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_app_handoff_and_envs() {
+  local workdir shared_manifest app_manifest resolved_env bridge_env backoffice_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  assert_file_exists "$app_manifest" "app deploy manifest"
+  assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "http://bridge.alpha.intents-testing.thejunowallet.com:8082" "bridge public url"
+  assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "http://203.0.113.21:8082" "bridge probe url"
+  assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "http://ops.alpha.intents-testing.thejunowallet.com:8090" "backoffice public url"
+  assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
+  assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
+
+  resolved_env="$workdir/resolved-app.env"
+  production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
+  bridge_env="$workdir/bridge-api.env"
+  backoffice_env="$workdir/backoffice.env"
+  production_render_bridge_api_env "$shared_manifest" "$app_manifest" "$resolved_env" "$bridge_env"
+  production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_POSTGRES_DSN=postgres://alpha" "bridge env postgres dsn"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WJUNO_ADDRESS=0x3333333333333333333333333333333333333333" "bridge env wjuno"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env juno rpc user"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
+  rm -rf "$workdir"
+}
+
 main() {
   test_resolve_secret_contract_allows_alpha_literals
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
+  test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
+  test_render_app_handoff_and_envs
 }
 
 main "$@"

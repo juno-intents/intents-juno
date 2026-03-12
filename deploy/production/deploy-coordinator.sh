@@ -134,7 +134,11 @@ fi
 shared_manifest="$output_dir/shared-manifest.json"
 production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir"
 production_render_operator_handoffs "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
+production_render_app_handoff "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
 
 log "shared manifest: $shared_manifest"
 log "rollout state: $output_dir/rollout-state.json"
 log "operator handoffs: $output_dir/operators"
+if [[ -f "$output_dir/app/app-deploy.json" ]]; then
+  log "app handoff: $output_dir/app/app-deploy.json"
+fi
