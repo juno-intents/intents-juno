@@ -179,6 +179,49 @@ wait_for_remote_service_active() {
   die "service $svc did not become active on $operator_host (last status: ${status:-unknown})"
 }
 
+remote_juno_scan_post() {
+  local scan_url="$1"
+  local path="$2"
+  local payload="$3"
+  local bearer_token="$4"
+  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$payload" "$bearer_token" <<'REMOTE_EOF'
+set -euo pipefail
+scan_url="$1"
+path="$2"
+payload="$3"
+bearer_token="$4"
+
+curl_headers=()
+if [[ -n "$bearer_token" ]]; then
+  curl_headers=(-H "Authorization: Bearer $bearer_token")
+fi
+
+curl -fsS -X POST "${curl_headers[@]}" -H "Content-Type: application/json" --data "$payload" "${scan_url%/}${path}"
+REMOTE_EOF
+}
+
+sync_remote_scan_wallet() {
+  local scan_url="$1"
+  local wallet_id="$2"
+  local signer_ufvk="$3"
+  local bearer_token="$4"
+  local wallet_payload backfill_payload backfill_response next_height to_height
+
+  wallet_payload="$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$signer_ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')"
+  remote_juno_scan_post "$scan_url" "/v1/wallets" "$wallet_payload" "$bearer_token" >/dev/null
+
+  next_height=0
+  while :; do
+    backfill_payload="$(jq -cn --argjson from_height "$next_height" --argjson batch_size 10000 '{from_height: $from_height, batch_size: $batch_size}')"
+    backfill_response="$(remote_juno_scan_post "$scan_url" "/v1/wallets/${wallet_id}/backfill" "$backfill_payload" "$bearer_token")"
+    to_height="$(jq -er '.to_height' <<<"$backfill_response")"
+    next_height="$(jq -er '.next_height' <<<"$backfill_response")"
+    if (( next_height > to_height )); then
+      break
+    fi
+  done
+}
+
 derive_base_relayer_allowlist() {
   local shared_manifest="$1"
   jq -r '
@@ -480,6 +523,16 @@ REMOTE_EOF
   for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
     wait_for_remote_service_active "$svc"
   done
+fi
+
+if [[ "$dry_run" != "true" ]]; then
+  scan_wallet_id="$(production_env_first_value "$merged_env" DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
+  scan_url="$(production_env_first_value "$merged_env" DEPOSIT_SCAN_JUNO_SCAN_URL WITHDRAW_FINALIZER_JUNO_SCAN_URL || true)"
+  scan_bearer_token="$(production_env_first_value "$merged_env" JUNO_SCAN_BEARER_TOKEN || true)"
+  if [[ -n "$scan_wallet_id" ]]; then
+    [[ -n "$scan_url" ]] || die "rendered operator env is missing juno-scan URL for wallet $scan_wallet_id"
+    sync_remote_scan_wallet "$scan_url" "$scan_wallet_id" "$(tr -d '\r\n' < "$signer_ufvk_file")" "$scan_bearer_token"
+  fi
 fi
 
 if [[ "$dns_mode" == "public-zone" && -n "$dns_zone_id" && -n "$dns_record_name" && -n "$public_endpoint" ]]; then

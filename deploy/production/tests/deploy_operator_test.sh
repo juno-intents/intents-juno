@@ -63,6 +63,8 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
 EOF
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
@@ -96,10 +98,14 @@ EOF
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
 printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+cat "\$stdin_file" >>"$log_dir/ssh.stdin"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
 fi
-cat >>"$log_dir/ssh.stdin" || true
 exit 0
 EOF
   cat >"$fake_bin/aws" <<EOF
@@ -161,8 +167,15 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "operator address staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "juno rpc user staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "juno rpc pass staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_ENABLED=true" "deposit scan enabled"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080" "deposit scan url staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-op1" "deposit scan wallet id staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232" "deposit scan rpc url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "withdraw coordinator rpc url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "withdraw finalizer scan url staged"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'curl -fsS -X POST "${curl_headers[@]}" -H "Content-Type: application/json" --data "$payload" "${scan_url%/}${path}"' "deploy posts scan wallet mutations through curl"
+  assert_contains "$(cat "$log_dir/ssh.log")" "bash -s -- http://127.0.0.1:8080 /v1/wallets" "deploy runs wallet registration over ssh"
+  assert_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy runs wallet backfill over ssh"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "tss ufvk path staged"
   assert_contains "$(cat "$log_dir/ufvk.txt")" "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" "ufvk value staged"
   assert_contains "$(cat "$log_dir/junocashd.conf")" "rpcuser=juno" "junocashd config rpc user staged"

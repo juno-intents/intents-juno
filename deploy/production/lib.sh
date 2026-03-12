@@ -732,9 +732,11 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
+  local deposit_scan_wallet_id
   local checkpoint_signer_private_key base_relayer_private_keys
   checkpoint_signer_private_key=""
   base_relayer_private_keys=""
+  deposit_scan_wallet_id=""
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
@@ -833,6 +835,13 @@ EOF
   fi
   if [[ -n "$withdraw_image_id" ]]; then
     printf 'WITHDRAW_IMAGE_ID=%s\n' "$withdraw_image_id" >>"$output_file"
+  fi
+  deposit_scan_wallet_id="$(production_env_first_value "$resolved_secret_env" WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
+  if [[ -n "$deposit_scan_wallet_id" ]]; then
+    printf 'DEPOSIT_SCAN_ENABLED=true\n' >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080\n' >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=%s\n' "$deposit_scan_wallet_id" >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232\n' >>"$output_file"
   fi
 
   awk -F= '
