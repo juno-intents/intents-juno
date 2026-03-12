@@ -518,10 +518,11 @@ if [[ -f "$dkg_peer_hosts_file" ]]; then
     }
     | with_entries(select(.value != null))
   ' "$dkg_roster_tmp" >"$dkg_roster_hash_tmp"
+  dkg_roster_canonical="$(cat "$dkg_roster_hash_tmp")"
   if command -v sha256sum >/dev/null 2>&1; then
-    dkg_roster_hash="$(sha256sum "$dkg_roster_hash_tmp" | awk '{print $1}')"
+    dkg_roster_hash="$(printf '%s' "$dkg_roster_canonical" | sha256sum | awk '{print $1}')"
   else
-    dkg_roster_hash="$(shasum -a 256 "$dkg_roster_hash_tmp" | awk '{print $1}')"
+    dkg_roster_hash="$(printf '%s' "$dkg_roster_canonical" | shasum -a 256 | awk '{print $1}')"
   fi
   jq --arg roster_hash "$dkg_roster_hash" '.roster_hash_hex = $roster_hash' "$dkg_roster_tmp" >"${dkg_roster_tmp}.final"
   sudo install -m 0640 -o intents-juno -g intents-juno "${dkg_roster_tmp}.final" "$admin_config_path"
