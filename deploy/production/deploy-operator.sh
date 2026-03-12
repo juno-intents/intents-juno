@@ -106,6 +106,7 @@ SCP_OPTS=("${SSH_OPTS[@]}")
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
+junocashd_conf="$tmp_dir/junocashd.conf"
 generated_base_relayer_tls_files=()
 success="false"
 reserved="false"
@@ -264,6 +265,7 @@ trap cleanup EXIT
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
+production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
@@ -273,6 +275,7 @@ remote_stage_dir="/tmp/intents-juno-deploy-$(production_safe_slug "$operator_id"
 files_to_copy=(
   "$dkg_backup_zip"
   "$merged_env"
+  "$junocashd_conf"
   "$shared_manifest_path"
   "$operator_deploy"
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
@@ -314,6 +317,7 @@ if sudo test -f /etc/intents-juno/operator-stack.env; then
 fi
 sudo rm -f /etc/intents-juno/checkpoint-signer.key
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
+sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
 sudo install -m 0640 "$remote_stage_dir/shared-manifest.json" /etc/intents-juno/shared-manifest.json
 sudo install -m 0640 "$remote_stage_dir/operator-deploy.json" /etc/intents-juno/operator-deploy.json
 sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tmp/intents-juno-dkg-backup.zip 2>/dev/null || true

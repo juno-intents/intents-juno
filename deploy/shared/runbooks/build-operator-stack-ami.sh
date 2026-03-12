@@ -791,6 +791,8 @@ checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env
 checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env_value CHECKPOINT_SIGNER_DRIVER || true)" || true)"
 checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
+juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
+juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
 checkpoint_operators="$(resolve_value "CHECKPOINT_OPERATORS" "$(read_env_value CHECKPOINT_OPERATORS || true)" || true)"
 checkpoint_threshold="$(resolve_value "CHECKPOINT_THRESHOLD" "$(read_env_value CHECKPOINT_THRESHOLD || true)" || true)"
 kafka_tls="$(resolve_value "JUNO_QUEUE_KAFKA_TLS" "$(read_env_value JUNO_QUEUE_KAFKA_TLS || true)" || true)"
@@ -804,6 +806,8 @@ required_key "CHECKPOINT_POSTGRES_DSN" "$checkpoint_postgres_dsn"
 required_key "CHECKPOINT_KAFKA_BROKERS" "$checkpoint_kafka_brokers"
 required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
+required_key "JUNO_RPC_USER" "$juno_rpc_user"
+required_key "JUNO_RPC_PASS" "$juno_rpc_pass"
 required_key "CHECKPOINT_OPERATORS" "$checkpoint_operators"
 required_key "CHECKPOINT_THRESHOLD" "$checkpoint_threshold"
 
@@ -860,6 +864,8 @@ set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
+set_env_value "$tmp_env" JUNO_RPC_USER "$juno_rpc_user"
+set_env_value "$tmp_env" JUNO_RPC_PASS "$juno_rpc_pass"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
@@ -885,6 +891,25 @@ fi
 cat "$tmp_env" > "$stack_env_file"
 chmod 0640 "$stack_env_file"
 rm -f "$tmp_env"
+
+junocashd_conf_file="/etc/intents-juno/junocashd.conf"
+tmp_junocashd_conf="$(mktemp)"
+cat > "$tmp_junocashd_conf" <<CFG
+testnet=1
+server=1
+txindex=1
+daemon=0
+listen=1
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=18232
+rpcuser=${juno_rpc_user}
+rpcpassword=${juno_rpc_pass}
+CFG
+cat "$tmp_junocashd_conf" > "$junocashd_conf_file"
+chmod 0640 "$junocashd_conf_file"
+chown root:intents-juno "$junocashd_conf_file"
+rm -f "$tmp_junocashd_conf"
 
 if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_ID:-}" ]]; then
   log "hydrated operator stack config from Secrets Manager and local env"

@@ -216,6 +216,26 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_junocashd_conf_uses_juno_rpc_credentials() {
+  local workdir env_file output_conf
+  workdir="$(mktemp -d)"
+  env_file="$workdir/operator-stack.env"
+  output_conf="$workdir/junocashd.conf"
+
+  cat >"$env_file" <<'EOF'
+JUNO_RPC_USER=juno
+JUNO_RPC_PASS=rpcpass
+EOF
+
+  production_render_junocashd_conf "$env_file" "$output_conf"
+
+  assert_contains "$(cat "$output_conf")" "rpcbind=127.0.0.1" "junocashd conf rpc bind"
+  assert_contains "$(cat "$output_conf")" "rpcport=18232" "junocashd conf rpc port"
+  assert_contains "$(cat "$output_conf")" "rpcuser=juno" "junocashd conf rpc user"
+  assert_contains "$(cat "$output_conf")" "rpcpassword=rpcpass" "junocashd conf rpc password"
+  rm -rf "$workdir"
+}
+
 test_rollout_state_enforces_one_operator_at_a_time() {
   local workdir inventory
   workdir="$(mktemp -d)"
@@ -249,6 +269,7 @@ main() {
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
+  test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time
 }
 

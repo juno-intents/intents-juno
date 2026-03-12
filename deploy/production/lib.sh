@@ -531,6 +531,45 @@ EOF
   done
 }
 
+production_render_junocashd_conf() {
+  local operator_stack_env="$1"
+  local output_file="$2"
+  local rpc_user rpc_pass
+
+  [[ -f "$operator_stack_env" ]] || die "operator stack env not found: $operator_stack_env"
+  rpc_user="$(
+    awk -F= '
+      $1 == "JUNO_RPC_USER" {
+        print substr($0, index($0, "=") + 1)
+        exit
+      }
+    ' "$operator_stack_env"
+  )"
+  rpc_pass="$(
+    awk -F= '
+      $1 == "JUNO_RPC_PASS" {
+        print substr($0, index($0, "=") + 1)
+        exit
+      }
+    ' "$operator_stack_env"
+  )"
+  [[ -n "$rpc_user" ]] || die "operator stack env is missing JUNO_RPC_USER"
+  [[ -n "$rpc_pass" ]] || die "operator stack env is missing JUNO_RPC_PASS"
+
+  {
+    printf 'testnet=1\n'
+    printf 'server=1\n'
+    printf 'txindex=1\n'
+    printf 'daemon=0\n'
+    printf 'listen=1\n'
+    printf 'rpcbind=127.0.0.1\n'
+    printf 'rpcallowip=127.0.0.1\n'
+    printf 'rpcport=18232\n'
+    printf 'rpcuser=%s\n' "$rpc_user"
+    printf 'rpcpassword=%s\n' "$rpc_pass"
+  } >"$output_file"
+}
+
 production_rollout_reserve() {
   local state_file="$1"
   local operator_id="$2"

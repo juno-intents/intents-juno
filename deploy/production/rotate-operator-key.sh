@@ -287,6 +287,7 @@ SCP_OPTS=("${SSH_OPTS[@]}")
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
+junocashd_conf="$tmp_dir/junocashd.conf"
 generated_base_relayer_tls_files=()
 
 cleanup() {
@@ -296,6 +297,7 @@ trap cleanup EXIT
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
+production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 
 if [[ "$dry_run" == "true" ]]; then
@@ -324,7 +326,7 @@ fi
 capture_remote_operator_evidence "$output_dir/pre.json"
 
 remote_stage_dir="/tmp/intents-juno-rotate-$(production_safe_slug "$operator_id")"
-files_to_copy=("$merged_env")
+files_to_copy=("$merged_env" "$junocashd_conf")
 for tls_file in "${generated_base_relayer_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
@@ -354,6 +356,7 @@ if sudo test -f /etc/intents-juno/operator-stack.env; then
 fi
 sudo rm -f /etc/intents-juno/checkpoint-signer.key
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
+sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
 sudo systemctl restart intents-juno-config-hydrator.service
 for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
