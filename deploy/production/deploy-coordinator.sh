@@ -17,6 +17,7 @@ Usage:
 Options:
   --inventory PATH             Deployment inventory JSON (required)
   --dkg-summary PATH           DKG summary JSON (required)
+  --dkg-completion PATH        Optional DKG completion JSON for UFVK/Juno address fallback
   --bridge-deploy-binary PATH  Bridge deploy binary (required unless reusing bridge summary)
   --deployer-key-file PATH     Deployer key file (required when deploying bridge)
   --existing-bridge-summary PATH
@@ -31,6 +32,7 @@ EOF
 
 inventory=""
 dkg_summary=""
+dkg_completion=""
 bridge_deploy_binary=""
 deployer_key_file=""
 existing_bridge_summary=""
@@ -44,6 +46,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --inventory) inventory="$2"; shift 2 ;;
     --dkg-summary) dkg_summary="$2"; shift 2 ;;
+    --dkg-completion) dkg_completion="$2"; shift 2 ;;
     --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
     --deployer-key-file) deployer_key_file="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
@@ -61,6 +64,9 @@ done
 [[ -f "$inventory" ]] || die "inventory not found: $inventory"
 [[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
 [[ -f "$dkg_summary" ]] || die "dkg summary not found: $dkg_summary"
+if [[ -n "$dkg_completion" ]]; then
+  [[ -f "$dkg_completion" ]] || die "dkg completion not found: $dkg_completion"
+fi
 if [[ -z "$existing_bridge_summary" ]]; then
   [[ -n "$bridge_deploy_binary" ]] || die "--bridge-deploy-binary is required when bridge summary is not reused"
   [[ -f "$bridge_deploy_binary" ]] || die "bridge deploy binary not found: $bridge_deploy_binary"
@@ -132,7 +138,7 @@ else
 fi
 
 shared_manifest="$output_dir/shared-manifest.json"
-production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir"
+production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
 production_render_operator_handoffs "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
 production_render_app_handoff "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
 

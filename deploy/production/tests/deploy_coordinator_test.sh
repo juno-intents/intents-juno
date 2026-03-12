@@ -140,10 +140,57 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk() {
+  local workdir output_dir dkg_summary_no_ufvk dkg_completion bridge_summary_no_ua manifest
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary_no_ufvk="$workdir/dkg-summary.no-ufvk.json"
+  jq 'del(.ufvk)' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary_no_ufvk"
+  bridge_summary_no_ua="$workdir/bridge-summary.no-ua.json"
+  jq 'del(.owallet_ua) | del(.juno_shielded_address)' "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" >"$bridge_summary_no_ua"
+  dkg_completion="$workdir/dkg-completion.json"
+  cat >"$dkg_completion" <<'EOF'
+{
+  "network": "testnet",
+  "ufvk": "uview1coordinatorfallback",
+  "juno_shielded_address": "u1coordinatorfallback"
+}
+EOF
+
+  bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$dkg_summary_no_ufvk" \
+    --dkg-completion "$dkg_completion" \
+    --existing-bridge-summary "$bridge_summary_no_ua" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  manifest="$output_dir/alpha/shared-manifest.json"
+  assert_eq "$(jq -r '.checkpoint.signer_ufvk' "$manifest")" "uview1coordinatorfallback" "coordinator signer ufvk fallback"
+  assert_eq "$(jq -r '.contracts.owallet_ua' "$manifest")" "u1coordinatorfallback" "coordinator juno shielded address fallback"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_normalizes_relative_output_paths
+  test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
 }
 
 main "$@"

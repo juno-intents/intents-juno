@@ -262,16 +262,26 @@ production_render_shared_manifest() {
   local tf_json="$4"
   local output_file="$5"
   local inventory_dir="$6"
+  local dkg_completion="${7:-}"
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
+  local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
+  local summary_owallet_ua completion_owallet_ua
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
   dkg_network="$(production_json_required "$dkg_summary" '.network | select(type == "string" and length > 0)')"
   [[ "$juno_network" == "$dkg_network" ]] || die "inventory contracts.juno_network ($juno_network) does not match dkg summary network ($dkg_network)"
+  if [[ -n "$dkg_completion" ]]; then
+    [[ -f "$dkg_completion" ]] || die "dkg completion not found: $dkg_completion"
+    dkg_completion_network="$(production_json_optional "$dkg_completion" '.network')"
+    if [[ -n "$dkg_completion_network" ]]; then
+      [[ "$juno_network" == "$dkg_completion_network" ]] || die "inventory contracts.juno_network ($juno_network) does not match dkg completion network ($dkg_completion_network)"
+    fi
+  fi
   base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
   deposit_image_id="$(production_json_optional "$inventory" '.contracts.deposit_image_id')"
@@ -299,6 +309,18 @@ production_render_shared_manifest() {
   roster_json="$(jq -c '.operators | map({index, operator_id, aws_profile, aws_region, account_id, public_dns_label})' "$inventory")"
   secret_keys_json="$(production_secret_keys_json "$inventory" "$inventory_dir")"
   governance_json="$(jq -c '.governance // null' "$bridge_summary")"
+  inventory_owallet_ua="$(production_json_optional "$inventory" '.contracts.owallet_ua')"
+  bridge_summary_owallet_ua="$(production_json_optional "$bridge_summary" '.owallet_ua // .juno_shielded_address')"
+  summary_owallet_ua="$(production_json_optional "$dkg_summary" '.juno_shielded_address // .owallet_ua')"
+  completion_owallet_ua=""
+  if [[ -n "$dkg_completion" ]]; then
+    completion_owallet_ua="$(production_json_optional "$dkg_completion" '.juno_shielded_address // .owallet_ua')"
+  fi
+  signer_ufvk="$(production_json_optional "$dkg_summary" '.ufvk')"
+  if [[ -z "$signer_ufvk" && -n "$dkg_completion" ]]; then
+    signer_ufvk="$(production_json_optional "$dkg_completion" '.ufvk')"
+  fi
+  [[ -n "$signer_ufvk" ]] || die "dkg summary and completion are missing ufvk"
 
   jq -n \
     --arg version "1" \
@@ -322,12 +344,15 @@ production_render_shared_manifest() {
     --argjson base_chain_id "$base_chain_id" \
     --arg deposit_image_id "$deposit_image_id" \
     --arg withdraw_image_id "$withdraw_image_id" \
+    --arg signer_ufvk "$signer_ufvk" \
     --arg bridge_address "$(production_json_required "$bridge_summary" '.contracts.bridge | select(type == "string" and length > 0)')" \
     --arg wjuno_address "$(production_json_optional "$bridge_summary" '.contracts.wjuno')" \
     --arg operator_registry "$(production_json_optional "$bridge_summary" '.contracts.operator_registry')" \
     --arg fee_distributor "$(production_json_optional "$bridge_summary" '.contracts.fee_distributor')" \
-    --arg owallet_ua "$(production_json_optional "$inventory" '.contracts.owallet_ua // empty')" \
-    --arg bridge_summary_owallet_ua "$(production_json_optional "$bridge_summary" '.owallet_ua // .juno_shielded_address')" \
+    --arg owallet_ua "$inventory_owallet_ua" \
+    --arg bridge_summary_owallet_ua "$bridge_summary_owallet_ua" \
+    --arg summary_owallet_ua "$summary_owallet_ua" \
+    --arg completion_owallet_ua "$completion_owallet_ua" \
     --argjson ttl_seconds "$ttl_seconds" \
     --argjson checkpoint_threshold "$threshold" \
     --argjson checkpoint_operators "$operators_json" \
@@ -374,6 +399,10 @@ production_render_shared_manifest() {
             $owallet_ua
           elif $bridge_summary_owallet_ua != "" then
             $bridge_summary_owallet_ua
+          elif $summary_owallet_ua != "" then
+            $summary_owallet_ua
+          elif $completion_owallet_ua != "" then
+            $completion_owallet_ua
           else
             null
           end
@@ -382,6 +411,7 @@ production_render_shared_manifest() {
       checkpoint: {
         operators: $checkpoint_operators,
         threshold: $checkpoint_threshold,
+        signer_ufvk: $signer_ufvk,
         signature_topic: "checkpoints.signatures.v1",
         package_topic: "checkpoints.packages.v1"
       },

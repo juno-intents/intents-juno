@@ -196,6 +196,95 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_requires_signer_ufvk() {
+  local workdir shared_manifest dkg_summary_no_ufvk
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary_no_ufvk="$workdir/dkg-summary.no-ufvk.json"
+  jq 'del(.ufvk)' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary_no_ufvk"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  if (
+    production_render_shared_manifest \
+      "$workdir/inventory.json" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      "$dkg_summary_no_ufvk" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      "$shared_manifest" \
+      "$workdir" >/dev/null 2>&1
+  ); then
+    printf 'expected production_render_shared_manifest to require a signer UFVK\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk() {
+  local workdir shared_manifest dkg_summary_no_ufvk dkg_completion bridge_summary_no_ua
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary_no_ufvk="$workdir/dkg-summary.no-ufvk.json"
+  jq 'del(.ufvk)' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary_no_ufvk"
+  bridge_summary_no_ua="$workdir/bridge-summary.no-ua.json"
+  jq 'del(.owallet_ua) | del(.juno_shielded_address)' "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" >"$bridge_summary_no_ua"
+  dkg_completion="$workdir/dkg-completion.json"
+  cat >"$dkg_completion" <<'EOF'
+{
+  "network": "testnet",
+  "ufvk": "uview1completionfallback",
+  "juno_shielded_address": "u1completionfallback"
+}
+EOF
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$bridge_summary_no_ua" \
+    "$dkg_summary_no_ufvk" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir" \
+    "$dkg_completion"
+
+  assert_eq "$(jq -r '.checkpoint.signer_ufvk' "$shared_manifest")" "uview1completionfallback" "completion ufvk fallback"
+  assert_eq "$(jq -r '.contracts.owallet_ua' "$shared_manifest")" "u1completionfallback" "completion juno shielded address fallback"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_uses_kms_contract() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -628,6 +717,8 @@ main() {
   test_render_shared_manifest_and_handoffs
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network
+  test_render_shared_manifest_requires_signer_ufvk
+  test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_stack_env_derives_local_checkpoint_key_from_base_relayer_key
   test_render_operator_stack_env_requires_juno_rpc_credentials
