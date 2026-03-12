@@ -16,6 +16,7 @@ Usage:
 
 Options:
   --operator-deploy PATH      Operator deploy manifest (required)
+  --dkg-tls-dir PATH          Override DKG coordinator TLS dir from manifest
   --known-hosts PATH          Override known_hosts path from manifest
   --secret-contract-file PATH Override operator-secrets.env path from manifest
   --force                     Redeploy even when rollout-state already marks this operator done
@@ -24,6 +25,7 @@ EOF
 }
 
 operator_deploy=""
+dkg_tls_dir_override=""
 known_hosts_override=""
 secret_contract_override=""
 force="false"
@@ -32,6 +34,7 @@ dry_run="false"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --operator-deploy) operator_deploy="$2"; shift 2 ;;
+    --dkg-tls-dir) dkg_tls_dir_override="$2"; shift 2 ;;
     --known-hosts) known_hosts_override="$2"; shift 2 ;;
     --secret-contract-file) secret_contract_override="$2"; shift 2 ;;
     --force) force="true"; shift ;;
@@ -70,6 +73,16 @@ aws_profile="$(production_json_optional "$operator_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
 dkg_backup_zip="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.dkg_backup_zip | select(type == "string" and length > 0)')")"
 [[ -f "$dkg_backup_zip" ]] || die "dkg backup zip not found: $dkg_backup_zip"
+dkg_tls_dir="$dkg_tls_dir_override"
+if [[ -z "$dkg_tls_dir" ]]; then
+  dkg_tls_dir="$(production_json_optional "$operator_deploy" '.dkg_tls_dir')"
+fi
+if [[ -n "$dkg_tls_dir" ]]; then
+  dkg_tls_dir="$(production_abs_path "$manifest_dir" "$dkg_tls_dir")"
+  [[ -d "$dkg_tls_dir" ]] || die "dkg tls dir not found: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $dkg_tls_dir"
+fi
 
 known_hosts_file="$known_hosts_override"
 if [[ -z "$known_hosts_file" ]]; then
@@ -114,6 +127,7 @@ junocashd_conf="$tmp_dir/junocashd.conf"
 signer_ufvk_file="$tmp_dir/ufvk.txt"
 dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
 generated_base_relayer_tls_files=()
+generated_dkg_server_tls_files=()
 success="false"
 reserved="false"
 
@@ -164,6 +178,138 @@ delete_env_key_local() {
   tmp="$(mktemp)"
   awk -v key="$key" 'index($0, key "=") != 1 { print }' "$file" >"$tmp"
   mv "$tmp" "$file"
+}
+
+append_unique_san_entry() {
+  local entry="$1"
+  shift
+  local existing
+  for existing in "$@"; do
+    [[ "$existing" == "$entry" ]] && return 0
+  done
+  printf '%s\n' "$entry"
+}
+
+append_host_san_entries() {
+  local host="$1"
+  [[ -n "$host" ]] || return 0
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    printf 'IP:%s\n' "$host"
+  else
+    printf 'DNS:%s\n' "$host"
+  fi
+}
+
+aws_resolve_private_ip() {
+  local profile="$1"
+  local region="$2"
+  local host="$3"
+  local query='Reservations[].Instances[].PrivateIpAddress'
+  local result=""
+
+  if ! have_cmd aws; then
+    printf '%s\n' "$host"
+    return 0
+  fi
+
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=ip-address,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+    if [[ -z "$result" || "$result" == "None" ]]; then
+      result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+        --filters "Name=private-ip-address,Values=$host" \
+        --query "$query" --output text 2>/dev/null || true)"
+    fi
+  else
+    result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=dns-name,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$result" && "$result" != "None" ]]; then
+    printf '%s\n' "$result"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+resolve_dkg_peer_host_from_manifest() {
+  local manifest="$1"
+  local host profile region
+  host="$(jq -r '(.operator_host // .public_endpoint) // empty' "$manifest")"
+  [[ -n "$host" ]] || die "peer operator manifest missing operator_host/public_endpoint: $manifest"
+  profile="$(jq -r '.aws_profile // empty' "$manifest")"
+  region="$(jq -r '.aws_region // empty' "$manifest")"
+  if [[ -n "$profile" && -n "$region" ]]; then
+    aws_resolve_private_ip "$profile" "$region" "$host"
+    return 0
+  fi
+  printf '%s\n' "$host"
+}
+
+generate_dkg_server_tls() {
+  local tls_dir="$1"
+  local resolved_host="$2"
+  local original_host="$3"
+  local public_host="$4"
+  local out_cert="$5"
+  local out_key="$6"
+  local tmp_cert_dir="$tmp_dir/dkg-server-tls"
+  local csr_path="$tmp_cert_dir/server.csr"
+  local ext_path="$tmp_cert_dir/server.ext"
+  local serial_path="$tmp_cert_dir/ca.srl"
+  local -a san_entries=()
+  local candidate
+
+  [[ -d "$tls_dir" ]] || die "dkg tls dir not found: $tls_dir"
+  [[ -f "$tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $tls_dir"
+  [[ -f "$tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $tls_dir"
+  have_cmd openssl || die "required command not found: openssl"
+
+  mkdir -p "$tmp_cert_dir"
+  san_entries=("DNS:localhost" "IP:127.0.0.1")
+  for candidate in "$resolved_host" "$original_host" "$public_host"; do
+    while IFS= read -r entry; do
+      [[ -n "$entry" ]] || continue
+      if ! printf '%s\n' "${san_entries[@]}" | grep -Fxq "$entry"; then
+        san_entries+=("$entry")
+      fi
+    done < <(append_host_san_entries "$candidate")
+  done
+
+  {
+    printf 'basicConstraints=CA:FALSE\n'
+    printf 'keyUsage = digitalSignature,keyEncipherment\n'
+    printf 'extendedKeyUsage = serverAuth\n'
+    printf 'subjectAltName='
+    local first="true"
+    for entry in "${san_entries[@]}"; do
+      if [[ "$first" == "true" ]]; then
+        printf '%s' "$entry"
+        first="false"
+      else
+        printf ',%s' "$entry"
+      fi
+    done
+    printf '\n'
+  } >"$ext_path"
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$out_key" \
+    -out "$csr_path" \
+    -subj "/CN=localhost" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$csr_path" \
+    -CA "$tls_dir/ca.pem" \
+    -CAkey "$tls_dir/ca.key" \
+    -CAserial "$serial_path" \
+    -CAcreateserial \
+    -out "$out_cert" \
+    -days 365 \
+    -sha256 \
+    -extfile "$ext_path" >/dev/null 2>&1
+  chmod 0600 "$out_key"
 }
 
 wait_for_remote_service_active() {
@@ -403,16 +549,27 @@ prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 printf '%s\n' "$(production_json_required "$shared_manifest_path" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')" >"$signer_ufvk_file"
 mapfile -t peer_operator_manifests < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
 (( ${#peer_operator_manifests[@]} > 0 )) || die "no peer operator manifests found under $peer_manifests_dir"
-jq -s '
-  map({
-    operator_id: (.operator_id // error("peer operator manifest missing operator_id")),
-    host: (
-      (.operator_host // .public_endpoint)
-      // error("peer operator manifest missing operator_host/public_endpoint")
-    )
-  })
-  | sort_by(.operator_id)
-' "${peer_operator_manifests[@]}" >"$dkg_peer_hosts_file"
+peer_hosts_jsonl="$tmp_dir/dkg-peer-hosts.jsonl"
+: >"$peer_hosts_jsonl"
+for peer_manifest in "${peer_operator_manifests[@]}"; do
+  peer_operator_id="$(jq -r '.operator_id // empty' "$peer_manifest")"
+  [[ -n "$peer_operator_id" ]] || die "peer operator manifest missing operator_id: $peer_manifest"
+  peer_host="$(resolve_dkg_peer_host_from_manifest "$peer_manifest")"
+  jq -n \
+    --arg operator_id "$peer_operator_id" \
+    --arg host "$peer_host" \
+    '{operator_id: $operator_id, host: $host}' >>"$peer_hosts_jsonl"
+done
+jq -s 'sort_by(.operator_id)' "$peer_hosts_jsonl" >"$dkg_peer_hosts_file"
+
+if [[ -n "$dkg_tls_dir" ]]; then
+  resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"
+  [[ -n "$resolved_operator_host" && "$resolved_operator_host" != "null" ]] || die "missing resolved dkg peer host for operator_id $operator_id"
+  dkg_server_cert_file="$tmp_dir/dkg-server.pem"
+  dkg_server_key_file="$tmp_dir/dkg-server.key"
+  generate_dkg_server_tls "$dkg_tls_dir" "$resolved_operator_host" "$operator_host" "$public_endpoint" "$dkg_server_cert_file" "$dkg_server_key_file"
+  generated_dkg_server_tls_files=("$dkg_server_cert_file" "$dkg_server_key_file")
+fi
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
 reserved="true"
@@ -430,6 +587,9 @@ files_to_copy=(
   "$REPO_ROOT/deploy/operators/dkg/common.sh"
 )
 for tls_file in "${generated_base_relayer_tls_files[@]}"; do
+  files_to_copy+=("$tls_file")
+done
+for tls_file in "${generated_dkg_server_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
 
@@ -472,6 +632,12 @@ sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tm
 sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
 sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
+if [[ -f "$remote_stage_dir/dkg-server.pem" ]]; then
+  sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"
+fi
+if [[ -f "$remote_stage_dir/dkg-server.key" ]]; then
+  sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"
+fi
 dkg_peer_hosts_file="$remote_stage_dir/dkg-peer-hosts.json"
 if [[ -f "$dkg_peer_hosts_file" ]]; then
   admin_config_path="$runtime_dir/bundle/admin-config.json"

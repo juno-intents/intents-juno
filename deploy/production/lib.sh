@@ -755,13 +755,18 @@ production_render_operator_handoffs() {
   shared_manifest="$(production_abs_path "$(pwd)" "$shared_manifest")"
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 
-  local env_slug public_subdomain zone_id dns_mode ttl_seconds
+  local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
+  dkg_tls_dir="$(jq -r '.dkg_tls_dir // empty' "$inventory")"
+  if [[ -n "$dkg_tls_dir" ]]; then
+    dkg_tls_dir="$(production_abs_path "$inventory_dir" "$dkg_tls_dir")"
+    [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
+  fi
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   derived_deposit_owallet_ivk=""
   derived_withdraw_owallet_ovk=""
@@ -854,6 +859,7 @@ production_render_operator_handoffs() {
       --arg known_hosts_file "$known_hosts_dst" \
       --arg secret_contract_file "$secrets_dst" \
       --arg dkg_backup_zip "$backup_zip_src" \
+      --arg dkg_tls_dir "$dkg_tls_dir" \
       --arg public_dns_name "$public_dns_name" \
       --arg public_endpoint "$public_endpoint" \
       --arg zone_id "$zone_id" \
@@ -877,6 +883,7 @@ production_render_operator_handoffs() {
         operator_user: ($operator.operator_user // "ubuntu"),
         runtime_dir: ($operator.runtime_dir // "/var/lib/intents-juno/operator-runtime"),
         dkg_backup_zip: $dkg_backup_zip,
+        dkg_tls_dir: (if $dkg_tls_dir == "" then null else $dkg_tls_dir end),
         known_hosts_file: (if $known_hosts_file == "" then null else $known_hosts_file end),
         secret_contract_file: (if $secret_contract_file == "" then null else $secret_contract_file end),
         public_endpoint: (if $public_endpoint == "" then null else $public_endpoint end),

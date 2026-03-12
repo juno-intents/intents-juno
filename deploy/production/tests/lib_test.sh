@@ -43,6 +43,45 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+test_render_operator_handoffs_preserves_dkg_tls_dir() {
+  local workdir shared_manifest handoff_dir
+  workdir="$(mktemp -d)"
+  mkdir -p "$workdir/dkg-tls"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  assert_eq "$(jq -r '.dkg_tls_dir' "$handoff_dir/operator-deploy.json")" "$workdir/dkg-tls" "operator deploy preserves dkg tls dir"
+  rm -rf "$workdir"
+}
+
 write_dkg_summary_with_operator_key() {
   local target="$1"
   local operator_key_file="$2"
@@ -1005,6 +1044,7 @@ main() {
   test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
+  test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_requires_explicit_local_checkpoint_key
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials

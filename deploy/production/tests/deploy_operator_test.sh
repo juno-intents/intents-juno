@@ -213,6 +213,102 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_stages_distributed_dkg_server_tls() {
+  local workdir output_dir manifest shared_manifest log_dir fake_bin state_file cert_b64 key_b64 san_text
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin" "$workdir/dkg-tls"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$workdir/dkg-tls/ca.key" \
+    -out "$workdir/dkg-tls/ca.pem" \
+    -subj "/CN=Test DKG CA" \
+    -days 1 >/dev/null 2>&1
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+  shared_manifest="$workdir/shared-manifest.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+for arg in "\$@"; do
+  if [[ -f "\$arg" ]]; then
+    cp "\$arg" "$log_dir/\$(basename "\$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+printf '10.0.0.11\n'
+exit 0
+EOF
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.pem" "deploy copies generated dkg server cert"
+  assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.key" "deploy copies generated dkg server key"
+  assert_contains "$(cat "$log_dir/aws.log")" "describe-instances" "deploy resolves peer hosts through aws"
+  assert_contains "$(cat "$log_dir/dkg-peer-hosts.json")" "10.0.0.11" "deploy writes resolved peer hosts"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"
+  san_text="$(openssl x509 -in "$log_dir/dkg-server.pem" -noout -ext subjectAltName 2>/dev/null)"
+  assert_contains "$san_text" "DNS:localhost" "generated cert preserves localhost san"
+  assert_contains "$san_text" "IP Address:10.0.0.11" "generated cert includes resolved peer host"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
+  rm -rf "$workdir"
+}
+
 test_deploy_operator_force_reruns_done_operator() {
   local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
   workdir="$(mktemp -d)"
@@ -368,6 +464,7 @@ EOF
 
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
+  test_deploy_operator_stages_distributed_dkg_server_tls
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
 }

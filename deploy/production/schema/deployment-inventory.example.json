@@ -1,5 +1,6 @@
 {
   "environment": "alpha",
+  "dkg_tls_dir": "",
   "shared_services": {
     "aws_profile": "juno",
     "aws_region": "us-east-1",
