@@ -321,7 +321,6 @@ fi
 sudo rm -f /etc/intents-juno/checkpoint-signer.key
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
-sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
 sudo install -m 0640 "$remote_stage_dir/shared-manifest.json" /etc/intents-juno/shared-manifest.json
 sudo install -m 0640 "$remote_stage_dir/operator-deploy.json" /etc/intents-juno/operator-deploy.json
 sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tmp/intents-juno-dkg-backup.zip 2>/dev/null || true
@@ -345,10 +344,10 @@ case "$(env_get_value_remote "JUNO_DEV_MODE")" in
     coord_client_key="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE")"
     server_cert="$(env_get_value_remote "TSS_TLS_CERT_FILE")"
     server_key="$(env_get_value_remote "TSS_TLS_KEY_FILE")"
-    if [[ -n "$coord_client_cert" && -n "$server_cert" && ! -s "$coord_client_cert" && -s "$server_cert" ]]; then
+    if [[ -n "$coord_client_cert" && -n "$server_cert" ]] && ! sudo test -s "$coord_client_cert" && sudo test -s "$server_cert"; then
       sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"
     fi
-    if [[ -n "$coord_client_key" && -n "$server_key" && ! -s "$coord_client_key" && -s "$server_key" ]]; then
+    if [[ -n "$coord_client_key" && -n "$server_key" ]] && ! sudo test -s "$coord_client_key" && sudo test -s "$server_key"; then
       sudo install -D -m 0640 -o root -g intents-juno "$server_key" "$coord_client_key"
     fi
     ;;
@@ -453,6 +452,7 @@ if [[ -f "$config_hydrator_script" ]] && {
 fi
 
 sudo systemctl restart intents-juno-config-hydrator.service
+sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
 for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
 done
