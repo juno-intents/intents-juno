@@ -612,6 +612,10 @@ for peer_manifest in "${peer_operator_manifests[@]}"; do
     '{operator_id: $operator_id, host: $host}' >>"$peer_hosts_jsonl"
 done
 jq -s 'sort_by(.operator_id)' "$peer_hosts_jsonl" >"$dkg_peer_hosts_file"
+resolved_withdraw_tss_server_name="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host // empty' "$dkg_peer_hosts_file")"
+if [[ -n "$resolved_withdraw_tss_server_name" ]]; then
+  set_env_value_local "$merged_env" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME" "$resolved_withdraw_tss_server_name"
+fi
 
 if [[ -n "$dkg_tls_dir" ]]; then
   resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"

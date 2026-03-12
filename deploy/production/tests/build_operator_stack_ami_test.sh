@@ -404,6 +404,7 @@ JUNO_RPC_USER=actual-rpc-username-secret
 JUNO_RPC_PASS=actual-rpc-password-secret
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=$tmp/ca.pem
+WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
@@ -423,6 +424,7 @@ EOF
   assert_contains "$(cat "$output_file")" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper forwards RPC username env name"
   assert_contains "$(cat "$output_file")" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper forwards RPC password env name"
   assert_contains "$(cat "$output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper forwards base relayer auth env name"
+  assert_contains "$(cat "$output_file")" '--tss-server-name 10.0.0.11' "withdraw wrapper forwards optional tss server name override"
   assert_not_contains "$(cat "$output_file")" 'postgres://coordinator?sslmode=require' "withdraw wrapper does not pass raw DSN in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-base-relayer-secret-token' "withdraw wrapper does not pass base relayer secret in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-rpc-username-secret' "withdraw wrapper does not pass RPC username in argv"

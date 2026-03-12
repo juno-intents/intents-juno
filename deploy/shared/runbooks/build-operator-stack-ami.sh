@@ -1674,6 +1674,10 @@ command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
   exit 1
 }
+tss_server_name_args=()
+if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
+  tss_server_name_args=(--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}")
+fi
 export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
@@ -1695,6 +1699,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
+  "${tss_server_name_args[@]}" \
   --tss-client-cert-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE}" \
   --tss-client-key-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE}" \
   --tss-timeout 120s \
