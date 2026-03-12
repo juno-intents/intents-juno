@@ -148,6 +148,7 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "backoffice.env" "backoffice env copied"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'bridge_api_wrapper="/usr/local/bin/intents-juno-bridge-api.sh"' "remote bridge wrapper path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'backoffice_wrapper="/usr/local/bin/intents-juno-backoffice.sh"' "remote backoffice wrapper path"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if ! id -u intents-juno >/dev/null 2>&1; then' "remote ensures intents-juno user"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
