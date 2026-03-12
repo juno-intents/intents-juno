@@ -136,6 +136,7 @@ else
     --dkg-summary "$dkg_summary" \
     --output "$bridge_summary"
 fi
+production_refresh_bridge_summary_owallet_ua "$bridge_summary" "$dkg_summary" "$dkg_completion"
 
 shared_manifest="$output_dir/shared-manifest.json"
 production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"

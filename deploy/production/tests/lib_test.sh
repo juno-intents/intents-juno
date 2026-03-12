@@ -271,6 +271,85 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_prefers_dkg_owallet_ua_over_reused_bridge_summary() {
+  local workdir shared_manifest bridge_summary dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  bridge_summary="$workdir/bridge-summary.json"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" "$bridge_summary"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '.juno_shielded_address = "u1freshdkgsummary"' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$bridge_summary" \
+    "$dkg_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  assert_eq "$(jq -r '.contracts.owallet_ua' "$shared_manifest")" "u1freshdkgsummary" "dkg owallet ua overrides reused bridge summary"
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_rejects_inventory_owallet_ua_mismatch_with_dkg() {
+  local workdir shared_manifest dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '.juno_shielded_address = "u1freshdkgsummary"' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+  shared_manifest="$workdir/shared-manifest.json"
+
+  if (
+    production_render_shared_manifest \
+      "$workdir/inventory.json" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      "$dkg_summary" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      "$shared_manifest" \
+      "$workdir" >/dev/null 2>&1
+  ); then
+    printf 'expected production_render_shared_manifest to reject stale inventory owallet ua\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_rejects_mismatched_juno_network() {
   local workdir shared_manifest mainnet_dkg_summary
   workdir="$(mktemp -d)"
@@ -510,6 +589,50 @@ EOF
   assert_contains "$(cat "$output_env")" "TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key" "rendered env tss key path"
   assert_contains "$(cat "$output_env")" "TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" "rendered env tss client ca"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rendered env omits private key for kms signer"
+  rm -rf "$workdir"
+}
+
+test_render_operator_handoffs_refresh_withdraw_change_address_from_shared_manifest() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=literal:u1staleaddress
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=literal:u1alphaexample" "handoff refreshes withdraw change address"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=u1alphaexample" "rendered env uses refreshed withdraw change address"
   rm -rf "$workdir"
 }
 

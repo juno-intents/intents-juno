@@ -229,6 +229,60 @@ production_secret_contract_upsert_literal() {
   mv "$tmp" "$file"
 }
 
+production_effective_owallet_ua() {
+  local inventory_owallet_ua="${1:-}"
+  local bridge_summary_owallet_ua="${2:-}"
+  local summary_owallet_ua="${3:-}"
+  local completion_owallet_ua="${4:-}"
+  local dkg_owallet_ua=""
+
+  if [[ -n "$summary_owallet_ua" && -n "$completion_owallet_ua" && "$summary_owallet_ua" != "$completion_owallet_ua" ]]; then
+    die "dkg summary owallet ua ($summary_owallet_ua) does not match dkg completion owallet ua ($completion_owallet_ua)"
+  fi
+
+  if [[ -n "$completion_owallet_ua" ]]; then
+    dkg_owallet_ua="$completion_owallet_ua"
+  else
+    dkg_owallet_ua="$summary_owallet_ua"
+  fi
+
+  if [[ -n "$inventory_owallet_ua" && -n "$dkg_owallet_ua" && "$inventory_owallet_ua" != "$dkg_owallet_ua" ]]; then
+    die "inventory contracts.owallet_ua ($inventory_owallet_ua) does not match dkg owallet ua ($dkg_owallet_ua)"
+  fi
+
+  if [[ -n "$inventory_owallet_ua" ]]; then
+    printf '%s\n' "$inventory_owallet_ua"
+  elif [[ -n "$dkg_owallet_ua" ]]; then
+    printf '%s\n' "$dkg_owallet_ua"
+  elif [[ -n "$bridge_summary_owallet_ua" ]]; then
+    printf '%s\n' "$bridge_summary_owallet_ua"
+  fi
+}
+
+production_refresh_bridge_summary_owallet_ua() {
+  local bridge_summary="$1"
+  local dkg_summary="$2"
+  local dkg_completion="${3:-}"
+  local bridge_summary_owallet_ua summary_owallet_ua completion_owallet_ua effective_owallet_ua tmp
+
+  bridge_summary_owallet_ua="$(production_json_optional "$bridge_summary" '.owallet_ua // .juno_shielded_address')"
+  summary_owallet_ua="$(production_json_optional "$dkg_summary" '.juno_shielded_address // .owallet_ua')"
+  completion_owallet_ua=""
+  if [[ -n "$dkg_completion" ]]; then
+    completion_owallet_ua="$(production_json_optional "$dkg_completion" '.juno_shielded_address // .owallet_ua')"
+  fi
+
+  effective_owallet_ua="$(production_effective_owallet_ua "" "$bridge_summary_owallet_ua" "$summary_owallet_ua" "$completion_owallet_ua")"
+  [[ -n "$effective_owallet_ua" ]] || return 0
+
+  tmp="$(mktemp)"
+  jq \
+    --arg owallet_ua "$effective_owallet_ua" \
+    '.owallet_ua = $owallet_ua | .juno_shielded_address = $owallet_ua' \
+    "$bridge_summary" >"$tmp"
+  mv "$tmp" "$bridge_summary"
+}
+
 production_dkg_operator_key_file() {
   local dkg_summary="$1"
   local operator_id="$2"
@@ -437,7 +491,7 @@ production_render_shared_manifest() {
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
-  local summary_owallet_ua completion_owallet_ua base_event_scanner_start_block
+  local summary_owallet_ua completion_owallet_ua effective_owallet_ua base_event_scanner_start_block
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
@@ -486,6 +540,7 @@ production_render_shared_manifest() {
   if [[ -n "$dkg_completion" ]]; then
     completion_owallet_ua="$(production_json_optional "$dkg_completion" '.juno_shielded_address // .owallet_ua')"
   fi
+  effective_owallet_ua="$(production_effective_owallet_ua "$inventory_owallet_ua" "$bridge_summary_owallet_ua" "$summary_owallet_ua" "$completion_owallet_ua")"
   signer_ufvk="$(production_json_optional "$dkg_summary" '.ufvk')"
   if [[ -z "$signer_ufvk" && -n "$dkg_completion" ]]; then
     signer_ufvk="$(production_json_optional "$dkg_completion" '.ufvk')"
@@ -520,10 +575,7 @@ production_render_shared_manifest() {
     --arg wjuno_address "$(production_json_optional "$bridge_summary" '.contracts.wjuno')" \
     --arg operator_registry "$(production_json_optional "$bridge_summary" '.contracts.operator_registry')" \
     --arg fee_distributor "$(production_json_optional "$bridge_summary" '.contracts.fee_distributor')" \
-    --arg owallet_ua "$inventory_owallet_ua" \
-    --arg bridge_summary_owallet_ua "$bridge_summary_owallet_ua" \
-    --arg summary_owallet_ua "$summary_owallet_ua" \
-    --arg completion_owallet_ua "$completion_owallet_ua" \
+    --arg effective_owallet_ua "$effective_owallet_ua" \
     --argjson ttl_seconds "$ttl_seconds" \
     --argjson checkpoint_threshold "$threshold" \
     --argjson checkpoint_operators "$operators_json" \
@@ -566,19 +618,7 @@ production_render_shared_manifest() {
         fee_distributor: (if $fee_distributor == "" then null else $fee_distributor end),
         deposit_image_id: (if $deposit_image_id == "" then null else $deposit_image_id end),
         withdraw_image_id: (if $withdraw_image_id == "" then null else $withdraw_image_id end),
-        owallet_ua: (
-          if $owallet_ua != "" then
-            $owallet_ua
-          elif $bridge_summary_owallet_ua != "" then
-            $bridge_summary_owallet_ua
-          elif $summary_owallet_ua != "" then
-            $summary_owallet_ua
-          elif $completion_owallet_ua != "" then
-            $completion_owallet_ua
-          else
-            null
-          end
-        )
+        owallet_ua: (if $effective_owallet_ua == "" then null else $effective_owallet_ua end)
       },
       checkpoint: {
         operators: $checkpoint_operators,
@@ -790,7 +830,7 @@ production_render_operator_handoffs() {
   shared_manifest="$(production_abs_path "$(pwd)" "$shared_manifest")"
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 
-  local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir
+  local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -802,6 +842,7 @@ production_render_operator_handoffs() {
     dkg_tls_dir="$(production_abs_path "$inventory_dir" "$dkg_tls_dir")"
     [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
   fi
+  shared_owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   derived_deposit_owallet_ivk=""
   derived_withdraw_owallet_ovk=""
@@ -865,10 +906,11 @@ production_render_operator_handoffs() {
         if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst"; then
           production_secret_contract_upsert_literal "$secrets_dst" DEPOSIT_OWALLET_IVK "$derived_deposit_owallet_ivk"
         fi
-        if ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
+      if ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
           production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_OWALLET_OVK "$derived_withdraw_owallet_ovk"
         fi
       fi
+      production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
     fi
 
     if [[ -n "$backup_zip_src" ]]; then
@@ -940,9 +982,10 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id base_event_scanner_start_block
-  local checkpoint_signer_private_key
+  local checkpoint_signer_private_key owallet_ua withdraw_change_address
   checkpoint_signer_private_key=""
   deposit_scan_wallet_id=""
+  owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
@@ -954,6 +997,10 @@ production_render_operator_stack_env() {
   aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
   if [[ -z "$operator_address" ]]; then
     operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+  fi
+  withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
+  if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
+    die "resolved secret env WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS ($withdraw_change_address) does not match shared manifest owallet_ua ($owallet_ua)"
   fi
 
   case "$signer_driver" in
@@ -995,6 +1042,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/b
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
@@ -1053,6 +1101,7 @@ EOF
     $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
     $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
     $1 == "OPERATOR_ADDRESS" { next }
+    $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
     { print }
   ' "$resolved_secret_env" >>"$output_file"
 

@@ -187,6 +187,8 @@ EOF
   manifest="$output_dir/alpha/shared-manifest.json"
   assert_eq "$(jq -r '.checkpoint.signer_ufvk' "$manifest")" "uview1coordinatorfallback" "coordinator signer ufvk fallback"
   assert_eq "$(jq -r '.contracts.owallet_ua' "$manifest")" "u1coordinatorfallback" "coordinator juno shielded address fallback"
+  assert_eq "$(jq -r '.owallet_ua' "$output_dir/alpha/bridge-summary.json")" "u1coordinatorfallback" "coordinator bridge summary owallet ua refreshed"
+  assert_eq "$(jq -r '.juno_shielded_address' "$output_dir/alpha/bridge-summary.json")" "u1coordinatorfallback" "coordinator bridge summary juno shielded address refreshed"
   rm -rf "$workdir"
 }
 
