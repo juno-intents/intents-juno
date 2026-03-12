@@ -127,6 +127,7 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "junocashd.conf" "junocashd config copied"
   assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/known_hosts" "ssh uses known_hosts file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "remote deploy updates checkpoint signer wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"' "remote deploy checks checkpoint signer flag support before writing wrapper args"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"' "remote deploy restores per-operator checkpoint signer lease names"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--lease-name "${checkpoint_signer_lease_name}"' "remote deploy wires the per-operator checkpoint signer lease into the wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "remote deploy updates checkpoint aggregator wrapper"

@@ -423,6 +423,15 @@ EOF
 
   cat >"$fake_bin/checkpoint-signer" <<EOF
 #!/usr/bin/env bash
+if [[ "\${1:-}" == "--help" ]]; then
+  cat <<'EOF_HELP'
+Usage of /usr/local/bin/checkpoint-signer:
+  -lease-name string
+  -signer-driver string
+  -kms-key-id string
+EOF_HELP
+  exit 0
+fi
 printf '%s\n' "\$*" >"$signer_output_file"
 exit 0
 EOF
@@ -470,6 +479,24 @@ EOF
   assert_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper preserves local-env compatibility"
   assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x3333333333333333333333333333333333333333' "checkpoint signer wrapper uses a unique lease name per operator"
   assert_not_contains "$(cat "$signer_output_file")" '--kms-key-id' "checkpoint signer wrapper omits kms key id outside aws-kms mode"
+
+  cat >"$fake_bin/checkpoint-signer" <<EOF
+#!/usr/bin/env bash
+if [[ "\${1:-}" == "--help" ]]; then
+  cat <<'EOF_HELP'
+Usage of /usr/local/bin/checkpoint-signer:
+  -lease-name string
+EOF_HELP
+  exit 0
+fi
+printf '%s\n' "\$*" >"$signer_output_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/checkpoint-signer"
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
+  assert_not_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper omits signer-driver when the host binary lacks that flag"
+  assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x3333333333333333333333333333333333333333' "checkpoint signer wrapper still isolates leases on legacy binaries"
 
   cat >"$env_file" <<EOF
 JUNO_DEV_MODE=false
