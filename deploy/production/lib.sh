@@ -449,12 +449,13 @@ production_render_operator_stack_env() {
   local resolved_secret_env="$3"
   local output_file="$4"
 
-  local checkpoint_operators signer_driver signer_kms_key_id operator_address
+  local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
   operator_address="$(production_json_optional "$operator_deploy" '.operator_address')"
+  aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
   if [[ -z "$operator_address" ]]; then
     operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
   fi
@@ -463,6 +464,7 @@ production_render_operator_stack_env() {
     local-env) ;;
     aws-kms)
       [[ -n "$signer_kms_key_id" ]] || die "operator deploy manifest is missing checkpoint_signer_kms_key_id for aws-kms signer"
+      [[ -n "$aws_region" ]] || die "operator deploy manifest is missing aws_region for aws-kms signer"
       if grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$resolved_secret_env"; then
         die "resolved secret env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=aws-kms"
       fi
@@ -491,6 +493,10 @@ EOF
 
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
+  fi
+  if [[ -n "$aws_region" ]]; then
+    printf 'AWS_REGION=%s\n' "$aws_region" >>"$output_file"
+    printf 'AWS_DEFAULT_REGION=%s\n' "$aws_region" >>"$output_file"
   fi
 
   local checkpoint_blob_bucket checkpoint_blob_prefix deposit_image_id withdraw_image_id
