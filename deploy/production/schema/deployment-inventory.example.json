@@ -9,6 +9,7 @@
     "public_subdomain": "alpha.intents-testing.thejunowallet.com"
   },
   "contracts": {
+    "juno_network": "testnet",
     "base_rpc_url": "https://base-sepolia.example.invalid",
     "base_chain_id": 84532,
     "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",

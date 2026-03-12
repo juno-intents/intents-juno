@@ -106,6 +106,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
+  assert_eq "$(jq -r '.contracts.juno_network' "$shared_manifest")" "testnet" "juno network"
   assert_eq "$(jq -r '.contracts.bridge' "$shared_manifest")" "0x2222222222222222222222222222222222222222" "bridge address"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
@@ -154,6 +155,44 @@ EOF
     "$workdir"
 
   assert_eq "$(jq -r '.contracts.owallet_ua' "$shared_manifest")" "u1alphaexample" "inventory owallet ua fallback"
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_rejects_mismatched_juno_network() {
+  local workdir shared_manifest mainnet_dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mainnet_dkg_summary="$workdir/dkg-summary-mainnet.json"
+  jq '.network = "mainnet"' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$mainnet_dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  if (
+    production_render_shared_manifest \
+      "$workdir/inventory.json" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      "$mainnet_dkg_summary" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      "$shared_manifest" \
+      "$workdir" >/dev/null 2>&1
+  ); then
+    printf 'expected production_render_shared_manifest to reject mismatched juno network\n' >&2
+    exit 1
+  fi
   rm -rf "$workdir"
 }
 
@@ -416,6 +455,7 @@ main() {
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
   test_render_shared_manifest_prefers_inventory_owallet_ua
+  test_render_shared_manifest_rejects_mismatched_juno_network
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract

@@ -57,6 +57,7 @@ EOF
   assert_file_exists "$operator_dir/operator-deploy.json" "operator manifest"
   assert_file_exists "$output_dir/alpha/app/app-deploy.json" "app manifest"
   assert_eq "$(jq -r '.environment' "$manifest")" "alpha" "manifest environment"
+  assert_eq "$(jq -r '.contracts.juno_network' "$manifest")" "testnet" "manifest juno network"
   assert_eq "$(jq -r '.governance.timelock.address' "$manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
   assert_eq "$(jq -r '.dns.record_name' "$operator_dir/operator-deploy.json")" "op1.alpha.intents-testing.thejunowallet.com" "operator dns record"
   assert_eq "$(jq -r '.operator_address' "$operator_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "operator signer address"

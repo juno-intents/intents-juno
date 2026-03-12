@@ -242,12 +242,15 @@ production_render_shared_manifest() {
   local output_file="$5"
   local inventory_dir="$6"
 
-  local env_slug base_rpc_url base_chain_id deposit_image_id withdraw_image_id
+  local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+  juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
+  dkg_network="$(production_json_required "$dkg_summary" '.network | select(type == "string" and length > 0)')"
+  [[ "$juno_network" == "$dkg_network" ]] || die "inventory contracts.juno_network ($juno_network) does not match dkg summary network ($dkg_network)"
   base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
   deposit_image_id="$(production_json_optional "$inventory" '.contracts.deposit_image_id')"
@@ -280,6 +283,7 @@ production_render_shared_manifest() {
     --arg version "1" \
     --arg environment "$env_slug" \
     --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+    --arg juno_network "$juno_network" \
     --arg aws_profile "$aws_profile" \
     --arg aws_region "$aws_region" \
     --arg terraform_dir "$terraform_dir" \
@@ -335,6 +339,7 @@ production_render_shared_manifest() {
         }
       },
       contracts: {
+        juno_network: $juno_network,
         base_rpc_url: $base_rpc_url,
         base_chain_id: $base_chain_id,
         bridge: $bridge_address,

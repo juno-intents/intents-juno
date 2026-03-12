@@ -24,6 +24,7 @@
     }
   },
   "contracts": {
+    "juno_network": "testnet",
     "base_rpc_url": "https://base-sepolia.example.invalid",
     "base_chain_id": 84532,
     "bridge": "0x2222222222222222222222222222222222222222",

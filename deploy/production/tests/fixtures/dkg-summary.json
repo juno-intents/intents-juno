@@ -1,4 +1,5 @@
 {
+  "network": "testnet",
   "threshold": 3,
   "ufvk": "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
   "operators": [
