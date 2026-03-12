@@ -16,6 +16,134 @@ assert_contains_line() {
   fi
 }
 
+ensure_openssl_available() {
+  if ! command -v openssl >/dev/null 2>&1; then
+    printf 'openssl is required for backup_package_test.sh\n' >&2
+    exit 1
+  fi
+}
+
+write_test_signed_cert() {
+  local cert_path="$1"
+  local key_path="$2"
+  local ca_cert_path="$3"
+  local ca_key_path="$4"
+  local common_name="$5"
+  local ext_contents="$6"
+  local tmp_dir
+  tmp_dir="$(mktemp -d)"
+
+  cat >"$tmp_dir/cert.ext" <<EOF
+$ext_contents
+EOF
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$key_path" \
+    -out "$tmp_dir/cert.csr" \
+    -subj "/CN=$common_name" >/dev/null 2>&1
+
+  openssl x509 -req \
+    -in "$tmp_dir/cert.csr" \
+    -CA "$ca_cert_path" \
+    -CAkey "$ca_key_path" \
+    -CAcreateserial \
+    -out "$cert_path" \
+    -days 3650 \
+    -sha256 \
+    -extfile "$tmp_dir/cert.ext" >/dev/null 2>&1
+
+  chmod 0600 "$key_path"
+  rm -rf "$tmp_dir"
+}
+
+write_test_tls_bundle() {
+  local tls_dir="$1"
+  local coordinator_mode="${2:-client}"
+  local tmp_dir coordinator_ext
+  tmp_dir="$(mktemp -d)"
+  mkdir -p "$tls_dir"
+
+  cat >"$tmp_dir/server.ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:localhost,IP:127.0.0.1
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+
+  case "$coordinator_mode" in
+    client)
+      coordinator_ext='basicConstraints=CA:FALSE
+subjectAltName=DNS:coordinator-client
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth'
+      ;;
+    server)
+      coordinator_ext='basicConstraints=CA:FALSE
+subjectAltName=DNS:coordinator-client
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth'
+      ;;
+    *)
+      printf 'unsupported coordinator cert mode: %s\n' "$coordinator_mode" >&2
+      exit 1
+      ;;
+  esac
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$tmp_dir/ca.key" \
+    -out "$tls_dir/ca.pem" \
+    -days 3650 \
+    -subj "/CN=Backup Package Test CA" >/dev/null 2>&1
+
+  write_test_signed_cert \
+    "$tls_dir/server.pem" \
+    "$tls_dir/server.key" \
+    "$tls_dir/ca.pem" \
+    "$tmp_dir/ca.key" \
+    "localhost" \
+    "$(cat "$tmp_dir/server.ext")"
+
+  write_test_signed_cert \
+    "$tls_dir/coordinator-client.pem" \
+    "$tls_dir/coordinator-client.key" \
+    "$tls_dir/ca.pem" \
+    "$tmp_dir/ca.key" \
+    "coordinator-client" \
+    "$coordinator_ext"
+
+  rm -rf "$tmp_dir"
+}
+
+cert_sha256_hex() {
+  local cert_path="$1"
+  openssl x509 -in "$cert_path" -noout -fingerprint -sha256 \
+    | cut -d= -f2 \
+    | tr -d ':' \
+    | tr 'A-F' 'a-f'
+}
+
+assert_cert_purpose_yes() {
+  local cert_path="$1"
+  local purpose_label="$2"
+  local msg="$3"
+  if ! openssl x509 -in "$cert_path" -noout -purpose 2>/dev/null | grep -Fq "$purpose_label : Yes"; then
+    printf 'assert_cert_purpose_yes failed: %s\n' "$msg" >&2
+    openssl x509 -in "$cert_path" -noout -purpose >&2 || true
+    exit 1
+  fi
+}
+
+assert_cert_text_contains() {
+  local cert_path="$1"
+  local needle="$2"
+  local msg="$3"
+  if ! openssl x509 -in "$cert_path" -noout -text 2>/dev/null | grep -Fq "$needle"; then
+    printf 'assert_cert_text_contains failed: %s: missing=%q\n' "$msg" "$needle" >&2
+    openssl x509 -in "$cert_path" -noout -text >&2 || true
+    exit 1
+  fi
+}
+
 test_backup_package_contains_required_files() {
   local tmp runtime workdir output
   tmp="$(mktemp -d)"
@@ -108,13 +236,13 @@ test_backup_package_restore_reconstructs_runtime() {
 }
 JSON
 
-  printf 'FAKE-CA\n' >"$runtime/bundle/tls/ca.pem"
-  printf 'FAKE-SERVER\n' >"$runtime/bundle/tls/server.pem"
-  printf 'FAKE-KEY\n' >"$runtime/bundle/tls/server.key"
+  ensure_openssl_available
+  write_test_tls_bundle "$tmp/ceremony-tls" "client"
+  cp "$tmp/ceremony-tls/ca.pem" "$runtime/bundle/tls/ca.pem"
+  cp "$tmp/ceremony-tls/server.pem" "$runtime/bundle/tls/server.pem"
+  cp "$tmp/ceremony-tls/server.key" "$runtime/bundle/tls/server.key"
   chmod 0600 "$runtime/bundle/tls/server.key"
   printf 'test-ufvk\n' >"$tmp/ufvk.txt"
-  printf 'coord-cert\n' >"$tmp/ceremony-tls/coordinator-client.pem"
-  printf 'coord-key\n' >"$tmp/ceremony-tls/coordinator-client.key"
   cat >"$runtime/bin/dkg-admin" <<'EOF'
 #!/usr/bin/env bash
 printf 'fake-dkg-admin\n'
@@ -230,12 +358,110 @@ EOF
     printf 'unexpected dkg-admin contents: %q\n' "$(cat "$runtime/bin/dkg-admin")" >&2
     exit 1
   fi
-  if [[ "$(cat "$runtime/bundle/tls/coordinator-client.pem")" != "coord-cert" ]]; then
-    printf 'unexpected coordinator-client.pem contents: %q\n' "$(cat "$runtime/bundle/tls/coordinator-client.pem")" >&2
+  assert_cert_purpose_yes "$runtime/bundle/tls/coordinator-client.pem" "SSL client" "restored coordinator client cert supports tls client auth"
+  assert_cert_text_contains "$runtime/bundle/tls/coordinator-client.pem" "DNS:coordinator-client" "restored coordinator client cert keeps coordinator SAN"
+  if [[ "$(jq -r '.grpc.coordinator_client_cert_sha256' "$runtime/bundle/admin-config.json")" != "$(cert_sha256_hex "$runtime/bundle/tls/coordinator-client.pem")" ]]; then
+    printf 'unexpected coordinator client fingerprint in admin config\n' >&2
     exit 1
   fi
-  if [[ "$(cat "$runtime/bundle/tls/coordinator-client.key")" != "coord-key" ]]; then
-    printf 'unexpected coordinator-client.key contents: %q\n' "$(cat "$runtime/bundle/tls/coordinator-client.key")" >&2
+
+  rm -rf "$tmp"
+}
+
+test_backup_package_restore_repairs_server_auth_only_coordinator_client_cert() {
+  local tmp runtime output fake_bin
+  tmp="$(mktemp -d)"
+  runtime="$tmp/operator-runtime"
+  output="$tmp/operator-backup.zip"
+  fake_bin="$tmp/fake-bin"
+
+  ensure_openssl_available
+  mkdir -p "$runtime/bundle/tls" "$runtime/bin" "$tmp/backup" "$tmp/exports" "$fake_bin" "$tmp/ceremony-tls"
+  cat >"$runtime/bundle/admin-config.json" <<'JSON'
+{
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "identifier": 1,
+  "threshold": 3,
+  "max_signers": 5,
+  "network": "testnet",
+  "ceremony_id": "11111111-1111-1111-1111-111111111111",
+  "roster_hash_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "roster": {"roster_version":1, "operators":[]},
+  "state_dir": "./state",
+  "grpc": {
+    "listen_addr": "0.0.0.0:18443",
+    "tls_ca_cert_pem_path": "./tls/ca.pem",
+    "tls_server_cert_pem_path": "./tls/server.pem",
+    "tls_server_key_pem_path": "./tls/server.key",
+    "coordinator_client_cert_sha256": null
+  }
+}
+JSON
+
+  write_test_tls_bundle "$tmp/ceremony-tls" "server"
+  cp "$tmp/ceremony-tls/ca.pem" "$runtime/bundle/tls/ca.pem"
+  cp "$tmp/ceremony-tls/server.pem" "$runtime/bundle/tls/server.pem"
+  cp "$tmp/ceremony-tls/server.key" "$runtime/bundle/tls/server.key"
+  chmod 0600 "$runtime/bundle/tls/server.key"
+
+  cat >"$runtime/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+printf 'fake-dkg-admin\n'
+EOF
+  chmod 0755 "$runtime/bin/dkg-admin"
+  printf 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n' >"$tmp/backup/age-identity.txt"
+  printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$tmp/exports/keypackage-backup.json"
+  printf '{"receipt_version":"key_import_receipt_v1"}\n' >"$tmp/exports/keypackage-backup.json.KeyImportReceipt.json"
+
+  cat >"$fake_bin/age" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" != "--decrypt" ]]; then
+  echo "unexpected age args: $*" >&2
+  exit 1
+fi
+cat <<'JSON'
+{
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "identifier": 1,
+  "threshold": 3,
+  "max_signers": 5,
+  "network": "testnet",
+  "roster_hash_hex": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "key_package_bytes_b64": "a3BieXRlcw==",
+  "public_key_package_bytes_b64": "cGtwYnl0ZXM="
+}
+JSON
+EOF
+  chmod 0755 "$fake_bin/age"
+
+  (
+    cd "$REPO_ROOT"
+    deploy/operators/dkg/backup-package.sh create \
+      --workdir "$runtime" \
+      --age-identity-file "$tmp/backup/age-identity.txt" \
+      --age-backup-file "$tmp/exports/keypackage-backup.json" \
+      --admin-config "$runtime/bundle/admin-config.json" \
+      --coordinator-client-cert "$tmp/ceremony-tls/coordinator-client.pem" \
+      --coordinator-client-key "$tmp/ceremony-tls/coordinator-client.key" \
+      --output "$output"
+  )
+
+  rm -rf "$runtime"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    deploy/operators/dkg/backup-package.sh restore \
+      --package "$output" \
+      --workdir "$runtime"
+  )
+
+  assert_cert_purpose_yes "$runtime/bundle/tls/coordinator-client.pem" "SSL client" "restored coordinator client cert repairs mTLS client auth purpose"
+  assert_cert_text_contains "$runtime/bundle/tls/coordinator-client.pem" "TLS Web Client Authentication" "restored coordinator client cert has clientAuth eku"
+  assert_cert_text_contains "$runtime/bundle/tls/coordinator-client.pem" "DNS:coordinator-client" "restored coordinator client cert includes coordinator SAN"
+  if [[ "$(jq -r '.grpc.coordinator_client_cert_sha256' "$runtime/bundle/admin-config.json")" != "$(cert_sha256_hex "$runtime/bundle/tls/coordinator-client.pem")" ]]; then
+    printf 'unexpected repaired coordinator client fingerprint in admin config\n' >&2
     exit 1
   fi
 
@@ -245,6 +471,7 @@ EOF
 main() {
   test_backup_package_contains_required_files
   test_backup_package_restore_reconstructs_runtime
+  test_backup_package_restore_repairs_server_auth_only_coordinator_client_cert
 }
 
 main "$@"

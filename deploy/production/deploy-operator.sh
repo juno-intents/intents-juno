@@ -471,13 +471,32 @@ case "$(env_get_value_remote "JUNO_DEV_MODE")" in
   1|true|TRUE|yes|YES|on|ON)
     coord_client_cert="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE")"
     coord_client_key="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE")"
-    server_cert="$(env_get_value_remote "TSS_TLS_CERT_FILE")"
-    server_key="$(env_get_value_remote "TSS_TLS_KEY_FILE")"
-    if [[ -n "$coord_client_cert" && -n "$server_cert" ]] && ! sudo test -s "$coord_client_cert" && sudo test -s "$server_cert"; then
-      sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"
-    fi
-    if [[ -n "$coord_client_key" && -n "$server_key" ]] && ! sudo test -s "$coord_client_key" && sudo test -s "$server_key"; then
-      sudo install -D -m 0640 -o root -g intents-juno "$server_key" "$coord_client_key"
+    coord_client_ca="$(env_get_value_remote "TSS_CLIENT_CA_FILE")"
+    [[ -n "$coord_client_cert" ]] || {
+      echo "operator runtime is missing WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
+    [[ -n "$coord_client_key" ]] || {
+      echo "operator runtime is missing WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
+    sudo test -s "$coord_client_cert" || {
+      echo "operator runtime is missing coordinator client cert: $coord_client_cert" >&2
+      exit 1
+    }
+    sudo test -s "$coord_client_key" || {
+      echo "operator runtime is missing coordinator client key: $coord_client_key" >&2
+      exit 1
+    }
+    sudo openssl x509 -in "$coord_client_cert" -noout -purpose 2>/dev/null | grep -Fq 'SSL client : Yes' || {
+      echo "operator runtime coordinator client cert is not valid for TLS client auth: $coord_client_cert" >&2
+      exit 1
+    }
+    if [[ -n "$coord_client_ca" ]] && sudo test -s "$coord_client_ca"; then
+      sudo openssl verify -CAfile "$coord_client_ca" "$coord_client_cert" >/dev/null 2>&1 || {
+        echo "operator runtime coordinator client cert does not verify against CA: $coord_client_cert" >&2
+        exit 1
+      }
     fi
     ;;
 esac
@@ -504,6 +523,7 @@ sudo test -x "$dkg_admin_runtime_bin" || {
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
 dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
+spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"
 withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
 base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
 [[ -f "$checkpoint_signer_script" ]] || {
@@ -516,6 +536,10 @@ base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
 }
 [[ -f "$dkg_admin_serve_script" ]] || {
   echo "dkg-admin wrapper is missing: $dkg_admin_serve_script" >&2
+  exit 1
+}
+[[ -f "$spendauth_signer_script" ]] || {
+  echo "spendauth signer wrapper is missing: $spendauth_signer_script" >&2
   exit 1
 }
 [[ -f "$withdraw_coordinator_script" ]] || {
@@ -653,6 +677,51 @@ exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_confi
 EOF_DKG_WRAPPER
 sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"
 rm -f "$dkg_admin_tmp"
+
+if [[ "$(printf '%s' "$(env_get_value_remote "TSS_SIGNER_RUNTIME_MODE")" | tr '[:upper:]' '[:lower:]')" == "host-process" ]]; then
+  spendauth_tmp="$(mktemp)"
+  cat >"$spendauth_tmp" <<'EOF_SPENDAUTH_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
+case "$runtime_mode" in
+  host-process)
+    if ! dev_mode_enabled; then
+      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
+      exit 1
+    fi
+    [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    admin_config="${DKG_ADMIN_CONFIG_FILE:-/var/lib/intents-juno/operator-runtime/bundle/admin-config.json}"
+    [[ -s "$admin_config" ]] || {
+      echo "tss-host host-process mode requires DKG_ADMIN_CONFIG_FILE: $admin_config" >&2
+      exit 1
+    }
+    admin_config_dir="$(dirname "$admin_config")"
+    cd "$admin_config_dir"
+    exec "${TSS_SPENDAUTH_SIGNER_BIN}" --config "$admin_config" "$@"
+    ;;
+  *)
+    echo "unsupported TSS_SIGNER_RUNTIME_MODE for host-process spendauth patch: ${TSS_SIGNER_RUNTIME_MODE:-unset}" >&2
+    exit 1
+    ;;
+esac
+EOF_SPENDAUTH_WRAPPER
+  sudo install -m 0755 "$spendauth_tmp" "$spendauth_signer_script"
+  rm -f "$spendauth_tmp"
+fi
 
 if grep -Fq 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script" && \
   ! grep -Fq 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script"; then

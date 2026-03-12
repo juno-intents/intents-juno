@@ -1259,7 +1259,14 @@ case "$runtime_mode" in
       echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
       exit 1
     }
-    exec "${TSS_SPENDAUTH_SIGNER_BIN}" "$@"
+    admin_config="${DKG_ADMIN_CONFIG_FILE:-/var/lib/intents-juno/operator-runtime/bundle/admin-config.json}"
+    [[ -s "$admin_config" ]] || {
+      echo "tss-host host-process mode requires DKG_ADMIN_CONFIG_FILE: $admin_config" >&2
+      exit 1
+    }
+    admin_config_dir="$(dirname "$admin_config")"
+    cd "$admin_config_dir"
+    exec "${TSS_SPENDAUTH_SIGNER_BIN}" --config "$admin_config" "$@"
     ;;
   *)
     echo "unsupported TSS_SIGNER_RUNTIME_MODE: ${TSS_SIGNER_RUNTIME_MODE:-unset} (expected nitro-enclave or host-process)" >&2

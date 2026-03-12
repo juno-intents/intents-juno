@@ -335,6 +335,7 @@ EOF
 
 test_build_operator_stack_ami_wrapper_smoke() {
   local tmp env_file fake_bin output_file stderr_file signer_output_file signer_stderr_file
+  local spendauth_output_file spendauth_pwd_file
   tmp="$(mktemp -d)"
   env_file="$tmp/operator-stack.env"
   fake_bin="$tmp/bin"
@@ -342,6 +343,8 @@ test_build_operator_stack_ami_wrapper_smoke() {
   stderr_file="$tmp/tss.stderr"
   signer_output_file="$tmp/signer.args"
   signer_stderr_file="$tmp/signer.stderr"
+  spendauth_output_file="$tmp/spendauth.args"
+  spendauth_pwd_file="$tmp/spendauth.pwd"
   mkdir -p "$fake_bin"
 
   render_wrapper \
@@ -524,6 +527,36 @@ EOF
     exit 1
   fi
   assert_contains "$(cat "$signer_stderr_file")" "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID" "checkpoint signer wrapper rejects missing kms key id in aws-kms mode"
+
+  cat >"$fake_bin/dkg-admin" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$spendauth_output_file"
+pwd >"$spendauth_pwd_file"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/dkg-admin"
+
+  mkdir -p "$tmp/operator-runtime/bundle"
+  printf '{"network":"testnet"}\n' >"$tmp/operator-runtime/bundle/admin-config.json"
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=true
+TSS_SIGNER_RUNTIME_MODE=host-process
+TSS_SPENDAUTH_SIGNER_BIN=$fake_bin/dkg-admin
+DKG_ADMIN_CONFIG_FILE=$tmp/operator-runtime/bundle/admin-config.json
+EOF
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-spendauth-signer.sh <<'EOF_TSS_SPENDAUTH'" \
+    "EOF_TSS_SPENDAUTH" \
+    "$tmp/intents-juno-spendauth-signer.sh" \
+    "$env_file"
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-spendauth-signer.sh" \
+    sign-spendauth --session-id test-session --requests /tmp/requests.json --out /tmp/out.json
+
+  assert_contains "$(cat "$spendauth_output_file")" "--config $tmp/operator-runtime/bundle/admin-config.json" "spendauth wrapper passes admin config explicitly in host-process mode"
+  assert_contains "$(cat "$spendauth_output_file")" "sign-spendauth --session-id test-session --requests /tmp/requests.json --out /tmp/out.json" "spendauth wrapper forwards the sign-spendauth request args"
+  assert_eq "$(cat "$spendauth_pwd_file")" "$tmp/operator-runtime/bundle" "spendauth wrapper runs from the admin config directory in host-process mode"
 
   rm -rf "$tmp"
 }
