@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -211,6 +212,21 @@ func TestKafkaTLSEnabledFromEnv(t *testing.T) {
 				t.Fatalf("kafkaTLSEnabledFromEnv(%q) = %t, want %t", tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestKafkaTLSConfigPinsTLS12(t *testing.T) {
+	t.Parallel()
+
+	cfg := kafkaTLSConfig()
+	if cfg == nil {
+		t.Fatalf("kafkaTLSConfig() = nil")
+	}
+	if cfg.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
+	}
+	if cfg.MaxVersion != tls.VersionTLS12 {
+		t.Fatalf("MaxVersion = %d, want %d", cfg.MaxVersion, tls.VersionTLS12)
 	}
 }
 

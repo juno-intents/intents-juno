@@ -308,6 +308,13 @@ func kafkaTLSEnabledFromEnv() bool {
 	}
 }
 
+func kafkaTLSConfig() *tls.Config {
+	return &tls.Config{
+		MinVersion: tls.VersionTLS12,
+		MaxVersion: tls.VersionTLS12,
+	}
+}
+
 func runWithRetry(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -478,9 +485,7 @@ func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error
 
 	dialer := &kafka.Dialer{Timeout: 10 * time.Second}
 	if kafkaTLSEnabledFromEnv() {
-		dialer.TLS = &tls.Config{
-			MinVersion: tls.VersionTLS13,
-		}
+		dialer.TLS = kafkaTLSConfig()
 	}
 	var lastErr error
 
