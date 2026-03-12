@@ -1045,10 +1045,160 @@ EOF_SPENDAUTH_WRAPPER
   rm -f "$spendauth_tmp"
 fi
 
-if grep -Fq 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script" && \
-  ! grep -Fq 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script"; then
-  sudo sed -i 's|^export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS$|export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS|' "$withdraw_coordinator_script"
+withdraw_tmp="$(mktemp)"
+cat >"$withdraw_tmp" <<'EOF_WITHDRAW_COORDINATOR_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "withdraw-coordinator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "withdraw-coordinator requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "withdraw-coordinator requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_URL:-}" ]] || {
+  echo "withdraw-coordinator requires BASE_RELAYER_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_AUTH_TOKEN:-}" ]] || {
+  echo "withdraw-coordinator requires BASE_RELAYER_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_JUNO_WALLET_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${JUNO_RPC_USER:-}" ]] || {
+  echo "withdraw-coordinator requires JUNO_RPC_USER in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${JUNO_RPC_PASS:-}" ]] || {
+  echo "withdraw-coordinator requires JUNO_RPC_PASS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_COORDINATOR_TSS_URL:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ "${WITHDRAW_COORDINATOR_TSS_URL}" == https://* ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_URL to use https://" >&2
+  exit 1
+}
+[[ -s "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE to reference a readable PEM file" >&2
+  exit 1
+}
+if ! dev_mode_enabled; then
+  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE:-}" ]] || {
+    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
+  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE:-}" ]] || {
+    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
 fi
+[[ -n "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -x "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN}" ]] || {
+  echo "withdraw-coordinator requires executable WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN: ${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN}" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_BLOB_BUCKET:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+  echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
+  exit 1
+fi
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
+  1|true|yes|on)
+    export JUNO_QUEUE_KAFKA_TLS=true
+    ;;
+  *)
+    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    exit 1
+    ;;
+esac
+txbuild_bin="${WITHDRAW_COORDINATOR_TXBUILD_BIN:-juno-txbuild}"
+command -v "${txbuild_bin}" >/dev/null 2>&1 || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
+  exit 1
+}
+tss_server_name_args=()
+if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
+  tss_server_name_args=(--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}")
+fi
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
+
+withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
+withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
+withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v1}"
+
+exec /usr/local/bin/withdraw-coordinator \
+  --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
+  --owner "${withdraw_coord_owner}" \
+  --queue-driver kafka \
+  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}" \
+  --queue-group "${withdraw_coord_queue_group}" \
+  --queue-topics "${withdraw_coord_queue_topics}" \
+  --juno-txbuild-bin "${txbuild_bin}" \
+  --juno-rpc-url "${WITHDRAW_COORDINATOR_JUNO_RPC_URL}" \
+  --juno-rpc-user-env JUNO_RPC_USER \
+  --juno-rpc-pass-env JUNO_RPC_PASS \
+  --juno-wallet-id "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID}" \
+  --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
+  --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
+  --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
+  "${tss_server_name_args[@]}" \
+  --tss-client-cert-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE}" \
+  --tss-client-key-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE}" \
+  --tss-timeout 120s \
+  --base-chain-id "${BASE_CHAIN_ID}" \
+  --bridge-address "${BRIDGE_ADDRESS}" \
+  --base-relayer-url "${BASE_RELAYER_URL}" \
+  --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN \
+  --extend-signer-bin "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN}" \
+  --expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-30h}" \
+  --max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}" \
+  --blob-driver s3 \
+  --blob-bucket "${WITHDRAW_BLOB_BUCKET}" \
+  --blob-prefix "${WITHDRAW_BLOB_PREFIX:-withdraw-live}" \
+  --health-port "${WITHDRAW_COORDINATOR_HEALTH_PORT:-18304}"
+EOF_WITHDRAW_COORDINATOR_WRAPPER
+sudo install -m 0755 "$withdraw_tmp" "$withdraw_coordinator_script"
+rm -f "$withdraw_tmp"
 
 base_event_scanner_tmp="$(mktemp)"
 cat >"$base_event_scanner_tmp" <<'EOF_BASE_EVENT_SCANNER_WRAPPER'
