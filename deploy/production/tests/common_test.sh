@@ -31,3 +31,29 @@ assert_file_exists() {
     exit 1
   fi
 }
+
+test_default_deposit_owallet_ivk() {
+  printf '0x'
+  printf '1%.0s' $(seq 1 128)
+  printf '\n'
+}
+
+test_default_withdraw_owallet_ovk() {
+  printf '0x'
+  printf '2%.0s' $(seq 1 64)
+  printf '\n'
+}
+
+append_default_owallet_proof_keys() {
+  local file="$1"
+  local deposit_ivk withdraw_ovk
+  deposit_ivk="$(test_default_deposit_owallet_ivk)"
+  withdraw_ovk="$(test_default_withdraw_owallet_ovk)"
+
+  if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$file"; then
+    printf 'DEPOSIT_OWALLET_IVK=literal:%s\n' "$deposit_ivk" >>"$file"
+  fi
+  if ! grep -q '^WITHDRAW_OWALLET_OVK=' "$file"; then
+    printf 'WITHDRAW_OWALLET_OVK=literal:%s\n' "$withdraw_ovk" >>"$file"
+  fi
+}

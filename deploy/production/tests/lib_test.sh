@@ -98,6 +98,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -145,6 +146,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -178,6 +180,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -216,6 +219,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -256,6 +260,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -305,6 +310,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -373,6 +379,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -406,6 +413,111 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk() {
+  local workdir shared_manifest handoff_dir fake_bin derived_ivk derived_ovk old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  derived_ivk="0x$(printf 'a%.0s' $(seq 1 128))"
+  derived_ovk="0x$(printf 'b%.0s' $(seq 1 64))"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/cargo" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'SP1_DEPOSIT_OWALLET_IVK_HEX=%s\n' '$derived_ivk'
+printf 'SP1_WITHDRAW_OWALLET_OVK_HEX=%s\n' '$derived_ovk'
+EOF
+  chmod +x "$fake_bin/cargo"
+
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  PATH="$old_path"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "DEPOSIT_OWALLET_IVK=literal:$derived_ivk" "handoff injects derived deposit owallet ivk"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "WITHDRAW_OWALLET_OVK=literal:$derived_ovk" "handoff injects derived withdraw owallet ovk"
+  rm -rf "$workdir"
+}
+
+test_render_operator_handoffs_preserves_explicit_owallet_keys() {
+  local workdir shared_manifest handoff_dir fake_bin explicit_ivk explicit_ovk old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  explicit_ivk="0x$(printf '1%.0s' $(seq 1 128))"
+  explicit_ovk="0x$(printf '2%.0s' $(seq 1 64))"
+  cat >"$workdir/operator-secrets.env" <<EOF
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+DEPOSIT_OWALLET_IVK=literal:$explicit_ivk
+WITHDRAW_OWALLET_OVK=literal:$explicit_ovk
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  cat >"$fake_bin/cargo" <<'EOF'
+#!/usr/bin/env bash
+exit 99
+EOF
+  chmod +x "$fake_bin/cargo"
+
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  PATH="$old_path"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "DEPOSIT_OWALLET_IVK=literal:$explicit_ivk" "handoff keeps explicit deposit owallet ivk"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "WITHDRAW_OWALLET_OVK=literal:$explicit_ovk" "handoff keeps explicit withdraw owallet ovk"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_requires_explicit_local_checkpoint_key() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -417,6 +529,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -466,6 +579,7 @@ JUNO_RPC_PASS=literal:rpcpass
 WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
 WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -507,6 +621,7 @@ test_render_operator_stack_env_requires_juno_rpc_credentials() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -547,6 +662,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -607,6 +723,7 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -639,6 +756,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -697,6 +815,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -741,6 +860,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -819,6 +939,8 @@ main() {
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary
+  test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
+  test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_stack_env_requires_explicit_local_checkpoint_key
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials

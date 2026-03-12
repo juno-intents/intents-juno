@@ -34,6 +34,7 @@ test_deploy_coordinator_generates_handoffs() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -76,6 +77,7 @@ test_deploy_coordinator_supports_run_label() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -113,6 +115,7 @@ test_deploy_coordinator_normalizes_relative_output_paths() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -149,6 +152,7 @@ test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'

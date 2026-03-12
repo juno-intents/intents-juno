@@ -50,6 +50,7 @@ BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
   export TEST_BASE_RELAYER_AUTH_TOKEN="token"

@@ -260,6 +260,45 @@ production_seed_local_checkpoint_signer_secret() {
   production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_SIGNER_PRIVATE_KEY "$checkpoint_signer_private_key"
 }
 
+production_normalize_prefixed_hex() {
+  local raw_value="$1"
+  local expected_nibbles="$2"
+  local field_name="$3"
+  local normalized
+  normalized="$(tr '[:upper:]' '[:lower:]' <<<"${raw_value#0x}")"
+  [[ "$normalized" =~ ^[0-9a-f]+$ ]] || die "$field_name must be hex"
+  [[ "${#normalized}" -eq "$expected_nibbles" ]] || die "$field_name must be ${expected_nibbles} hex chars"
+  printf '0x%s\n' "$normalized"
+}
+
+production_derive_owallet_keys_from_ufvk() {
+  local signer_ufvk="$1"
+  local repo_root derive_manifest output status deposit_ivk withdraw_ovk
+
+  repo_root="${REPO_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
+  derive_manifest="${repo_root}/deploy/operators/dkg/e2e/ufvk-derive-keys/Cargo.toml"
+  [[ -f "$derive_manifest" ]] || die "ufvk derive manifest not found: $derive_manifest"
+  have_cmd cargo || die "cargo is required to derive oWallet keys from signer_ufvk"
+
+  set +e
+  output="$(cargo run --quiet --manifest-path "$derive_manifest" -- "$signer_ufvk" 2>&1)"
+  status=$?
+  set -e
+  if [[ $status -ne 0 ]]; then
+    printf '%s\n' "$output" >&2
+    die "failed to derive oWallet keys from signer_ufvk"
+  fi
+
+  deposit_ivk="$(awk -F= '/^SP1_DEPOSIT_OWALLET_IVK_HEX=/{print $2; exit}' <<<"$output")"
+  withdraw_ovk="$(awk -F= '/^SP1_WITHDRAW_OWALLET_OVK_HEX=/{print $2; exit}' <<<"$output")"
+  [[ -n "$deposit_ivk" ]] || die "ufvk derive output is missing SP1_DEPOSIT_OWALLET_IVK_HEX"
+  [[ -n "$withdraw_ovk" ]] || die "ufvk derive output is missing SP1_WITHDRAW_OWALLET_OVK_HEX"
+
+  deposit_ivk="$(production_normalize_prefixed_hex "$deposit_ivk" 128 "SP1_DEPOSIT_OWALLET_IVK_HEX")"
+  withdraw_ovk="$(production_normalize_prefixed_hex "$withdraw_ovk" 64 "SP1_WITHDRAW_OWALLET_OVK_HEX")"
+  printf '%s\n%s\n' "$deposit_ivk" "$withdraw_ovk"
+}
+
 production_port_from_listen_addr() {
   local listen_addr="$1"
   local port="${listen_addr##*:}"
@@ -674,11 +713,15 @@ production_render_operator_handoffs() {
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds
+  local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
+  signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
+  derived_deposit_owallet_ivk=""
+  derived_withdraw_owallet_ovk=""
 
   local rollout_state="$output_dir/rollout-state.json"
   production_write_rollout_state "$inventory" "$rollout_state"
@@ -728,6 +771,21 @@ production_render_operator_handoffs() {
       [[ -f "$secrets_src" ]] || die "secret contract file not found: $secrets_src"
       secrets_dst="$handoff_dir/operator-secrets.env"
       cp "$secrets_src" "$secrets_dst"
+      if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst" || ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
+        local -a derived_owallet_keys
+        if [[ -z "$derived_deposit_owallet_ivk" || -z "$derived_withdraw_owallet_ovk" ]]; then
+          mapfile -t derived_owallet_keys < <(production_derive_owallet_keys_from_ufvk "$signer_ufvk")
+          [[ "${#derived_owallet_keys[@]}" -eq 2 ]] || die "ufvk derive output must contain deposit ivk and withdraw ovk"
+          derived_deposit_owallet_ivk="${derived_owallet_keys[0]}"
+          derived_withdraw_owallet_ovk="${derived_owallet_keys[1]}"
+        fi
+        if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst"; then
+          production_secret_contract_upsert_literal "$secrets_dst" DEPOSIT_OWALLET_IVK "$derived_deposit_owallet_ivk"
+        fi
+        if ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
+          production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_OWALLET_OVK "$derived_withdraw_owallet_ovk"
+        fi
+      fi
     fi
 
     if [[ -n "$backup_zip_src" ]]; then

@@ -76,6 +76,7 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
+    append_default_owallet_proof_keys "$workdir/operators/$op/operator-secrets.env"
   done
 }
 
