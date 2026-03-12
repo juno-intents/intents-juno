@@ -327,6 +327,40 @@ production_require_loopback_listen_addr() {
   esac
 }
 
+production_endpoint_host() {
+  local endpoint="$1"
+  local host
+
+  host="$(printf '%s\n' "$endpoint" | sed -E 's|^https?://\[?([^]/]+)\]?(:[0-9]+)?$|\1|')"
+  [[ -n "$host" && "$host" != "$endpoint" ]] || die "invalid endpoint, expected https://host:port: $endpoint"
+  printf '%s\n' "$host"
+}
+
+production_is_nonroutable_host() {
+  local host="$1"
+  case "$host" in
+    localhost|127.*|0.0.0.0|::1|'[::1]'|::)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+production_require_routable_dkg_endpoints() {
+  local dkg_summary="$1"
+  local endpoint host
+
+  while IFS= read -r endpoint; do
+    [[ -n "$endpoint" ]] || continue
+    host="$(production_endpoint_host "$endpoint")"
+    if production_is_nonroutable_host "$host"; then
+      die "dkg summary contains a non-routable operator endpoint ($endpoint); rerun DKG with operator-reachable endpoints before production-style deployment"
+    fi
+  done < <(jq -r '.operators[] | (.endpoint // .grpc_endpoint // empty)' "$dkg_summary")
+}
+
 production_public_url() {
   local scheme="$1"
   local host="$2"
@@ -409,6 +443,7 @@ production_render_shared_manifest() {
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
   dkg_network="$(production_json_required "$dkg_summary" '.network | select(type == "string" and length > 0)')"
   [[ "$juno_network" == "$dkg_network" ]] || die "inventory contracts.juno_network ($juno_network) does not match dkg summary network ($dkg_network)"
+  production_require_routable_dkg_endpoints "$dkg_summary"
   if [[ -n "$dkg_completion" ]]; then
     [[ -f "$dkg_completion" ]] || die "dkg completion not found: $dkg_completion"
     dkg_completion_network="$(production_json_optional "$dkg_completion" '.network')"

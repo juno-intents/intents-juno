@@ -310,6 +310,49 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_rejects_nonroutable_dkg_endpoints() {
+  local workdir shared_manifest loopback_dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  loopback_dkg_summary="$workdir/dkg-summary.loopback.json"
+  jq '
+    .operators[0].endpoint = "https://127.0.0.1:18443"
+    | .operators[1].endpoint = "https://127.0.0.1:18444"
+    | .operators[2].endpoint = "https://localhost:18445"
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$loopback_dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  if (
+    production_render_shared_manifest \
+      "$workdir/inventory.json" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      "$loopback_dkg_summary" \
+      "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      "$shared_manifest" \
+      "$workdir" >/dev/null 2>&1
+  ); then
+    printf 'expected production_render_shared_manifest to reject non-routable dkg endpoints\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_requires_signer_ufvk() {
   local workdir shared_manifest dkg_summary_no_ufvk
   workdir="$(mktemp -d)"
@@ -1038,6 +1081,7 @@ main() {
   test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network
+  test_render_shared_manifest_rejects_nonroutable_dkg_endpoints
   test_render_shared_manifest_requires_signer_ufvk
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract

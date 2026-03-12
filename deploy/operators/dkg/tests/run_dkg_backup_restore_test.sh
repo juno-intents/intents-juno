@@ -25,6 +25,8 @@ test_run_dkg_backup_restore_can_render_handoffs_after_local_restore() {
   assert_contains "$script_text" "--shared-manifest-path <p>" "usage documents shared-manifest handoff option"
   assert_contains "$script_text" "--rollout-state-file <p>" "usage documents rollout-state handoff option"
   assert_contains "$script_text" "deploy/operators/dkg/render-handoff.sh" "script invokes render-handoff after restore flow"
+  assert_contains "$script_text" '--coordinator-client-cert "$coordinator_workdir/tls/coordinator-client.pem" \' "backup restore flow includes shared coordinator client cert in backup packages"
+  assert_contains "$script_text" '--coordinator-client-key "$coordinator_workdir/tls/coordinator-client.key" \' "backup restore flow includes shared coordinator client key in backup packages"
   assert_contains "$script_text" '--shared-manifest-path "$shared_manifest_path"' "script forwards shared-manifest path into render-handoff"
   assert_contains "$script_text" '--rollout-state-file "$rollout_state_file"' "script forwards rollout-state path into render-handoff"
   assert_contains "$script_text" "--validate" "script validates rendered handoff bundles immediately"

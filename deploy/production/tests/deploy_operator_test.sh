@@ -246,6 +246,17 @@ EOF
     -out "$workdir/dkg-tls/ca.pem" \
     -subj "/CN=Test DKG CA" \
     -days 1 >/dev/null 2>&1
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$workdir/dkg-tls/coordinator-client.key" \
+    -out "$workdir/dkg-tls/coordinator-client.csr" \
+    -subj "/CN=coordinator-client" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$workdir/dkg-tls/coordinator-client.csr" \
+    -CA "$workdir/dkg-tls/ca.pem" \
+    -CAkey "$workdir/dkg-tls/ca.key" \
+    -CAcreateserial \
+    -out "$workdir/dkg-tls/coordinator-client.pem" \
+    -days 1 >/dev/null 2>&1
 
   production_render_shared_manifest \
     "$workdir/inventory.json" \
@@ -298,9 +309,16 @@ EOF
 
   assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.pem" "deploy copies generated dkg server cert"
   assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.key" "deploy copies generated dkg server key"
+  assert_contains "$(cat "$log_dir/scp.log")" "coordinator-client.pem" "deploy copies dkg coordinator client cert"
+  assert_contains "$(cat "$log_dir/scp.log")" "coordinator-client.key" "deploy copies dkg coordinator client key"
+  assert_contains "$(cat "$log_dir/scp.log")" "ca.pem" "deploy copies dkg ca"
   assert_contains "$(cat "$log_dir/aws.log")" "describe-instances" "deploy resolves peer hosts through aws"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "deploy ensures operator grpc mesh ingress"
   assert_contains "$(cat "$log_dir/dkg-peer-hosts.json")" "10.0.0.11" "deploy writes resolved peer hosts"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/ca.pem" "$runtime_dir/bundle/tls/ca.pem"' "remote deploy installs shared dkg ca"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/coordinator-client.pem" "$runtime_dir/bundle/tls/coordinator-client.pem"' "remote deploy installs shared dkg coordinator client cert"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"' "remote deploy installs shared dkg coordinator client key"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" "coordinator_client_cert_sha256" "remote deploy refreshes dkg coordinator client fingerprint"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"
   san_text="$(openssl x509 -in "$log_dir/dkg-server.pem" -noout -ext subjectAltName 2>/dev/null)"

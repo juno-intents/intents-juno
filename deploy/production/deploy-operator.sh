@@ -82,6 +82,8 @@ if [[ -n "$dkg_tls_dir" ]]; then
   [[ -d "$dkg_tls_dir" ]] || die "dkg tls dir not found: $dkg_tls_dir"
   [[ -f "$dkg_tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $dkg_tls_dir"
   [[ -f "$dkg_tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/coordinator-client.pem" ]] || die "dkg tls dir missing coordinator-client.pem: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/coordinator-client.key" ]] || die "dkg tls dir missing coordinator-client.key: $dkg_tls_dir"
 fi
 
 known_hosts_file="$known_hosts_override"
@@ -128,6 +130,7 @@ signer_ufvk_file="$tmp_dir/ufvk.txt"
 dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
 generated_base_relayer_tls_files=()
 generated_dkg_server_tls_files=()
+staged_dkg_tls_files=()
 success="false"
 reserved="false"
 
@@ -617,6 +620,11 @@ if [[ -n "$dkg_tls_dir" ]]; then
   dkg_server_key_file="$tmp_dir/dkg-server.key"
   generate_dkg_server_tls "$dkg_tls_dir" "$resolved_operator_host" "$operator_host" "$public_endpoint" "$dkg_server_cert_file" "$dkg_server_key_file"
   generated_dkg_server_tls_files=("$dkg_server_cert_file" "$dkg_server_key_file")
+  staged_dkg_tls_files=(
+    "$dkg_tls_dir/ca.pem"
+    "$dkg_tls_dir/coordinator-client.pem"
+    "$dkg_tls_dir/coordinator-client.key"
+  )
 fi
 
 production_rollout_reserve "$rollout_state_file" "$operator_id"
@@ -638,6 +646,9 @@ for tls_file in "${generated_base_relayer_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
 for tls_file in "${generated_dkg_server_tls_files[@]}"; do
+  files_to_copy+=("$tls_file")
+done
+for tls_file in "${staged_dkg_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
 
@@ -685,6 +696,15 @@ if [[ -f "$remote_stage_dir/dkg-server.pem" ]]; then
 fi
 if [[ -f "$remote_stage_dir/dkg-server.key" ]]; then
   sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"
+fi
+if [[ -f "$remote_stage_dir/ca.pem" ]]; then
+  sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/ca.pem" "$runtime_dir/bundle/tls/ca.pem"
+fi
+if [[ -f "$remote_stage_dir/coordinator-client.pem" ]]; then
+  sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/coordinator-client.pem" "$runtime_dir/bundle/tls/coordinator-client.pem"
+fi
+if [[ -f "$remote_stage_dir/coordinator-client.key" ]]; then
+  sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"
 fi
 dkg_peer_hosts_file="$remote_stage_dir/dkg-peer-hosts.json"
 if [[ -f "$dkg_peer_hosts_file" ]]; then
@@ -741,6 +761,18 @@ if [[ -f "$dkg_peer_hosts_file" ]]; then
   jq --arg roster_hash "$dkg_roster_hash" '.roster_hash_hex = $roster_hash' "$dkg_roster_tmp" >"${dkg_roster_tmp}.final"
   sudo install -m 0640 -o intents-juno -g intents-juno "${dkg_roster_tmp}.final" "$admin_config_path"
   rm -f "$dkg_roster_tmp" "${dkg_roster_tmp}.final" "$dkg_roster_hash_tmp"
+fi
+if [[ -f "$runtime_dir/bundle/tls/coordinator-client.pem" ]]; then
+  admin_config_path="$runtime_dir/bundle/admin-config.json"
+  coordinator_client_fingerprint_tmp="$(mktemp)"
+  coordinator_client_fingerprint="$(openssl x509 -in "$runtime_dir/bundle/tls/coordinator-client.pem" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+  jq --arg fingerprint "$coordinator_client_fingerprint" '
+    .grpc = ((.grpc // {}) + {
+      coordinator_client_cert_sha256: $fingerprint
+    })
+  ' "$admin_config_path" >"$coordinator_client_fingerprint_tmp"
+  sudo install -m 0640 -o intents-juno -g intents-juno "$coordinator_client_fingerprint_tmp" "$admin_config_path"
+  rm -f "$coordinator_client_fingerprint_tmp"
 fi
 
 env_get_value_remote() {

@@ -2063,6 +2063,8 @@ deploy/operators/dkg/backup-package.sh create \
   --age-identity-file "\$age_identity" \
   --age-backup-file "\$age_backup" \
   --admin-config "\$runtime_dir/bundle/admin-config.json" \
+  --coordinator-client-cert "$coordinator_workdir/tls/coordinator-client.pem" \
+  --coordinator-client-key "$coordinator_workdir/tls/coordinator-client.key" \
   --output "\$backup_zip" \
   --force
 

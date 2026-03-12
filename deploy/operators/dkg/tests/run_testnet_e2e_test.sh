@@ -1049,6 +1049,8 @@ test_aws_wrapper_freezes_direct_runner_flow_and_allows_internal_canary_run() {
   assert_contains "$script_text" "direct 'run' is frozen; use 'preflight' or 'canary'" "aws wrapper directs callers to replacement canaries"
   assert_contains "$script_text" 'if [[ "${JUNO_E2E_INTERNAL_CANARY_RUN:-0}" == "1" ]]; then' "aws wrapper exempts internal canary launch from run freeze"
   assert_contains "$script_text" 'JUNO_E2E_INTERNAL_CANARY_RUN=1 "$SCRIPT_DIR/run-testnet-e2e-aws.sh" run \' "canary subcommand re-enters run with internal override"
+  assert_contains "$script_text" '--coordinator-client-cert "$coordinator_workdir/tls/coordinator-client.pem" \' "aws wrapper backup packages include shared coordinator client cert"
+  assert_contains "$script_text" '--coordinator-client-key "$coordinator_workdir/tls/coordinator-client.key" \' "aws wrapper backup packages include shared coordinator client key"
 }
 
 test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
