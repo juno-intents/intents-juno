@@ -487,7 +487,7 @@ if [[ -f "$dkg_peer_hosts_file" ]]; then
           | "\($endpoint.scheme)://\($peer.host):\($endpoint.port)"
         )
     )
-  ' "$admin_config_path" >"$dkg_roster_tmp"
+  ' >"$dkg_roster_tmp"
   jq -c '
     {
       roster_version: .roster_version,
