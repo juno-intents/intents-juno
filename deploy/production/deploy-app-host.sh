@@ -238,6 +238,7 @@ if ! id -u intents-juno >/dev/null 2>&1; then
   sudo useradd --system --create-home --home-dir /var/lib/intents-juno --shell /usr/sbin/nologin intents-juno
 fi
 
+sudo install -d -m 0755 -o intents-juno -g intents-juno "\$runtime_dir"
 sudo install -d -m 0755 -o intents-juno -g intents-juno "\$runtime_dir/bin"
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno
 sudo install -m 0755 "\$remote_stage_dir/bridge-api_linux_amd64" "\$runtime_dir/bin/bridge-api"

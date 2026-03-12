@@ -154,6 +154,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'backoffice_wrapper="/usr/local/bin/intents-juno-backoffice.sh"' "remote backoffice wrapper path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_infra_e2e_bin="$runtime_dir/bin/shared-infra-e2e"' "remote shared infra binary path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if ! id -u intents-juno >/dev/null 2>&1; then' "remote ensures intents-juno user"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -d -m 0755 -o intents-juno -g intents-juno "$runtime_dir"' "remote ensures runtime root is writable for shared infra report"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$remote_stage_dir/shared-infra-e2e_linux_amd64" "$shared_infra_e2e_bin"' "remote installs shared infra binary"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'JUNO_QUEUE_KAFKA_TLS="$kafka_tls_enabled"' "shared infra validation carries kafka tls setting"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation ensures required kafka topics"
