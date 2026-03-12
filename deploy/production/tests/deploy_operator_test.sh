@@ -182,6 +182,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart intents-juno-config-hydrator.service' "remote deploy restarts config hydrator before dependent services"
   assert_line_order "$(cat "$log_dir/ssh.stdin")" 'restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force' 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk after restoring the runtime"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy restarts junocashd before scanner-dependent services"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl reset-failed "$svc" || true' "remote deploy clears systemd start limits before restarting operator services"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active junocashd" "deploy verifies junocashd after restarting it"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force' "remote deploy forces backup restore for retry-safe rollout"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active juno-scan" "deploy verifies juno-scan after restarting it"
