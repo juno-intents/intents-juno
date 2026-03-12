@@ -185,18 +185,29 @@ remote_juno_scan_post() {
   local payload="$3"
   local bearer_token="$4"
   local payload_b64
+  local bearer_token_b64
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\n')"
-  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$payload_b64" "$bearer_token" <<'REMOTE_EOF'
+  bearer_token_b64="$(printf '%s' "$bearer_token" | base64 | tr -d '\n')"
+  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$payload_b64" "$bearer_token_b64" <<'REMOTE_EOF'
 set -euo pipefail
 scan_url="$1"
 path="$2"
-payload_b64="$3"
-bearer_token="$4"
+payload_b64="${3-}"
+bearer_token_b64="${4-}"
 
 if payload="$(printf '%s' "$payload_b64" | base64 --decode 2>/dev/null)"; then
   :
 else
   payload="$(printf '%s' "$payload_b64" | base64 -D)"
+fi
+if [[ -n "$bearer_token_b64" ]]; then
+  if bearer_token="$(printf '%s' "$bearer_token_b64" | base64 --decode 2>/dev/null)"; then
+    :
+  else
+    bearer_token="$(printf '%s' "$bearer_token_b64" | base64 -D)"
+  fi
+else
+  bearer_token=""
 fi
 
 curl_headers=()
@@ -212,11 +223,23 @@ remote_juno_scan_get() {
   local scan_url="$1"
   local path="$2"
   local bearer_token="$3"
-  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$bearer_token" <<'REMOTE_EOF'
+  local bearer_token_b64
+  bearer_token_b64="$(printf '%s' "$bearer_token" | base64 | tr -d '\n')"
+  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$bearer_token_b64" <<'REMOTE_EOF'
 set -euo pipefail
 scan_url="$1"
 path="$2"
-bearer_token="$3"
+bearer_token_b64="${3-}"
+
+if [[ -n "$bearer_token_b64" ]]; then
+  if bearer_token="$(printf '%s' "$bearer_token_b64" | base64 --decode 2>/dev/null)"; then
+    :
+  else
+    bearer_token="$(printf '%s' "$bearer_token_b64" | base64 -D)"
+  fi
+else
+  bearer_token=""
+fi
 
 curl_headers=()
 if [[ -n "$bearer_token" ]]; then
