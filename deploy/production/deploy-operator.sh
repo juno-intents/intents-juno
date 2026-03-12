@@ -505,6 +505,7 @@ checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
 dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
 withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
+base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
 [[ -f "$checkpoint_signer_script" ]] || {
   echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
   exit 1
@@ -519,6 +520,10 @@ withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh
 }
 [[ -f "$withdraw_coordinator_script" ]] || {
   echo "withdraw-coordinator wrapper is missing: $withdraw_coordinator_script" >&2
+  exit 1
+}
+[[ -f "$base_event_scanner_script" ]] || {
+  echo "base-event-scanner wrapper is missing: $base_event_scanner_script" >&2
   exit 1
 }
 
@@ -653,6 +658,54 @@ if grep -Fq 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withd
   ! grep -Fq 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "$withdraw_coordinator_script"; then
   sudo sed -i 's|^export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS$|export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS|' "$withdraw_coordinator_script"
 fi
+
+base_event_scanner_tmp="$(mktemp)"
+cat >"$base_event_scanner_tmp" <<'EOF_BASE_EVENT_SCANNER_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "base-event-scanner requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_EVENT_SCANNER_BASE_RPC_URL:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "base-event-scanner requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+
+args=(
+  --base-rpc-url "${BASE_EVENT_SCANNER_BASE_RPC_URL}"
+  --bridge-address "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS}"
+  --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
+  --start-block "${BASE_EVENT_SCANNER_START_BLOCK}"
+  --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
+  --queue-driver kafka
+  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v1}"
+  --health-port "${BASE_EVENT_SCANNER_HEALTH_PORT:-18306}"
+)
+
+case "${JUNO_QUEUE_KAFKA_TLS:-}" in
+  true|1|yes) export JUNO_QUEUE_KAFKA_TLS="true" ;;
+esac
+
+exec /usr/local/bin/base-event-scanner "${args[@]}"
+EOF_BASE_EVENT_SCANNER_WRAPPER
+sudo install -m 0755 "$base_event_scanner_tmp" "$base_event_scanner_script"
+rm -f "$base_event_scanner_tmp"
 
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
 if [[ -f "$config_hydrator_script" ]] && {

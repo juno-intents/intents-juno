@@ -349,6 +349,46 @@ production_origin_url() {
   printf '%s://%s\n' "$scheme" "$host"
 }
 
+production_is_positive_integer() {
+  local value="$1"
+  [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 ))
+}
+
+production_is_tx_hash() {
+  local value="$1"
+  [[ "$value" =~ ^0x[0-9a-fA-F]{64}$ ]]
+}
+
+production_resolve_base_event_scanner_start_block() {
+  local bridge_summary="$1"
+  local base_rpc_url="$2"
+  local explicit_start_block tx_hash block_number max_block
+
+  explicit_start_block="$(production_json_optional "$bridge_summary" '.base_event_scanner_start_block // .contracts.base_event_scanner_start_block // .scanner.start_block')"
+  if [[ -n "$explicit_start_block" ]]; then
+    production_is_positive_integer "$explicit_start_block" \
+      || die "bridge summary base_event_scanner_start_block must be a positive integer"
+    printf '%s\n' "$explicit_start_block"
+    return 0
+  fi
+
+  command -v cast >/dev/null 2>&1 || die "cast is required to derive the base event scanner start block from bridge summary transactions"
+
+  max_block=0
+  while IFS= read -r tx_hash; do
+    production_is_tx_hash "$tx_hash" || continue
+    block_number="$(cast receipt "$tx_hash" blockNumber --rpc-url "$base_rpc_url" | tr -d '[:space:]')"
+    production_is_positive_integer "$block_number" \
+      || die "failed to resolve a positive block number for bridge summary transaction $tx_hash"
+    if (( block_number > max_block )); then
+      max_block="$block_number"
+    fi
+  done < <(jq -r '.transactions // {} | to_entries[]? | .value' "$bridge_summary")
+
+  (( max_block > 0 )) || die "bridge summary is missing base_event_scanner_start_block and usable transaction hashes"
+  printf '%s\n' "$max_block"
+}
+
 production_render_shared_manifest() {
   local inventory="$1"
   local bridge_summary="$2"
@@ -363,7 +403,7 @@ production_render_shared_manifest() {
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
-  local summary_owallet_ua completion_owallet_ua
+  local summary_owallet_ua completion_owallet_ua base_event_scanner_start_block
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
@@ -378,6 +418,7 @@ production_render_shared_manifest() {
   fi
   base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
+  base_event_scanner_start_block="$(production_resolve_base_event_scanner_start_block "$bridge_summary" "$base_rpc_url")"
   deposit_image_id="$(production_json_optional "$inventory" '.contracts.deposit_image_id')"
   withdraw_image_id="$(production_json_optional "$inventory" '.contracts.withdraw_image_id')"
   aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
@@ -436,6 +477,7 @@ production_render_shared_manifest() {
     --arg dkg_prefix "$dkg_prefix" \
     --arg base_rpc_url "$base_rpc_url" \
     --argjson base_chain_id "$base_chain_id" \
+    --argjson base_event_scanner_start_block "$base_event_scanner_start_block" \
     --arg deposit_image_id "$deposit_image_id" \
     --arg withdraw_image_id "$withdraw_image_id" \
     --arg signer_ufvk "$signer_ufvk" \
@@ -482,6 +524,7 @@ production_render_shared_manifest() {
         juno_network: $juno_network,
         base_rpc_url: $base_rpc_url,
         base_chain_id: $base_chain_id,
+        base_event_scanner_start_block: $base_event_scanner_start_block,
         bridge: $bridge_address,
         wjuno: (if $wjuno_address == "" then null else $wjuno_address end),
         operator_registry: (if $operator_registry == "" then null else $operator_registry end),
@@ -854,12 +897,15 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
-  local deposit_scan_wallet_id
+  local deposit_scan_wallet_id base_event_scanner_start_block
   local checkpoint_signer_private_key
   checkpoint_signer_private_key=""
   deposit_scan_wallet_id=""
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
+  base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
+  production_is_positive_integer "$base_event_scanner_start_block" \
+    || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
   operator_address="$(production_json_optional "$operator_deploy" '.operator_address')"
@@ -900,6 +946,7 @@ BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
+BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block
 WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem

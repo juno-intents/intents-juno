@@ -520,7 +520,7 @@ BASE_EVENT_SCANNER_ENABLED=false
 BASE_EVENT_SCANNER_BASE_RPC_URL=
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
-BASE_EVENT_SCANNER_START_BLOCK=0
+BASE_EVENT_SCANNER_START_BLOCK=
 BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC=withdrawals.requested.v1
 CHECKPOINT_SIGNER_HEALTH_PORT=18301
 CHECKPOINT_AGGREGATOR_HEALTH_PORT=18302
@@ -1851,12 +1851,16 @@ source /etc/intents-juno/operator-stack.env
   echo "base-event-scanner requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {
+  echo "base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 
 args=(
   --base-rpc-url "${BASE_EVENT_SCANNER_BASE_RPC_URL}"
   --bridge-address "${BASE_EVENT_SCANNER_BRIDGE_ADDRESS}"
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
-  --start-block "${BASE_EVENT_SCANNER_START_BLOCK:-0}"
+  --start-block "${BASE_EVENT_SCANNER_START_BLOCK}"
   --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
   --queue-driver kafka
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"

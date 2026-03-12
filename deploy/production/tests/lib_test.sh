@@ -119,6 +119,7 @@ EOF
     "$workdir"
   assert_eq "$(jq -r '.contracts.juno_network' "$shared_manifest")" "testnet" "juno network"
   assert_eq "$(jq -r '.contracts.bridge' "$shared_manifest")" "0x2222222222222222222222222222222222222222" "bridge address"
+  assert_eq "$(jq -r '.contracts.base_event_scanner_start_block' "$shared_manifest")" "12345" "base event scanner start block"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
@@ -133,6 +134,67 @@ EOF
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "handoff signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
+  rm -rf "$workdir"
+}
+
+test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions() {
+  local workdir shared_manifest bridge_summary old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  bridge_summary="$workdir/bridge-summary.json"
+  jq '
+    del(.base_event_scanner_start_block)
+    | .transactions = {
+        set_fee_distributor: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        set_threshold: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        set_bridge_wjuno: "",
+        set_bridge_fees: "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" >"$bridge_summary"
+
+  mkdir -p "$workdir/bin"
+  cat >"$workdir/bin/cast" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+tx_hash="$2"
+case "$tx_hash" in
+  0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa) printf '11111\n' ;;
+  0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb) printf '22222\n' ;;
+  0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc) printf '33333\n' ;;
+  *) printf 'unexpected tx hash: %s\n' "$tx_hash" >&2; exit 1 ;;
+esac
+EOF
+  chmod +x "$workdir/bin/cast"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  old_path="$PATH"
+  PATH="$workdir/bin:$PATH"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$bridge_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  PATH="$old_path"
+
+  assert_eq "$(jq -r '.contracts.base_event_scanner_start_block' "$shared_manifest")" "33333" "derived base event scanner start block"
   rm -rf "$workdir"
 }
 
@@ -340,6 +402,7 @@ EOF
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rendered env signer driver"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "rendered env signer kms key id"
   assert_contains "$(cat "$output_env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rendered env operator address"
+  assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "rendered env base event scanner start block"
   assert_contains "$(cat "$output_env")" "AWS_REGION=us-east-1" "rendered env aws region"
   assert_contains "$(cat "$output_env")" "AWS_DEFAULT_REGION=us-east-1" "rendered env aws default region"
   assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
@@ -933,6 +996,7 @@ main() {
   test_resolve_secret_contract_allows_alpha_literals
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
+  test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network
   test_render_shared_manifest_requires_signer_ufvk
