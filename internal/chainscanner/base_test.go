@@ -532,6 +532,56 @@ func TestBaseScanner_StartBlockUsedWhenNoState(t *testing.T) {
 	}
 }
 
+func TestBaseScanner_PollDoesNotRejectComputedHeaderHashMismatch(t *testing.T) {
+	t.Parallel()
+
+	stateStore := NewMemoryStateStore()
+	ctx := context.Background()
+
+	client := &mockEthClient{
+		blockNumber: 2,
+		headers: map[uint64]*types.Header{
+			1: {
+				Number:     new(big.Int).SetUint64(1),
+				ParentHash: common.Hash{},
+				Extra:      []byte("header-one"),
+			},
+			2: {
+				Number:     new(big.Int).SetUint64(2),
+				ParentHash: common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+				Extra:      []byte("header-two"),
+			},
+		},
+	}
+
+	if client.headers[2].ParentHash == client.headers[1].Hash() {
+		t.Fatal("test fixture must force parent/hash mismatch")
+	}
+
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:           client,
+		BridgeAddr:       common.HexToAddress("0x1234"),
+		StateStore:       stateStore,
+		ServiceName:      "test-scanner",
+		MaxBlocksPerPoll: 10,
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	if err := scanner.poll(ctx, 1, func(_ context.Context, _ WithdrawRequestedEvent) error { return nil }); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	height, err := stateStore.GetLastHeight(ctx, "test-scanner")
+	if err != nil {
+		t.Fatalf("GetLastHeight: %v", err)
+	}
+	if height != 2 {
+		t.Fatalf("last height: got=%d want=2", height)
+	}
+}
+
 func TestBaseScanner_RewindsOnStoredHashMismatch(t *testing.T) {
 	t.Parallel()
 

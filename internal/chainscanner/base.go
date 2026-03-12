@@ -249,33 +249,15 @@ func (s *BaseScanner) rewindToCanonicalHeight(ctx context.Context, currentBlock 
 func (s *BaseScanner) loadHeaders(ctx context.Context, lastHeight, fromBlock, toBlock int64) ([]*types.Header, error) {
 	headers := make([]*types.Header, 0, toBlock-fromBlock+1)
 
-	var lastHash common.Hash
-	hasLastHash := false
-	if lastHeight > 0 {
-		ref, ok, err := s.stateStore.GetBlockRef(ctx, s.serviceName, lastHeight)
-		if err != nil {
-			return nil, fmt.Errorf("get prior block ref: %w", err)
-		}
-		if ok {
-			lastHash = ref.Hash
-			hasLastHash = true
-		}
-	}
-
 	for height := fromBlock; height <= toBlock; height++ {
 		header, err := s.client.HeaderByNumber(ctx, big.NewInt(height))
 		if err != nil {
 			return nil, fmt.Errorf("get header %d: %w", height, err)
 		}
-		if height == fromBlock && hasLastHash && header.ParentHash != lastHash {
-			return nil, fmt.Errorf("header continuity mismatch at height %d", height)
-		}
-		if len(headers) > 0 {
-			prev := headers[len(headers)-1]
-			if header.ParentHash != prev.Hash() {
-				return nil, fmt.Errorf("header continuity mismatch at height %d", height)
-			}
-		}
+		// Some RPC providers expose canonical parentHash values that do not round-trip
+		// through go-ethereum's local Header.Hash() computation on newer OP Stack chains.
+		// We still persist per-height block hashes for rewind detection across polls, but
+		// we intentionally avoid rejecting in-batch progress on parent/hash mismatches here.
 		headers = append(headers, header)
 	}
 
