@@ -228,6 +228,12 @@ production_public_url() {
   esac
 }
 
+production_origin_url() {
+  local scheme="$1"
+  local host="$2"
+  printf '%s://%s\n' "$scheme" "$host"
+}
+
 production_render_shared_manifest() {
   local inventory="$1"
   local bridge_summary="$2"
@@ -385,7 +391,8 @@ production_render_app_handoff() {
   local public_endpoint aws_profile aws_region account_id security_group_id
   local bridge_dns_label ops_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name ops_record_name bridge_public_url ops_public_url
-  local bridge_probe_url ops_probe_url juno_rpc_url operator_addresses_json
+  local bridge_probe_url ops_probe_url bridge_internal_url ops_internal_url
+  local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -429,10 +436,12 @@ production_render_app_handoff() {
 
   bridge_record_name="${bridge_dns_label}.${public_subdomain}"
   ops_record_name="${ops_dns_label}.${public_subdomain}"
-  bridge_public_url="$(production_public_url "$public_scheme" "$bridge_record_name" "$bridge_listen_addr")"
-  ops_public_url="$(production_public_url "$public_scheme" "$ops_record_name" "$backoffice_listen_addr")"
-  bridge_probe_url="$(production_public_url "$public_scheme" "$public_endpoint" "$bridge_listen_addr")"
-  ops_probe_url="$(production_public_url "$public_scheme" "$public_endpoint" "$backoffice_listen_addr")"
+  bridge_public_url="$(production_origin_url "$public_scheme" "$bridge_record_name")"
+  ops_public_url="$(production_origin_url "$public_scheme" "$ops_record_name")"
+  bridge_probe_url="$bridge_public_url"
+  ops_probe_url="$ops_public_url"
+  bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
+  ops_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
 
   app_dir="$(production_app_dir "$output_dir")"
   mkdir -p "$app_dir"
@@ -460,11 +469,14 @@ production_render_app_handoff() {
     --arg bridge_listen_addr "$bridge_listen_addr" \
     --arg bridge_public_url "$bridge_public_url" \
     --arg bridge_probe_url "$bridge_probe_url" \
+    --arg bridge_internal_url "$bridge_internal_url" \
     --arg bridge_record_name "$bridge_record_name" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
     --arg backoffice_public_url "$ops_public_url" \
     --arg backoffice_probe_url "$ops_probe_url" \
+    --arg backoffice_internal_url "$ops_internal_url" \
     --arg backoffice_record_name "$ops_record_name" \
+    --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
     --arg zone_id "$zone_id" \
     --argjson ttl_seconds "$ttl_seconds" \
@@ -485,6 +497,7 @@ production_render_app_handoff() {
       aws_region: (if $aws_region == "" then null else $aws_region end),
       account_id: (if $account_id == "" then null else $account_id end),
       security_group_id: (if $security_group_id == "" then null else $security_group_id end),
+      public_scheme: $public_scheme,
       juno_rpc_url: $juno_rpc_url,
       operator_addresses: $operator_addresses,
       service_urls: $service_urls,
@@ -494,12 +507,14 @@ production_render_app_handoff() {
           listen_addr: $bridge_listen_addr,
           public_url: $bridge_public_url,
           probe_url: $bridge_probe_url,
+          internal_url: $bridge_internal_url,
           record_name: $bridge_record_name
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,
           public_url: $backoffice_public_url,
           probe_url: $backoffice_probe_url,
+          internal_url: $backoffice_internal_url,
           record_name: $backoffice_record_name
         }
       },
@@ -815,6 +830,8 @@ production_render_backoffice_env() {
   operator_addresses="$(jq -r '.operator_addresses | join(",")' "$app_deploy")"
   service_urls="$(jq -r '.service_urls | join(",")' "$app_deploy")"
   operator_endpoints="$(jq -r '.operator_endpoints | join(",")' "$app_deploy")"
+  production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
+  production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
   cat >"$output_file" <<EOF
 BACKOFFICE_LISTEN_ADDR=$listen_addr

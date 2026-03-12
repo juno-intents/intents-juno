@@ -83,6 +83,7 @@ public_endpoint="$(production_json_required "$app_deploy" '.public_endpoint | se
 aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$app_deploy" '.aws_region')"
 security_group_id="$(production_json_optional "$app_deploy" '.security_group_id')"
+public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select(type == "string" and length > 0)')"
 dns_mode="$(production_json_optional "$app_deploy" '.dns.mode')"
 zone_id="$(production_json_optional "$app_deploy" '.dns.zone_id')"
 ttl_seconds="$(production_json_optional "$app_deploy" '.dns.ttl_seconds')"
@@ -127,9 +128,21 @@ ensure_security_group_ingress() {
   [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
   aws_args+=(--region "$aws_region")
 
-  AWS_PAGER="" "${aws_args[@]}" ec2 authorize-security-group-ingress \
+  local output status
+  set +e
+  output="$(AWS_PAGER="" "${aws_args[@]}" ec2 authorize-security-group-ingress \
     --group-id "$security_group_id" \
-    --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":${port},\"ToPort\":${port},\"IpRanges\":[{\"CidrIp\":\"0.0.0.0/0\",\"Description\":\"intents-juno app\"}]}]" >/dev/null 2>&1 || true
+    --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":${port},\"ToPort\":${port},\"IpRanges\":[{\"CidrIp\":\"0.0.0.0/0\",\"Description\":\"intents-juno app\"}]}]" 2>&1)"
+  status=$?
+  set -e
+  if [[ $status -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$output" == *"InvalidPermission.Duplicate"* || "$output" == *"already exists"* ]]; then
+    return 0
+  fi
+  printf '%s\n' "$output" >&2
+  die "failed to authorize security group ingress on port $port"
 }
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
@@ -144,8 +157,18 @@ if [[ "$dry_run" == "true" ]]; then
   exit 0
 fi
 
-ensure_security_group_ingress "$bridge_port"
-ensure_security_group_ingress "$backoffice_port"
+if [[ "$public_scheme" == "https" ]]; then
+  ensure_security_group_ingress 80
+  ensure_security_group_ingress 443
+else
+  ensure_security_group_ingress "$bridge_port"
+  ensure_security_group_ingress "$backoffice_port"
+fi
+
+if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
+  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
+  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
+fi
 
 remote_stage_dir="/tmp/intents-juno-app-deploy"
 ssh "${SSH_OPTS[@]}" "$ssh_target" "rm -rf '$remote_stage_dir' && mkdir -p '$remote_stage_dir'"
@@ -166,6 +189,9 @@ bridge_api_wrapper="/usr/local/bin/intents-juno-bridge-api.sh"
 backoffice_wrapper="/usr/local/bin/intents-juno-backoffice.sh"
 bridge_api_env="/etc/intents-juno/bridge-api.env"
 backoffice_env="/etc/intents-juno/backoffice.env"
+public_scheme="$public_scheme"
+bridge_record_name="$bridge_record_name"
+backoffice_record_name="$backoffice_record_name"
 
 sudo install -d -m 0755 -o intents-juno -g intents-juno "\$runtime_dir/bin"
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno
@@ -280,17 +306,40 @@ UNIT
 sudo install -m 0644 "\$backoffice_unit_tmp" /etc/systemd/system/backoffice.service
 rm -f "\$backoffice_unit_tmp"
 
+if [[ "\$public_scheme" == "https" ]]; then
+  if ! command -v caddy >/dev/null 2>&1; then
+    sudo apt-get update
+    sudo apt-get install -y caddy
+  fi
+  caddyfile_tmp="\$(mktemp)"
+  cat >"\$caddyfile_tmp" <<CADDY
+\$bridge_record_name {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:$bridge_port
+}
+
+\$backoffice_record_name {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:$backoffice_port
+}
+CADDY
+  sudo install -m 0644 "\$caddyfile_tmp" /etc/caddy/Caddyfile
+  rm -f "\$caddyfile_tmp"
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable bridge-api backoffice >/dev/null
 sudo systemctl restart bridge-api
 sudo systemctl restart backoffice
+if [[ "\$public_scheme" == "https" ]]; then
+  sudo systemctl enable caddy >/dev/null
+  sudo systemctl restart caddy
+fi
 sudo rm -rf "\$remote_stage_dir"
 EOF
 
 ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active bridge-api"
 ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active backoffice"
-
-if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
-  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
-  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
+if [[ "$public_scheme" == "https" ]]; then
+  ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active caddy"
 fi

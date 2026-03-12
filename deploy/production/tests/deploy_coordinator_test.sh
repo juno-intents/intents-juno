@@ -62,7 +62,7 @@ EOF
   assert_eq "$(jq -r '.operator_address' "$operator_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "operator signer address"
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$operator_dir/operator-deploy.json")" "aws-kms" "operator signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$operator_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "operator signer kms key id"
-  assert_eq "$(jq -r '.services.bridge_api.public_url' "$output_dir/alpha/app/app-deploy.json")" "http://bridge.alpha.intents-testing.thejunowallet.com:8082" "app manifest bridge url"
+  assert_eq "$(jq -r '.services.bridge_api.public_url' "$output_dir/alpha/app/app-deploy.json")" "https://bridge.alpha.intents-testing.thejunowallet.com" "app manifest bridge url"
   rm -rf "$workdir"
 }
 

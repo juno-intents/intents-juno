@@ -28,9 +28,9 @@
     "secret_contract_file": "app/app-secrets.env",
     "bridge_public_dns_label": "bridge",
     "ops_public_dns_label": "ops",
-    "public_scheme": "http",
-    "bridge_api_listen": "0.0.0.0:8082",
-    "backoffice_listen": "0.0.0.0:8090",
+    "public_scheme": "https",
+    "bridge_api_listen": "127.0.0.1:8082",
+    "backoffice_listen": "127.0.0.1:8090",
     "juno_rpc_url": "http://127.0.0.1:18232",
     "service_urls": [
       "bridge-api=http://127.0.0.1:8082/readyz"

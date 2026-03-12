@@ -386,9 +386,11 @@ EOF
   app_manifest="$workdir/output/app/app-deploy.json"
 
   assert_file_exists "$app_manifest" "app deploy manifest"
-  assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "http://bridge.alpha.intents-testing.thejunowallet.com:8082" "bridge public url"
-  assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "http://203.0.113.21:8082" "bridge probe url"
-  assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "http://ops.alpha.intents-testing.thejunowallet.com:8090" "backoffice public url"
+  assert_eq "$(jq -r '.public_scheme' "$app_manifest")" "https" "public scheme"
+  assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge public url"
+  assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge probe url"
+  assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
+  assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "https://ops.alpha.intents-testing.thejunowallet.com" "backoffice public url"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
 

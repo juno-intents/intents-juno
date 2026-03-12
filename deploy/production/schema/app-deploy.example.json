@@ -22,15 +22,17 @@
   "operator_endpoints": [],
   "services": {
     "bridge_api": {
-      "listen_addr": "0.0.0.0:8082",
-      "public_url": "http://bridge.alpha.intents-testing.thejunowallet.com:8082",
-      "probe_url": "http://203.0.113.21:8082",
+      "listen_addr": "127.0.0.1:8082",
+      "public_url": "https://bridge.alpha.intents-testing.thejunowallet.com",
+      "probe_url": "https://bridge.alpha.intents-testing.thejunowallet.com",
+      "internal_url": "http://127.0.0.1:8082",
       "record_name": "bridge.alpha.intents-testing.thejunowallet.com"
     },
     "backoffice": {
-      "listen_addr": "0.0.0.0:8090",
-      "public_url": "http://ops.alpha.intents-testing.thejunowallet.com:8090",
-      "probe_url": "http://203.0.113.21:8090",
+      "listen_addr": "127.0.0.1:8090",
+      "public_url": "https://ops.alpha.intents-testing.thejunowallet.com",
+      "probe_url": "https://ops.alpha.intents-testing.thejunowallet.com",
+      "internal_url": "http://127.0.0.1:8090",
       "record_name": "ops.alpha.intents-testing.thejunowallet.com"
     }
   },

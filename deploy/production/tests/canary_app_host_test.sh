@@ -78,16 +78,16 @@ EOF
 printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
 url="${@: -1}"
 case "$url" in
-  http://203.0.113.21:8082/readyz|http://203.0.113.21:8090/readyz)
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz|https://ops.alpha.intents-testing.thejunowallet.com/readyz)
     printf '{"status":"ok"}\n'
     ;;
-  http://203.0.113.21:8082/v1/config)
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
     printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample"}\n'
     ;;
-  http://203.0.113.21:8082/)
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>Bridge UI</body></html>\n'
     ;;
-  http://203.0.113.21:8090/)
+  https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
     ;;
   *)
@@ -104,8 +104,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$workdir/output/app/known_hosts" "canary uses known_hosts file"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active bridge-api" "bridge systemd checked"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active backoffice" "backoffice systemd checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "http://203.0.113.21:8082/v1/config" "bridge config checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "http://203.0.113.21:8090/" "backoffice ui checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/config" "bridge config checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/" "backoffice ui checked"
   assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready for test"
   assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "passed" "bridge config passed"
   assert_eq "$(jq -r '.checks.backoffice_ui.status' "$output_json")" "passed" "backoffice ui passed"
