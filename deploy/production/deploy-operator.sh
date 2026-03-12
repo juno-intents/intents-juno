@@ -324,6 +324,32 @@ sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tm
 sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
 sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
 sudo rm -f /tmp/intents-juno-dkg-backup.zip
+
+env_get_value_remote() {
+  local key="$1"
+  sudo awk -F= -v key="$key" '
+    index($0, key "=") == 1 {
+      print substr($0, length(key) + 2)
+      exit
+    }
+  ' /etc/intents-juno/operator-stack.env
+}
+
+case "$(env_get_value_remote "JUNO_DEV_MODE")" in
+  1|true|TRUE|yes|YES|on|ON)
+    coord_client_cert="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE")"
+    coord_client_key="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE")"
+    server_cert="$(env_get_value_remote "TSS_TLS_CERT_FILE")"
+    server_key="$(env_get_value_remote "TSS_TLS_KEY_FILE")"
+    if [[ -n "$coord_client_cert" && -n "$server_cert" && ! -s "$coord_client_cert" && -s "$server_cert" ]]; then
+      sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"
+    fi
+    if [[ -n "$coord_client_key" && -n "$server_key" && ! -s "$coord_client_key" && -s "$server_key" ]]; then
+      sudo install -D -m 0640 -o root -g intents-juno "$server_key" "$coord_client_key"
+    fi
+    ;;
+esac
+
 # shellcheck source=/dev/null
 source "$remote_stage_dir/common.sh"
 dkg_release_tag="${JUNO_DKG_RELEASE_TAG:-$JUNO_DKG_VERSION_DEFAULT}"

@@ -263,6 +263,55 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_stack_env_derives_local_checkpoint_key_from_base_relayer_key() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].checkpoint_signer_driver = "local-env"
+    | .operators[0].checkpoint_signer_kms_key_id = null
+    | .operators[0].operator_address = null
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "rendered env signer driver"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=0x1111111111111111111111111111111111111111111111111111111111111111" "rendered env derives checkpoint signer private key from first base relayer key"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=" "rendered env omits kms key id for local-env signer"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_requires_juno_rpc_credentials() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -580,6 +629,7 @@ main() {
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network
   test_render_operator_stack_env_uses_kms_contract
+  test_render_operator_stack_env_derives_local_checkpoint_key_from_base_relayer_key
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
   test_render_junocashd_conf_uses_juno_rpc_credentials

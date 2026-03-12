@@ -702,6 +702,9 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
+  local checkpoint_signer_private_key base_relayer_private_keys
+  checkpoint_signer_private_key=""
+  base_relayer_private_keys=""
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
@@ -713,7 +716,16 @@ production_render_operator_stack_env() {
   fi
 
   case "$signer_driver" in
-    local-env) ;;
+    local-env)
+      checkpoint_signer_private_key="$(production_env_first_value "$resolved_secret_env" CHECKPOINT_SIGNER_PRIVATE_KEY || true)"
+      if [[ -z "$checkpoint_signer_private_key" ]]; then
+        base_relayer_private_keys="$(production_env_first_value "$resolved_secret_env" BASE_RELAYER_PRIVATE_KEYS || true)"
+        if [[ -n "$base_relayer_private_keys" ]]; then
+          checkpoint_signer_private_key="${base_relayer_private_keys%%,*}"
+        fi
+      fi
+      [[ -n "$checkpoint_signer_private_key" ]] || die "resolved secret env is missing CHECKPOINT_SIGNER_PRIVATE_KEY or BASE_RELAYER_PRIVATE_KEYS for local-env checkpoint signer"
+      ;;
     aws-kms)
       [[ -n "$signer_kms_key_id" ]] || die "operator deploy manifest is missing checkpoint_signer_kms_key_id for aws-kms signer"
       [[ -n "$aws_region" ]] || die "operator deploy manifest is missing aws_region for aws-kms signer"
@@ -766,6 +778,9 @@ EOF
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
   fi
+  if [[ -n "$checkpoint_signer_private_key" ]]; then
+    printf 'CHECKPOINT_SIGNER_PRIVATE_KEY=%s\n' "$checkpoint_signer_private_key" >>"$output_file"
+  fi
   if [[ -n "$aws_region" ]]; then
     printf 'AWS_REGION=%s\n' "$aws_region" >>"$output_file"
     printf 'AWS_DEFAULT_REGION=%s\n' "$aws_region" >>"$output_file"
@@ -793,6 +808,7 @@ EOF
   awk -F= '
     $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
     $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
+    $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
     $1 == "OPERATOR_ADDRESS" { next }
     { print }
   ' "$resolved_secret_env" >>"$output_file"
