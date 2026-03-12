@@ -47,6 +47,8 @@ test_rotate_operator_key_captures_evidence_and_restarts_services() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
@@ -113,6 +115,8 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rotation env signer driver"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "rotation env kms key id"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rotation env operator address"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "rotation env juno rpc user"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "rotation env juno rpc pass"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rotation env omits private key"
   assert_eq "$(jq -r '.signer.driver' "$evidence_dir/pre.json")" "aws-kms" "pre evidence signer driver"
   assert_eq "$(jq -r '.services["checkpoint-signer"]' "$evidence_dir/post.json")" "active" "post evidence checkpoint signer active"

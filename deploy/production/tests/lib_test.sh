@@ -77,6 +77,8 @@ test_render_shared_manifest_and_handoffs() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
@@ -114,6 +116,8 @@ test_render_operator_stack_env_uses_kms_contract() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
@@ -137,7 +141,41 @@ EOF
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rendered env signer driver"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "rendered env signer kms key id"
   assert_contains "$(cat "$output_env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rendered env operator address"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_PASS=rpcpass" "rendered env juno rpc pass"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rendered env omits private key for kms signer"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_requires_juno_rpc_credentials() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
+    printf 'expected production_render_operator_stack_env to require JUNO_RPC_USER/JUNO_RPC_PASS\n' >&2
+    exit 1
+  fi
   rm -rf "$workdir"
 }
 
@@ -148,6 +186,8 @@ test_render_operator_stack_env_rejects_private_key_with_kms_contract() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
@@ -180,6 +220,8 @@ test_rollout_state_enforces_one_operator_at_a_time() {
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
@@ -203,6 +245,7 @@ main() {
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
   test_render_operator_stack_env_uses_kms_contract
+  test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
   test_rollout_state_enforces_one_operator_at_a_time
 }

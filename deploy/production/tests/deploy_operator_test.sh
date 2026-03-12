@@ -47,6 +47,8 @@ test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
@@ -131,6 +133,8 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "kms signer driver staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "kms signer key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "operator address staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "juno rpc user staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "juno rpc pass staged"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "kms operator env omits private key"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"
@@ -158,6 +162,8 @@ test_deploy_operator_force_reruns_done_operator() {
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"

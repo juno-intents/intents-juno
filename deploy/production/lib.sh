@@ -518,6 +518,11 @@ EOF
     $1 == "OPERATOR_ADDRESS" { next }
     { print }
   ' "$resolved_secret_env" >>"$output_file"
+
+  local required_env_key
+  for required_env_key in CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS; do
+    grep -q "^${required_env_key}=" "$output_file" || die "rendered operator env is missing ${required_env_key}"
+  done
 }
 
 production_rollout_reserve() {
