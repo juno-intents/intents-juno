@@ -26,10 +26,12 @@ write_inventory_fixture() {
     --arg kh "$workdir/known_hosts" \
     --arg backup "$workdir/dkg-backup.zip" \
     --arg secrets "$workdir/operator-secrets.env" \
+    --arg operator_address "0x9999999999999999999999999999999999999999" \
     '
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
+      | .operators[0].operator_address = $operator_address
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -98,6 +100,7 @@ EOF
   assert_file_exists "$handoff_dir/operator-deploy.json" "operator manifest"
   assert_file_exists "$handoff_dir/operator-secrets.env" "secret contract copy"
   assert_file_exists "$handoff_dir/known_hosts" "known_hosts copy"
+  assert_eq "$(jq -r '.operator_address' "$handoff_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "handoff operator address"
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "handoff signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
@@ -133,7 +136,7 @@ EOF
 
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rendered env signer driver"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "rendered env signer kms key id"
-  assert_contains "$(cat "$output_env")" "OPERATOR_ADDRESS=0x1111111111111111111111111111111111111111" "rendered env operator address"
+  assert_contains "$(cat "$output_env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rendered env operator address"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rendered env omits private key for kms signer"
   rm -rf "$workdir"
 }

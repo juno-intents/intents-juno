@@ -112,7 +112,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active checkpoint-signer" "rotation verifies checkpoint signer"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "rotation env signer driver"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "rotation env kms key id"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x1111111111111111111111111111111111111111" "rotation env operator address"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rotation env operator address"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rotation env omits private key"
   assert_eq "$(jq -r '.signer.driver' "$evidence_dir/pre.json")" "aws-kms" "pre evidence signer driver"
   assert_eq "$(jq -r '.services["checkpoint-signer"]' "$evidence_dir/post.json")" "active" "post evidence checkpoint signer active"

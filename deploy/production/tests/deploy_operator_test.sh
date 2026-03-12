@@ -130,7 +130,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active juno-scan" "deploy verifies juno-scan after restarting it"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "kms signer driver staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "kms signer key id staged"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x1111111111111111111111111111111111111111" "operator address staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "operator address staged"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "kms operator env omits private key"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"

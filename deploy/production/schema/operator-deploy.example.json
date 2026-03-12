@@ -4,6 +4,7 @@
   "shared_manifest_path": "production-output/alpha/shared-manifest.json",
   "rollout_state_file": "production-output/alpha/rollout-state.json",
   "operator_id": "0x1111111111111111111111111111111111111111",
+  "operator_address": "0x9999999999999999999999999999999999999999",
   "checkpoint_signer_driver": "aws-kms",
   "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
   "operator_index": 1,

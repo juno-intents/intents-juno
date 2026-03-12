@@ -350,7 +350,7 @@ production_render_operator_handoffs() {
   for ((index = 0; index < operator_count; index++)); do
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
-    local checkpoint_signer_driver checkpoint_signer_kms_key_id
+    local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     handoff_dir="$(production_operator_dir "$output_dir" "$operator_id")"
@@ -363,6 +363,7 @@ production_render_operator_handoffs() {
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
     checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "local-env"' <<<"$operator_json")"
     checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
+    operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
 
     case "$checkpoint_signer_driver" in
@@ -402,6 +403,7 @@ production_render_operator_handoffs() {
       --arg rollout_state_file "$rollout_state" \
       --arg checkpoint_signer_driver "$checkpoint_signer_driver" \
       --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
+      --arg operator_address "$operator_address" \
       --arg known_hosts_file "$known_hosts_dst" \
       --arg secret_contract_file "$secrets_dst" \
       --arg dkg_backup_zip "$backup_zip_src" \
@@ -417,6 +419,7 @@ production_render_operator_handoffs() {
         shared_manifest_path: $shared_manifest_path,
         rollout_state_file: $rollout_state_file,
         operator_id: $operator.operator_id,
+        operator_address: (if $operator_address == "" then null else $operator_address end),
         checkpoint_signer_driver: $checkpoint_signer_driver,
         checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end),
         operator_index: $operator.index,
@@ -451,7 +454,10 @@ production_render_operator_stack_env() {
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
-  operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+  operator_address="$(production_json_optional "$operator_deploy" '.operator_address')"
+  if [[ -z "$operator_address" ]]; then
+    operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+  fi
 
   case "$signer_driver" in
     local-env) ;;
