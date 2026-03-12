@@ -489,6 +489,26 @@ BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
+WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
+WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
+WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
+WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
+TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
+TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+TSS_NITRO_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer
+TSS_NITRO_ENCLAVE_EIF_FILE=/var/lib/intents-juno/operator-runtime/enclave/spendauth-signer.eif
+TSS_NITRO_ENCLAVE_CID=16
+TSS_NITRO_ATTESTATION_FILE=/var/lib/intents-juno/operator-runtime/attestation/spendauth-attestation.json
+TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS=300
+TSS_SIGNER_WORK_DIR=/var/lib/intents-juno/tss-signer
+TSS_LISTEN_ADDR=127.0.0.1:9443
+TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
+TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
+TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 EOF
 
   if [[ -n "$signer_kms_key_id" ]]; then
