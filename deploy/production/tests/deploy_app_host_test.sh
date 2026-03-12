@@ -80,10 +80,12 @@ EOF
 
   printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
   printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
+  printf 'shared-infra-e2e-binary\n' >"$assets_dir/shared-infra-e2e_linux_amd64"
   (
     cd "$assets_dir"
     sha256sum bridge-api_linux_amd64 >bridge-api_linux_amd64.sha256
     sha256sum backoffice_linux_amd64 >backoffice_linux_amd64.sha256
+    sha256sum shared-infra-e2e_linux_amd64 >shared-infra-e2e_linux_amd64.sha256
   )
 
   cat >"$fake_bin/gh" <<'EOF'
@@ -143,12 +145,24 @@ EOF
   assert_contains "$(cat "$log_dir/gh.log")" "release download $release_tag" "gh release download"
   assert_contains "$(cat "$log_dir/gh.log")" "bridge-api_linux_amd64" "bridge asset download"
   assert_contains "$(cat "$log_dir/gh.log")" "backoffice_linux_amd64" "backoffice asset download"
+  assert_contains "$(cat "$log_dir/gh.log")" "shared-infra-e2e_linux_amd64" "shared infra asset download"
   assert_contains "$(cat "$log_dir/scp.log")" "StrictHostKeyChecking=yes" "scp strict host key checking"
   assert_contains "$(cat "$log_dir/scp.log")" "bridge-api.env" "bridge env copied"
   assert_contains "$(cat "$log_dir/scp.log")" "backoffice.env" "backoffice env copied"
+  assert_contains "$(cat "$log_dir/scp.log")" "shared-infra-e2e_linux_amd64" "shared infra binary copied"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'bridge_api_wrapper="/usr/local/bin/intents-juno-bridge-api.sh"' "remote bridge wrapper path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'backoffice_wrapper="/usr/local/bin/intents-juno-backoffice.sh"' "remote backoffice wrapper path"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_infra_e2e_bin="$runtime_dir/bin/shared-infra-e2e"' "remote shared infra binary path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if ! id -u intents-juno >/dev/null 2>&1; then' "remote ensures intents-juno user"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$remote_stage_dir/shared-infra-e2e_linux_amd64" "$shared_infra_e2e_bin"' "remote installs shared infra binary"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'JUNO_QUEUE_KAFKA_TLS="$kafka_tls_enabled"' "shared infra validation carries kafka tls setting"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation ensures required kafka topics"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.requests.v1' "shared infra validation includes proof request topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.fulfillments.v1' "shared infra validation includes proof fulfillment topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.failures.v1' "shared infra validation includes proof failure topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposits.event.v1' "shared infra validation includes deposit event topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdrawals.requested.v1' "shared infra validation includes withdrawal topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'ops.alerts.v1' "shared infra validation includes ops alert topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
@@ -212,10 +226,12 @@ EOF
 
   printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
   printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
+  printf 'shared-infra-e2e-binary\n' >"$assets_dir/shared-infra-e2e_linux_amd64"
   (
     cd "$assets_dir"
     sha256sum bridge-api_linux_amd64 >bridge-api_linux_amd64.sha256
     sha256sum backoffice_linux_amd64 >backoffice_linux_amd64.sha256
+    sha256sum shared-infra-e2e_linux_amd64 >shared-infra-e2e_linux_amd64.sha256
   )
 
   cat >"$fake_bin/gh" <<'EOF'
@@ -278,6 +294,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then' "backoffice wrapper guards juno rpc flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_USER:-}" ]]; then' "backoffice wrapper guards juno rpc user flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_PASS:-}" ]]; then' "backoffice wrapper guards juno rpc pass flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation still runs when backoffice juno rpc is omitted"
   rm -rf "$workdir"
 }
 

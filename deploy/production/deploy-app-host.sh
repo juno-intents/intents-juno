@@ -92,12 +92,20 @@ bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_a
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
 backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
+shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
+shared_ipfs_api_url="$(production_json_required "$shared_manifest_path" '.shared_services.ipfs.api_url | select(type == "string" and length > 0)')"
+checkpoint_signature_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.signature_topic | select(type == "string" and length > 0)')"
+checkpoint_package_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.package_topic | select(type == "string" and length > 0)')"
+checkpoint_threshold="$(production_json_required "$shared_manifest_path" '.checkpoint.threshold')"
+checkpoint_operators_csv="$(jq -r '.checkpoint.operators | map(select(type == "string" and length > 0)) | join(",")' "$shared_manifest_path")"
 
 bridge_port="$(production_port_from_listen_addr "$bridge_listen_addr")"
 backoffice_port="$(production_port_from_listen_addr "$backoffice_listen_addr")"
 [[ "$public_scheme" == "https" ]] || die "app deploy manifest must use public_scheme=https"
 production_require_loopback_listen_addr "$bridge_listen_addr" "services.bridge_api.listen_addr"
 production_require_loopback_listen_addr "$backoffice_listen_addr" "services.backoffice.listen_addr"
+[[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || die "shared manifest checkpoint.threshold must be numeric"
+[[ -n "$checkpoint_operators_csv" ]] || die "shared manifest checkpoint.operators must not be empty"
 ssh_target="${app_user}@${app_host}"
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 
@@ -151,9 +159,29 @@ ensure_security_group_ingress() {
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
 production_render_bridge_api_env "$shared_manifest_path" "$app_deploy" "$resolved_env" "$bridge_env"
 production_render_backoffice_env "$shared_manifest_path" "$app_deploy" "$resolved_env" "$backoffice_env"
+shared_postgres_dsn="$(production_env_first_value "$bridge_env" BRIDGE_API_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
+[[ -n "$shared_postgres_dsn" ]] || die "rendered bridge-api env is missing postgres dsn for shared infra validation"
+required_kafka_topics_csv="$(
+  printf '%s\n' \
+    "$checkpoint_signature_topic" \
+    "$checkpoint_package_topic" \
+    "proof.requests.v1" \
+    "proof.fulfillments.v1" \
+    "proof.failures.v1" \
+    "deposits.event.v1" \
+    "withdrawals.requested.v1" \
+    "ops.alerts.v1" \
+    | awk 'NF && !seen[$0]++' \
+    | paste -sd, -
+)"
+kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_services.kafka.tls')"
+if [[ "$kafka_tls_enabled" != "true" ]]; then
+  kafka_tls_enabled="false"
+fi
 
 download_release_asset "bridge-api_linux_amd64"
 download_release_asset "backoffice_linux_amd64"
+download_release_asset "shared-infra-e2e_linux_amd64"
 
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy bridge-api and backoffice to $ssh_target from release $release_tag"
@@ -178,6 +206,7 @@ ssh "${SSH_OPTS[@]}" "$ssh_target" "rm -rf '$remote_stage_dir' && mkdir -p '$rem
 scp "${SSH_OPTS[@]}" \
   "$download_dir/bridge-api_linux_amd64" \
   "$download_dir/backoffice_linux_amd64" \
+  "$download_dir/shared-infra-e2e_linux_amd64" \
   "$bridge_env" \
   "$backoffice_env" \
   "$shared_manifest_path" \
@@ -190,11 +219,20 @@ remote_stage_dir="$remote_stage_dir"
 runtime_dir="$runtime_dir"
 bridge_api_wrapper="/usr/local/bin/intents-juno-bridge-api.sh"
 backoffice_wrapper="/usr/local/bin/intents-juno-backoffice.sh"
+shared_infra_e2e_bin="\$runtime_dir/bin/shared-infra-e2e"
+shared_infra_report="\$runtime_dir/shared-infra-e2e.json"
 bridge_api_env="/etc/intents-juno/bridge-api.env"
 backoffice_env="/etc/intents-juno/backoffice.env"
 public_scheme="$public_scheme"
 bridge_record_name="$bridge_record_name"
 backoffice_record_name="$backoffice_record_name"
+shared_postgres_dsn="$shared_postgres_dsn"
+shared_kafka_brokers="$shared_kafka_brokers"
+shared_required_kafka_topics="$required_kafka_topics_csv"
+shared_ipfs_api_url="$shared_ipfs_api_url"
+shared_checkpoint_operators="$checkpoint_operators_csv"
+shared_checkpoint_threshold="$checkpoint_threshold"
+kafka_tls_enabled="$kafka_tls_enabled"
 
 if ! id -u intents-juno >/dev/null 2>&1; then
   sudo useradd --system --create-home --home-dir /var/lib/intents-juno --shell /usr/sbin/nologin intents-juno
@@ -204,8 +242,20 @@ sudo install -d -m 0755 -o intents-juno -g intents-juno "\$runtime_dir/bin"
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno
 sudo install -m 0755 "\$remote_stage_dir/bridge-api_linux_amd64" "\$runtime_dir/bin/bridge-api"
 sudo install -m 0755 "\$remote_stage_dir/backoffice_linux_amd64" "\$runtime_dir/bin/backoffice"
+sudo install -m 0755 "\$remote_stage_dir/shared-infra-e2e_linux_amd64" "\$shared_infra_e2e_bin"
 sudo install -m 0640 -o root -g intents-juno "\$remote_stage_dir/bridge-api.env" "\$bridge_api_env"
 sudo install -m 0640 -o root -g intents-juno "\$remote_stage_dir/backoffice.env" "\$backoffice_env"
+
+sudo -u intents-juno env \
+  JUNO_QUEUE_KAFKA_TLS="\$kafka_tls_enabled" \
+  "\$shared_infra_e2e_bin" \
+    --postgres-dsn "\$shared_postgres_dsn" \
+    --kafka-brokers "\$shared_kafka_brokers" \
+    --required-kafka-topics "\$shared_required_kafka_topics" \
+    --checkpoint-ipfs-api-url "\$shared_ipfs_api_url" \
+    --checkpoint-operators "\$shared_checkpoint_operators" \
+    --checkpoint-threshold "\$shared_checkpoint_threshold" \
+    --output "\$shared_infra_report"
 
 bridge_wrapper_tmp="\$(mktemp)"
 cat >"\$bridge_wrapper_tmp" <<'WRAP'

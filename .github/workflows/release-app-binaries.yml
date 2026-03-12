@@ -42,11 +42,13 @@ jobs:
 
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/bridge-api_linux_amd64 ./cmd/bridge-api
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/backoffice_linux_amd64 ./cmd/backoffice
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/shared-infra-e2e_linux_amd64 ./cmd/shared-infra-e2e
 
           (
             cd .ci/out
             sha256sum bridge-api_linux_amd64 > bridge-api_linux_amd64.sha256
             sha256sum backoffice_linux_amd64 > backoffice_linux_amd64.sha256
+            sha256sum shared-infra-e2e_linux_amd64 > shared-infra-e2e_linux_amd64.sha256
           )
 
       - name: Resolve release tag
@@ -73,6 +75,8 @@ jobs:
               .ci/out/bridge-api_linux_amd64.sha256 \
               .ci/out/backoffice_linux_amd64 \
               .ci/out/backoffice_linux_amd64.sha256 \
+              .ci/out/shared-infra-e2e_linux_amd64 \
+              .ci/out/shared-infra-e2e_linux_amd64.sha256 \
               --clobber
           else
             gh release create "$tag" \
@@ -80,6 +84,8 @@ jobs:
               .ci/out/bridge-api_linux_amd64.sha256 \
               .ci/out/backoffice_linux_amd64 \
               .ci/out/backoffice_linux_amd64.sha256 \
+              .ci/out/shared-infra-e2e_linux_amd64 \
+              .ci/out/shared-infra-e2e_linux_amd64.sha256 \
               --title "$tag" \
               --notes "Release ${tag}"
           fi
