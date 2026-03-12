@@ -50,6 +50,120 @@ locals {
   shared_proof_service_image_uses_ecr          = local.shared_proof_service_image_override == "" || can(regex("^[0-9]{12}\\.dkr\\.ecr\\.[^.]+\\.amazonaws\\.com/.+", local.shared_proof_service_image_override))
   shared_proof_service_image_requires_ecr_pull = local.shared_proof_service_image_uses_ecr
   shared_proof_service_ecr_repository_arn      = local.shared_proof_service_image_override == "" ? aws_ecr_repository.proof_services.arn : trimspace(var.shared_proof_service_image_ecr_repository_arn)
+  shared_sp1_requestor_address                 = trimspace(var.shared_sp1_requestor_address)
+  shared_proof_runtime_enabled                 = var.shared_ecs_desired_count > 0
+  shared_proof_guest_release_tag               = trimspace(var.shared_bridge_guest_release_tag)
+  shared_deposit_image_id                      = lower(trimspace(var.shared_deposit_image_id))
+  shared_withdraw_image_id                     = lower(trimspace(var.shared_withdraw_image_id))
+  shared_deposit_image_id_hex                  = replace(local.shared_deposit_image_id, "0x", "")
+  shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
+  shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
+  shared_kafka_bootstrap_brokers_tls           = aws_msk_cluster.shared.bootstrap_brokers_tls
+  shared_sp1_projected_pair_cost_wei           = (var.shared_sp1_groth16_base_fee_wei * 2) + (var.shared_sp1_max_price_per_pgu * (var.shared_sp1_deposit_pgu_estimate + var.shared_sp1_withdraw_pgu_estimate))
+  shared_sp1_projected_with_overhead           = floor(((local.shared_sp1_projected_pair_cost_wei * 120) + 99) / 100)
+  shared_sp1_required_credit_buffer            = local.shared_sp1_projected_with_overhead * 3
+  shared_sp1_deposit_program_url               = can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/deposit-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_deposit_image_id_hex) : ""
+  shared_sp1_withdraw_program_url              = can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
+  shared_proof_requestor_command = [
+    "/usr/local/bin/proof-requestor",
+    "--postgres-dsn", local.shared_postgres_dsn,
+    "--store-driver", "postgres",
+    "--owner", "${local.resource_name}-proof-requestor",
+    "--sp1-requestor-address", local.shared_sp1_requestor_address,
+    "--sp1-requestor-key-secret-arn", "PROOF_REQUESTOR_KEY",
+    "--sp1-requestor-key-env", "PROOF_REQUESTOR_KEY",
+    "--secrets-driver", "env",
+    "--chain-id", tostring(var.shared_base_chain_id),
+    "--input-topic", "proof.requests.v1",
+    "--result-topic", "proof.fulfillments.v1",
+    "--failure-topic", "proof.failures.v1",
+    "--max-inflight-requests", "32",
+    "--request-timeout", format("%ds", var.shared_sp1_request_timeout_seconds),
+    "--queue-driver", "kafka",
+    "--queue-brokers", local.shared_kafka_bootstrap_brokers_tls,
+    "--queue-group", "proof-requestor",
+    "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
+  ]
+  shared_proof_funder_command = [
+    "/usr/local/bin/proof-funder",
+    "--postgres-dsn", local.shared_postgres_dsn,
+    "--lease-driver", "postgres",
+    "--owner-id", "${local.resource_name}-proof-funder",
+    "--sp1-requestor-address", local.shared_sp1_requestor_address,
+    "--min-balance-wei", tostring(local.shared_sp1_required_credit_buffer),
+    "--critical-balance-wei", tostring(local.shared_sp1_projected_with_overhead),
+    "--queue-driver", "kafka",
+    "--queue-brokers", local.shared_kafka_bootstrap_brokers_tls,
+    "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
+  ]
+  shared_proof_requestor_environment = [
+    {
+      name  = "JUNO_QUEUE_KAFKA_TLS"
+      value = "true"
+    },
+    {
+      name  = "SP1_NETWORK_RPC_URL"
+      value = trimspace(var.shared_sp1_rpc_url)
+    },
+    {
+      name  = "SP1_MAX_PRICE_PER_PGU"
+      value = tostring(var.shared_sp1_max_price_per_pgu)
+    },
+    {
+      name  = "SP1_MIN_AUCTION_PERIOD"
+      value = tostring(var.shared_sp1_min_auction_period)
+    },
+    {
+      name  = "SP1_AUCTION_TIMEOUT_SECONDS"
+      value = tostring(var.shared_sp1_auction_timeout_seconds)
+    },
+    {
+      name  = "SP1_REQUEST_TIMEOUT_SECONDS"
+      value = tostring(var.shared_sp1_request_timeout_seconds)
+    },
+    {
+      name  = "SP1_DEPOSIT_PROGRAM_URL"
+      value = local.shared_sp1_deposit_program_url
+    },
+    {
+      name  = "SP1_WITHDRAW_PROGRAM_URL"
+      value = local.shared_sp1_withdraw_program_url
+    },
+    {
+      name  = "SP1_DEPOSIT_PROGRAM_VKEY"
+      value = local.shared_deposit_image_id
+    },
+    {
+      name  = "SP1_WITHDRAW_PROGRAM_VKEY"
+      value = local.shared_withdraw_image_id
+    },
+  ]
+  shared_proof_funder_environment = [
+    {
+      name  = "JUNO_QUEUE_KAFKA_TLS"
+      value = "true"
+    },
+    {
+      name  = "SP1_NETWORK_RPC_URL"
+      value = trimspace(var.shared_sp1_rpc_url)
+    },
+    {
+      name  = "SP1_DEPOSIT_PROGRAM_URL"
+      value = local.shared_sp1_deposit_program_url
+    },
+    {
+      name  = "SP1_WITHDRAW_PROGRAM_URL"
+      value = local.shared_sp1_withdraw_program_url
+    },
+    {
+      name  = "SP1_DEPOSIT_PROGRAM_VKEY"
+      value = local.shared_deposit_image_id
+    },
+    {
+      name  = "SP1_WITHDRAW_PROGRAM_VKEY"
+      value = local.shared_withdraw_image_id
+    },
+  ]
 
   ipfs_lb_name            = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
   ipfs_target_group_name  = trim(substr("${local.resource_slug}-ipfs-api", 0, 32), "-")
@@ -465,16 +579,11 @@ resource "aws_ecs_task_definition" "proof_requestor" {
 
   container_definitions = jsonencode([
     {
-      name      = "proof-requestor"
-      image     = local.shared_proof_service_image
-      essential = true
-      command   = ["/usr/local/bin/proof-requestor"]
-      environment = [
-        {
-          name  = "JUNO_QUEUE_KAFKA_TLS"
-          value = "true"
-        }
-      ]
+      name        = "proof-requestor"
+      image       = local.shared_proof_service_image
+      essential   = true
+      command     = local.shared_proof_requestor_command
+      environment = local.shared_proof_requestor_environment
       secrets = [
         {
           name      = "PROOF_REQUESTOR_KEY"
@@ -497,6 +606,22 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       condition     = local.shared_proof_service_image != ""
       error_message = "shared_proof_service_image must resolve to a non-empty value."
     }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""
+      error_message = "shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || var.shared_base_chain_id > 0
+      error_message = "shared_base_chain_id must be > 0 when shared_ecs_desired_count > 0."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
+      error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id))
+      error_message = "shared_withdraw_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+    }
   }
 
   tags = local.common_tags
@@ -512,16 +637,11 @@ resource "aws_ecs_task_definition" "proof_funder" {
 
   container_definitions = jsonencode([
     {
-      name      = "proof-funder"
-      image     = local.shared_proof_service_image
-      essential = true
-      command   = ["/usr/local/bin/proof-funder"]
-      environment = [
-        {
-          name  = "JUNO_QUEUE_KAFKA_TLS"
-          value = "true"
-        }
-      ]
+      name        = "proof-funder"
+      image       = local.shared_proof_service_image
+      essential   = true
+      command     = local.shared_proof_funder_command
+      environment = local.shared_proof_funder_environment
       secrets = [
         {
           name      = "PROOF_FUNDER_KEY"
@@ -543,6 +663,18 @@ resource "aws_ecs_task_definition" "proof_funder" {
     precondition {
       condition     = local.shared_proof_service_image != ""
       error_message = "shared_proof_service_image must resolve to a non-empty value."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""
+      error_message = "shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_deposit_image_id))
+      error_message = "shared_deposit_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
+    }
+    precondition {
+      condition     = !local.shared_proof_runtime_enabled || can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id))
+      error_message = "shared_withdraw_image_id must be a 32-byte hex value when shared_ecs_desired_count > 0."
     }
   }
 

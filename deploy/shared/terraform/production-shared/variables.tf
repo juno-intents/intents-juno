@@ -184,6 +184,84 @@ variable "shared_sp1_funder_secret_arn" {
   type        = string
 }
 
+variable "shared_sp1_requestor_address" {
+  description = "EVM address for the shared SP1 requestor key. Required when shared_ecs_desired_count > 0."
+  type        = string
+  default     = ""
+}
+
+variable "shared_base_chain_id" {
+  description = "Base/EVM chain id used by shared proof-requestor request IDs. Required when shared_ecs_desired_count > 0."
+  type        = number
+  default     = 0
+}
+
+variable "shared_deposit_image_id" {
+  description = "Deposit guest image id (bytes32 hex) used to derive the shared proof-requestor deposit guest program URL. Required when shared_ecs_desired_count > 0."
+  type        = string
+  default     = ""
+}
+
+variable "shared_withdraw_image_id" {
+  description = "Withdraw guest image id (bytes32 hex) used to derive the shared proof-requestor withdraw guest program URL. Required when shared_ecs_desired_count > 0."
+  type        = string
+  default     = ""
+}
+
+variable "shared_bridge_guest_release_tag" {
+  description = "GitHub release tag used to derive shared SP1 guest program URLs from guest image ids."
+  type        = string
+  default     = "bridge-guests-latest"
+}
+
+variable "shared_sp1_rpc_url" {
+  description = "Succinct SP1 network RPC URL used by the shared proof services."
+  type        = string
+  default     = "https://rpc.mainnet.succinct.xyz"
+}
+
+variable "shared_sp1_max_price_per_pgu" {
+  description = "Maximum SP1 auction price per PGU used by the shared proof-requestor and proof-funder credit guardrail."
+  type        = number
+  default     = 2000000000
+}
+
+variable "shared_sp1_deposit_pgu_estimate" {
+  description = "Deposit PGU estimate used to compute shared proof-funder credit guardrails."
+  type        = number
+  default     = 50000000
+}
+
+variable "shared_sp1_withdraw_pgu_estimate" {
+  description = "Withdraw PGU estimate used to compute shared proof-funder credit guardrails."
+  type        = number
+  default     = 50000000
+}
+
+variable "shared_sp1_groth16_base_fee_wei" {
+  description = "Groth16 base fee used to compute shared proof-funder credit guardrails."
+  type        = number
+  default     = 200000000000000000
+}
+
+variable "shared_sp1_min_auction_period" {
+  description = "Minimum SP1 auction period in seconds for the shared proof-requestor."
+  type        = number
+  default     = 85
+}
+
+variable "shared_sp1_auction_timeout_seconds" {
+  description = "SP1 auction timeout in seconds for the shared proof-requestor."
+  type        = number
+  default     = 625
+}
+
+variable "shared_sp1_request_timeout_seconds" {
+  description = "SP1 request timeout in seconds for the shared proof-requestor."
+  type        = number
+  default     = 1500
+}
+
 variable "shared_log_retention_days" {
   description = "CloudWatch log retention in days for shared proof services."
   type        = number
