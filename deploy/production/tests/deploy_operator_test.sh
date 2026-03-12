@@ -164,6 +164,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo cat "$admin_config_path" | jq --slurpfile peer_hosts' "remote deploy reads the protected admin-config through sudo before rewriting the distributed roster"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '.roster.operators |= map(' "remote deploy rewrites admin-config roster endpoints from the staged peer map"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'capture("^(?<scheme>https?)://(?<host>[^:/]+)(?::(?<port>[0-9]+))?$")' "remote deploy preserves grpc endpoint scheme and port while replacing the host"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" ".roster |" "remote deploy canonicalizes the nested roster object when recomputing roster_hash_hex"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"' "remote deploy can patch legacy config hydrator"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -Fq '\''install -m 0600 "$tmp" "$file"'\''' "remote deploy detects legacy hydrator env rewrites"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$hydrator_tmp" "$config_hydrator_script"' "remote deploy replaces the legacy hydrator script before restarting services"

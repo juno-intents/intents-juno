@@ -489,6 +489,7 @@ if [[ -f "$dkg_peer_hosts_file" ]]; then
     )
   ' >"$dkg_roster_tmp"
   jq -c '
+    .roster |
     {
       roster_version: .roster_version,
       operators: (
