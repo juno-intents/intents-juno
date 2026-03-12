@@ -200,7 +200,7 @@ func TestQueueKafkaTLSEnabled(t *testing.T) {
 	}
 }
 
-func TestKafkaTLSConfigUsesTLS12Minimum(t *testing.T) {
+func TestKafkaTLSConfigPinsKafkaTLS12(t *testing.T) {
 	t.Parallel()
 
 	cfg := kafkaTLSConfig()
@@ -209,6 +209,9 @@ func TestKafkaTLSConfigUsesTLS12Minimum(t *testing.T) {
 	}
 	if cfg.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
+	}
+	if cfg.MaxVersion != tls.VersionTLS12 {
+		t.Fatalf("MaxVersion = %d, want %d", cfg.MaxVersion, tls.VersionTLS12)
 	}
 }
 
