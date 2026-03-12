@@ -299,6 +299,7 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.pem" "deploy copies generated dkg server cert"
   assert_contains "$(cat "$log_dir/scp.log")" "dkg-server.key" "deploy copies generated dkg server key"
   assert_contains "$(cat "$log_dir/aws.log")" "describe-instances" "deploy resolves peer hosts through aws"
+  assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "deploy ensures operator grpc mesh ingress"
   assert_contains "$(cat "$log_dir/dkg-peer-hosts.json")" "10.0.0.11" "deploy writes resolved peer hosts"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"

@@ -234,6 +234,33 @@ aws_resolve_private_ip() {
   fi
 }
 
+aws_describe_instance_field() {
+  local profile="$1"
+  local region="$2"
+  local host="$3"
+  local query="$4"
+  local result=""
+
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=ip-address,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+    if [[ -z "$result" || "$result" == "None" ]]; then
+      result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+        --filters "Name=private-ip-address,Values=$host" \
+        --query "$query" --output text 2>/dev/null || true)"
+    fi
+  else
+    result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=dns-name,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$result" && "$result" != "None" ]]; then
+    printf '%s\n' "$result"
+  fi
+}
+
 resolve_dkg_peer_host_from_manifest() {
   local manifest="$1"
   local host profile region
@@ -246,6 +273,26 @@ resolve_dkg_peer_host_from_manifest() {
     return 0
   fi
   printf '%s\n' "$host"
+}
+
+ensure_operator_grpc_mesh_ingress() {
+  local profile="$1"
+  local region="$2"
+  local host="$3"
+  local group_ids group_id
+
+  [[ -n "$profile" && -n "$region" ]] || return 0
+  have_cmd aws || return 0
+
+  group_ids="$(aws_describe_instance_field "$profile" "$region" "$host" 'Reservations[].Instances[].SecurityGroups[].GroupId')"
+  [[ -n "$group_ids" ]] || return 0
+
+  for group_id in $group_ids; do
+    aws --profile "$profile" --region "$region" ec2 authorize-security-group-ingress \
+      --group-id "$group_id" \
+      --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"UserIdGroupPairs\":[{\"GroupId\":\"$group_id\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
+      >/dev/null 2>&1 || true
+  done
 }
 
 generate_dkg_server_tls() {
@@ -546,6 +593,7 @@ production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolve
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
 production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
+ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
 printf '%s\n' "$(production_json_required "$shared_manifest_path" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')" >"$signer_ufvk_file"
 mapfile -t peer_operator_manifests < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
 (( ${#peer_operator_manifests[@]} > 0 )) || die "no peer operator manifests found under $peer_manifests_dir"
