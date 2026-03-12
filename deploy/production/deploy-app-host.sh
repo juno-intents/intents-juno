@@ -95,6 +95,9 @@ backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.back
 
 bridge_port="$(production_port_from_listen_addr "$bridge_listen_addr")"
 backoffice_port="$(production_port_from_listen_addr "$backoffice_listen_addr")"
+[[ "$public_scheme" == "https" ]] || die "app deploy manifest must use public_scheme=https"
+production_require_loopback_listen_addr "$bridge_listen_addr" "services.bridge_api.listen_addr"
+production_require_loopback_listen_addr "$backoffice_listen_addr" "services.backoffice.listen_addr"
 ssh_target="${app_user}@${app_host}"
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 

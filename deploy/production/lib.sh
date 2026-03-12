@@ -212,6 +212,27 @@ production_port_from_listen_addr() {
   printf '%s\n' "$port"
 }
 
+production_host_from_listen_addr() {
+  local listen_addr="$1"
+  local host="${listen_addr%:*}"
+  [[ -n "$host" && "$host" != "$listen_addr" ]] || die "invalid listen address, expected host:port: $listen_addr"
+  printf '%s\n' "$host"
+}
+
+production_require_loopback_listen_addr() {
+  local listen_addr="$1"
+  local field_name="$2"
+  local host
+  host="$(production_host_from_listen_addr "$listen_addr")"
+  case "$host" in
+    127.0.0.1|localhost)
+      ;;
+    *)
+      die "$field_name must bind loopback: $listen_addr"
+      ;;
+  esac
+}
+
 production_public_url() {
   local scheme="$1"
   local host="$2"
@@ -421,9 +442,12 @@ production_render_app_handoff() {
   ops_dns_label="$(jq -r '.ops_public_dns_label // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_host.bridge_public_dns_label is required when inventory.app_host is present"
   [[ -n "$ops_dns_label" ]] || die "app_host.ops_public_dns_label is required when inventory.app_host is present"
-  public_scheme="$(jq -r '.public_scheme // "http"' <<<"$app_json")"
+  public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
+  [[ "$public_scheme" == "https" ]] || die "app_host.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"
   backoffice_listen_addr="$(jq -r '.backoffice_listen // "0.0.0.0:8090"' <<<"$app_json")"
+  production_require_loopback_listen_addr "$bridge_listen_addr" "app_host.bridge_api_listen"
+  production_require_loopback_listen_addr "$backoffice_listen_addr" "app_host.backoffice_listen"
   juno_rpc_url="$(jq -r '.juno_rpc_url // "http://127.0.0.1:18232"' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"

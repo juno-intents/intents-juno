@@ -112,8 +112,55 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_rejects_non_https_manifest() {
+  local workdir shared_manifest app_manifest
+  workdir="$(mktemp -d)"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  jq '
+    .public_scheme = "http"
+    | .services.bridge_api.public_url = "http://bridge.alpha.intents-testing.thejunowallet.com:8082"
+    | .services.backoffice.public_url = "http://ops.alpha.intents-testing.thejunowallet.com:8090"
+  ' "$app_manifest" >"$workdir/app-deploy.http.json"
+
+  if (
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$workdir/app-deploy.http.json" \
+      --dry-run >/dev/null 2>&1
+  ); then
+    printf 'expected canary-app-host.sh to reject non-https manifests\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
+  test_canary_app_host_rejects_non_https_manifest
 }
 
 main "$@"

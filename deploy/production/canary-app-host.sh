@@ -64,12 +64,16 @@ secret_contract_file="$(production_abs_path "$manifest_dir" "$(production_json_r
 app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
 app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
 runtime_dir="$(production_json_required "$app_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
+public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select(type == "string" and length > 0)')"
 bridge_probe_url="$(production_json_required "$app_deploy" '.services.bridge_api.public_url | select(type == "string" and length > 0)')"
 backoffice_probe_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
 
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
 [[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"
+[[ "$public_scheme" == "https" ]] || die "app deploy manifest must use public_scheme=https"
+[[ "$bridge_probe_url" == https://* ]] || die "bridge probe url must use https: $bridge_probe_url"
+[[ "$backoffice_probe_url" == https://* ]] || die "backoffice probe url must use https: $backoffice_probe_url"
 
 input_status="passed"
 input_detail="handoff inputs present"

@@ -9,6 +9,16 @@ source "$SCRIPT_DIR/common_test.sh"
 # shellcheck source=../lib.sh
 source "$REPO_ROOT/deploy/production/lib.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -153,14 +163,108 @@ EOF
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
   assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":80' "security group ingress http"
   assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":443' "security group ingress https"
+  assert_not_contains "$(cat "$log_dir/aws.log")" '"FromPort":8082' "https deploy must not expose bridge app port"
+  assert_not_contains "$(cat "$log_dir/aws.log")" '"FromPort":8090' "https deploy must not expose backoffice app port"
   assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
   rm -rf "$workdir"
 }
 
+test_deploy_app_host_rejects_non_https_manifest() {
+  local workdir shared_manifest app_manifest
+  workdir="$(mktemp -d)"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  jq '.public_scheme = "http"' "$app_manifest" >"$workdir/app-deploy.http.json"
+
+  if (
+    bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
+      --app-deploy "$workdir/app-deploy.http.json" \
+      --release-tag app-binaries-v0.1.0-testnet \
+      --dry-run >/dev/null 2>&1
+  ); then
+    printf 'expected deploy-app-host.sh to reject non-https manifests\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
+test_deploy_app_host_rejects_non_loopback_listeners() {
+  local workdir shared_manifest app_manifest
+  workdir="$(mktemp -d)"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  jq '.services.bridge_api.listen_addr = "0.0.0.0:8082"' "$app_manifest" >"$workdir/app-deploy.nonloopback.json"
+
+  if (
+    bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
+      --app-deploy "$workdir/app-deploy.nonloopback.json" \
+      --release-tag app-binaries-v0.1.0-testnet \
+      --dry-run >/dev/null 2>&1
+  ); then
+    printf 'expected deploy-app-host.sh to reject non-loopback listeners\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_app_host_uses_release_assets_and_updates_remote_runtime
+  test_deploy_app_host_rejects_non_https_manifest
+  test_deploy_app_host_rejects_non_loopback_listeners
 }
 
 main "$@"
