@@ -200,6 +200,41 @@ curl -fsS -X POST "${curl_headers[@]}" -H "Content-Type: application/json" --dat
 REMOTE_EOF
 }
 
+remote_juno_scan_get() {
+  local scan_url="$1"
+  local path="$2"
+  local bearer_token="$3"
+  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$bearer_token" <<'REMOTE_EOF'
+set -euo pipefail
+scan_url="$1"
+path="$2"
+bearer_token="$3"
+
+curl_headers=()
+if [[ -n "$bearer_token" ]]; then
+  curl_headers=(-H "Authorization: Bearer $bearer_token")
+fi
+
+curl -fsS "${curl_headers[@]}" "${scan_url%/}${path}"
+REMOTE_EOF
+}
+
+wait_for_remote_juno_scan_tip() {
+  local scan_url="$1"
+  local bearer_token="$2"
+  local attempt health_response
+  for ((attempt = 1; attempt <= service_active_retries; attempt++)); do
+    health_response="$(remote_juno_scan_get "$scan_url" "/v1/health" "$bearer_token" 2>/dev/null || true)"
+    if [[ -n "$health_response" ]] && jq -e '.status == "ok" and ((.scanned_height | type) == "number")' >/dev/null <<<"$health_response"; then
+      return 0
+    fi
+    if (( attempt < service_active_retries )); then
+      sleep "$service_active_sleep_seconds"
+    fi
+  done
+  die "juno-scan did not report a scanned tip on $operator_host"
+}
+
 sync_remote_scan_wallet() {
   local scan_url="$1"
   local wallet_id="$2"
@@ -209,6 +244,8 @@ sync_remote_scan_wallet() {
 
   wallet_payload="$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$signer_ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')"
   remote_juno_scan_post "$scan_url" "/v1/wallets" "$wallet_payload" "$bearer_token" >/dev/null
+
+  wait_for_remote_juno_scan_tip "$scan_url" "$bearer_token"
 
   next_height=0
   while :; do

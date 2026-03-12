@@ -103,6 +103,8 @@ cat >"\$stdin_file" || true
 cat "\$stdin_file" >>"$log_dir/ssh.stdin"
 if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
 elif [[ "\$*" == *"/backfill"* ]]; then
   printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
 fi
