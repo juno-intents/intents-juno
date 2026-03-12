@@ -149,6 +149,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env' "remote deploy stages the rendered operator env atomically"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf' "remote deploy stages junocashd rpc config"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk file"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl daemon-reload' "remote deploy reloads systemd units before restarting services"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart intents-juno-config-hydrator.service' "remote deploy restarts config hydrator before dependent services"
   assert_line_order "$(cat "$log_dir/ssh.stdin")" 'restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force' 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk after restoring the runtime"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy restarts junocashd before scanner-dependent services"
@@ -247,9 +248,93 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_retries_transient_service_checks() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+if [[ "\$*" == *"systemctl is-active juno-scan"* ]]; then
+  counter_file="$log_dir/juno-scan.counter"
+  count=0
+  if [[ -f "\$counter_file" ]]; then
+    count="\$(cat "\$counter_file")"
+  fi
+  count=\$((count + 1))
+  printf '%s' "\$count" >"\$counter_file"
+  if (( count < 3 )); then
+    printf 'inactive\n'
+    exit 0
+  fi
+  printf 'active\n'
+  exit 0
+fi
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+cat >>"$log_dir/ssh.stdin" || true
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES=5 \
+  PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS=0.01 \
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  if [[ "$(grep -c 'systemctl is-active juno-scan' "$log_dir/ssh.log")" -lt 3 ]]; then
+    printf 'expected deploy-operator.sh to retry juno-scan readiness\n' >&2
+    exit 1
+  fi
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "transient service retries still complete rollout"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_force_reruns_done_operator
+  test_deploy_operator_retries_transient_service_checks
 }
 
 main "$@"

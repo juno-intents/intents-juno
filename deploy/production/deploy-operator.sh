@@ -102,6 +102,8 @@ fi
 ssh_target="${operator_user}@${operator_host}"
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 SCP_OPTS=("${SSH_OPTS[@]}")
+service_active_retries="${PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES:-20}"
+service_active_sleep_seconds="${PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS:-2}"
 
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
@@ -159,6 +161,22 @@ delete_env_key_local() {
   tmp="$(mktemp)"
   awk -v key="$key" 'index($0, key "=") != 1 { print }' "$file" >"$tmp"
   mv "$tmp" "$file"
+}
+
+wait_for_remote_service_active() {
+  local svc="$1"
+  local status=""
+  local attempt
+  for ((attempt = 1; attempt <= service_active_retries; attempt++)); do
+    status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
+    if [[ "$status" == "active" ]]; then
+      return 0
+    fi
+    if (( attempt < service_active_retries )); then
+      sleep "$service_active_sleep_seconds"
+    fi
+  done
+  die "service $svc did not become active on $operator_host (last status: ${status:-unknown})"
 }
 
 derive_base_relayer_allowlist() {
@@ -451,6 +469,7 @@ if [[ -f "$config_hydrator_script" ]] && {
   rm -f "$hydrator_tmp"
 fi
 
+sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service
 sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
 for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
@@ -459,8 +478,7 @@ done
 REMOTE_EOF
 
   for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
-    status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
-    [[ "$status" == "active" ]] || die "service $svc is not active on $operator_host"
+    wait_for_remote_service_active "$svc"
   done
 fi
 
