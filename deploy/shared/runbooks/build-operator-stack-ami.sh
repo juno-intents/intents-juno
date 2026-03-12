@@ -965,6 +965,10 @@ set +a
   echo "checkpoint-signer requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${OPERATOR_ADDRESS:-}" ]] || {
+  echo "checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 [[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
   echo "checkpoint-signer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -984,6 +988,7 @@ case "${kafka_tls_value,,}" in
     ;;
 esac
 signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-local-env}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 case "${signer_driver}" in
   ""|local-env)
     signer_driver="local-env"
@@ -992,10 +997,6 @@ case "${signer_driver}" in
   aws-kms)
     [[ -n "${CHECKPOINT_SIGNER_KMS_KEY_ID:-}" ]] || {
       echo "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
-      exit 1
-    }
-    [[ -n "${OPERATOR_ADDRESS:-}" ]] || {
-      echo "checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
       exit 1
     }
     signer_args=(
@@ -1016,6 +1017,7 @@ exec /usr/local/bin/checkpoint-signer \
   --confirmations 1 \
   --poll-interval 15s \
   --owner-id "$(hostname -s)" \
+  --lease-name "${checkpoint_signer_lease_name}" \
   --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
   --lease-driver postgres \
   --queue-driver kafka \

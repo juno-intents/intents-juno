@@ -209,11 +209,13 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"
   assert_contains "$signer_wrapper" 'CHECKPOINT_SIGNER_DRIVER:-local-env' "checkpoint signer defaults to local-env when signer driver is unset"
   assert_contains "$signer_wrapper" 'checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer requires kms key id for aws-kms mode"
-  assert_contains "$signer_wrapper" 'checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer requires operator address for aws-kms mode"
+  assert_contains "$signer_wrapper" 'checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env' "checkpoint signer requires operator address in operator env"
+  assert_contains "$signer_wrapper" 'checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"' "checkpoint signer derives a per-operator lease name"
   assert_contains "$signer_wrapper" '--signer-driver "${signer_driver}"' "checkpoint signer passes signer driver through to the binary"
   assert_contains "$signer_wrapper" '--kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"' "checkpoint signer passes kms key id through to the binary"
   assert_contains "$signer_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint signer reads base chain id from operator env"
   assert_contains "$signer_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint signer reads bridge address from operator env"
+  assert_contains "$signer_wrapper" '--lease-name "${checkpoint_signer_lease_name}"' "checkpoint signer passes the per-operator lease name through to the binary"
   assert_not_contains "$signer_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint signer does not bake bootstrap bridge address into wrapper"
 
   aggregator_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "EOF_AGG")"
@@ -460,11 +462,13 @@ BASE_CHAIN_ID=84532
 BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=local-env
 CHECKPOINT_SIGNER_PRIVATE_KEY=4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a
+OPERATOR_ADDRESS=0x3333333333333333333333333333333333333333
 JUNO_QUEUE_KAFKA_TLS=true
 EOF
 
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
   assert_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper preserves local-env compatibility"
+  assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x3333333333333333333333333333333333333333' "checkpoint signer wrapper uses a unique lease name per operator"
   assert_not_contains "$(cat "$signer_output_file")" '--kms-key-id' "checkpoint signer wrapper omits kms key id outside aws-kms mode"
 
   cat >"$env_file" <<EOF
@@ -476,6 +480,7 @@ CHECKPOINT_THRESHOLD=1
 BASE_CHAIN_ID=84532
 BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=aws-kms
+OPERATOR_ADDRESS=0x4444444444444444444444444444444444444444
 JUNO_QUEUE_KAFKA_TLS=true
 EOF
 

@@ -522,12 +522,96 @@ withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh
   exit 1
 }
 
-if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_signer_script"; then
-  sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"
+signer_tmp="$(mktemp)"
+cat >"$signer_tmp" <<'EOF_SIGNER_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+set -a
+source /etc/intents-juno/operator-stack.env
+set +a
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_SIGNATURE_TOPIC:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_SIGNATURE_TOPIC in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "checkpoint-signer requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "checkpoint-signer requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${OPERATOR_ADDRESS:-}" ]] || {
+  echo "checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "checkpoint-signer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+  echo "checkpoint-signer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
+  exit 1
 fi
-if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_signer_script"; then
-  sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_signer_script"
-fi
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
+  1|true|yes|on)
+    export JUNO_QUEUE_KAFKA_TLS=true
+    ;;
+  *)
+    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    exit 1
+    ;;
+esac
+signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-local-env}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
+case "${signer_driver}" in
+  ""|local-env)
+    signer_driver="local-env"
+    signer_args=(--signer-driver "${signer_driver}")
+    ;;
+  aws-kms)
+    [[ -n "${CHECKPOINT_SIGNER_KMS_KEY_ID:-}" ]] || {
+      echo "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
+      exit 1
+    }
+    signer_args=(
+      --signer-driver "${signer_driver}"
+      --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"
+    )
+    ;;
+  *)
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+    ;;
+esac
+exec /usr/local/bin/checkpoint-signer \
+  --juno-rpc-url http://127.0.0.1:18232 \
+  "${signer_args[@]}" \
+  --base-chain-id "${BASE_CHAIN_ID}" \
+  --bridge-address "${BRIDGE_ADDRESS}" \
+  --confirmations 1 \
+  --poll-interval 15s \
+  --owner-id "$(hostname -s)" \
+  --lease-name "${checkpoint_signer_lease_name}" \
+  --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
+  --lease-driver postgres \
+  --queue-driver kafka \
+  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-output-topic "$CHECKPOINT_SIGNATURE_TOPIC" \
+  --health-port "${CHECKPOINT_SIGNER_HEALTH_PORT:-18301}"
+EOF_SIGNER_WRAPPER
+sudo install -m 0755 "$signer_tmp" "$checkpoint_signer_script"
+rm -f "$signer_tmp"
 if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_aggregator_script"; then
   sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"
 fi

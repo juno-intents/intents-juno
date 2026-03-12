@@ -127,6 +127,8 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "junocashd.conf" "junocashd config copied"
   assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/known_hosts" "ssh uses known_hosts file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "remote deploy updates checkpoint signer wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"' "remote deploy restores per-operator checkpoint signer lease names"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--lease-name "${checkpoint_signer_lease_name}"' "remote deploy wires the per-operator checkpoint signer lease into the wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "remote deploy updates checkpoint aggregator wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'source "$remote_stage_dir/common.sh"' "remote deploy loads dkg helper functions on the host"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_stage_dir="$(mktemp -d)"' "remote deploy stages dkg-admin in a writable temp dir"
