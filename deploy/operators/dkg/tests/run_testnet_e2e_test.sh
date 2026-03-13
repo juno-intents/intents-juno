@@ -262,61 +262,58 @@ test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_
   assert_not_contains "$script_text" 'die "distributed relayer runtime requires coordinator client key:' "distributed relayer runtime no longer hard-fails when runner coordinator key artifact is absent"
 }
 
-test_distributed_relayer_runtime_stages_coordinator_client_tls_to_operator_host() {
+test_distributed_relayer_runtime_uses_operator_local_coordinator_tls_material() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_cert_file="/tmp/testnet-e2e-coordinator-client.pem"' "distributed relayer runtime defines staged operator-host path for coordinator client cert"
-  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_key_file="/tmp/testnet-e2e-coordinator-client.key"' "distributed relayer runtime defines staged operator-host path for coordinator client key"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_source" \' "distributed relayer runtime stages runner coordinator client cert source"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_file"; then' "distributed relayer runtime copies coordinator client cert to operator-host staging path"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_source" \' "distributed relayer runtime stages runner coordinator client key source"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_file"; then' "distributed relayer runtime copies coordinator client key to operator-host staging path"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_file" \' "distributed relayer runtime passes staged operator-host cert path into tss-host signer rewiring helper"
-  assert_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_file"; then' "distributed relayer runtime passes staged operator-host key path into tss-host signer rewiring helper"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_tss_server_ca_file="/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem"' "distributed relayer runtime uses operator-local coordinator CA path"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_cert_file="/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem"' "distributed relayer runtime uses operator-local coordinator client cert path"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_client_key_file="/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key"' "distributed relayer runtime uses operator-local coordinator client key path"
+  assert_not_contains "$script_text" 'local distributed_withdraw_coordinator_client_cert_file="/tmp/testnet-e2e-coordinator-client.pem"' "distributed relayer runtime no longer stages coordinator client cert into tmp"
+  assert_not_contains "$script_text" 'local distributed_withdraw_coordinator_client_key_file="/tmp/testnet-e2e-coordinator-client.key"' "distributed relayer runtime no longer stages coordinator client key into tmp"
+  assert_not_contains "$script_text" '"$distributed_withdraw_coordinator_client_cert_source" \' "distributed relayer runtime no longer uploads runner coordinator client cert into operator hosts"
+  assert_not_contains "$script_text" '"$distributed_withdraw_coordinator_client_key_source" \' "distributed relayer runtime no longer uploads runner coordinator client key into operator hosts"
 }
 
-test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts() {
+test_distributed_relayer_runtime_uses_release_installed_operator_binaries() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" "stage_remote_runtime_file_atomic() {" "run-testnet-e2e defines helper to stage runtime files via temp-path + atomic move"
-  assert_contains "$script_text" 'local remote_temp_path="${remote_path}.tmp.$$"' "atomic staging helper uses per-process temp path to avoid busy-target writes"
-  assert_contains "$script_text" "stage_remote_relayer_binaries() {" "run-testnet-e2e defines helper to stage relayer binaries to operator hosts"
-  assert_contains "$script_text" "if ! stage_remote_runtime_file_atomic \\" "distributed relayer binary staging hard-fails on per-binary upload/move failure"
-  assert_contains "$script_text" "distributed relayer runtime staging freshly built relayer binaries to operator hosts" "distributed relayer runtime logs binary staging phase"
-  assert_contains "$script_text" 'local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"' "distributed relayer runtime uses staged base-relayer binary path"
-  assert_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"' "distributed relayer runtime uses staged deposit-relayer binary path"
-  assert_contains "$script_text" 'local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"' "distributed relayer runtime uses staged withdraw-coordinator binary path"
-  assert_contains "$script_text" 'local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"' "distributed relayer runtime uses staged withdraw-finalizer binary path"
-  assert_contains "$script_text" 'GO111MODULE=on go build -o "$output_dir/tss-signer" ./cmd/tss-signer' "distributed relayer runtime builds tss-signer for live host patch iteration"
-  assert_contains "$script_text" "for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer tss-signer; do" "distributed relayer runtime stages tss-signer alongside relayer binaries"
+  assert_contains "$script_text" "verify_distributed_release_runtime_on_host() {" "run-testnet-e2e defines release-runtime validation helper"
+  assert_contains "$script_text" "distributed relayer runtime using release-installed operator binaries" "distributed relayer runtime logs release-runtime mode"
+  assert_contains "$script_text" 'local distributed_base_relayer_bin_path="/usr/local/bin/base-relayer"' "distributed relayer runtime uses installed base-relayer binary path"
+  assert_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/usr/local/bin/deposit-relayer"' "distributed relayer runtime uses installed deposit-relayer binary path"
+  assert_contains "$script_text" 'local distributed_withdraw_coordinator_bin_path="/usr/local/bin/withdraw-coordinator"' "distributed relayer runtime uses installed withdraw-coordinator binary path"
+  assert_contains "$script_text" 'local distributed_withdraw_finalizer_bin_path="/usr/local/bin/withdraw-finalizer"' "distributed relayer runtime uses installed withdraw-finalizer binary path"
+  assert_contains "$script_text" 'local distributed_juno_txbuild_bin_path="/usr/local/bin/juno-txbuild"' "distributed relayer runtime uses installed juno-txbuild binary path"
+  assert_contains "$script_text" 'verify_distributed_release_runtime_on_host' "distributed relayer runtime validates installed runtime before launch"
+  assert_not_contains "$script_text" "distributed relayer runtime staging freshly built relayer binaries to operator hosts" "distributed relayer runtime no longer stages freshly built relayer binaries"
+  assert_not_contains "$script_text" 'local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"' "distributed relayer runtime no longer uses tmp staged base-relayer path"
+  assert_not_contains "$script_text" 'local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"' "distributed relayer runtime no longer uses tmp staged deposit-relayer path"
+  assert_not_contains "$script_text" 'local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"' "distributed relayer runtime no longer uses tmp staged withdraw-coordinator path"
+  assert_not_contains "$script_text" 'local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"' "distributed relayer runtime no longer uses tmp staged withdraw-finalizer path"
+  assert_not_contains "$script_text" 'GO111MODULE=on go build -o "$output_dir/tss-signer" ./cmd/tss-signer' "distributed relayer runtime no longer builds fresh tss-signer for live hosts"
+  assert_not_contains "$script_text" "for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer tss-signer; do" "distributed relayer runtime no longer stages relayer or tss binaries to live hosts"
   assert_contains "$script_text" '"$distributed_base_relayer_bin_path"' "base-relayer launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_deposit_relayer_bin_path"' "deposit-relayer launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_withdraw_coordinator_bin_path"' "withdraw-coordinator launch uses staged binary path"
   assert_contains "$script_text" '"$distributed_withdraw_finalizer_bin_path"' "withdraw-finalizer launch uses staged binary path"
 }
 
-test_distributed_relayer_runtime_stages_operator_signer_binary() {
+test_distributed_relayer_runtime_uses_installed_operator_signer_runtime() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local distributed_bridge_operator_signer_bin=""' "distributed relayer runtime tracks staged operator signer path"
-  assert_contains "$script_text" 'distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"' "distributed relayer runtime uses staged juno-txsign path on operator hosts"
-  assert_contains "$script_text" 'stage_remote_runtime_file \' "distributed relayer runtime reuses staged file helper for signer binary copy"
-  assert_contains "$script_text" '"$runner_bridge_operator_signer_bin_path"' "distributed relayer runtime copies resolved signer binary from runner to operators"
-  assert_contains "$script_text" '"$distributed_bridge_operator_signer_bin"' "distributed relayer runtime marks staged signer binary executable on operators"
-  assert_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime defines helper to align tss-host signer/tooling runtime paths"
-  assert_contains "$script_text" 'remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"' "distributed relayer runtime stages a spendauth wrapper with explicit dkg-admin config path"
-  assert_contains "$script_text" 'dkg_admin_workdir="/var/lib/intents-juno/operator-runtime/bundle"' "distributed relayer runtime tracks explicit dkg-admin bundle working directory for spendauth signer wrapper"
-  assert_contains "$script_text" 'cd "$dkg_admin_workdir"' "distributed relayer runtime spendauth signer wrapper sets dkg-admin working directory before exec"
-  assert_contains "$script_text" 'set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"' "distributed relayer runtime points tss-host spendauth signer at the staged wrapper"
-  assert_contains "$script_text" 'set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"' "distributed relayer runtime keeps withdraw extension signer aligned with staged juno-txsign binary"
-  assert_contains "$script_text" 'sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign' "distributed relayer runtime ensures tss-signer can find juno-txsign via PATH-stable location"
-  assert_contains "$script_text" 'remote_tss_signer_bin="/tmp/testnet-e2e-bin/tss-signer"' "distributed relayer runtime expects staged tss-signer on operator host"
-  assert_contains "$script_text" 'sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer' "distributed relayer runtime repoints operator tss-signer to freshly staged binary"
-  assert_contains "$script_text" "sudo systemctl restart tss-host.service" "distributed relayer runtime restarts tss-host after signer rewiring"
-  assert_contains "$script_text" "if ! configure_remote_tss_host_signer_bin \\" "distributed relayer runtime hard-fails when remote tss-host signer rewiring fails"
+  assert_contains "$script_text" 'local distributed_bridge_operator_signer_bin="/var/lib/intents-juno/operator-runtime/bin/juno-txsign"' "distributed relayer runtime uses installed runtime juno-txsign path on operator hosts"
+  assert_contains "$script_text" 'remote_paths=("$base_relayer_bin" "$deposit_relayer_bin" "$withdraw_coordinator_bin" "$withdraw_finalizer_bin" "$juno_txbuild_bin" "$signer_bin" "$tss_server_ca_file" "$tss_client_cert_file" "$tss_client_key_file")' "distributed relayer runtime validates signer and TLS material as part of the installed runtime contract"
+  assert_contains "$script_text" '--tss-client-cert-file "$distributed_withdraw_coordinator_client_cert_file" \' "distributed withdraw coordinator forwards installed TSS client cert path"
+  assert_contains "$script_text" '--tss-client-key-file "$distributed_withdraw_coordinator_client_key_file" \' "distributed withdraw coordinator forwards installed TSS client key path"
+  assert_not_contains "$script_text" "configure_remote_tss_host_signer_bin() {" "distributed relayer runtime no longer rewires tss-host for e2e"
+  assert_not_contains "$script_text" 'remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"' "distributed relayer runtime no longer stages a temporary spendauth wrapper"
+  assert_not_contains "$script_text" 'sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign' "distributed relayer runtime no longer repoints installed juno-txsign symlinks"
+  assert_not_contains "$script_text" 'sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer' "distributed relayer runtime no longer repoints installed tss-signer symlinks"
+  assert_not_contains "$script_text" "sudo systemctl restart tss-host.service" "distributed relayer runtime no longer restarts tss-host as part of the proof harness"
+  assert_not_contains "$script_text" "if ! configure_remote_tss_host_signer_bin \\" "distributed relayer runtime no longer rewires tss-host before launch"
   assert_contains "$script_text" '--extend-signer-bin "$withdraw_coordinator_extend_signer_bin" \' "withdraw coordinator launch uses runtime-selected signer binary path"
 }
 
@@ -1182,9 +1179,9 @@ main() {
   test_distributed_withdraw_coordinator_sets_tss_server_name_override
   test_distributed_relayer_runtime_exports_aws_region_for_s3_artifacts
   test_distributed_relayer_runtime_reuses_operator_tls_when_runner_cert_artifacts_missing
-  test_distributed_relayer_runtime_stages_coordinator_client_tls_to_operator_host
-  test_distributed_relayer_runtime_stages_fresh_binaries_to_operator_hosts
-  test_distributed_relayer_runtime_stages_operator_signer_binary
+  test_distributed_relayer_runtime_uses_operator_local_coordinator_tls_material
+  test_distributed_relayer_runtime_uses_release_installed_operator_binaries
+  test_distributed_relayer_runtime_uses_installed_operator_signer_runtime
   test_distributed_relayer_runtime_persists_base_relayer_auth_token_in_operator_env
   test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
 test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor

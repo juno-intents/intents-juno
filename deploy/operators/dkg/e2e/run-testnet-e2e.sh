@@ -2767,207 +2767,67 @@ postgres_exec_statement() {
   psql "$postgres_dsn" -v ON_ERROR_STOP=1 -qc "$sql" >/dev/null 2>&1
 }
 
-build_local_relayer_binaries() {
-  local output_dir="$1"
-  mkdir -p "$output_dir"
-  (
-    cd "$REPO_ROOT"
-    GO111MODULE=on go build -o "$output_dir/base-relayer" ./cmd/base-relayer
-    GO111MODULE=on go build -o "$output_dir/deposit-relayer" ./cmd/deposit-relayer
-    GO111MODULE=on go build -o "$output_dir/withdraw-coordinator" ./cmd/withdraw-coordinator
-    GO111MODULE=on go build -o "$output_dir/withdraw-finalizer" ./cmd/withdraw-finalizer
-    GO111MODULE=on go build -o "$output_dir/tss-signer" ./cmd/tss-signer
-  )
-}
-
-stage_remote_relayer_binaries() {
+verify_distributed_release_runtime_on_host() {
   local host="$1"
   local ssh_user="$2"
   local ssh_key_file="$3"
-  local local_bin_dir="$4"
-  local remote_bin_dir="$5"
-
-  ssh \
-    -i "$ssh_key_file" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=6 \
-    -o TCPKeepAlive=yes \
-    "$ssh_user@$host" \
-    "mkdir -p '$remote_bin_dir'" >/dev/null
-
-  local bin_name=""
-  for bin_name in base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer tss-signer; do
-    [[ -f "$local_bin_dir/$bin_name" ]] || die "missing local relayer binary for staging: $local_bin_dir/$bin_name"
-    if ! stage_remote_runtime_file_atomic \
-      "$local_bin_dir/$bin_name" \
-      "$host" \
-      "$ssh_user" \
-      "$ssh_key_file" \
-      "$remote_bin_dir/$bin_name"; then
-      return 1
-    fi
-  done
-
-  ssh \
-    -i "$ssh_key_file" \
-    -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o ServerAliveInterval=30 \
-    -o ServerAliveCountMax=6 \
-    -o TCPKeepAlive=yes \
-    "$ssh_user@$host" \
-    "chmod 0755 '$remote_bin_dir/base-relayer' '$remote_bin_dir/deposit-relayer' '$remote_bin_dir/withdraw-coordinator' '$remote_bin_dir/withdraw-finalizer' '$remote_bin_dir/tss-signer'" >/dev/null
-}
-
-configure_remote_tss_host_signer_bin() {
-  local host="$1"
-  local ssh_user="$2"
-  local ssh_key_file="$3"
-  local signer_bin="$4"
-  local coordinator_client_cert_source="${5:-}"
-  local coordinator_client_key_source="${6:-}"
+  local base_relayer_bin="$4"
+  local deposit_relayer_bin="$5"
+  local withdraw_coordinator_bin="$6"
+  local withdraw_finalizer_bin="$7"
+  local juno_txbuild_bin="$8"
+  local signer_bin="$9"
+  local tss_server_ca_file="${10}"
+  local tss_client_cert_file="${11}"
+  local tss_client_key_file="${12}"
 
   local remote_script
 remote_script="$(cat <<'EOF'
 set -euo pipefail
-signer_bin="$1"
-coordinator_client_cert_source="${2:-}"
-coordinator_client_key_source="${3:-}"
+base_relayer_bin="$1"
+deposit_relayer_bin="$2"
+withdraw_coordinator_bin="$3"
+withdraw_finalizer_bin="$4"
+juno_txbuild_bin="$5"
+signer_bin="$6"
+tss_server_ca_file="$7"
+tss_client_cert_file="$8"
+tss_client_key_file="$9"
 stack_env_file="/etc/intents-juno/operator-stack.env"
-remote_signer_wrapper_path="/tmp/testnet-e2e-bin/dkg-admin-spendauth-signer"
-remote_tss_signer_bin="/tmp/testnet-e2e-bin/tss-signer"
-dkg_admin_bin="/var/lib/intents-juno/operator-runtime/bin/dkg-admin"
-dkg_admin_config="/var/lib/intents-juno/operator-runtime/bundle/admin-config.json"
-dkg_admin_workdir="/var/lib/intents-juno/operator-runtime/bundle"
-dkg_admin_tls_dir="$dkg_admin_workdir/tls"
-dkg_admin_client_cert_path="$dkg_admin_tls_dir/coordinator-client.pem"
-dkg_admin_client_key_path="$dkg_admin_tls_dir/coordinator-client.key"
+remote_paths=("$base_relayer_bin" "$deposit_relayer_bin" "$withdraw_coordinator_bin" "$withdraw_finalizer_bin" "$juno_txbuild_bin" "$signer_bin" "$tss_server_ca_file" "$tss_client_cert_file" "$tss_client_key_file")
 
-[[ -x "$signer_bin" ]] || {
-  echo "withdraw coordinator signer binary is missing or not executable: $signer_bin" >&2
-  exit 1
-}
-[[ -x "$dkg_admin_bin" ]] || {
-  echo "tss-host spendauth signer binary is missing or not executable: $dkg_admin_bin" >&2
-  exit 1
-}
-[[ -s "$dkg_admin_config" ]] || {
-  echo "tss-host spendauth signer config is missing: $dkg_admin_config" >&2
-  exit 1
-}
-[[ -d "$dkg_admin_workdir/state" ]] || {
-  echo "tss-host spendauth signer state directory is missing: $dkg_admin_workdir/state" >&2
-  exit 1
-}
-[[ -d "$dkg_admin_tls_dir" ]] || {
-  echo "tss-host spendauth signer TLS directory is missing: $dkg_admin_tls_dir" >&2
-  exit 1
-}
+for remote_bin in "$base_relayer_bin" "$deposit_relayer_bin" "$withdraw_coordinator_bin" "$withdraw_finalizer_bin" "$juno_txbuild_bin" "$signer_bin"; do
+  sudo test -x "$remote_bin" || {
+    echo "distributed relayer runtime missing executable release artifact: $remote_bin" >&2
+    exit 1
+  }
+done
+
+for remote_file in "$tss_server_ca_file" "$tss_client_cert_file" "$tss_client_key_file"; do
+  sudo test -s "$remote_file" || {
+    echo "distributed relayer runtime missing operator-local TLS material: $remote_file" >&2
+    exit 1
+  }
+done
+
 sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
-
-set_env() {
-  local file="$1"
-  local key="$2"
-  local value="$3"
-  local tmp_next
-  tmp_next="$(mktemp)"
-  if ! awk -F= -v key="$key" -v value="$value" '
-    BEGIN { updated = 0 }
-    $1 == key { print key "=" value; updated = 1; next }
-    { print }
-    END {
-      if (updated == 0) {
-        print key "=" value
-      }
-    }
-  ' "$file" >"$tmp_next"; then
-    rm -f "$tmp_next"
-    return 1
-  fi
-  mv "$tmp_next" "$file"
-}
-
-tmp_signer_wrapper="$(mktemp)"
-cat >"$tmp_signer_wrapper" <<EOF_WRAPPER
-#!/usr/bin/env bash
-set -euo pipefail
-cd "$dkg_admin_workdir"
-exec "$dkg_admin_bin" --config "$dkg_admin_config" "\$@"
-EOF_WRAPPER
-chmod 0755 "$tmp_signer_wrapper"
-sudo install -d -m 0755 -o ubuntu -g ubuntu "$(dirname "$remote_signer_wrapper_path")"
-sudo install -m 0755 -o ubuntu -g ubuntu "$tmp_signer_wrapper" "$remote_signer_wrapper_path"
-rm -f "$tmp_signer_wrapper"
-
-tmp_env_file="$(mktemp)"
-sudo cp "$stack_env_file" "$tmp_env_file"
-sudo chown "$(id -u):$(id -g)" "$tmp_env_file"
-chmod 600 "$tmp_env_file"
-set_env "$tmp_env_file" TSS_SPENDAUTH_SIGNER_BIN "$remote_signer_wrapper_path"
-set_env "$tmp_env_file" WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN "$signer_bin"
-sudo install -d -m 0750 -o root -g ubuntu /etc/intents-juno
-sudo install -m 0640 -o root -g ubuntu "$tmp_env_file" "$stack_env_file"
-rm -f "$tmp_env_file"
-
-if [[ -n "$coordinator_client_cert_source" || -n "$coordinator_client_key_source" ]]; then
-  [[ -s "$coordinator_client_cert_source" ]] || {
-    echo "coordinator client cert source is missing: $coordinator_client_cert_source" >&2
-    exit 1
-  }
-  [[ -s "$coordinator_client_key_source" ]] || {
-    echo "coordinator client key source is missing: $coordinator_client_key_source" >&2
-    exit 1
-  }
-
-  tmp_admin_config="$(mktemp)"
-  cp "$dkg_admin_config" "$tmp_admin_config"
-  jq --arg cert "./tls/coordinator-client.pem" \
-     --arg key "./tls/coordinator-client.key" \
-     '.grpc = (.grpc // {}) | .grpc.tls_client_cert_pem_path = $cert | .grpc.tls_client_key_pem_path = $key' \
-     "$tmp_admin_config" >"${tmp_admin_config}.next"
-  mv "${tmp_admin_config}.next" "$tmp_admin_config"
-  sudo install -m 0644 -o ubuntu -g ubuntu "$tmp_admin_config" "$dkg_admin_config"
-  rm -f "$tmp_admin_config"
-
-  sudo install -m 0644 -o ubuntu -g ubuntu "$coordinator_client_cert_source" "$dkg_admin_client_cert_path"
-  sudo install -m 0600 -o ubuntu -g ubuntu "$coordinator_client_key_source" "$dkg_admin_client_key_path"
-fi
-
-sudo ln -sf "$signer_bin" /usr/local/bin/juno-txsign
-[[ -x /usr/local/bin/juno-txsign ]] || {
-  echo "failed to provide /usr/local/bin/juno-txsign for tss-signer ext-prepare" >&2
+sudo grep -q "^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$signer_bin$" "$stack_env_file" || {
+  echo "operator stack env is not pointing withdraw coordinator at installed signer path: $signer_bin" >&2
   exit 1
 }
-[[ -x "$remote_tss_signer_bin" ]] || {
-  echo "distributed relayer runtime requires staged tss-signer binary: $remote_tss_signer_bin" >&2
-  exit 1
-}
-sudo ln -sf "$remote_tss_signer_bin" /usr/local/bin/tss-signer
-[[ -x /usr/local/bin/tss-signer ]] || {
-  echo "failed to provide /usr/local/bin/tss-signer for tss-host runtime" >&2
+sudo grep -q "^TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin$" "$stack_env_file" || {
+  echo "operator stack env is not pointing tss-host at installed dkg-admin signer runtime" >&2
   exit 1
 }
 
-sudo systemctl daemon-reload
-sudo systemctl restart dkg-admin-serve.service
-sleep 2
-if ! sudo systemctl is-active --quiet dkg-admin-serve.service; then
-  echo "dkg-admin-serve failed to start" >&2
-  sudo journalctl -u dkg-admin-serve.service --no-pager -n 20 || true
+signer_help="$(sudo "$signer_bin" --help 2>&1 || true)"
+grep -qE '(^|[[:space:]])sign-digest([[:space:]]|$)' <<<"$signer_help" || {
+  echo "installed signer runtime does not support sign-digest: $signer_bin" >&2
   exit 1
-fi
-
-sudo systemctl restart tss-host.service
-if ! sudo systemctl is-active --quiet tss-host.service; then
-  echo "tss-host failed to restart after signer update" >&2
-  sudo systemctl status tss-host.service --no-pager || true
-  exit 1
-fi
+}
 EOF
 )"
 
@@ -2979,7 +2839,7 @@ EOF
     -o ServerAliveCountMax=6 \
     -o TCPKeepAlive=yes \
     "$ssh_user@$host" \
-    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$signer_bin") $(printf '%q' "$coordinator_client_cert_source") $(printf '%q' "$coordinator_client_key_source")"
+    "bash -lc $(printf '%q' "$remote_script") -- $(printf '%q' "$base_relayer_bin") $(printf '%q' "$deposit_relayer_bin") $(printf '%q' "$withdraw_coordinator_bin") $(printf '%q' "$withdraw_finalizer_bin") $(printf '%q' "$juno_txbuild_bin") $(printf '%q' "$signer_bin") $(printf '%q' "$tss_server_ca_file") $(printf '%q' "$tss_client_cert_file") $(printf '%q' "$tss_client_key_file")"
 }
 
 configure_remote_operator_checkpoint_services_for_bridge() {
@@ -6580,27 +6440,24 @@ command_run() {
   local deposit_relayer_host=""
   local withdraw_coordinator_host=""
   local withdraw_finalizer_host=""
-  local distributed_withdraw_coordinator_tss_server_ca_file="$withdraw_coordinator_tss_server_ca_file"
+  local distributed_withdraw_coordinator_tss_server_ca_file="/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem"
   local distributed_withdraw_coordinator_tss_server_name=""
   local distributed_withdraw_coordinator_tss_url="$withdraw_coordinator_tss_url"
   local distributed_withdraw_coordinator_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_withdraw_finalizer_juno_scan_url="$sp1_witness_juno_scan_url"
   local distributed_withdraw_finalizer_juno_rpc_url="$sp1_witness_juno_rpc_url"
   local distributed_relayer_aws_region=""
-  local distributed_relayer_bin_dir="/tmp/testnet-e2e-bin"
-  local distributed_base_relayer_bin_path="/tmp/testnet-e2e-bin/base-relayer"
-  local distributed_deposit_relayer_bin_path="/tmp/testnet-e2e-bin/deposit-relayer"
-  local distributed_withdraw_coordinator_bin_path="/tmp/testnet-e2e-bin/withdraw-coordinator"
-  local distributed_withdraw_finalizer_bin_path="/tmp/testnet-e2e-bin/withdraw-finalizer"
+  local distributed_base_relayer_bin_path="/usr/local/bin/base-relayer"
+  local distributed_deposit_relayer_bin_path="/usr/local/bin/deposit-relayer"
+  local distributed_withdraw_coordinator_bin_path="/usr/local/bin/withdraw-coordinator"
+  local distributed_withdraw_finalizer_bin_path="/usr/local/bin/withdraw-finalizer"
   # Health ports for distributed relayer services (on the operator host).
   local distributed_base_relayer_health_port=18301
   local distributed_deposit_relayer_health_port=18302
   local distributed_withdraw_coordinator_health_port=18303
   local distributed_withdraw_finalizer_health_port=18304
-  local distributed_juno_txbuild_bin_path="/tmp/testnet-e2e-bin/juno-txbuild"
-  local distributed_bridge_operator_signer_bin=""
-  local runner_bridge_operator_signer_bin_path=""
-  local runner_distributed_relayer_bin_dir="$workdir/bin/distributed-relayer"
+  local distributed_juno_txbuild_bin_path="/usr/local/bin/juno-txbuild"
+  local distributed_bridge_operator_signer_bin="/var/lib/intents-juno/operator-runtime/bin/juno-txsign"
   local withdraw_coordinator_extend_signer_bin=""
   : >"$base_relayer_log"
   : >"$deposit_relayer_log"
@@ -6650,21 +6507,19 @@ command_run() {
     distributed_withdraw_coordinator_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_scan_url="http://127.0.0.1:8080"
     distributed_withdraw_finalizer_juno_rpc_url="http://127.0.0.1:18232"
-    distributed_withdraw_coordinator_tss_server_ca_file="/tmp/testnet-e2e-witness-tss-ca.pem"
     distributed_withdraw_coordinator_client_cert_source=""
     distributed_withdraw_coordinator_client_key_source=""
-    local distributed_withdraw_coordinator_client_cert_file="/tmp/testnet-e2e-coordinator-client.pem"
-    local distributed_withdraw_coordinator_client_key_file="/tmp/testnet-e2e-coordinator-client.key"
+    local distributed_withdraw_coordinator_client_cert_file="/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem"
+    local distributed_withdraw_coordinator_client_key_file="/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key"
     distributed_relayer_aws_region="$(trim "${AWS_REGION:-${AWS_DEFAULT_REGION:-}}")"
-    distributed_bridge_operator_signer_bin="$distributed_relayer_bin_dir/juno-txsign"
     [[ -n "$distributed_relayer_aws_region" ]] || \
       die "distributed relayer runtime requires AWS_REGION or AWS_DEFAULT_REGION for s3 withdraw artifacts"
 
     local dkg_coordinator_workdir
     dkg_coordinator_workdir="$(jq -r '.coordinator_workdir // empty' "$dkg_summary" 2>/dev/null || true)"
     if [[ -n "$dkg_coordinator_workdir" ]]; then
-      distributed_withdraw_coordinator_client_cert_source="$dkg_coordinator_workdir/tls/coordinator-client.pem"
-      distributed_withdraw_coordinator_client_key_source="$dkg_coordinator_workdir/tls/coordinator-client.key"
+      distributed_withdraw_coordinator_client_cert_source=""
+      distributed_withdraw_coordinator_client_key_source=""
     fi
     if [[ -n "$distributed_withdraw_coordinator_client_cert_source" || -n "$distributed_withdraw_coordinator_client_key_source" ]]; then
       if [[ ! -s "$distributed_withdraw_coordinator_client_cert_source" || ! -s "$distributed_withdraw_coordinator_client_key_source" ]]; then
@@ -6773,31 +6628,22 @@ command_run() {
     done
 
     if (( relayer_status == 0 )); then
-      if ! stage_remote_runtime_file \
-        "$withdraw_coordinator_tss_server_ca_file" \
-        "$withdraw_coordinator_host" \
-        "$relayer_runtime_operator_ssh_user" \
-        "$relayer_runtime_operator_ssh_key_file" \
-        "$distributed_withdraw_coordinator_tss_server_ca_file"; then
-        relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      log "distributed relayer runtime staging freshly built relayer binaries to operator hosts"
-      if ! build_local_relayer_binaries "$runner_distributed_relayer_bin_dir"; then
-        log "failed to build local relayer binaries for distributed runtime staging"
-        relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
+      log "distributed relayer runtime using release-installed operator binaries"
       for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
-        if ! stage_remote_relayer_binaries \
+        if ! verify_distributed_release_runtime_on_host \
           "$relayer_cleanup_host" \
           "$relayer_runtime_operator_ssh_user" \
           "$relayer_runtime_operator_ssh_key_file" \
-          "$runner_distributed_relayer_bin_dir" \
-          "$distributed_relayer_bin_dir"; then
-          log "failed to stage relayer binaries onto host=$relayer_cleanup_host"
+          "$distributed_base_relayer_bin_path" \
+          "$distributed_deposit_relayer_bin_path" \
+          "$distributed_withdraw_coordinator_bin_path" \
+          "$distributed_withdraw_finalizer_bin_path" \
+          "$distributed_juno_txbuild_bin_path" \
+          "$distributed_bridge_operator_signer_bin" \
+          "$distributed_withdraw_coordinator_tss_server_ca_file" \
+          "$distributed_withdraw_coordinator_client_cert_file" \
+          "$distributed_withdraw_coordinator_client_key_file"; then
+          log "distributed relayer runtime release validation failed host=$relayer_cleanup_host"
           relayer_status=1
           break
         fi
@@ -6806,115 +6652,9 @@ command_run() {
     if (( relayer_status == 0 )); then
       log "ensuring bridge operator signer for withdraw coordinator relayer flow"
       ensure_bridge_operator_signer_ready
-      if [[ "$bridge_operator_signer_bin" == */* ]]; then
-        runner_bridge_operator_signer_bin_path="$bridge_operator_signer_bin"
-      else
-        runner_bridge_operator_signer_bin_path="$(command -v "$bridge_operator_signer_bin" 2>/dev/null || true)"
-      fi
-      if [[ -z "$runner_bridge_operator_signer_bin_path" || ! -x "$runner_bridge_operator_signer_bin_path" ]]; then
-        log "resolved bridge operator signer binary is missing or not executable path=$runner_bridge_operator_signer_bin_path"
+      if [[ -z "$distributed_bridge_operator_signer_bin" || ! "$distributed_bridge_operator_signer_bin" =~ ^/ ]]; then
+        log "distributed relayer runtime signer path is invalid path=$distributed_bridge_operator_signer_bin"
         relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      for relayer_cleanup_host in "${relayer_cleanup_hosts[@]}"; do
-        if ! stage_remote_runtime_file_atomic \
-          "$runner_bridge_operator_signer_bin_path" \
-          "$relayer_cleanup_host" \
-          "$relayer_runtime_operator_ssh_user" \
-          "$relayer_runtime_operator_ssh_key_file" \
-          "$distributed_bridge_operator_signer_bin"; then
-          log "failed to stage bridge operator signer binary onto host=$relayer_cleanup_host"
-          relayer_status=1
-          break
-        fi
-        if ! ssh \
-          -i "$relayer_runtime_operator_ssh_key_file" \
-          -o StrictHostKeyChecking=no \
-          -o UserKnownHostsFile=/dev/null \
-          -o ServerAliveInterval=30 \
-          -o ServerAliveCountMax=6 \
-          -o TCPKeepAlive=yes \
-          "$relayer_runtime_operator_ssh_user@$relayer_cleanup_host" \
-          "chmod 0755 '$distributed_bridge_operator_signer_bin'" >/dev/null; then
-          log "failed to mark staged bridge operator signer binary executable on host=$relayer_cleanup_host"
-          relayer_status=1
-          break
-        fi
-      done
-    fi
-    if (( relayer_status == 0 )); then
-      if [[ -n "$distributed_withdraw_coordinator_client_cert_source" ]]; then
-        if ! stage_remote_runtime_file \
-          "$distributed_withdraw_coordinator_client_cert_source" \
-          "$withdraw_coordinator_host" \
-          "$relayer_runtime_operator_ssh_user" \
-          "$relayer_runtime_operator_ssh_key_file" \
-          "$distributed_withdraw_coordinator_client_cert_file"; then
-          relayer_status=1
-        fi
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      if [[ -n "$distributed_withdraw_coordinator_client_key_source" ]]; then
-        if ! stage_remote_runtime_file \
-          "$distributed_withdraw_coordinator_client_key_source" \
-          "$withdraw_coordinator_host" \
-          "$relayer_runtime_operator_ssh_user" \
-          "$relayer_runtime_operator_ssh_key_file" \
-          "$distributed_withdraw_coordinator_client_key_file"; then
-          relayer_status=1
-        fi
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      if ! configure_remote_tss_host_signer_bin \
-        "$withdraw_coordinator_host" \
-        "$relayer_runtime_operator_ssh_user" \
-        "$relayer_runtime_operator_ssh_key_file" \
-        "$distributed_bridge_operator_signer_bin" \
-        "$distributed_withdraw_coordinator_client_cert_file" \
-        "$distributed_withdraw_coordinator_client_key_file"; then
-        log "failed to update tss-host signer binary on withdraw-coordinator host=$withdraw_coordinator_host"
-        relayer_status=1
-      fi
-    fi
-    if (( relayer_status == 0 )); then
-      log "ensuring juno-txbuild binary for withdraw-coordinator"
-      local runner_juno_txbuild_bin
-      runner_juno_txbuild_bin="$(ensure_juno_txbuild_binary "$JUNO_TXBUILD_VERSION_DEFAULT" "$runner_distributed_relayer_bin_dir")"
-      if [[ -z "$runner_juno_txbuild_bin" || ! -x "$runner_juno_txbuild_bin" ]]; then
-        log "juno-txbuild binary download failed"
-        relayer_status=1
-      else
-        if ! stage_remote_runtime_file_atomic \
-          "$runner_juno_txbuild_bin" \
-          "$withdraw_coordinator_host" \
-          "$relayer_runtime_operator_ssh_user" \
-          "$relayer_runtime_operator_ssh_key_file" \
-          "$distributed_juno_txbuild_bin_path"; then
-          log "failed to stage juno-txbuild onto withdraw-coordinator host=$withdraw_coordinator_host"
-          relayer_status=1
-        else
-          ssh \
-            -i "$relayer_runtime_operator_ssh_key_file" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=6 \
-            -o TCPKeepAlive=yes \
-            "$relayer_runtime_operator_ssh_user@$withdraw_coordinator_host" \
-            "chmod 0755 '$distributed_juno_txbuild_bin_path'" >/dev/null
-          ssh \
-            -i "$relayer_runtime_operator_ssh_key_file" \
-            -o StrictHostKeyChecking=no \
-            -o UserKnownHostsFile=/dev/null \
-            -o ServerAliveInterval=30 \
-            -o ServerAliveCountMax=6 \
-            -o TCPKeepAlive=yes \
-            "$relayer_runtime_operator_ssh_user@$withdraw_coordinator_host" \
-            "sudo ln -sf '$distributed_juno_txbuild_bin_path' /usr/local/bin/juno-txbuild"
-        fi
       fi
     fi
   else
@@ -6946,7 +6686,8 @@ command_run() {
           "$distributed_base_relayer_bin_path" \
           --rpc-url "$base_rpc_url" \
           --chain-id "$base_chain_id" \
-        --listen "0.0.0.0:${base_relayer_port}"
+          --listen "0.0.0.0:${base_relayer_port}" \
+          --min-ready-balance-wei "${BASE_RELAYER_MIN_READY_BALANCE_WEI:-250000000000000}"
     )"
   else
     (
@@ -7047,6 +6788,8 @@ command_run() {
           --tss-url "$distributed_withdraw_coordinator_tss_url" \
           --tss-server-name "$distributed_withdraw_coordinator_tss_server_name" \
           --tss-server-ca-file "$distributed_withdraw_coordinator_tss_server_ca_file" \
+          --tss-client-cert-file "$distributed_withdraw_coordinator_client_cert_file" \
+          --tss-client-key-file "$distributed_withdraw_coordinator_client_key_file" \
           --base-chain-id "$base_chain_id" \
           --bridge-address "$deployed_bridge_address" \
           --base-relayer-url "$base_relayer_url" \
