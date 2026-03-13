@@ -2153,7 +2153,7 @@ stack_env_file="/etc/intents-juno/operator-stack.env"
   echo "operator stack env key must not be empty" >&2
   exit 1
 }
-[[ -s "$stack_env_file" ]] || {
+sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
@@ -2476,7 +2476,7 @@ dkg_admin_client_key_path="$dkg_admin_tls_dir/coordinator-client.key"
   echo "tss-host spendauth signer TLS directory is missing: $dkg_admin_tls_dir" >&2
   exit 1
 }
-[[ -s "$stack_env_file" ]] || {
+sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
@@ -2658,11 +2658,11 @@ if [[ -f "$hydrator_env_file" ]]; then
   fi
 fi
 
-[[ -s "$stack_env_file" ]] || {
+sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
-[[ -s "$config_json_path" ]] || {
+sudo test -s "$config_json_path" || {
   echo "operator stack config json is missing: $config_json_path" >&2
   exit 1
 }
@@ -2684,12 +2684,12 @@ resolve_aws_region() {
     return 0
   fi
 
-  candidate="$(normalize_region "$(awk -F= '/^AWS_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
+  candidate="$(normalize_region "$(sudo awk -F= '/^AWS_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
   if [[ -n "$candidate" ]]; then
     printf '%s' "$candidate"
     return 0
   fi
-  candidate="$(normalize_region "$(awk -F= '/^AWS_DEFAULT_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
+  candidate="$(normalize_region "$(sudo awk -F= '/^AWS_DEFAULT_REGION=/{print substr($0, index($0, "=")+1); exit}' "$stack_env_file" 2>/dev/null || true)")"
   if [[ -n "$candidate" ]]; then
     printf '%s' "$candidate"
     return 0
