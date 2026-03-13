@@ -693,7 +693,21 @@ production_render_app_handoff() {
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
-  operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
+  operator_endpoints_json="$(jq -c '
+    .app_host.operator_endpoints as $configured
+    | if ($configured // [] | length) > 0 then
+        $configured
+      else
+        [
+          .operators[]
+          | (.operator_address // .operator_id // empty) as $address
+          | (.public_endpoint // .operator_host // empty) as $endpoint_host
+          | select(($address | type) == "string" and ($address | length) > 0)
+          | select(($endpoint_host | type) == "string" and ($endpoint_host | length) > 0)
+          | "\($address)=\($endpoint_host):18443"
+        ]
+      end
+  ' "$inventory")"
 
   known_hosts_src="$(jq -r '.known_hosts_file // empty' <<<"$app_json")"
   [[ -n "$known_hosts_src" ]] || die "app_host.known_hosts_file is required when inventory.app_host is present"

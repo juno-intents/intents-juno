@@ -165,6 +165,7 @@ EOF
   assert_eq "$(jq -r '.governance.timelock.min_delay_seconds' "$shared_manifest")" "0" "timelock delay"
 
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
   assert_file_exists "$handoff_dir/operator-deploy.json" "operator manifest"
   assert_file_exists "$handoff_dir/operator-secrets.env" "secret contract copy"
@@ -173,6 +174,7 @@ EOF
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "handoff signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
+  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff derives operator endpoint probes"
   rm -rf "$workdir"
 }
 
@@ -1068,6 +1070,7 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WJUNO_ADDRESS=0x3333333333333333333333333333333333333333" "bridge env wjuno"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env juno rpc user"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"

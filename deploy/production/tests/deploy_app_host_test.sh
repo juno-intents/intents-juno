@@ -184,6 +184,7 @@ EOF
   assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
   rm -rf "$workdir"
 }
