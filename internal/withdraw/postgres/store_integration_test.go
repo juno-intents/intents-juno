@@ -130,6 +130,22 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
 		t.Fatalf("MarkBatchSigning: %v", err)
 	}
+	if err := s.ResetBatchSigning(ctx, batchID, []byte(`{"v":"replanned"}`)); err != nil {
+		t.Fatalf("ResetBatchSigning: %v", err)
+	}
+	bReset, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch after ResetBatchSigning: %v", err)
+	}
+	if bReset.State != withdraw.BatchStatePlanned {
+		t.Fatalf("state after ResetBatchSigning: got %s want %s", bReset.State, withdraw.BatchStatePlanned)
+	}
+	if got, want := string(bReset.TxPlan), `{"v":"replanned"}`; got != want {
+		t.Fatalf("tx plan after ResetBatchSigning: got %q want %q", got, want)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchSigning after ResetBatchSigning: %v", err)
+	}
 	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
 		t.Fatalf("SetBatchSigned: %v", err)
 	}

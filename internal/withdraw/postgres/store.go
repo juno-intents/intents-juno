@@ -404,6 +404,33 @@ func (s *Store) MarkBatchSigning(ctx context.Context, batchID [32]byte) error {
 	return s.updateState(ctx, batchID, withdraw.BatchStatePlanned, withdraw.BatchStateSigning)
 }
 
+func (s *Store) ResetBatchSigning(ctx context.Context, batchID [32]byte, txPlan []byte) error {
+	if len(txPlan) == 0 {
+		return withdraw.ErrInvalidConfig
+	}
+
+	state, _, _, err := s.getBatchStateFields(ctx, batchID)
+	if err != nil {
+		return err
+	}
+	if state != withdraw.BatchStateSigning {
+		return withdraw.ErrInvalidTransition
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, base_tx_hash = NULL, next_rebroadcast_at = NULL, updated_at = now()
+		WHERE batch_id = $1 AND state = $4
+	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateSigning))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: reset signing: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
 func (s *Store) SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error {
 	if len(signedTx) == 0 {
 		return withdraw.ErrInvalidConfig

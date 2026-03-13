@@ -1,6 +1,7 @@
 package withdrawcoordinator
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -8,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/juno-intents/intents-juno/internal/batching"
@@ -336,6 +338,10 @@ func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[
 }
 
 func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
+	return c.signBatchWithRetry(ctx, batchID, true)
+}
+
+func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, allowReplan bool) error {
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -351,6 +357,15 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 	c.log.Info("batch signing", "batch_id", hex.EncodeToString(batchID[:]))
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
+		if allowReplan {
+			replanned, replanErr := c.maybeReplanBatchAfterSigningFailure(ctx, b, err)
+			if replanErr != nil {
+				return replanErr
+			}
+			if replanned {
+				return c.signBatchWithRetry(ctx, batchID, false)
+			}
+		}
 		if dlqErr := c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error()); dlqErr != nil {
 			return dlqErr
 		}
@@ -364,6 +379,51 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 	}
 	c.log.Info("batch signed", "batch_id", hex.EncodeToString(batchID[:]), "raw_tx_len", len(rawTx))
 	return nil
+}
+
+func (c *Coordinator) maybeReplanBatchAfterSigningFailure(ctx context.Context, b withdraw.Batch, signErr error) (bool, error) {
+	if !isStaleSigningTxPlanError(signErr) {
+		return false, nil
+	}
+
+	withdrawals := make([]withdraw.Withdrawal, 0, len(b.WithdrawalIDs))
+	for _, wid := range b.WithdrawalIDs {
+		w, err := c.store.GetWithdrawal(ctx, wid)
+		if err != nil {
+			return false, err
+		}
+		withdrawals = append(withdrawals, w)
+	}
+
+	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(plan, b.TxPlan) {
+		return false, nil
+	}
+	if err := c.store.ResetBatchSigning(ctx, b.ID, plan); err != nil {
+		if !errors.Is(err, withdraw.ErrInvalidTransition) {
+			return false, err
+		}
+		b2, err2 := c.store.GetBatch(ctx, b.ID)
+		if err2 != nil {
+			return false, err2
+		}
+		if b2.State != withdraw.BatchStateSigning {
+			return false, nil
+		}
+		return false, err
+	}
+	c.log.Info(
+		"batch replanned after signing failure",
+		"batch_id", hex.EncodeToString(b.ID[:]),
+		"error", signErr.Error(),
+	)
+	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) error {
@@ -619,6 +679,13 @@ func signingSessionIDV1(batchID [32]byte, txPlan []byte) [32]byte {
 	var out [32]byte
 	copy(out[:], h.Sum(nil))
 	return out
+}
+
+func isStaleSigningTxPlanError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "note_decrypt_failed")
 }
 
 func (c *Coordinator) rebroadcastBackoff(attempts uint32) time.Duration {

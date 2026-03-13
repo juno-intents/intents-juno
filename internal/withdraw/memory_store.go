@@ -267,6 +267,31 @@ func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, signed
 	return nil
 }
 
+func (s *MemoryStore) ResetBatchSigning(_ context.Context, batchID [32]byte, txPlan []byte) error {
+	if len(txPlan) == 0 {
+		return ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, ok := s.batches[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if b.State != BatchStateSigning {
+		return ErrInvalidTransition
+	}
+
+	b.State = BatchStatePlanned
+	b.TxPlan = append([]byte(nil), txPlan...)
+	b.SignedTx = nil
+	b.JunoTxID = ""
+	b.NextRebroadcastAt = time.Time{}
+	s.batches[batchID] = b
+	return nil
+}
+
 func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, txid string) error {
 	if txid == "" {
 		return ErrInvalidConfig

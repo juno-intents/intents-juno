@@ -26,6 +26,23 @@ func (p *stubPlanner) Plan(_ context.Context, batchID [32]byte, withdrawals []wi
 	return []byte(`{"v":1}`), nil
 }
 
+type sequencePlanner struct {
+	calls int
+	plans [][]byte
+}
+
+func (p *sequencePlanner) Plan(_ context.Context, _ [32]byte, _ []withdraw.Withdrawal) ([]byte, error) {
+	if len(p.plans) == 0 {
+		return nil, errors.New("no plans configured")
+	}
+	p.calls++
+	idx := p.calls - 1
+	if idx >= len(p.plans) {
+		idx = len(p.plans) - 1
+	}
+	return append([]byte(nil), p.plans[idx]...), nil
+}
+
 type stubSigner struct {
 	calls int
 	ids   [][32]byte
@@ -36,6 +53,24 @@ func (s *stubSigner) Sign(_ context.Context, signingSessionID [32]byte, txPlan [
 	s.calls++
 	s.ids = append(s.ids, signingSessionID)
 	return []byte{0x01}, nil
+}
+
+type txPlanAwareSigner struct {
+	calls int
+	plans []string
+}
+
+func (s *txPlanAwareSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
+	s.calls++
+	s.plans = append(s.plans, string(txPlan))
+	switch string(txPlan) {
+	case `{"v":1}`:
+		return nil, errors.New(`sign txplan: tsssigner: ext-prepare failed: exit status 1: {"error":{"code":"prepare_failed","message":"txsign: note_decrypt_failed"},"status":"err","version":"v1"}`)
+	case `{"v":2}`:
+		return []byte{0x02}, nil
+	default:
+		return nil, errors.New("unexpected tx plan")
+	}
 }
 
 type stubBroadcaster struct {
@@ -377,6 +412,83 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	}
 	if broadcaster.calls != 1 {
 		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	}
+}
+
+func TestCoordinator_ReplansWhenSigningPlanTurnsStale(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x11), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x7a)
+	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+
+	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":2}`)}}
+	signer := &txPlanAwareSigner{}
+	broadcaster := &stubBroadcaster{}
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending}}
+	dlqStore := dlq.NewMemoryStore(nil)
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		DLQStore: dlqStore,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if planner.calls != 1 {
+		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	}
+	if signer.calls != 2 {
+		t.Fatalf("signer calls: got %d want 2", signer.calls)
+	}
+	if got, want := signer.plans, []string{`{"v":1}`, `{"v":2}`}; !bytes.Equal([]byte(strings.Join(got, ",")), []byte(strings.Join(want, ","))) {
+		t.Fatalf("signer plans: got %v want %v", got, want)
+	}
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateConfirmed {
+		t.Fatalf("expected batch to recover to confirmed, got %s", b.State)
+	}
+	if got, want := string(b.TxPlan), `{"v":2}`; got != want {
+		t.Fatalf("tx plan after recovery: got %q want %q", got, want)
+	}
+
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.WithdrawalBatches != 0 {
+		t.Fatalf("expected no withdrawal DLQ entries, got %d", counts.WithdrawalBatches)
 	}
 }
 

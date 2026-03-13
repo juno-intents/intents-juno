@@ -109,6 +109,7 @@ type Store interface {
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
 
 	MarkBatchSigning(ctx context.Context, batchID [32]byte) error
+	ResetBatchSigning(ctx context.Context, batchID [32]byte, txPlan []byte) error
 	SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error
 	SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error
 	ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error
