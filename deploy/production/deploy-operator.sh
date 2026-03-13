@@ -1050,6 +1050,15 @@ cat >"$withdraw_tmp" <<'EOF_WITHDRAW_COORDINATOR_WRAPPER'
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
 
 dev_mode_enabled() {
   case "${JUNO_DEV_MODE:-false}" in
@@ -1199,6 +1208,143 @@ exec /usr/local/bin/withdraw-coordinator \
 EOF_WITHDRAW_COORDINATOR_WRAPPER
 sudo install -m 0755 "$withdraw_tmp" "$withdraw_coordinator_script"
 rm -f "$withdraw_tmp"
+
+withdraw_finalizer_script="/usr/local/bin/intents-juno-withdraw-finalizer.sh"
+withdraw_finalizer_tmp="$(mktemp)"
+cat >"$withdraw_finalizer_tmp" <<'EOF_WITHDRAW_FINALIZER_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "withdraw-finalizer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "withdraw-finalizer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
+  echo "withdraw-finalizer requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "withdraw-finalizer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "withdraw-finalizer requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "withdraw-finalizer requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_IMAGE_ID:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_IMAGE_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_URL:-}" ]] || {
+  echo "withdraw-finalizer requires BASE_RELAYER_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_AUTH_TOKEN:-}" ]] || {
+  echo "withdraw-finalizer requires BASE_RELAYER_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_BLOB_BUCKET:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_FINALIZER_JUNO_SCAN_URL:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_FINALIZER_JUNO_SCAN_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${WITHDRAW_FINALIZER_JUNO_RPC_URL:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_FINALIZER_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${JUNO_RPC_USER:-}" ]] || {
+  echo "withdraw-finalizer requires JUNO_RPC_USER in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${JUNO_RPC_PASS:-}" ]] || {
+  echo "withdraw-finalizer requires JUNO_RPC_PASS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+  echo "withdraw-finalizer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
+  exit 1
+fi
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
+  1|true|yes|on)
+    export JUNO_QUEUE_KAFKA_TLS=true
+    ;;
+  *)
+    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    exit 1
+    ;;
+esac
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
+
+withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
+withdraw_finalizer_queue_group="${WITHDRAW_FINALIZER_QUEUE_GROUP:-withdraw-finalizer}"
+withdraw_finalizer_queue_topics="${WITHDRAW_FINALIZER_QUEUE_TOPICS:-checkpoints.packages.v1}"
+withdraw_finalizer_proof_response_group="${WITHDRAW_FINALIZER_PROOF_RESPONSE_GROUP:-$(hostname -s)-withdraw-finalizer-proof}"
+
+args=(
+  --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
+  --base-chain-id "${BASE_CHAIN_ID}"
+  --bridge-address "${BRIDGE_ADDRESS}"
+  --operators "${CHECKPOINT_OPERATORS}"
+  --operator-threshold "${CHECKPOINT_THRESHOLD}"
+  --withdraw-image-id "${WITHDRAW_IMAGE_ID}"
+  --withdraw-witness-extractor-enabled
+  --juno-scan-url "${WITHDRAW_FINALIZER_JUNO_SCAN_URL}"
+  --juno-scan-wallet-id "${WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID}"
+  --juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN
+  --juno-rpc-url "${WITHDRAW_FINALIZER_JUNO_RPC_URL}"
+  --juno-rpc-user-env JUNO_RPC_USER
+  --juno-rpc-pass-env JUNO_RPC_PASS
+  --base-relayer-url "${BASE_RELAYER_URL}"
+  --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
+  --owner "${withdraw_finalizer_owner}"
+  --proof-driver queue
+  --proof-request-topic "${PROOF_REQUEST_TOPIC:-proof.requests.v1}"
+  --proof-result-topic "${PROOF_RESULT_TOPIC:-proof.fulfillments.v1}"
+  --proof-failure-topic "${PROOF_FAILURE_TOPIC:-proof.failures.v1}"
+  --proof-response-group "${withdraw_finalizer_proof_response_group}"
+  --queue-driver kafka
+  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  --queue-group "${withdraw_finalizer_queue_group}"
+  --queue-topics "${withdraw_finalizer_queue_topics}"
+  --blob-driver s3
+  --blob-bucket "${WITHDRAW_BLOB_BUCKET}"
+  --blob-prefix "${WITHDRAW_BLOB_PREFIX:-withdraw-live}"
+  --health-port "${WITHDRAW_FINALIZER_HEALTH_PORT:-18305}"
+)
+if [[ -n "${WITHDRAW_OWALLET_OVK:-}" ]]; then
+  args+=(--owallet-ovk "${WITHDRAW_OWALLET_OVK}")
+fi
+
+exec /usr/local/bin/withdraw-finalizer "${args[@]}"
+EOF_WITHDRAW_FINALIZER_WRAPPER
+sudo install -m 0755 "$withdraw_finalizer_tmp" "$withdraw_finalizer_script"
+rm -f "$withdraw_finalizer_tmp"
 
 base_event_scanner_tmp="$(mktemp)"
 cat >"$base_event_scanner_tmp" <<'EOF_BASE_EVENT_SCANNER_WRAPPER'

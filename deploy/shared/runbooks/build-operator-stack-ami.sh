@@ -1573,6 +1573,15 @@ EOF_DEPOSIT_RELAYER
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
 dev_mode_enabled() {
   case "${JUNO_DEV_MODE:-false}" in
     1|true|TRUE|yes|YES|on|ON) return 0 ;;
@@ -1725,6 +1734,15 @@ EOF_WITHDRAW_COORDINATOR
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "withdraw-finalizer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1

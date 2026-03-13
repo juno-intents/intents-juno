@@ -186,6 +186,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
+  assert_contains "$withdraw_wrapper" 'export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "withdraw wrapper exports AWS SDK env when present"
   assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "withdraw wrapper exports DSN and secret env vars"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
@@ -193,6 +194,12 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper passes RPC password env name"
   assert_contains "$withdraw_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper passes base-relayer auth env name"
   assert_not_contains "$withdraw_wrapper" '--postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper does not pass raw Postgres DSN"
+
+  local withdraw_finalizer_wrapper
+  withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
+  assert_contains "$withdraw_finalizer_wrapper" 'export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "withdraw finalizer wrapper exports AWS SDK env when present"
+  assert_contains "$withdraw_finalizer_wrapper" '--blob-driver s3' "withdraw finalizer wrapper uses the S3 blobstore"
+  assert_contains "$withdraw_finalizer_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw finalizer wrapper passes base relayer auth env name"
 
   tss_wrapper="$(extract_block "cat > /tmp/intents-juno-tss-host.sh <<'EOF_TSS'" "EOF_TSS")"
   assert_contains "$tss_wrapper" '[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {' "tss wrapper requires client CA in production"
@@ -412,6 +419,9 @@ WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
+AWS_PROFILE=alpha-testnet
 JUNO_QUEUE_KAFKA_TLS=true
 EOF
 
@@ -420,6 +430,13 @@ EOF
     "EOF_WITHDRAW_COORDINATOR" \
     "$tmp/intents-juno-withdraw-coordinator.sh" \
     "$env_file"
+  python3 - "$tmp/intents-juno-withdraw-coordinator.sh" "$fake_bin/withdraw-coordinator" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("/usr/local/bin/withdraw-coordinator", sys.argv[2]))
+EOF
 
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-withdraw-coordinator.sh"
 
@@ -437,6 +454,63 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'BASE_RELAYER_AUTH_TOKEN=actual-base-relayer-secret-token' "withdraw wrapper exports base relayer auth token"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_USER=actual-rpc-username-secret' "withdraw wrapper exports RPC user"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_PASS=actual-rpc-password-secret' "withdraw wrapper exports RPC pass"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_REGION=us-east-1' "withdraw wrapper exports AWS region"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw wrapper exports AWS default region"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_PROFILE=alpha-testnet' "withdraw wrapper exports AWS profile"
+
+  local finalizer_output_file
+  finalizer_output_file="$tmp/finalizer.args"
+  cat >"$fake_bin/withdraw-finalizer" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$finalizer_output_file"
+env | sort >"$tmp/finalizer.env"
+exit 0
+EOF
+  chmod 0755 "$fake_bin/withdraw-finalizer"
+
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://finalizer?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+CHECKPOINT_OPERATORS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
+CHECKPOINT_THRESHOLD=2
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+WITHDRAW_IMAGE_ID=deadbeef
+BASE_RELAYER_URL=https://127.0.0.1:18081
+BASE_RELAYER_AUTH_TOKEN=actual-base-relayer-secret-token
+WITHDRAW_BLOB_BUCKET=withdraw-bucket
+WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-123
+WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
+JUNO_RPC_USER=actual-rpc-username-secret
+JUNO_RPC_PASS=actual-rpc-password-secret
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
+AWS_PROFILE=alpha-testnet
+JUNO_QUEUE_KAFKA_TLS=true
+EOF
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" \
+    "EOF_WITHDRAW_FINALIZER" \
+    "$tmp/intents-juno-withdraw-finalizer.sh" \
+    "$env_file"
+  python3 - "$tmp/intents-juno-withdraw-finalizer.sh" "$fake_bin/withdraw-finalizer" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("/usr/local/bin/withdraw-finalizer", sys.argv[2]))
+EOF
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-withdraw-finalizer.sh"
+
+  assert_contains "$(cat "$finalizer_output_file")" '--blob-driver s3' "withdraw finalizer wrapper uses the S3 blobstore"
+  assert_contains "$(cat "$finalizer_output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw finalizer wrapper forwards base relayer auth env name"
+  assert_contains "$(cat "$tmp/finalizer.env")" 'AWS_REGION=us-east-1' "withdraw finalizer wrapper exports AWS region"
+  assert_contains "$(cat "$tmp/finalizer.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw finalizer wrapper exports AWS default region"
+  assert_contains "$(cat "$tmp/finalizer.env")" 'AWS_PROFILE=alpha-testnet' "withdraw finalizer wrapper exports AWS profile"
 
   cat >"$fake_bin/checkpoint-signer" <<EOF
 #!/usr/bin/env bash
