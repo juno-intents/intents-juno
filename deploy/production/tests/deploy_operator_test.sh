@@ -155,6 +155,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"' "remote deploy can patch the withdraw-coordinator wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_tmp="$(mktemp)"' "remote deploy rewrites the withdraw-coordinator wrapper from a temp file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "remote deploy writes the withdraw wrapper to pass the Postgres DSN by env indirection"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "remote deploy writes the withdraw wrapper with a durable claim ttl default"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}"' "remote deploy writes the withdraw wrapper to forward the optional tss server-name override"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_tmp" "$withdraw_coordinator_script"' "remote deploy installs the corrected withdraw-coordinator wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"' "remote deploy can patch the base-event-scanner wrapper"

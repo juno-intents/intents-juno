@@ -1168,6 +1168,7 @@ withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.req
 exec /usr/local/bin/withdraw-coordinator \
   --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
   --owner "${withdraw_coord_owner}" \
+  --claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}" \
   --queue-driver kafka \
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}" \
   --queue-group "${withdraw_coord_queue_group}" \

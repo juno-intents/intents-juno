@@ -188,6 +188,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
   assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "withdraw wrapper exports DSN and secret env vars"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
+  assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
   assert_contains "$withdraw_wrapper" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper passes RPC username env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper passes RPC password env name"
   assert_contains "$withdraw_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper passes base-relayer auth env name"
@@ -409,6 +410,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
+WITHDRAW_COORDINATOR_CLAIM_TTL=7m
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 JUNO_QUEUE_KAFKA_TLS=true
 EOF
@@ -422,6 +424,7 @@ EOF
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-withdraw-coordinator.sh"
 
   assert_contains "$(cat "$output_file")" '--postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "withdraw wrapper forwards DSN env name"
+  assert_contains "$(cat "$output_file")" '--claim-ttl 7m' "withdraw wrapper forwards the configured claim ttl"
   assert_contains "$(cat "$output_file")" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper forwards RPC username env name"
   assert_contains "$(cat "$output_file")" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper forwards RPC password env name"
   assert_contains "$(cat "$output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper forwards base relayer auth env name"
