@@ -2662,10 +2662,6 @@ sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
-sudo test -s "$config_json_path" || {
-  echo "operator stack config json is missing: $config_json_path" >&2
-  exit 1
-}
 
 normalize_region() {
   local value="${1:-}"
@@ -2758,36 +2754,40 @@ if [[ -z "$aws_region" ]]; then
   exit 1
 fi
 
-tmp_json="$(mktemp)"
-tmp_next="$(mktemp)"
-sudo cp "$config_json_path" "$tmp_json"
-sudo chown "$(id -u):$(id -g)" "$tmp_json"
-chmod 600 "$tmp_json"
+if sudo test -s "$config_json_path"; then
+  tmp_json="$(mktemp)"
+  tmp_next="$(mktemp)"
+  sudo cp "$config_json_path" "$tmp_json"
+  sudo chown "$(id -u):$(id -g)" "$tmp_json"
+  chmod 600 "$tmp_json"
 
-jq \
-  --arg bridge "$bridge_address" \
-  --arg chain "$base_chain_id" \
-  --arg shared_postgres_dsn "$shared_postgres_dsn" \
-  --arg shared_kafka_brokers "$shared_kafka_brokers" \
-  --arg operator_checkpoint_ipfs_api_url "$operator_checkpoint_ipfs_api_url" \
-  '
-  .BRIDGE_ADDRESS = $bridge
-  | .BASE_CHAIN_ID = $chain
-  | .CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn
-  | .CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers
-  | .CHECKPOINT_IPFS_API_URL = $operator_checkpoint_ipfs_api_url
-  | .JUNO_QUEUE_KAFKA_TLS = (
-      if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
-        "true"
-      else
-        .JUNO_QUEUE_KAFKA_TLS
-      end
-    )
-  ' "$tmp_json" >"$tmp_next"
+  jq \
+    --arg bridge "$bridge_address" \
+    --arg chain "$base_chain_id" \
+    --arg shared_postgres_dsn "$shared_postgres_dsn" \
+    --arg shared_kafka_brokers "$shared_kafka_brokers" \
+    --arg operator_checkpoint_ipfs_api_url "$operator_checkpoint_ipfs_api_url" \
+    '
+    .BRIDGE_ADDRESS = $bridge
+    | .BASE_CHAIN_ID = $chain
+    | .CHECKPOINT_POSTGRES_DSN = $shared_postgres_dsn
+    | .CHECKPOINT_KAFKA_BROKERS = $shared_kafka_brokers
+    | .CHECKPOINT_IPFS_API_URL = $operator_checkpoint_ipfs_api_url
+    | .JUNO_QUEUE_KAFKA_TLS = (
+        if (.JUNO_QUEUE_KAFKA_TLS // "") == "" then
+          "true"
+        else
+          .JUNO_QUEUE_KAFKA_TLS
+        end
+      )
+    ' "$tmp_json" >"$tmp_next"
 
-sudo install -d -m 0750 -o root -g ubuntu "$(dirname "$config_json_path")"
-sudo install -m 0640 -o root -g ubuntu "$tmp_next" "$config_json_path"
-rm -f "$tmp_json" "$tmp_next"
+  sudo install -d -m 0750 -o root -g ubuntu "$(dirname "$config_json_path")"
+  sudo install -m 0640 -o root -g ubuntu "$tmp_next" "$config_json_path"
+  rm -f "$tmp_json" "$tmp_next"
+else
+  echo "operator stack config json missing at $config_json_path; continuing with stack env only"
+fi
 
 tmp_env="$(mktemp)"
 sudo cp "$stack_env_file" "$tmp_env"

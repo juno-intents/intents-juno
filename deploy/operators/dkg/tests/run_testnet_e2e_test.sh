@@ -604,9 +604,22 @@ test_remote_operator_env_updates_use_sudo_for_root_owned_stack_files() {
   script_text="$(cat "$TARGET_SCRIPT")"
 
   assert_contains "$script_text" 'sudo test -s "$stack_env_file" || {' "remote operator env helpers verify root-owned stack env files via sudo"
-  assert_contains "$script_text" 'sudo test -s "$config_json_path" || {' "checkpoint bridge config updater verifies root-owned config json via sudo"
+  assert_contains "$script_text" 'if sudo test -s "$config_json_path"; then' "checkpoint bridge config updater only rewrites config json when the root-owned file exists"
   assert_contains "$script_text" 'candidate="$(normalize_region "$(sudo awk -F= '"'"'/^AWS_REGION=/{print substr($0, index($0, "=")+1); exit}'"'"' "$stack_env_file" 2>/dev/null || true)")"' "checkpoint bridge config updater reads AWS_REGION from root-owned env via sudo"
   assert_contains "$script_text" 'candidate="$(normalize_region "$(sudo awk -F= '"'"'/^AWS_DEFAULT_REGION=/{print substr($0, index($0, "=")+1); exit}'"'"' "$stack_env_file" 2>/dev/null || true)")"' "checkpoint bridge config updater reads AWS_DEFAULT_REGION from root-owned env via sudo"
+}
+
+test_checkpoint_bridge_config_updates_do_not_require_optional_config_json() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_not_contains "$script_text" 'echo "operator stack config json is missing: $config_json_path" >&2' "checkpoint bridge config updater no longer hard-fails when optional config json is absent"
+  assert_contains "$script_text" 'if sudo test -s "$config_json_path"; then' "checkpoint bridge config updater gates config json rewrite behind file existence"
+  assert_contains "$script_text" 'echo "operator stack config json missing at $config_json_path; continuing with stack env only"' "checkpoint bridge config updater logs when it falls back to env-only bridge staging"
+  assert_order "$script_text" \
+    'if sudo test -s "$config_json_path"; then' \
+    'tmp_env="$(mktemp)"' \
+    "checkpoint bridge config updater decides whether config json exists before mutating stack env"
 }
 
 test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
@@ -1131,6 +1144,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_existing_bridge_summary_reuses_deployed_contracts
   test_existing_bridge_summary_validates_operator_set_with_explicit_dkg_summary_path
   test_remote_operator_env_updates_use_sudo_for_root_owned_stack_files
+  test_checkpoint_bridge_config_updates_do_not_require_optional_config_json
   test_checkpoint_bridge_config_updates_stack_env_runtime_keys
   test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window
   test_relayer_runtime_seeds_checkpoint_after_startup
