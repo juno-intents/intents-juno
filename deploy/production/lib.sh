@@ -1030,6 +1030,12 @@ production_render_operator_handoffs() {
         fi
       fi
       production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
+      if [[ -z "$juno_txsign_signer_keys_csv" ]]; then
+        juno_txsign_signer_keys_csv="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
+      fi
+      if [[ -n "$juno_txsign_signer_keys_csv" ]]; then
+        production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys_csv"
+      fi
     fi
 
     if [[ -n "$backup_zip_src" ]]; then
@@ -1042,11 +1048,6 @@ production_render_operator_handoffs() {
         grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$secrets_dst" \
           || die "operator $operator_id uses local-env checkpoint signer but no CHECKPOINT_SIGNER_PRIVATE_KEY is available in the secret contract or dkg summary"
       fi
-      if [[ -z "$juno_txsign_signer_keys_csv" ]]; then
-        juno_txsign_signer_keys_csv="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
-      fi
-      [[ -n "$juno_txsign_signer_keys_csv" ]] || die "operator $operator_id uses local-env checkpoint signer but dkg summary is missing operator signer keys for juno-txsign sign-digest"
-      production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys_csv"
     fi
 
     jq -n \
@@ -1124,6 +1125,7 @@ production_render_operator_stack_env() {
     operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
   fi
   juno_txsign_signer_keys="$(production_env_first_value "$resolved_secret_env" JUNO_TXSIGN_SIGNER_KEYS || true)"
+  [[ -n "$juno_txsign_signer_keys" ]] || die "resolved secret env is missing JUNO_TXSIGN_SIGNER_KEYS for juno-txsign sign-digest"
   withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
   if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
     die "resolved secret env WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS ($withdraw_change_address) does not match shared manifest owallet_ua ($owallet_ua)"
