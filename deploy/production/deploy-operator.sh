@@ -1293,7 +1293,7 @@ sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service
 sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
 sudo pkill -f '/usr/local/bin/intents-juno-dkg-admin-serve.sh' || true
-sudo pkill -f '/var/lib/intents-juno/operator-runtime/bin/dkg-admin --config .* serve' || true
+sudo pkill -f 'dkg-admin .* serve' || true
 for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl reset-failed "$svc" || true
   sudo systemctl restart "$svc"
