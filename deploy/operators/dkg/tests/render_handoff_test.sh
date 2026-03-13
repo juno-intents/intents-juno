@@ -40,7 +40,7 @@ build_fixture_backup_zip() {
   local runtime="$tmp/runtime"
   local output="$tmp/operator-backup.zip"
 
-  mkdir -p "$runtime/bundle/tls" "$tmp/backup" "$tmp/exports"
+  mkdir -p "$runtime/bundle/tls" "$runtime/bin" "$tmp/backup" "$tmp/exports"
   cat >"$runtime/bundle/admin-config.json" <<'JSON'
 {
   "operator_id": "0x1111111111111111111111111111111111111111",
@@ -65,6 +65,11 @@ JSON
   printf 'FAKE-SERVER\n' >"$runtime/bundle/tls/server.pem"
   printf 'FAKE-KEY\n' >"$runtime/bundle/tls/server.key"
   chmod 0600 "$runtime/bundle/tls/server.key"
+  cat >"$runtime/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$runtime/bin/dkg-admin"
 
   printf 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n' >"$tmp/backup/age-identity.txt"
   printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$tmp/exports/keypackage-backup.json"

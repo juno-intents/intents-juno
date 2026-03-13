@@ -364,6 +364,14 @@ EOF
     printf 'unexpected coordinator client fingerprint in admin config\n' >&2
     exit 1
   fi
+  if [[ "$(jq -r '.grpc.tls_client_cert_pem_path // empty' "$runtime/bundle/admin-config.json")" != "./tls/coordinator-client.pem" ]]; then
+    printf 'unexpected coordinator client cert path in admin config\n' >&2
+    exit 1
+  fi
+  if [[ "$(jq -r '.grpc.tls_client_key_pem_path // empty' "$runtime/bundle/admin-config.json")" != "./tls/coordinator-client.key" ]]; then
+    printf 'unexpected coordinator client key path in admin config\n' >&2
+    exit 1
+  fi
 
   rm -rf "$tmp"
 }
@@ -462,6 +470,14 @@ EOF
   assert_cert_text_contains "$runtime/bundle/tls/coordinator-client.pem" "DNS:coordinator-client" "restored coordinator client cert includes coordinator SAN"
   if [[ "$(jq -r '.grpc.coordinator_client_cert_sha256' "$runtime/bundle/admin-config.json")" != "$(cert_sha256_hex "$runtime/bundle/tls/coordinator-client.pem")" ]]; then
     printf 'unexpected repaired coordinator client fingerprint in admin config\n' >&2
+    exit 1
+  fi
+  if [[ "$(jq -r '.grpc.tls_client_cert_pem_path // empty' "$runtime/bundle/admin-config.json")" != "./tls/coordinator-client.pem" ]]; then
+    printf 'unexpected repaired coordinator client cert path in admin config\n' >&2
+    exit 1
+  fi
+  if [[ "$(jq -r '.grpc.tls_client_key_pem_path // empty' "$runtime/bundle/admin-config.json")" != "./tls/coordinator-client.key" ]]; then
+    printf 'unexpected repaired coordinator client key path in admin config\n' >&2
     exit 1
   fi
 

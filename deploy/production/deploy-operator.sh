@@ -783,6 +783,19 @@ if [[ -f "$runtime_dir/bundle/tls/coordinator-client.pem" ]]; then
   sudo install -m 0640 -o intents-juno -g intents-juno "$coordinator_client_fingerprint_tmp" "$admin_config_path"
   rm -f "$coordinator_client_fingerprint_tmp"
 fi
+sudo jq -er '
+  (.grpc.coordinator_client_cert_sha256 // "" | tostring | length) > 0
+' "$runtime_dir/bundle/admin-config.json" >/dev/null || {
+  echo "operator runtime admin config missing coordinator client fingerprint: $runtime_dir/bundle/admin-config.json" >&2
+  exit 1
+}
+sudo jq -er '
+  .grpc.tls_client_cert_pem_path == "./tls/coordinator-client.pem"
+  and .grpc.tls_client_key_pem_path == "./tls/coordinator-client.key"
+' "$runtime_dir/bundle/admin-config.json" >/dev/null || {
+  echo "operator runtime admin config missing coordinator client tls paths: $runtime_dir/bundle/admin-config.json" >&2
+  exit 1
+}
 
 env_get_value_remote() {
   local key="$1"

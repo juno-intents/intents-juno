@@ -143,7 +143,9 @@ set_coordinator_client_cert_sha256() {
   tmp_path="$(mktemp)"
   jq --arg fingerprint "$fingerprint" '
     .grpc = ((.grpc // {}) + {
-      coordinator_client_cert_sha256: $fingerprint
+      coordinator_client_cert_sha256: $fingerprint,
+      tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+      tls_client_key_pem_path: "./tls/coordinator-client.key"
     })
   ' "$config_path" >"$tmp_path"
   mv "$tmp_path" "$config_path"
@@ -505,13 +507,17 @@ normalize_restored_admin_config() {
           tls_ca_cert_pem_path: "./tls/ca.pem",
           tls_server_cert_pem_path: "./tls/server.pem",
           tls_server_key_pem_path: "./tls/server.key",
+          tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+          tls_client_key_pem_path: "./tls/coordinator-client.key",
           coordinator_client_cert_sha256: null
         }
       else
         (.grpc + {
           tls_ca_cert_pem_path: "./tls/ca.pem",
           tls_server_cert_pem_path: "./tls/server.pem",
-          tls_server_key_pem_path: "./tls/server.key"
+          tls_server_key_pem_path: "./tls/server.key",
+          tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+          tls_client_key_pem_path: "./tls/coordinator-client.key"
         })
       end
     )
