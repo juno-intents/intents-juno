@@ -96,6 +96,20 @@ test_shared_postgres_runner_readiness_wait_precedes_shared_validation() {
     "shared postgres readiness wait runs before shared infra validation attempt"
 }
 
+test_distributed_shared_validation_runs_from_operator_host() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "resolve_remote_linux_goarch() {" "run-testnet-e2e resolves remote linux goarch before staging shared validation binary"
+  assert_contains "$script_text" "build_local_shared_infra_validation_binary() {" "run-testnet-e2e defines cross-compile helper for shared validation binary"
+  assert_contains "$script_text" 'GOOS=linux GOARCH="$target_goarch" GO111MODULE=on go build -o "$output_path" ./cmd/shared-infra-e2e' "shared validation binary is cross-compiled for remote linux host"
+  assert_contains "$script_text" "run_remote_shared_infra_validation_attempt() {" "run-testnet-e2e defines remote shared validation launcher"
+  assert_contains "$script_text" 'shared_validation_host="${relayer_runtime_operator_hosts[0]}"' "distributed mode selects an operator host for shared validation"
+  assert_contains "$script_text" 'build_local_shared_infra_validation_binary "$shared_validation_local_bin" "$shared_validation_remote_goarch"' "distributed mode builds shared validation binary for remote host architecture"
+  assert_contains "$script_text" 'run_remote_shared_infra_validation_attempt "$shared_validation_host"' "distributed mode runs shared validation from operator host"
+  assert_contains "$script_text" 'scp \' "remote shared validation copies report output back to runner"
+}
+
 test_bridge_config_contract_reads_retry_on_malformed_rpc_responses() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1134,6 +1148,7 @@ main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_shared_postgres_runner_readiness_wait_precedes_shared_validation
+  test_distributed_shared_validation_runs_from_operator_host
   test_bridge_config_contract_reads_retry_on_malformed_rpc_responses
   test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch

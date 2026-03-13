@@ -2418,6 +2418,118 @@ stage_remote_runtime_file_atomic() {
   fi
 }
 
+resolve_remote_linux_goarch() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local remote_arch=""
+
+  remote_arch="$(
+    ssh \
+      -i "$ssh_key_file" \
+      -o StrictHostKeyChecking=no \
+      -o UserKnownHostsFile=/dev/null \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
+      -o TCPKeepAlive=yes \
+      "$ssh_user@$host" \
+      "uname -m" 2>/dev/null || true
+  )"
+  remote_arch="$(trim "$remote_arch")"
+
+  case "$remote_arch" in
+    x86_64|amd64) printf 'amd64' ;;
+    aarch64|arm64) printf 'arm64' ;;
+    *) return 1 ;;
+  esac
+}
+
+build_local_shared_infra_validation_binary() {
+  local output_path="$1"
+  local target_goarch="$2"
+
+  [[ -n "$output_path" ]] || return 1
+  [[ "$target_goarch" =~ ^(amd64|arm64)$ ]] || return 1
+
+  mkdir -p "$(dirname "$output_path")"
+  (
+    cd "$REPO_ROOT"
+    GOOS=linux GOARCH="$target_goarch" GO111MODULE=on go build -o "$output_path" ./cmd/shared-infra-e2e
+  )
+}
+
+run_remote_shared_infra_validation_attempt() {
+  local host="$1"
+  local ssh_user="$2"
+  local ssh_key_file="$3"
+  local local_bin_path="$4"
+  local remote_bin_path="$5"
+  local local_output_path="$6"
+  local remote_output_path="$7"
+  shift 7 || true
+
+  [[ -n "$host" ]] || return 1
+  [[ -n "$ssh_user" ]] || return 1
+  [[ -f "$ssh_key_file" ]] || return 1
+  [[ -x "$local_bin_path" ]] || return 1
+  [[ -n "$remote_bin_path" ]] || return 1
+  [[ -n "$local_output_path" ]] || return 1
+  [[ -n "$remote_output_path" ]] || return 1
+
+  local remote_output_dir remote_cmd remote_joined
+  remote_output_dir="$(dirname "$remote_output_path")"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "mkdir -p '$(dirname "$remote_bin_path")' '$remote_output_dir'" >/dev/null
+
+  stage_remote_runtime_file_atomic \
+    "$local_bin_path" \
+    "$host" \
+    "$ssh_user" \
+    "$ssh_key_file" \
+    "$remote_bin_path"
+
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "chmod 0755 '$remote_bin_path'" >/dev/null
+
+  remote_joined="$(shell_join "$remote_bin_path" "$@")"
+  remote_cmd="JUNO_QUEUE_KAFKA_TLS=true $remote_joined"
+  ssh \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host" \
+    "bash -lc $(printf '%q' "$remote_cmd")"
+
+  mkdir -p "$(dirname "$local_output_path")"
+  scp \
+    -i "$ssh_key_file" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$ssh_user@$host:$remote_output_path" \
+    "$local_output_path" >/dev/null
+}
+
 build_local_relayer_binaries() {
   local output_dir="$1"
   mkdir -p "$output_dir"
@@ -3181,6 +3293,11 @@ command_run() {
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="300s"
   local shared_postgres_ready_timeout_seconds="600"
+  local shared_validation_host=""
+  local shared_validation_remote_goarch=""
+  local shared_validation_local_bin="$workdir/bin/shared-infra-e2e"
+  local shared_validation_remote_bin="/tmp/testnet-e2e-bin/shared-infra-e2e"
+  local shared_validation_remote_output="/tmp/testnet-e2e-shared-infra-summary.json"
   local shared_output=""
   local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
@@ -5854,11 +5971,6 @@ command_run() {
       done
     fi
 
-    if ! wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"; then
-      die "shared postgres endpoint did not become reachable from runner before shared infra validation"
-    fi
-
-    log "validating operator-service checkpoint publication via shared infra"
     local shared_status=0
     local shared_validation_no_fresh_package_pattern
     local shared_validation_ipfs_timeout_pattern
@@ -5873,21 +5985,54 @@ command_run() {
     run_shared_infra_validation_attempt() {
       local checkpoint_min_persisted_at="$1"
       local shared_validation_output_path="${2:-$shared_summary}"
-      (
-        cd "$REPO_ROOT"
-	        JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/shared-infra-e2e \
-	          --postgres-dsn "$shared_postgres_dsn" \
-	          --kafka-brokers "$shared_kafka_brokers" \
-	          --checkpoint-ipfs-api-url "$shared_ipfs_api_url" \
-	          --checkpoint-operators "$checkpoint_operators_csv" \
-	          --checkpoint-threshold "$threshold" \
-	          --checkpoint-min-persisted-at "$checkpoint_min_persisted_at" \
-	          --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}" \
-	          --topic-prefix "$shared_topic_prefix" \
-	          --timeout "$shared_timeout" \
-	          --output "$shared_validation_output_path"
-	      )
-	    }
+      local -a shared_validation_args=(
+        --postgres-dsn "$shared_postgres_dsn"
+        --kafka-brokers "$shared_kafka_brokers"
+        --checkpoint-ipfs-api-url "$shared_ipfs_api_url"
+        --checkpoint-operators "$checkpoint_operators_csv"
+        --checkpoint-threshold "$threshold"
+        --checkpoint-min-persisted-at "$checkpoint_min_persisted_at"
+        --required-kafka-topics "${checkpoint_signature_topic},${checkpoint_package_topic},${proof_request_topic},${proof_result_topic},${proof_failure_topic},${deposit_event_topic},${withdraw_request_topic}"
+        --topic-prefix "$shared_topic_prefix"
+        --timeout "$shared_timeout"
+      )
+      if [[ -n "$shared_validation_host" ]]; then
+        run_remote_shared_infra_validation_attempt "$shared_validation_host" \
+          "$relayer_runtime_operator_ssh_user" \
+          "$relayer_runtime_operator_ssh_key_file" \
+          "$shared_validation_local_bin" \
+          "$shared_validation_remote_bin" \
+          "$shared_validation_output_path" \
+          "$shared_validation_remote_output" \
+          "${shared_validation_args[@]}" \
+          --output "$shared_validation_remote_output"
+      else
+        (
+          cd "$REPO_ROOT"
+          JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/shared-infra-e2e \
+            "${shared_validation_args[@]}" \
+            --output "$shared_validation_output_path"
+        )
+      fi
+    }
+
+    if [[ "$relayer_runtime_mode" == "distributed" ]]; then
+      shared_validation_host="${relayer_runtime_operator_hosts[0]}"
+      [[ -n "$shared_validation_host" ]] || die "distributed shared validation requires at least one operator host"
+      if [[ -z "$shared_validation_remote_goarch" ]]; then
+        shared_validation_remote_goarch="$(resolve_remote_linux_goarch "$shared_validation_host" "$relayer_runtime_operator_ssh_user" "$relayer_runtime_operator_ssh_key_file" || true)"
+      fi
+      [[ "$shared_validation_remote_goarch" =~ ^(amd64|arm64)$ ]] || \
+        die "failed to resolve remote goarch for shared validation host=$shared_validation_host"
+      build_local_shared_infra_validation_binary "$shared_validation_local_bin" "$shared_validation_remote_goarch" || \
+        die "failed to build shared validation binary for host=$shared_validation_host goarch=$shared_validation_remote_goarch"
+      log "validating operator-service checkpoint publication via shared infra from operator host host=$shared_validation_host"
+    else
+      if ! wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"; then
+        die "shared postgres endpoint did not become reachable from runner before shared infra validation"
+      fi
+      log "validating operator-service checkpoint publication via shared infra"
+    fi
 
     set +e
     run_shared_infra_validation_attempt "$checkpoint_started_at" 2>&1 | tee "$shared_validation_log"
