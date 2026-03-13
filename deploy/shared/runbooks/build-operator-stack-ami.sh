@@ -542,6 +542,7 @@ WITHDRAW_COORDINATOR_TXBUILD_BIN=juno-txbuild
 WITHDRAW_COORDINATOR_JUNO_WALLET_ID=
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=
 WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV=CHECKPOINT_POSTGRES_DSN
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
@@ -1624,6 +1625,10 @@ dev_mode_enabled() {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_JUNO_SCAN_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 [[ -n "${JUNO_RPC_USER:-}" ]] || {
   echo "withdraw-coordinator requires JUNO_RPC_USER in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1690,6 +1695,7 @@ if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
   tss_server_name_args=(--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}")
 fi
 export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
+export JUNO_SCAN_BEARER_TOKEN
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
@@ -1704,6 +1710,8 @@ exec /usr/local/bin/withdraw-coordinator \
   --queue-group "${withdraw_coord_queue_group}" \
   --queue-topics "${withdraw_coord_queue_topics}" \
   --juno-txbuild-bin "${txbuild_bin}" \
+  --juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}" \
+  --juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN \
   --juno-rpc-url "${WITHDRAW_COORDINATOR_JUNO_RPC_URL}" \
   --juno-rpc-user-env JUNO_RPC_USER \
   --juno-rpc-pass-env JUNO_RPC_PASS \

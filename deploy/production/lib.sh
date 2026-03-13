@@ -1135,6 +1135,7 @@ BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manif
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block
 WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232
+WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem

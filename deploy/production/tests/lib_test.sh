@@ -700,6 +700,7 @@ EOF
   assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
   assert_contains "$(cat "$output_env")" "JUNO_RPC_PASS=rpcpass" "rendered env juno rpc pass"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw coordinator juno rpc url"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw coordinator scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443" "rendered env withdraw coordinator tss url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" "rendered env withdraw coordinator tss ca"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem" "rendered env withdraw coordinator client cert"
