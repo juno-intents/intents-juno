@@ -268,6 +268,23 @@ latest_checkpoint_height_from_log() {
   ' "$relayer_log_path" 2>/dev/null || true
 }
 
+assert_bridge_summary_matches_dkg_operators() {
+  local bridge_summary_path="$1"
+  local dkg_summary_path="$2"
+  local bridge_ops dkg_ops
+
+  [[ -n "$bridge_summary_path" ]] || return 0
+  [[ -n "$dkg_summary_path" ]] || return 0
+  [[ -f "$bridge_summary_path" ]] || return 0
+  [[ -f "$dkg_summary_path" ]] || return 0
+
+  bridge_ops="$(jq -r '[.operators[]?] | sort | join(",")' "$bridge_summary_path" 2>/dev/null || true)"
+  dkg_ops="$(jq -r '[.operators[].operator_id] | sort | join(",")' "$dkg_summary_path" 2>/dev/null || true)"
+  if [[ -n "$bridge_ops" && -n "$dkg_ops" && "$bridge_ops" != "$dkg_ops" ]]; then
+    die "OPERATOR MISMATCH: bridge summary operators [$bridge_ops] do not match DKG operators [$dkg_ops]. The bridge must be redeployed with the current DKG keys."
+  fi
+}
+
 wait_for_relayer_checkpoint_height_at_least() {
   local relayer_log_path="$1"
   local min_height="$2"
@@ -3671,17 +3688,7 @@ command_run() {
   if [[ -n "$existing_bridge_summary_path" ]]; then
     [[ -f "$existing_bridge_summary_path" ]] || \
       die "existing bridge summary file not found: $existing_bridge_summary_path"
-
-    # Validate that the bridge's registered operators match the DKG summary.
-    # A mismatch means checkpoint signatures will be rejected on-chain.
-    if [[ -n "$dkg_summary" && -f "$dkg_summary" ]]; then
-      local _bridge_ops _dkg_ops
-      _bridge_ops="$(jq -r '[.operators[]?] | sort | join(",")' "$existing_bridge_summary_path" 2>/dev/null || true)"
-      _dkg_ops="$(jq -r '[.operators[].operator_id] | sort | join(",")' "$dkg_summary" 2>/dev/null || true)"
-      if [[ -n "$_bridge_ops" && -n "$_dkg_ops" && "$_bridge_ops" != "$_dkg_ops" ]]; then
-        die "OPERATOR MISMATCH: bridge summary operators [$_bridge_ops] do not match DKG operators [$_dkg_ops]. The bridge must be redeployed with the current DKG keys."
-      fi
-    fi
+    assert_bridge_summary_matches_dkg_operators "$existing_bridge_summary_path" "$dkg_summary_path"
   fi
 
   case "$stop_after_stage" in
@@ -4067,6 +4074,7 @@ command_run() {
         --force
     )
   fi
+  assert_bridge_summary_matches_dkg_operators "$existing_bridge_summary_path" "$dkg_summary"
 
   local bridge_operator_signer_supports_operator_endpoint="false"
   local bridge_operator_signer_ready="false"

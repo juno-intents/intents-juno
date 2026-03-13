@@ -586,6 +586,19 @@ test_existing_bridge_summary_reuses_deployed_contracts() {
     "existing bridge summary conditional wraps deploy bootstrap invocation"
 }
 
+test_existing_bridge_summary_validates_operator_set_with_explicit_dkg_summary_path() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "assert_bridge_summary_matches_dkg_operators() {" "run-testnet-e2e defines a bridge-vs-dkg operator consistency helper"
+  assert_contains "$script_text" 'assert_bridge_summary_matches_dkg_operators "$existing_bridge_summary_path" "$dkg_summary_path"' "run-testnet-e2e validates bridge operators against explicit --dkg-summary-path before local dkg summary initialization"
+  assert_contains "$script_text" 'assert_bridge_summary_matches_dkg_operators "$existing_bridge_summary_path" "$dkg_summary"' "run-testnet-e2e validates bridge operators against the active dkg summary after DKG resolution"
+  assert_order "$script_text" \
+    'assert_bridge_summary_matches_dkg_operators "$existing_bridge_summary_path" "$dkg_summary_path"' \
+    'local dkg_summary="$workdir/reports/dkg-summary.json"' \
+    "explicit dkg summary validation runs before local dkg_summary is initialized"
+}
+
 test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1106,6 +1119,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode
   test_existing_bridge_summary_reuses_deployed_contracts
+  test_existing_bridge_summary_validates_operator_set_with_explicit_dkg_summary_path
   test_checkpoint_bridge_config_updates_stack_env_runtime_keys
   test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window
   test_relayer_runtime_seeds_checkpoint_after_startup
