@@ -2662,6 +2662,8 @@ sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
+stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"
+[[ -n "$stack_env_group" ]] || stack_env_group="intents-juno"
 
 normalize_region() {
   local value="${1:-}"
@@ -2755,6 +2757,8 @@ if [[ -z "$aws_region" ]]; then
 fi
 
 if sudo test -s "$config_json_path"; then
+  config_json_group="$(sudo stat -c %G "$config_json_path" 2>/dev/null || true)"
+  [[ -n "$config_json_group" ]] || config_json_group="$stack_env_group"
   tmp_json="$(mktemp)"
   tmp_next="$(mktemp)"
   sudo cp "$config_json_path" "$tmp_json"
@@ -2782,8 +2786,8 @@ if sudo test -s "$config_json_path"; then
       )
     ' "$tmp_json" >"$tmp_next"
 
-  sudo install -d -m 0750 -o root -g ubuntu "$(dirname "$config_json_path")"
-  sudo install -m 0640 -o root -g ubuntu "$tmp_next" "$config_json_path"
+  sudo install -d -m 0750 -o root -g "$config_json_group" "$(dirname "$config_json_path")"
+  sudo install -m 0640 -o root -g "$config_json_group" "$tmp_next" "$config_json_path"
   rm -f "$tmp_json" "$tmp_next"
 else
   echo "operator stack config json missing at $config_json_path; continuing with stack env only"
@@ -2804,7 +2808,7 @@ set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "true"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY "$operator_signer_key_hex"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_LEASE_NAME "$checkpoint_signer_lease_name"
-sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"
+sudo install -m 0640 -o root -g "$stack_env_group" "$tmp_env" "$stack_env_file"
 rm -f "$tmp_env"
 
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"

@@ -622,6 +622,15 @@ test_checkpoint_bridge_config_updates_do_not_require_optional_config_json() {
     "checkpoint bridge config updater decides whether config json exists before mutating stack env"
 }
 
+test_checkpoint_bridge_config_updates_preserve_service_readable_group() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" 'stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"' "checkpoint bridge config updater reads the existing operator stack env group"
+  assert_contains "$script_text" '[[ -n "$stack_env_group" ]] || stack_env_group="intents-juno"' "checkpoint bridge config updater falls back to intents-juno group when stack env group lookup fails"
+  assert_contains "$script_text" 'sudo install -m 0640 -o root -g "$stack_env_group" "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater preserves a service-readable group on operator stack env"
+}
+
 test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -646,7 +655,7 @@ test_checkpoint_bridge_config_updates_stack_env_runtime_keys() {
   assert_contains "$script_text" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "checkpoint bridge config updater writes operator DKG address into operator stack env"
   assert_contains "$script_text" 'checkpoint_signer_lease_name="checkpoint-signer-${operator_address#0x}"' "checkpoint bridge config updater derives a per-operator checkpoint signer lease name"
   assert_contains "$script_text" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_LEASE_NAME "$checkpoint_signer_lease_name"' "checkpoint bridge config updater persists checkpoint signer lease name"
-  assert_contains "$script_text" 'sudo install -m 0640 -o root -g ubuntu "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater persists mutated operator stack env with expected ownership"
+  assert_contains "$script_text" 'sudo install -m 0640 -o root -g "$stack_env_group" "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater persists mutated operator stack env with preserved ownership"
   assert_contains "$script_text" 'checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"' "checkpoint bridge config updater targets checkpoint-signer wrapper script"
   assert_contains "$script_text" 'checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"' "checkpoint bridge config updater targets checkpoint-aggregator wrapper script"
   assert_contains "$script_text" 'sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_signer_script"' "checkpoint bridge config updater rewrites checkpoint-signer base chain id flag"
@@ -1145,6 +1154,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_existing_bridge_summary_validates_operator_set_with_explicit_dkg_summary_path
   test_remote_operator_env_updates_use_sudo_for_root_owned_stack_files
   test_checkpoint_bridge_config_updates_do_not_require_optional_config_json
+  test_checkpoint_bridge_config_updates_preserve_service_readable_group
   test_checkpoint_bridge_config_updates_stack_env_runtime_keys
   test_shared_checkpoint_validation_retries_with_relaxed_min_persisted_at_window
   test_relayer_runtime_seeds_checkpoint_after_startup
