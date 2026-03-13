@@ -646,6 +646,34 @@ EOF
   assert_contains "$(cat "$spendauth_output_file")" "sign-spendauth --session-id test-session --requests /tmp/requests.json --out /tmp/out.json" "spendauth wrapper forwards the sign-spendauth request args"
   assert_eq "$(cat "$spendauth_pwd_file")" "$tmp/operator-runtime/bundle" "spendauth wrapper runs from the admin config directory in host-process mode"
 
+  rm -f "$spendauth_output_file" "$spendauth_pwd_file"
+  cat >"$fake_bin/id" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "-u" ]]; then
+  printf '%s\n' "${FAKE_ID_RESULT:-0}"
+  exit 0
+fi
+exec /usr/bin/id "$@"
+EOF
+  chmod 0755 "$fake_bin/id"
+  cat >"$fake_bin/sudo" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" != "-u" || "${2:-}" != "intents-juno" ]]; then
+  printf 'unexpected sudo args: %s\n' "$*" >&2
+  exit 1
+fi
+shift 2
+FAKE_ID_RESULT=1000 exec "$@"
+EOF
+  chmod 0755 "$fake_bin/sudo"
+
+  PATH="$fake_bin:$PATH" FAKE_ID_RESULT=0 "$tmp/intents-juno-spendauth-signer.sh" \
+    sign-spendauth --session-id root-session --requests /tmp/root-requests.json --out /tmp/root-out.json
+
+  assert_contains "$(cat "$spendauth_output_file")" "--config $tmp/operator-runtime/bundle/admin-config.json" "spendauth wrapper still passes admin config after dropping root"
+  assert_contains "$(cat "$spendauth_output_file")" "sign-spendauth --session-id root-session --requests /tmp/root-requests.json --out /tmp/root-out.json" "spendauth wrapper preserves request args after dropping root"
+  assert_eq "$(cat "$spendauth_pwd_file")" "$tmp/operator-runtime/bundle" "spendauth wrapper still runs from the bundle directory after dropping root"
+
   rm -rf "$tmp"
 }
 

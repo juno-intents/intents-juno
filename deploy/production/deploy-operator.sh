@@ -1030,6 +1030,9 @@ case "$runtime_mode" in
       echo "tss-host host-process mode requires DKG_ADMIN_CONFIG_FILE: $admin_config" >&2
       exit 1
     }
+    if [[ "$(id -u)" -eq 0 ]]; then
+      exec sudo -u intents-juno "$0" "$@"
+    fi
     admin_config_dir="$(dirname "$admin_config")"
     cd "$admin_config_dir"
     exec "${TSS_SPENDAUTH_SIGNER_BIN}" --config "$admin_config" "$@"

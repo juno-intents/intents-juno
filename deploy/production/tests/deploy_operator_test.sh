@@ -150,6 +150,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"' "remote deploy installs the corrected dkg-admin wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"' "remote deploy can patch the spendauth signer wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'spendauth_tmp="$(mktemp)"' "remote deploy rewrites the spendauth signer wrapper from a temp file"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec sudo -u intents-juno "$0" "$@"' "remote deploy writes the spendauth wrapper to drop root before host-process signing"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'exec "${TSS_SPENDAUTH_SIGNER_BIN}" --config "$admin_config" "$@"' "remote deploy writes the corrected spendauth signer wrapper command"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$spendauth_tmp" "$spendauth_signer_script"' "remote deploy installs the corrected spendauth signer wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"' "remote deploy can patch the withdraw-coordinator wrapper"
