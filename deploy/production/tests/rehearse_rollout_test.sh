@@ -80,6 +80,42 @@ EOF
   done
 }
 
+write_dkg_summary_fixture() {
+  local target="$1"
+  local workdir="$2"
+
+  printf '0x1111111111111111111111111111111111111111111111111111111111111111' >"$workdir/operators/op1/operator-key.hex"
+  printf '0x2222222222222222222222222222222222222222222222222222222222222222' >"$workdir/operators/op2/operator-key.hex"
+  printf '0x3333333333333333333333333333333333333333333333333333333333333333' >"$workdir/operators/op3/operator-key.hex"
+
+  jq -n \
+    --arg op1_key "$workdir/operators/op1/operator-key.hex" \
+    --arg op2_key "$workdir/operators/op2/operator-key.hex" \
+    --arg op3_key "$workdir/operators/op3/operator-key.hex" \
+    '{
+      network: "testnet",
+      threshold: 3,
+      ufvk: "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq",
+      operators: [
+        {
+          index: 1,
+          operator_id: "0x1111111111111111111111111111111111111111",
+          operator_key_file: $op1_key
+        },
+        {
+          index: 2,
+          operator_id: "0x6666666666666666666666666666666666666666",
+          operator_key_file: $op2_key
+        },
+        {
+          index: 3,
+          operator_id: "0x7777777777777777777777777777777777777777",
+          operator_key_file: $op3_key
+        }
+      ]
+    }' >"$target"
+}
+
 write_fake_tools() {
   local bin_dir="$1"
   local log_file="$2"
@@ -156,15 +192,17 @@ EOF
 }
 
 test_rehearse_rollout_creates_timestamped_run_and_resumes() {
-  local workdir inventory log_file fake_bin output_root run_dir
+  local workdir inventory dkg_summary log_file fake_bin output_root run_dir
   workdir="$(mktemp -d)"
   inventory="$workdir/inventory.json"
+  dkg_summary="$workdir/dkg-summary.json"
   log_file="$workdir/rehearsal.log"
   fake_bin="$workdir/bin"
   output_root="$workdir/rehearsal"
 
   write_operator_inputs "$workdir"
   write_inventory_fixture "$inventory" "$workdir"
+  write_dkg_summary_fixture "$dkg_summary" "$workdir"
   write_fake_tools "$fake_bin" "$log_file"
 
   (
@@ -174,7 +212,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
     PRODUCTION_CANARY_OPERATOR_BIN="$fake_bin/canary-operator-boot.sh" \
     bash deploy/production/rehearse-rollout.sh \
       --inventory "$inventory" \
-      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --dkg-summary "$dkg_summary" \
       --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
       --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
       --skip-terraform-apply \

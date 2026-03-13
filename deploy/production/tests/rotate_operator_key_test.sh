@@ -44,11 +44,12 @@ test_rotate_operator_key_captures_evidence_and_restarts_services() {
   printf 'backup' >"$workdir/dkg-backup.zip"
   cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
-  cat >"$workdir/operator-secrets.env" <<'EOF'
+cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
@@ -124,6 +125,7 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "rotation env operator address"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "rotation env juno rpc user"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "rotation env juno rpc pass"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "rotation env juno txsign signer keys"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "rotation env withdraw coordinator rpc url"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rotation env withdraw finalizer scan url"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "rotation env tss ufvk path"

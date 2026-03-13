@@ -392,6 +392,25 @@ production_seed_local_checkpoint_signer_secret() {
   production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_SIGNER_PRIVATE_KEY "$checkpoint_signer_private_key"
 }
 
+production_dkg_signer_keys_csv() {
+  local dkg_summary="$1"
+  local dkg_dir operator_key_file operator_key_hex
+  local -a key_hexes=()
+
+  dkg_dir="$(cd "$(dirname "$dkg_summary")" && pwd)"
+  while IFS= read -r operator_key_file; do
+    [[ -n "$operator_key_file" ]] || return 1
+    operator_key_file="$(production_abs_path "$dkg_dir" "$operator_key_file")"
+    [[ -f "$operator_key_file" ]] || die "operator key file not found: $operator_key_file"
+    operator_key_hex="$(production_normalize_ecdsa_private_key "$(cat "$operator_key_file")")"
+    key_hexes+=("$operator_key_hex")
+  done < <(jq -r '.operators[] | .operator_key_file // empty' "$dkg_summary")
+
+  (( ${#key_hexes[@]} > 0 )) || return 1
+  IFS=,
+  printf '%s\n' "${key_hexes[*]}"
+}
+
 production_normalize_prefixed_hex() {
   local raw_value="$1"
   local expected_nibbles="$2"
@@ -930,6 +949,7 @@ production_render_operator_handoffs() {
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
+  local juno_txsign_signer_keys_csv
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
@@ -944,6 +964,7 @@ production_render_operator_handoffs() {
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   derived_deposit_owallet_ivk=""
   derived_withdraw_owallet_ovk=""
+  juno_txsign_signer_keys_csv=""
 
   local rollout_state="$output_dir/rollout-state.json"
   production_write_rollout_state "$inventory" "$rollout_state"
@@ -1021,6 +1042,11 @@ production_render_operator_handoffs() {
         grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$secrets_dst" \
           || die "operator $operator_id uses local-env checkpoint signer but no CHECKPOINT_SIGNER_PRIVATE_KEY is available in the secret contract or dkg summary"
       fi
+      if [[ -z "$juno_txsign_signer_keys_csv" ]]; then
+        juno_txsign_signer_keys_csv="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
+      fi
+      [[ -n "$juno_txsign_signer_keys_csv" ]] || die "operator $operator_id uses local-env checkpoint signer but dkg summary is missing operator signer keys for juno-txsign sign-digest"
+      production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys_csv"
     fi
 
     jq -n \
@@ -1080,8 +1106,9 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id base_event_scanner_start_block
-  local checkpoint_signer_private_key owallet_ua withdraw_change_address
+  local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
   checkpoint_signer_private_key=""
+  juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
@@ -1096,6 +1123,7 @@ production_render_operator_stack_env() {
   if [[ -z "$operator_address" ]]; then
     operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
   fi
+  juno_txsign_signer_keys="$(production_env_first_value "$resolved_secret_env" JUNO_TXSIGN_SIGNER_KEYS || true)"
   withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
   if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
     die "resolved secret env WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS ($withdraw_change_address) does not match shared manifest owallet_ua ($owallet_ua)"
@@ -1140,7 +1168,7 @@ WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
-WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
@@ -1163,6 +1191,9 @@ EOF
   fi
   if [[ -n "$checkpoint_signer_private_key" ]]; then
     printf 'CHECKPOINT_SIGNER_PRIVATE_KEY=%s\n' "$checkpoint_signer_private_key" >>"$output_file"
+  fi
+  if [[ -n "$juno_txsign_signer_keys" ]]; then
+    printf 'JUNO_TXSIGN_SIGNER_KEYS=%s\n' "$juno_txsign_signer_keys" >>"$output_file"
   fi
   if [[ -n "$aws_region" ]]; then
     printf 'AWS_REGION=%s\n' "$aws_region" >>"$output_file"

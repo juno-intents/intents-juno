@@ -65,6 +65,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
 WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
@@ -138,12 +139,16 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'ensure_dkg_binary "dkg-admin" "$dkg_release_tag" "$dkg_stage_dir"' "remote deploy fetches the Linux dkg-admin release artifact"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"' "remote deploy installs the downloaded dkg-admin binary into the protected runtime"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"' "remote deploy records the installed dkg-admin runtime path"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_downloaded="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$dkg_stage_dir")"' "remote deploy fetches the Linux juno-txsign release artifact"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$juno_txsign_downloaded" "$runtime_dir/bin/juno-txsign"' "remote deploy installs the downloaded juno-txsign binary into the protected runtime"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_runtime_bin="$runtime_dir/bin/juno-txsign"' "remote deploy records the installed juno-txsign runtime path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo chown -R intents-juno:intents-juno "$runtime_dir"' "remote deploy reassigns restored runtime to the service user"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl stop juno-scan || true' "remote deploy stops juno-scan before repairing its state directory"
   assert_contains "$(cat "$log_dir/ssh.stdin")" "sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'" "remote deploy repairs juno-scan state ownership through a root shell"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo test -x "$dkg_admin_runtime_bin"' "remote deploy verifies the restored runtime binary through sudo"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_help="$(sudo "$dkg_admin_runtime_bin" --help 2>&1 || true)"' "remote deploy probes the runtime dkg-admin command set"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -qE '\''(^|[[:space:]])sign-digest([[:space:]]|$)'\'' <<<"$dkg_admin_help"' "remote deploy requires dkg-admin sign-digest support"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo test -x "$juno_txsign_runtime_bin"' "remote deploy verifies the restored juno-txsign binary through sudo"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_txsign_help="$(sudo "$juno_txsign_runtime_bin" --help 2>&1 || true)"' "remote deploy probes the runtime juno-txsign command set"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -qE '\''(^|[[:space:]])sign-digest([[:space:]]|$)'\'' <<<"$juno_txsign_help"' "remote deploy requires juno-txsign sign-digest support"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"' "remote deploy can patch legacy dkg-admin wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_tmp="$(mktemp)"' "remote deploy rewrites the dkg-admin wrapper from a temp file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'admin_config_dir="$(dirname "$admin_config")"' "remote deploy writes a dkg-admin wrapper that derives the bundle directory"
@@ -169,7 +174,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_finalizer_tmp" "$withdraw_finalizer_script"' "remote deploy installs the corrected withdraw-finalizer wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"' "remote deploy can patch the base-event-scanner wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "remote deploy restores base-event-scanner start block guard"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN' "remote deploy backfills exported Postgres DSN into the withdraw-coordinator wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS' "remote deploy backfills exported signer env into the withdraw-coordinator wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'coord_client_cert="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE")"' "remote deploy derives withdraw coordinator client cert path from staged env"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'openssl x509 -in "$coord_client_cert" -noout -purpose' "remote deploy validates the restored coordinator client cert purpose"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"' "remote deploy no longer fabricates coordinator client certs from the server cert"
@@ -211,6 +216,8 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-op1" "deposit scan wallet id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232" "deposit scan rpc url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "withdraw coordinator rpc url staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "withdraw coordinator extend signer staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "withdraw coordinator signer keys staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "withdraw finalizer scan url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "base event scanner start block staged"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'curl -fsS -X POST "${curl_headers[@]}" -H "Content-Type: application/json" --data "$payload" "${scan_url%/}${path}"' "deploy posts scan wallet mutations through curl"

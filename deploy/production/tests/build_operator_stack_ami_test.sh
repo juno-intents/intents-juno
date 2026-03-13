@@ -189,6 +189,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" 'export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "withdraw wrapper exports AWS SDK env when present"
   assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS' "withdraw wrapper exports DSN and secret env vars"
   assert_contains "$withdraw_wrapper" 'export JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper exports juno scan bearer token"
+  assert_contains "$withdraw_wrapper" 'export JUNO_TXSIGN_SIGNER_KEYS' "withdraw wrapper exports juno txsign signer keys"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
   assert_contains "$withdraw_wrapper" '--juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}"' "withdraw wrapper pins juno txbuild to the scanner URL"
@@ -422,6 +423,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 AWS_REGION=us-east-1
@@ -462,6 +464,7 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_USER=actual-rpc-username-secret' "withdraw wrapper exports RPC user"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_PASS=actual-rpc-password-secret' "withdraw wrapper exports RPC pass"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_SCAN_BEARER_TOKEN=actual-juno-scan-bearer-secret' "withdraw wrapper exports the scanner bearer token"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "withdraw wrapper exports the juno txsign signer keys"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_REGION=us-east-1' "withdraw wrapper exports AWS region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw wrapper exports AWS default region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_PROFILE=alpha-testnet' "withdraw wrapper exports AWS profile"

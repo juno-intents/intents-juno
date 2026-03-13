@@ -831,10 +831,13 @@ source "$remote_stage_dir/common.sh"
 dkg_release_tag="${JUNO_DKG_RELEASE_TAG:-$JUNO_DKG_VERSION_DEFAULT}"
 dkg_stage_dir="$(mktemp -d)"
 dkg_admin_downloaded="$(ensure_dkg_binary "dkg-admin" "$dkg_release_tag" "$dkg_stage_dir")"
+juno_txsign_downloaded="$(ensure_juno_txsign_binary "$JUNO_TXSIGN_VERSION_DEFAULT" "$dkg_stage_dir")"
 sudo install -d -m 0755 -o intents-juno -g intents-juno "$runtime_dir/bin"
 sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"
+sudo install -m 0755 "$juno_txsign_downloaded" "$runtime_dir/bin/juno-txsign"
 rm -rf "$dkg_stage_dir"
 dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
+juno_txsign_runtime_bin="$runtime_dir/bin/juno-txsign"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
 if sudo test -e /var/lib/intents-juno/juno-scan.db; then
   sudo systemctl stop juno-scan || true
@@ -844,9 +847,13 @@ sudo test -x "$dkg_admin_runtime_bin" || {
   echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
   exit 1
 }
-dkg_admin_help="$(sudo "$dkg_admin_runtime_bin" --help 2>&1 || true)"
-grep -qE '(^|[[:space:]])sign-digest([[:space:]]|$)' <<<"$dkg_admin_help" || {
-  echo "restored runtime dkg-admin binary does not support sign-digest: $dkg_admin_runtime_bin" >&2
+sudo test -x "$juno_txsign_runtime_bin" || {
+  echo "restored runtime is missing juno-txsign binary: $juno_txsign_runtime_bin" >&2
+  exit 1
+}
+juno_txsign_help="$(sudo "$juno_txsign_runtime_bin" --help 2>&1 || true)"
+grep -qE '(^|[[:space:]])sign-digest([[:space:]]|$)' <<<"$juno_txsign_help" || {
+  echo "restored runtime juno-txsign binary does not support sign-digest: $juno_txsign_runtime_bin" >&2
   exit 1
 }
 
@@ -1184,7 +1191,7 @@ tss_server_name_args=()
 if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
   tss_server_name_args=(--tss-server-name "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME}")
 fi
-export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"

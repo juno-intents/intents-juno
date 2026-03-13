@@ -53,6 +53,7 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
@@ -131,11 +132,12 @@ test_render_shared_manifest_and_handoffs() {
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   printf 'secret' >"$workdir/secret.txt"
-  cat >"$workdir/operator-secrets.env" <<'EOF'
+cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
@@ -182,11 +184,12 @@ test_render_shared_manifest_derives_base_event_scanner_start_block_from_transact
   local workdir shared_manifest bridge_summary old_path
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
-  cat >"$workdir/operator-secrets.env" <<'EOF'
+cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
@@ -663,6 +666,7 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
@@ -705,7 +709,8 @@ EOF
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" "rendered env withdraw coordinator tss ca"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem" "rendered env withdraw coordinator client cert"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key" "rendered env withdraw coordinator client key"
-  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin" "rendered env withdraw coordinator extend signer"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "rendered env withdraw coordinator extend signer"
+  assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env juno txsign signer keys"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw finalizer scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw finalizer juno rpc url"
   assert_contains "$(cat "$output_env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "rendered env tss ufvk path"

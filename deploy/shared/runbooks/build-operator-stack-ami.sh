@@ -548,7 +548,7 @@ WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
-WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/juno-txsign
 WITHDRAW_FINALIZER_OWNER=
 WITHDRAW_FINALIZER_QUEUE_GROUP=withdraw-finalizer
 WITHDRAW_FINALIZER_QUEUE_TOPICS=checkpoints.packages.v1
@@ -1699,6 +1699,7 @@ if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
 fi
 export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
 export JUNO_SCAN_BEARER_TOKEN
+export JUNO_TXSIGN_SIGNER_KEYS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
