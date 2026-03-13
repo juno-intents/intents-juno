@@ -456,6 +456,7 @@ write_stack_config() {
  testnet=1
  server=1
  txindex=1
+ txunpaidactionlimit=10000
  daemon=0
  listen=1
  rpcbind=127.0.0.1
@@ -898,6 +899,7 @@ cat > "$tmp_junocashd_conf" <<CFG
 testnet=1
 server=1
 txindex=1
+txunpaidactionlimit=10000
 daemon=0
 listen=1
 rpcbind=127.0.0.1

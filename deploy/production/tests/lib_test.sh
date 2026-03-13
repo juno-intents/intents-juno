@@ -979,6 +979,7 @@ EOF
   assert_contains "$(cat "$output_conf")" "rpcport=18232" "junocashd conf rpc port"
   assert_contains "$(cat "$output_conf")" "rpcuser=juno" "junocashd conf rpc user"
   assert_contains "$(cat "$output_conf")" "rpcpassword=rpcpass" "junocashd conf rpc password"
+  assert_contains "$(cat "$output_conf")" "txunpaidactionlimit=10000" "junocashd conf raises unpaid action limit for shielded transactions"
   rm -rf "$workdir"
 }
 

@@ -176,6 +176,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'required_key "CHECKPOINT_SIGNER_KMS_KEY_ID when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$checkpoint_signer_kms_key_id"' "config hydrator requires KMS key id for aws-kms mode"
   assert_contains "$hydrator_script" 'required_key "OPERATOR_ADDRESS when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$operator_address"' "config hydrator requires operator address for aws-kms mode"
   assert_contains "$hydrator_script" 'junocashd_conf_file="/etc/intents-juno/junocashd.conf"' "config hydrator rewrites junocashd conf"
+  assert_contains "$hydrator_script" 'txunpaidactionlimit=10000' "config hydrator raises unpaid action limit for shielded transactions"
   assert_contains "$hydrator_script" 'rpcuser=${juno_rpc_user}' "config hydrator writes junocashd rpc user"
   assert_contains "$hydrator_script" 'rpcpassword=${juno_rpc_pass}' "config hydrator writes junocashd rpc password"
   assert_contains "$hydrator_script" 'chown root:intents-juno "$junocashd_conf_file"' "config hydrator preserves junocashd conf ownership"

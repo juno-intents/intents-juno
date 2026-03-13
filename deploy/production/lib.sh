@@ -1234,6 +1234,7 @@ production_render_junocashd_conf() {
     printf 'testnet=1\n'
     printf 'server=1\n'
     printf 'txindex=1\n'
+    printf 'txunpaidactionlimit=10000\n'
     printf 'daemon=0\n'
     printf 'listen=1\n'
     printf 'rpcbind=127.0.0.1\n'
