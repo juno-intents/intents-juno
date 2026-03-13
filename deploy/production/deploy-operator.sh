@@ -1251,10 +1251,29 @@ rm -f "$base_event_scanner_tmp"
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
 if [[ -f "$config_hydrator_script" ]] && {
   grep -Fq 'install -m 0600 "$tmp" "$file"' "$config_hydrator_script" ||
-  grep -Fq 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "$config_hydrator_script"
+  grep -Fq 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "$config_hydrator_script" ||
+  ! grep -Fq 'txunpaidactionlimit=10000' "$config_hydrator_script"
 }; then
   hydrator_tmp="$(mktemp)"
   awk '
+    BEGIN {
+      unpaid_action_limit = 0
+    }
+    $0 == "txindex=1" {
+      print
+      if (!unpaid_action_limit) {
+        print "txunpaidactionlimit=10000"
+        unpaid_action_limit = 1
+      }
+      next
+    }
+    $0 == "txunpaidactionlimit=10000" {
+      if (!unpaid_action_limit) {
+        print
+        unpaid_action_limit = 1
+      }
+      next
+    }
     $0 == "  install -m 0600 \"$tmp\" \"$file\"" {
       print "  cat \"$tmp\" > \"$file\""
       print "  chmod 0640 \"$file\""

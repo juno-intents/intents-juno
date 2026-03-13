@@ -357,6 +357,47 @@ fi
 sudo rm -f /etc/intents-juno/checkpoint-signer.key
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
+config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
+if [[ -f "$config_hydrator_script" ]] && {
+  grep -Fq 'install -m 0600 "$tmp" "$file"' "$config_hydrator_script" ||
+  grep -Fq 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "$config_hydrator_script" ||
+  ! grep -Fq 'txunpaidactionlimit=10000' "$config_hydrator_script"
+}; then
+  hydrator_tmp="$(mktemp)"
+  awk '
+    BEGIN {
+      unpaid_action_limit = 0
+    }
+    $0 == "txindex=1" {
+      print
+      if (!unpaid_action_limit) {
+        print "txunpaidactionlimit=10000"
+        unpaid_action_limit = 1
+      }
+      next
+    }
+    $0 == "txunpaidactionlimit=10000" {
+      if (!unpaid_action_limit) {
+        print
+        unpaid_action_limit = 1
+      }
+      next
+    }
+    $0 == "  install -m 0600 \"$tmp\" \"$file\"" {
+      print "  cat \"$tmp\" > \"$file\""
+      print "  chmod 0640 \"$file\""
+      next
+    }
+    $0 == "install -m 0640 -o root -g intents-juno \"$tmp_env\" \"$stack_env_file\"" {
+      print "cat \"$tmp_env\" > \"$stack_env_file\""
+      print "chmod 0640 \"$stack_env_file\""
+      next
+    }
+    { print }
+  ' "$config_hydrator_script" >"$hydrator_tmp"
+  sudo install -m 0755 "$hydrator_tmp" "$config_hydrator_script"
+  rm -f "$hydrator_tmp"
+fi
 sudo systemctl restart intents-juno-config-hydrator.service
 for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"
