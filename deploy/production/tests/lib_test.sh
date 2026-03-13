@@ -284,6 +284,90 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_app_handoff_uses_dkg_operator_ports_when_present() {
+  local workdir shared_manifest dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators += [
+      {
+        "index": 2,
+        "operator_id": "0x6666666666666666666666666666666666666666",
+        "operator_address": "0x8888888888888888888888888888888888888888",
+        "checkpoint_signer_driver": "aws-kms",
+        "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/66666666-2222-3333-4444-555555555555",
+        "aws_profile": "juno",
+        "aws_region": "us-east-1",
+        "account_id": "021490342184",
+        "operator_host": "203.0.113.12",
+        "operator_user": "ubuntu",
+        "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+        "public_dns_label": "op2",
+        "public_endpoint": "203.0.113.12",
+        "known_hosts_file": "'"$workdir"'/known_hosts",
+        "dkg_backup_zip": "'"$workdir"'/dkg-backup.zip",
+        "secret_contract_file": "'"$workdir"'/operator-secrets.env"
+      },
+      {
+        "index": 3,
+        "operator_id": "0x7777777777777777777777777777777777777777",
+        "operator_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checkpoint_signer_driver": "aws-kms",
+        "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/77777777-2222-3333-4444-555555555555",
+        "aws_profile": "juno",
+        "aws_region": "us-east-1",
+        "account_id": "021490342184",
+        "operator_host": "203.0.113.13",
+        "operator_user": "ubuntu",
+        "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+        "public_dns_label": "op3",
+        "public_endpoint": "203.0.113.13",
+        "known_hosts_file": "'"$workdir"'/known_hosts",
+        "dkg_backup_zip": "'"$workdir"'/dkg-backup.zip",
+        "secret_contract_file": "'"$workdir"'/operator-secrets.env"
+      }
+    ]
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '
+    .operators[0].endpoint = "https://10.0.0.11:18443"
+    | .operators[1].endpoint = "https://10.0.0.12:18444"
+    | .operators[2].endpoint = "https://10.0.0.13:18445"
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+
+  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "first operator endpoint port"
+  assert_eq "$(jq -r '.operator_endpoints[1]' "$workdir/output/app/app-deploy.json")" "0x8888888888888888888888888888888888888888=203.0.113.12:18444" "second operator endpoint port"
+  assert_eq "$(jq -r '.operator_endpoints[2]' "$workdir/output/app/app-deploy.json")" "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=203.0.113.13:18445" "third operator endpoint port"
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_prefers_inventory_owallet_ua() {
   local workdir shared_manifest bridge_summary_no_ua
   workdir="$(mktemp -d)"
