@@ -1463,6 +1463,46 @@ END
   return 1
 }
 
+wait_for_postgres_dsn_ready() {
+  local postgres_dsn="$1"
+  local timeout_seconds="${2:-600}"
+  local retry_sleep_seconds="${3:-5}"
+  local label="${4:-postgres endpoint}"
+  local connect_timeout_seconds="${5:-5}"
+  local deadline_epoch now_epoch attempt status
+
+  [[ -n "$postgres_dsn" ]] || return 1
+  [[ "$timeout_seconds" =~ ^[0-9]+$ ]] || return 1
+  (( timeout_seconds > 0 )) || return 1
+  [[ "$retry_sleep_seconds" =~ ^[0-9]+$ ]] || return 1
+  (( retry_sleep_seconds >= 0 )) || return 1
+  [[ "$connect_timeout_seconds" =~ ^[0-9]+$ ]] || return 1
+  (( connect_timeout_seconds > 0 )) || return 1
+
+  deadline_epoch="$(( $(date +%s) + timeout_seconds ))"
+  attempt=0
+
+  while :; do
+    attempt="$((attempt + 1))"
+    set +e
+    PGCONNECT_TIMEOUT="$connect_timeout_seconds" psql "$postgres_dsn" -Atqc "SELECT 1" >/dev/null 2>&1
+    status=$?
+    set -e
+    if (( status == 0 )); then
+      return 0
+    fi
+
+    now_epoch="$(date +%s)"
+    if (( now_epoch >= deadline_epoch )); then
+      log "timed out waiting for $label from runner after ${timeout_seconds}s"
+      return 1
+    fi
+
+    log "waiting for $label from runner attempt=${attempt} retry_sleep_seconds=${retry_sleep_seconds}"
+    sleep "$retry_sleep_seconds"
+  done
+}
+
 supports_sign_digest_subcommand() {
   local signer_bin="$1"
   local probe_digest output status lowered
@@ -3140,6 +3180,7 @@ command_run() {
   local shared_proof_services_image=""
   local shared_topic_prefix="shared.infra.e2e"
   local shared_timeout="300s"
+  local shared_postgres_ready_timeout_seconds="600"
   local shared_output=""
   local relayer_runtime_mode="distributed"
   local relayer_runtime_operator_hosts_csv=""
@@ -5811,6 +5852,10 @@ command_run() {
           die "failed to update checkpoint bridge config on host=$checkpoint_host"
         stage_checkpoint_bridge_config_update_success="$((stage_checkpoint_bridge_config_update_success + 1))"
       done
+    fi
+
+    if ! wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"; then
+      die "shared postgres endpoint did not become reachable from runner before shared infra validation"
     fi
 
     log "validating operator-service checkpoint publication via shared infra"

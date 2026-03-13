@@ -81,6 +81,21 @@ test_base_balance_queries_retry_on_transient_rpc_failures() {
   assert_contains "$script_text" "funding_sender_balance_wei=\"\$(read_balance_wei_with_retry \"\$rpc_url\" \"\$funding_sender_address\" \"base funder balance for pre-fund budget check\")\"" "prefund budget check uses balance retry helper"
 }
 
+test_shared_postgres_runner_readiness_wait_precedes_shared_validation() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "wait_for_postgres_dsn_ready() {" "run-testnet-e2e defines shared postgres readiness helper"
+  assert_contains "$script_text" 'PGCONNECT_TIMEOUT="$connect_timeout_seconds" psql "$postgres_dsn" -Atqc "SELECT 1"' "shared postgres readiness helper probes postgres reachability with bounded connect timeout"
+  assert_contains "$script_text" 'local shared_postgres_ready_timeout_seconds="600"' "run-testnet-e2e sets an explicit shared postgres readiness timeout for fresh infra"
+  assert_contains "$script_text" 'wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"' "shared validation waits for runner postgres reachability"
+  assert_contains "$script_text" 'die "shared postgres endpoint did not become reachable from runner before shared infra validation"' "shared validation fails with explicit postgres readiness context"
+  assert_order "$script_text" \
+    'wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"' \
+    'run_shared_infra_validation_attempt "$checkpoint_started_at" 2>&1 | tee "$shared_validation_log"' \
+    "shared postgres readiness wait runs before shared infra validation attempt"
+}
+
 test_bridge_config_contract_reads_retry_on_malformed_rpc_responses() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1118,6 +1133,7 @@ test_deploy_production_canaries_excludes_legacy_aws_e2e_paths() {
 main() {
   test_base_prefund_budget_preflight_exists_and_runs_before_prefund_loop
   test_base_balance_queries_retry_on_transient_rpc_failures
+  test_shared_postgres_runner_readiness_wait_precedes_shared_validation
   test_bridge_config_contract_reads_retry_on_malformed_rpc_responses
   test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
