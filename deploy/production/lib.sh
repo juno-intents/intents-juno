@@ -546,26 +546,93 @@ production_required_min_base_relayer_balance_wei() {
   printf '%s\n' "$value"
 }
 
-production_base_relayer_first_private_key() {
+production_base_relayer_private_keys() {
   local env_file="$1"
-  local base_relayer_private_keys first_key
+  local base_relayer_private_keys
+  local -a base_relayer_keys=()
+  local key
 
   base_relayer_private_keys="$(production_env_first_value "$env_file" BASE_RELAYER_PRIVATE_KEYS || true)"
   [[ -n "$base_relayer_private_keys" ]] || die "resolved secret env is missing BASE_RELAYER_PRIVATE_KEYS"
-  first_key="${base_relayer_private_keys%%,*}"
-  [[ -n "$first_key" ]] || die "resolved secret env BASE_RELAYER_PRIVATE_KEYS is empty"
-  production_normalize_ecdsa_private_key "$first_key"
+
+  IFS=',' read -r -a base_relayer_keys <<<"$base_relayer_private_keys"
+  [[ "${#base_relayer_keys[@]}" -gt 0 ]] || die "resolved secret env BASE_RELAYER_PRIVATE_KEYS is empty"
+  for key in "${base_relayer_keys[@]}"; do
+    [[ -n "${key//[[:space:]]/}" ]] || continue
+    production_normalize_ecdsa_private_key "$key"
+  done
 }
 
-production_base_relayer_address() {
+production_base_relayer_addresses() {
   local env_file="$1"
   local private_key address
 
   have_cmd cast || die "cast is required to verify base relayer funding"
-  private_key="$(production_base_relayer_first_private_key "$env_file")"
-  address="$(cast wallet address --private-key "$private_key" | tr -d '[:space:]')"
-  [[ "$address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "failed to derive base relayer address from BASE_RELAYER_PRIVATE_KEYS"
-  printf '%s\n' "$address"
+  while IFS= read -r private_key; do
+    [[ -n "$private_key" ]] || continue
+    address="$(cast wallet address --private-key "$private_key" | tr -d '[:space:]')"
+    [[ "$address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "failed to derive base relayer address from BASE_RELAYER_PRIVATE_KEYS"
+    printf '%s\n' "$address"
+  done < <(production_base_relayer_private_keys "$env_file")
+}
+
+production_base_relayer_addresses_csv() {
+  local env_file="$1"
+  local addresses_csv=""
+  local address
+
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    if [[ -n "$addresses_csv" ]]; then
+      addresses_csv+=","
+    fi
+    addresses_csv+="$address"
+  done < <(production_base_relayer_addresses "$env_file")
+
+  printf '%s\n' "$addresses_csv"
+}
+
+production_backoffice_relayer_signer_addresses_csv() {
+  local app_deploy="$1"
+  local manifest_dir operators_dir environment allow_local_resolvers tmp_dir addresses_file
+  local operator_deploy secret_contract_file aws_profile aws_region resolved_env
+  local -a operator_deploys=()
+  local addresses_csv
+
+  manifest_dir="$(cd "$(dirname "$app_deploy")" && pwd)"
+  operators_dir="$(production_abs_path "$manifest_dir" "../operators")"
+  [[ -d "$operators_dir" ]] || die "operator handoff directory not found for app deploy: $operators_dir"
+
+  environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
+  allow_local_resolvers="false"
+  [[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+
+  tmp_dir="$(mktemp -d)"
+  addresses_file="$tmp_dir/base-relayer-addresses.txt"
+
+  operator_deploys=("$operators_dir"/*/operator-deploy.json)
+  [[ "${#operator_deploys[@]}" -gt 0 && -f "${operator_deploys[0]}" ]] || die "no operator handoff manifests found for app deploy: $app_deploy"
+
+  for operator_deploy in "${operator_deploys[@]}"; do
+    [[ -f "$operator_deploy" ]] || continue
+    [[ -n "$operator_deploy" ]] || continue
+    secret_contract_file="$(production_abs_path "$(dirname "$operator_deploy")" "$(production_json_required "$operator_deploy" '.secret_contract_file | select(type == "string" and length > 0)')")"
+    aws_profile="$(production_json_optional "$operator_deploy" '.aws_profile')"
+    aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
+    resolved_env="$tmp_dir/$(production_safe_slug "$(basename "$(dirname "$operator_deploy")")").resolved.env"
+    production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
+    production_base_relayer_addresses "$resolved_env" >>"$addresses_file"
+  done
+
+  if [[ ! -s "$addresses_file" ]]; then
+    rm -rf "$tmp_dir"
+    die "no operator handoffs with base relayer signer addresses found for app deploy: $app_deploy"
+  fi
+
+  addresses_csv="$(awk 'NF { key = tolower($0); if (!seen[key]++) print $0 }' "$addresses_file" | paste -sd, -)"
+  rm -rf "$tmp_dir"
+  [[ -n "$addresses_csv" ]] || die "failed to derive base relayer signer addresses for app deploy: $app_deploy"
+  printf '%s\n' "$addresses_csv"
 }
 
 production_base_relayer_balance_snapshot() {
@@ -574,10 +641,12 @@ production_base_relayer_balance_snapshot() {
   local address balance_wei
 
   [[ -n "$base_rpc_url" ]] || die "base rpc url is required to verify base relayer funding"
-  address="$(production_base_relayer_address "$env_file")"
-  balance_wei="$(cast balance --rpc-url "$base_rpc_url" "$address" | tr -d '[:space:]')"
-  [[ "$balance_wei" =~ ^[0-9]+$ ]] || die "failed to resolve base relayer balance for $address"
-  printf '%s %s\n' "$address" "$balance_wei"
+  while IFS= read -r address; do
+    [[ -n "$address" ]] || continue
+    balance_wei="$(cast balance --rpc-url "$base_rpc_url" "$address" | tr -d '[:space:]')"
+    [[ "$balance_wei" =~ ^[0-9]+$ ]] || die "failed to resolve base relayer balance for $address"
+    printf '%s %s\n' "$address" "$balance_wei"
+  done < <(production_base_relayer_addresses "$env_file")
 }
 
 production_require_base_relayer_balance() {
@@ -585,16 +654,21 @@ production_require_base_relayer_balance() {
   local base_rpc_url="$2"
   local minimum_balance_wei="${3:-}"
   local address balance_wei
+  local saw_address="false"
 
   if [[ -z "$minimum_balance_wei" ]]; then
     minimum_balance_wei="$(production_required_min_base_relayer_balance_wei)"
   fi
   production_is_positive_integer "$minimum_balance_wei" \
     || die "minimum base relayer balance must be a positive integer"
-  read -r address balance_wei <<<"$(production_base_relayer_balance_snapshot "$env_file" "$base_rpc_url")"
-  if (( balance_wei < minimum_balance_wei )); then
-    die "base relayer $address balance $balance_wei wei is below minimum $minimum_balance_wei wei"
-  fi
+  while read -r address balance_wei; do
+    [[ -n "${address:-}" ]] || continue
+    saw_address="true"
+    if (( balance_wei < minimum_balance_wei )); then
+      die "base relayer $address balance $balance_wei wei is below minimum $minimum_balance_wei wei"
+    fi
+  done < <(production_base_relayer_balance_snapshot "$env_file" "$base_rpc_url")
+  [[ "$saw_address" == "true" ]] || die "no base relayer addresses resolved from BASE_RELAYER_PRIVATE_KEYS"
 }
 
 production_is_tx_hash() {
@@ -1361,6 +1435,7 @@ production_render_backoffice_env() {
 
   local postgres_dsn auth_secret juno_rpc_url juno_rpc_user juno_rpc_pass
   local listen_addr operator_addresses service_urls operator_endpoints
+  local base_relayer_signer_addresses base_relayer_gas_min_wei
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -1373,6 +1448,8 @@ production_render_backoffice_env() {
   operator_addresses="$(jq -r '.operator_addresses | join(",")' "$app_deploy")"
   service_urls="$(jq -r '.service_urls | join(",")' "$app_deploy")"
   operator_endpoints="$(jq -r '.operator_endpoints | join(",")' "$app_deploy")"
+  base_relayer_signer_addresses="$(production_backoffice_relayer_signer_addresses_csv "$app_deploy")"
+  base_relayer_gas_min_wei="$(production_required_min_base_relayer_balance_wei)"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -1385,6 +1462,8 @@ BACKOFFICE_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BACKOFFICE_WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$shared_manifest")
 BACKOFFICE_OPERATOR_REGISTRY_ADDRESS=$(jq -r '.contracts.operator_registry' "$shared_manifest")
 BACKOFFICE_OPERATOR_ADDRESSES=$operator_addresses
+BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=$base_relayer_signer_addresses
+BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=$base_relayer_gas_min_wei
 BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 EOF

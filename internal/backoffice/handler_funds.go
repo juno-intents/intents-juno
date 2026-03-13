@@ -16,8 +16,8 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 )
 
-// handleFunds returns all fund data in one response: operator balances,
-// prover funds, bridge wJUNO balance, and MPC wallet balance.
+// handleFunds returns all fund data in one response: base relayer signer
+// balances, prover funds, bridge wJUNO balance, and MPC wallet balance.
 func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -47,15 +47,15 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				creditsBig, ok := new(big.Int).SetString(credits, 10)
-			if !ok {
-				creditsBig = new(big.Int)
-			}
-			resp["prover"] = map[string]any{
-				"address":          s.cfg.SP1RequestorAddress.Hex(),
-				"creditsRaw":       credits,
-				"creditsFormatted": weiToEthString(creditsBig),
-				"network":          "succinct",
-			}
+				if !ok {
+					creditsBig = new(big.Int)
+				}
+				resp["prover"] = map[string]any{
+					"address":          s.cfg.SP1RequestorAddress.Hex(),
+					"creditsRaw":       credits,
+					"creditsFormatted": weiToEthString(creditsBig),
+					"network":          "succinct",
+				}
 			}
 		} else {
 			prover, proverErr := s.fetchAddressBalance(ctx, s.cfg.SP1RequestorAddress, s.cfg.ProverFundsMinWei)
@@ -101,13 +101,31 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// fetchOperatorBalances queries ETH balance for each configured operator address.
+// fundsBalanceAddresses returns the addresses shown in the funds monitor.
+// Prefer explicit base relayer signer addresses when configured; fall back to
+// operator addresses for older deployments.
+func (s *Server) fundsBalanceAddresses() []common.Address {
+	if len(s.cfg.BaseRelayerSignerAddresses) > 0 {
+		return append([]common.Address(nil), s.cfg.BaseRelayerSignerAddresses...)
+	}
+	return append([]common.Address(nil), s.cfg.OperatorAddresses...)
+}
+
+func (s *Server) fundsBalanceMinWei() *big.Int {
+	if s.cfg.BaseRelayerFundsMinWei != nil {
+		return s.cfg.BaseRelayerFundsMinWei
+	}
+	return s.cfg.OperatorGasMinWei
+}
+
+// fetchOperatorBalances queries ETH balance for each configured base relayer signer.
 func (s *Server) fetchOperatorBalances(ctx context.Context) ([]map[string]any, error) {
-	results := make([]map[string]any, 0, len(s.cfg.OperatorAddresses))
-	for _, addr := range s.cfg.OperatorAddresses {
-		entry, err := s.fetchAddressBalance(ctx, addr, s.cfg.OperatorGasMinWei)
+	addrs := s.fundsBalanceAddresses()
+	results := make([]map[string]any, 0, len(addrs))
+	for _, addr := range addrs {
+		entry, err := s.fetchAddressBalance(ctx, addr, s.fundsBalanceMinWei())
 		if err != nil {
-			return nil, fmt.Errorf("operator %s: %w", addr.Hex(), err)
+			return nil, fmt.Errorf("base relayer signer %s: %w", addr.Hex(), err)
 		}
 		results = append(results, entry)
 	}

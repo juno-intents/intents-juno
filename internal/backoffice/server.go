@@ -29,12 +29,13 @@ type ServerConfig struct {
 	DLQStore   dlq.Store
 	AlertStore *alerts.Store
 
-	BridgeAddress           common.Address
-	WJunoAddress            common.Address
-	OperatorRegistryAddress common.Address
-	FeeDistributorAddress   common.Address
-	SP1RequestorAddress     common.Address
-	OperatorAddresses       []common.Address
+	BridgeAddress              common.Address
+	WJunoAddress               common.Address
+	OperatorRegistryAddress    common.Address
+	FeeDistributorAddress      common.Address
+	SP1RequestorAddress        common.Address
+	OperatorAddresses          []common.Address
+	BaseRelayerSignerAddresses []common.Address
 
 	ServiceEntries    []ServiceEntry
 	OperatorEndpoints []OperatorEndpoint
@@ -47,9 +48,10 @@ type ServerConfig struct {
 	RateLimitPerSecond float64
 	RateLimitBurst     int
 
-	OperatorGasMinWei *big.Int
-	ProverFundsMinWei *big.Int
-	ReadinessCheck    func(context.Context) error
+	OperatorGasMinWei      *big.Int
+	BaseRelayerFundsMinWei *big.Int
+	ProverFundsMinWei      *big.Int
+	ReadinessCheck         func(context.Context) error
 
 	Log *slog.Logger
 }
@@ -84,6 +86,9 @@ func New(cfg ServerConfig) (*Server, error) {
 	}
 	if cfg.OperatorGasMinWei == nil {
 		cfg.OperatorGasMinWei = new(big.Int)
+	}
+	if cfg.BaseRelayerFundsMinWei == nil {
+		cfg.BaseRelayerFundsMinWei = new(big.Int).Set(cfg.OperatorGasMinWei)
 	}
 	if cfg.ProverFundsMinWei == nil {
 		cfg.ProverFundsMinWei = new(big.Int)

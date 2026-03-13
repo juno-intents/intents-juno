@@ -10,16 +10,39 @@ source "$SCRIPT_DIR/common_test.sh"
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
-  local balance_wei="$3"
+  local first_balance_wei="$3"
+  local second_balance_wei="${4:-$3}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 printf 'cast %s\n' "\$*" >>"$log_file"
 if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
-  printf '0x1111111111111111111111111111111111111111\n'
+  case "\$4" in
+    0x1111111111111111111111111111111111111111111111111111111111111111)
+      printf '0x1111111111111111111111111111111111111111\n'
+      ;;
+    0x2222222222222222222222222222222222222222222222222222222222222222)
+      printf '0x2222222222222222222222222222222222222222\n'
+      ;;
+    *)
+      printf 'unexpected private key: %s\n' "\$4" >&2
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 if [[ "\$1" == "balance" ]]; then
-  printf '%s\n' "$balance_wei"
+  case "\${@: -1}" in
+    0x1111111111111111111111111111111111111111)
+      printf '%s\n' "$first_balance_wei"
+      ;;
+    0x2222222222222222222222222222222222222222)
+      printf '%s\n' "$second_balance_wei"
+      ;;
+    *)
+      printf 'unexpected balance address: %s\n' "\${@: -1}" >&2
+      exit 1
+      ;;
+  esac
   exit 0
 fi
 printf 'unexpected cast invocation: %s\n' "\$*" >&2
@@ -41,7 +64,7 @@ test_operator_boot_canary_checks_services_over_strict_ssh() {
   printf '203.0.113.11 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBundleHostKey\n' >"$tmp/known_hosts"
   cat >"$tmp/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
-BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   printf 'backup' >"$tmp/dkg-backup.zip"
@@ -100,7 +123,7 @@ if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"*
 fi
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000" "400000000000000"
   chmod 0755 "$fake_bin/ssh"
 
   (
@@ -120,9 +143,12 @@ EOF
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "operator canary verifies remote juno-txsign path"
   assert_contains "$(cat "$log_file")" "/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help" "operator canary verifies juno-txsign runtime"
   assert_contains "$(cat "$tmp/cast.log")" "wallet address --private-key" "operator canary derives the base relayer address from the configured key"
-  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid" "operator canary checks base relayer funding"
+  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x1111111111111111111111111111111111111111" "operator canary checks first base relayer signer funding"
+  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "operator canary checks second base relayer signer funding"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "operator canary ready flag"
   assert_eq "$(jq -r '.checks.relayer_funding.status' "$output_json")" "passed" "operator canary relayer funding status"
+  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x1111111111111111111111111111111111111111=300000000000000" "operator canary reports first relayer balance"
+  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x2222222222222222222222222222222222222222=400000000000000" "operator canary reports second relayer balance"
   assert_eq "$(jq -r '.checks.withdraw_config.status' "$output_json")" "passed" "operator canary withdraw config status"
   assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "passed" "operator canary txsign runtime status"
   assert_eq "$(jq -r '.checks.systemd.status' "$output_json")" "passed" "operator canary systemd status"
@@ -142,7 +168,7 @@ test_operator_boot_canary_rejects_underfunded_relayer() {
   printf '203.0.113.11 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBundleHostKey\n' >"$tmp/known_hosts"
   cat >"$tmp/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
-BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   printf 'backup' >"$tmp/dkg-backup.zip"
@@ -173,7 +199,7 @@ JSON
 printf 'ssh should not be called when relayer funding is insufficient\n' >&2
 exit 1
 EOF
-  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1000"
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000" "1000"
   chmod 0755 "$fake_bin/ssh"
 
   (
@@ -186,7 +212,9 @@ EOF
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "false" "underfunded relayer blocks ready flag"
   assert_eq "$(jq -r '.checks.relayer_funding.status' "$output_json")" "failed" "underfunded relayer fails funding check"
   assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "below minimum" "underfunded relayer detail"
-  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid" "underfunded relayer still checks base relayer funding"
+  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x2222222222222222222222222222222222222222" "underfunded relayer detail identifies the failing signer"
+  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x1111111111111111111111111111111111111111" "underfunded relayer still checks the first signer"
+  assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "underfunded relayer still checks the failing signer"
 
   rm -rf "$tmp"
 }

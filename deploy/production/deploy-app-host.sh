@@ -47,7 +47,7 @@ done
 [[ -f "$app_deploy" ]] || die "app deploy manifest not found: $app_deploy"
 [[ -n "$release_tag" ]] || die "--release-tag is required"
 
-for cmd in jq gh sha256sum ssh scp; do
+for cmd in jq gh sha256sum ssh scp cast; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 if [[ "$dry_run" != "true" ]]; then
@@ -318,6 +318,12 @@ if [[ -n "\${BACKOFFICE_SERVICE_URLS:-}" ]]; then
 fi
 if [[ -n "\${BACKOFFICE_OPERATOR_ENDPOINTS:-}" ]]; then
   args+=(--operator-endpoints "\$BACKOFFICE_OPERATOR_ENDPOINTS")
+fi
+if [[ -n "\${BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES:-}" ]]; then
+  args+=(--base-relayer-signer-addresses "\$BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES")
+fi
+if [[ -n "\${BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI:-}" ]]; then
+  args+=(--base-relayer-gas-min-wei "\$BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI")
 fi
 exec __RUNTIME_DIR__/bin/backoffice "\${args[@]}"
 WRAP

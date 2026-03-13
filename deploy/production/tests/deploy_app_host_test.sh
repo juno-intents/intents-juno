@@ -41,6 +41,30 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_fake_cast() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
+  case "\$4" in
+    0x1111111111111111111111111111111111111111111111111111111111111111)
+      printf '0xd68c28F414B210a6C519D05159014378A5b8Bc0F\n'
+      ;;
+    *)
+      printf 'unexpected private key: %s\n' "\$4" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 test_deploy_app_host_uses_release_assets_and_updates_remote_runtime() {
   local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag
   workdir="$(mktemp -d)"
@@ -53,10 +77,12 @@ test_deploy_app_host_uses_release_assets_and_updates_remote_runtime() {
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
@@ -75,6 +101,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
 
@@ -135,6 +162,7 @@ EOF
 printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
   chmod +x "$fake_bin/gh" "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   TEST_LOG_DIR="$log_dir" TEST_ASSETS_DIR="$assets_dir" PATH="$fake_bin:$PATH" \
@@ -166,6 +194,10 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'ops.alerts.v1' "shared infra validation includes ops alert topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES:-}" ]]; then' "backoffice wrapper guards relayer signer flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI:-}" ]]; then' "backoffice wrapper guards relayer gas floor flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-signer-addresses "$BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES"' "backoffice wrapper passes relayer signer addresses"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-gas-min-wei "$BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI"' "backoffice wrapper passes relayer gas floor"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '/etc/caddy/Caddyfile' "remote writes caddyfile"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'acme_account_email="ops@thejunowallet.com"' "remote configures acme account email"
@@ -186,6 +218,8 @@ EOF
   assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=250000000000000" "backoffice env relayer gas floor"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
   rm -rf "$workdir"
@@ -203,10 +237,12 @@ test_deploy_app_host_allows_missing_backoffice_juno_rpc_url() {
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
@@ -225,6 +261,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
 
@@ -285,6 +322,7 @@ EOF
 printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
   chmod +x "$fake_bin/gh" "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   TEST_LOG_DIR="$log_dir" TEST_ASSETS_DIR="$assets_dir" PATH="$fake_bin:$PATH" \
@@ -295,16 +333,20 @@ EOF
   assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
   assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
   assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env still carries relayer signer addresses"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then' "backoffice wrapper guards juno rpc flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_USER:-}" ]]; then' "backoffice wrapper guards juno rpc user flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_PASS:-}" ]]; then' "backoffice wrapper guards juno rpc pass flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-signer-addresses "$BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES"' "backoffice wrapper still passes relayer signer addresses without juno rpc"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation still runs when backoffice juno rpc is omitted"
   rm -rf "$workdir"
 }
 
 test_deploy_app_host_rejects_non_https_manifest() {
-  local workdir shared_manifest app_manifest
+  local workdir shared_manifest app_manifest fake_bin
   workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
 
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
@@ -334,8 +376,10 @@ EOF
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
   jq '.public_scheme = "http"' "$app_manifest" >"$workdir/app-deploy.http.json"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
 
   if (
+    PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
       --app-deploy "$workdir/app-deploy.http.json" \
       --release-tag app-binaries-v0.1.0-testnet \
@@ -348,8 +392,10 @@ EOF
 }
 
 test_deploy_app_host_rejects_non_loopback_listeners() {
-  local workdir shared_manifest app_manifest
+  local workdir shared_manifest app_manifest fake_bin
   workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
 
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
@@ -379,8 +425,10 @@ EOF
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
   jq '.services.bridge_api.listen_addr = "0.0.0.0:8082"' "$app_manifest" >"$workdir/app-deploy.nonloopback.json"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
 
   if (
+    PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
       --app-deploy "$workdir/app-deploy.nonloopback.json" \
       --release-tag app-binaries-v0.1.0-testnet \

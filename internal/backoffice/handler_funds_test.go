@@ -2,9 +2,16 @@ package backoffice
 
 import (
 	"encoding/binary"
+	"encoding/json"
+	"io"
+	"log/slog"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 )
 
 func TestExtractProtoString(t *testing.T) {
@@ -141,5 +148,125 @@ func TestFetchSP1Balance_ProtobufEncoding(t *testing.T) {
 	}
 	if credits != "500000" {
 		t.Errorf("credits: got %q, want %q", credits, "500000")
+	}
+}
+
+func TestFundsBalanceAddressesPrefersBaseRelayerSigners(t *testing.T) {
+	operatorAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	relayerAddr := common.HexToAddress("0xd68c28f414b210a6c519d05159014378a5b8bc0f")
+	s := &Server{
+		cfg: ServerConfig{
+			OperatorAddresses:          []common.Address{operatorAddr},
+			BaseRelayerSignerAddresses: []common.Address{relayerAddr},
+		},
+	}
+
+	got := s.fundsBalanceAddresses()
+	if len(got) != 1 || got[0] != relayerAddr {
+		t.Fatalf("fundsBalanceAddresses = %v, want [%s]", got, relayerAddr.Hex())
+	}
+}
+
+func TestFundsBalanceAddressesFallsBackToOperatorAddresses(t *testing.T) {
+	operatorAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	s := &Server{
+		cfg: ServerConfig{
+			OperatorAddresses: []common.Address{operatorAddr},
+		},
+	}
+
+	got := s.fundsBalanceAddresses()
+	if len(got) != 1 || got[0] != operatorAddr {
+		t.Fatalf("fundsBalanceAddresses = %v, want [%s]", got, operatorAddr.Hex())
+	}
+}
+
+func TestHandleFundsUsesBaseRelayerSignerAddresses(t *testing.T) {
+	operatorAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	relayerAddr := common.HexToAddress("0xd68c28f414b210a6c519d05159014378a5b8bc0f")
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any               `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+		if req.Method != "eth_getBalance" {
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+		var addrHex string
+		if len(req.Params) > 0 {
+			if err := json.Unmarshal(req.Params[0], &addrHex); err != nil {
+				t.Fatalf("decode balance address: %v", err)
+			}
+		}
+		addr := common.HexToAddress(addrHex)
+		result := "0x0"
+		if addr == relayerAddr {
+			result = "0x38d7ea4c68000"
+		}
+		if addr == operatorAddr {
+			result = "0x1"
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  result,
+		}); err != nil {
+			t.Fatalf("encode rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	client, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer client.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:                 client,
+			OperatorAddresses:          []common.Address{operatorAddr},
+			BaseRelayerSignerAddresses: []common.Address{relayerAddr},
+			BaseRelayerFundsMinWei:     big.NewInt(250_000_000_000_000),
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Operators []struct {
+			Address        string `json:"address"`
+			BalanceWei     string `json:"balanceWei"`
+			BelowThreshold bool   `json:"belowThreshold"`
+		} `json:"operators"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	if len(body.Operators) != 1 {
+		t.Fatalf("operators len = %d, want 1", len(body.Operators))
+	}
+	if got := body.Operators[0].Address; got != relayerAddr.Hex() {
+		t.Fatalf("address = %s, want %s", got, relayerAddr.Hex())
+	}
+	if got := body.Operators[0].BalanceWei; got != "1000000000000000" {
+		t.Fatalf("balanceWei = %s, want %s", got, "1000000000000000")
+	}
+	if body.Operators[0].BelowThreshold {
+		t.Fatalf("belowThreshold = true, want false")
 	}
 }

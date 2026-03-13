@@ -44,13 +44,14 @@ func main() {
 		rateLimitPerSecond = flag.Float64("rate-limit-per-second", 5, "Per-IP rate limit refill rate")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 10, "Per-IP rate limit burst capacity")
 
-		bridgeAddr       = flag.String("bridge-address", "", "Bridge contract address on Base (required)")
-		wjunoAddr        = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")
-		opRegistryAddr   = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
-		feeDistAddr      = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
-		sp1RequestorStr  = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
-		sp1RPCURL        = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
-		operatorAddrsRaw = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
+		bridgeAddr                = flag.String("bridge-address", "", "Bridge contract address on Base (required)")
+		wjunoAddr                 = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")
+		opRegistryAddr            = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
+		feeDistAddr               = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
+		sp1RequestorStr           = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
+		sp1RPCURL                 = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
+		operatorAddrsRaw          = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
+		baseRelayerSignerAddrsRaw = flag.String("base-relayer-signer-addresses", "", "Comma-separated list of Base relayer signer addresses")
 
 		serviceURLsRaw       = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
 		operatorEndpointsRaw = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
@@ -59,8 +60,9 @@ func main() {
 
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
 
-		operatorGasMinWeiStr = flag.String("operator-gas-min-wei", "500000000000000000", "Min operator ETH balance (wei)")
-		proverFundsMinWeiStr = flag.String("prover-funds-min-wei", "1000000000000000000", "Min prover ETH balance (wei)")
+		operatorGasMinWeiStr    = flag.String("operator-gas-min-wei", "500000000000000000", "Min operator ETH balance (wei)")
+		baseRelayerGasMinWeiStr = flag.String("base-relayer-gas-min-wei", "250000000000000", "Min Base relayer signer ETH balance (wei)")
+		proverFundsMinWeiStr    = flag.String("prover-funds-min-wei", "1000000000000000000", "Min prover ETH balance (wei)")
 	)
 	flag.Parse()
 
@@ -108,6 +110,21 @@ func main() {
 				os.Exit(2)
 			}
 			operatorAddresses = append(operatorAddresses, common.HexToAddress(s))
+		}
+	}
+
+	var baseRelayerSignerAddresses []common.Address
+	if raw := strings.TrimSpace(*baseRelayerSignerAddrsRaw); raw != "" {
+		for _, s := range strings.Split(raw, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			if !common.IsHexAddress(s) {
+				fmt.Fprintf(os.Stderr, "error: invalid base relayer signer address: %s\n", s)
+				os.Exit(2)
+			}
+			baseRelayerSignerAddresses = append(baseRelayerSignerAddresses, common.HexToAddress(s))
 		}
 	}
 
@@ -165,6 +182,11 @@ func main() {
 	operatorGasMinWei := new(big.Int)
 	if _, ok := operatorGasMinWei.SetString(*operatorGasMinWeiStr, 10); !ok {
 		fmt.Fprintln(os.Stderr, "error: --operator-gas-min-wei must be a valid integer")
+		os.Exit(2)
+	}
+	baseRelayerGasMinWei := new(big.Int)
+	if _, ok := baseRelayerGasMinWei.SetString(*baseRelayerGasMinWeiStr, 10); !ok {
+		fmt.Fprintln(os.Stderr, "error: --base-relayer-gas-min-wei must be a valid integer")
 		os.Exit(2)
 	}
 	proverFundsMinWei := new(big.Int)
@@ -242,12 +264,13 @@ func main() {
 		DLQStore:   dlqStore,
 		AlertStore: alertStore,
 
-		BridgeAddress:           common.HexToAddress(*bridgeAddr),
-		WJunoAddress:            common.HexToAddress(*wjunoAddr),
-		OperatorRegistryAddress: common.HexToAddress(*opRegistryAddr),
-		FeeDistributorAddress:   feeDistributor,
-		SP1RequestorAddress:     sp1Requestor,
-		OperatorAddresses:       operatorAddresses,
+		BridgeAddress:              common.HexToAddress(*bridgeAddr),
+		WJunoAddress:               common.HexToAddress(*wjunoAddr),
+		OperatorRegistryAddress:    common.HexToAddress(*opRegistryAddr),
+		FeeDistributorAddress:      feeDistributor,
+		SP1RequestorAddress:        sp1Requestor,
+		OperatorAddresses:          operatorAddresses,
+		BaseRelayerSignerAddresses: baseRelayerSignerAddresses,
 
 		ServiceEntries:    serviceEntries,
 		OperatorEndpoints: operatorEndpoints,
@@ -259,9 +282,10 @@ func main() {
 		RateLimitPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:     *rateLimitBurst,
 
-		OperatorGasMinWei: operatorGasMinWei,
-		ProverFundsMinWei: proverFundsMinWei,
-		ReadinessCheck:    pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+		OperatorGasMinWei:      operatorGasMinWei,
+		BaseRelayerFundsMinWei: baseRelayerGasMinWei,
+		ProverFundsMinWei:      proverFundsMinWei,
+		ReadinessCheck:         pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 
 		Log: log,
 	})

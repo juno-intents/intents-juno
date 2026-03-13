@@ -138,18 +138,39 @@ else
     systemd_status="blocked"
     systemd_detail="blocked by relayer funding failure"
   else
-    read -r relayer_address relayer_balance_wei <<<"$relayer_snapshot"
-    if (( relayer_balance_wei < minimum_base_relayer_balance_wei )); then
+    relayer_summary=""
+    relayer_count=0
+    while read -r relayer_address relayer_balance_wei; do
+      [[ -n "${relayer_address:-}" ]] || continue
+      relayer_count=$((relayer_count + 1))
+      if [[ -n "$relayer_summary" ]]; then
+        relayer_summary+=", "
+      fi
+      relayer_summary+="$relayer_address=$relayer_balance_wei"
+      if (( relayer_balance_wei < minimum_base_relayer_balance_wei )); then
+        relayer_funding_status="failed"
+        relayer_funding_detail="base relayer $relayer_address balance $relayer_balance_wei wei is below minimum $minimum_base_relayer_balance_wei wei"
+        withdraw_config_status="blocked"
+        withdraw_config_detail="blocked by relayer funding failure"
+        txsign_runtime_status="blocked"
+        txsign_runtime_detail="blocked by relayer funding failure"
+        systemd_status="blocked"
+        systemd_detail="blocked by relayer funding failure"
+        break
+      fi
+    done <<<"$relayer_snapshot"
+
+    if (( relayer_count == 0 )); then
       relayer_funding_status="failed"
-      relayer_funding_detail="base relayer $relayer_address balance $relayer_balance_wei wei is below minimum $minimum_base_relayer_balance_wei wei"
+      relayer_funding_detail="no base relayer signer addresses resolved from BASE_RELAYER_PRIVATE_KEYS"
       withdraw_config_status="blocked"
       withdraw_config_detail="blocked by relayer funding failure"
       txsign_runtime_status="blocked"
       txsign_runtime_detail="blocked by relayer funding failure"
       systemd_status="blocked"
       systemd_detail="blocked by relayer funding failure"
-    else
-      relayer_funding_detail="base relayer $relayer_address balance $relayer_balance_wei wei meets minimum $minimum_base_relayer_balance_wei wei"
+    elif [[ "$relayer_funding_status" == "passed" ]]; then
+      relayer_funding_detail="base relayer balances meet minimum $minimum_base_relayer_balance_wei wei: $relayer_summary"
       ssh_target="${operator_user}@${operator_host}"
 
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then

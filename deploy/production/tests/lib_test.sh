@@ -43,6 +43,50 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_fake_cast() {
+  local target="$1"
+  local log_file="$2"
+  local first_balance_wei="${3:-300000000000000}"
+  local second_balance_wei="${4:-$first_balance_wei}"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
+  case "\$4" in
+    0x1111111111111111111111111111111111111111111111111111111111111111)
+      printf '0xd68c28F414B210a6C519D05159014378A5b8Bc0F\n'
+      ;;
+    0x2222222222222222222222222222222222222222222222222222222222222222)
+      printf '0x2222222222222222222222222222222222222222\n'
+      ;;
+    *)
+      printf 'unexpected private key: %s\n' "\$4" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+if [[ "\$1" == "balance" ]]; then
+  case "\${@: -1}" in
+    0xd68c28F414B210a6C519D05159014378A5b8Bc0F)
+      printf '%s\n' "$first_balance_wei"
+      ;;
+    0x2222222222222222222222222222222222222222)
+      printf '%s\n' "$second_balance_wei"
+      ;;
+    *)
+      printf 'unexpected balance address: %s\n' "\${@: -1}" >&2
+      exit 1
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 test_render_operator_handoffs_preserves_dkg_tls_dir() {
   local workdir shared_manifest handoff_dir
   workdir="$(mktemp -d)"
@@ -1264,10 +1308,12 @@ EOF
 
 test_render_app_handoff_and_envs() {
   local workdir shared_manifest app_manifest resolved_env bridge_env backoffice_env
+  local fake_bin old_path
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -1291,6 +1337,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
 
@@ -1307,14 +1354,22 @@ EOF
   production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
   bridge_env="$workdir/bridge-api.env"
   backoffice_env="$workdir/backoffice.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
   production_render_bridge_api_env "$shared_manifest" "$app_manifest" "$resolved_env" "$bridge_env"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+  PATH="$old_path"
 
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_POSTGRES_DSN=postgres://alpha" "bridge env postgres dsn"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_WJUNO_ADDRESS=0x3333333333333333333333333333333333333333" "bridge env wjuno"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=250000000000000" "backoffice env relayer signer balance floor"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env juno rpc user"
@@ -1324,10 +1379,12 @@ EOF
 
 test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url() {
   local workdir shared_manifest app_manifest resolved_env backoffice_env
+  local fake_bin old_path
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -1351,6 +1408,7 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
 
@@ -1359,11 +1417,48 @@ EOF
   resolved_env="$workdir/resolved-app.env"
   production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
   backoffice_env="$workdir/backoffice.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+  PATH="$old_path"
 
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses still render without juno rpc"
+  rm -rf "$workdir"
+}
+
+test_require_base_relayer_balance_validates_all_configured_keys() {
+  local workdir fake_bin old_path output
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  cat >"$workdir/operator-secrets.resolved.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
+EOF
+
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log" "300000000000000" "1000"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  set +e
+  output="$( ( production_require_base_relayer_balance "$workdir/operator-secrets.resolved.env" "https://base-sepolia.example.invalid" "250000000000000" ) 2>&1 )"
+  status=$?
+  set -e
+  PATH="$old_path"
+
+  if [[ $status -eq 0 ]]; then
+    printf 'expected production_require_base_relayer_balance to fail when any configured relayer signer is underfunded\n' >&2
+    exit 1
+  fi
+  assert_contains "$output" "0x2222222222222222222222222222222222222222 balance 1000 wei is below minimum 250000000000000 wei" "relayer balance check reports the failing signer"
+  assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "relayer balance check probes the first signer"
+  assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "relayer balance check probes the second signer"
+
   rm -rf "$workdir"
 }
 
