@@ -1213,6 +1213,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-rpc-pass-env JUNO_RPC_PASS \
   --juno-wallet-id "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID}" \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
+  --juno-fee-add-zat "${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
   "${tss_server_name_args[@]}" \

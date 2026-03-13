@@ -1169,6 +1169,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/b
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
+WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
