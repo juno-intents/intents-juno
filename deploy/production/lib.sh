@@ -92,6 +92,70 @@ production_tf_output_value() {
   printf '%s\n' "$value"
 }
 
+production_aws_describe_instance_field() {
+  local profile="$1"
+  local region="$2"
+  local host="$3"
+  local query="$4"
+  local result=""
+
+  [[ -n "$profile" && -n "$region" ]] || return 0
+  have_cmd aws || return 0
+
+  if [[ "$host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    result="$(AWS_PAGER="" aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=ip-address,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+    if [[ -z "$result" || "$result" == "None" ]]; then
+      result="$(AWS_PAGER="" aws --profile "$profile" --region "$region" ec2 describe-instances \
+        --filters "Name=private-ip-address,Values=$host" \
+        --query "$query" --output text 2>/dev/null || true)"
+    fi
+  else
+    result="$(AWS_PAGER="" aws --profile "$profile" --region "$region" ec2 describe-instances \
+      --filters "Name=dns-name,Values=$host" \
+      --query "$query" --output text 2>/dev/null || true)"
+  fi
+
+  if [[ -n "$result" && "$result" != "None" ]]; then
+    printf '%s\n' "$result"
+  fi
+}
+
+production_aws_resolve_private_ip() {
+  local profile="$1"
+  local region="$2"
+  local host="$3"
+  local result=""
+
+  result="$(production_aws_describe_instance_field "$profile" "$region" "$host" 'Reservations[].Instances[].PrivateIpAddress')"
+  if [[ -n "$result" ]]; then
+    printf '%s\n' "$result"
+  else
+    printf '%s\n' "$host"
+  fi
+}
+
+production_default_operator_endpoints_json() {
+  local inventory="$1"
+  local operator_count index operator_json endpoint_addr endpoint_host endpoint_profile endpoint_region
+
+  operator_count="$(jq -r '.operators | length' "$inventory")"
+  for ((index = 0; index < operator_count; index++)); do
+    operator_json="$(jq -c ".operators[$index]" "$inventory")"
+    endpoint_addr="$(jq -r '.operator_address // .operator_id // empty' <<<"$operator_json")"
+    endpoint_host="$(jq -r '.private_endpoint // .operator_probe_host // .public_endpoint // .operator_host // empty' <<<"$operator_json")"
+    endpoint_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
+    endpoint_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
+
+    [[ -n "$endpoint_addr" && -n "$endpoint_host" ]] || continue
+    if [[ -n "$endpoint_profile" && -n "$endpoint_region" ]]; then
+      endpoint_host="$(production_aws_resolve_private_ip "$endpoint_profile" "$endpoint_region" "$endpoint_host")"
+    fi
+    printf '%s=%s:18443\n' "$endpoint_addr" "$endpoint_host"
+  done | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
 production_validate_secret_resolver() {
   local value="$1"
   local allow_local="$2"
@@ -693,21 +757,10 @@ production_render_app_handoff() {
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
-  operator_endpoints_json="$(jq -c '
-    .app_host.operator_endpoints as $configured
-    | if ($configured // [] | length) > 0 then
-        $configured
-      else
-        [
-          .operators[]
-          | (.operator_address // .operator_id // empty) as $address
-          | (.public_endpoint // .operator_host // empty) as $endpoint_host
-          | select(($address | type) == "string" and ($address | length) > 0)
-          | select(($endpoint_host | type) == "string" and ($endpoint_host | length) > 0)
-          | "\($address)=\($endpoint_host):18443"
-        ]
-      end
-  ' "$inventory")"
+  operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
+  if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
+    operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory")"
+  fi
 
   known_hosts_src="$(jq -r '.known_hosts_file // empty' <<<"$app_json")"
   [[ -n "$known_hosts_src" ]] || die "app_host.known_hosts_file is required when inventory.app_host is present"

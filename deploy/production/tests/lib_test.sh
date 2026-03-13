@@ -239,6 +239,51 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_app_handoff_prefers_private_operator_endpoints_when_resolvable() {
+  local workdir shared_manifest old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mkdir -p "$workdir/bin"
+  cat >"$workdir/bin/aws" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf '10.0.0.12\n'
+EOF
+  chmod +x "$workdir/bin/aws"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  old_path="$PATH"
+  PATH="$workdir/bin:$PATH"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  PATH="$old_path"
+
+  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=10.0.0.12:18443" "app handoff prefers private operator endpoints"
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_prefers_inventory_owallet_ua() {
   local workdir shared_manifest bridge_summary_no_ua
   workdir="$(mktemp -d)"
