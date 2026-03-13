@@ -36,6 +36,10 @@ type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
 }
 
+type ReadinessChecker interface {
+	Ready(ctx context.Context) error
+}
+
 type DepositWitnessRefresher interface {
 	RefreshDepositWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error)
 }
@@ -68,6 +72,7 @@ type Config struct {
 	DLQStore dlq.Store
 
 	DepositWitnessRefresher DepositWitnessRefresher
+	ReadinessChecker        ReadinessChecker
 
 	Now func() time.Time
 }
@@ -105,6 +110,8 @@ type Relayer struct {
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
+
+	readinessChecker ReadinessChecker
 
 	// pauseChecker is an optional bridge pause checker.
 	pauseChecker PauseChecker
@@ -198,6 +205,7 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		staged:             make(map[common.Hash]struct{}, cfg.MaxItems*2),
 		proofAttempts:      make(map[common.Hash]int),
 		quorumVerifier:     quorumVerifier,
+		readinessChecker:   cfg.ReadinessChecker,
 	}, nil
 }
 
@@ -271,6 +279,9 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 }
 
 func (r *Relayer) FlushDue(ctx context.Context) error {
+	if !r.ready(ctx) {
+		return nil
+	}
 	if err := r.recoverSubmittedAttempts(ctx); err != nil {
 		return err
 	}
@@ -293,6 +304,9 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 }
 
 func (r *Relayer) Flush(ctx context.Context) error {
+	if !r.ready(ctx) {
+		return nil
+	}
 	if err := r.recoverSubmittedAttempts(ctx); err != nil {
 		return err
 	}
@@ -315,6 +329,9 @@ func (r *Relayer) Flush(ctx context.Context) error {
 }
 
 func (r *Relayer) refillFromStore(ctx context.Context) error {
+	if !r.ready(ctx) {
+		return nil
+	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
@@ -356,6 +373,9 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 }
 
 func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
+	if !r.ready(ctx) {
+		return nil
+	}
 	limit := r.cfg.MaxItems * 4
 	if limit < r.cfg.MaxItems {
 		limit = r.cfg.MaxItems
@@ -378,6 +398,13 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (r *Relayer) ready(ctx context.Context) bool {
+	if r.readinessChecker == nil {
+		return true
+	}
+	return r.readinessChecker.Ready(ctx) == nil
 }
 
 func (r *Relayer) resubmitSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {

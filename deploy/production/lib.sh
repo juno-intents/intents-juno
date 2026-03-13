@@ -1166,10 +1166,11 @@ production_render_operator_stack_env() {
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id base_event_scanner_start_block
   local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
-  local withdraw_expiry_safety_margin withdraw_max_expiry_extension
+  local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   checkpoint_signer_private_key=""
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
+  min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
   withdraw_expiry_safety_margin="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN || true)"
   withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -1228,6 +1229,7 @@ OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+BASE_RELAYER_MIN_READY_BALANCE_WEI=$min_base_relayer_balance_wei
 BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block

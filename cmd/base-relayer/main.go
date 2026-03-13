@@ -36,6 +36,7 @@ type config struct {
 	AllowedContracts           []common.Address
 	TLSCertFile                string
 	TLSKeyFile                 string
+	MinReadyBalanceWei         uint64
 	RateLimitPerSecond         float64
 	RateLimitBurst             int
 	RateLimitMaxTrackedClients int
@@ -70,8 +71,11 @@ func main() {
 	}
 
 	signers := make([]eth.Signer, 0, len(keys))
+	signerAddrs := make([]common.Address, 0, len(keys))
 	for _, key := range keys {
-		signers = append(signers, eth.NewLocalSigner(key))
+		signer := eth.NewLocalSigner(key)
+		signers = append(signers, signer)
+		signerAddrs = append(signerAddrs, signer.Address())
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -123,6 +127,7 @@ func main() {
 	}
 
 	handler := httpapi.NewHandler(relayer, httpapi.Config{
+		ReadinessCheck:             httpapi.MinSignerBalanceReadinessCheck(client, signerAddrs, new(big.Int).SetUint64(cfg.MinReadyBalanceWei)),
 		AuthToken:                  authToken,
 		AllowedContracts:           cfg.AllowedContracts,
 		MaxBodyBytes:               1 << 20,
@@ -193,6 +198,7 @@ func parseConfig(args []string) (config, error) {
 	fs.StringVar(&allowedContractsRaw, "allowed-contracts", "", "comma-separated list of allowed contract addresses")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "PEM certificate for HTTPS listener")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "PEM private key for HTTPS listener")
+	fs.Uint64Var(&cfg.MinReadyBalanceWei, "min-ready-balance-wei", 0, "minimum per-signer balance required for /readyz in wei (0 disables readiness balance checks)")
 	fs.Float64Var(&cfg.RateLimitPerSecond, "rate-limit-per-second", 20, "per-client refill rate for ingress rate limiting")
 	fs.IntVar(&cfg.RateLimitBurst, "rate-limit-burst", 40, "per-client burst capacity for ingress rate limiting")
 	fs.IntVar(&cfg.RateLimitMaxTrackedClients, "rate-limit-max-tracked-clients", 10_000, "maximum tracked client entries in the ingress rate limiter")

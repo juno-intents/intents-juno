@@ -432,7 +432,13 @@ func main() {
 			log.Error("ensure lease schema", "err", err)
 			os.Exit(2)
 		}
-		elector, err = withdrawcoordinator.NewLeaderElector(leaseStore, *leaderLeaseName, *owner, *leaderLeaseTTL)
+		elector, err = withdrawcoordinator.NewLeaderElector(
+			leaseStore,
+			*leaderLeaseName,
+			*owner,
+			*leaderLeaseTTL,
+			withdrawcoordinator.WithReadinessChecker(baseClient),
+		)
 		if err != nil {
 			log.Error("init leader elector", "err", err)
 			os.Exit(2)
@@ -470,7 +476,10 @@ func main() {
 			ctx,
 			healthz.ListenAddr(*healthPort),
 			"withdraw-coordinator",
-			healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)),
+			healthz.WithReadinessCheck(healthz.CombineReadinessChecks(
+				pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+				baseClient.Ready,
+			)),
 		); err != nil {
 			log.Error("healthz server", "err", err)
 		}

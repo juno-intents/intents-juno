@@ -34,6 +34,10 @@ type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
 }
 
+type ReadinessChecker interface {
+	Ready(ctx context.Context) error
+}
+
 type WithdrawWitnessExtractRequest struct {
 	TxHash           string
 	ActionIndex      uint32
@@ -79,6 +83,7 @@ type Config struct {
 	ProofPriority       int
 
 	WitnessExtractor WithdrawWitnessExtractor
+	ReadinessChecker ReadinessChecker
 }
 
 type Finalizer struct {
@@ -94,6 +99,7 @@ type Finalizer struct {
 
 	quorumVerifier   *checkpoint.QuorumVerifier
 	witnessExtractor WithdrawWitnessExtractor
+	readinessChecker ReadinessChecker
 	pauseChecker     PauseChecker
 
 	checkpoint *checkpoint.Checkpoint
@@ -152,6 +158,7 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 		log:              log,
 		quorumVerifier:   quorumVerifier,
 		witnessExtractor: cfg.WitnessExtractor,
+		readinessChecker: cfg.ReadinessChecker,
 	}, nil
 }
 
@@ -225,6 +232,14 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 	if len(ids) < f.cfg.MaxBatches {
 		if err := appendState(withdraw.BatchStateConfirmed); err != nil {
 			return err
+		}
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	if f.readinessChecker != nil {
+		if err := f.readinessChecker.Ready(ctx); err != nil {
+			return nil
 		}
 	}
 

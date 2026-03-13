@@ -26,6 +26,9 @@ type Config struct {
 	// AuthToken enables bearer-token auth on every request when set.
 	AuthToken string
 
+	// ReadinessCheck is evaluated for /readyz. Nil means always ready.
+	ReadinessCheck func(context.Context) error
+
 	// AllowedContracts limits /v1/send targets. Empty means allow any address.
 	AllowedContracts []common.Address
 
@@ -104,9 +107,26 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			"service": "base-relayer",
 		})
 	}
+	handleReady := func(w http.ResponseWriter, r *http.Request) {
+		if cfg.ReadinessCheck != nil {
+			if err := cfg.ReadinessCheck(r.Context()); err != nil {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				uptime := cfg.Now().Sub(startTime).Truncate(time.Second).String()
+				_ = json.NewEncoder(w).Encode(map[string]string{
+					"status":  "not_ready",
+					"uptime":  uptime,
+					"service": "base-relayer",
+					"error":   err.Error(),
+				})
+				return
+			}
+		}
+		handleHealth(w, r)
+	}
 	mux.HandleFunc("GET /livez", handleHealth)
 	mux.HandleFunc("GET /healthz", handleHealth)
-	mux.HandleFunc("GET /readyz", handleHealth)
+	mux.HandleFunc("GET /readyz", handleReady)
 
 	mux.HandleFunc("POST /v1/send", func(w http.ResponseWriter, r *http.Request) {
 		bearerToken, authorized := parseBearer(r.Header.Get("Authorization"), cfg.AuthToken)

@@ -139,6 +139,52 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (SendResponse, error
 	return out, nil
 }
 
+func (c *Client) Ready(ctx context.Context) error {
+	if c == nil || c.baseURL == nil || c.hc == nil {
+		return fmt.Errorf("%w: nil client", ErrInvalidClientConfig)
+	}
+
+	u := *c.baseURL
+	u.Path = joinPath(u.Path, "/readyz")
+
+	r, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return fmt.Errorf("httpapi: build request: %w", err)
+	}
+	r.Header.Set("Accept", "application/json")
+	if c.authToken != "" {
+		r.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
+
+	resp, err := c.hc.Do(r)
+	if err != nil {
+		return fmt.Errorf("httpapi: http do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := readAllLimited(resp.Body, c.maxRespBytes)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+
+	msg := strings.TrimSpace(string(body))
+	if msg != "" {
+		var er struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(body, &er) == nil && er.Error != "" {
+			msg = er.Error
+		}
+	}
+	if msg == "" {
+		msg = resp.Status
+	}
+	return fmt.Errorf("httpapi: status %d: %s", resp.StatusCode, msg)
+}
+
 func joinPath(basePath string, suffix string) string {
 	// path.Join cleans up redundant slashes, but preserves a leading slash.
 	if basePath == "" {

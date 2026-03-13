@@ -330,6 +330,7 @@ func main() {
 		Now:                     time.Now,
 		OWalletIVKBytes:         owalletIVKBytes,
 		DepositWitnessRefresher: depositWitnessRefresher,
+		ReadinessChecker:        baseClient,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
@@ -339,7 +340,12 @@ func main() {
 	go func() {
 		opts := []healthz.Option{}
 		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+			opts = append(opts, healthz.WithReadinessCheck(healthz.CombineReadinessChecks(
+				pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+				baseClient.Ready,
+			)))
+		} else {
+			opts = append(opts, healthz.WithReadinessCheck(baseClient.Ready))
 		}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "deposit-relayer", opts...); err != nil {
 			log.Error("healthz server", "err", err)

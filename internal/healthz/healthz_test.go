@@ -151,3 +151,37 @@ func TestRegister_LivezAndHealthzShareLivenessHandler(t *testing.T) {
 		}
 	}
 }
+
+func TestCombineReadinessChecks_StopsAtFirstFailure(t *testing.T) {
+	t.Parallel()
+
+	calls := 0
+	check := CombineReadinessChecks(
+		func(context.Context) error {
+			calls++
+			return nil
+		},
+		func(context.Context) error {
+			calls++
+			return errors.New("db unavailable")
+		},
+		func(context.Context) error {
+			calls++
+			return nil
+		},
+	)
+	if check == nil {
+		t.Fatalf("expected combined readiness check")
+	}
+
+	err := check(context.Background())
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if err.Error() != "db unavailable" {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if calls != 2 {
+		t.Fatalf("expected to stop after first failure, got %d calls", calls)
+	}
+}

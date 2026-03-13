@@ -33,6 +33,16 @@ func (s *recordingSender) Send(_ context.Context, req httpapi.SendRequest) (http
 	return s.res, s.err
 }
 
+type stubReadinessChecker struct {
+	calls int
+	err   error
+}
+
+func (s *stubReadinessChecker) Ready(context.Context) error {
+	s.calls++
+	return s.err
+}
+
 type staticProofRequester struct {
 	res    proofclient.Result
 	gotReq proofclient.Request
@@ -699,6 +709,74 @@ func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 	}
 	if sender.calls != 0 {
 		t.Fatalf("expected no send calls, got %d", sender.calls)
+	}
+}
+
+func TestFinalizer_SkipsBatchesWhenBaseRelayerNotReady(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{BaseChainID: 31337, BridgeContract: bridgeAddr}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	readiness := &stubReadinessChecker{err: errors.New("underfunded")}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		ReadinessChecker:  readiness,
+	}, store, leaseStore, sender, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_ = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+
+	if err := f.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if readiness.calls == 0 {
+		t.Fatalf("expected readiness check")
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected no send calls, got %d", sender.calls)
+	}
+	if _, ok, err := leaseStore.TryAcquire(ctx, batchLeaseName(batchID), "other", 10*time.Second); err != nil || !ok {
+		t.Fatalf("batch lease should remain free, ok=%v err=%v", ok, err)
 	}
 }
 

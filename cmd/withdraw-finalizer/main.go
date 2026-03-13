@@ -311,6 +311,7 @@ func main() {
 		ProofPriority:       *proofPriority,
 		OWalletOVKBytes:     owalletOVKBytes,
 		WitnessExtractor:    witnessExtractor,
+		ReadinessChecker:    baseClient,
 	}, store, leaseStore, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)
@@ -323,7 +324,10 @@ func main() {
 			ctx,
 			healthz.ListenAddr(*healthPort),
 			"withdraw-finalizer",
-			healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)),
+			healthz.WithReadinessCheck(healthz.CombineReadinessChecks(
+				pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+				baseClient.Ready,
+			)),
 		); err != nil {
 			log.Error("healthz server", "err", err)
 		}

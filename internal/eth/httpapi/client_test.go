@@ -101,3 +101,50 @@ func TestClient_Send_ReturnsErrorOnNon200(t *testing.T) {
 	}
 }
 
+func TestClient_Ready_ReturnsNilOn200(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			t.Fatalf("method: got %s want %s", r.Method, http.MethodGet)
+		}
+		if r.URL.Path != "/readyz" {
+			t.Fatalf("path: got %s want %s", r.URL.Path, "/readyz")
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, "secret", WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if err := c.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v", err)
+	}
+}
+
+func TestClient_Ready_ReturnsErrorOnNon200(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		_, _ = w.Write([]byte(`{"error":"signer 0xabc balance 1 below minimum 2"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, "secret", WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	err = c.Ready(context.Background())
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("below minimum")) {
+		t.Fatalf("error should contain readiness detail: %v", err)
+	}
+}

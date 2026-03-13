@@ -42,6 +42,26 @@ func buildOptions(opts []Option) options {
 	return out
 }
 
+func CombineReadinessChecks(checks ...func(context.Context) error) func(context.Context) error {
+	filtered := make([]func(context.Context) error, 0, len(checks))
+	for _, check := range checks {
+		if check != nil {
+			filtered = append(filtered, check)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		for _, check := range filtered {
+			if err := check(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+}
+
 // Register adds the standard liveness and readiness probes to mux.
 // /healthz is retained as a compatibility alias for /livez.
 func Register(mux *http.ServeMux, serviceName string, startTime time.Time, opts ...Option) {

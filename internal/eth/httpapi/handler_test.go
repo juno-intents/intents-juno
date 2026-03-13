@@ -115,6 +115,28 @@ func TestHandler_ProbePathsRemainUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestHandler_ReadyzReturnsServiceUnavailableWhenReadinessFails(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(&stubSender{}, Config{
+		AuthToken: "secret",
+		ReadinessCheck: func(context.Context) error {
+			return errors.New("relayer underfunded")
+		},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte("relayer underfunded")) {
+		t.Fatalf("body missing readiness error: %s", rr.Body.String())
+	}
+}
+
 func TestHandler_RejectsSendOutsideAllowlist(t *testing.T) {
 	t.Parallel()
 

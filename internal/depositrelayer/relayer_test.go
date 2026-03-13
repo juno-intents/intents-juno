@@ -40,6 +40,16 @@ func (s *stubSender) Send(_ context.Context, req httpapi.SendRequest) (httpapi.S
 	return s.res, s.err
 }
 
+type stubReadinessChecker struct {
+	calls int
+	err   error
+}
+
+func (s *stubReadinessChecker) Ready(context.Context) error {
+	s.calls++
+	return s.err
+}
+
 type scriptedSenderStep struct {
 	res httpapi.SendResponse
 	err error
@@ -566,6 +576,84 @@ func TestRelayer_ProcessesConfirmedDepositsFromStore(t *testing.T) {
 	}
 	if got.State != deposit.StateFinalized {
 		t.Fatalf("state: got %v want %v", got.State, deposit.StateFinalized)
+	}
+}
+
+func TestRelayer_DoesNotClaimDepositsWhenBaseRelayerNotReady(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	ctx := context.Background()
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:         1,
+		BaseChainID:    31337,
+		BridgeContract: bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	sender := &stubSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	readiness := &stubReadinessChecker{err: errors.New("underfunded")}
+	r, err := New(Config{
+		BaseChainID:       uint32(cp.BaseChainID),
+		BridgeAddress:     bridgeAddr,
+		DepositImageID:    common.HexToHash("0x01"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            time.Minute,
+		DedupeMax:         16,
+		Owner:             "relayer-a",
+		ClaimTTL:          10 * time.Second,
+		GasLimit:          120_000,
+		ReadinessChecker:  readiness,
+	}, store, sender, &stubProofRequester{res: proofclient.Result{Seal: []byte{0x01}}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	var commitment [32]byte
+	commitment[0] = 0x42
+
+	depID, err := idempotency.DepositIDV1(commitment, 7)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	if _, _, err := store.UpsertConfirmed(ctx, deposit.Deposit{
+		DepositID:     depID,
+		Commitment:    commitment,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: [20]byte(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	if err := r.FlushDue(ctx); err != nil {
+		t.Fatalf("FlushDue: %v", err)
+	}
+	if readiness.calls == 0 {
+		t.Fatalf("expected readiness checks")
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected no send calls, got %d", sender.calls)
+	}
+
+	jobs, err := store.ClaimConfirmed(ctx, "other", 10*time.Second, 1)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed: %v", err)
+	}
+	if len(jobs) != 1 {
+		t.Fatalf("expected deposit to remain claimable, got %d jobs", len(jobs))
 	}
 }
 
