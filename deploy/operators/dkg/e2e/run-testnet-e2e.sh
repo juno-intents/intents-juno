@@ -316,23 +316,38 @@ replay_latest_checkpoint_package_to_topic() {
   local checkpoint_replay_kafka_brokers="$3"
   local checkpoint_package_topic="$4"
   local checkpoint_replay_context="${5:-runtime}"
-  local checkpoint_replay_status
+  local checkpoint_replay_status query_base64
 
   [[ -n "$checkpoint_replay_payload_file" ]] || die "checkpoint replay requires payload file path"
   [[ -n "$checkpoint_replay_postgres_dsn" ]] || die "checkpoint replay requires postgres dsn"
   [[ -n "$checkpoint_replay_kafka_brokers" ]] || die "checkpoint replay requires kafka brokers"
   [[ -n "$checkpoint_package_topic" ]] || die "checkpoint replay requires topic"
 
-  set +e
-  psql "$checkpoint_replay_postgres_dsn" -Atqc "
-    SELECT convert_from(package_json, 'UTF8')
-    FROM checkpoint_packages
-    WHERE package_json IS NOT NULL
-    ORDER BY persisted_at DESC
-    LIMIT 1;
-  " >"$checkpoint_replay_payload_file"
-  checkpoint_replay_status=$?
-  set -e
+  query_base64="$(printf '%s' "
+SELECT convert_from(package_json, 'UTF8')
+FROM checkpoint_packages
+WHERE package_json IS NOT NULL
+ORDER BY persisted_at DESC
+LIMIT 1;
+" | base64 | tr -d '\n')"
+
+  if [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]]; then
+    set +e
+    run_remote_postgres_query_base64 "$checkpoint_replay_postgres_dsn" "$query_base64" >"$checkpoint_replay_payload_file"
+    checkpoint_replay_status=$?
+    set -e
+  else
+    set +e
+    psql "$checkpoint_replay_postgres_dsn" -Atqc "
+      SELECT convert_from(package_json, 'UTF8')
+      FROM checkpoint_packages
+      WHERE package_json IS NOT NULL
+      ORDER BY persisted_at DESC
+      LIMIT 1;
+    " >"$checkpoint_replay_payload_file"
+    checkpoint_replay_status=$?
+    set -e
+  fi
   if (( checkpoint_replay_status != 0 )) || [[ ! -s "$checkpoint_replay_payload_file" ]]; then
     log "failed to load latest checkpoint package payload for replay context=$checkpoint_replay_context"
     return 1
@@ -343,17 +358,24 @@ replay_latest_checkpoint_package_to_topic() {
     return 1
   fi
 
-  set +e
-  (
-    cd "$REPO_ROOT"
-    JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
-      --queue-driver kafka \
-      --queue-brokers "$checkpoint_replay_kafka_brokers" \
-      "--topic" "$checkpoint_package_topic" \
-      "--payload-file" "$checkpoint_replay_payload_file"
-  )
-  checkpoint_replay_status=$?
-  set -e
+  if [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]]; then
+    set +e
+    run_remote_queue_publish_payload "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"
+    checkpoint_replay_status=$?
+    set -e
+  else
+    set +e
+    (
+      cd "$REPO_ROOT"
+      JUNO_QUEUE_KAFKA_TLS="true" go run ./cmd/queue-publish \
+        --queue-driver kafka \
+        --queue-brokers "$checkpoint_replay_kafka_brokers" \
+        "--topic" "$checkpoint_package_topic" \
+        "--payload-file" "$checkpoint_replay_payload_file"
+    )
+    checkpoint_replay_status=$?
+    set -e
+  fi
   if (( checkpoint_replay_status != 0 )); then
     log "failed to replay latest checkpoint package onto relayer checkpoint topic context=$checkpoint_replay_context"
     return 1
@@ -1277,7 +1299,7 @@ proof_jobs_count() {
   local count_raw status
 
   set +e
-  count_raw="$(psql "$postgres_dsn" -Atqc 'SELECT COUNT(*) FROM proof_jobs;' 2>/dev/null)"
+  count_raw="$(postgres_query_scalar_lines "$postgres_dsn" 'SELECT COUNT(*) FROM proof_jobs;' 2>/dev/null)"
   status=$?
   set -e
   if (( status != 0 )); then
@@ -1295,7 +1317,7 @@ proof_jobs_latest_updated_epoch() {
 
   set +e
   epoch_raw="$(
-    psql "$postgres_dsn" -Atqc "SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)),0)::bigint FROM proof_jobs;" 2>/dev/null
+    postgres_query_scalar_lines "$postgres_dsn" "SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)),0)::bigint FROM proof_jobs;" 2>/dev/null
   )"
   status=$?
   set -e
@@ -1317,7 +1339,7 @@ proof_jobs_latest_retryable_failure_epoch() {
 
   set +e
   epoch_raw="$(
-    psql "$postgres_dsn" -Atqc "
+    postgres_query_scalar_lines "$postgres_dsn" "
 SELECT COALESCE(EXTRACT(EPOCH FROM MAX(updated_at)),0)::bigint
 FROM proof_jobs
 WHERE pipeline = '$pipeline'
@@ -1346,7 +1368,7 @@ proof_jobs_latest_retryable_failure_code() {
 
   set +e
   code_raw="$(
-    psql "$postgres_dsn" -Atqc "
+    postgres_query_scalar_lines "$postgres_dsn" "
 SELECT COALESCE((
   SELECT error_code
   FROM proof_jobs
@@ -1382,7 +1404,7 @@ proof_jobs_latest_retryable_failure_message() {
 
   set +e
   message_raw="$(
-    psql "$postgres_dsn" -Atqc "
+    postgres_query_scalar_lines "$postgres_dsn" "
 SELECT COALESCE((
   SELECT error_message
   FROM proof_jobs
@@ -1418,7 +1440,7 @@ clear_live_bridge_runtime_state() {
 
   for attempt in $(seq 1 "$max_attempts"); do
     set +e
-    psql "$postgres_dsn" -v ON_ERROR_STOP=1 -qc "
+    postgres_exec_statement "$postgres_dsn" "
 DO \$\$
 BEGIN
   IF to_regclass('public.proof_events') IS NOT NULL THEN
@@ -1485,8 +1507,13 @@ wait_for_postgres_dsn_ready() {
   while :; do
     attempt="$((attempt + 1))"
     set +e
-    PGCONNECT_TIMEOUT="$connect_timeout_seconds" psql "$postgres_dsn" -Atqc "SELECT 1" >/dev/null 2>&1
-    status=$?
+    if [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]]; then
+      postgres_query_scalar_lines "$postgres_dsn" "SELECT 1" >/dev/null 2>&1
+      status=$?
+    else
+      PGCONNECT_TIMEOUT="$connect_timeout_seconds" psql "$postgres_dsn" -Atqc "SELECT 1" >/dev/null 2>&1
+      status=$?
+    fi
     set -e
     if (( status == 0 )); then
       return 0
@@ -2458,6 +2485,34 @@ build_local_shared_infra_validation_binary() {
   )
 }
 
+build_local_postgres_e2e_binary() {
+  local output_path="$1"
+  local target_goarch="$2"
+
+  [[ -n "$output_path" ]] || return 1
+  [[ "$target_goarch" =~ ^(amd64|arm64)$ ]] || return 1
+
+  mkdir -p "$(dirname "$output_path")"
+  (
+    cd "$REPO_ROOT"
+    GOOS=linux GOARCH="$target_goarch" GO111MODULE=on go build -o "$output_path" ./cmd/postgres-e2e
+  )
+}
+
+build_local_queue_publish_binary() {
+  local output_path="$1"
+  local target_goarch="$2"
+
+  [[ -n "$output_path" ]] || return 1
+  [[ "$target_goarch" =~ ^(amd64|arm64)$ ]] || return 1
+
+  mkdir -p "$(dirname "$output_path")"
+  (
+    cd "$REPO_ROOT"
+    GOOS=linux GOARCH="$target_goarch" GO111MODULE=on go build -o "$output_path" ./cmd/queue-publish
+  )
+}
+
 run_remote_shared_infra_validation_attempt() {
   local host="$1"
   local ssh_user="$2"
@@ -2528,6 +2583,188 @@ run_remote_shared_infra_validation_attempt() {
     -o TCPKeepAlive=yes \
     "$ssh_user@$host:$remote_output_path" \
     "$local_output_path" >/dev/null
+}
+
+ensure_remote_postgres_helper_ready() {
+  [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]] || return 1
+  [[ -n "${E2E_REMOTE_POSTGRES_SSH_USER:-}" ]] || return 1
+  [[ -f "${E2E_REMOTE_POSTGRES_SSH_KEY_FILE:-}" ]] || return 1
+  [[ -x "${E2E_REMOTE_POSTGRES_HELPER_LOCAL_BIN:-}" ]] || return 1
+  [[ -n "${E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN:-}" ]] || return 1
+
+  if [[ "${E2E_REMOTE_POSTGRES_HELPER_READY:-}" == "1" ]]; then
+    return 0
+  fi
+
+  ssh \
+    -i "$E2E_REMOTE_POSTGRES_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_POSTGRES_SSH_USER@$E2E_REMOTE_POSTGRES_HOST" \
+    "mkdir -p '$(dirname "$E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN")'" >/dev/null
+
+  stage_remote_runtime_file_atomic \
+    "$E2E_REMOTE_POSTGRES_HELPER_LOCAL_BIN" \
+    "$E2E_REMOTE_POSTGRES_HOST" \
+    "$E2E_REMOTE_POSTGRES_SSH_USER" \
+    "$E2E_REMOTE_POSTGRES_SSH_KEY_FILE" \
+    "$E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN"
+
+  ssh \
+    -i "$E2E_REMOTE_POSTGRES_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_POSTGRES_SSH_USER@$E2E_REMOTE_POSTGRES_HOST" \
+    "chmod 0755 '$E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN'" >/dev/null
+
+  export E2E_REMOTE_POSTGRES_HELPER_READY="1"
+}
+
+ensure_remote_queue_publish_helper_ready() {
+  [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]] || return 1
+  [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_SSH_USER:-}" ]] || return 1
+  [[ -f "${E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE:-}" ]] || return 1
+  [[ -x "${E2E_REMOTE_QUEUE_PUBLISH_LOCAL_BIN:-}" ]] || return 1
+  [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN:-}" ]] || return 1
+
+  if [[ "${E2E_REMOTE_QUEUE_PUBLISH_READY:-}" == "1" ]]; then
+    return 0
+  fi
+
+  ssh \
+    -i "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER@$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
+    "mkdir -p '$(dirname "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN")'" >/dev/null
+
+  stage_remote_runtime_file_atomic \
+    "$E2E_REMOTE_QUEUE_PUBLISH_LOCAL_BIN" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN"
+
+  ssh \
+    -i "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER@$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
+    "chmod 0755 '$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN'" >/dev/null
+
+  export E2E_REMOTE_QUEUE_PUBLISH_READY="1"
+}
+
+run_remote_postgres_query_base64() {
+  local postgres_dsn="$1"
+  local query_base64="$2"
+  local remote_joined
+
+  ensure_remote_postgres_helper_ready || return 1
+  remote_joined="$(shell_join "$E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN" --postgres-dsn "$postgres_dsn" --query-base64 "$query_base64" --output -)"
+  ssh \
+    -i "$E2E_REMOTE_POSTGRES_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_POSTGRES_SSH_USER@$E2E_REMOTE_POSTGRES_HOST" \
+    "bash -lc $(printf '%q' "$remote_joined")"
+}
+
+run_remote_postgres_exec_base64() {
+  local postgres_dsn="$1"
+  local sql_base64="$2"
+  local remote_joined
+
+  ensure_remote_postgres_helper_ready || return 1
+  remote_joined="$(shell_join "$E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN" --postgres-dsn "$postgres_dsn" --exec-base64 "$sql_base64" --output -)"
+  ssh \
+    -i "$E2E_REMOTE_POSTGRES_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_POSTGRES_SSH_USER@$E2E_REMOTE_POSTGRES_HOST" \
+    "bash -lc $(printf '%q' "$remote_joined")" >/dev/null
+}
+
+run_remote_queue_publish_payload() {
+  local kafka_brokers="$1"
+  local topic="$2"
+  local payload_file="$3"
+  local remote_payload_path remote_joined
+
+  [[ -f "$payload_file" ]] || return 1
+  ensure_remote_queue_publish_helper_ready || return 1
+
+  remote_payload_path="$(dirname "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN")/checkpoint-replay-payload.json"
+  stage_remote_runtime_file_atomic \
+    "$payload_file" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER" \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
+    "$remote_payload_path"
+
+  remote_joined="$(shell_join "$E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN" --queue-driver kafka --queue-brokers "$kafka_brokers" --topic "$topic" --payload-file "$remote_payload_path")"
+  ssh \
+    -i "$E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE" \
+    -o StrictHostKeyChecking=no \
+    -o UserKnownHostsFile=/dev/null \
+    -o ServerAliveInterval=30 \
+    -o ServerAliveCountMax=6 \
+    -o TCPKeepAlive=yes \
+    "$E2E_REMOTE_QUEUE_PUBLISH_SSH_USER@$E2E_REMOTE_QUEUE_PUBLISH_HOST" \
+    "JUNO_QUEUE_KAFKA_TLS=true bash -lc $(printf '%q' "$remote_joined")" >/dev/null
+}
+
+postgres_query_scalar_lines() {
+  local postgres_dsn="$1"
+  local query="$2"
+  local query_base64 result status
+
+  if [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]]; then
+    query_base64="$(printf '%s' "$query" | base64 | tr -d '\n')"
+    set +e
+    result="$(run_remote_postgres_query_base64 "$postgres_dsn" "$query_base64" 2>/dev/null)"
+    status=$?
+    set -e
+    if (( status != 0 )); then
+      return 1
+    fi
+    printf '%s' "$result"
+    return 0
+  fi
+
+  psql "$postgres_dsn" -Atqc "$query" 2>/dev/null
+}
+
+postgres_exec_statement() {
+  local postgres_dsn="$1"
+  local sql="$2"
+  local sql_base64
+
+  if [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]]; then
+    sql_base64="$(printf '%s' "$sql" | base64 | tr -d '\n')"
+    run_remote_postgres_exec_base64 "$postgres_dsn" "$sql_base64"
+    return $?
+  fi
+
+  psql "$postgres_dsn" -v ON_ERROR_STOP=1 -qc "$sql" >/dev/null 2>&1
 }
 
 build_local_relayer_binaries() {
@@ -3172,7 +3409,7 @@ query_withdrawal_payout_txid() {
     die "invalid withdrawal id for payout tx query: $withdrawal_id"
 
   txid="$(
-    psql "$postgres_dsn" -Atqc "
+    postgres_query_scalar_lines "$postgres_dsn" "
       SELECT wb.juno_txid
       FROM withdrawal_batch_items wbi
       JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
@@ -3961,7 +4198,9 @@ command_run() {
   fi
   [[ -n "$operator_checkpoint_ipfs_api_url" ]] || die "--operator-checkpoint-ipfs-api-url must not be empty"
   [[ -n "$shared_topic_prefix" ]] || die "--shared-topic-prefix must not be empty"
-  command -v psql >/dev/null 2>&1 || die "psql is required for live withdrawal payout-state checks (install postgresql client)"
+  if [[ "$relayer_runtime_mode" != "distributed" ]]; then
+    command -v psql >/dev/null 2>&1 || die "psql is required for live withdrawal payout-state checks (install postgresql client)"
+  fi
   [[ -n "$shared_ecs_cluster_arn" ]] || die "--shared-ecs-cluster-arn is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
   [[ -n "$shared_proof_requestor_service_name" ]] || die "--shared-proof-requestor-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
   [[ -n "$shared_proof_funder_service_name" ]] || die "--shared-proof-funder-service-name is required (shared services own all SP1 request/auction/balance/fulfillment logic)"
@@ -6026,8 +6265,28 @@ command_run() {
         die "failed to resolve remote goarch for shared validation host=$shared_validation_host"
       build_local_shared_infra_validation_binary "$shared_validation_local_bin" "$shared_validation_remote_goarch" || \
         die "failed to build shared validation binary for host=$shared_validation_host goarch=$shared_validation_remote_goarch"
+      build_local_postgres_e2e_binary "$workdir/bin/postgres-e2e" "$shared_validation_remote_goarch" || \
+        die "failed to build postgres helper binary for host=$shared_validation_host goarch=$shared_validation_remote_goarch"
+      build_local_queue_publish_binary "$workdir/bin/queue-publish" "$shared_validation_remote_goarch" || \
+        die "failed to build queue publish binary for host=$shared_validation_host goarch=$shared_validation_remote_goarch"
+      export E2E_REMOTE_POSTGRES_HOST="$shared_validation_host"
+      export E2E_REMOTE_POSTGRES_SSH_USER="$relayer_runtime_operator_ssh_user"
+      export E2E_REMOTE_POSTGRES_SSH_KEY_FILE="$relayer_runtime_operator_ssh_key_file"
+      export E2E_REMOTE_POSTGRES_HELPER_LOCAL_BIN="$workdir/bin/postgres-e2e"
+      export E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN="/tmp/testnet-e2e-bin/postgres-e2e"
+      export E2E_REMOTE_POSTGRES_HELPER_READY=""
+      export E2E_REMOTE_QUEUE_PUBLISH_HOST="$shared_validation_host"
+      export E2E_REMOTE_QUEUE_PUBLISH_SSH_USER="$relayer_runtime_operator_ssh_user"
+      export E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE="$relayer_runtime_operator_ssh_key_file"
+      export E2E_REMOTE_QUEUE_PUBLISH_LOCAL_BIN="$workdir/bin/queue-publish"
+      export E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN="/tmp/testnet-e2e-bin/queue-publish"
+      export E2E_REMOTE_QUEUE_PUBLISH_READY=""
       log "validating operator-service checkpoint publication via shared infra from operator host host=$shared_validation_host"
     else
+      unset E2E_REMOTE_POSTGRES_HOST E2E_REMOTE_POSTGRES_SSH_USER E2E_REMOTE_POSTGRES_SSH_KEY_FILE \
+        E2E_REMOTE_POSTGRES_HELPER_LOCAL_BIN E2E_REMOTE_POSTGRES_HELPER_REMOTE_BIN E2E_REMOTE_POSTGRES_HELPER_READY \
+        E2E_REMOTE_QUEUE_PUBLISH_HOST E2E_REMOTE_QUEUE_PUBLISH_SSH_USER E2E_REMOTE_QUEUE_PUBLISH_SSH_KEY_FILE \
+        E2E_REMOTE_QUEUE_PUBLISH_LOCAL_BIN E2E_REMOTE_QUEUE_PUBLISH_REMOTE_BIN E2E_REMOTE_QUEUE_PUBLISH_READY
       if ! wait_for_postgres_dsn_ready "$shared_postgres_dsn" "$shared_postgres_ready_timeout_seconds" 5 "shared postgres endpoint"; then
         die "shared postgres endpoint did not become reachable from runner before shared infra validation"
       fi

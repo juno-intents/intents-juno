@@ -110,6 +110,28 @@ test_distributed_shared_validation_runs_from_operator_host() {
   assert_contains "$script_text" 'scp \' "remote shared validation copies report output back to runner"
 }
 
+test_distributed_runtime_routes_private_postgres_ops_through_operator_host() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "run_remote_postgres_query_base64() {" "run-testnet-e2e defines remote postgres query helper"
+  assert_contains "$script_text" "run_remote_postgres_exec_base64() {" "run-testnet-e2e defines remote postgres exec helper"
+  assert_contains "$script_text" 'if [[ -n "${E2E_REMOTE_POSTGRES_HOST:-}" ]]; then' "postgres helpers can switch to operator-host execution in distributed mode"
+  assert_contains "$script_text" 'run_remote_postgres_exec_base64 "$postgres_dsn" "$sql_base64"' "stale bridge cleanup uses remote postgres exec helper when runner cannot reach private aurora"
+  assert_contains "$script_text" 'run_remote_postgres_query_base64 "$postgres_dsn" "$query_base64"' "proof and withdrawal postgres queries use remote postgres query helper when runner cannot reach private aurora"
+  assert_contains "$script_text" 'export E2E_REMOTE_POSTGRES_HOST="$shared_validation_host"' "distributed setup exports operator-host postgres helper target"
+}
+
+test_distributed_runtime_replays_checkpoint_seed_from_operator_host() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "run_remote_queue_publish_payload() {" "run-testnet-e2e defines remote kafka publish helper"
+  assert_contains "$script_text" 'if [[ -n "${E2E_REMOTE_QUEUE_PUBLISH_HOST:-}" ]]; then' "checkpoint replay can switch to operator-host kafka publish in distributed mode"
+  assert_contains "$script_text" 'run_remote_queue_publish_payload "$checkpoint_replay_kafka_brokers" "$checkpoint_package_topic" "$checkpoint_replay_payload_file"' "checkpoint replay publishes from operator host when runner cannot reach private kafka"
+  assert_contains "$script_text" 'export E2E_REMOTE_QUEUE_PUBLISH_HOST="$shared_validation_host"' "distributed setup exports operator-host kafka helper target"
+}
+
 test_bridge_config_contract_reads_retry_on_malformed_rpc_responses() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1149,6 +1171,7 @@ main() {
   test_base_balance_queries_retry_on_transient_rpc_failures
   test_shared_postgres_runner_readiness_wait_precedes_shared_validation
   test_distributed_shared_validation_runs_from_operator_host
+  test_distributed_runtime_routes_private_postgres_ops_through_operator_host
   test_bridge_config_contract_reads_retry_on_malformed_rpc_responses
   test_remote_relayer_service_preserves_quoted_args_over_ssh
   test_distributed_relayer_runtime_cleans_stale_processes_before_launch
