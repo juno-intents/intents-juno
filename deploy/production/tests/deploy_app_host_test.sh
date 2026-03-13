@@ -168,6 +168,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '/etc/caddy/Caddyfile' "remote writes caddyfile"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'acme_account_email="ops@thejunowallet.com"' "remote configures acme account email"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'email $acme_account_email' "caddyfile uses configured acme account email"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'reverse_proxy 127.0.0.1:8082' "bridge caddy reverse proxy"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'reverse_proxy 127.0.0.1:8090' "backoffice caddy reverse proxy"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart bridge-api' "remote bridge restart"

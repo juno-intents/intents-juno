@@ -87,6 +87,7 @@ public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select
 dns_mode="$(production_json_optional "$app_deploy" '.dns.mode')"
 zone_id="$(production_json_optional "$app_deploy" '.dns.zone_id')"
 ttl_seconds="$(production_json_optional "$app_deploy" '.dns.ttl_seconds')"
+acme_account_email="${ACME_ACCOUNT_EMAIL:-ops@thejunowallet.com}"
 
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
@@ -224,6 +225,7 @@ shared_infra_report="\$runtime_dir/shared-infra-e2e.json"
 bridge_api_env="/etc/intents-juno/bridge-api.env"
 backoffice_env="/etc/intents-juno/backoffice.env"
 public_scheme="$public_scheme"
+acme_account_email="$acme_account_email"
 bridge_record_name="$bridge_record_name"
 backoffice_record_name="$backoffice_record_name"
 shared_postgres_dsn="$shared_postgres_dsn"
@@ -373,6 +375,10 @@ if [[ "\$public_scheme" == "https" ]]; then
   fi
   caddyfile_tmp="\$(mktemp)"
   cat >"\$caddyfile_tmp" <<CADDY
+{
+  email \$acme_account_email
+}
+
 \$bridge_record_name {
   encode zstd gzip
   reverse_proxy 127.0.0.1:$bridge_port
