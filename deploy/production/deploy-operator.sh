@@ -1227,7 +1227,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --base-relayer-url "${BASE_RELAYER_URL}" \
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN \
   --extend-signer-bin "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN}" \
-  --expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-30h}" \
+  --expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-6h}" \
   --max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}" \
   --blob-driver s3 \
   --blob-bucket "${WITHDRAW_BLOB_BUCKET}" \

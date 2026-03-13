@@ -1166,9 +1166,12 @@ production_render_operator_stack_env() {
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id base_event_scanner_start_block
   local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
+  local withdraw_expiry_safety_margin withdraw_max_expiry_extension
   checkpoint_signer_private_key=""
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
+  withdraw_expiry_safety_margin="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN || true)"
+  withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
@@ -1187,6 +1190,12 @@ production_render_operator_stack_env() {
   withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
   if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
     die "resolved secret env WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS ($withdraw_change_address) does not match shared manifest owallet_ua ($owallet_ua)"
+  fi
+  if [[ -n "$withdraw_expiry_safety_margin" && "$withdraw_expiry_safety_margin" != "6h" ]]; then
+    die "resolved secret env must not override WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN (expected 6h, got $withdraw_expiry_safety_margin)"
+  fi
+  if [[ -n "$withdraw_max_expiry_extension" && "$withdraw_max_expiry_extension" != "12h" ]]; then
+    die "resolved secret env must not override WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION (expected 12h, got $withdraw_max_expiry_extension)"
   fi
 
   case "$signer_driver" in
@@ -1230,6 +1239,8 @@ WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
 WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000
+WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h
+WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
@@ -1293,6 +1304,8 @@ EOF
     $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
     $1 == "OPERATOR_ADDRESS" { next }
     $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
+    $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
+    $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
     { print }
   ' "$resolved_secret_env" >>"$output_file"
 

@@ -729,6 +729,8 @@ EOF
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key" "rendered env withdraw coordinator client key"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "rendered env withdraw coordinator extend signer"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "rendered env withdraw coordinator max expiry extension"
   assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env juno txsign signer keys"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw finalizer scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw finalizer juno rpc url"
@@ -1119,6 +1121,50 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_stack_env_rejects_withdraw_expiry_overrides() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=literal:30h
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
+    printf 'expected production_render_operator_stack_env to reject withdraw expiry overrides\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_rejects_private_key_with_kms_contract() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -1417,6 +1463,7 @@ main() {
   test_render_operator_stack_env_requires_explicit_local_checkpoint_key
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials
+  test_render_operator_stack_env_rejects_withdraw_expiry_overrides
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
   test_render_junocashd_conf_uses_juno_rpc_credentials
   test_rollout_state_enforces_one_operator_at_a_time

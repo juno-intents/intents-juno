@@ -155,6 +155,12 @@ else
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000"
+      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h"
+      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h"
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$runtime_dir/bin/juno-txsign$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is not pointing withdraw coordinator at $runtime_dir/bin/juno-txsign"

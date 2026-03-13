@@ -82,6 +82,12 @@ fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
   exit 0
 fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
+  exit 0
+fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign$'"* ]]; then
   exit 0
 fi
@@ -109,6 +115,8 @@ EOF
   assert_contains "$(cat "$log_file")" "systemctl is-active checkpoint-signer" "operator canary checks checkpoint signer"
   assert_contains "$(cat "$log_file")" "systemctl is-active withdraw-finalizer" "operator canary checks withdraw finalizer"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "operator canary verifies remote juno fee floor"
+  assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "operator canary verifies remote expiry safety margin"
+  assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "operator canary verifies remote max expiry extension"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "operator canary verifies remote juno-txsign path"
   assert_contains "$(cat "$log_file")" "/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help" "operator canary verifies juno-txsign runtime"
   assert_contains "$(cat "$tmp/cast.log")" "wallet address --private-key" "operator canary derives the base relayer address from the configured key"
