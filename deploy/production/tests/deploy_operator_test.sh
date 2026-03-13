@@ -33,6 +33,27 @@ assert_line_order() {
   fi
 }
 
+write_fake_cast() {
+  local target="$1"
+  local log_file="$2"
+  local balance_wei="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
+  printf '0x1111111111111111111111111111111111111111\n'
+  exit 0
+fi
+if [[ "\$1" == "balance" ]]; then
+  printf '%s\n' "$balance_wei"
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -60,6 +81,7 @@ test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -117,6 +139,7 @@ EOF
 printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -232,6 +255,8 @@ EOF
   assert_contains "$(cat "$log_dir/junocashd.conf")" "txunpaidactionlimit=10000" "junocashd config raises unpaid action limit"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "kms operator env omits private key"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
+  assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key" "deploy derives the base relayer address from the configured key"
+  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before rollout"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_PER_SECOND=20" "rate limit refill default"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_BURST=40" "rate limit burst default"
@@ -256,6 +281,7 @@ test_deploy_operator_stages_distributed_dkg_server_tls() {
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -333,6 +359,7 @@ printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 printf '10.0.0.11\n'
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -345,6 +372,7 @@ EOF
   assert_contains "$(cat "$log_dir/scp.log")" "ca.pem" "deploy copies dkg ca"
   assert_contains "$(cat "$log_dir/aws.log")" "describe-instances" "deploy resolves peer hosts through aws"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "deploy ensures operator grpc mesh ingress"
+  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before distributed dkg rollout"
   assert_contains "$(cat "$log_dir/dkg-peer-hosts.json")" "10.0.0.11" "deploy writes resolved peer hosts"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11" "deploy stages tss server name override from resolved private host"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/ca.pem" "$runtime_dir/bundle/tls/ca.pem"' "remote deploy installs shared dkg ca"
@@ -375,6 +403,7 @@ test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state() {
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -442,6 +471,84 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_rejects_underfunded_base_relayer_before_rollout() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1000"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  if PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null 2>&1; then
+    printf 'expected deploy-operator.sh to reject underfunded base relayer\n' >&2
+    exit 1
+  fi
+
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "underfunded relayer leaves rollout state pending"
+  assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "underfunded relayer check reads balance"
+  if [[ -e "$log_dir/scp.log" ]]; then
+    printf 'expected underfunded relayer to block before scp but saw:\n%s\n' "$(cat "$log_dir/scp.log")" >&2
+    exit 1
+  fi
+  if [[ -e "$log_dir/ssh.log" ]]; then
+    printf 'expected underfunded relayer to block before ssh but saw:\n%s\n' "$(cat "$log_dir/ssh.log")" >&2
+    exit 1
+  fi
+
+  rm -rf "$workdir"
+}
+
 test_deploy_operator_force_reruns_done_operator() {
   local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
   workdir="$(mktemp -d)"
@@ -455,6 +562,7 @@ test_deploy_operator_force_reruns_done_operator() {
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -500,6 +608,7 @@ EOF
 printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -525,6 +634,7 @@ test_deploy_operator_retries_transient_service_checks() {
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
@@ -582,6 +692,7 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES=5 \
@@ -601,6 +712,7 @@ main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_stages_distributed_dkg_server_tls
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
+  test_deploy_operator_rejects_underfunded_base_relayer_before_rollout
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
 }

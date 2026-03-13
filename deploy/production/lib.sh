@@ -539,6 +539,64 @@ production_is_positive_integer() {
   [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 ))
 }
 
+production_required_min_base_relayer_balance_wei() {
+  local value="${PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI:-250000000000000}"
+  production_is_positive_integer "$value" \
+    || die "PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI must be a positive integer"
+  printf '%s\n' "$value"
+}
+
+production_base_relayer_first_private_key() {
+  local env_file="$1"
+  local base_relayer_private_keys first_key
+
+  base_relayer_private_keys="$(production_env_first_value "$env_file" BASE_RELAYER_PRIVATE_KEYS || true)"
+  [[ -n "$base_relayer_private_keys" ]] || die "resolved secret env is missing BASE_RELAYER_PRIVATE_KEYS"
+  first_key="${base_relayer_private_keys%%,*}"
+  [[ -n "$first_key" ]] || die "resolved secret env BASE_RELAYER_PRIVATE_KEYS is empty"
+  production_normalize_ecdsa_private_key "$first_key"
+}
+
+production_base_relayer_address() {
+  local env_file="$1"
+  local private_key address
+
+  have_cmd cast || die "cast is required to verify base relayer funding"
+  private_key="$(production_base_relayer_first_private_key "$env_file")"
+  address="$(cast wallet address --private-key "$private_key" | tr -d '[:space:]')"
+  [[ "$address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "failed to derive base relayer address from BASE_RELAYER_PRIVATE_KEYS"
+  printf '%s\n' "$address"
+}
+
+production_base_relayer_balance_snapshot() {
+  local env_file="$1"
+  local base_rpc_url="$2"
+  local address balance_wei
+
+  [[ -n "$base_rpc_url" ]] || die "base rpc url is required to verify base relayer funding"
+  address="$(production_base_relayer_address "$env_file")"
+  balance_wei="$(cast balance --rpc-url "$base_rpc_url" "$address" | tr -d '[:space:]')"
+  [[ "$balance_wei" =~ ^[0-9]+$ ]] || die "failed to resolve base relayer balance for $address"
+  printf '%s %s\n' "$address" "$balance_wei"
+}
+
+production_require_base_relayer_balance() {
+  local env_file="$1"
+  local base_rpc_url="$2"
+  local minimum_balance_wei="${3:-}"
+  local address balance_wei
+
+  if [[ -z "$minimum_balance_wei" ]]; then
+    minimum_balance_wei="$(production_required_min_base_relayer_balance_wei)"
+  fi
+  production_is_positive_integer "$minimum_balance_wei" \
+    || die "minimum base relayer balance must be a positive integer"
+  read -r address balance_wei <<<"$(production_base_relayer_balance_snapshot "$env_file" "$base_rpc_url")"
+  if (( balance_wei < minimum_balance_wei )); then
+    die "base relayer $address balance $balance_wei wei is below minimum $minimum_balance_wei wei"
+  fi
+}
+
 production_is_tx_hash() {
   local value="$1"
   [[ "$value" =~ ^0x[0-9a-fA-F]{64}$ ]]

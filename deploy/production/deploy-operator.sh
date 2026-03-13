@@ -58,6 +58,7 @@ allow_local_resolvers="false"
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
+base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
 peer_manifests_dir="$(cd "$manifest_dir/.." && pwd)"
 [[ -d "$peer_manifests_dir" ]] || die "peer operator manifests directory not found: $peer_manifests_dir"
@@ -655,6 +656,7 @@ done
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
 else
+  production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url"
   ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
   production_rollout_reserve "$rollout_state_file" "$operator_id"
   reserved="true"
