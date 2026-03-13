@@ -32,6 +32,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
 type envelope struct {
@@ -193,6 +194,32 @@ func main() {
 		os.Exit(2)
 	}
 
+	var (
+		scanClient              *junoscanhttp.Client
+		rpcClient               *junorpc.Client
+		depositWitnessRefresher depositrelayer.DepositWitnessRefresher
+	)
+	if *scanEnabled {
+		if *junoScanURL == "" || *junoScanWalletID == "" || *junoRPCURL == "" {
+			fmt.Fprintln(os.Stderr, "error: --juno-scan-url, --juno-scan-wallet-id, and --juno-rpc-url are required when --scan-enabled")
+			os.Exit(2)
+		}
+		rpcUser := os.Getenv(*junoRPCUserEnv)
+		rpcPass := os.Getenv(*junoRPCPassEnv)
+		if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
+			fmt.Fprintf(os.Stderr, "error: missing junocashd RPC credentials in env %s/%s\n", *junoRPCUserEnv, *junoRPCPassEnv)
+			os.Exit(2)
+		}
+		scanBearer := os.Getenv(*junoScanBearerEnv)
+		scanClient = junoscanhttp.New(*junoScanURL, scanBearer)
+		rpcClient, err = junorpc.New(*junoRPCURL, rpcUser, rpcPass)
+		if err != nil {
+			log.Error("init junorpc client for scanner", "err", err)
+			os.Exit(2)
+		}
+		depositWitnessRefresher = witnessextract.New(scanClient, rpcClient)
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -286,22 +313,23 @@ func main() {
 	defer proofCleanup()
 
 	relayer, err := depositrelayer.New(depositrelayer.Config{
-		BaseChainID:         uint32(*baseChainID),
-		BridgeAddress:       bridge,
-		DepositImageID:      imageID,
-		OperatorAddresses:   operatorAddrs,
-		OperatorThreshold:   *threshold,
-		MaxItems:            *maxItems,
-		MaxAge:              *maxAge,
-		DedupeMax:           *dedupeMax,
-		Owner:               workerOwner,
-		ClaimTTL:            *claimTTL,
-		GasLimit:            *gasLimit,
-		ProofRequestTimeout: *submitTimeout,
-		ProofPriority:       *proofPriority,
-		DLQStore:            proofDLQStore,
-		Now:                 time.Now,
-		OWalletIVKBytes:     owalletIVKBytes,
+		BaseChainID:             uint32(*baseChainID),
+		BridgeAddress:           bridge,
+		DepositImageID:          imageID,
+		OperatorAddresses:       operatorAddrs,
+		OperatorThreshold:       *threshold,
+		MaxItems:                *maxItems,
+		MaxAge:                  *maxAge,
+		DedupeMax:               *dedupeMax,
+		Owner:                   workerOwner,
+		ClaimTTL:                *claimTTL,
+		GasLimit:                *gasLimit,
+		ProofRequestTimeout:     *submitTimeout,
+		ProofPriority:           *proofPriority,
+		DLQStore:                proofDLQStore,
+		Now:                     time.Now,
+		OWalletIVKBytes:         owalletIVKBytes,
+		DepositWitnessRefresher: depositWitnessRefresher,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
@@ -319,23 +347,6 @@ func main() {
 	}()
 
 	if *scanEnabled {
-		if *junoScanURL == "" || *junoScanWalletID == "" || *junoRPCURL == "" {
-			fmt.Fprintln(os.Stderr, "error: --juno-scan-url, --juno-scan-wallet-id, and --juno-rpc-url are required when --scan-enabled")
-			os.Exit(2)
-		}
-		rpcUser := os.Getenv(*junoRPCUserEnv)
-		rpcPass := os.Getenv(*junoRPCPassEnv)
-		if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
-			fmt.Fprintf(os.Stderr, "error: missing junocashd RPC credentials in env %s/%s\n", *junoRPCUserEnv, *junoRPCPassEnv)
-			os.Exit(2)
-		}
-		scanBearer := os.Getenv(*junoScanBearerEnv)
-		scanClient := junoscanhttp.New(*junoScanURL, scanBearer)
-		rpcClient, rpcErr := junorpc.New(*junoRPCURL, rpcUser, rpcPass)
-		if rpcErr != nil {
-			log.Error("init junorpc client for scanner", "err", rpcErr)
-			os.Exit(2)
-		}
 		scanner, scanErr := depositscanner.New(depositscanner.Config{
 			WalletID:     *junoScanWalletID,
 			PollInterval: *scanPollInterval,

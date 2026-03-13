@@ -2,6 +2,7 @@ package witnessextract
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -120,6 +121,40 @@ func (b *Builder) BuildDeposit(ctx context.Context, req DepositRequest) (BuildRe
 		Position:         position,
 		WitnessItem:      item,
 	}, nil
+}
+
+func (b *Builder) RefreshDepositWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error) {
+	if b == nil || b.scan == nil {
+		return common.Hash{}, nil, fmt.Errorf("%w: nil scan client", ErrInvalidConfig)
+	}
+	if anchorHeight <= 0 {
+		return common.Hash{}, nil, fmt.Errorf("%w: anchor height must be > 0", ErrInvalidConfig)
+	}
+	position, action, err := parseDepositWitnessItem(witnessItem)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	wit, err := b.scan.OrchardWitness(ctx, &anchorHeight, []uint32{position})
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: orchard witness: %w", err)
+	}
+	root, err := parseHash32Hex(wit.Root)
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: parse witness root: %w", err)
+	}
+	authPathHex, ok := findAuthPathForPosition(wit.Paths, position)
+	if !ok {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: witness path missing for position %d", position)
+	}
+	authPath, err := decodeAuthPathHex(authPathHex)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	refreshed, err := witnessitem.EncodeDepositItem(position, authPath, action)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return root, refreshed, nil
 }
 
 func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (BuildResult, error) {
@@ -335,6 +370,35 @@ func decodeAuthPathHex(pathHex []string) ([][32]byte, error) {
 	}
 	return out, nil
 }
+
+func parseDepositWitnessItem(item []byte) (uint32, witnessitem.OrchardAction, error) {
+	if len(item) != witnessitemDepositLen {
+		return 0, witnessitem.OrchardAction{}, fmt.Errorf(
+			"witnessextract: invalid deposit witness item length: got=%d want=%d",
+			len(item),
+			witnessitemDepositLen,
+		)
+	}
+	leafIndex := binary.LittleEndian.Uint32(item[:4])
+	offset := 4 + (32 * 32)
+	var action witnessitem.OrchardAction
+	copy(action.Nullifier[:], item[offset:offset+32])
+	offset += 32
+	copy(action.RK[:], item[offset:offset+32])
+	offset += 32
+	copy(action.CMX[:], item[offset:offset+32])
+	offset += 32
+	copy(action.EphemeralKey[:], item[offset:offset+32])
+	offset += 32
+	copy(action.EncCiphertext[:], item[offset:offset+580])
+	offset += 580
+	copy(action.OutCiphertext[:], item[offset:offset+80])
+	offset += 80
+	copy(action.CV[:], item[offset:offset+32])
+	return leafIndex, action, nil
+}
+
+const witnessitemDepositLen = 4 + (32 * 32) + (32*5 + 580 + 80)
 
 func parseHash32Hex(raw string) (common.Hash, error) {
 	b, err := decodeHexFixed(raw, 32)

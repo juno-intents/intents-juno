@@ -1,6 +1,7 @@
 package witnessextract
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -8,6 +9,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/witnessitem"
 )
 
 func TestBuilder_BuildDeposit_Success(t *testing.T) {
@@ -69,6 +71,58 @@ func TestBuilder_BuildDeposit_NoteNotFound(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "note not found") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuilder_RefreshDepositWitness_Success(t *testing.T) {
+	t.Parallel()
+
+	originalAuth := testAuthPathHex()
+	refreshedAuth := testAuthPathHexWithSeed(0x80)
+	action := testRPCAction()
+	originalWitness, err := witnessitem.EncodeDepositItem(7, mustAuthPathFromHex(t, originalAuth), toWitnessAction(action))
+	if err != nil {
+		t.Fatalf("EncodeDepositItem: %v", err)
+	}
+
+	scan := &stubScan{
+		witness: WitnessResponse{
+			AnchorHeight: 321,
+			Root:         "0x" + strings.Repeat("ab", 32),
+			Paths: []WitnessPath{
+				{
+					Position: 7,
+					AuthPath: refreshedAuth,
+				},
+			},
+		},
+	}
+
+	b := New(scan, &stubRPC{})
+	root, refreshed, err := b.RefreshDepositWitness(context.Background(), 321, originalWitness)
+	if err != nil {
+		t.Fatalf("RefreshDepositWitness: %v", err)
+	}
+	if root != common.HexToHash(scan.witness.Root) {
+		t.Fatalf("root mismatch: got=%s want=%s", root.Hex(), common.HexToHash(scan.witness.Root).Hex())
+	}
+	if scan.gotAnchorHeight == nil || *scan.gotAnchorHeight != 321 {
+		t.Fatalf("anchor height mismatch: got=%v want=321", scan.gotAnchorHeight)
+	}
+	if len(scan.gotPositions) != 1 || scan.gotPositions[0] != 7 {
+		t.Fatalf("positions mismatch: got=%v want=[7]", scan.gotPositions)
+	}
+	if len(refreshed) != proverinput.DepositWitnessItemLen {
+		t.Fatalf("refreshed witness len mismatch: got=%d want=%d", len(refreshed), proverinput.DepositWitnessItemLen)
+	}
+	if !bytes.Equal(refreshed[:4], originalWitness[:4]) {
+		t.Fatalf("leaf index bytes changed")
+	}
+	if !bytes.Equal(refreshed[4+(32*32):], originalWitness[4+(32*32):]) {
+		t.Fatalf("action bytes changed")
+	}
+	if bytes.Equal(refreshed[4:4+(32*32)], originalWitness[4:4+(32*32)]) {
+		t.Fatalf("auth path did not refresh")
 	}
 }
 
@@ -249,11 +303,13 @@ func TestBuilder_BuildWithdraw_FallbackWalletIDByTxMatch(t *testing.T) {
 }
 
 type stubScan struct {
-	notes         []WalletNote
-	notesByWallet map[string][]WalletNote
-	walletIDs     []string
-	witness       WitnessResponse
-	err           error
+	notes           []WalletNote
+	notesByWallet   map[string][]WalletNote
+	walletIDs       []string
+	witness         WitnessResponse
+	err             error
+	gotAnchorHeight *int64
+	gotPositions    []uint32
 }
 
 func (s *stubScan) ListWalletIDs(ctx context.Context) ([]string, error) {
@@ -287,6 +343,13 @@ func (s *stubScan) OrchardWitness(ctx context.Context, anchorHeight *int64, posi
 	if s.err != nil {
 		return WitnessResponse{}, s.err
 	}
+	if anchorHeight != nil {
+		v := *anchorHeight
+		s.gotAnchorHeight = &v
+	} else {
+		s.gotAnchorHeight = nil
+	}
+	s.gotPositions = append([]uint32(nil), positions...)
 	return s.witness, nil
 }
 
@@ -319,10 +382,14 @@ func testRPCAction() junorpc.OrchardAction {
 }
 
 func testAuthPathHex() []string {
+	return testAuthPathHexWithSeed(0x01)
+}
+
+func testAuthPathHexWithSeed(seed byte) []string {
 	out := make([]string, 32)
 	for i := 0; i < 32; i++ {
 		b := make([]byte, 32)
-		b[0] = byte(i + 1)
+		b[0] = seed + byte(i)
 		out[i] = "0x" + common.Bytes2Hex(b)
 	}
 	return out
@@ -330,4 +397,13 @@ func testAuthPathHex() []string {
 
 func ptrInt64(v int64) *int64 {
 	return &v
+}
+
+func mustAuthPathFromHex(t *testing.T, pathHex []string) [][32]byte {
+	t.Helper()
+	path, err := decodeAuthPathHex(pathHex)
+	if err != nil {
+		t.Fatalf("decodeAuthPathHex: %v", err)
+	}
+	return path
 }

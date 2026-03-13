@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"math/big"
 	"strings"
 	"time"
@@ -35,6 +36,10 @@ type Sender interface {
 	Send(ctx context.Context, req httpapi.SendRequest) (httpapi.SendResponse, error)
 }
 
+type DepositWitnessRefresher interface {
+	RefreshDepositWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error)
+}
+
 type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
@@ -61,6 +66,8 @@ type Config struct {
 
 	// DLQStore is an optional dead-letter queue store. If nil, DLQ insertion is skipped.
 	DLQStore dlq.Store
+
+	DepositWitnessRefresher DepositWitnessRefresher
 
 	Now func() time.Time
 }
@@ -477,9 +484,32 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 
 	items := make([]bridgeabi.MintItem, 0, len(batch.Items))
 	witnessItems := make([][]byte, 0, len(batch.Items))
-	for _, it := range batch.Items {
+	for i, it := range batch.Items {
 		items = append(items, it.Val.Mint)
-		witnessItems = append(witnessItems, it.Val.ProofWitnessItem)
+		witness := append([]byte(nil), it.Val.ProofWitnessItem...)
+		if len(r.cfg.OWalletIVKBytes) == 64 && r.cfg.DepositWitnessRefresher != nil {
+			if cp.Height > math.MaxInt64 {
+				return fmt.Errorf("depositrelayer: checkpoint height %d exceeds int64", cp.Height)
+			}
+			refreshedRoot, refreshedWitness, err := r.cfg.DepositWitnessRefresher.RefreshDepositWitness(
+				ctx,
+				int64(cp.Height),
+				witness,
+			)
+			if err != nil {
+				return fmt.Errorf("depositrelayer: refresh proof witness item for batch index %d: %w", i, err)
+			}
+			if refreshedRoot != cp.FinalOrchardRoot {
+				return fmt.Errorf(
+					"depositrelayer: refreshed witness root %s does not match checkpoint root %s for batch index %d",
+					refreshedRoot.Hex(),
+					cp.FinalOrchardRoot.Hex(),
+					i,
+				)
+			}
+			witness = refreshedWitness
+		}
+		witnessItems = append(witnessItems, witness)
 	}
 
 	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{

@@ -78,6 +78,23 @@ func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Req
 	return p.res, p.err
 }
 
+type stubDepositWitnessRefresher struct {
+	gotAnchorHeight int64
+	gotWitnessItem  []byte
+	root            common.Hash
+	item            []byte
+	err             error
+}
+
+func (s *stubDepositWitnessRefresher) RefreshDepositWitness(_ context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error) {
+	s.gotAnchorHeight = anchorHeight
+	s.gotWitnessItem = append([]byte(nil), witnessItem...)
+	if s.err != nil {
+		return common.Hash{}, nil, s.err
+	}
+	return s.root, append([]byte(nil), s.item...), nil
+}
+
 type flakyDLQStore struct {
 	inner         dlq.Store
 	depositErrs   []error
@@ -1241,6 +1258,101 @@ func TestRelayer_UsesBinaryGuestInputWhenConfigured(t *testing.T) {
 	}
 	if !bytes.Equal(prover.gotReq.PrivateInput, wantInput) {
 		t.Fatalf("proof requester private input mismatch")
+	}
+}
+
+func TestRelayer_RefreshesGuestWitnessToCheckpointAnchor(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var ivk [64]byte
+	for i := range ivk {
+		ivk[i] = byte(i + 1)
+	}
+	originalWitness := bytes.Repeat([]byte{0x44}, proverinput.DepositWitnessItemLen)
+	refreshedWitness := bytes.Repeat([]byte{0x55}, proverinput.DepositWitnessItemLen)
+	refresher := &stubDepositWitnessRefresher{
+		root: cp.FinalOrchardRoot,
+		item: refreshedWitness,
+	}
+
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:             baseChainID,
+		BridgeAddress:           bridge,
+		DepositImageID:          common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses:       operatorAddrs,
+		OperatorThreshold:       1,
+		MaxItems:                1,
+		MaxAge:                  10 * time.Minute,
+		DedupeMax:               1000,
+		GasLimit:                55555,
+		Now:                     time.Now,
+		OWalletIVKBytes:         ivk[:],
+		DepositWitnessRefresher: refresher,
+	}, deposit.NewMemoryStore(), sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: originalWitness,
+	}); err != nil {
+		t.Fatalf("IngestDeposit: %v", err)
+	}
+
+	if refresher.gotAnchorHeight != int64(cp.Height) {
+		t.Fatalf("anchor height mismatch: got=%d want=%d", refresher.gotAnchorHeight, cp.Height)
+	}
+	if !bytes.Equal(refresher.gotWitnessItem, originalWitness) {
+		t.Fatalf("refresher witness mismatch")
+	}
+
+	wantInput, err := proverinput.EncodeDepositGuestPrivateInput(cp, ivk, [][]byte{refreshedWitness})
+	if err != nil {
+		t.Fatalf("EncodeDepositGuestPrivateInput: %v", err)
+	}
+	if !bytes.Equal(prover.gotReq.PrivateInput, wantInput) {
+		t.Fatalf("proof requester private input mismatch after refresh")
 	}
 }
 
