@@ -339,6 +339,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/coordinator-client.pem" "$runtime_dir/bundle/tls/coordinator-client.pem"' "remote deploy installs shared dkg coordinator client cert"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"' "remote deploy installs shared dkg coordinator client key"
   assert_contains "$(cat "$log_dir/ssh.stdin")" "coordinator_client_cert_sha256" "remote deploy refreshes dkg coordinator client fingerprint"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" "tls_client_cert_pem_path" "remote deploy patches dkg admin config with tls client cert path"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" "tls_client_key_pem_path" "remote deploy patches dkg admin config with tls client key path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"' "remote deploy installs generated dkg server cert"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/dkg-server.key" "$runtime_dir/bundle/tls/server.key"' "remote deploy installs generated dkg server key"
   san_text="$(openssl x509 -in "$log_dir/dkg-server.pem" -noout -ext subjectAltName 2>/dev/null)"

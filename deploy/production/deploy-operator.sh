@@ -769,9 +769,13 @@ if [[ -f "$runtime_dir/bundle/tls/coordinator-client.pem" ]]; then
   admin_config_path="$runtime_dir/bundle/admin-config.json"
   coordinator_client_fingerprint_tmp="$(mktemp)"
   coordinator_client_fingerprint="$(openssl x509 -in "$runtime_dir/bundle/tls/coordinator-client.pem" -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
-  jq --arg fingerprint "$coordinator_client_fingerprint" '
+  jq --arg fingerprint "$coordinator_client_fingerprint" \
+     --arg cert "./tls/coordinator-client.pem" \
+     --arg key "./tls/coordinator-client.key" '
     .grpc = ((.grpc // {}) + {
-      coordinator_client_cert_sha256: $fingerprint
+      coordinator_client_cert_sha256: $fingerprint,
+      tls_client_cert_pem_path: $cert,
+      tls_client_key_pem_path: $key
     })
   ' "$admin_config_path" >"$coordinator_client_fingerprint_tmp"
   sudo install -m 0640 -o intents-juno -g intents-juno "$coordinator_client_fingerprint_tmp" "$admin_config_path"
