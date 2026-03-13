@@ -844,6 +844,11 @@ sudo test -x "$dkg_admin_runtime_bin" || {
   echo "restored runtime is missing dkg-admin binary: $dkg_admin_runtime_bin" >&2
   exit 1
 }
+dkg_admin_help="$(sudo "$dkg_admin_runtime_bin" --help 2>&1 || true)"
+grep -qE '(^|[[:space:]])sign-digest([[:space:]]|$)' <<<"$dkg_admin_help" || {
+  echo "restored runtime dkg-admin binary does not support sign-digest: $dkg_admin_runtime_bin" >&2
+  exit 1
+}
 
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"

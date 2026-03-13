@@ -142,6 +142,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl stop juno-scan || true' "remote deploy stops juno-scan before repairing its state directory"
   assert_contains "$(cat "$log_dir/ssh.stdin")" "sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'" "remote deploy repairs juno-scan state ownership through a root shell"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo test -x "$dkg_admin_runtime_bin"' "remote deploy verifies the restored runtime binary through sudo"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_help="$(sudo "$dkg_admin_runtime_bin" --help 2>&1 || true)"' "remote deploy probes the runtime dkg-admin command set"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'grep -qE '\''(^|[[:space:]])sign-digest([[:space:]]|$)'\'' <<<"$dkg_admin_help"' "remote deploy requires dkg-admin sign-digest support"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"' "remote deploy can patch legacy dkg-admin wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'dkg_admin_tmp="$(mktemp)"' "remote deploy rewrites the dkg-admin wrapper from a temp file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'admin_config_dir="$(dirname "$admin_config")"' "remote deploy writes a dkg-admin wrapper that derives the bundle directory"
