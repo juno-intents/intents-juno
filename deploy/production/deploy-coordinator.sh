@@ -83,6 +83,11 @@ done
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+allow_local_resolvers="false"
+[[ "$env_slug" == "alpha" ]] && allow_local_resolvers="true"
+inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
+inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
 terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
 terraform_dir="$(production_abs_path "$REPO_ROOT" "$terraform_dir_rel")"
 [[ -d "$terraform_dir" ]] || die "terraform dir not found: $terraform_dir"
@@ -92,6 +97,19 @@ else
   output_dir="$output_root/$env_slug"
 fi
 mkdir -p "$output_dir"
+
+minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
+preflight_secret_dir="$(mktemp -d)"
+trap 'rm -rf "$preflight_secret_dir"' EXIT
+while IFS= read -r operator_json; do
+  operator_id="$(jq -r '.operator_id | select(type == "string" and length > 0)' <<<"$operator_json")"
+  secret_contract_rel="$(jq -r '.secret_contract_file | select(type == "string" and length > 0)' <<<"$operator_json")"
+  secret_contract_file="$(production_abs_path "$inventory_dir" "$secret_contract_rel")"
+  [[ -f "$secret_contract_file" ]] || die "operator secret contract file not found: $secret_contract_file"
+  resolved_secret_env="$preflight_secret_dir/${operator_id}.env"
+  production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$inventory_aws_profile" "$inventory_aws_region" "$resolved_secret_env"
+  production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url" "$minimum_base_relayer_balance_wei"
+done < <(jq -c '.operators[]' "$inventory")
 
 if [[ "$skip_terraform_apply" != "true" ]]; then
   for cmd in terraform; do

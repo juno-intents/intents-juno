@@ -7,6 +7,27 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+write_fake_cast() {
+  local target="$1"
+  local log_file="$2"
+  local balance_wei="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
+  printf '0x1111111111111111111111111111111111111111\n'
+  exit 0
+fi
+if [[ "\$1" == "balance" ]]; then
+  printf '%s\n' "$balance_wei"
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -26,12 +47,16 @@ write_inventory_fixture() {
 }
 
 test_deploy_coordinator_generates_handoffs() {
-  local workdir output_dir manifest operator_dir
+  local workdir output_dir manifest operator_dir fake_bin log_dir
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
@@ -42,8 +67,9 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
 
-  bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
@@ -69,12 +95,16 @@ EOF
 }
 
 test_deploy_coordinator_supports_run_label() {
-  local workdir output_dir run_dir operator_dir
+  local workdir output_dir run_dir operator_dir fake_bin log_dir
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
@@ -85,8 +115,9 @@ CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
 
-  bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
@@ -108,11 +139,15 @@ EOF
 }
 
 test_deploy_coordinator_normalizes_relative_output_paths() {
-  local workdir inventory_path operator_dir
+  local workdir inventory_path operator_dir fake_bin log_dir
   workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
@@ -124,10 +159,11 @@ APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   inventory_path="$workdir/inventory.json"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
 
   (
     cd "$workdir"
-    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
       --inventory "$inventory_path" \
       --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
       --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
@@ -144,12 +180,16 @@ EOF
 }
 
 test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk() {
-  local workdir output_dir dkg_summary_no_ufvk dkg_completion bridge_summary_no_ua manifest
+  local workdir output_dir dkg_summary_no_ufvk dkg_completion bridge_summary_no_ua manifest fake_bin log_dir
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
   printf 'backup' >"$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
@@ -174,8 +214,9 @@ EOF
   "juno_shielded_address": "u1coordinatorfallback"
 }
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
 
-  bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$dkg_summary_no_ufvk" \
     --dkg-completion "$dkg_completion" \
@@ -192,11 +233,56 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_rejects_underfunded_operator_before_render() {
+  local workdir output_dir fake_bin log_dir output
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1000"
+
+  if output="$(
+    PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --output-dir "$output_dir" 2>&1
+  )"; then
+    printf 'expected deploy-coordinator.sh to reject underfunded operator relayer\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "base relayer 0x1111111111111111111111111111111111111111 balance 1000 wei is below minimum 250000000000000 wei" "underfunded relayer error"
+  [[ ! -e "$output_dir/alpha/shared-manifest.json" ]] || {
+    printf 'expected no shared manifest when relayer funding preflight fails\n' >&2
+    exit 1
+  }
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_normalizes_relative_output_paths
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
+  test_deploy_coordinator_rejects_underfunded_operator_before_render
 }
 
 main "$@"

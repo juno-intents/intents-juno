@@ -74,6 +74,7 @@ write_operator_inputs() {
     cat >"$workdir/operators/$op/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
     append_default_owallet_proof_keys "$workdir/operators/$op/operator-secrets.env"
@@ -184,7 +185,24 @@ printf 'deploy-coordinator-should-not-run %s\n' "\$*" >>"$log_file"
 exit 99
 EOF
 
+  cat >"$bin_dir/cast" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
+  printf '0x1111111111111111111111111111111111111111\n'
+  exit 0
+fi
+if [[ "\$1" == "balance" ]]; then
+  printf '300000000000000\n'
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+
   chmod 0755 \
+    "$bin_dir/cast" \
     "$bin_dir/deploy-operator.sh" \
     "$bin_dir/canary-shared-services.sh" \
     "$bin_dir/canary-operator-boot.sh" \
@@ -207,6 +225,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
 
   (
     cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
     PRODUCTION_DEPLOY_OPERATOR_BIN="$fake_bin/deploy-operator.sh" \
     PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
     PRODUCTION_CANARY_OPERATOR_BIN="$fake_bin/canary-operator-boot.sh" \
@@ -235,6 +254,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
 
   (
     cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
     PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator-should-not-run.sh" \
     PRODUCTION_DEPLOY_OPERATOR_BIN="$fake_bin/deploy-operator.sh" \
     PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
