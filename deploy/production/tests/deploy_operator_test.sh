@@ -183,6 +183,9 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl daemon-reload' "remote deploy reloads systemd units before restarting services"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart intents-juno-config-hydrator.service' "remote deploy restarts config hydrator before dependent services"
   assert_line_order "$(cat "$log_dir/ssh.stdin")" 'restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force' 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk after restoring the runtime"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''/usr/local/bin/intents-juno-dkg-admin-serve.sh'\'' || true' "remote deploy clears stale dkg-admin wrapper processes before restart"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''/var/lib/intents-juno/operator-runtime/bin/dkg-admin --config .* serve'\'' || true' "remote deploy clears stale dkg-admin runtime processes before restart"
+  assert_line_order "$(cat "$log_dir/ssh.stdin")" 'sudo pkill -f '\''/usr/local/bin/intents-juno-dkg-admin-serve.sh'\'' || true' 'sudo systemctl reset-failed "$svc" || true' "remote deploy clears stale dkg-admin processes before restarting services"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do' "remote deploy restarts junocashd before scanner-dependent services"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl reset-failed "$svc" || true' "remote deploy clears systemd start limits before restarting operator services"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active junocashd" "deploy verifies junocashd after restarting it"
@@ -334,6 +337,85 @@ EOF
   assert_contains "$san_text" "DNS:localhost" "generated cert preserves localhost san"
   assert_contains "$san_text" "IP Address:10.0.0.11" "generated cert includes resolved peer host"
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
+  rm -rf "$workdir"
+}
+
+test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state() {
+  local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+cat >>"$log_dir/ssh.stdin" || true
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+if [[ "\$*" == *"describe-instances"* ]]; then
+  printf '10.0.0.11\n'
+fi
+exit 0
+EOF
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" \
+    --dry-run >/dev/null
+
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "pending" "dry-run leaves rollout state pending"
+  if [[ -e "$log_dir/scp.log" ]]; then
+    printf 'expected dry-run to avoid scp but saw:\n%s\n' "$(cat "$log_dir/scp.log")" >&2
+    exit 1
+  fi
+  if [[ -e "$log_dir/ssh.log" ]]; then
+    printf 'expected dry-run to avoid ssh but saw:\n%s\n' "$(cat "$log_dir/ssh.log")" >&2
+    exit 1
+  fi
+  if [[ -e "$log_dir/aws.log" ]]; then
+    assert_not_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "dry-run avoids mutating security groups"
+  fi
+
   rm -rf "$workdir"
 }
 
@@ -493,6 +575,7 @@ EOF
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_stages_distributed_dkg_server_tls
+  test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
 }

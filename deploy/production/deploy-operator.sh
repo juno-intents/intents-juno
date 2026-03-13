@@ -585,7 +585,7 @@ prepare_base_relayer_env() {
 }
 
 cleanup() {
-  if [[ "$reserved" == "true" && "$success" != "true" ]]; then
+  if [[ "$dry_run" != "true" && "$reserved" == "true" && "$success" != "true" ]]; then
     production_rollout_complete "$rollout_state_file" "$operator_id" "failed" "remote deployment failed"
   fi
   rm -rf "$tmp_dir"
@@ -596,7 +596,6 @@ production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolve
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
 production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
-ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
 printf '%s\n' "$(production_json_required "$shared_manifest_path" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')" >"$signer_ufvk_file"
 mapfile -t peer_operator_manifests < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
 (( ${#peer_operator_manifests[@]} > 0 )) || die "no peer operator manifests found under $peer_manifests_dir"
@@ -631,9 +630,6 @@ if [[ -n "$dkg_tls_dir" ]]; then
   )
 fi
 
-production_rollout_reserve "$rollout_state_file" "$operator_id"
-reserved="true"
-
 remote_stage_dir="/tmp/intents-juno-deploy-$(production_safe_slug "$operator_id")"
 files_to_copy=(
   "$dkg_backup_zip"
@@ -659,6 +655,9 @@ done
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
 else
+  ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
+  production_rollout_reserve "$rollout_state_file" "$operator_id"
+  reserved="true"
   ssh "${SSH_OPTS[@]}" "$ssh_target" "rm -rf '$remote_stage_dir' && mkdir -p '$remote_stage_dir'"
   for source_path in "${files_to_copy[@]}"; do
     scp "${SCP_OPTS[@]}" "$source_path" "$ssh_target:$remote_stage_dir/$(basename "$source_path")"
@@ -1293,6 +1292,8 @@ fi
 sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service
 sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
+sudo pkill -f '/usr/local/bin/intents-juno-dkg-admin-serve.sh' || true
+sudo pkill -f '/var/lib/intents-juno/operator-runtime/bin/dkg-admin --config .* serve' || true
 for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl reset-failed "$svc" || true
   sudo systemctl restart "$svc"
@@ -1322,6 +1323,11 @@ if [[ "$dns_mode" == "public-zone" && -n "$dns_zone_id" && -n "$dns_record_name"
   fi
 fi
 
-production_rollout_complete "$rollout_state_file" "$operator_id" "done" "healthy"
-success="true"
-log "operator deployed: $operator_id"
+if [[ "$dry_run" == "true" ]]; then
+  success="true"
+  log "[DRY RUN] operator deploy validated: $operator_id"
+else
+  production_rollout_complete "$rollout_state_file" "$operator_id" "done" "healthy"
+  success="true"
+  log "operator deployed: $operator_id"
+fi
