@@ -91,6 +91,9 @@ func TestHandler_Config(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
 		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control: got %q want %q", got, "no-store")
+		}
 
 		var out map[string]any
 		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
@@ -125,6 +128,9 @@ func TestHandler_Config(t *testing.T) {
 		h.ServeHTTP(rec, req)
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status: got %d want %d", rec.Code, http.StatusOK)
+		}
+		if got := rec.Header().Get("Cache-Control"); got != "no-store" {
+			t.Fatalf("Cache-Control: got %q want %q", got, "no-store")
 		}
 
 		var out map[string]any

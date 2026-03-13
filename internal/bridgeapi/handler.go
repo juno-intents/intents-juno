@@ -202,6 +202,7 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	resp := map[string]any{
 		"version":             "v1",
 		"baseChainId":         h.cfg.BaseChainID,
