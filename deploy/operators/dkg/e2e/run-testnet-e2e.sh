@@ -2662,7 +2662,28 @@ sudo test -s "$stack_env_file" || {
   echo "operator stack env is missing: $stack_env_file" >&2
   exit 1
 }
-stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"
+
+resolve_service_group() {
+  local service="${1:-}"
+  local group user
+  group="$(sudo systemctl show -p Group --value "$service" 2>/dev/null || true)"
+  if [[ -n "$group" ]]; then
+    printf '%s' "$group"
+    return 0
+  fi
+  user="$(sudo systemctl show -p User --value "$service" 2>/dev/null || true)"
+  if [[ -n "$user" ]]; then
+    group="$(id -gn "$user" 2>/dev/null || true)"
+    if [[ -n "$group" ]]; then
+      printf '%s' "$group"
+      return 0
+    fi
+  fi
+  return 1
+}
+
+stack_env_group="$(resolve_service_group checkpoint-signer.service || true)"
+[[ -n "$stack_env_group" ]] || stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"
 [[ -n "$stack_env_group" ]] || stack_env_group="intents-juno"
 
 normalize_region() {

@@ -626,7 +626,12 @@ test_checkpoint_bridge_config_updates_preserve_service_readable_group() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"' "checkpoint bridge config updater reads the existing operator stack env group"
+  assert_contains "$script_text" 'resolve_service_group() {' "checkpoint bridge config updater defines a service-group resolver"
+  assert_contains "$script_text" 'group="$(sudo systemctl show -p Group --value "$service" 2>/dev/null || true)"' "checkpoint bridge config updater checks explicit systemd group first"
+  assert_contains "$script_text" 'user="$(sudo systemctl show -p User --value "$service" 2>/dev/null || true)"' "checkpoint bridge config updater falls back to the systemd service user"
+  assert_contains "$script_text" 'group="$(id -gn "$user" 2>/dev/null || true)"' "checkpoint bridge config updater resolves the service user's primary group"
+  assert_contains "$script_text" 'stack_env_group="$(resolve_service_group checkpoint-signer.service || true)"' "checkpoint bridge config updater prefers the checkpoint-signer service group"
+  assert_contains "$script_text" '[[ -n "$stack_env_group" ]] || stack_env_group="$(sudo stat -c %G "$stack_env_file" 2>/dev/null || true)"' "checkpoint bridge config updater only falls back to the existing env file group when service metadata is unavailable"
   assert_contains "$script_text" '[[ -n "$stack_env_group" ]] || stack_env_group="intents-juno"' "checkpoint bridge config updater falls back to intents-juno group when stack env group lookup fails"
   assert_contains "$script_text" 'sudo install -m 0640 -o root -g "$stack_env_group" "$tmp_env" "$stack_env_file"' "checkpoint bridge config updater preserves a service-readable group on operator stack env"
 }
