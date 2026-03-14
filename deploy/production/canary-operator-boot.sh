@@ -186,6 +186,12 @@ else
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000"
+      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env is missing CHECKPOINT_SIGNER_DRIVER=aws-kms"
+      elif ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY"
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h"
@@ -195,9 +201,9 @@ else
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$runtime_dir/bin/juno-txsign$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is not pointing withdraw coordinator at $runtime_dir/bin/juno-txsign"
-      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^JUNO_TXSIGN_SIGNER_KEYS=' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
-        withdraw_config_detail="remote operator env is missing JUNO_TXSIGN_SIGNER_KEYS"
+        withdraw_config_detail="remote operator env must contain exactly one operator-scoped JUNO_TXSIGN_SIGNER_KEYS entry"
       fi
 
       if [[ "$withdraw_config_status" == "passed" ]]; then

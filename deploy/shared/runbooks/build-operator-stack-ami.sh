@@ -661,6 +661,21 @@ set_env_value() {
   rm -f "$tmp"
 }
 
+delete_env_value() {
+  local file="$1"
+  local key="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" '
+    index($0, key "=") != 1 {
+      print
+    }
+  ' "$file" > "$tmp"
+  cat "$tmp" > "$file"
+  chmod 0640 "$file"
+  rm -f "$tmp"
+}
+
 resolve_secret_region() {
   if [[ -n "${OPERATOR_STACK_CONFIG_SECRET_REGION:-}" ]]; then
     printf '%s' "$OPERATOR_STACK_CONFIG_SECRET_REGION"
@@ -797,6 +812,7 @@ checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env
 checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env_value CHECKPOINT_SIGNER_DRIVER || true)" || true)"
 checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
+juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
 checkpoint_operators="$(resolve_value "CHECKPOINT_OPERATORS" "$(read_env_value CHECKPOINT_OPERATORS || true)" || true)"
@@ -814,6 +830,7 @@ required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
 required_key "JUNO_RPC_USER" "$juno_rpc_user"
 required_key "JUNO_RPC_PASS" "$juno_rpc_pass"
+required_key "JUNO_TXSIGN_SIGNER_KEYS" "$juno_txsign_signer_keys"
 required_key "CHECKPOINT_OPERATORS" "$checkpoint_operators"
 required_key "CHECKPOINT_THRESHOLD" "$checkpoint_threshold"
 
@@ -833,20 +850,18 @@ case "${kafka_tls,,}" in
     ;;
 esac
 
-checkpoint_signer_driver="$(printf '%s' "${checkpoint_signer_driver:-local-env}" | tr '[:upper:]' '[:lower:]')"
+checkpoint_signer_driver="$(printf '%s' "${checkpoint_signer_driver:-}" | tr '[:upper:]' '[:lower:]')"
 case "$checkpoint_signer_driver" in
-  ""|local-env)
-    checkpoint_signer_driver="local-env"
-    ;;
   aws-kms)
     required_key "CHECKPOINT_SIGNER_KMS_KEY_ID when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$checkpoint_signer_kms_key_id"
     required_key "OPERATOR_ADDRESS when CHECKPOINT_SIGNER_DRIVER=aws-kms" "$operator_address"
     [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || fail "requires OPERATOR_ADDRESS as 20-byte hex when CHECKPOINT_SIGNER_DRIVER=aws-kms"
     ;;
   *)
-    fail "requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms"
+    fail "requires CHECKPOINT_SIGNER_DRIVER=aws-kms in production"
     ;;
 esac
+[[ "$juno_txsign_signer_keys" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in production"
 
 [[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
 
@@ -875,9 +890,11 @@ set_env_value "$tmp_env" JUNO_RPC_PASS "$juno_rpc_pass"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
+set_env_value "$tmp_env" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys"
 set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
 set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "$kafka_tls"
+delete_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY
 
 if [[ -n "$checkpoint_blob_prefix" ]]; then
   set_env_value "$tmp_env" CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
@@ -994,7 +1011,7 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
-signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-local-env}" | tr '[:upper:]' '[:lower:]')"
+signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
 checkpoint_signer_supports_signer_driver=false
@@ -1002,14 +1019,6 @@ if grep -q -- '-signer-driver ' <<<"$checkpoint_signer_help"; then
   checkpoint_signer_supports_signer_driver=true
 fi
 case "${signer_driver}" in
-  ""|local-env)
-    signer_driver="local-env"
-    if [[ "$checkpoint_signer_supports_signer_driver" == true ]]; then
-      signer_args=(--signer-driver "${signer_driver}")
-    else
-      signer_args=()
-    fi
-    ;;
   aws-kms)
     [[ -n "${CHECKPOINT_SIGNER_KMS_KEY_ID:-}" ]] || {
       echo "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
@@ -1025,10 +1034,14 @@ case "${signer_driver}" in
     )
     ;;
   *)
-    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms in /etc/intents-juno/operator-stack.env" >&2
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
     exit 1
     ;;
 esac
+[[ -z "${CHECKPOINT_SIGNER_PRIVATE_KEY:-}" ]] || {
+  echo "checkpoint-signer must not receive CHECKPOINT_SIGNER_PRIVATE_KEY when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
+  exit 1
+}
 exec /usr/local/bin/checkpoint-signer \
   --juno-rpc-url http://127.0.0.1:18232 \
   "${signer_args[@]}" \
@@ -1707,6 +1720,10 @@ if [[ -n "${WITHDRAW_COORDINATOR_TSS_SERVER_NAME:-}" ]]; then
 fi
 export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS
 export JUNO_SCAN_BEARER_TOKEN
+[[ "${JUNO_TXSIGN_SIGNER_KEYS:-}" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+  echo "withdraw-coordinator requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 export JUNO_TXSIGN_SIGNER_KEYS
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"

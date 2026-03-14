@@ -239,7 +239,9 @@ EOF
   assert_file_exists "$handoff_dir/operator-deploy.json" "operator manifest"
   assert_file_exists "$handoff_dir/operator-secrets.env" "secret contract copy"
   assert_file_exists "$handoff_dir/known_hosts" "known_hosts copy"
-  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "handoff injects withdraw signer keys"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "handoff injects the operator-scoped withdraw signer key"
+  assert_not_contains "$(cat "$handoff_dir/operator-secrets.env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "handoff omits other operators' withdraw signer keys"
+  assert_not_contains "$(cat "$handoff_dir/operator-secrets.env")" "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "handoff omits all non-local withdraw signer keys"
   assert_eq "$(jq -r '.operator_address' "$handoff_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "handoff operator address"
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "handoff signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
@@ -454,7 +456,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
-  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'JUNO_TXSIGN_SIGNER_KEYS=literal:%s\n' "$(test_default_operator_txsign_key)" >>"$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -788,7 +790,8 @@ EOF
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "rendered env withdraw coordinator max expiry extension"
-  assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env juno txsign signer keys"
+  assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "rendered env uses only the operator-scoped juno txsign signer key"
+  assert_not_contains "$(cat "$output_env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env omits non-local juno txsign signer keys"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw finalizer scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw finalizer juno rpc url"
   assert_contains "$(cat "$output_env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "rendered env tss ufvk path"
@@ -852,8 +855,8 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary() {
-  local workdir shared_manifest handoff_dir dkg_summary_with_key
+test_render_operator_handoffs_rejects_local_checkpoint_signer_driver() {
+  local workdir shared_manifest dkg_summary_with_key
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
@@ -890,10 +893,10 @@ EOF
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary_with_key" "$workdir/output" "$workdir"
-  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
-
-  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x0123456789012345678901234567890123456789012345678901234567890123" "handoff injects checkpoint signer key from dkg summary"
+  if (production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary_with_key" "$workdir/output" "$workdir" >/dev/null 2>&1); then
+    printf 'expected production_render_operator_handoffs to reject checkpoint_signer_driver=local-env in production\n' >&2
+    exit 1
+  fi
   rm -rf "$workdir"
 }
 
@@ -907,6 +910,7 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
+  printf 'JUNO_TXSIGN_SIGNER_KEYS=literal:%s\n' "$(test_default_operator_txsign_key)" >>"$workdir/operator-secrets.env"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -1002,7 +1006,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_requires_explicit_local_checkpoint_key() {
+test_render_operator_stack_env_rejects_local_checkpoint_signer_driver() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
@@ -1045,7 +1049,7 @@ EOF
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
   if (production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env" >/dev/null 2>&1); then
-    printf 'expected production_render_operator_stack_env to require CHECKPOINT_SIGNER_PRIVATE_KEY for local-env signer\n' >&2
+    printf 'expected production_render_operator_stack_env to reject local-env checkpoint signers in production\n' >&2
     exit 1
   fi
   rm -rf "$workdir"
@@ -1167,6 +1171,8 @@ EOF
     "$workdir"
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  awk -F= 'index($0, "JUNO_TXSIGN_SIGNER_KEYS=") != 1 { print }' "$handoff_dir/operator-secrets.env" >"$handoff_dir/operator-secrets.env.next"
+  mv "$handoff_dir/operator-secrets.env.next" "$handoff_dir/operator-secrets.env"
 
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
@@ -1254,6 +1260,7 @@ EOF
     "$workdir"
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  printf 'CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef\n' >>"$handoff_dir/operator-secrets.env"
 
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
@@ -1577,11 +1584,11 @@ main() {
   test_render_shared_manifest_requires_signer_ufvk
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract
-  test_render_operator_handoffs_injects_local_checkpoint_signer_key_from_dkg_summary
+  test_render_operator_handoffs_rejects_local_checkpoint_signer_driver
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir
-  test_render_operator_stack_env_requires_explicit_local_checkpoint_key
+  test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_withdraw_expiry_overrides

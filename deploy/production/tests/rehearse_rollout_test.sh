@@ -17,6 +17,9 @@ write_inventory_fixture() {
         {
           index: 1,
           operator_id: "0x1111111111111111111111111111111111111111",
+          operator_address: "0x9999999999999999999999999999999999999999",
+          checkpoint_signer_driver: "aws-kms",
+          checkpoint_signer_kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",
@@ -32,6 +35,9 @@ write_inventory_fixture() {
         {
           index: 2,
           operator_id: "0x6666666666666666666666666666666666666666",
+          operator_address: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          checkpoint_signer_driver: "aws-kms",
+          checkpoint_signer_kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/66666666-2222-3333-4444-555555555555",
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",
@@ -47,6 +53,9 @@ write_inventory_fixture() {
         {
           index: 3,
           operator_id: "0x7777777777777777777777777777777777777777",
+          operator_address: "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          checkpoint_signer_driver: "aws-kms",
+          checkpoint_signer_kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/77777777-2222-3333-4444-555555555555",
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",

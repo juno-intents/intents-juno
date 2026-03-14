@@ -231,8 +231,10 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   signer_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER")"
   assert_contains "$signer_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint signer requires base chain id in operator env"
   assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"
-  assert_contains "$signer_wrapper" 'CHECKPOINT_SIGNER_DRIVER:-local-env' "checkpoint signer defaults to local-env when signer driver is unset"
+  assert_not_contains "$signer_wrapper" 'CHECKPOINT_SIGNER_DRIVER:-local-env' "checkpoint signer no longer defaults to local-env"
   assert_contains "$signer_wrapper" 'checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer requires kms key id for aws-kms mode"
+  assert_contains "$signer_wrapper" 'checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env' "checkpoint signer rejects non-kms production signers"
+  assert_contains "$signer_wrapper" 'checkpoint-signer must not receive CHECKPOINT_SIGNER_PRIVATE_KEY when CHECKPOINT_SIGNER_DRIVER=aws-kms' "checkpoint signer rejects stale private key material"
   assert_contains "$signer_wrapper" 'checkpoint-signer requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env' "checkpoint signer requires operator address in operator env"
   assert_contains "$signer_wrapper" 'checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"' "checkpoint signer derives a per-operator lease name"
   assert_contains "$signer_wrapper" '--signer-driver "${signer_driver}"' "checkpoint signer passes signer driver through to the binary"
@@ -443,7 +445,7 @@ WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=2
 RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=3
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=4
-JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 AWS_REGION=us-east-1
@@ -489,7 +491,7 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_USER=actual-rpc-username-secret' "withdraw wrapper exports RPC user"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_RPC_PASS=actual-rpc-password-secret' "withdraw wrapper exports RPC pass"
   assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_SCAN_BEARER_TOKEN=actual-juno-scan-bearer-secret' "withdraw wrapper exports the scanner bearer token"
-  assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "withdraw wrapper exports the juno txsign signer keys"
+  assert_contains "$(cat "$tmp/withdraw.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "withdraw wrapper exports the isolated juno txsign signer key"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_REGION=us-east-1' "withdraw wrapper exports AWS region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw wrapper exports AWS default region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_PROFILE=alpha-testnet' "withdraw wrapper exports AWS profile"
@@ -587,6 +589,7 @@ EOF
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
   assert_contains "$(cat "$signer_output_file")" '--signer-driver aws-kms' "checkpoint signer wrapper forwards aws-kms signer driver"
   assert_contains "$(cat "$signer_output_file")" '--kms-key-id arn:aws:kms:us-east-1:111111111111:key/abc' "checkpoint signer wrapper forwards kms key id"
+  assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x2222222222222222222222222222222222222222' "checkpoint signer wrapper uses a unique lease name per operator"
 
   cat >"$env_file" <<EOF
 JUNO_DEV_MODE=false
@@ -602,10 +605,11 @@ OPERATOR_ADDRESS=0x3333333333333333333333333333333333333333
 JUNO_QUEUE_KAFKA_TLS=true
 EOF
 
-  PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
-  assert_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper preserves local-env compatibility"
-  assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x3333333333333333333333333333333333333333' "checkpoint signer wrapper uses a unique lease name per operator"
-  assert_not_contains "$(cat "$signer_output_file")" '--kms-key-id' "checkpoint signer wrapper omits kms key id outside aws-kms mode"
+  if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
+    printf 'expected checkpoint-signer wrapper to reject local-env in production\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$signer_stderr_file")" "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms" "checkpoint signer wrapper rejects local-env compatibility mode"
 
   cat >"$fake_bin/checkpoint-signer" <<EOF
 #!/usr/bin/env bash
@@ -621,9 +625,25 @@ exit 0
 EOF
   chmod 0755 "$fake_bin/checkpoint-signer"
 
-  PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
-  assert_not_contains "$(cat "$signer_output_file")" '--signer-driver local-env' "checkpoint signer wrapper omits signer-driver when the host binary lacks that flag"
-  assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x3333333333333333333333333333333333333333' "checkpoint signer wrapper still isolates leases on legacy binaries"
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
+CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
+CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
+CHECKPOINT_THRESHOLD=1
+BASE_CHAIN_ID=84532
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
+CHECKPOINT_SIGNER_DRIVER=aws-kms
+CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
+OPERATOR_ADDRESS=0x3333333333333333333333333333333333333333
+JUNO_QUEUE_KAFKA_TLS=true
+EOF
+
+  if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
+    printf 'expected checkpoint-signer wrapper to reject legacy binaries without --signer-driver support in aws-kms mode\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$signer_stderr_file")" "checkpoint-signer binary does not support CHECKPOINT_SIGNER_DRIVER=aws-kms" "checkpoint signer wrapper fails closed on legacy binaries"
 
   cat >"$env_file" <<EOF
 JUNO_DEV_MODE=false

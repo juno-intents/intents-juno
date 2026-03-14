@@ -322,6 +322,17 @@ production_secret_contract_upsert_literal() {
   mv "$tmp" "$file"
 }
 
+production_secret_contract_delete_key() {
+  local file="$1"
+  local key="$2"
+  local tmp
+  tmp="$(mktemp)"
+  awk -F= -v key="$key" '
+    index($0, key "=") != 1 { print }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
 production_effective_owallet_ua() {
   local inventory_owallet_ua="${1:-}"
   local bridge_summary_owallet_ua="${2:-}"
@@ -424,6 +435,69 @@ production_dkg_signer_keys_csv() {
   (( ${#key_hexes[@]} > 0 )) || return 1
   IFS=,
   printf '%s\n' "${key_hexes[*]}"
+}
+
+production_csv_value_at_index() {
+  local csv="$1"
+  local index="$2"
+  local IFS=,
+  local -a values=()
+  read -r -a values <<<"$csv"
+  (( index >= 1 )) || return 1
+  (( ${#values[@]} >= index )) || return 1
+  printf '%s\n' "${values[$((index - 1))]}"
+}
+
+production_dkg_operator_signer_key_hex() {
+  local dkg_summary="$1"
+  local operator_id="$2"
+  local dkg_dir operator_key_file
+
+  operator_key_file="$(production_dkg_operator_key_file "$dkg_summary" "$operator_id")"
+  [[ -n "$operator_key_file" ]] || return 1
+
+  dkg_dir="$(cd "$(dirname "$dkg_summary")" && pwd)"
+  operator_key_file="$(production_abs_path "$dkg_dir" "$operator_key_file")"
+  [[ -f "$operator_key_file" ]] || die "operator key file not found for $operator_id: $operator_key_file"
+  production_normalize_ecdsa_private_key "$(cat "$operator_key_file")"
+}
+
+production_operator_txsign_signer_key() {
+  local dkg_summary="$1"
+  local operator_id="$2"
+  local operator_index="$3"
+  local secret_contract_file="${4:-}"
+  local aws_profile="${5:-}"
+  local aws_region="${6:-}"
+  local signer_key existing_keys
+
+  signer_key="$(production_dkg_operator_signer_key_hex "$dkg_summary" "$operator_id" 2>/dev/null || true)"
+  if [[ -n "$signer_key" ]]; then
+    printf '%s\n' "$signer_key"
+    return 0
+  fi
+
+  [[ -n "$secret_contract_file" && -f "$secret_contract_file" ]] || return 1
+  existing_keys="$(production_env_get_value "$secret_contract_file" "JUNO_TXSIGN_SIGNER_KEYS")"
+  [[ -n "$existing_keys" ]] || return 1
+  case "$existing_keys" in
+    literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
+      existing_keys="$(production_resolve_secret_value "$existing_keys" "$aws_profile" "$aws_region")"
+      ;;
+  esac
+  signer_key="$(production_csv_value_at_index "$existing_keys" "$operator_index" || true)"
+  [[ -n "$signer_key" ]] || return 1
+  production_normalize_ecdsa_private_key "$signer_key"
+}
+
+production_require_single_txsign_signer_key() {
+  local csv="$1"
+  local IFS=,
+  local -a values=()
+
+  read -r -a values <<<"$csv"
+  (( ${#values[@]} == 1 )) || die "JUNO_TXSIGN_SIGNER_KEYS must contain exactly one operator key in production"
+  production_normalize_ecdsa_private_key "${values[0]}"
 }
 
 production_normalize_prefixed_hex() {
@@ -1212,7 +1286,6 @@ production_render_operator_handoffs() {
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
-  local juno_txsign_signer_keys_csv
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
@@ -1227,7 +1300,6 @@ production_render_operator_handoffs() {
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   derived_deposit_owallet_ivk=""
   derived_withdraw_owallet_ovk=""
-  juno_txsign_signer_keys_csv=""
 
   local rollout_state="$output_dir/rollout-state.json"
   production_write_rollout_state "$inventory" "$rollout_state"
@@ -1237,9 +1309,10 @@ production_render_operator_handoffs() {
   for ((index = 0; index < operator_count; index++)); do
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
-    local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address
+    local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index operator_txsign_signer_key
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
+    operator_index="$(jq -r '.index' <<<"$operator_json")"
     handoff_dir="$(production_operator_dir "$output_dir" "$operator_id")"
     mkdir -p "$handoff_dir"
 
@@ -1248,18 +1321,17 @@ production_render_operator_handoffs() {
     backup_zip_src="$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")"
     public_endpoint="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
-    checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "local-env"' <<<"$operator_json")"
+    checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "aws-kms"' <<<"$operator_json")"
     checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
 
     case "$checkpoint_signer_driver" in
-      local-env) ;;
       aws-kms)
         [[ -n "$checkpoint_signer_kms_key_id" ]] || die "operator $operator_id uses checkpoint_signer_driver=aws-kms but checkpoint_signer_kms_key_id is empty"
         ;;
       *)
-        die "operator $operator_id has unsupported checkpoint_signer_driver: $checkpoint_signer_driver"
+        die "operator $operator_id must use checkpoint_signer_driver=aws-kms in production (got: $checkpoint_signer_driver)"
         ;;
     esac
 
@@ -1293,24 +1365,14 @@ production_render_operator_handoffs() {
         fi
       fi
       production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
-      if [[ -z "$juno_txsign_signer_keys_csv" ]]; then
-        juno_txsign_signer_keys_csv="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
-      fi
-      if [[ -n "$juno_txsign_signer_keys_csv" ]]; then
-        production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys_csv"
-      fi
+      operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
+      [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
+      production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
+      production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
     fi
 
     if [[ -n "$backup_zip_src" ]]; then
       backup_zip_src="$(production_abs_path "$inventory_dir" "$backup_zip_src")"
-    fi
-
-    if [[ "$checkpoint_signer_driver" == "local-env" ]]; then
-      [[ -n "$secrets_dst" ]] || die "operator $operator_id uses local-env checkpoint signer but secret_contract_file is missing"
-      if ! production_seed_local_checkpoint_signer_secret "$secrets_dst" "$dkg_summary" "$operator_id"; then
-        grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$secrets_dst" \
-          || die "operator $operator_id uses local-env checkpoint signer but no CHECKPOINT_SIGNER_PRIVATE_KEY is available in the secret contract or dkg summary"
-      fi
     fi
 
     jq -n \
@@ -1370,10 +1432,9 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
-  local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
+  local juno_txsign_signer_keys owallet_ua withdraw_change_address
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  checkpoint_signer_private_key=""
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
@@ -1398,6 +1459,7 @@ production_render_operator_stack_env() {
   fi
   juno_txsign_signer_keys="$(production_env_first_value "$resolved_secret_env" JUNO_TXSIGN_SIGNER_KEYS || true)"
   [[ -n "$juno_txsign_signer_keys" ]] || die "resolved secret env is missing JUNO_TXSIGN_SIGNER_KEYS for juno-txsign sign-digest"
+  juno_txsign_signer_keys="$(production_require_single_txsign_signer_key "$juno_txsign_signer_keys")"
   withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
   if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
     die "resolved secret env WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS ($withdraw_change_address) does not match shared manifest owallet_ua ($owallet_ua)"
@@ -1410,10 +1472,6 @@ production_render_operator_stack_env() {
   fi
 
   case "$signer_driver" in
-    local-env)
-      checkpoint_signer_private_key="$(production_env_first_value "$resolved_secret_env" CHECKPOINT_SIGNER_PRIVATE_KEY || true)"
-      [[ -n "$checkpoint_signer_private_key" ]] || die "resolved secret env is missing CHECKPOINT_SIGNER_PRIVATE_KEY for local-env checkpoint signer"
-      ;;
     aws-kms)
       [[ -n "$signer_kms_key_id" ]] || die "operator deploy manifest is missing checkpoint_signer_kms_key_id for aws-kms signer"
       [[ -n "$aws_region" ]] || die "operator deploy manifest is missing aws_region for aws-kms signer"
@@ -1422,7 +1480,7 @@ production_render_operator_stack_env() {
       fi
       ;;
     *)
-      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver"
+      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver (production requires aws-kms)"
       ;;
   esac
 
@@ -1475,9 +1533,6 @@ EOF
 
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
-  fi
-  if [[ -n "$checkpoint_signer_private_key" ]]; then
-    printf 'CHECKPOINT_SIGNER_PRIVATE_KEY=%s\n' "$checkpoint_signer_private_key" >>"$output_file"
   fi
   if [[ -n "$juno_txsign_signer_keys" ]]; then
     printf 'JUNO_TXSIGN_SIGNER_KEYS=%s\n' "$juno_txsign_signer_keys" >>"$output_file"

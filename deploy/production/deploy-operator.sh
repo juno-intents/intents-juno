@@ -958,7 +958,7 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
-signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-local-env}" | tr '[:upper:]' '[:lower:]')"
+signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
 checkpoint_signer_supports_signer_driver=false
@@ -966,14 +966,6 @@ if grep -q -- '-signer-driver ' <<<"$checkpoint_signer_help"; then
   checkpoint_signer_supports_signer_driver=true
 fi
 case "${signer_driver}" in
-  ""|local-env)
-    signer_driver="local-env"
-    if [[ "$checkpoint_signer_supports_signer_driver" == true ]]; then
-      signer_args=(--signer-driver "${signer_driver}")
-    else
-      signer_args=()
-    fi
-    ;;
   aws-kms)
     [[ -n "${CHECKPOINT_SIGNER_KMS_KEY_ID:-}" ]] || {
       echo "checkpoint-signer requires CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=aws-kms" >&2
@@ -989,7 +981,7 @@ case "${signer_driver}" in
     )
     ;;
   *)
-    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be local-env or aws-kms in /etc/intents-juno/operator-stack.env" >&2
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
     exit 1
     ;;
 esac
