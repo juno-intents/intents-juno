@@ -27,8 +27,8 @@ func TestParseArgs_ValidDirectDeployer(t *testing.T) {
 	if cfg.UseEphemeralDeployer {
 		t.Fatalf("UseEphemeralDeployer = true, want false")
 	}
-	if cfg.TimelockMinDelaySeconds != defaultTimelockMinDelaySeconds {
-		t.Fatalf("TimelockMinDelaySeconds = %d, want %d", cfg.TimelockMinDelaySeconds, defaultTimelockMinDelaySeconds)
+	if cfg.TimelockMinDelaySeconds != 48*60*60 {
+		t.Fatalf("TimelockMinDelaySeconds = %d, want %d", cfg.TimelockMinDelaySeconds, 48*60*60)
 	}
 	if got := cfg.GovernanceSafe.Hex(); got != "0x1111111111111111111111111111111111111111" {
 		t.Fatalf("GovernanceSafe = %s", got)
