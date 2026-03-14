@@ -6,7 +6,7 @@
     "value": 5432
   },
   "shared_kafka_bootstrap_brokers": {
-    "value": "b-1.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094,b-2.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094"
+    "value": "b-1.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098,b-2.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098"
   },
   "shared_ipfs_api_url": {
     "value": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001"

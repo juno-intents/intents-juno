@@ -11,7 +11,7 @@
       "port": 5432
     },
     "kafka": {
-      "bootstrap_brokers": "b-1.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094,b-2.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094",
+      "bootstrap_brokers": "b-1.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098,b-2.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098",
       "tls": true,
       "auth": {
         "mode": "aws-msk-iam",

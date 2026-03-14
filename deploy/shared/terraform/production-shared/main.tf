@@ -58,7 +58,14 @@ locals {
   shared_deposit_image_id_hex                  = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
-  shared_kafka_bootstrap_brokers_tls           = aws_msk_cluster.shared.bootstrap_brokers_tls
+  shared_kafka_bootstrap_brokers               = aws_msk_cluster.shared.bootstrap_brokers_sasl_iam
+  shared_kafka_topic_arn_prefix                = replace(aws_msk_cluster.shared.arn, ":cluster/", ":topic/")
+  shared_kafka_group_arn_prefix                = replace(aws_msk_cluster.shared.arn, ":cluster/", ":group/")
+  shared_proof_request_topic                   = "proof.requests.v1"
+  shared_proof_result_topic                    = "proof.fulfillments.v1"
+  shared_proof_failure_topic                   = "proof.failures.v1"
+  shared_ops_alert_topic                       = "ops.alerts.v1"
+  shared_proof_requestor_group                 = "proof-requestor"
   shared_sp1_projected_pair_cost_wei           = (var.shared_sp1_groth16_base_fee_wei * 2) + (var.shared_sp1_max_price_per_pgu * (var.shared_sp1_deposit_pgu_estimate + var.shared_sp1_withdraw_pgu_estimate))
   shared_sp1_projected_with_overhead           = floor(((local.shared_sp1_projected_pair_cost_wei * 120) + 99) / 100)
   shared_sp1_required_credit_buffer            = local.shared_sp1_projected_with_overhead * 3
@@ -74,14 +81,14 @@ locals {
     "--sp1-requestor-key-env", "PROOF_REQUESTOR_KEY",
     "--secrets-driver", "env",
     "--chain-id", tostring(var.shared_base_chain_id),
-    "--input-topic", "proof.requests.v1",
-    "--result-topic", "proof.fulfillments.v1",
-    "--failure-topic", "proof.failures.v1",
+    "--input-topic", local.shared_proof_request_topic,
+    "--result-topic", local.shared_proof_result_topic,
+    "--failure-topic", local.shared_proof_failure_topic,
     "--max-inflight-requests", "32",
     "--request-timeout", format("%ds", var.shared_sp1_request_timeout_seconds),
     "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers_tls,
-    "--queue-group", "proof-requestor",
+    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
+    "--queue-group", local.shared_proof_requestor_group,
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
   ]
   shared_proof_funder_command = [
@@ -93,13 +100,21 @@ locals {
     "--min-balance-wei", tostring(local.shared_sp1_required_credit_buffer),
     "--critical-balance-wei", tostring(local.shared_sp1_projected_with_overhead),
     "--queue-driver", "kafka",
-    "--queue-brokers", local.shared_kafka_bootstrap_brokers_tls,
+    "--queue-brokers", local.shared_kafka_bootstrap_brokers,
     "--sp1-bin", "/usr/local/bin/sp1-prover-adapter",
   ]
   shared_proof_requestor_environment = [
     {
       name  = "JUNO_QUEUE_KAFKA_TLS"
       value = "true"
+    },
+    {
+      name  = "JUNO_QUEUE_KAFKA_AUTH_MODE"
+      value = "aws-msk-iam"
+    },
+    {
+      name  = "JUNO_QUEUE_KAFKA_AWS_REGION"
+      value = var.aws_region
     },
     {
       name  = "SP1_NETWORK_RPC_URL"
@@ -142,6 +157,14 @@ locals {
     {
       name  = "JUNO_QUEUE_KAFKA_TLS"
       value = "true"
+    },
+    {
+      name  = "JUNO_QUEUE_KAFKA_AUTH_MODE"
+      value = "aws-msk-iam"
+    },
+    {
+      name  = "JUNO_QUEUE_KAFKA_AWS_REGION"
+      value = var.aws_region
     },
     {
       name  = "SP1_NETWORK_RPC_URL"
@@ -431,6 +454,18 @@ resource "aws_iam_role" "proof_funder_execution" {
   tags               = local.common_tags
 }
 
+resource "aws_iam_role" "proof_requestor_task" {
+  name               = "${local.resource_name}-proof-requestor-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume_role.json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role" "proof_funder_task" {
+  name               = "${local.resource_name}-proof-funder-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_execution_assume_role.json
+  tags               = local.common_tags
+}
+
 data "aws_iam_policy_document" "proof_requestor_execution_access" {
   dynamic "statement" {
     for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
@@ -527,6 +562,75 @@ data "aws_iam_policy_document" "proof_funder_execution_access" {
   }
 }
 
+data "aws_iam_policy_document" "proof_requestor_task_access" {
+  statement {
+    sid = "AllowMSKConnect"
+    actions = [
+      "kafka-cluster:Connect",
+      "kafka-cluster:DescribeCluster",
+      "kafka-cluster:DescribeClusterDynamicConfiguration",
+    ]
+    resources = [aws_msk_cluster.shared.arn]
+  }
+
+  statement {
+    sid = "AllowReadProofRequestsTopic"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:ReadData",
+    ]
+    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_request_topic}"]
+  }
+
+  statement {
+    sid = "AllowWriteProofResultsTopic"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:WriteData",
+    ]
+    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_result_topic}"]
+  }
+
+  statement {
+    sid = "AllowWriteProofFailuresTopic"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:WriteData",
+    ]
+    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_proof_failure_topic}"]
+  }
+
+  statement {
+    sid = "AllowReadProofRequestorGroup"
+    actions = [
+      "kafka-cluster:AlterGroup",
+      "kafka-cluster:DescribeGroup",
+    ]
+    resources = ["${local.shared_kafka_group_arn_prefix}/${local.shared_proof_requestor_group}"]
+  }
+}
+
+data "aws_iam_policy_document" "proof_funder_task_access" {
+  statement {
+    sid = "AllowMSKConnect"
+    actions = [
+      "kafka-cluster:Connect",
+      "kafka-cluster:DescribeCluster",
+      "kafka-cluster:DescribeClusterDynamicConfiguration",
+    ]
+    resources = [aws_msk_cluster.shared.arn]
+  }
+
+  statement {
+    sid = "AllowWriteOpsAlertsTopic"
+    actions = [
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:WriteData",
+    ]
+    resources = ["${local.shared_kafka_topic_arn_prefix}/${local.shared_ops_alert_topic}"]
+  }
+}
+
 resource "aws_iam_role_policy" "proof_requestor_execution_access" {
   name   = "${local.resource_name}-proof-requestor-exec"
   role   = aws_iam_role.proof_requestor_execution.id
@@ -537,6 +641,18 @@ resource "aws_iam_role_policy" "proof_funder_execution_access" {
   name   = "${local.resource_name}-proof-funder-exec"
   role   = aws_iam_role.proof_funder_execution.id
   policy = data.aws_iam_policy_document.proof_funder_execution_access.json
+}
+
+resource "aws_iam_role_policy" "proof_requestor_task_access" {
+  name   = "${local.resource_name}-proof-requestor-task"
+  role   = aws_iam_role.proof_requestor_task.id
+  policy = data.aws_iam_policy_document.proof_requestor_task_access.json
+}
+
+resource "aws_iam_role_policy" "proof_funder_task_access" {
+  name   = "${local.resource_name}-proof-funder-task"
+  role   = aws_iam_role.proof_funder_task.id
+  policy = data.aws_iam_policy_document.proof_funder_task_access.json
 }
 
 resource "aws_ecr_repository" "proof_services" {
@@ -576,6 +692,7 @@ resource "aws_ecs_task_definition" "proof_requestor" {
   cpu                      = tostring(var.shared_ecs_task_cpu)
   memory                   = tostring(var.shared_ecs_task_memory)
   execution_role_arn       = aws_iam_role.proof_requestor_execution.arn
+  task_role_arn            = aws_iam_role.proof_requestor_task.arn
 
   container_definitions = jsonencode([
     {
@@ -634,6 +751,7 @@ resource "aws_ecs_task_definition" "proof_funder" {
   cpu                      = tostring(var.shared_ecs_task_cpu)
   memory                   = tostring(var.shared_ecs_task_memory)
   execution_role_arn       = aws_iam_role.proof_funder_execution.arn
+  task_role_arn            = aws_iam_role.proof_funder_task.arn
 
   container_definitions = jsonencode([
     {
@@ -702,7 +820,7 @@ resource "aws_ecs_service" "proof_requestor" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy.proof_requestor_execution_access]
+  depends_on = [aws_iam_role_policy.proof_requestor_execution_access, aws_iam_role_policy.proof_requestor_task_access]
   tags       = local.common_tags
 }
 
@@ -727,7 +845,7 @@ resource "aws_ecs_service" "proof_funder" {
     assign_public_ip = var.shared_ecs_assign_public_ip
   }
 
-  depends_on = [aws_iam_role_policy.proof_funder_execution_access]
+  depends_on = [aws_iam_role_policy.proof_funder_execution_access, aws_iam_role_policy.proof_funder_task_access]
   tags       = local.common_tags
 }
 
