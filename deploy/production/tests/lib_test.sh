@@ -204,6 +204,11 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
   dkg_summary="$workdir/dkg-summary.json"
   jq '
     .operators[0].operator_key_file = "op1.key"
@@ -248,8 +253,61 @@ EOF
   assert_eq "$(jq -r '.operator_address' "$handoff_dir/operator-deploy.json")" "0x9999999999999999999999999999999999999999" "handoff operator address"
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "handoff signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
+  assert_eq "$(jq -r '.checkpoint_blob_bucket' "$handoff_dir/operator-deploy.json")" "alpha-op1-dkg-keypackages" "handoff checkpoint blob bucket"
+  assert_eq "$(jq -r '.checkpoint_blob_prefix' "$handoff_dir/operator-deploy.json")" "operators/op1/checkpoint-packages" "handoff checkpoint blob prefix"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
   assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff derives operator endpoint probes"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env prefers operator checkpoint bucket"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_PREFIX=operators/op1/checkpoint-packages" "operator env prefers operator checkpoint prefix"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "operator env does not fall back to shared checkpoint bucket when operator bucket is set"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_PREFIX=dkg/keypackages" "operator env does not fall back to shared checkpoint prefix when operator prefix is set"
   rm -rf "$workdir"
 }
 
@@ -1592,6 +1650,7 @@ main() {
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir
+  test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials

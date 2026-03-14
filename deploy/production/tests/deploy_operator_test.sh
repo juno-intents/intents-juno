@@ -95,6 +95,11 @@ EOF
   export TEST_BASE_RELAYER_AUTH_TOKEN="token"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   production_render_shared_manifest \
     "$workdir/inventory.json" \
@@ -284,6 +289,9 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_TLS_CERT_FILE=/etc/intents-juno/base-relayer/server.pem" "tls cert path injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_TLS_KEY_FILE=/etc/intents-juno/base-relayer/server.key" "tls key path injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_URL=https://127.0.0.1:18081" "https base relayer url"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env uses operator-owned checkpoint bucket"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_PREFIX=operators/op1/checkpoint-packages" "operator env uses operator-owned checkpoint prefix"
+  assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "operator env omits shared checkpoint bucket when operator bucket is configured"
   assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
   rm -rf "$workdir"
 }

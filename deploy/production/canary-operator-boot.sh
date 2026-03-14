@@ -93,7 +93,10 @@ kms_export_detail="no checkpoint blob bucket configured"
 allow_local_resolvers="false"
 [[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
-checkpoint_blob_bucket="$(production_json_optional "$shared_manifest_path" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
+checkpoint_blob_bucket="$(production_json_optional "$operator_deploy" '.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
+if [[ -z "$checkpoint_blob_bucket" ]]; then
+  checkpoint_blob_bucket="$(production_json_optional "$shared_manifest_path" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
+fi
 minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"

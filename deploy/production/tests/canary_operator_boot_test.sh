@@ -71,9 +71,7 @@ EOF
   cat >"$shared_manifest" <<JSON
 {
   "shared_services": {
-    "artifacts": {
-      "checkpoint_blob_bucket": "alpha-dkg-keypackages"
-    }
+    "artifacts": {}
   },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
@@ -89,6 +87,8 @@ JSON
   "operator_user": "intents-juno",
   "runtime_dir": "/var/lib/intents-juno/operator-runtime",
   "shared_manifest_path": "$shared_manifest",
+  "checkpoint_blob_bucket": "alpha-op1-dkg-keypackages",
+  "checkpoint_blob_prefix": "operators/op1/checkpoint-packages",
   "dkg_backup_zip": "$tmp/dkg-backup.zip",
   "known_hosts_file": "$tmp/known_hosts",
   "secret_contract_file": "$tmp/operator-secrets.env",

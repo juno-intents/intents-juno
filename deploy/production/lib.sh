@@ -1325,6 +1325,7 @@ production_render_operator_handoffs() {
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index operator_txsign_signer_key
+    local checkpoint_blob_bucket checkpoint_blob_prefix
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     operator_index="$(jq -r '.index' <<<"$operator_json")"
@@ -1338,6 +1339,8 @@ production_render_operator_handoffs() {
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
     checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "aws-kms"' <<<"$operator_json")"
     checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
+    checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
+    checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
 
@@ -1397,6 +1400,8 @@ production_render_operator_handoffs() {
       --arg rollout_state_file "$rollout_state" \
       --arg checkpoint_signer_driver "$checkpoint_signer_driver" \
       --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
+      --arg checkpoint_blob_bucket "$checkpoint_blob_bucket" \
+      --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
       --arg operator_address "$operator_address" \
       --arg known_hosts_file "$known_hosts_dst" \
       --arg secret_contract_file "$secrets_dst" \
@@ -1417,6 +1422,8 @@ production_render_operator_handoffs() {
         operator_address: (if $operator_address == "" then null else $operator_address end),
         checkpoint_signer_driver: $checkpoint_signer_driver,
         checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end),
+        checkpoint_blob_bucket: (if $checkpoint_blob_bucket == "" then null else $checkpoint_blob_bucket end),
+        checkpoint_blob_prefix: (if $checkpoint_blob_prefix == "" then null else $checkpoint_blob_prefix end),
         operator_index: $operator.index,
         aws_profile: $operator.aws_profile,
         aws_region: $operator.aws_region,
@@ -1560,8 +1567,14 @@ EOF
   fi
 
   local checkpoint_blob_bucket checkpoint_blob_prefix deposit_image_id withdraw_image_id
-  checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
-  checkpoint_blob_prefix="$(jq -r '.shared_services.artifacts.checkpoint_blob_prefix // empty' "$shared_manifest")"
+  checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' "$operator_deploy")"
+  checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' "$operator_deploy")"
+  if [[ -z "$checkpoint_blob_bucket" ]]; then
+    checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
+  fi
+  if [[ -z "$checkpoint_blob_prefix" ]]; then
+    checkpoint_blob_prefix="$(jq -r '.shared_services.artifacts.checkpoint_blob_prefix // empty' "$shared_manifest")"
+  fi
   deposit_image_id="$(jq -r '.contracts.deposit_image_id // empty' "$shared_manifest")"
   withdraw_image_id="$(jq -r '.contracts.withdraw_image_id // empty' "$shared_manifest")"
 
