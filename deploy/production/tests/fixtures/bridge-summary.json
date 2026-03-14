@@ -9,7 +9,7 @@
   "governance": {
     "timelock": {
       "address": "0x8888888888888888888888888888888888888888",
-      "min_delay_seconds": 0,
+      "min_delay_seconds": 172800,
       "proposers": [
         "0x9999999999999999999999999999999999999999"
       ],

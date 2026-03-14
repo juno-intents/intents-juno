@@ -174,6 +174,7 @@ if [[ -n "$existing_bridge_summary" ]]; then
 else
   log "Deploying bridge contracts"
   bridge_deploy_name="$(basename "$bridge_deploy_binary")"
+  [[ "$bridge_deploy_name" == "bridge-deploy" ]] || die "production bridge deployment requires a bridge-deploy binary, got: $bridge_deploy_name"
   bridge_deploy_cmd=(
     "$bridge_deploy_binary"
     --rpc-url "$base_rpc_url" \
@@ -192,13 +193,9 @@ else
     --min-withdraw-amount "$(production_default_bridge_min_withdraw_amount_zat)" \
     --output "$bridge_summary"
   )
-  if [[ "$bridge_deploy_name" != "bridge-deploy" ]]; then
-    bridge_deploy_cmd=( "$bridge_deploy_binary" --deploy-only "${bridge_deploy_cmd[@]:1}" )
-  else
-    [[ -n "$governance_safe_address" ]] || die "inventory is missing governance.safe required by bridge-deploy"
-    [[ -n "$pause_guardian_address" ]] || die "inventory is missing governance.pause_guardian required by bridge-deploy"
-    bridge_deploy_cmd+=(--governance-safe "$governance_safe_address" --pause-guardian "$pause_guardian_address")
-  fi
+  [[ -n "$governance_safe_address" ]] || die "inventory is missing governance.safe required by bridge-deploy"
+  [[ -n "$pause_guardian_address" ]] || die "inventory is missing governance.pause_guardian required by bridge-deploy"
+  bridge_deploy_cmd+=(--governance-safe "$governance_safe_address" --pause-guardian "$pause_guardian_address")
   while IFS= read -r operator_address; do
     [[ -n "$operator_address" ]] || continue
     bridge_deploy_cmd+=(--operator-address "$operator_address")

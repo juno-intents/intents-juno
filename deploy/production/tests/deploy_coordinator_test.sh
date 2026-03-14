@@ -258,12 +258,12 @@ EOF
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
-  write_fake_bridge_deploy_binary "$fake_bin/bridge-e2e" "$log_dir/bridge.log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+  write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$log_dir/bridge.log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
-    --bridge-deploy-binary "$fake_bin/bridge-e2e" \
+    --bridge-deploy-binary "$fake_bin/bridge-deploy" \
     --deployer-key-file "$workdir/deployer.key" \
     --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     --skip-terraform-apply \
@@ -274,11 +274,14 @@ EOF
   assert_contains "$(cat "$log_dir/bridge.log")" '--verifier-address 0x397A5f7f3dBd538f23DE225B51f532c34448dA9B' "bridge deploy forwards verifier address"
   assert_contains "$(cat "$log_dir/bridge.log")" '--deposit-image-id 0x000000000000000000000000000000000000000000000000000000000000aa01' "bridge deploy forwards deposit image id"
   assert_contains "$(cat "$log_dir/bridge.log")" '--withdraw-image-id 0x000000000000000000000000000000000000000000000000000000000000aa02' "bridge deploy forwards withdraw image id"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--governance-safe 0x4444444444444444444444444444444444444444' "bridge deploy forwards governance safe"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--pause-guardian 0x5555555555555555555555555555555555555555' "bridge deploy forwards pause guardian"
   assert_contains "$(cat "$log_dir/bridge.log")" '--min-deposit-admin-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards min deposit admin address"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards first operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x6666666666666666666666666666666666666666' "bridge deploy forwards second operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x7777777777777777777777777777777777777777' "bridge deploy forwards third operator"
   assert_not_contains "$(cat "$log_dir/bridge.log")" '--dkg-summary' "bridge deploy does not pass dkg summary"
+  assert_not_contains "$(cat "$log_dir/bridge.log")" '--deploy-only' "production deploy does not pass legacy deploy-only flag"
   assert_file_exists "$output_dir/alpha/bridge-summary.json" "bridge deploy summary"
   rm -rf "$workdir"
 }
@@ -425,8 +428,8 @@ EOF
   rm -rf "$workdir"
 }
 
-test_deploy_coordinator_invokes_bridge_binary_with_direct_flags() {
-  local workdir output_dir fake_bin log_dir bridge_log
+test_deploy_coordinator_rejects_legacy_bridge_e2e_binary() {
+  local workdir output_dir fake_bin log_dir bridge_log output
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   fake_bin="$workdir/bin"
@@ -451,22 +454,25 @@ EOF
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
   write_fake_bridge_deploy_binary "$fake_bin/bridge-e2e" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
-  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
-    --inventory "$workdir/inventory.json" \
-    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
-    --bridge-deploy-binary "$fake_bin/bridge-e2e" \
-    --deployer-key-file "$workdir/dkg-backup.zip" \
-    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
-    --skip-terraform-apply \
-    --output-dir "$output_dir" >/dev/null
-
-  assert_contains "$(cat "$bridge_log")" "--deploy-only" "bridge deploy binary receives deploy-only flag"
-  assert_contains "$(cat "$bridge_log")" "--min-deposit-admin-address 0x1111111111111111111111111111111111111111" "bridge deploy binary receives min deposit admin address"
-  if grep -Fq "bridge-e2e deploy " "$bridge_log"; then
-    printf 'expected bridge deploy binary invocation without legacy subcommand\n' >&2
+  if output="$(
+    PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --bridge-deploy-binary "$fake_bin/bridge-e2e" \
+      --deployer-key-file "$workdir/dkg-backup.zip" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --output-dir "$output_dir" 2>&1
+  )"; then
+    printf 'expected deploy-coordinator.sh to reject legacy bridge-e2e binary\n' >&2
     exit 1
   fi
-  assert_file_exists "$output_dir/alpha/bridge-summary.json" "bridge summary created from direct bridge deploy invocation"
+
+  assert_contains "$output" "production bridge deployment requires a bridge-deploy binary, got: bridge-e2e" "legacy bridge-e2e binary rejected"
+  [[ ! -e "$output_dir/alpha/bridge-summary.json" ]] || {
+    printf 'expected no bridge summary when legacy bridge-e2e binary is rejected\n' >&2
+    exit 1
+  }
   rm -rf "$workdir"
 }
 
@@ -518,7 +524,7 @@ main() {
   test_deploy_coordinator_normalizes_relative_output_paths
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
   test_deploy_coordinator_rejects_underfunded_operator_before_render
-  test_deploy_coordinator_invokes_bridge_binary_with_direct_flags
+  test_deploy_coordinator_rejects_legacy_bridge_e2e_binary
   test_deploy_coordinator_invokes_production_bridge_deploy_binary
 }
 

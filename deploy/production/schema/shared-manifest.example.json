@@ -13,6 +13,10 @@
     "kafka": {
       "bootstrap_brokers": "b-1.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094,b-2.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9094",
       "tls": true,
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      },
       "min_insync_replicas": 2
     },
     "ipfs": {
@@ -52,6 +56,12 @@
     "threshold": 3,
     "signature_topic": "checkpoints.signatures.v1",
     "package_topic": "checkpoints.packages.v1"
+  },
+  "governance": {
+    "timelock": {
+      "address": "0x8888888888888888888888888888888888888888",
+      "min_delay_seconds": 172800
+    }
   },
   "operator_roster": [
     {
