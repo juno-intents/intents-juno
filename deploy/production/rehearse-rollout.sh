@@ -19,6 +19,10 @@ Options:
   --dkg-summary PATH             DKG summary JSON (required for new runs)
   --bridge-deploy-binary PATH    Bridge deploy binary (required unless reusing bridge summary)
   --deployer-key-file PATH       Deployer key file (required when deploying bridge)
+  --funder-key-file PATH         Funder key file for bridge-deploy ephemeral mode
+  --ephemeral-funding-amount-wei AMOUNT
+                                 Wei amount to fund a generated ephemeral deployer
+  --sweep-recipient ADDRESS      Optional sweep recipient for the ephemeral deployer
   --existing-bridge-summary PATH Reuse an existing bridge summary instead of deploying
   --terraform-output-json PATH   Use a precomputed terraform output -json file
   --skip-terraform-apply         Do not run terraform init/apply during coordinator generation
@@ -40,6 +44,9 @@ inventory=""
 dkg_summary=""
 bridge_deploy_binary=""
 deployer_key_file=""
+funder_key_file=""
+ephemeral_funding_amount_wei=""
+sweep_recipient=""
 existing_bridge_summary=""
 terraform_output_json=""
 skip_terraform_apply="false"
@@ -60,6 +67,9 @@ while [[ $# -gt 0 ]]; do
     --dkg-summary) dkg_summary="$2"; shift 2 ;;
     --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
     --deployer-key-file) deployer_key_file="$2"; shift 2 ;;
+    --funder-key-file) funder_key_file="$2"; shift 2 ;;
+    --ephemeral-funding-amount-wei) ephemeral_funding_amount_wei="$2"; shift 2 ;;
+    --sweep-recipient) sweep_recipient="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
     --terraform-output-json) terraform_output_json="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
@@ -261,8 +271,20 @@ else
     coordinator_args+=(--existing-bridge-summary "$existing_bridge_summary")
   else
     [[ -n "$bridge_deploy_binary" ]] || die "--bridge-deploy-binary is required when bridge summary is not reused"
-    [[ -n "$deployer_key_file" ]] || die "--deployer-key-file is required when bridge summary is not reused"
-    coordinator_args+=(--bridge-deploy-binary "$bridge_deploy_binary" --deployer-key-file "$deployer_key_file")
+    if [[ -n "$deployer_key_file" ]]; then
+      coordinator_args+=(--bridge-deploy-binary "$bridge_deploy_binary" --deployer-key-file "$deployer_key_file")
+    else
+      coordinator_args+=(--bridge-deploy-binary "$bridge_deploy_binary")
+    fi
+    if [[ -n "$funder_key_file" ]]; then
+      coordinator_args+=(--funder-key-file "$funder_key_file")
+    fi
+    if [[ -n "$ephemeral_funding_amount_wei" ]]; then
+      coordinator_args+=(--ephemeral-funding-amount-wei "$ephemeral_funding_amount_wei")
+    fi
+    if [[ -n "$sweep_recipient" ]]; then
+      coordinator_args+=(--sweep-recipient "$sweep_recipient")
+    fi
   fi
   if [[ -n "$terraform_output_json" ]]; then
     coordinator_args+=(--terraform-output-json "$terraform_output_json")

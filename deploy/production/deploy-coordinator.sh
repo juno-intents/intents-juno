@@ -20,6 +20,10 @@ Options:
   --dkg-completion PATH        Optional DKG completion JSON for UFVK/Juno address fallback
   --bridge-deploy-binary PATH  Bridge deploy binary (required unless reusing bridge summary)
   --deployer-key-file PATH     Deployer key file (required when deploying bridge)
+  --funder-key-file PATH       Funder key file for bridge-deploy ephemeral mode
+  --ephemeral-funding-amount-wei AMOUNT
+                               Wei amount to fund a generated ephemeral deployer
+  --sweep-recipient ADDRESS    Optional sweep recipient for the ephemeral deployer
   --existing-bridge-summary PATH
                                Reuse an existing bridge summary instead of deploying
   --terraform-output-json PATH Use a precomputed terraform output -json file
@@ -35,6 +39,9 @@ dkg_summary=""
 dkg_completion=""
 bridge_deploy_binary=""
 deployer_key_file=""
+funder_key_file=""
+ephemeral_funding_amount_wei=""
+sweep_recipient=""
 existing_bridge_summary=""
 terraform_output_json=""
 skip_terraform_apply="false"
@@ -49,6 +56,9 @@ while [[ $# -gt 0 ]]; do
     --dkg-completion) dkg_completion="$2"; shift 2 ;;
     --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
     --deployer-key-file) deployer_key_file="$2"; shift 2 ;;
+    --funder-key-file) funder_key_file="$2"; shift 2 ;;
+    --ephemeral-funding-amount-wei) ephemeral_funding_amount_wei="$2"; shift 2 ;;
+    --sweep-recipient) sweep_recipient="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
     --terraform-output-json) terraform_output_json="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
@@ -71,8 +81,12 @@ if [[ -z "$existing_bridge_summary" ]]; then
   [[ -n "$bridge_deploy_binary" ]] || die "--bridge-deploy-binary is required when bridge summary is not reused"
   [[ -f "$bridge_deploy_binary" ]] || die "bridge deploy binary not found: $bridge_deploy_binary"
   [[ "$dry_run" != "true" ]] || die "--dry-run requires --existing-bridge-summary"
-  [[ -n "$deployer_key_file" ]] || die "--deployer-key-file is required when deploying bridge"
-  [[ -f "$deployer_key_file" ]] || die "deployer key file not found: $deployer_key_file"
+  if [[ -n "$deployer_key_file" ]]; then
+    [[ -f "$deployer_key_file" ]] || die "deployer key file not found: $deployer_key_file"
+  fi
+  if [[ -n "$funder_key_file" ]]; then
+    [[ -f "$funder_key_file" ]] || die "funder key file not found: $funder_key_file"
+  fi
 else
   [[ -f "$existing_bridge_summary" ]] || die "bridge summary not found: $existing_bridge_summary"
 fi
@@ -83,6 +97,29 @@ done
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+if [[ -z "$existing_bridge_summary" ]]; then
+  if [[ -n "$deployer_key_file" && -n "$funder_key_file" ]]; then
+    die "use only one of --deployer-key-file or --funder-key-file"
+  fi
+  if [[ -n "$sweep_recipient" && -z "$funder_key_file" ]]; then
+    die "--sweep-recipient requires --funder-key-file"
+  fi
+  if [[ "$env_slug" == "alpha" ]]; then
+    if [[ -z "$deployer_key_file" && -z "$funder_key_file" ]]; then
+      die "--deployer-key-file or --funder-key-file is required when deploying bridge"
+    fi
+  else
+    [[ -z "$deployer_key_file" ]] || die "--deployer-key-file is not allowed outside alpha; use --funder-key-file with bridge-deploy ephemeral mode"
+    [[ -n "$funder_key_file" ]] || die "--funder-key-file is required when deploying bridge outside alpha"
+    [[ -n "$ephemeral_funding_amount_wei" ]] || die "--ephemeral-funding-amount-wei is required when deploying bridge outside alpha"
+  fi
+  if [[ -n "$funder_key_file" && -z "$ephemeral_funding_amount_wei" ]]; then
+    die "--ephemeral-funding-amount-wei is required with --funder-key-file"
+  fi
+  if [[ -n "$deployer_key_file" && -n "$ephemeral_funding_amount_wei" ]]; then
+    die "--ephemeral-funding-amount-wei requires --funder-key-file"
+  fi
+fi
 base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
 deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
@@ -179,7 +216,6 @@ else
     "$bridge_deploy_binary"
     --rpc-url "$base_rpc_url" \
     --chain-id "$base_chain_id" \
-    --deployer-key-file "$deployer_key_file" \
     --contracts-out "$REPO_ROOT/contracts/out" \
     --threshold "$bridge_threshold" \
     --verifier-address "$bridge_verifier_address" \
@@ -193,6 +229,14 @@ else
     --min-withdraw-amount "$(production_default_bridge_min_withdraw_amount_zat)" \
     --output "$bridge_summary"
   )
+  if [[ -n "$funder_key_file" ]]; then
+    bridge_deploy_cmd+=(--funder-key-file "$funder_key_file" --ephemeral-funding-amount-wei "$ephemeral_funding_amount_wei")
+    if [[ -n "$sweep_recipient" ]]; then
+      bridge_deploy_cmd+=(--sweep-recipient "$sweep_recipient")
+    fi
+  else
+    bridge_deploy_cmd+=(--deployer-key-file "$deployer_key_file")
+  fi
   [[ -n "$governance_safe_address" ]] || die "inventory is missing governance.safe required by bridge-deploy"
   [[ -n "$pause_guardian_address" ]] || die "inventory is missing governance.pause_guardian required by bridge-deploy"
   bridge_deploy_cmd+=(--governance-safe "$governance_safe_address" --pause-guardian "$pause_guardian_address")

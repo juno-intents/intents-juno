@@ -286,6 +286,104 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_forwards_ephemeral_funder_mode() {
+  local workdir output_dir fake_bin log_dir bridge_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  bridge_log="$log_dir/bridge.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cat >"$workdir/funder.key" <<'EOF'
+0x59c6995e998f97a5a0044966f09453883f4b8f3359aa4fcf3e4a76fb3f8d5c11
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --bridge-deploy-binary "$fake_bin/bridge-deploy" \
+    --funder-key-file "$workdir/funder.key" \
+    --ephemeral-funding-amount-wei 123456789 \
+    --sweep-recipient 0x9999999999999999999999999999999999999999 \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$bridge_log")" "--funder-key-file $workdir/funder.key" "bridge deploy forwards funder key file"
+  assert_contains "$(cat "$bridge_log")" "--ephemeral-funding-amount-wei 123456789" "bridge deploy forwards ephemeral funding amount"
+  assert_contains "$(cat "$bridge_log")" "--sweep-recipient 0x9999999999999999999999999999999999999999" "bridge deploy forwards sweep recipient"
+  assert_not_contains "$(cat "$bridge_log")" "--deployer-key-file" "bridge deploy omits direct deployer key in ephemeral mode"
+  rm -rf "$workdir"
+}
+
+test_deploy_coordinator_rejects_direct_deployer_outside_alpha() {
+  local workdir output_dir fake_bin log_dir output
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cat >"$workdir/deployer.key" <<'EOF'
+0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '.environment = "mainnet"' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$log_dir/bridge.log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+
+  if output="$(
+    PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --bridge-deploy-binary "$fake_bin/bridge-deploy" \
+      --deployer-key-file "$workdir/deployer.key" \
+      --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+      --skip-terraform-apply \
+      --output-dir "$output_dir" 2>&1
+  )"; then
+    printf 'expected deploy-coordinator.sh to reject direct deployer mode outside alpha\n' >&2
+    exit 1
+  fi
+
+  assert_contains "$output" "--deployer-key-file is not allowed outside alpha; use --funder-key-file with bridge-deploy ephemeral mode" "non-alpha deploys reject direct deployer mode"
+  [[ ! -e "$output_dir/mainnet/bridge-summary.json" ]] || {
+    printf 'expected no bridge summary when non-alpha direct deployer mode is rejected\n' >&2
+    exit 1
+  }
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_normalizes_relative_output_paths() {
   local workdir inventory_path operator_dir fake_bin log_dir
   workdir="$(mktemp -d)"
@@ -525,6 +623,8 @@ main() {
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
   test_deploy_coordinator_rejects_underfunded_operator_before_render
   test_deploy_coordinator_rejects_legacy_bridge_e2e_binary
+  test_deploy_coordinator_forwards_ephemeral_funder_mode
+  test_deploy_coordinator_rejects_direct_deployer_outside_alpha
   test_deploy_coordinator_invokes_production_bridge_deploy_binary
 }
 
