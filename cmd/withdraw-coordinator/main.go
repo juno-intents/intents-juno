@@ -41,20 +41,6 @@ type envelope struct {
 	Version string `json:"version"`
 }
 
-type withdrawRequestedV1 struct {
-	Version string `json:"version"`
-
-	WithdrawalID string `json:"withdrawalId"`
-	Requester    string `json:"requester"`
-	Amount       uint64 `json:"amount"`
-
-	RecipientUA string `json:"recipientUA"` // hex bytes (no 0x required)
-	// Optional per-withdrawal witness payload for binary withdraw guest input.
-	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
-	Expiry           uint64 `json:"expiry"` // unix seconds
-	FeeBps           uint32 `json:"feeBps"`
-}
-
 type withdrawRequestedV2 struct {
 	Version string `json:"version"`
 
@@ -628,7 +614,7 @@ func main() {
 			}
 
 			switch env.Version {
-			case "withdrawals.requested.v1", "withdrawals.requested.v2":
+			case "withdrawals.requested.v2":
 				reqMsg, err := parseWithdrawRequestedMessage(line)
 				if err != nil {
 					log.Error("parse withdraw requested", "err", err)
@@ -685,22 +671,20 @@ func main() {
 					BaseLogIndex:       uint64(reqMsg.LogIndex),
 					BaseFinalitySource: reqMsg.FinalitySource,
 				}
-				if reqMsg.Version == "withdrawals.requested.v2" {
-					blockHash, err := parseHash32(reqMsg.BlockHash)
-					if err != nil {
-						log.Error("parse blockHash", "err", err)
-						ackMessage(qmsg, *ackTimeout, log)
-						continue
-					}
-					txHash, err := parseHash32(reqMsg.TxHash)
-					if err != nil {
-						log.Error("parse txHash", "err", err)
-						ackMessage(qmsg, *ackTimeout, log)
-						continue
-					}
-					w.BaseBlockHash = blockHash
-					w.BaseTxHash = txHash
+				blockHash, err := parseHash32(reqMsg.BlockHash)
+				if err != nil {
+					log.Error("parse blockHash", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
+					continue
 				}
+				txHash, err := parseHash32(reqMsg.TxHash)
+				if err != nil {
+					log.Error("parse txHash", "err", err)
+					ackMessage(qmsg, *ackTimeout, log)
+					continue
+				}
+				w.BaseBlockHash = blockHash
+				w.BaseTxHash = txHash
 
 				cctx, cancel := withTimeout(ctx, 5*time.Second)
 				err = coord.IngestWithdrawRequested(cctx, w)
@@ -733,20 +717,7 @@ func parseWithdrawRequestedMessage(line []byte) (withdrawRequestedMessage, error
 
 	switch env.Version {
 	case "withdrawals.requested.v1":
-		var raw withdrawRequestedV1
-		if err := json.Unmarshal(line, &raw); err != nil {
-			return withdrawRequestedMessage{}, err
-		}
-		return withdrawRequestedMessage{
-			Version:          raw.Version,
-			WithdrawalID:     raw.WithdrawalID,
-			Requester:        raw.Requester,
-			Amount:           raw.Amount,
-			RecipientUA:      raw.RecipientUA,
-			ProofWitnessItem: raw.ProofWitnessItem,
-			Expiry:           raw.Expiry,
-			FeeBps:           raw.FeeBps,
-		}, nil
+		return withdrawRequestedMessage{}, errors.New("legacy message version withdrawals.requested.v1 is no longer supported")
 	case "withdrawals.requested.v2":
 		var raw withdrawRequestedV2
 		if err := json.Unmarshal(line, &raw); err != nil {

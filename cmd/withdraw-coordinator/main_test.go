@@ -183,3 +183,24 @@ func TestParseWithdrawRequestedMessage_RejectsUnknownFinalitySource(t *testing.T
 		t.Fatalf("expected invalid finalitySource error, got %v", err)
 	}
 }
+
+func TestParseWithdrawRequestedMessage_RejectsLegacyV1(t *testing.T) {
+	t.Parallel()
+
+	line, err := json.Marshal(map[string]any{
+		"version":      "withdrawals.requested.v1",
+		"withdrawalId": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"requester":    "0x1111111111111111111111111111111111111111",
+		"amount":       42000,
+		"recipientUA":  "0x" + strings.Repeat("11", 43),
+		"expiry":       1700000000,
+		"feeBps":       50,
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if _, err := parseWithdrawRequestedMessage(line); err == nil || !strings.Contains(err.Error(), "legacy message version") {
+		t.Fatalf("expected legacy message version error, got %v", err)
+	}
+}
