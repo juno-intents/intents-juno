@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
@@ -61,6 +71,48 @@ done
 }
 [[ "\$has_dkg_summary" == "false" ]] || {
   printf 'unexpected --dkg-summary path\n' >&2
+  exit 1
+}
+cp "$bridge_summary_fixture" "\$output_path"
+EOF
+  chmod +x "$target"
+}
+
+write_fake_production_bridge_deploy_binary() {
+  local target="$1"
+  local log_file="$2"
+  local bridge_summary_fixture="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'bridge-deploy %s\n' "\$*" >>"$log_file"
+output_path=""
+has_governance_safe="false"
+has_pause_guardian="false"
+has_deploy_only="false"
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --output) output_path="\$2"; shift 2 ;;
+    --governance-safe) has_governance_safe="true"; shift 2 ;;
+    --pause-guardian) has_pause_guardian="true"; shift 2 ;;
+    --deploy-only) has_deploy_only="true"; shift ;;
+    *) shift ;;
+  esac
+done
+[[ "\$has_deploy_only" == "false" ]] || {
+  printf 'unexpected --deploy-only flag\n' >&2
+  exit 1
+}
+[[ "\$has_governance_safe" == "true" ]] || {
+  printf 'missing --governance-safe\n' >&2
+  exit 1
+}
+[[ "\$has_pause_guardian" == "true" ]] || {
+  printf 'missing --pause-guardian\n' >&2
+  exit 1
+}
+[[ -n "\$output_path" ]] || {
+  printf 'missing --output path\n' >&2
   exit 1
 }
 cp "$bridge_summary_fixture" "\$output_path"
@@ -418,6 +470,48 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_invokes_production_bridge_deploy_binary() {
+  local workdir output_dir fake_bin log_dir bridge_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  bridge_log="$log_dir/bridge.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --bridge-deploy-binary "$fake_bin/bridge-deploy" \
+    --deployer-key-file "$workdir/dkg-backup.zip" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$bridge_log")" "--governance-safe 0x4444444444444444444444444444444444444444" "bridge-deploy receives governance safe"
+  assert_contains "$(cat "$bridge_log")" "--pause-guardian 0x5555555555555555555555555555555555555555" "bridge-deploy receives pause guardian"
+  assert_contains "$(cat "$bridge_log")" "--min-deposit-admin-address 0x1111111111111111111111111111111111111111" "bridge-deploy receives min deposit admin"
+  assert_not_contains "$(cat "$bridge_log")" "--deploy-only" "bridge-deploy does not receive legacy deploy-only flag"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
@@ -425,6 +519,7 @@ main() {
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
   test_deploy_coordinator_rejects_underfunded_operator_before_render
   test_deploy_coordinator_invokes_bridge_binary_with_direct_flags
+  test_deploy_coordinator_invokes_production_bridge_deploy_binary
 }
 
 main "$@"

@@ -117,6 +117,8 @@ while IFS= read -r operator_json; do
 done < <(jq -c '.operators[]' "$inventory")
 
 min_deposit_admin_address=""
+governance_safe_address=""
+pause_guardian_address=""
 if jq -e '.app_host != null' "$inventory" >/dev/null 2>&1; then
   app_secret_contract_rel="$(jq -r '.app_host.secret_contract_file | select(type == "string" and length > 0)' "$inventory")"
   app_secret_contract_file="$(production_abs_path "$inventory_dir" "$app_secret_contract_rel")"
@@ -129,6 +131,10 @@ if jq -e '.app_host != null' "$inventory" >/dev/null 2>&1; then
   [[ "$min_deposit_admin_private_key" != *,* ]] || die "app min deposit admin secret must contain exactly one private key"
   min_deposit_admin_address="$(cast wallet address --private-key "$min_deposit_admin_private_key" | tr -d '[:space:]')"
   [[ "$min_deposit_admin_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "derived min deposit admin address is invalid: $min_deposit_admin_address"
+fi
+if jq -e '.governance != null' "$inventory" >/dev/null 2>&1; then
+  governance_safe_address="$(production_json_optional "$inventory" '.governance.safe')"
+  pause_guardian_address="$(production_json_optional "$inventory" '.governance.pause_guardian')"
 fi
 
 if [[ "$skip_terraform_apply" != "true" ]]; then
@@ -167,9 +173,9 @@ if [[ -n "$existing_bridge_summary" ]]; then
   cp "$existing_bridge_summary" "$bridge_summary"
 else
   log "Deploying bridge contracts"
+  bridge_deploy_name="$(basename "$bridge_deploy_binary")"
   bridge_deploy_cmd=(
     "$bridge_deploy_binary"
-    --deploy-only \
     --rpc-url "$base_rpc_url" \
     --chain-id "$base_chain_id" \
     --deployer-key-file "$deployer_key_file" \
@@ -186,6 +192,13 @@ else
     --min-withdraw-amount "$(production_default_bridge_min_withdraw_amount_zat)" \
     --output "$bridge_summary"
   )
+  if [[ "$bridge_deploy_name" != "bridge-deploy" ]]; then
+    bridge_deploy_cmd=( "$bridge_deploy_binary" --deploy-only "${bridge_deploy_cmd[@]:1}" )
+  else
+    [[ -n "$governance_safe_address" ]] || die "inventory is missing governance.safe required by bridge-deploy"
+    [[ -n "$pause_guardian_address" ]] || die "inventory is missing governance.pause_guardian required by bridge-deploy"
+    bridge_deploy_cmd+=(--governance-safe "$governance_safe_address" --pause-guardian "$pause_guardian_address")
+  fi
   while IFS= read -r operator_address; do
     [[ -n "$operator_address" ]] || continue
     bridge_deploy_cmd+=(--operator-address "$operator_address")
