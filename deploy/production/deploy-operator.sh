@@ -1145,6 +1145,16 @@ deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
 deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
+deposit_base_rpc_url="${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}"
+[[ -n "${deposit_base_rpc_url}" ]] || {
+  echo "deposit-relayer requires BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+deposit_juno_rpc_url="${DEPOSIT_SCAN_JUNO_RPC_URL:-${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}}"
+[[ -n "${deposit_juno_rpc_url}" ]] || {
+  echo "deposit-relayer requires DEPOSIT_SCAN_JUNO_RPC_URL or WITHDRAW_COORDINATOR_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 
 args=(
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
@@ -1156,6 +1166,8 @@ args=(
   --deposit-image-id "${DEPOSIT_IMAGE_ID}"
   --base-relayer-url "${BASE_RELAYER_URL}"
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
+  --base-rpc-url "${deposit_base_rpc_url}"
+  --juno-rpc-url "${deposit_juno_rpc_url}"
   --owner "${deposit_owner}"
   --proof-driver queue
   --proof-request-topic "${PROOF_REQUEST_TOPIC:-proof.requests.v1}"
@@ -1192,7 +1204,6 @@ if [[ "${DEPOSIT_SCAN_ENABLED:-false}" == "true" ]]; then
     --juno-scan-url "${DEPOSIT_SCAN_JUNO_SCAN_URL}"
     --juno-scan-wallet-id "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID}"
     --juno-scan-bearer-env "${DEPOSIT_SCAN_JUNO_SCAN_BEARER_ENV:-JUNO_SCAN_BEARER_TOKEN}"
-    --juno-rpc-url "${DEPOSIT_SCAN_JUNO_RPC_URL}"
     --juno-rpc-user-env "${DEPOSIT_SCAN_JUNO_RPC_USER_ENV:-JUNO_RPC_USER}"
     --juno-rpc-pass-env "${DEPOSIT_SCAN_JUNO_RPC_PASS_ENV:-JUNO_RPC_PASS}"
     --scan-poll-interval "${DEPOSIT_SCAN_POLL_INTERVAL:-15s}"
