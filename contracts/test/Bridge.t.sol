@@ -56,6 +56,7 @@ contract BridgeTest is Test {
     address private owner = address(this);
     address private relayer = makeAddr("relayer");
     address private minDepositAdmin = makeAddr("minDepositAdmin");
+    address private pauseGuardian = makeAddr("pauseGuardian");
 
     uint256[5] private opPks = [uint256(0xA0), uint256(0xA1), uint256(0xA2), uint256(0xA3), uint256(0xA4)];
 
@@ -181,6 +182,33 @@ contract BridgeTest is Test {
         assertEq(bridge.minDepositAdmin(), minDepositAdmin);
     }
 
+    function test_pauseGuardian_canPause_butOnlyOwnerCanUnpause() public {
+        bridge.setPauseGuardian(pauseGuardian);
+
+        vm.prank(pauseGuardian);
+        bridge.pause();
+        assertTrue(bridge.paused());
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, pauseGuardian));
+        vm.prank(pauseGuardian);
+        bridge.unpause();
+
+        bridge.unpause();
+        assertFalse(bridge.paused());
+    }
+
+    function test_pauseGuardian_cannotSetAdminRoles() public {
+        bridge.setPauseGuardian(pauseGuardian);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, pauseGuardian));
+        vm.prank(pauseGuardian);
+        bridge.setMinDepositAdmin(minDepositAdmin);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, pauseGuardian));
+        vm.prank(pauseGuardian);
+        bridge.setPauseGuardian(address(0xBEEF));
+    }
+
     function test_mintBatch_mintsNetAndFees_andIsIdempotent() public {
         Bridge.Checkpoint memory cp = _checkpoint();
 
@@ -219,6 +247,50 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(items[0].recipient), net);
         assertEq(token.balanceOf(address(distributor)), feeToDist);
         assertEq(token.balanceOf(relayer), tip);
+    }
+
+    function test_mintBatch_belowMinDepositDoesNotBurnDepositId() public {
+        bridge.setMinDepositAmount(100_000);
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes32 depositId = keccak256("deposit-below-min");
+        address recipient = makeAddr("alice");
+        uint256 amount = 99_999;
+
+        Bridge.MintItem[] memory items = new Bridge.MintItem[](1);
+        items[0] = Bridge.MintItem({depositId: depositId, recipient: recipient, amount: amount});
+
+        Bridge.DepositJournal memory dj = Bridge.DepositJournal({
+            finalOrchardRoot: cp.finalOrchardRoot,
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract,
+            items: items
+        });
+        bytes memory journal = abi.encode(dj);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
+
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"01", journal);
+
+        assertEq(token.balanceOf(recipient), 0);
+        assertFalse(bridge.depositUsed(depositId));
+
+        bridge.setMinDepositAmount(amount);
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 tip = (fee * TIP_BPS) / 10_000;
+        uint256 feeToDist = fee - tip;
+        uint256 net = amount - fee;
+
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"02", journal);
+
+        assertEq(token.balanceOf(recipient), net);
+        assertEq(token.balanceOf(address(distributor)), feeToDist);
+        assertEq(token.balanceOf(relayer), tip);
+        assertTrue(bridge.depositUsed(depositId));
     }
 
     function test_requestWithdraw_andRefund() public {

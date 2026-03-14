@@ -123,6 +123,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     uint96 public relayerTipBps; // portion of fee (in bps) paid to msg.sender
     uint64 public refundWindowSeconds;
     uint64 public maxExpiryExtensionSeconds;
+    address public pauseGuardian;
     address public minDepositAdmin;
     uint256 public minDepositAmount;
     uint256 public minWithdrawAmount;
@@ -142,6 +143,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint256 minDepositAmount,
         uint256 minWithdrawAmount
     );
+    event PauseGuardianUpdated(address indexed pauseGuardian);
     event MinDepositAdminUpdated(address indexed minDepositAdmin);
     event MinDepositAmountUpdated(uint256 minDepositAmount);
     event VerifierUpdated(address indexed verifier);
@@ -223,6 +225,13 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         _;
     }
 
+    modifier onlyOwnerOrPauseGuardian() {
+        if (msg.sender != owner() && msg.sender != pauseGuardian) {
+            revert OwnableUnauthorizedAccount(msg.sender);
+        }
+        _;
+    }
+
     function setParams(
         uint96 newFeeBps,
         uint96 newRelayerTipBps,
@@ -258,6 +267,11 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit MinDepositAdminUpdated(newMinDepositAdmin);
     }
 
+    function setPauseGuardian(address newPauseGuardian) external onlyOwner {
+        pauseGuardian = newPauseGuardian;
+        emit PauseGuardianUpdated(newPauseGuardian);
+    }
+
     function setMinDepositAmount(uint256 newMinDepositAmount) external onlyOwnerOrMinDepositAdmin {
         minDepositAmount = newMinDepositAmount;
         emit MinDepositAmountUpdated(newMinDepositAmount);
@@ -276,7 +290,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit ImageIdsUpdated(newDepositImageId, newWithdrawImageId);
     }
 
-    function pause() external onlyOwner {
+    function pause() external onlyOwnerOrPauseGuardian {
         _pause();
     }
 
@@ -345,13 +359,14 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 continue;
             }
 
-            depositUsed[it.depositId] = true;
-
-            // Skip invalid items to keep batches resilient (but prevent replays by marking used).
+            // Skip invalid items and leave them replayable so governance can
+            // later lower the threshold or operators can correct bad inputs.
             if (it.recipient == address(0) || it.amount == 0 || it.amount < minDepositAmount) {
                 emit DepositSkipped(it.depositId);
                 continue;
             }
+
+            depositUsed[it.depositId] = true;
 
             (uint256 fee, uint256 tip, uint256 net) = _computeFeeAndNet(it.amount, fbps, tipBps);
 
