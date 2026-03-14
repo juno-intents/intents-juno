@@ -9,6 +9,11 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	recipient_ua BYTEA NOT NULL,
 	proof_witness_item BYTEA,
 	expiry TIMESTAMPTZ NOT NULL,
+	base_block_number BIGINT,
+	base_block_hash BYTEA,
+	base_tx_hash BYTEA,
+	base_log_index BIGINT,
+	base_finality_source TEXT,
 	status SMALLINT NOT NULL DEFAULT 1,
 
 	claimed_by TEXT,
@@ -23,6 +28,10 @@ CREATE TABLE IF NOT EXISTS withdrawal_requests (
 	CONSTRAINT fee_bps_range CHECK (fee_bps >= 0 AND fee_bps <= 10000),
 	CONSTRAINT withdrawal_status_range CHECK (status >= 1 AND status <= 4),
 	CONSTRAINT recipient_ua_nonempty CHECK (octet_length(recipient_ua) > 0),
+	CONSTRAINT base_block_hash_len CHECK (base_block_hash IS NULL OR octet_length(base_block_hash) = 32),
+	CONSTRAINT base_tx_hash_len CHECK (base_tx_hash IS NULL OR octet_length(base_tx_hash) = 32),
+	CONSTRAINT base_log_index_nonneg CHECK (base_log_index IS NULL OR base_log_index >= 0),
+	CONSTRAINT base_finality_source_nonempty CHECK (base_finality_source IS NULL OR base_finality_source <> ''),
 	CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923),
 	CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
 );
@@ -34,9 +43,21 @@ ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS proof_witness_item BYTE
 ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE withdrawal_requests ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1923);
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_block_number BIGINT;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_block_hash BYTEA;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_tx_hash BYTEA;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_log_index BIGINT;
+ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS base_finality_source TEXT;
 ALTER TABLE withdrawal_requests ADD COLUMN IF NOT EXISTS status SMALLINT NOT NULL DEFAULT 1;
 ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS withdrawal_status_range;
 ALTER TABLE withdrawal_requests ADD CONSTRAINT withdrawal_status_range CHECK (status >= 1 AND status <= 4);
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS base_block_hash_len;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT base_block_hash_len CHECK (base_block_hash IS NULL OR octet_length(base_block_hash) = 32);
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS base_tx_hash_len;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT base_tx_hash_len CHECK (base_tx_hash IS NULL OR octet_length(base_tx_hash) = 32);
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS base_log_index_nonneg;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT base_log_index_nonneg CHECK (base_log_index IS NULL OR base_log_index >= 0);
+ALTER TABLE withdrawal_requests DROP CONSTRAINT IF EXISTS base_finality_source_nonempty;
+ALTER TABLE withdrawal_requests ADD CONSTRAINT base_finality_source_nonempty CHECK (base_finality_source IS NULL OR base_finality_source <> '');
 CREATE INDEX IF NOT EXISTS withdrawal_requests_base_block_number_idx ON withdrawal_requests (base_block_number);
 
 CREATE TABLE IF NOT EXISTS withdrawal_batches (

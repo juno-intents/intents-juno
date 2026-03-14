@@ -170,7 +170,7 @@ required_kafka_topics_csv="$(
     "proof.fulfillments.v1" \
     "proof.failures.v1" \
     "deposits.event.v2" \
-    "withdrawals.requested.v1" \
+    "withdrawals.requested.v2" \
     "ops.alerts.v1" \
     | awk 'NF && !seen[$0]++' \
     | paste -sd, -

@@ -454,7 +454,16 @@ func cloneWithdrawal(w Withdrawal) Withdrawal {
 }
 
 func withdrawalEqual(a, b Withdrawal) bool {
-	if a.ID != b.ID || a.Requester != b.Requester || a.Amount != b.Amount || a.FeeBps != b.FeeBps || !a.Expiry.Equal(b.Expiry) || a.BaseBlockNumber != b.BaseBlockNumber {
+	if a.ID != b.ID ||
+		a.Requester != b.Requester ||
+		a.Amount != b.Amount ||
+		a.FeeBps != b.FeeBps ||
+		!a.Expiry.Equal(b.Expiry) ||
+		a.BaseBlockNumber != b.BaseBlockNumber ||
+		a.BaseBlockHash != b.BaseBlockHash ||
+		a.BaseTxHash != b.BaseTxHash ||
+		a.BaseLogIndex != b.BaseLogIndex ||
+		a.BaseFinalitySource != b.BaseFinalitySource {
 		return false
 	}
 	return bytes.Equal(a.RecipientUA, b.RecipientUA) &&

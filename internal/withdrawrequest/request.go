@@ -40,6 +40,10 @@ type RequestedEvent struct {
 	RecipientUA  []byte
 	Expiry       uint64
 	FeeBps       uint32
+	BlockNumber  uint64
+	BlockHash    common.Hash
+	TxHash       common.Hash
+	LogIndex     uint
 }
 
 type Payload struct {
@@ -51,6 +55,11 @@ type Payload struct {
 	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
 	Expiry           uint64 `json:"expiry"`
 	FeeBps           uint32 `json:"feeBps"`
+	BlockNumber      uint64 `json:"blockNumber"`
+	BlockHash        string `json:"blockHash"`
+	TxHash           string `json:"txHash"`
+	LogIndex         uint   `json:"logIndex"`
+	FinalitySource   string `json:"finalitySource"`
 	ApproveTxHash    string `json:"approveTxHash"`
 	RequestTxHash    string `json:"requestTxHash"`
 }
@@ -154,15 +163,20 @@ func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, e
 	}
 
 	payload := Payload{
-		Version:       "withdrawals.requested.v1",
-		WithdrawalID:  event.WithdrawalID.Hex(),
-		Requester:     event.Requester.Hex(),
-		Amount:        event.Amount,
-		RecipientUA:   "0x" + hex.EncodeToString(event.RecipientUA),
-		Expiry:        event.Expiry,
-		FeeBps:        event.FeeBps,
-		ApproveTxHash: approveTx.Hash().Hex(),
-		RequestTxHash: requestTx.Hash().Hex(),
+		Version:        "withdrawals.requested.v2",
+		WithdrawalID:   event.WithdrawalID.Hex(),
+		Requester:      event.Requester.Hex(),
+		Amount:         event.Amount,
+		RecipientUA:    "0x" + hex.EncodeToString(event.RecipientUA),
+		Expiry:         event.Expiry,
+		FeeBps:         event.FeeBps,
+		BlockNumber:    event.BlockNumber,
+		BlockHash:      event.BlockHash.Hex(),
+		TxHash:         event.TxHash.Hex(),
+		LogIndex:       event.LogIndex,
+		FinalitySource: "direct-receipt",
+		ApproveTxHash:  approveTx.Hash().Hex(),
+		RequestTxHash:  requestTx.Hash().Hex(),
 	}
 	if len(req.ProofWitnessItem) > 0 {
 		payload.ProofWitnessItem = "0x" + hex.EncodeToString(req.ProofWitnessItem)
@@ -250,6 +264,10 @@ func ParseWithdrawRequestedEvent(logs []*types.Log, bridgeAddress common.Address
 			RecipientUA:  append([]byte(nil), recipientUA...),
 			Expiry:       expiry,
 			FeeBps:       uint32(feeBps64),
+			BlockNumber:  lg.BlockNumber,
+			BlockHash:    lg.BlockHash,
+			TxHash:       lg.TxHash,
+			LogIndex:     lg.Index,
 		}, nil
 	}
 	return RequestedEvent{}, errors.New("WithdrawRequested event not found in receipt logs")

@@ -1339,7 +1339,7 @@ export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PA
 
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
-withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v1}"
+withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v2}"
 
 exec /usr/local/bin/withdraw-coordinator \
   --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
@@ -1554,7 +1554,7 @@ args=(
   --poll-interval "${BASE_EVENT_SCANNER_POLL_INTERVAL:-3s}"
   --queue-driver kafka
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
-  --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v1}"
+  --withdraw-event-topic "${BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC:-withdrawals.requested.v2}"
   --health-port "${BASE_EVENT_SCANNER_HEALTH_PORT:-18306}"
 )
 

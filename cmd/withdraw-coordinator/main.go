@@ -674,13 +674,32 @@ func main() {
 				expiry := time.Unix(int64(reqMsg.Expiry), 0).UTC()
 
 				w := withdraw.Withdrawal{
-					ID:               id,
-					Requester:        requester,
-					Amount:           reqMsg.Amount,
-					FeeBps:           reqMsg.FeeBps,
-					RecipientUA:      ua,
-					ProofWitnessItem: proofWitnessItem,
-					Expiry:           expiry,
+					ID:                 id,
+					Requester:          requester,
+					Amount:             reqMsg.Amount,
+					FeeBps:             reqMsg.FeeBps,
+					RecipientUA:        ua,
+					ProofWitnessItem:   proofWitnessItem,
+					Expiry:             expiry,
+					BaseBlockNumber:    int64(reqMsg.BlockNumber),
+					BaseLogIndex:       uint64(reqMsg.LogIndex),
+					BaseFinalitySource: reqMsg.FinalitySource,
+				}
+				if reqMsg.Version == "withdrawals.requested.v2" {
+					blockHash, err := parseHash32(reqMsg.BlockHash)
+					if err != nil {
+						log.Error("parse blockHash", "err", err)
+						ackMessage(qmsg, *ackTimeout, log)
+						continue
+					}
+					txHash, err := parseHash32(reqMsg.TxHash)
+					if err != nil {
+						log.Error("parse txHash", "err", err)
+						ackMessage(qmsg, *ackTimeout, log)
+						continue
+					}
+					w.BaseBlockHash = blockHash
+					w.BaseTxHash = txHash
 				}
 
 				cctx, cancel := withTimeout(ctx, 5*time.Second)
@@ -733,11 +752,20 @@ func parseWithdrawRequestedMessage(line []byte) (withdrawRequestedMessage, error
 		if err := json.Unmarshal(line, &raw); err != nil {
 			return withdrawRequestedMessage{}, err
 		}
+		if raw.BlockNumber == 0 {
+			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing blockNumber")
+		}
 		if strings.TrimSpace(raw.BlockHash) == "" {
 			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing blockHash")
 		}
+		if strings.TrimSpace(raw.TxHash) == "" {
+			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing txHash")
+		}
 		if strings.TrimSpace(raw.FinalitySource) == "" {
 			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing finalitySource")
+		}
+		if !validFinalitySource(raw.FinalitySource) {
+			return withdrawRequestedMessage{}, fmt.Errorf("withdrawals.requested.v2 invalid finalitySource %q", raw.FinalitySource)
 		}
 		return withdrawRequestedMessage{
 			Version:          raw.Version,
@@ -843,6 +871,26 @@ func decodeHexBytesOptional(s string) ([]byte, error) {
 		return nil, fmt.Errorf("decode hex: %w", err)
 	}
 	return b, nil
+}
+
+func validFinalitySource(s string) bool {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "safe" || s == "finalized" {
+		return true
+	}
+	if !strings.HasPrefix(s, "latest-minus-") {
+		return false
+	}
+	remainder := strings.TrimPrefix(s, "latest-minus-")
+	if remainder == "" {
+		return false
+	}
+	for _, r := range remainder {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return remainder != "0"
 }
 
 func normalizeRuntimeMode(v string) (string, error) {

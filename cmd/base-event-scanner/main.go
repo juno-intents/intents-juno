@@ -30,9 +30,8 @@ func main() {
 	}
 }
 
-// eventPayload is the JSON envelope published for each WithdrawRequested event.
-// Fields match the coordinator's withdrawRequestedV1 struct; extra fields
-// (blockNumber, txHash, logIndex) are harmlessly ignored by the coordinator.
+// eventPayload is the finalized-safe JSON envelope published for each
+// WithdrawRequested event and consumed by withdraw-coordinator.
 type eventPayload struct {
 	Version        string `json:"version"`
 	WithdrawalID   string `json:"withdrawalId"`

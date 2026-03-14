@@ -173,6 +173,62 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	}
 }
 
+func TestStore_UpsertRequested_RoundTripsBaseEventMetadata(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	w := withdraw.Withdrawal{
+		ID:                 seq32(0x11),
+		Amount:             1,
+		FeeBps:             0,
+		RecipientUA:        []byte{0x01},
+		Expiry:             now.Add(24 * time.Hour),
+		BaseBlockNumber:    123,
+		BaseBlockHash:      seq32(0x21),
+		BaseTxHash:         seq32(0x41),
+		BaseLogIndex:       7,
+		BaseFinalitySource: "safe",
+	}
+
+	if _, created, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	got, err := s.GetWithdrawal(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal: %v", err)
+	}
+	if !withdrawalEqual(got, w) {
+		t.Fatalf("round trip mismatch: got=%+v want=%+v", got, w)
+	}
+}
+
 func seq32(start byte) (out [32]byte) {
 	for i := 0; i < 32; i++ {
 		out[i] = start + byte(i)

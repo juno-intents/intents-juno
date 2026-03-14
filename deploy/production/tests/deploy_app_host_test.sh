@@ -191,7 +191,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.fulfillments.v1' "shared infra validation includes proof fulfillment topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.failures.v1' "shared infra validation includes proof failure topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposits.event.v2' "shared infra validation includes deposit event topic"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdrawals.requested.v1' "shared infra validation includes withdrawal topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdrawals.requested.v2' "shared infra validation includes withdrawal topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'ops.alerts.v1' "shared infra validation includes ops alert topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"

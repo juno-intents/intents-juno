@@ -69,6 +69,27 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 		bn := w.BaseBlockNumber
 		baseBlockNumber = &bn
 	}
+	var baseBlockHash []byte
+	if w.BaseBlockHash != ([32]byte{}) {
+		baseBlockHash = w.BaseBlockHash[:]
+	}
+	var baseTxHash []byte
+	if w.BaseTxHash != ([32]byte{}) {
+		baseTxHash = w.BaseTxHash[:]
+	}
+	var baseLogIndex *int64
+	if w.BaseTxHash != ([32]byte{}) || w.BaseBlockHash != ([32]byte{}) || w.BaseLogIndex > 0 || w.BaseFinalitySource != "" {
+		if w.BaseLogIndex > math.MaxInt64 {
+			return withdraw.Withdrawal{}, false, fmt.Errorf("%w: base log index too large", withdraw.ErrInvalidConfig)
+		}
+		v := int64(w.BaseLogIndex)
+		baseLogIndex = &v
+	}
+	var baseFinalitySource *string
+	if w.BaseFinalitySource != "" {
+		src := w.BaseFinalitySource
+		baseFinalitySource = &src
+	}
 
 	tag, err := s.pool.Exec(ctx, `
 		INSERT INTO withdrawal_requests (
@@ -79,13 +100,17 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 			recipient_ua,
 			proof_witness_item,
 			expiry,
-			status,
 			base_block_number,
+			base_block_hash,
+			base_tx_hash,
+			base_log_index,
+			base_finality_source,
+			status,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
 		ON CONFLICT (withdrawal_id) DO NOTHING
-	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, int16(withdraw.WithdrawalStatusRequested), baseBlockNumber)
+	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, baseBlockNumber, baseBlockHash, baseTxHash, baseLogIndex, baseFinalitySource, int16(withdraw.WithdrawalStatusRequested))
 	if err != nil {
 		return withdraw.Withdrawal{}, false, fmt.Errorf("withdraw/postgres: insert requested: %w", err)
 	}
@@ -132,7 +157,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			updated_at = now()
 		FROM cte
 		WHERE wr.withdrawal_id = cte.withdrawal_id
-		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry, wr.base_block_number
+		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry, wr.base_block_number, wr.base_block_hash, wr.base_tx_hash, wr.base_log_index, wr.base_finality_source
 	`, max, owner, ttlMS, int16(withdraw.WithdrawalStatusRequested))
 	if err != nil {
 		return nil, fmt.Errorf("withdraw/postgres: claim unbatched: %w", err)
@@ -150,8 +175,12 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			witness         []byte
 			expiry          time.Time
 			baseBlockNumber *int64
+			baseBlockHash   []byte
+			baseTxHash      []byte
+			baseLogIndex    *int64
+			baseFinality    *string
 		)
-		if err := rows.Scan(&idRaw, &reqRaw, &amount, &feeBps, &recipUA, &witness, &expiry, &baseBlockNumber); err != nil {
+		if err := rows.Scan(&idRaw, &reqRaw, &amount, &feeBps, &recipUA, &witness, &expiry, &baseBlockNumber, &baseBlockHash, &baseTxHash, &baseLogIndex, &baseFinality); err != nil {
 			return nil, fmt.Errorf("withdraw/postgres: scan claim row: %w", err)
 		}
 		id, err := to32(idRaw)
@@ -169,15 +198,38 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 		if baseBlockNumber != nil {
 			bn = *baseBlockNumber
 		}
+		bh, err := toOptional32(baseBlockHash)
+		if err != nil {
+			return nil, err
+		}
+		txh, err := toOptional32(baseTxHash)
+		if err != nil {
+			return nil, err
+		}
+		var li uint64
+		if baseLogIndex != nil {
+			if *baseLogIndex < 0 {
+				return nil, fmt.Errorf("withdraw/postgres: negative base log index in db")
+			}
+			li = uint64(*baseLogIndex)
+		}
+		var finality string
+		if baseFinality != nil {
+			finality = *baseFinality
+		}
 		out = append(out, withdraw.Withdrawal{
-			ID:               id,
-			Requester:        req,
-			Amount:           uint64(amount),
-			FeeBps:           uint32(feeBps),
-			RecipientUA:      append([]byte(nil), recipUA...),
-			ProofWitnessItem: append([]byte(nil), witness...),
-			Expiry:           expiry,
-			BaseBlockNumber:  bn,
+			ID:                 id,
+			Requester:          req,
+			Amount:             uint64(amount),
+			FeeBps:             uint32(feeBps),
+			RecipientUA:        append([]byte(nil), recipUA...),
+			ProofWitnessItem:   append([]byte(nil), witness...),
+			Expiry:             expiry,
+			BaseBlockNumber:    bn,
+			BaseBlockHash:      bh,
+			BaseTxHash:         txh,
+			BaseLogIndex:       li,
+			BaseFinalitySource: finality,
 		})
 	}
 	if err := rows.Err(); err != nil {
@@ -788,12 +840,16 @@ func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 		witness         []byte
 		expiry          time.Time
 		baseBlockNumber *int64
+		baseBlockHash   []byte
+		baseTxHash      []byte
+		baseLogIndex    *int64
+		baseFinality    *string
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT withdrawal_id, requester, amount, fee_bps, recipient_ua, proof_witness_item, expiry, base_block_number
+		SELECT withdrawal_id, requester, amount, fee_bps, recipient_ua, proof_witness_item, expiry, base_block_number, base_block_hash, base_tx_hash, base_log_index, base_finality_source
 		FROM withdrawal_requests
 		WHERE withdrawal_id = $1
-	`, id[:]).Scan(&idRaw, &reqRaw, &amount, &feeBps, &ua, &witness, &expiry, &baseBlockNumber)
+	`, id[:]).Scan(&idRaw, &reqRaw, &amount, &feeBps, &ua, &witness, &expiry, &baseBlockNumber, &baseBlockHash, &baseTxHash, &baseLogIndex, &baseFinality)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Withdrawal{}, withdraw.ErrNotFound
@@ -816,15 +872,38 @@ func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 	if baseBlockNumber != nil {
 		bn = *baseBlockNumber
 	}
+	bh, err := toOptional32(baseBlockHash)
+	if err != nil {
+		return withdraw.Withdrawal{}, err
+	}
+	txh, err := toOptional32(baseTxHash)
+	if err != nil {
+		return withdraw.Withdrawal{}, err
+	}
+	var li uint64
+	if baseLogIndex != nil {
+		if *baseLogIndex < 0 {
+			return withdraw.Withdrawal{}, fmt.Errorf("withdraw/postgres: negative base log index in db")
+		}
+		li = uint64(*baseLogIndex)
+	}
+	var finality string
+	if baseFinality != nil {
+		finality = *baseFinality
+	}
 	return withdraw.Withdrawal{
-		ID:               gotID,
-		Requester:        req,
-		Amount:           uint64(amount),
-		FeeBps:           uint32(feeBps),
-		RecipientUA:      append([]byte(nil), ua...),
-		ProofWitnessItem: append([]byte(nil), witness...),
-		Expiry:           expiry,
-		BaseBlockNumber:  bn,
+		ID:                 gotID,
+		Requester:          req,
+		Amount:             uint64(amount),
+		FeeBps:             uint32(feeBps),
+		RecipientUA:        append([]byte(nil), ua...),
+		ProofWitnessItem:   append([]byte(nil), witness...),
+		Expiry:             expiry,
+		BaseBlockNumber:    bn,
+		BaseBlockHash:      bh,
+		BaseTxHash:         txh,
+		BaseLogIndex:       li,
+		BaseFinalitySource: finality,
 	}, nil
 }
 
@@ -835,7 +914,16 @@ func cloneWithdrawal(w withdraw.Withdrawal) withdraw.Withdrawal {
 }
 
 func withdrawalEqual(a, b withdraw.Withdrawal) bool {
-	if a.ID != b.ID || a.Requester != b.Requester || a.Amount != b.Amount || a.FeeBps != b.FeeBps || !a.Expiry.Equal(b.Expiry) || a.BaseBlockNumber != b.BaseBlockNumber {
+	if a.ID != b.ID ||
+		a.Requester != b.Requester ||
+		a.Amount != b.Amount ||
+		a.FeeBps != b.FeeBps ||
+		!a.Expiry.Equal(b.Expiry) ||
+		a.BaseBlockNumber != b.BaseBlockNumber ||
+		a.BaseBlockHash != b.BaseBlockHash ||
+		a.BaseTxHash != b.BaseTxHash ||
+		a.BaseLogIndex != b.BaseLogIndex ||
+		a.BaseFinalitySource != b.BaseFinalitySource {
 		return false
 	}
 	return bytes.Equal(a.RecipientUA, b.RecipientUA) &&
@@ -870,6 +958,13 @@ func to20(b []byte) ([20]byte, error) {
 	var out [20]byte
 	copy(out[:], b)
 	return out, nil
+}
+
+func toOptional32(b []byte) ([32]byte, error) {
+	if len(b) == 0 {
+		return [32]byte{}, nil
+	}
+	return to32(b)
 }
 
 func ttlMilliseconds(ttl time.Duration) int64 {

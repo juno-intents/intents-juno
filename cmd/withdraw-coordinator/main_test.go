@@ -132,3 +132,54 @@ func TestParseWithdrawRequestedMessage_AcceptsV2(t *testing.T) {
 		t.Fatalf("FinalitySource = %q", msg.FinalitySource)
 	}
 }
+
+func TestParseWithdrawRequestedMessage_RejectsV2WithoutTxHash(t *testing.T) {
+	t.Parallel()
+
+	line, err := json.Marshal(map[string]any{
+		"version":        "withdrawals.requested.v2",
+		"withdrawalId":   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"requester":      "0x1111111111111111111111111111111111111111",
+		"amount":         42000,
+		"recipientUA":    "0x" + strings.Repeat("11", 43),
+		"expiry":         1700000000,
+		"feeBps":         50,
+		"blockNumber":    123,
+		"blockHash":      "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"logIndex":       7,
+		"finalitySource": "safe",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if _, err := parseWithdrawRequestedMessage(line); err == nil || !strings.Contains(err.Error(), "missing txHash") {
+		t.Fatalf("expected missing txHash error, got %v", err)
+	}
+}
+
+func TestParseWithdrawRequestedMessage_RejectsUnknownFinalitySource(t *testing.T) {
+	t.Parallel()
+
+	line, err := json.Marshal(map[string]any{
+		"version":        "withdrawals.requested.v2",
+		"withdrawalId":   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"requester":      "0x1111111111111111111111111111111111111111",
+		"amount":         42000,
+		"recipientUA":    "0x" + strings.Repeat("11", 43),
+		"expiry":         1700000000,
+		"feeBps":         50,
+		"blockNumber":    123,
+		"blockHash":      "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"txHash":         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"logIndex":       7,
+		"finalitySource": "direct-receipt",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	if _, err := parseWithdrawRequestedMessage(line); err == nil || !strings.Contains(err.Error(), "invalid finalitySource") {
+		t.Fatalf("expected invalid finalitySource error, got %v", err)
+	}
+}

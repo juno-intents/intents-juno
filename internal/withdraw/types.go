@@ -33,6 +33,22 @@ type Withdrawal struct {
 	// BaseBlockNumber is the Base chain block number where this withdrawal was requested.
 	// Zero means unknown (legacy rows).
 	BaseBlockNumber int64
+
+	// BaseBlockHash is the canonical Base block hash where this withdrawal was requested.
+	// Zero means unknown (legacy rows).
+	BaseBlockHash [32]byte
+
+	// BaseTxHash is the Base transaction hash that emitted the withdrawal request.
+	// Zero means unknown (legacy rows).
+	BaseTxHash [32]byte
+
+	// BaseLogIndex is the log index of the withdrawal request event within BaseTxHash.
+	// Zero may be a valid log index or indicate unknown on legacy rows.
+	BaseLogIndex uint64
+
+	// BaseFinalitySource records how the request was finalized when ingested, for
+	// example "safe", "finalized", or "latest-minus-64".
+	BaseFinalitySource string
 }
 
 func (w Withdrawal) Validate() error {

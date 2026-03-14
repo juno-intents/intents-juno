@@ -48,7 +48,11 @@ func TestParseWithdrawRequestedEvent(t *testing.T) {
 	}
 
 	logEntry := &types.Log{
-		Address: bridgeAddr,
+		Address:     bridgeAddr,
+		BlockNumber: 123,
+		BlockHash:   common.HexToHash("0x" + strings.Repeat("55", 32)),
+		TxHash:      common.HexToHash("0x" + strings.Repeat("66", 32)),
+		Index:       9,
 		Topics: []common.Hash{
 			eventDef.ID,
 			withdrawalID,
@@ -78,5 +82,17 @@ func TestParseWithdrawRequestedEvent(t *testing.T) {
 	}
 	if hex.EncodeToString(event.RecipientUA) != hex.EncodeToString(recipientUA) {
 		t.Fatalf("recipientUA mismatch")
+	}
+	if event.BlockNumber != 123 {
+		t.Fatalf("block number mismatch: got=%d want=123", event.BlockNumber)
+	}
+	if event.BlockHash != logEntry.BlockHash {
+		t.Fatalf("block hash mismatch: got=%s want=%s", event.BlockHash.Hex(), logEntry.BlockHash.Hex())
+	}
+	if event.TxHash != logEntry.TxHash {
+		t.Fatalf("tx hash mismatch: got=%s want=%s", event.TxHash.Hex(), logEntry.TxHash.Hex())
+	}
+	if event.LogIndex != logEntry.Index {
+		t.Fatalf("log index mismatch: got=%d want=%d", event.LogIndex, logEntry.Index)
 	}
 }
