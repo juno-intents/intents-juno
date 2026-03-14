@@ -48,6 +48,10 @@ if [[ "\$1" == "balance" ]]; then
   printf '%s\n' "$balance_wei"
   exit 0
 fi
+if [[ "\$1" == "call" && "\$5" == "isOperator(address)(bool)" ]]; then
+  printf 'true\n'
+  exit 0
+fi
 printf 'unexpected cast invocation: %s\n' "\$*" >&2
 exit 1
 EOF
@@ -280,6 +284,7 @@ EOF
   assert_contains "$(cat "$log_dir/junocashd.conf")" "txunpaidactionlimit=10000" "junocashd config raises unpaid action limit"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "kms operator env omits private key"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "dns publish"
+  assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x4444444444444444444444444444444444444444 isOperator(address)(bool) 0x9999999999999999999999999999999999999999" "deploy validates operator registry membership before rollout"
   assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key" "deploy derives the base relayer address from the configured key"
   assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before rollout"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"

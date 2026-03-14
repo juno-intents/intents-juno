@@ -841,6 +841,42 @@ production_require_base_relayer_balance() {
   [[ "$saw_address" == "true" ]] || die "no base relayer addresses resolved from BASE_RELAYER_PRIVATE_KEYS"
 }
 
+production_effective_operator_address() {
+  local operator_deploy="$1"
+  local operator_address
+
+  operator_address="$(production_json_optional "$operator_deploy" '.operator_address')"
+  if [[ -z "$operator_address" ]]; then
+    operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+  fi
+  printf '%s\n' "$operator_address"
+}
+
+production_require_registered_operator() {
+  local shared_manifest="$1"
+  local operator_deploy="$2"
+  local base_rpc_url operator_registry operator_address is_registered
+
+  have_cmd cast || die "required command not found: cast"
+
+  base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+  operator_registry="$(production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and test("^0x[0-9a-fA-F]{40}$"))')"
+  operator_address="$(production_effective_operator_address "$operator_deploy")"
+  [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "operator deploy manifest is missing a valid operator address"
+
+  is_registered="$(cast call --rpc-url "$base_rpc_url" "$operator_registry" "isOperator(address)(bool)" "$operator_address" 2>/dev/null | tr -d '[:space:]')"
+  case "$is_registered" in
+    true|1|0x1)
+      ;;
+    false|0|0x0)
+      die "operator $operator_address is not active in operator registry $operator_registry"
+      ;;
+    *)
+      die "failed to verify operator registry membership for $operator_address against $operator_registry"
+      ;;
+  esac
+}
+
 production_is_tx_hash() {
   local value="$1"
   [[ "$value" =~ ^0x[0-9a-fA-F]{64}$ ]]

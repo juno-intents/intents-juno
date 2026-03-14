@@ -35,7 +35,7 @@ write_inventory_fixture() {
 
 test_package_mainnet_release_renders_self_contained_operator_bundle() {
   local workdir handoff_dir release_dir shared_manifest bundle_zip extract_dir
-  local operator_id operator_slug bundle_root deploy_log fake_bin local_manifest
+  local operator_id operator_slug bundle_root deploy_log cast_log fake_bin local_manifest
 
   workdir="$(mktemp -d)"
   handoff_dir="$workdir/output/alpha"
@@ -126,6 +126,7 @@ EOF
   chmod 0755 "$bundle_root/deploy/production/deploy-operator.sh" "$bundle_root/deploy/production/canary-operator-boot.sh"
 
   fake_bin="$workdir/bin"
+  cast_log="$workdir/cast.log"
   mkdir -p "$fake_bin"
   cat >"$fake_bin/aws" <<'EOF'
 #!/usr/bin/env bash
@@ -141,10 +142,23 @@ fi
 printf 'unexpected aws invocation: %s\n' "$*" >&2
 exit 1
 EOF
+  cat >"$fake_bin/cast" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'cast %s\n' "\$*" >>"$cast_log"
+if [[ "\$1" == "call" && "\$5" == "isOperator(address)(bool)" ]]; then
+  printf 'true\n'
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
+exit 1
+EOF
   chmod 0755 "$fake_bin/aws"
+  chmod 0755 "$fake_bin/cast"
 
   PATH="$fake_bin:$PATH" "$bundle_root/bundle/operator/deploy-mainnet-operator.sh" --dry-run
 
+  assert_contains "$(cat "$cast_log")" "call --rpc-url https://base-sepolia.example.invalid 0x4444444444444444444444444444444444444444 isOperator(address)(bool) 0x9999999999999999999999999999999999999999" "bundle wrapper validates operator registry membership"
   assert_contains "$(cat "$deploy_log")" "--operator-deploy" "deploy wrapper forwards operator manifest"
   assert_eq "$(jq -r '.status' "$bundle_root/bundle/operator/deployment-report.json")" "ready" "deployment report records success"
   assert_eq "$(jq -r '.ready_for_deploy' "$bundle_root/bundle/operator/canary-result.json")" "true" "canary result persisted"

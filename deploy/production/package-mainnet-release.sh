@@ -107,18 +107,49 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUNDLE_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 OPERATOR_ID="__OPERATOR_ID__"
 OPERATOR_DEPLOY="$SCRIPT_DIR/operators/$OPERATOR_ID/operator-deploy.json"
+SHARED_MANIFEST="$SCRIPT_DIR/shared-manifest.json"
 DEPLOY_BIN="$BUNDLE_ROOT/deploy/production/deploy-operator.sh"
 CANARY_BIN="$BUNDLE_ROOT/deploy/production/canary-operator-boot.sh"
 RELEASE_MANIFEST="$BUNDLE_ROOT/mainnet-release-manifest.json"
+RELEASE_MANIFEST_SHA="$BUNDLE_ROOT/mainnet-release-manifest.sha256"
 REPORT_FILE="$SCRIPT_DIR/deployment-report.json"
 CANARY_FILE="$SCRIPT_DIR/canary-result.json"
+
+have_cmd_local() {
+  command -v "$1" >/dev/null 2>&1
+}
+
+sha256_hex_file() {
+  local path="$1"
+  if have_cmd_local sha256sum; then
+    sha256sum "$path" | awk '{print $1}'
+    return 0
+  fi
+  shasum -a 256 "$path" | awk '{print $1}'
+}
+
+write_failure_report() {
+  local status="$1"
+  finished_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n --arg operator_id "$OPERATOR_ID" --arg started_at "$started_at" --arg finished_at "$finished_at" --arg status "$status" \
+    '{operator_id: $operator_id, started_at: $started_at, finished_at: $finished_at, status: $status}' >"$REPORT_FILE"
+  exit 1
+}
 
 [[ -f "$OPERATOR_DEPLOY" ]] || {
   echo "operator deploy manifest not found: $OPERATOR_DEPLOY" >&2
   exit 1
 }
+[[ -f "$SHARED_MANIFEST" ]] || {
+  echo "shared manifest not found: $SHARED_MANIFEST" >&2
+  exit 1
+}
 [[ -f "$RELEASE_MANIFEST" ]] || {
   echo "release manifest not found: $RELEASE_MANIFEST" >&2
+  exit 1
+}
+[[ -f "$RELEASE_MANIFEST_SHA" ]] || {
+  echo "release manifest checksum not found: $RELEASE_MANIFEST_SHA" >&2
   exit 1
 }
 [[ -x "$DEPLOY_BIN" ]] || {
@@ -132,6 +163,42 @@ CANARY_FILE="$SCRIPT_DIR/canary-result.json"
 
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 status="deploy_failed"
+have_cmd_local jq || {
+  echo "required command not found: jq" >&2
+  write_failure_report "missing_jq"
+}
+have_cmd_local cast || {
+  echo "required command not found: cast" >&2
+  write_failure_report "missing_cast"
+}
+
+expected_manifest_sha="$(awk 'NF { print $1; exit }' "$RELEASE_MANIFEST_SHA")"
+actual_manifest_sha="$(sha256_hex_file "$RELEASE_MANIFEST")"
+[[ -n "$expected_manifest_sha" && "$actual_manifest_sha" == "$expected_manifest_sha" ]] || {
+  echo "release manifest checksum mismatch" >&2
+  write_failure_report "release_manifest_checksum_mismatch"
+}
+
+release_entry="$(jq -c --arg operator_id "$OPERATOR_ID" '.operators[] | select(.operator_id == $operator_id)' "$RELEASE_MANIFEST")"
+[[ -n "$release_entry" ]] || {
+  echo "release manifest entry missing for operator $OPERATOR_ID" >&2
+  write_failure_report "release_manifest_entry_missing"
+}
+
+shared_manifest_sha="$(sha256_hex_file "$SHARED_MANIFEST")"
+entry_shared_manifest_sha="$(jq -r '.shared_manifest_sha256 // empty' <<<"$release_entry")"
+[[ -n "$entry_shared_manifest_sha" && "$shared_manifest_sha" == "$entry_shared_manifest_sha" ]] || {
+  echo "shared manifest checksum mismatch for operator $OPERATOR_ID" >&2
+  write_failure_report "shared_manifest_mismatch"
+}
+
+operator_address="$(jq -r '.operator_address // empty' "$OPERATOR_DEPLOY")"
+expected_operator_address="$(jq -r '.operator_address // empty' <<<"$release_entry")"
+[[ -z "$expected_operator_address" || "$operator_address" == "$expected_operator_address" ]] || {
+  echo "operator address mismatch: expected $expected_operator_address, got $operator_address" >&2
+  write_failure_report "operator_address_mismatch"
+}
+
 if command -v aws >/dev/null 2>&1; then
   aws_profile="$(jq -r '.aws_profile // empty' "$OPERATOR_DEPLOY")"
   aws_region="$(jq -r '.aws_region // empty' "$OPERATOR_DEPLOY")"
@@ -160,6 +227,32 @@ if command -v aws >/dev/null 2>&1; then
     }
   fi
 fi
+
+base_rpc_url="$(jq -r '.contracts.base_rpc_url // empty' "$SHARED_MANIFEST")"
+operator_registry="$(jq -r '.contracts.operator_registry // empty' "$SHARED_MANIFEST")"
+effective_operator_address="${operator_address:-$OPERATOR_ID}"
+[[ "$base_rpc_url" =~ ^https?:// ]] || {
+  echo "shared manifest is missing contracts.base_rpc_url" >&2
+  write_failure_report "shared_manifest_missing_base_rpc"
+}
+[[ "$operator_registry" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
+  echo "shared manifest is missing contracts.operator_registry" >&2
+  write_failure_report "shared_manifest_missing_operator_registry"
+}
+[[ "$effective_operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || {
+  echo "operator deploy manifest is missing a valid operator address" >&2
+  write_failure_report "operator_address_missing"
+}
+
+operator_registered="$(cast call --rpc-url "$base_rpc_url" "$operator_registry" "isOperator(address)(bool)" "$effective_operator_address" 2>/dev/null | tr -d '[:space:]')"
+case "$operator_registered" in
+  true|1|0x1)
+    ;;
+  *)
+    echo "operator $effective_operator_address is not active in operator registry $operator_registry" >&2
+    write_failure_report "operator_not_registered"
+    ;;
+esac
 
 if "$DEPLOY_BIN" --operator-deploy "$OPERATOR_DEPLOY" "$@"; then
   if "$CANARY_BIN" --operator-deploy "$OPERATOR_DEPLOY" >"$CANARY_FILE"; then

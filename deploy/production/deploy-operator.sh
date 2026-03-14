@@ -658,6 +658,7 @@ if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
 else
   production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url"
+  production_require_registered_operator "$shared_manifest_path" "$operator_deploy"
   ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
   production_rollout_reserve "$rollout_state_file" "$operator_id"
   reserved="true"
