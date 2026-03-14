@@ -199,11 +199,29 @@ expected_operator_address="$(jq -r '.operator_address // empty' <<<"$release_ent
   write_failure_report "operator_address_mismatch"
 }
 
+aws_region="$(jq -r '.aws_region // empty' "$OPERATOR_DEPLOY")"
+expected_aws_region="$(jq -r '.aws_region // empty' <<<"$release_entry")"
+[[ "$aws_region" == "$expected_aws_region" ]] || {
+  echo "aws region mismatch: expected $expected_aws_region, got $aws_region" >&2
+  write_failure_report "release_manifest_region_mismatch"
+}
+
+account_id="$(jq -r '.account_id // empty' "$OPERATOR_DEPLOY")"
+expected_account_id="$(jq -r '.account_id // empty' <<<"$release_entry")"
+[[ "$account_id" == "$expected_account_id" ]] || {
+  echo "aws account mismatch: expected $expected_account_id, got $account_id" >&2
+  write_failure_report "release_manifest_account_mismatch"
+}
+
+kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' "$OPERATOR_DEPLOY")"
+expected_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$release_entry")"
+[[ "$kms_key_id" == "$expected_kms_key_id" ]] || {
+  echo "kms key mismatch: expected $expected_kms_key_id, got $kms_key_id" >&2
+  write_failure_report "release_manifest_kms_mismatch"
+}
+
 if command -v aws >/dev/null 2>&1; then
   aws_profile="$(jq -r '.aws_profile // empty' "$OPERATOR_DEPLOY")"
-  aws_region="$(jq -r '.aws_region // empty' "$OPERATOR_DEPLOY")"
-  account_id="$(jq -r '.account_id // empty' "$OPERATOR_DEPLOY")"
-  kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' "$OPERATOR_DEPLOY")"
   if [[ -n "$aws_profile" && -n "$aws_region" && -n "$account_id" ]]; then
     actual_account="$(aws --profile "$aws_profile" --region "$aws_region" sts get-caller-identity --query Account --output text)"
     [[ "$actual_account" == "$account_id" ]] || {
