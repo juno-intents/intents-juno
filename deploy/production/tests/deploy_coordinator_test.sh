@@ -105,6 +105,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
@@ -153,6 +154,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
@@ -197,6 +199,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   cat >"$workdir/deployer.key" <<'EOF'
 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
@@ -219,6 +222,7 @@ EOF
   assert_contains "$(cat "$log_dir/bridge.log")" '--verifier-address 0x397A5f7f3dBd538f23DE225B51f532c34448dA9B' "bridge deploy forwards verifier address"
   assert_contains "$(cat "$log_dir/bridge.log")" '--deposit-image-id 0x000000000000000000000000000000000000000000000000000000000000aa01' "bridge deploy forwards deposit image id"
   assert_contains "$(cat "$log_dir/bridge.log")" '--withdraw-image-id 0x000000000000000000000000000000000000000000000000000000000000aa02' "bridge deploy forwards withdraw image id"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--min-deposit-admin-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards min deposit admin address"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards first operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x6666666666666666666666666666666666666666' "bridge deploy forwards second operator"
   assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x7777777777777777777777777777777777777777' "bridge deploy forwards third operator"
@@ -245,6 +249,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   inventory_path="$workdir/inventory.json"
@@ -287,6 +292,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   jq 'del(.contracts.owallet_ua)' "$workdir/inventory.json" >"$workdir/inventory.next"
@@ -341,6 +347,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1000"
@@ -386,6 +393,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
@@ -401,6 +409,7 @@ EOF
     --output-dir "$output_dir" >/dev/null
 
   assert_contains "$(cat "$bridge_log")" "--deploy-only" "bridge deploy binary receives deploy-only flag"
+  assert_contains "$(cat "$bridge_log")" "--min-deposit-admin-address 0x1111111111111111111111111111111111111111" "bridge deploy binary receives min deposit admin address"
   if grep -Fq "bridge-e2e deploy " "$bridge_log"; then
     printf 'expected bridge deploy binary invocation without legacy subcommand\n' >&2
     exit 1

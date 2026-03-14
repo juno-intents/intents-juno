@@ -78,6 +78,8 @@ type config struct {
 	BridgeMaxExpiryExtensionSeconds uint64
 	BridgeMinDepositAmount          uint64
 	BridgeMinWithdrawAmount         uint64
+	MinDepositAdmin                 common.Address
+	MinDepositAdminSet              bool
 	DepositCheckpointHeight         uint64
 	DepositCheckpointBlockHash      common.Hash
 	WithdrawCheckpointHeight        uint64
@@ -550,6 +552,7 @@ func parseArgs(args []string) (config, error) {
 	var existingOperatorRegAddressHex string
 	var existingFeeDistributorHex string
 	var existingBridgeAddressHex string
+	var minDepositAdminAddressHex string
 	var junoExecutionTxHash string
 
 	filteredArgs, operatorKeyFiles, err := consumeOperatorKeyFileFlags(args)
@@ -578,6 +581,7 @@ func parseArgs(args []string) (config, error) {
 	fs.Uint64Var(&cfg.BridgeMaxExpiryExtensionSeconds, "max-expiry-extension-seconds", defaultBridgeMaxExpiryExtensionSeconds, "bridge max expiry extension in seconds")
 	fs.Uint64Var(&cfg.BridgeMinDepositAmount, "min-deposit-amount", defaultBridgeMinDepositAmountZat, "bridge minimum deposit amount in Juno base units")
 	fs.Uint64Var(&cfg.BridgeMinWithdrawAmount, "min-withdraw-amount", defaultBridgeMinWithdrawAmountZat, "bridge minimum withdrawal amount in wJUNO base units")
+	fs.StringVar(&minDepositAdminAddressHex, "min-deposit-admin-address", "", "dedicated minDepositAdmin address to configure on the bridge")
 	fs.Uint64Var(&cfg.DepositCheckpointHeight, "deposit-checkpoint-height", 0, "Juno checkpoint height used for deposit checkpoint signing")
 	fs.StringVar(&depositCheckpointBlockHashHex, "deposit-checkpoint-block-hash", "", "Juno checkpoint block hash for deposit checkpoint signing (bytes32 hex)")
 	fs.Uint64Var(&cfg.WithdrawCheckpointHeight, "withdraw-checkpoint-height", 0, "Juno checkpoint height used for withdraw checkpoint signing (defaults to --deposit-checkpoint-height)")
@@ -673,6 +677,13 @@ func parseArgs(args []string) (config, error) {
 	}
 	if cfg.BridgeMinDepositAmount == 0 {
 		return cfg, errors.New("--min-deposit-amount must be > 0")
+	}
+	if minDepositAdminAddressHex != "" {
+		if !common.IsHexAddress(minDepositAdminAddressHex) {
+			return cfg, errors.New("--min-deposit-admin-address must be a valid hex address")
+		}
+		cfg.MinDepositAdmin = common.HexToAddress(minDepositAdminAddressHex)
+		cfg.MinDepositAdminSet = true
 	}
 	_, minDepositNet, err := withdraw.ComputeFeeAndNet(cfg.BridgeMinDepositAmount, uint32(cfg.BridgeFeeBps))
 	if err != nil {
@@ -1363,6 +1374,15 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		); err != nil {
 			return nil, err
 		}
+		if cfg.MinDepositAdminSet {
+			onChainMinDepositAdmin, err := callAddress(ctx, bridge, "minDepositAdmin")
+			if err != nil {
+				return nil, fmt.Errorf("bridge.minDepositAdmin: %w", err)
+			}
+			if onChainMinDepositAdmin != cfg.MinDepositAdmin {
+				return nil, fmt.Errorf("bridge minDepositAdmin mismatch: got=%s want=%s", onChainMinDepositAdmin.Hex(), cfg.MinDepositAdmin.Hex())
+			}
+		}
 	}
 
 	if !cfg.ReuseDeployedContracts {
@@ -1391,6 +1411,11 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			return nil, fmt.Errorf("feeDistributor.setBridge: %w", err)
 		}
 		logProgress("setBridge tx=%s", setBridgeFeesTx.Hex())
+		if cfg.MinDepositAdminSet {
+			if _, err := transactAndWait(ctx, client, auth, bridge, "setMinDepositAdmin", cfg.MinDepositAdmin); err != nil {
+				return nil, fmt.Errorf("bridge.setMinDepositAdmin: %w", err)
+			}
+		}
 
 		timelockProposers := []common.Address{owner}
 		timelockExecutors := []common.Address{owner}

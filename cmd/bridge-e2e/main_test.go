@@ -152,6 +152,32 @@ func TestParseArgs_DeployOnlyAllowsMinimalDeploymentFlags(t *testing.T) {
 	}
 }
 
+func TestParseArgs_AcceptsMinDepositAdminAddress(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deploy-only",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--min-deposit-admin-address", "0x1111111111111111111111111111111111111111",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if !cfg.MinDepositAdminSet {
+		t.Fatalf("min deposit admin flag not recorded")
+	}
+	if got := cfg.MinDepositAdmin.Hex(); got != "0x1111111111111111111111111111111111111111" {
+		t.Fatalf("min deposit admin: got %s", got)
+	}
+}
+
 func TestParseArgs_RequiresEnoughOperatorKeys(t *testing.T) {
 	t.Parallel()
 
