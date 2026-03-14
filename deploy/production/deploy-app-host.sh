@@ -94,6 +94,8 @@ bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_a
 backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
 shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
+shared_kafka_auth_mode="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
+shared_kafka_auth_aws_region="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.aws_region | select(type == "string" and length > 0)')"
 shared_ipfs_api_url="$(production_json_required "$shared_manifest_path" '.shared_services.ipfs.api_url | select(type == "string" and length > 0)')"
 checkpoint_signature_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.signature_topic | select(type == "string" and length > 0)')"
 checkpoint_package_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.package_topic | select(type == "string" and length > 0)')"
@@ -179,6 +181,7 @@ kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_s
 if [[ "$kafka_tls_enabled" != "true" ]]; then
   kafka_tls_enabled="false"
 fi
+[[ "$shared_kafka_auth_mode" == "aws-msk-iam" ]] || die "shared manifest kafka.auth.mode must be aws-msk-iam"
 
 download_release_asset "bridge-api_linux_amd64"
 download_release_asset "backoffice_linux_amd64"
@@ -230,6 +233,8 @@ bridge_record_name="$bridge_record_name"
 backoffice_record_name="$backoffice_record_name"
 shared_postgres_dsn="$shared_postgres_dsn"
 shared_kafka_brokers="$shared_kafka_brokers"
+shared_kafka_auth_mode="$shared_kafka_auth_mode"
+shared_kafka_auth_aws_region="$shared_kafka_auth_aws_region"
 shared_required_kafka_topics="$required_kafka_topics_csv"
 shared_ipfs_api_url="$shared_ipfs_api_url"
 shared_checkpoint_operators="$checkpoint_operators_csv"
@@ -251,6 +256,8 @@ sudo install -m 0640 -o root -g intents-juno "\$remote_stage_dir/backoffice.env"
 
 sudo -u intents-juno env \
   JUNO_QUEUE_KAFKA_TLS="\$kafka_tls_enabled" \
+  JUNO_QUEUE_KAFKA_AUTH_MODE="\$shared_kafka_auth_mode" \
+  JUNO_QUEUE_KAFKA_AWS_REGION="\$shared_kafka_auth_aws_region" \
   "\$shared_infra_e2e_bin" \
     --postgres-dsn "\$shared_postgres_dsn" \
     --kafka-brokers "\$shared_kafka_brokers" \

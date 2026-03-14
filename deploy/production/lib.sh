@@ -986,6 +986,8 @@ production_render_shared_manifest() {
     --arg postgres_endpoint "$postgres_endpoint" \
     --arg postgres_port "$postgres_port" \
     --arg kafka_brokers "$kafka_brokers" \
+    --arg kafka_auth_mode "aws-msk-iam" \
+    --arg kafka_auth_aws_region "$aws_region" \
     --arg ipfs_api_url "$ipfs_api_url" \
     --arg dkg_bucket "$dkg_bucket" \
     --arg dkg_prefix "$dkg_prefix" \
@@ -1027,6 +1029,10 @@ production_render_shared_manifest() {
         kafka: {
           bootstrap_brokers: $kafka_brokers,
           tls: true,
+          auth: {
+            mode: $kafka_auth_mode,
+            aws_region: $kafka_auth_aws_region
+          },
           min_insync_replicas: 2
         },
         ipfs: {
@@ -1493,6 +1499,8 @@ CHECKPOINT_THRESHOLD=$(jq -r '.checkpoint.threshold' "$shared_manifest")
 CHECKPOINT_SIGNATURE_TOPIC=$(jq -r '.checkpoint.signature_topic' "$shared_manifest")
 CHECKPOINT_PACKAGE_TOPIC=$(jq -r '.checkpoint.package_topic' "$shared_manifest")
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=$(jq -r '.shared_services.kafka.auth.mode' "$shared_manifest")
+JUNO_QUEUE_KAFKA_AWS_REGION=$(jq -r '.shared_services.kafka.auth.aws_region' "$shared_manifest")
 OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")

@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -185,48 +184,6 @@ func TestParseArgs_RequiredKafkaTopicsDedupAndTrim(t *testing.T) {
 	}
 	if cfg.RequiredKafkaTopics[0] != "checkpoints.signatures.v1" || cfg.RequiredKafkaTopics[1] != "checkpoints.packages.v1" {
 		t.Fatalf("unexpected required kafka topics: %#v", cfg.RequiredKafkaTopics)
-	}
-}
-
-func TestKafkaTLSEnabledFromEnv(t *testing.T) {
-	cases := []struct {
-		name  string
-		value string
-		want  bool
-	}{
-		{name: "unset", value: "", want: false},
-		{name: "false", value: "false", want: false},
-		{name: "zero", value: "0", want: false},
-		{name: "true", value: "true", want: true},
-		{name: "one", value: "1", want: true},
-		{name: "yes", value: "yes", want: true},
-		{name: "on", value: "on", want: true},
-		{name: "mixed case and spaces", value: "  TrUE ", want: true},
-	}
-
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Setenv(envQueueKafkaTLS, tc.value)
-			if got := kafkaTLSEnabledFromEnv(); got != tc.want {
-				t.Fatalf("kafkaTLSEnabledFromEnv(%q) = %t, want %t", tc.value, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestKafkaTLSConfigPinsTLS12(t *testing.T) {
-	t.Parallel()
-
-	cfg := kafkaTLSConfig()
-	if cfg == nil {
-		t.Fatalf("kafkaTLSConfig() = nil")
-	}
-	if cfg.MinVersion != tls.VersionTLS12 {
-		t.Fatalf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
-	}
-	if cfg.MaxVersion != tls.VersionTLS12 {
-		t.Fatalf("MaxVersion = %d, want %d", cfg.MaxVersion, tls.VersionTLS12)
 	}
 }
 
@@ -669,11 +626,11 @@ func TestCheckCheckpointIPFSWithSource_ForwardsMinPersistedAt(t *testing.T) {
 	defer srv.Close()
 
 	_, err = checkCheckpointIPFSWithSource(context.Background(), config{
-		PostgresDSN:               "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
-		CheckpointIPFSAPIURL:      srv.URL,
-		CheckpointOperators:       []common.Address{operator},
-		CheckpointThreshold:       1,
-		CheckpointMinPersistedAt:  minPersistedAt,
+		PostgresDSN:              "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL:     srv.URL,
+		CheckpointOperators:      []common.Address{operator},
+		CheckpointThreshold:      1,
+		CheckpointMinPersistedAt: minPersistedAt,
 	}, source)
 	if err != nil {
 		t.Fatalf("checkCheckpointIPFSWithSource: %v", err)

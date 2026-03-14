@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/segmentio/kafka-go"
+	"github.com/segmentio/kafka-go/sasl"
 )
 
 const (
@@ -22,6 +23,8 @@ const (
 
 const (
 	envKafkaTLS          = "JUNO_QUEUE_KAFKA_TLS"
+	envKafkaAuthMode     = "JUNO_QUEUE_KAFKA_AUTH_MODE"
+	envKafkaAWSRegion    = "JUNO_QUEUE_KAFKA_AWS_REGION"
 	defaultMaxLineBytes  = 1 << 20
 	defaultKafkaMinBytes = 1
 	defaultKafkaMaxBytes = 10 << 20
@@ -159,6 +162,83 @@ func kafkaTLSConfig() *tls.Config {
 	}
 }
 
+func queueKafkaAuthMode() string {
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(envKafkaAuthMode)))
+	switch v {
+	case "", "none", "disabled":
+		return "none"
+	default:
+		return v
+	}
+}
+
+func queueKafkaAWSRegion() string {
+	for _, key := range []string{envKafkaAWSRegion, "AWS_REGION", "AWS_DEFAULT_REGION"} {
+		if v := strings.TrimSpace(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func kafkaSASLMechanismFromEnv() (sasl.Mechanism, error) {
+	switch mode := queueKafkaAuthMode(); mode {
+	case "none":
+		return nil, nil
+	case "aws-msk-iam":
+		if !queueKafkaTLSEnabled() {
+			return nil, errors.New("kafka aws-msk-iam auth requires JUNO_QUEUE_KAFKA_TLS=true")
+		}
+		region := queueKafkaAWSRegion()
+		if region == "" {
+			return nil, errors.New("kafka aws-msk-iam auth requires JUNO_QUEUE_KAFKA_AWS_REGION or AWS_REGION")
+		}
+		return newAWSMSKIAMMechanism(region), nil
+	default:
+		return nil, fmt.Errorf("unsupported kafka auth mode %q", mode)
+	}
+}
+
+func kafkaDialerFromEnv(timeout time.Duration) (*kafka.Dialer, error) {
+	mechanism, err := kafkaSASLMechanismFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	dialer := &kafka.Dialer{Timeout: timeout}
+	if queueKafkaTLSEnabled() {
+		dialer.TLS = kafkaTLSConfig()
+	}
+	if mechanism != nil {
+		dialer.SASLMechanism = mechanism
+	}
+	return dialer, nil
+}
+
+func kafkaTransportFromEnv() (*kafka.Transport, error) {
+	mechanism, err := kafkaSASLMechanismFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	transport := &kafka.Transport{}
+	if queueKafkaTLSEnabled() {
+		transport.TLS = kafkaTLSConfig()
+	}
+	if mechanism != nil {
+		transport.SASL = mechanism
+	}
+	return transport, nil
+}
+
+// NewKafkaDialerFromEnv returns a kafka-go dialer configured from the queue transport env vars.
+func NewKafkaDialerFromEnv(timeout time.Duration) (*kafka.Dialer, error) {
+	return kafkaDialerFromEnv(timeout)
+}
+
+// NewKafkaTransportFromEnv returns a kafka-go transport configured from the queue transport env vars.
+func NewKafkaTransportFromEnv() (*kafka.Transport, error) {
+	return kafkaTransportFromEnv()
+}
+
 type kafkaConsumer struct {
 	reader *kafka.Reader
 
@@ -207,12 +287,11 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 		StartOffset:           kafka.FirstOffset,
 		WatchPartitionChanges: true,
 	}
-	if queueKafkaTLSEnabled() {
-		readerCfg.Dialer = &kafka.Dialer{
-			Timeout: 10 * time.Second,
-			TLS:     kafkaTLSConfig(),
-		}
+	dialer, err := kafkaDialerFromEnv(10 * time.Second)
+	if err != nil {
+		return nil, err
 	}
+	readerCfg.Dialer = dialer
 	if cfg.KafkaLogger != nil {
 		readerCfg.Logger = cfg.KafkaLogger
 		readerCfg.ErrorLogger = cfg.KafkaLogger
@@ -371,11 +450,11 @@ func newKafkaProducer(cfg ProducerConfig) (Producer, error) {
 		BatchTimeout: batchTimeout,
 		RequiredAcks: kafka.RequireAll,
 	}
-	if queueKafkaTLSEnabled() {
-		writer.Transport = &kafka.Transport{
-			TLS: kafkaTLSConfig(),
-		}
+	transport, err := kafkaTransportFromEnv()
+	if err != nil {
+		return nil, err
 	}
+	writer.Transport = transport
 
 	return &kafkaProducer{writer: writer}, nil
 }

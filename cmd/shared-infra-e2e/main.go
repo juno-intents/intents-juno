@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -102,7 +101,6 @@ type postgresCheckpointPackageSource struct{}
 
 const (
 	checkpointIPFSMaxResponseLen = 1 << 20
-	envQueueKafkaTLS             = "JUNO_QUEUE_KAFKA_TLS"
 )
 
 func main() {
@@ -298,23 +296,6 @@ func parseBrokers(raw string) []string {
 	return out
 }
 
-func kafkaTLSEnabledFromEnv() bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(envQueueKafkaTLS)))
-	switch v {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
-}
-
-func kafkaTLSConfig() *tls.Config {
-	return &tls.Config{
-		MinVersion: tls.VersionTLS12,
-		MaxVersion: tls.VersionTLS12,
-	}
-}
-
 func runWithRetry(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
 	if interval <= 0 {
 		interval = 2 * time.Second
@@ -483,9 +464,9 @@ func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error
 		return errors.New("kafka topic is required")
 	}
 
-	dialer := &kafka.Dialer{Timeout: 10 * time.Second}
-	if kafkaTLSEnabledFromEnv() {
-		dialer.TLS = kafkaTLSConfig()
+	dialer, err := queue.NewKafkaDialerFromEnv(10 * time.Second)
+	if err != nil {
+		return err
 	}
 	var lastErr error
 

@@ -958,6 +958,26 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
+kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+case "$kafka_auth_mode" in
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    ;;
+  *)
+    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
+fi
 signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
@@ -1131,6 +1151,26 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
+kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+case "$kafka_auth_mode" in
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    ;;
+  *)
+    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
+fi
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
@@ -1326,6 +1366,26 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
+kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+case "$kafka_auth_mode" in
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    ;;
+  *)
+    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
+fi
 txbuild_bin="${WITHDRAW_COORDINATOR_TXBUILD_BIN:-juno-txbuild}"
 command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
@@ -1472,6 +1532,26 @@ case "${kafka_tls_value,,}" in
     exit 1
     ;;
 esac
+kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+case "$kafka_auth_mode" in
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    ;;
+  *)
+    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
+fi
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
@@ -1561,6 +1641,23 @@ args=(
 case "${JUNO_QUEUE_KAFKA_TLS:-}" in
   true|1|yes) export JUNO_QUEUE_KAFKA_TLS="true" ;;
 esac
+case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+  aws-msk-iam) export JUNO_QUEUE_KAFKA_AUTH_MODE="aws-msk-iam" ;;
+  *)
+    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
+fi
 
 exec /usr/local/bin/base-event-scanner "${args[@]}"
 EOF_BASE_EVENT_SCANNER_WRAPPER

@@ -200,6 +200,92 @@ func TestQueueKafkaTLSEnabled(t *testing.T) {
 	}
 }
 
+func TestQueueKafkaAuthMode(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{name: "unset", value: "", want: "none"},
+		{name: "none", value: "none", want: "none"},
+		{name: "disabled", value: "disabled", want: "none"},
+		{name: "aws msk iam", value: "aws-msk-iam", want: "aws-msk-iam"},
+		{name: "trim and lowercase", value: "  AWS-MSK-IAM ", want: "aws-msk-iam"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(envKafkaAuthMode, tc.value)
+			if got := queueKafkaAuthMode(); got != tc.want {
+				t.Fatalf("queueKafkaAuthMode(%q) = %q, want %q", tc.value, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestNewProducer_RejectsInvalidKafkaAuthEnv(t *testing.T) {
+	t.Setenv(envKafkaTLS, "true")
+	t.Setenv(envKafkaAuthMode, "aws-msk-iam")
+	t.Setenv(envKafkaAWSRegion, "")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+
+	p, err := NewProducer(ProducerConfig{
+		Driver:  DriverKafka,
+		Brokers: []string{"127.0.0.1:9092"},
+	})
+	if err == nil || !strings.Contains(err.Error(), envKafkaAWSRegion) {
+		t.Fatalf("expected region error, got producer=%v err=%v", p, err)
+	}
+}
+
+func TestNewConsumer_RejectsKafkaAuthWithoutTLS(t *testing.T) {
+	t.Setenv(envKafkaTLS, "false")
+	t.Setenv(envKafkaAuthMode, "aws-msk-iam")
+	t.Setenv(envKafkaAWSRegion, "us-east-1")
+
+	c, err := NewConsumer(context.Background(), ConsumerConfig{
+		Driver:  DriverKafka,
+		Brokers: []string{"127.0.0.1:9092"},
+		Group:   "g1",
+		Topics:  []string{"t1"},
+	})
+	if err == nil || !strings.Contains(err.Error(), envKafkaTLS) {
+		t.Fatalf("expected tls error, got consumer=%v err=%v", c, err)
+	}
+}
+
+func TestAWSMSKIAMMechanism_StartFormatsOAuthBearerInitialResponse(t *testing.T) {
+	t.Parallel()
+
+	mech := awsMSKIAMMechanism{
+		region: "us-east-1",
+		tokenProvider: func(context.Context, string) (string, error) {
+			return "token-123", nil
+		},
+	}
+
+	session, initial, err := mech.Start(context.Background())
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if session == nil {
+		t.Fatal("expected session")
+	}
+	if got, want := string(initial), "n,,\x01auth=Bearer token-123\x01\x01"; got != want {
+		t.Fatalf("initial response mismatch: got=%q want=%q", got, want)
+	}
+	if done, response, err := session.Next(context.Background(), nil); err != nil {
+		t.Fatalf("Next(nil): %v", err)
+	} else if !done || response != nil {
+		t.Fatalf("Next(nil) = done=%v response=%v, want done=true response=nil", done, response)
+	}
+	if _, _, err := session.Next(context.Background(), []byte("unexpected")); err == nil {
+		t.Fatal("expected challenge error")
+	}
+}
+
 func TestKafkaTLSConfigPinsKafkaTLS12(t *testing.T) {
 	t.Parallel()
 
