@@ -52,6 +52,7 @@ func main() {
 		wjunoAddr                 = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")
 		opRegistryAddr            = flag.String("operator-registry-address", "", "OperatorRegistry contract address (required)")
 		feeDistAddr               = flag.String("fee-distributor-address", "", "FeeDistributor contract address (optional)")
+		owalletUA                 = flag.String("owallet-ua", "", "Juno unified address displayed as the MPC bridge wallet (optional)")
 		sp1RequestorStr           = flag.String("sp1-requestor-address", "", "SP1 prover requestor address (optional)")
 		sp1RPCURL                 = flag.String("sp1-rpc-url", "", "SP1 prover network RPC URL (optional, for prover balance)")
 		operatorAddrsRaw          = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
@@ -366,6 +367,7 @@ func main() {
 		WJunoAddress:               common.HexToAddress(*wjunoAddr),
 		OperatorRegistryAddress:    common.HexToAddress(*opRegistryAddr),
 		FeeDistributorAddress:      feeDistributor,
+		OWalletUA:                  strings.TrimSpace(*owalletUA),
 		SP1RequestorAddress:        sp1Requestor,
 		OperatorAddresses:          operatorAddresses,
 		BaseRelayerSignerAddresses: baseRelayerSignerAddresses,

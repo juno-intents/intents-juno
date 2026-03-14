@@ -90,10 +90,17 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 		mpcBalance, mpcErr := s.fetchJunoMPCBalance(ctx)
 		if mpcErr != nil {
 			s.log.Warn("fetch juno mpc balance", "err", mpcErr)
-			resp["mpcWallet"] = map[string]any{
+			mpcWallet := map[string]any{
 				"error": mpcErr.Error(),
 			}
+			if strings.TrimSpace(s.cfg.OWalletUA) != "" {
+				mpcWallet["address"] = strings.TrimSpace(s.cfg.OWalletUA)
+			}
+			resp["mpcWallet"] = mpcWallet
 		} else {
+			if strings.TrimSpace(s.cfg.OWalletUA) != "" {
+				mpcBalance["address"] = strings.TrimSpace(s.cfg.OWalletUA)
+			}
 			resp["mpcWallet"] = mpcBalance
 		}
 	}

@@ -270,3 +270,71 @@ func TestHandleFundsUsesBaseRelayerSignerAddresses(t *testing.T) {
 		t.Fatalf("belowThreshold = true, want false")
 	}
 }
+
+func TestHandleFundsIncludesConfiguredMPCWalletAddress(t *testing.T) {
+	junoRPC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"result": map[string]any{
+				"transparent": "0.00000000",
+				"private":     "12.34000000",
+				"total":       "12.34000000",
+			},
+			"error": nil,
+		}); err != nil {
+			t.Fatalf("encode juno rpc response: %v", err)
+		}
+	}))
+	defer junoRPC.Close()
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x0",
+		}); err != nil {
+			t.Fatalf("encode eth rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	baseClient, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer baseClient.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient: baseClient,
+			JunoRPCURL: junoRPC.URL,
+			OWalletUA:  "u1examplempcwallet",
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		MPCWallet struct {
+			Address string `json:"address"`
+			Total   string `json:"total"`
+		} `json:"mpcWallet"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.MPCWallet.Address != "u1examplempcwallet" {
+		t.Fatalf("mpc address = %q, want %q", body.MPCWallet.Address, "u1examplempcwallet")
+	}
+	if body.MPCWallet.Total != "12.34000000" {
+		t.Fatalf("mpc total = %q, want %q", body.MPCWallet.Total, "12.34000000")
+	}
+}

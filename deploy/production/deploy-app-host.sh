@@ -314,6 +314,9 @@ args=(
   --kafka-brokers "\$BACKOFFICE_KAFKA_BROKERS"
   --ipfs-api-url "\$BACKOFFICE_IPFS_API_URL"
 )
+if [[ -n "\${BACKOFFICE_OWALLET_UA:-}" ]]; then
+  args+=(--owallet-ua "\$BACKOFFICE_OWALLET_UA")
+fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
   args+=(--juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL")
 fi

@@ -1395,6 +1395,7 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_MIN_WITHDRAW_AMOUNT=200000000" "bridge env min withdraw amount"
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_FEE_BPS=50" "bridge env fee bps"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=250000000000000" "backoffice env relayer signer balance floor"

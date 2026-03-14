@@ -24,6 +24,11 @@
       safe.slice(0, 6) + "\u2026" + safe.slice(-4) + '</span>';
   }
 
+  function addrWithCopy(addr) {
+    if (!addr) return '<span class="dim">-</span>';
+    return fmtAddr(addr) + copyBtn(addr);
+  }
+
   function fmtETH(wei) {
     if (wei === undefined || wei === null) return "-";
     var n = typeof wei === "string" ? parseFloat(wei) : wei;
@@ -225,13 +230,19 @@
       setHTML("funds-ops-tbody", ops || '<tr><td colspan="3" class="loading">-</td></tr>');
       // Prover
       if (d.prover) {
-        setText("prover-addr", fmtAddr(d.prover.address));
+        setHTML("prover-addr", addrWithCopy(d.prover.address));
         if (d.prover.error) {
-          setText("prover-balance", "Error: " + d.prover.error);
+          setText("prover-balance", "Unavailable");
+          setText("prover-network", d.prover.network === "succinct" ? "Succinct credits" : "Base balance");
+          setText("prover-detail", d.prover.error);
         } else if (d.prover.network === "succinct") {
           setText("prover-balance", (d.prover.creditsFormatted || d.prover.creditsRaw || "0") + " credits");
+          setText("prover-network", "Succinct credits");
+          setText("prover-detail", d.prover.creditsRaw ? "Raw credits: " + d.prover.creditsRaw : "Ready");
         } else {
           setText("prover-balance", d.prover.balanceEth || fmtETH(d.prover.balanceWei));
+          setText("prover-network", "Base ETH");
+          setText("prover-detail", d.prover.balanceWei ? "Wei: " + d.prover.balanceWei : "Ready");
         }
       }
       // Bridge escrow
@@ -239,8 +250,18 @@
         setText("escrow-wjuno", d.bridge.wjunoBalanceFormatted || d.bridge.wjunoBalanceRaw || "0");
       }
       // MPC wallet
-      if (d.mpcWallet && !d.mpcWallet.error) {
-        setText("mpc-balance", d.mpcWallet.total || "0");
+      if (d.mpcWallet) {
+        setHTML("mpc-addr", addrWithCopy(d.mpcWallet.address));
+        if (d.mpcWallet.error) {
+          setText("mpc-balance", "Unavailable");
+          setText("mpc-detail", d.mpcWallet.error);
+        } else {
+          setText("mpc-balance", d.mpcWallet.total || "0");
+          var mpcDetail = [];
+          if (d.mpcWallet.private) mpcDetail.push("Private: " + d.mpcWallet.private);
+          if (d.mpcWallet.transparent) mpcDetail.push("Transparent: " + d.mpcWallet.transparent);
+          setText("mpc-detail", mpcDetail.join(" | ") || "Ready");
+        }
       }
     });
   }
@@ -258,7 +279,7 @@
     apiFetch("/settings/runtime", function (resp) {
       var d = (resp && resp.data) || {};
       setText("settings-min-deposit", d.minDepositAmount || "-");
-      setText("settings-min-deposit-admin", d.minDepositAdmin || "-");
+      setHTML("settings-min-deposit-admin", addrWithCopy(d.minDepositAdmin));
       setText("settings-deposit-conf", d.depositMinConfirmations || "-");
       setText("settings-withdraw-planner-conf", d.withdrawPlannerMinConfirmations || "-");
       setText("settings-withdraw-batch-conf", d.withdrawBatchConfirmations || "-");

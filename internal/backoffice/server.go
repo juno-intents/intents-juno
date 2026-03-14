@@ -39,6 +39,7 @@ type ServerConfig struct {
 	WJunoAddress               common.Address
 	OperatorRegistryAddress    common.Address
 	FeeDistributorAddress      common.Address
+	OWalletUA                  string
 	SP1RequestorAddress        common.Address
 	OperatorAddresses          []common.Address
 	BaseRelayerSignerAddresses []common.Address

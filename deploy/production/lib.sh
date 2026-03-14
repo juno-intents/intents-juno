@@ -1676,6 +1676,7 @@ BACKOFFICE_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BACKOFFICE_AUTH_SECRET=$auth_secret
 BACKOFFICE_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BACKOFFICE_WJUNO_ADDRESS=$(jq -r '.contracts.wjuno' "$shared_manifest")
+BACKOFFICE_OWALLET_UA=$(jq -r '.contracts.owallet_ua' "$shared_manifest")
 BACKOFFICE_OPERATOR_REGISTRY_ADDRESS=$(jq -r '.contracts.operator_registry' "$shared_manifest")
 BACKOFFICE_OPERATOR_ADDRESSES=$operator_addresses
 BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=$base_relayer_signer_addresses

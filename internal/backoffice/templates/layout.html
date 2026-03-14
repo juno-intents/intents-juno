@@ -150,20 +150,53 @@
                 </table>
             </div>
 
-            <div class="cards">
+            <div class="metric-grid">
                 <div class="card">
                     <h3>Prover Funds</h3>
-                    <div>Address: <span class="mono" id="prover-addr">-</span></div>
-                    <div>Balance: <span id="prover-balance">-</span></div>
+                    <div class="detail-list">
+                        <div class="detail-item">
+                            <span class="detail-label">Address</span>
+                            <div class="detail-value copy-inline" id="prover-addr">-</div>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Balance</span>
+                            <div class="detail-value" id="prover-balance">-</div>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Network</span>
+                            <div class="detail-value muted" id="prover-network">-</div>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Detail</span>
+                            <div class="detail-value muted" id="prover-detail">-</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="card">
                     <h3>Bridge wJUNO Escrow</h3>
-                    <div>Balance: <span id="escrow-wjuno">-</span></div>
+                    <div class="detail-list">
+                        <div class="detail-item">
+                            <span class="detail-label">Balance</span>
+                            <div class="detail-value" id="escrow-wjuno">-</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="card">
                     <h3>MPC Wallet (Juno)</h3>
-                    <div>Address: <span class="mono" id="mpc-addr">-</span></div>
-                    <div>Balance: <span id="mpc-balance">-</span></div>
+                    <div class="detail-list">
+                        <div class="detail-item">
+                            <span class="detail-label">Address</span>
+                            <div class="detail-value copy-inline" id="mpc-addr">-</div>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Balance</span>
+                            <div class="detail-value" id="mpc-balance">-</div>
+                        </div>
+                        <div class="detail-item">
+                            <span class="detail-label">Detail</span>
+                            <div class="detail-value muted" id="mpc-detail">-</div>
+                        </div>
+                    </div>
                 </div>
             </div>
         </section>
@@ -171,71 +204,88 @@
         <!-- ===== SETTINGS ===== -->
         <section id="settings" class="tab-content">
             <h2 class="section-title">Runtime Settings</h2>
-            <div class="cards">
-                <div class="card">
-                    <h3>Current Min Deposit</h3>
-                    <div class="value" id="settings-min-deposit">-</div>
-                    <div style="margin-top:.5rem">Admin: <span class="mono" id="settings-min-deposit-admin">-</span></div>
-                </div>
-                <div class="card">
-                    <h3>Deposit Confirmations</h3>
-                    <div class="value" id="settings-deposit-conf">-</div>
-                </div>
-                <div class="card">
-                    <h3>Withdraw Planner Confirmations</h3>
-                    <div class="value" id="settings-withdraw-planner-conf">-</div>
-                </div>
-                <div class="card">
-                    <h3>Withdraw Batch Confirmations</h3>
-                    <div class="value" id="settings-withdraw-batch-conf">-</div>
-                </div>
-            </div>
+            <div class="settings-layout">
+                <div class="settings-column">
+                    <div class="metric-grid">
+                        <div class="card">
+                            <h3>Current Min Deposit</h3>
+                            <div class="value" id="settings-min-deposit">-</div>
+                            <div class="detail-item" style="margin-top:.75rem">
+                                <span class="detail-label">Min Deposit Admin</span>
+                                <div class="detail-value copy-inline" id="settings-min-deposit-admin">-</div>
+                            </div>
+                        </div>
+                        <div class="card">
+                            <h3>Deposit Confirmations</h3>
+                            <div class="value" id="settings-deposit-conf">-</div>
+                        </div>
+                        <div class="card">
+                            <h3>Withdraw Planner Confirmations</h3>
+                            <div class="value" id="settings-withdraw-planner-conf">-</div>
+                        </div>
+                        <div class="card">
+                            <h3>Withdraw Batch Confirmations</h3>
+                            <div class="value" id="settings-withdraw-batch-conf">-</div>
+                        </div>
+                    </div>
 
-            <div class="cards">
-                <div class="card">
-                    <h3>Update Runtime Confirmations</h3>
-                    <form id="settings-runtime-form" class="settings-form">
-                        <label>Deposit Min Confirmations
-                            <input type="number" min="1" id="settings-input-deposit-conf" required>
-                        </label>
-                        <label>Withdraw Planner Min Confirmations
-                            <input type="number" min="1" id="settings-input-withdraw-planner-conf" required>
-                        </label>
-                        <label>Withdraw Batch Confirmations
-                            <input type="number" min="1" id="settings-input-withdraw-batch-conf" required>
-                        </label>
-                        <label>Updated By
-                            <input type="text" id="settings-input-updated-by" placeholder="backoffice">
-                        </label>
-                        <button type="submit">Save Runtime Settings</button>
-                    </form>
-                </div>
-                <div class="card">
-                    <h3>Update On-Chain Min Deposit</h3>
-                    <form id="settings-min-deposit-form" class="settings-form">
-                        <label>Min Deposit Amount (zats)
-                            <input type="number" min="0" id="settings-input-min-deposit" required>
-                        </label>
-                        <label>Updated By
-                            <input type="text" id="settings-input-min-deposit-updated-by" placeholder="backoffice">
-                        </label>
-                        <button type="submit">Broadcast Min Deposit Update</button>
-                    </form>
-                </div>
-            </div>
+                    <div id="settings-status" class="card hidden"></div>
 
-            <div id="settings-status" class="card hidden"></div>
+                    <h2 class="section-title" style="margin-top:0">Settings Audit</h2>
+                    <div class="table-wrap scroll-y">
+                        <table>
+                            <thead>
+                                <tr><th>When</th><th>Setting</th><th>Old</th><th>New</th><th>Tx Hash</th><th>Updated By</th></tr>
+                            </thead>
+                            <tbody id="settings-audit-tbody">
+                                <tr><td colspan="6" class="loading">Loading...</td></tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
 
-            <h2 class="section-title" style="margin-top:1rem">Settings Audit</h2>
-            <div class="table-wrap scroll-y">
-                <table>
-                    <thead>
-                        <tr><th>When</th><th>Setting</th><th>Old</th><th>New</th><th>Tx Hash</th><th>Updated By</th></tr>
-                    </thead>
-                    <tbody id="settings-audit-tbody">
-                        <tr><td colspan="6" class="loading">Loading...</td></tr>
-                    </tbody>
-                </table>
+                <div class="settings-column">
+                    <div class="card">
+                        <h3>Update Runtime Confirmations</h3>
+                        <form id="settings-runtime-form" class="settings-form">
+                            <div class="settings-form-grid">
+                                <label>Deposit Min Confirmations
+                                    <input type="number" min="1" id="settings-input-deposit-conf" required>
+                                </label>
+                                <label>Withdraw Planner Min Confirmations
+                                    <input type="number" min="1" id="settings-input-withdraw-planner-conf" required>
+                                </label>
+                                <label>Withdraw Batch Confirmations
+                                    <input type="number" min="1" id="settings-input-withdraw-batch-conf" required>
+                                </label>
+                                <label class="full-span">Updated By
+                                    <input type="text" id="settings-input-updated-by" placeholder="backoffice">
+                                </label>
+                            </div>
+                            <div class="settings-form-actions">
+                                <span class="settings-note">Applied from Postgres runtime settings without restart.</span>
+                                <button type="submit">Save Runtime Settings</button>
+                            </div>
+                        </form>
+                    </div>
+                    <div class="card">
+                        <h3>Update On-Chain Min Deposit</h3>
+                        <form id="settings-min-deposit-form" class="settings-form">
+                            <div class="settings-form-grid">
+                                <label>Min Deposit Amount (zats)
+                                    <input type="number" min="0" id="settings-input-min-deposit" required>
+                                </label>
+                                <label class="full-span">Updated By
+                                    <input type="text" id="settings-input-min-deposit-updated-by" placeholder="backoffice">
+                                </label>
+                            </div>
+                            <div class="settings-form-actions">
+                                <span class="settings-note">Broadcasts an on-chain `setMinDepositAmount` transaction.</span>
+                                <button type="submit">Broadcast Min Deposit Update</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
             </div>
         </section>
 
