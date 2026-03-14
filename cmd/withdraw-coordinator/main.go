@@ -55,6 +55,40 @@ type withdrawRequestedV1 struct {
 	FeeBps           uint32 `json:"feeBps"`
 }
 
+type withdrawRequestedV2 struct {
+	Version string `json:"version"`
+
+	WithdrawalID string `json:"withdrawalId"`
+	Requester    string `json:"requester"`
+	Amount       uint64 `json:"amount"`
+
+	RecipientUA      string `json:"recipientUA"`
+	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
+	Expiry           uint64 `json:"expiry"`
+	FeeBps           uint32 `json:"feeBps"`
+	BlockNumber      uint64 `json:"blockNumber"`
+	BlockHash        string `json:"blockHash"`
+	TxHash           string `json:"txHash"`
+	LogIndex         uint   `json:"logIndex"`
+	FinalitySource   string `json:"finalitySource"`
+}
+
+type withdrawRequestedMessage struct {
+	Version          string
+	WithdrawalID     string
+	Requester        string
+	Amount           uint64
+	RecipientUA      string
+	ProofWitnessItem string
+	Expiry           uint64
+	FeeBps           uint32
+	BlockNumber      uint64
+	BlockHash        string
+	TxHash           string
+	LogIndex         uint
+	FinalitySource   string
+}
+
 const (
 	runtimeModeFull = "full"
 )
@@ -92,7 +126,7 @@ func main() {
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 		queueGroup    = flag.String("queue-group", "withdraw-coordinator", "queue consumer group (required for kafka)")
-		queueTopics   = flag.String("queue-topics", "withdrawals.requested.v1", "comma-separated queue topics")
+		queueTopics   = flag.String("queue-topics", "withdrawals.requested.v2", "comma-separated queue topics")
 		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
@@ -594,14 +628,10 @@ func main() {
 			}
 
 			switch env.Version {
-			case "withdrawals.requested.v1":
-				var reqMsg withdrawRequestedV1
-				if err := json.Unmarshal(line, &reqMsg); err != nil {
+			case "withdrawals.requested.v1", "withdrawals.requested.v2":
+				reqMsg, err := parseWithdrawRequestedMessage(line)
+				if err != nil {
 					log.Error("parse withdraw requested", "err", err)
-					ackMessage(qmsg, *ackTimeout, log)
-					continue
-				}
-				if reqMsg.Version != "withdrawals.requested.v1" {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
@@ -673,6 +703,59 @@ func main() {
 				continue
 			}
 		}
+	}
+}
+
+func parseWithdrawRequestedMessage(line []byte) (withdrawRequestedMessage, error) {
+	var env envelope
+	if err := json.Unmarshal(line, &env); err != nil {
+		return withdrawRequestedMessage{}, err
+	}
+
+	switch env.Version {
+	case "withdrawals.requested.v1":
+		var raw withdrawRequestedV1
+		if err := json.Unmarshal(line, &raw); err != nil {
+			return withdrawRequestedMessage{}, err
+		}
+		return withdrawRequestedMessage{
+			Version:          raw.Version,
+			WithdrawalID:     raw.WithdrawalID,
+			Requester:        raw.Requester,
+			Amount:           raw.Amount,
+			RecipientUA:      raw.RecipientUA,
+			ProofWitnessItem: raw.ProofWitnessItem,
+			Expiry:           raw.Expiry,
+			FeeBps:           raw.FeeBps,
+		}, nil
+	case "withdrawals.requested.v2":
+		var raw withdrawRequestedV2
+		if err := json.Unmarshal(line, &raw); err != nil {
+			return withdrawRequestedMessage{}, err
+		}
+		if strings.TrimSpace(raw.BlockHash) == "" {
+			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing blockHash")
+		}
+		if strings.TrimSpace(raw.FinalitySource) == "" {
+			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing finalitySource")
+		}
+		return withdrawRequestedMessage{
+			Version:          raw.Version,
+			WithdrawalID:     raw.WithdrawalID,
+			Requester:        raw.Requester,
+			Amount:           raw.Amount,
+			RecipientUA:      raw.RecipientUA,
+			ProofWitnessItem: raw.ProofWitnessItem,
+			Expiry:           raw.Expiry,
+			FeeBps:           raw.FeeBps,
+			BlockNumber:      raw.BlockNumber,
+			BlockHash:        raw.BlockHash,
+			TxHash:           raw.TxHash,
+			LogIndex:         raw.LogIndex,
+			FinalitySource:   raw.FinalitySource,
+		}, nil
+	default:
+		return withdrawRequestedMessage{}, fmt.Errorf("unsupported withdraw request version %q", env.Version)
 	}
 }
 

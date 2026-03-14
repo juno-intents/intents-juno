@@ -11,6 +11,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // mockEthClient is a test double for EthClient.
@@ -22,6 +23,8 @@ type mockEthClient struct {
 	filterCalls    []ethereum.FilterQuery
 	headers        map[uint64]*types.Header
 	headerErr      error
+	tagHeaders     map[int64]*types.Header
+	tagHeaderErrs  map[int64]error
 }
 
 func (m *mockEthClient) BlockNumber(_ context.Context) (uint64, error) {
@@ -39,6 +42,15 @@ func (m *mockEthClient) HeaderByNumber(_ context.Context, number *big.Int) (*typ
 	}
 	if number == nil {
 		return nil, errors.New("nil header number")
+	}
+	if number.Sign() < 0 {
+		if err := m.tagHeaderErrs[number.Int64()]; err != nil {
+			return nil, err
+		}
+		if hdr, ok := m.tagHeaders[number.Int64()]; ok {
+			return hdr, nil
+		}
+		return m.HeaderByNumber(context.Background(), new(big.Int).SetUint64(m.blockNumber))
 	}
 	if m.headers == nil {
 		m.headers = make(map[uint64]*types.Header)
@@ -62,6 +74,73 @@ func (m *mockEthClient) HeaderByNumber(_ context.Context, number *big.Int) (*typ
 		m.headers[height] = hdr
 	}
 	return hdr, nil
+}
+
+func TestBaseScanner_PollUsesSafeHeadWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	stateStore := NewMemoryStateStore()
+	ctx := context.Background()
+	client := &mockEthClient{
+		blockNumber: 500,
+		tagHeaders: map[int64]*types.Header{
+			int64(rpc.SafeBlockNumber): {
+				Number: new(big.Int).SetUint64(450),
+			},
+		},
+	}
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:      client,
+		BridgeAddr:  common.HexToAddress("0x1234"),
+		StateStore:  stateStore,
+		ServiceName: "test-scanner",
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	if err := scanner.poll(ctx, 1, func(_ context.Context, _ WithdrawRequestedEvent) error { return nil }); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(client.filterCalls) != 1 {
+		t.Fatalf("filter calls: got %d want 1", len(client.filterCalls))
+	}
+	if got := client.filterCalls[0].ToBlock.Uint64(); got != 450 {
+		t.Fatalf("toBlock: got %d want 450", got)
+	}
+}
+
+func TestBaseScanner_PollFallsBackToLatestMinusDepthWhenFinalityTagsUnavailable(t *testing.T) {
+	t.Parallel()
+
+	stateStore := NewMemoryStateStore()
+	ctx := context.Background()
+	client := &mockEthClient{
+		blockNumber: 200,
+		tagHeaderErrs: map[int64]error{
+			int64(rpc.SafeBlockNumber):      errors.New("safe tag unsupported"),
+			int64(rpc.FinalizedBlockNumber): errors.New("finalized tag unsupported"),
+		},
+	}
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:      client,
+		BridgeAddr:  common.HexToAddress("0x1234"),
+		StateStore:  stateStore,
+		ServiceName: "test-scanner",
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	if err := scanner.poll(ctx, 1, func(_ context.Context, _ WithdrawRequestedEvent) error { return nil }); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+	if len(client.filterCalls) != 1 {
+		t.Fatalf("filter calls: got %d want 1", len(client.filterCalls))
+	}
+	if got := client.filterCalls[0].ToBlock.Uint64(); got != 136 {
+		t.Fatalf("toBlock: got %d want 136", got)
+	}
 }
 
 func TestNewBaseScanner_Validation(t *testing.T) {

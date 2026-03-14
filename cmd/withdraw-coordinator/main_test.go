@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -93,5 +94,41 @@ func TestShouldAckWithdrawIngestError(t *testing.T) {
 				t.Fatalf("shouldAckWithdrawIngestError(%v) = %v want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestParseWithdrawRequestedMessage_AcceptsV2(t *testing.T) {
+	t.Parallel()
+
+	line, err := json.Marshal(map[string]any{
+		"version":        "withdrawals.requested.v2",
+		"withdrawalId":   "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"requester":      "0x1111111111111111111111111111111111111111",
+		"amount":         42000,
+		"recipientUA":    "0x" + strings.Repeat("11", 43),
+		"expiry":         1700000000,
+		"feeBps":         50,
+		"blockNumber":    123,
+		"blockHash":      "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"txHash":         "0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+		"logIndex":       7,
+		"finalitySource": "safe",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	msg, err := parseWithdrawRequestedMessage(line)
+	if err != nil {
+		t.Fatalf("parseWithdrawRequestedMessage: %v", err)
+	}
+	if msg.Version != "withdrawals.requested.v2" {
+		t.Fatalf("Version = %q", msg.Version)
+	}
+	if msg.BlockHash != "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" {
+		t.Fatalf("BlockHash = %q", msg.BlockHash)
+	}
+	if msg.FinalitySource != "safe" {
+		t.Fatalf("FinalitySource = %q", msg.FinalitySource)
 	}
 }

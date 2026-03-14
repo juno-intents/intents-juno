@@ -34,16 +34,18 @@ func main() {
 // Fields match the coordinator's withdrawRequestedV1 struct; extra fields
 // (blockNumber, txHash, logIndex) are harmlessly ignored by the coordinator.
 type eventPayload struct {
-	Version      string `json:"version"`
-	WithdrawalID string `json:"withdrawalId"`
-	Requester    string `json:"requester"`
-	Amount       uint64 `json:"amount"`
-	RecipientUA  string `json:"recipientUA"`
-	Expiry       uint64 `json:"expiry"`
-	FeeBps       uint32 `json:"feeBps"`
-	BlockNumber  uint64 `json:"blockNumber"`
-	TxHash       string `json:"txHash"`
-	LogIndex     uint   `json:"logIndex"`
+	Version        string `json:"version"`
+	WithdrawalID   string `json:"withdrawalId"`
+	Requester      string `json:"requester"`
+	Amount         uint64 `json:"amount"`
+	RecipientUA    string `json:"recipientUA"`
+	Expiry         uint64 `json:"expiry"`
+	FeeBps         uint32 `json:"feeBps"`
+	BlockNumber    uint64 `json:"blockNumber"`
+	BlockHash      string `json:"blockHash"`
+	TxHash         string `json:"txHash"`
+	LogIndex       uint   `json:"logIndex"`
+	FinalitySource string `json:"finalitySource"`
 }
 
 func runMain(args []string, stdout io.Writer) error {
@@ -63,12 +65,14 @@ func runMain(args []string, stdout io.Writer) error {
 	startBlock := fs.Int64("start-block", 0, "starting block number (0 = resume from DB state)")
 	pollInterval := fs.Duration("poll-interval", 5*time.Second, "poll interval")
 	maxBlocksPerPoll := fs.Int64("max-blocks-per-poll", 1000, "maximum blocks per poll")
+	headMode := fs.String("head-mode", chainscanner.HeadModeSafe, "Base head mode: safe|finalized")
+	fallbackDepth := fs.Int64("fallback-depth", 64, "fallback confirmation depth when safe/finalized tags are unavailable")
 
 	healthPort := fs.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
 	queueDriver := fs.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 	queueBrokers := fs.String("queue-brokers", "", "comma-separated Kafka broker addresses")
-	withdrawEventTopic := fs.String("withdraw-event-topic", "withdrawals.requested.v1", "Kafka topic for withdraw events")
+	withdrawEventTopic := fs.String("withdraw-event-topic", "withdrawals.requested.v2", "Kafka topic for withdraw events")
 
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -140,6 +144,8 @@ func runMain(args []string, stdout io.Writer) error {
 		ServiceName:      "base-event-scanner",
 		MaxBlocksPerPoll: *maxBlocksPerPoll,
 		PollInterval:     *pollInterval,
+		HeadMode:         *headMode,
+		FallbackDepth:    *fallbackDepth,
 	})
 	if err != nil {
 		return fmt.Errorf("create base scanner: %w", err)
@@ -181,16 +187,18 @@ func runMain(args []string, stdout io.Writer) error {
 			)
 		}
 		payload := eventPayload{
-			Version:      "withdrawals.requested.v1",
-			WithdrawalID: fmt.Sprintf("0x%x", event.WithdrawalID),
-			Requester:    event.Requester.Hex(),
-			Amount:       event.Amount.Uint64(),
-			RecipientUA:  fmt.Sprintf("0x%x", event.RecipientUA),
-			Expiry:       event.Expiry,
-			FeeBps:       uint32(event.FeeBps),
-			BlockNumber:  event.BlockNumber,
-			TxHash:       event.TxHash.Hex(),
-			LogIndex:     event.LogIndex,
+			Version:        "withdrawals.requested.v2",
+			WithdrawalID:   fmt.Sprintf("0x%x", event.WithdrawalID),
+			Requester:      event.Requester.Hex(),
+			Amount:         event.Amount.Uint64(),
+			RecipientUA:    fmt.Sprintf("0x%x", event.RecipientUA),
+			Expiry:         event.Expiry,
+			FeeBps:         uint32(event.FeeBps),
+			BlockNumber:    event.BlockNumber,
+			BlockHash:      event.BlockHash.Hex(),
+			TxHash:         event.TxHash.Hex(),
+			LogIndex:       event.LogIndex,
+			FinalitySource: event.FinalitySource,
 		}
 
 		encoded, err := json.Marshal(payload)

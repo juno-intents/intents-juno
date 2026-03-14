@@ -13,19 +13,22 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/ethereum/go-ethereum/rpc"
 )
 
 // WithdrawRequestedEvent represents a parsed Bridge.WithdrawRequested log.
 type WithdrawRequestedEvent struct {
-	WithdrawalID [32]byte
-	Requester    common.Address
-	Amount       *big.Int
-	RecipientUA  []byte
-	Expiry       uint64
-	FeeBps       uint64
-	BlockNumber  uint64
-	TxHash       common.Hash
-	LogIndex     uint
+	WithdrawalID   [32]byte
+	Requester      common.Address
+	Amount         *big.Int
+	RecipientUA    []byte
+	Expiry         uint64
+	FeeBps         uint64
+	BlockNumber    uint64
+	BlockHash      common.Hash
+	TxHash         common.Hash
+	LogIndex       uint
+	FinalitySource string
 }
 
 // withdrawRequestedTopic0 is keccak256("WithdrawRequested(bytes32,address,uint256,bytes,uint64,uint96)").
@@ -39,6 +42,8 @@ type BaseScannerConfig struct {
 	ServiceName      string
 	MaxBlocksPerPoll int64
 	PollInterval     time.Duration
+	HeadMode         string
+	FallbackDepth    int64
 }
 
 // EthClient is the subset of ethclient.Client used by the scanner.
@@ -59,7 +64,15 @@ type BaseScanner struct {
 	serviceName      string
 	maxBlocksPerPoll int64
 	pollInterval     time.Duration
+	headMode         string
+	fallbackDepth    int64
 }
+
+const (
+	HeadModeSafe         = "safe"
+	HeadModeFinalized    = "finalized"
+	defaultFallbackDepth = int64(64)
+)
 
 // NewBaseScanner creates a new BaseScanner from the provided config.
 func NewBaseScanner(cfg BaseScannerConfig) (*BaseScanner, error) {
@@ -84,6 +97,17 @@ func NewBaseScanner(cfg BaseScannerConfig) (*BaseScanner, error) {
 	if pollInterval <= 0 {
 		pollInterval = 5 * time.Second
 	}
+	headMode := strings.TrimSpace(strings.ToLower(cfg.HeadMode))
+	if headMode == "" {
+		headMode = HeadModeSafe
+	}
+	if headMode != HeadModeSafe && headMode != HeadModeFinalized {
+		return nil, fmt.Errorf("%w: unsupported head mode %q", ErrInvalidConfig, cfg.HeadMode)
+	}
+	fallbackDepth := cfg.FallbackDepth
+	if fallbackDepth <= 0 {
+		fallbackDepth = defaultFallbackDepth
+	}
 
 	return &BaseScanner{
 		client:           cfg.Client,
@@ -92,6 +116,8 @@ func NewBaseScanner(cfg BaseScannerConfig) (*BaseScanner, error) {
 		serviceName:      svc,
 		maxBlocksPerPoll: maxBlocks,
 		pollInterval:     pollInterval,
+		headMode:         headMode,
+		fallbackDepth:    fallbackDepth,
 	}, nil
 }
 
@@ -132,9 +158,9 @@ func (s *BaseScanner) Run(ctx context.Context, startBlock int64, publish func(ct
 }
 
 func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(ctx context.Context, event WithdrawRequestedEvent) error) error {
-	currentBlock, err := s.client.BlockNumber(ctx)
+	currentBlock, finalitySource, err := s.resolveScanHead(ctx)
 	if err != nil {
-		return fmt.Errorf("get block number: %w", err)
+		return err
 	}
 
 	lastHeight, err := s.rewindToCanonicalHeight(ctx, int64(currentBlock))
@@ -167,6 +193,7 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 	}
 
 	for _, event := range events {
+		event.FinalitySource = finalitySource
 		if err := publish(ctx, event); err != nil {
 			return fmt.Errorf("publish event: %w", err)
 		}
@@ -187,6 +214,30 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 	}
 
 	return nil
+}
+
+func (s *BaseScanner) resolveScanHead(ctx context.Context) (uint64, string, error) {
+	mode := s.headMode
+	tag := big.NewInt(int64(rpc.SafeBlockNumber))
+	if mode == HeadModeFinalized {
+		tag = big.NewInt(int64(rpc.FinalizedBlockNumber))
+	}
+	header, err := s.client.HeaderByNumber(ctx, tag)
+	if err == nil && header != nil && header.Number != nil {
+		return header.Number.Uint64(), mode, nil
+	}
+
+	latest, latestErr := s.client.BlockNumber(ctx)
+	if latestErr != nil {
+		if err != nil {
+			return 0, "", fmt.Errorf("resolve %s head: %w (latest fallback: %v)", mode, err, latestErr)
+		}
+		return 0, "", fmt.Errorf("get latest block number: %w", latestErr)
+	}
+	if latest <= uint64(s.fallbackDepth) {
+		return 0, fmt.Sprintf("latest-minus-%d", s.fallbackDepth), nil
+	}
+	return latest - uint64(s.fallbackDepth), fmt.Sprintf("latest-minus-%d", s.fallbackDepth), nil
 }
 
 func (s *BaseScanner) rewindToCanonicalHeight(ctx context.Context, currentBlock int64) (int64, error) {
@@ -358,6 +409,7 @@ func parseWithdrawRequestedLog(lg types.Log) (WithdrawRequestedEvent, error) {
 		Expiry:       expiry.Uint64(),
 		FeeBps:       feeBps.Uint64(),
 		BlockNumber:  lg.BlockNumber,
+		BlockHash:    lg.BlockHash,
 		TxHash:       lg.TxHash,
 		LogIndex:     lg.Index,
 	}, nil

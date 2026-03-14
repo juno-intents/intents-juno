@@ -11,28 +11,35 @@ import (
 func TestEventPayload_CoordinatorCompat(t *testing.T) {
 	t.Parallel()
 
-	// coordinatorMsg mirrors cmd/withdraw-coordinator withdrawRequestedV1.
+	// coordinatorMsg mirrors the fields cmd/withdraw-coordinator requires from withdrawRequestedV2.
 	type coordinatorMsg struct {
-		Version      string `json:"version"`
-		WithdrawalID string `json:"withdrawalId"`
-		Requester    string `json:"requester"`
-		Amount       uint64 `json:"amount"`
-		RecipientUA  string `json:"recipientUA"`
-		Expiry       uint64 `json:"expiry"`
-		FeeBps       uint32 `json:"feeBps"`
+		Version        string `json:"version"`
+		WithdrawalID   string `json:"withdrawalId"`
+		Requester      string `json:"requester"`
+		Amount         uint64 `json:"amount"`
+		RecipientUA    string `json:"recipientUA"`
+		Expiry         uint64 `json:"expiry"`
+		FeeBps         uint32 `json:"feeBps"`
+		BlockNumber    uint64 `json:"blockNumber"`
+		BlockHash      string `json:"blockHash"`
+		TxHash         string `json:"txHash"`
+		LogIndex       uint   `json:"logIndex"`
+		FinalitySource string `json:"finalitySource"`
 	}
 
 	src := eventPayload{
-		Version:      "withdrawals.requested.v1",
-		WithdrawalID: "0xaabbccdd",
-		Requester:    "0x1111111111111111111111111111111111111111",
-		Amount:       42000,
-		RecipientUA:  "0x" + "ff",
-		Expiry:       1700000000,
-		FeeBps:       50,
-		BlockNumber:  123,
-		TxHash:       "0xdeadbeef",
-		LogIndex:     7,
+		Version:        "withdrawals.requested.v2",
+		WithdrawalID:   "0xaabbccdd",
+		Requester:      "0x1111111111111111111111111111111111111111",
+		Amount:         42000,
+		RecipientUA:    "0x" + "ff",
+		Expiry:         1700000000,
+		FeeBps:         50,
+		BlockNumber:    123,
+		BlockHash:      "0xabc123",
+		TxHash:         "0xdeadbeef",
+		LogIndex:       7,
+		FinalitySource: "safe",
 	}
 
 	raw, err := json.Marshal(src)
@@ -65,6 +72,21 @@ func TestEventPayload_CoordinatorCompat(t *testing.T) {
 	}
 	if dst.FeeBps != src.FeeBps {
 		t.Errorf("feeBps: got %d want %d", dst.FeeBps, src.FeeBps)
+	}
+	if dst.BlockNumber != src.BlockNumber {
+		t.Errorf("blockNumber: got %d want %d", dst.BlockNumber, src.BlockNumber)
+	}
+	if dst.BlockHash != src.BlockHash {
+		t.Errorf("blockHash: got %q want %q", dst.BlockHash, src.BlockHash)
+	}
+	if dst.TxHash != src.TxHash {
+		t.Errorf("txHash: got %q want %q", dst.TxHash, src.TxHash)
+	}
+	if dst.LogIndex != src.LogIndex {
+		t.Errorf("logIndex: got %d want %d", dst.LogIndex, src.LogIndex)
+	}
+	if dst.FinalitySource != src.FinalitySource {
+		t.Errorf("finalitySource: got %q want %q", dst.FinalitySource, src.FinalitySource)
 	}
 }
 
