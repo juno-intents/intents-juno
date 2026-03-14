@@ -58,6 +58,21 @@ production_threshold() {
   jq -er '.threshold // .operator_threshold // .operatorThreshold // .max_signers_threshold // empty' "$dkg_summary"
 }
 
+production_default_bridge_verifier_address() {
+  printf '%s\n' "0x397A5f7f3dBd538f23DE225B51f532c34448dA9B"
+}
+
+production_bridge_verifier_address() {
+  local inventory="$1"
+  local verifier_address
+  verifier_address="$(production_json_optional "$inventory" '.contracts.verifier_address | select(type == "string" and length > 0)')"
+  if [[ -n "$verifier_address" ]]; then
+    printf '%s\n' "$verifier_address"
+    return 0
+  fi
+  production_default_bridge_verifier_address
+}
+
 production_secret_keys_json() {
   local inventory="$1"
   local inventory_dir="$2"

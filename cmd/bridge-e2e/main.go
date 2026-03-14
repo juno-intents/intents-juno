@@ -895,31 +895,6 @@ func parseArgs(args []string) (config, error) {
 	if !cfg.VerifierSet {
 		return cfg, errors.New("--verifier-address is required")
 	}
-	if !cfg.SP1.Auto {
-		return cfg, errors.New("--sp1-auto is required")
-	}
-	if strings.TrimSpace(cfg.SP1.Bin) == "" {
-		return cfg, errors.New("--sp1-bin is required when --sp1-auto is set")
-	}
-	if strings.TrimSpace(cfg.SP1.RPCURL) == "" {
-		return cfg, errors.New("--sp1-rpc-url is required when --sp1-auto is set")
-	}
-	if looksLikeBaseChainRPCURL(cfg.SP1.RPCURL) {
-		return cfg, fmt.Errorf("--sp1-rpc-url must point to the Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not Base chain RPC: %s", cfg.SP1.RPCURL)
-	}
-	if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionDirectCLI &&
-		strings.TrimSpace(cfg.SP1.RequestorKeyHex) == "" {
-		return cfg, errors.New("--sp1-requestor-key-file or --sp1-requestor-key-hex is required when --sp1-auto is set")
-	}
-	if strings.TrimSpace(cfg.SP1.DepositProgramURL) == "" {
-		return cfg, errors.New("--sp1-deposit-program-url is required when --sp1-auto is set")
-	}
-	if strings.TrimSpace(cfg.SP1.WithdrawProgramURL) == "" {
-		return cfg, errors.New("--sp1-withdraw-program-url is required when --sp1-auto is set")
-	}
-	if cfg.SP1.InputS3Bucket == "" {
-		return cfg, errors.New("--sp1-input-s3-bucket is required when --sp1-input-mode guest-witness-v1")
-	}
 	manualIVKSet := strings.TrimSpace(sp1DepositOWalletIVKHex) != ""
 	manualOVKSet := strings.TrimSpace(sp1WithdrawOWalletOVKHex) != ""
 	manualDepositItemsSet := len(sp1DepositWitnessItemFiles) > 0
@@ -928,6 +903,31 @@ func parseArgs(args []string) (config, error) {
 	manualAll := manualIVKSet && manualOVKSet && manualDepositItemsSet && manualWithdrawItemsSet
 
 	if !cfg.DeployOnly {
+		if !cfg.SP1.Auto {
+			return cfg, errors.New("--sp1-auto is required")
+		}
+		if strings.TrimSpace(cfg.SP1.Bin) == "" {
+			return cfg, errors.New("--sp1-bin is required when --sp1-auto is set")
+		}
+		if strings.TrimSpace(cfg.SP1.RPCURL) == "" {
+			return cfg, errors.New("--sp1-rpc-url is required when --sp1-auto is set")
+		}
+		if looksLikeBaseChainRPCURL(cfg.SP1.RPCURL) {
+			return cfg, fmt.Errorf("--sp1-rpc-url must point to the Succinct prover network RPC (for example https://rpc.mainnet.succinct.xyz), not Base chain RPC: %s", cfg.SP1.RPCURL)
+		}
+		if cfg.SP1.ProofSubmissionMode == sp1ProofSubmissionDirectCLI &&
+			strings.TrimSpace(cfg.SP1.RequestorKeyHex) == "" {
+			return cfg, errors.New("--sp1-requestor-key-file or --sp1-requestor-key-hex is required when --sp1-auto is set")
+		}
+		if strings.TrimSpace(cfg.SP1.DepositProgramURL) == "" {
+			return cfg, errors.New("--sp1-deposit-program-url is required when --sp1-auto is set")
+		}
+		if strings.TrimSpace(cfg.SP1.WithdrawProgramURL) == "" {
+			return cfg, errors.New("--sp1-withdraw-program-url is required when --sp1-auto is set")
+		}
+		if cfg.SP1.InputS3Bucket == "" {
+			return cfg, errors.New("--sp1-input-s3-bucket is required when --sp1-input-mode guest-witness-v1")
+		}
 		if manualAny && !manualAll {
 			return cfg, errors.New("all guest witness manual inputs must be set together: --sp1-deposit-owallet-ivk-hex, --sp1-withdraw-owallet-ovk-hex, --sp1-deposit-witness-item-file, --sp1-withdraw-witness-item-file")
 		}
@@ -970,29 +970,40 @@ func parseArgs(args []string) (config, error) {
 		}
 	}
 	if strings.TrimSpace(depositFinalOrchardRootHex) == "" {
-		return cfg, errors.New("--deposit-final-orchard-root is required")
-	}
-	cfg.DepositFinalOrchardRoot, err = parseHash32Flag("--deposit-final-orchard-root", depositFinalOrchardRootHex)
-	if err != nil {
-		return cfg, err
-	}
-	if strings.TrimSpace(withdrawFinalOrchardRootHex) == "" {
-		cfg.WithdrawFinalOrchardRoot = cfg.DepositFinalOrchardRoot
+		if !cfg.DeployOnly {
+			return cfg, errors.New("--deposit-final-orchard-root is required")
+		}
+		if strings.TrimSpace(withdrawFinalOrchardRootHex) != "" {
+			return cfg, errors.New("--withdraw-final-orchard-root requires --deposit-final-orchard-root")
+		}
 	} else {
-		cfg.WithdrawFinalOrchardRoot, err = parseHash32Flag("--withdraw-final-orchard-root", withdrawFinalOrchardRootHex)
+		cfg.DepositFinalOrchardRoot, err = parseHash32Flag("--deposit-final-orchard-root", depositFinalOrchardRootHex)
 		if err != nil {
 			return cfg, err
 		}
+		if strings.TrimSpace(withdrawFinalOrchardRootHex) == "" {
+			cfg.WithdrawFinalOrchardRoot = cfg.DepositFinalOrchardRoot
+		} else {
+			cfg.WithdrawFinalOrchardRoot, err = parseHash32Flag("--withdraw-final-orchard-root", withdrawFinalOrchardRootHex)
+			if err != nil {
+				return cfg, err
+			}
+		}
 	}
-	if cfg.DepositCheckpointHeight == 0 {
-		return cfg, errors.New("--deposit-checkpoint-height is required and must be > 0")
+	depositCheckpointHeightSet := cfg.DepositCheckpointHeight != 0
+	depositCheckpointHashSet := strings.TrimSpace(depositCheckpointBlockHashHex) != ""
+	if depositCheckpointHeightSet != depositCheckpointHashSet {
+		return cfg, errors.New("--deposit-checkpoint-height and --deposit-checkpoint-block-hash must be set together")
 	}
-	if strings.TrimSpace(depositCheckpointBlockHashHex) == "" {
-		return cfg, errors.New("--deposit-checkpoint-block-hash is required")
-	}
-	cfg.DepositCheckpointBlockHash, err = parseHash32Flag("--deposit-checkpoint-block-hash", depositCheckpointBlockHashHex)
-	if err != nil {
-		return cfg, err
+	if !depositCheckpointHeightSet {
+		if !cfg.DeployOnly {
+			return cfg, errors.New("--deposit-checkpoint-height is required and must be > 0")
+		}
+	} else {
+		cfg.DepositCheckpointBlockHash, err = parseHash32Flag("--deposit-checkpoint-block-hash", depositCheckpointBlockHashHex)
+		if err != nil {
+			return cfg, err
+		}
 	}
 	withdrawCheckpointHeightSet := cfg.WithdrawCheckpointHeight != 0
 	withdrawCheckpointHashSet := strings.TrimSpace(withdrawCheckpointBlockHashHex) != ""

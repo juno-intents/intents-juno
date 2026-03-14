@@ -118,6 +118,40 @@ func TestParseArgs_Valid(t *testing.T) {
 	}
 }
 
+func TestParseArgs_DeployOnlyAllowsMinimalDeploymentFlags(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "84532",
+		"--deploy-only",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if !cfg.DeployOnly {
+		t.Fatalf("deploy-only: got %v want true", cfg.DeployOnly)
+	}
+	if cfg.SP1.Auto {
+		t.Fatalf("sp1-auto: got %v want false", cfg.SP1.Auto)
+	}
+	if len(cfg.OperatorAddresses) != 3 {
+		t.Fatalf("operator addresses: got %d want 3", len(cfg.OperatorAddresses))
+	}
+	if cfg.DepositCheckpointHeight != 0 {
+		t.Fatalf("deposit checkpoint height: got %d want 0", cfg.DepositCheckpointHeight)
+	}
+	if cfg.DepositFinalOrchardRoot != (common.Hash{}) {
+		t.Fatalf("deposit final orchard root: got %s want zero", cfg.DepositFinalOrchardRoot.Hex())
+	}
+}
+
 func TestParseArgs_RequiresEnoughOperatorKeys(t *testing.T) {
 	t.Parallel()
 

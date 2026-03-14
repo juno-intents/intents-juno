@@ -42,12 +42,12 @@ if [[ "\${1:-}" == "deploy" ]]; then
 fi
 deploy_only="false"
 output_path=""
-dkg_summary=""
+has_dkg_summary="false"
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
     --deploy-only) deploy_only="true"; shift ;;
     --output) output_path="\$2"; shift 2 ;;
-    --dkg-summary) dkg_summary="\$2"; shift 2 ;;
+    --dkg-summary) has_dkg_summary="true"; shift 2 ;;
     *) shift ;;
   esac
 done
@@ -59,8 +59,8 @@ done
   printf 'missing --output path\n' >&2
   exit 1
 }
-[[ -n "\$dkg_summary" ]] || {
-  printf 'missing --dkg-summary path\n' >&2
+[[ "\$has_dkg_summary" == "false" ]] || {
+  printf 'unexpected --dkg-summary path\n' >&2
   exit 1
 }
 cp "$bridge_summary_fixture" "\$output_path"
@@ -175,6 +175,55 @@ EOF
   assert_eq "$(jq -r '.shared_manifest_path' "$operator_dir/operator-deploy.json")" "$run_dir/shared-manifest.json" "run label shared manifest path"
   assert_eq "$(jq -r '.rollout_state_file' "$operator_dir/operator-deploy.json")" "$run_dir/rollout-state.json" "run label rollout state path"
   assert_eq "$(jq -r '.shared_manifest_path' "$run_dir/app/app-deploy.json")" "$run_dir/shared-manifest.json" "run label app shared manifest path"
+  rm -rf "$workdir"
+}
+
+test_deploy_coordinator_uses_bridge_e2e_deploy_contract() {
+  local workdir output_dir fake_bin log_dir
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+EOF
+  cat >"$workdir/deployer.key" <<'EOF'
+0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_bridge_deploy_binary "$fake_bin/bridge-e2e" "$log_dir/bridge.log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --bridge-deploy-binary "$fake_bin/bridge-e2e" \
+    --deployer-key-file "$workdir/deployer.key" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$log_dir/bridge.log")" '--contracts-out /Users/ardud/intents-juno/monorepo/contracts/out' "bridge deploy uses repo contracts output"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--threshold 2' "bridge deploy forwards dkg threshold"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--verifier-address 0x397A5f7f3dBd538f23DE225B51f532c34448dA9B' "bridge deploy forwards verifier address"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--deposit-image-id 0x000000000000000000000000000000000000000000000000000000000000aa01' "bridge deploy forwards deposit image id"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--withdraw-image-id 0x000000000000000000000000000000000000000000000000000000000000aa02' "bridge deploy forwards withdraw image id"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x1111111111111111111111111111111111111111' "bridge deploy forwards first operator"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x6666666666666666666666666666666666666666' "bridge deploy forwards second operator"
+  assert_contains "$(cat "$log_dir/bridge.log")" '--operator-address 0x7777777777777777777777777777777777777777' "bridge deploy forwards third operator"
+  assert_not_contains "$(cat "$log_dir/bridge.log")" '--dkg-summary' "bridge deploy does not pass dkg summary"
+  assert_file_exists "$output_dir/alpha/bridge-summary.json" "bridge deploy summary"
   rm -rf "$workdir"
 }
 

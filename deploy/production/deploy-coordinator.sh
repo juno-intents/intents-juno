@@ -84,6 +84,11 @@ done
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
 base_rpc_url="$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
+deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
+withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
+bridge_verifier_address="$(production_bridge_verifier_address "$inventory")"
+bridge_threshold="$(production_threshold "$dkg_summary")"
 allow_local_resolvers="false"
 [[ "$env_slug" == "alpha" ]] && allow_local_resolvers="true"
 inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
@@ -147,19 +152,30 @@ if [[ -n "$existing_bridge_summary" ]]; then
   cp "$existing_bridge_summary" "$bridge_summary"
 else
   log "Deploying bridge contracts"
-  "$bridge_deploy_binary" \
+  bridge_deploy_cmd=(
+    "$bridge_deploy_binary"
     --deploy-only \
-    --rpc-url "$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')" \
-    --chain-id "$(production_json_required "$inventory" '.contracts.base_chain_id')" \
+    --rpc-url "$base_rpc_url" \
+    --chain-id "$base_chain_id" \
     --deployer-key-file "$deployer_key_file" \
+    --contracts-out "$REPO_ROOT/contracts/out" \
+    --threshold "$bridge_threshold" \
+    --verifier-address "$bridge_verifier_address" \
+    --deposit-image-id "$deposit_image_id" \
+    --withdraw-image-id "$withdraw_image_id" \
     --fee-bps "$(production_default_bridge_fee_bps)" \
     --relayer-tip-bps "$(production_default_bridge_relayer_tip_bps)" \
     --refund-window-seconds "$(production_default_bridge_refund_window_seconds)" \
     --max-expiry-extension-seconds "$(production_default_bridge_max_expiry_extension_seconds)" \
     --min-deposit-amount "$(production_default_bridge_min_deposit_amount_zat)" \
     --min-withdraw-amount "$(production_default_bridge_min_withdraw_amount_zat)" \
-    --dkg-summary "$dkg_summary" \
     --output "$bridge_summary"
+  )
+  while IFS= read -r operator_address; do
+    [[ -n "$operator_address" ]] || continue
+    bridge_deploy_cmd+=(--operator-address "$operator_address")
+  done < <(jq -r '.operators[].operator_id | select(type == "string" and length > 0)' "$dkg_summary")
+  "${bridge_deploy_cmd[@]}"
 fi
 production_refresh_bridge_summary_owallet_ua "$bridge_summary" "$dkg_summary" "$dkg_completion"
 
