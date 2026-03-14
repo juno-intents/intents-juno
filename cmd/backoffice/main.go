@@ -18,8 +18,12 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/backoffice"
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	ethutil "github.com/juno-intents/intents-juno/internal/eth"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
 func main() {
@@ -53,10 +57,15 @@ func main() {
 		operatorAddrsRaw          = flag.String("operator-addresses", "", "Comma-separated list of operator addresses")
 		baseRelayerSignerAddrsRaw = flag.String("base-relayer-signer-addresses", "", "Comma-separated list of Base relayer signer addresses")
 
-		serviceURLsRaw       = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
-		operatorEndpointsRaw = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
-		kafkaBrokersRaw      = flag.String("kafka-brokers", "", "Comma-separated Kafka broker addresses for health probe")
-		ipfsApiURL           = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
+		serviceURLsRaw                  = flag.String("service-urls", "", "Comma-separated list of service healthz URLs to poll")
+		operatorEndpointsRaw            = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
+		kafkaBrokersRaw                 = flag.String("kafka-brokers", "", "Comma-separated Kafka broker addresses for health probe")
+		ipfsApiURL                      = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+		minDepositAdminKeyEnv           = flag.String("min-deposit-admin-key-env", "MIN_DEPOSIT_ADMIN_PRIVATE_KEY", "env var containing the dedicated minDepositAdmin private key")
+		minDepositUpdateGasLimit        = flag.Uint64("min-deposit-update-gas-limit", 0, "optional gas limit override for setMinDepositAmount")
 
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
 
@@ -94,6 +103,10 @@ func main() {
 	}
 	if *opRegistryAddr == "" || !common.IsHexAddress(*opRegistryAddr) {
 		fmt.Fprintln(os.Stderr, "error: --operator-registry-address must be a valid hex address")
+		os.Exit(2)
+	}
+	if *depositMinConfirmations <= 0 || *withdrawPlannerMinConfirmations <= 0 || *withdrawBatchConfirmations <= 0 {
+		fmt.Fprintln(os.Stderr, "error: runtime confirmation defaults must be > 0")
 		os.Exit(2)
 	}
 
@@ -251,6 +264,87 @@ func main() {
 		os.Exit(2)
 	}
 
+	runtimeStore, err := runtimeconfig.New(pool)
+	if err != nil {
+		log.Error("init runtime settings store", "err", err)
+		os.Exit(2)
+	}
+	if err := runtimeStore.EnsureSchema(ctx); err != nil {
+		log.Error("ensure runtime settings schema", "err", err)
+		os.Exit(2)
+	}
+	if _, err := runtimeStore.EnsureDefaults(ctx, runtimeconfig.Settings{
+		DepositMinConfirmations:         *depositMinConfirmations,
+		WithdrawPlannerMinConfirmations: *withdrawPlannerMinConfirmations,
+		WithdrawBatchConfirmations:      *withdrawBatchConfirmations,
+	}, "backoffice"); err != nil {
+		log.Error("ensure runtime settings defaults", "err", err)
+		os.Exit(2)
+	}
+
+	settingsAuditStore, err := backoffice.NewSettingsAuditStore(pool)
+	if err != nil {
+		log.Error("init settings audit store", "err", err)
+		os.Exit(2)
+	}
+	if err := settingsAuditStore.EnsureSchema(ctx); err != nil {
+		log.Error("ensure settings audit schema", "err", err)
+		os.Exit(2)
+	}
+
+	bridgeReader, err := bridgeconfig.NewReader(baseClient, common.HexToAddress(*bridgeAddr))
+	if err != nil {
+		log.Error("init bridge settings reader", "err", err)
+		os.Exit(2)
+	}
+	initialBridgeSettings, err := bridgeReader.Load(ctx)
+	if err != nil {
+		log.Error("load bridge settings", "err", err)
+		os.Exit(2)
+	}
+	bridgeSettingsCache, err := bridgeconfig.NewCache(bridgeReader, 5*time.Second, log)
+	if err != nil {
+		log.Error("init bridge settings cache", "err", err)
+		os.Exit(2)
+	}
+	go bridgeSettingsCache.Start(ctx)
+
+	var minDepositUpdater backoffice.MinDepositUpdater
+	minDepositAdminKey := strings.TrimSpace(os.Getenv(*minDepositAdminKeyEnv))
+	if minDepositAdminKey == "" {
+		log.Warn("min deposit admin updates disabled; no private key configured", "env", *minDepositAdminKeyEnv)
+	} else {
+		keys, err := ethutil.ParsePrivateKeysHexList(minDepositAdminKey)
+		if err != nil {
+			log.Error("parse min deposit admin private key", "err", err, "env", *minDepositAdminKeyEnv)
+			os.Exit(2)
+		}
+		if len(keys) != 1 {
+			log.Error("min deposit admin env must contain exactly one private key", "env", *minDepositAdminKeyEnv)
+			os.Exit(2)
+		}
+		signer := ethutil.NewLocalSigner(keys[0])
+		if initialBridgeSettings.MinDepositAdmin != signer.Address() {
+			log.Error(
+				"configured min deposit admin signer does not match on-chain minDepositAdmin",
+				"expected", initialBridgeSettings.MinDepositAdmin.Hex(),
+				"got", signer.Address().Hex(),
+			)
+			os.Exit(2)
+		}
+		minDepositUpdater, err = backoffice.NewMinDepositTxUpdater(
+			ctx,
+			baseClient,
+			common.HexToAddress(*bridgeAddr),
+			signer,
+			*minDepositUpdateGasLimit,
+		)
+		if err != nil {
+			log.Error("init min deposit updater", "err", err)
+			os.Exit(2)
+		}
+	}
+
 	// Build server.
 	srv, err := backoffice.New(backoffice.ServerConfig{
 		Pool:       pool,
@@ -261,8 +355,12 @@ func main() {
 		JunoRPCUser: strings.TrimSpace(*junoRPCUser),
 		JunoRPCPass: strings.TrimSpace(*junoRPCPass),
 
-		DLQStore:   dlqStore,
-		AlertStore: alertStore,
+		DLQStore:          dlqStore,
+		AlertStore:        alertStore,
+		RuntimeStore:      runtimeStore,
+		BridgeSettings:    bridgeSettingsCache,
+		SettingsAudit:     settingsAuditStore,
+		MinDepositUpdater: minDepositUpdater,
 
 		BridgeAddress:              common.HexToAddress(*bridgeAddr),
 		WJunoAddress:               common.HexToAddress(*wjunoAddr),
@@ -285,7 +383,10 @@ func main() {
 		OperatorGasMinWei:      operatorGasMinWei,
 		BaseRelayerFundsMinWei: baseRelayerGasMinWei,
 		ProverFundsMinWei:      proverFundsMinWei,
-		ReadinessCheck:         pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+		ReadinessCheck: healthz.CombineReadinessChecks(
+			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+			bridgeSettingsCache.Ready,
+		),
 
 		Log: log,
 	})

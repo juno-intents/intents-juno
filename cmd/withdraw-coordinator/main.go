@@ -30,6 +30,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
@@ -102,19 +103,20 @@ func main() {
 		blobMaxGetSize = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
 
 		// Planner (juno-txbuild)
-		txbuildBin        = flag.String("juno-txbuild-bin", "juno-txbuild", "path to juno-txbuild binary")
-		junoWalletID      = flag.String("juno-wallet-id", "", "juno-txbuild wallet id (required)")
-		junoChangeAddress = flag.String("juno-change-address", "", "juno-txbuild change address (required)")
-		junoCoinType      = flag.Uint("juno-coin-type", 0, "ZIP-32 coin type for juno-txbuild")
-		junoAccount       = flag.Uint("juno-account", 0, "unified account id for juno-txbuild")
-		junoMinConf       = flag.Int64("juno-minconf", 1, "minimum confirmations for juno-txbuild input note selection")
-		junoExpiryOffset  = flag.Uint("juno-expiry-offset", 40, "juno tx expiry offset (min 4)")
-		junoFeeMultiplier = flag.Uint64("juno-fee-multiplier", 1, "juno-txbuild fee multiplier")
-		junoFeeAddZat     = flag.Uint64("juno-fee-add-zat", 0, "juno-txbuild extra absolute fee")
-		junoMinChangeZat  = flag.Uint64("juno-min-change-zat", 0, "juno-txbuild min change amount")
-		junoMinNoteZat    = flag.Uint64("juno-min-note-zat", 0, "juno-txbuild min note amount")
-		junoScanURL       = flag.String("juno-scan-url", "", "optional juno-scan URL for juno-txbuild")
-		junoScanBearerEnv = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for optional juno-scan bearer token")
+		txbuildBin              = flag.String("juno-txbuild-bin", "juno-txbuild", "path to juno-txbuild binary")
+		junoWalletID            = flag.String("juno-wallet-id", "", "juno-txbuild wallet id (required)")
+		junoChangeAddress       = flag.String("juno-change-address", "", "juno-txbuild change address (required)")
+		junoCoinType            = flag.Uint("juno-coin-type", 0, "ZIP-32 coin type for juno-txbuild")
+		junoAccount             = flag.Uint("juno-account", 0, "unified account id for juno-txbuild")
+		junoMinConf             = flag.Int64("juno-minconf", 1, "minimum confirmations for juno-txbuild input note selection")
+		junoExpiryOffset        = flag.Uint("juno-expiry-offset", 40, "juno tx expiry offset (min 4)")
+		junoFeeMultiplier       = flag.Uint64("juno-fee-multiplier", 1, "juno-txbuild fee multiplier")
+		junoFeeAddZat           = flag.Uint64("juno-fee-add-zat", 0, "juno-txbuild extra absolute fee")
+		junoMinChangeZat        = flag.Uint64("juno-min-change-zat", 0, "juno-txbuild min change amount")
+		junoMinNoteZat          = flag.Uint64("juno-min-note-zat", 0, "juno-txbuild min note amount")
+		junoScanURL             = flag.String("juno-scan-url", "", "optional juno-scan URL for juno-txbuild")
+		junoScanBearerEnv       = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for optional juno-scan bearer token")
+		depositMinConfirmations = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
 
 		// Juno RPC (broadcast + confirm)
 		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required)")
@@ -215,6 +217,10 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: juno txbuild settings invalid (--juno-minconf > 0, --juno-expiry-offset >= 4, --juno-fee-multiplier >= 1)")
 			os.Exit(2)
 		}
+		if *depositMinConfirmations <= 0 {
+			fmt.Fprintln(os.Stderr, "error: --deposit-min-confirmations must be > 0")
+			os.Exit(2)
+		}
 		if *baseRelayerTimeout <= 0 {
 			fmt.Fprintln(os.Stderr, "error: --base-relayer-timeout must be > 0")
 			os.Exit(2)
@@ -312,6 +318,29 @@ func main() {
 		log.Error("ensure schema", "err", err)
 		os.Exit(2)
 	}
+	runtimeStore, err := runtimeconfig.New(pool)
+	if err != nil {
+		log.Error("init runtime settings store", "err", err)
+		os.Exit(2)
+	}
+	if err := runtimeStore.EnsureSchema(ctx); err != nil {
+		log.Error("ensure runtime settings schema", "err", err)
+		os.Exit(2)
+	}
+	if _, err := runtimeStore.EnsureDefaults(ctx, runtimeconfig.Settings{
+		DepositMinConfirmations:         *depositMinConfirmations,
+		WithdrawPlannerMinConfirmations: *junoMinConf,
+		WithdrawBatchConfirmations:      *junoConfirmations,
+	}, "withdraw-coordinator"); err != nil {
+		log.Error("ensure runtime settings defaults", "err", err)
+		os.Exit(2)
+	}
+	runtimeSettingsCache, err := runtimeconfig.NewCache(runtimeStore, 5*time.Second, log)
+	if err != nil {
+		log.Error("init runtime settings cache", "err", err)
+		os.Exit(2)
+	}
+	go runtimeSettingsCache.Start(ctx)
 
 	artifactStore, err := newBlobStore(ctx, *blobDriver, *blobBucket, *blobPrefix, *blobMaxGetSize)
 	if err != nil {
@@ -327,7 +356,7 @@ func main() {
 		extender    withdrawcoordinator.ExpiryExtender
 		paidMarker  withdrawcoordinator.PaidMarker
 	)
-	planner, err = withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
+	txBuildPlanner, err := withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
 		Binary:           *txbuildBin,
 		WalletID:         *junoWalletID,
 		ChangeAddress:    *junoChangeAddress,
@@ -351,6 +380,7 @@ func main() {
 		log.Error("init txbuild planner", "err", err)
 		os.Exit(2)
 	}
+	planner = txBuildPlanner.WithRuntimeSettings(runtimeSettingsCache)
 
 	tssHTTPClient, err := newTSSHTTPClient(*tssTimeout, *tssServerCAFile, *tssClientCertFile, *tssClientKeyFile, *tssServerName)
 	if err != nil {
@@ -390,7 +420,7 @@ func main() {
 		log.Error("init juno confirmer", "err", err)
 		os.Exit(2)
 	}
-	confirmer = junoConfirmer
+	confirmer = junoConfirmer.WithRuntimeSettings(runtimeSettingsCache)
 
 	baseClient, err := httpapi.NewClient(*baseRelayerURL, baseRelayerAuth, httpapi.WithHTTPClient(&http.Client{Timeout: *baseRelayerTimeout}))
 	if err != nil {
@@ -432,12 +462,15 @@ func main() {
 			log.Error("ensure lease schema", "err", err)
 			os.Exit(2)
 		}
+		readinessChecker := readinessFunc(func(ctx context.Context) error {
+			return healthz.CombineReadinessChecks(baseClient.Ready, runtimeSettingsCache.Ready)(ctx)
+		})
 		elector, err = withdrawcoordinator.NewLeaderElector(
 			leaseStore,
 			*leaderLeaseName,
 			*owner,
 			*leaderLeaseTTL,
-			withdrawcoordinator.WithReadinessChecker(baseClient),
+			withdrawcoordinator.WithReadinessChecker(readinessChecker),
 		)
 		if err != nil {
 			log.Error("init leader elector", "err", err)
@@ -479,6 +512,7 @@ func main() {
 			healthz.WithReadinessCheck(healthz.CombineReadinessChecks(
 				pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 				baseClient.Ready,
+				runtimeSettingsCache.Ready,
 			)),
 		); err != nil {
 			log.Error("healthz server", "err", err)
@@ -640,6 +674,12 @@ func main() {
 			}
 		}
 	}
+}
+
+type readinessFunc func(context.Context) error
+
+func (f readinessFunc) Ready(ctx context.Context) error {
+	return f(ctx)
 }
 
 func withTimeout(ctx context.Context, d time.Duration) (context.Context, context.CancelFunc) {

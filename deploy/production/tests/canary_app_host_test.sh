@@ -31,6 +31,26 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_fake_cast() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+printf 'cast %s\n' "$*" >>"$TEST_LOG_DIR/cast.log"
+if [[ "$1" == "wallet" && "$2" == "address" ]]; then
+  printf '0x0000000000000000000000000000000000000abc\n'
+  exit 0
+fi
+if [[ "$1" == "call" ]]; then
+  printf '0x0000000000000000000000000000000000000abc\n'
+  exit 0
+fi
+printf 'unexpected cast invocation: %s\n' "$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 test_canary_app_host_checks_remote_services_and_http_endpoints() {
   local workdir fake_bin log_dir shared_manifest app_manifest output_json
   workdir="$(mktemp -d)"
@@ -48,6 +68,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
@@ -82,10 +103,13 @@ case "$url" in
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
-    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample"}\n'
+    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -95,6 +119,7 @@ case "$url" in
     ;;
 esac
 EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
   chmod +x "$fake_bin/ssh" "$fake_bin/curl"
 
   TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
@@ -105,10 +130,15 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active bridge-api" "bridge systemd checked"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active backoffice" "backoffice systemd checked"
   assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/config" "bridge config checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime" "backoffice settings checked"
   assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/" "backoffice ui checked"
+  assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "canary derives configured min deposit admin signer"
+  assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222 minDepositAdmin()(address)" "canary checks on-chain minDepositAdmin"
   assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready for test"
   assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "passed" "bridge config passed"
   assert_eq "$(jq -r '.checks.backoffice_ui.status' "$output_json")" "passed" "backoffice ui passed"
+  assert_eq "$(jq -r '.checks.backoffice_settings.status' "$output_json")" "passed" "backoffice settings passed"
+  assert_eq "$(jq -r '.checks.min_deposit_admin.status' "$output_json")" "passed" "min deposit admin passed"
   rm -rf "$workdir"
 }
 
@@ -126,6 +156,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"

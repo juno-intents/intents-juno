@@ -876,6 +876,7 @@ checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
 dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
 spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"
+deposit_relayer_script="/usr/local/bin/intents-juno-deposit-relayer.sh"
 withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
 base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
 [[ -f "$checkpoint_signer_script" ]] || {
@@ -892,6 +893,10 @@ base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
 }
 [[ -f "$spendauth_signer_script" ]] || {
   echo "spendauth signer wrapper is missing: $spendauth_signer_script" >&2
+  exit 1
+}
+[[ -f "$deposit_relayer_script" ]] || {
+  echo "deposit-relayer wrapper is missing: $deposit_relayer_script" >&2
   exit 1
 }
 [[ -f "$withdraw_coordinator_script" ]] || {
@@ -1078,6 +1083,127 @@ EOF_SPENDAUTH_WRAPPER
   rm -f "$spendauth_tmp"
 fi
 
+deposit_relayer_tmp="$(mktemp)"
+cat >"$deposit_relayer_tmp" <<'EOF_DEPOSIT_RELAYER_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "deposit-relayer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "deposit-relayer requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
+  echo "deposit-relayer requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "deposit-relayer requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "deposit-relayer requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "deposit-relayer requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${DEPOSIT_IMAGE_ID:-}" ]] || {
+  echo "deposit-relayer requires DEPOSIT_IMAGE_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_URL:-}" ]] || {
+  echo "deposit-relayer requires BASE_RELAYER_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_RELAYER_AUTH_TOKEN:-}" ]] || {
+  echo "deposit-relayer requires BASE_RELAYER_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+  echo "deposit-relayer requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
+  exit 1
+fi
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
+  1|true|yes|on)
+    export JUNO_QUEUE_KAFKA_TLS=true
+    ;;
+  *)
+    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    exit 1
+    ;;
+esac
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
+
+deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
+deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
+deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
+deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
+
+args=(
+  --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
+  --store-driver postgres
+  --base-chain-id "${BASE_CHAIN_ID}"
+  --bridge-address "${BRIDGE_ADDRESS}"
+  --operators "${CHECKPOINT_OPERATORS}"
+  --operator-threshold "${CHECKPOINT_THRESHOLD}"
+  --deposit-image-id "${DEPOSIT_IMAGE_ID}"
+  --base-relayer-url "${BASE_RELAYER_URL}"
+  --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
+  --owner "${deposit_owner}"
+  --proof-driver queue
+  --proof-request-topic "${PROOF_REQUEST_TOPIC:-proof.requests.v1}"
+  --proof-result-topic "${PROOF_RESULT_TOPIC:-proof.fulfillments.v1}"
+  --proof-failure-topic "${PROOF_FAILURE_TOPIC:-proof.failures.v1}"
+  --proof-response-group "${deposit_proof_response_group}"
+  --queue-driver kafka
+  --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
+  --queue-group "${deposit_queue_group}"
+  --queue-topics "${deposit_queue_topics}"
+  --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  --withdraw-planner-min-confirmations "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  --withdraw-batch-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
+  --health-port "${DEPOSIT_RELAYER_HEALTH_PORT:-18303}"
+)
+if [[ -n "${DEPOSIT_OWALLET_IVK:-}" ]]; then
+  args+=(--owallet-ivk "${DEPOSIT_OWALLET_IVK}")
+fi
+if [[ "${DEPOSIT_SCAN_ENABLED:-false}" == "true" ]]; then
+  [[ -n "${DEPOSIT_SCAN_JUNO_SCAN_URL:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_SCAN_URL in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${DEPOSIT_SCAN_JUNO_RPC_URL:-}" ]] || {
+    echo "deposit-relayer scanner requires DEPOSIT_SCAN_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  args+=(
+    --scan-enabled
+    --juno-scan-url "${DEPOSIT_SCAN_JUNO_SCAN_URL}"
+    --juno-scan-wallet-id "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID}"
+    --juno-scan-bearer-env "${DEPOSIT_SCAN_JUNO_SCAN_BEARER_ENV:-JUNO_SCAN_BEARER_TOKEN}"
+    --juno-rpc-url "${DEPOSIT_SCAN_JUNO_RPC_URL}"
+    --juno-rpc-user-env "${DEPOSIT_SCAN_JUNO_RPC_USER_ENV:-JUNO_RPC_USER}"
+    --juno-rpc-pass-env "${DEPOSIT_SCAN_JUNO_RPC_PASS_ENV:-JUNO_RPC_PASS}"
+    --scan-poll-interval "${DEPOSIT_SCAN_POLL_INTERVAL:-15s}"
+  )
+fi
+
+exec /usr/local/bin/deposit-relayer "${args[@]}"
+EOF_DEPOSIT_RELAYER_WRAPPER
+sudo install -m 0755 "$deposit_relayer_tmp" "$deposit_relayer_script"
+rm -f "$deposit_relayer_tmp"
+
 withdraw_tmp="$(mktemp)"
 cat >"$withdraw_tmp" <<'EOF_WITHDRAW_COORDINATOR_WRAPPER'
 #!/usr/bin/env bash
@@ -1228,6 +1354,9 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-rpc-pass-env JUNO_RPC_PASS \
   --juno-wallet-id "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID}" \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
+  --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}" \
+  --juno-minconf "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}" \
+  --juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}" \
   --juno-fee-add-zat "${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \

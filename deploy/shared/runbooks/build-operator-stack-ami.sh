@@ -506,9 +506,12 @@ PROOF_RESULT_TOPIC=proof.fulfillments.v1
 PROOF_FAILURE_TOPIC=proof.failures.v1
 DEPOSIT_IMAGE_ID=
 DEPOSIT_OWALLET_IVK=
+RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=1
+RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=1
+RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=1
 DEPOSIT_RELAYER_OWNER=
 DEPOSIT_RELAYER_QUEUE_GROUP=deposit-relayer
-DEPOSIT_RELAYER_QUEUE_TOPICS=checkpoints.packages.v1
+DEPOSIT_RELAYER_QUEUE_TOPICS=deposits.event.v2,checkpoints.packages.v1
 DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP=
 DEPOSIT_SCAN_ENABLED=false
 DEPOSIT_SCAN_JUNO_SCAN_URL=
@@ -1517,7 +1520,7 @@ export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKE
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
-deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v1,checkpoints.packages.v1}"
+deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
 
 args=(
@@ -1540,6 +1543,9 @@ args=(
   --queue-brokers "${CHECKPOINT_KAFKA_BROKERS}"
   --queue-group "${deposit_queue_group}"
   --queue-topics "${deposit_queue_topics}"
+  --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  --withdraw-planner-min-confirmations "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  --withdraw-batch-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
   --health-port "${DEPOSIT_RELAYER_HEALTH_PORT:-18303}"
 )
 if [[ -n "${DEPOSIT_OWALLET_IVK:-}" ]]; then
@@ -1723,6 +1729,9 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-rpc-pass-env JUNO_RPC_PASS \
   --juno-wallet-id "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID}" \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
+  --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}" \
+  --juno-minconf "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}" \
+  --juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
   "${tss_server_name_args[@]}" \

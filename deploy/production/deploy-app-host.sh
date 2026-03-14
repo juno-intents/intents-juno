@@ -169,7 +169,7 @@ required_kafka_topics_csv="$(
     "proof.requests.v1" \
     "proof.fulfillments.v1" \
     "proof.failures.v1" \
-    "deposits.event.v1" \
+    "deposits.event.v2" \
     "withdrawals.requested.v1" \
     "ops.alerts.v1" \
     | awk 'NF && !seen[$0]++' \
@@ -267,11 +267,14 @@ set -euo pipefail
 args=(
   --listen "\$BRIDGE_API_LISTEN_ADDR"
   --postgres-dsn "\$BRIDGE_API_POSTGRES_DSN"
+  --base-rpc-url "\$BRIDGE_API_BASE_RPC_URL"
   --base-chain-id "\$BRIDGE_API_BASE_CHAIN_ID"
   --bridge-address "\$BRIDGE_API_BRIDGE_ADDRESS"
   --owallet-ua "\$BRIDGE_API_OWALLET_UA"
   --refund-window-seconds "\$BRIDGE_API_REFUND_WINDOW_SECONDS"
-  --min-deposit-amount "\$BRIDGE_API_MIN_DEPOSIT_AMOUNT"
+  --deposit-min-confirmations "\${BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  --withdraw-planner-min-confirmations "\${BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  --withdraw-batch-confirmations "\${BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
   --min-withdraw-amount "\$BRIDGE_API_MIN_WITHDRAW_AMOUNT"
   --fee-bps "\$BRIDGE_API_FEE_BPS"
 )
@@ -298,6 +301,9 @@ args=(
   --wjuno-address "\$BACKOFFICE_WJUNO_ADDRESS"
   --operator-registry-address "\$BACKOFFICE_OPERATOR_REGISTRY_ADDRESS"
   --operator-addresses "\$BACKOFFICE_OPERATOR_ADDRESSES"
+  --deposit-min-confirmations "\${BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  --withdraw-planner-min-confirmations "\${BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  --withdraw-batch-confirmations "\${BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
   --kafka-brokers "\$BACKOFFICE_KAFKA_BROKERS"
   --ipfs-api-url "\$BACKOFFICE_IPFS_API_URL"
 )

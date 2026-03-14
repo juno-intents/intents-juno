@@ -24,15 +24,19 @@ type Payload struct {
 	CM               string `json:"cm"`
 	LeafIndex        uint64 `json:"leafIndex"`
 	Amount           uint64 `json:"amount"`
+	JunoHeight       int64  `json:"junoHeight"`
 	Memo             string `json:"memo"`
 	ProofWitnessItem string `json:"proofWitnessItem"`
 	DepositID        string `json:"depositId"`
 }
 
-func BuildPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, witnessItem []byte) (Payload, error) {
+func BuildPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, junoHeight int64, witnessItem []byte) (Payload, error) {
 	cm, leafIndex, err := ParseWitnessItem(witnessItem)
 	if err != nil {
 		return Payload{}, err
+	}
+	if junoHeight <= 0 {
+		return Payload{}, fmt.Errorf("juno height must be > 0")
 	}
 
 	var bridge20 [20]byte
@@ -54,10 +58,11 @@ func BuildPayload(baseChainID uint32, bridge, recipient common.Address, amount, 
 	}
 
 	return Payload{
-		Version:          "deposits.event.v1",
+		Version:          "deposits.event.v2",
 		CM:               cm.Hex(),
 		LeafIndex:        leafIndex,
 		Amount:           amount,
+		JunoHeight:       junoHeight,
 		Memo:             "0x" + hex.EncodeToString(memoBytes[:]),
 		ProofWitnessItem: "0x" + hex.EncodeToString(witnessItem),
 		DepositID:        "0x" + hex.EncodeToString(depositID[:]),

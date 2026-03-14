@@ -391,6 +391,11 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-weight: 600;
 }
 
+.progress-label-rejected {
+  color: var(--red);
+  font-weight: 600;
+}
+
 .search-bar {
   position: relative;
   margin-bottom: 20px;
@@ -498,6 +503,7 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .status-badge.green { background: rgba(0,200,83,0.2); color: var(--green); }
+.status-badge.red { background: rgba(255,23,68,0.2); color: var(--red); }
 .status-badge.orange { background: rgba(255,77,0,0.2); color: var(--accent); }
 .status-badge.dim { background: var(--bg-input); color: var(--text-dim); }
 

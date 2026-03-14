@@ -50,6 +50,7 @@
     if (!state) return badge("info");
     var s = String(state);
     if (s === "finalized") return '<span class="badge badge-ok">' + escapeHTML(s) + "</span>";
+    if (s === "rejected") return '<span class="badge badge-crit">' + escapeHTML(s) + "</span>";
     if (s === "unknown") return '<span class="badge badge-info">' + escapeHTML(s) + "</span>";
     return '<span class="badge badge-warn">' + escapeHTML(s) + "</span>";
   }
@@ -96,6 +97,17 @@
       .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
       .then(cb)
       .catch(function (e) { console.error("API POST error " + path, e); });
+  }
+
+  function apiPut(path, body, cb) {
+    fetch("/api" + path, {
+      method: "PUT",
+      headers: Object.assign({ "Content-Type": "application/json" }, authHeaders()),
+      body: JSON.stringify(body || {}),
+    })
+      .then(function (r) { if (!r.ok) throw new Error(r.status); return r.json(); })
+      .then(cb)
+      .catch(function (e) { console.error("API PUT error " + path, e); });
   }
 
   // --- Tab navigation ---
@@ -233,6 +245,47 @@
     });
   }
 
+  // --- Settings ---
+  function showSettingsStatus(kind, message) {
+    var el = document.getElementById("settings-status");
+    if (!el) return;
+    el.classList.remove("hidden");
+    el.style.borderColor = kind === "error" ? "var(--crit)" : "var(--ok)";
+    el.innerHTML = '<strong>' + escapeHTML(kind === "error" ? "Error" : "Updated") + ':</strong> ' + escapeHTML(message);
+  }
+
+  function refreshSettings() {
+    apiFetch("/settings/runtime", function (resp) {
+      var d = (resp && resp.data) || {};
+      setText("settings-min-deposit", d.minDepositAmount || "-");
+      setText("settings-min-deposit-admin", d.minDepositAdmin || "-");
+      setText("settings-deposit-conf", d.depositMinConfirmations || "-");
+      setText("settings-withdraw-planner-conf", d.withdrawPlannerMinConfirmations || "-");
+      setText("settings-withdraw-batch-conf", d.withdrawBatchConfirmations || "-");
+
+      var depositInput = document.getElementById("settings-input-deposit-conf");
+      var plannerInput = document.getElementById("settings-input-withdraw-planner-conf");
+      var batchInput = document.getElementById("settings-input-withdraw-batch-conf");
+      var minDepositInput = document.getElementById("settings-input-min-deposit");
+      if (depositInput && document.activeElement !== depositInput) depositInput.value = d.depositMinConfirmations || "";
+      if (plannerInput && document.activeElement !== plannerInput) plannerInput.value = d.withdrawPlannerMinConfirmations || "";
+      if (batchInput && document.activeElement !== batchInput) batchInput.value = d.withdrawBatchConfirmations || "";
+      if (minDepositInput && document.activeElement !== minDepositInput) minDepositInput.value = d.minDepositAmount || "";
+
+      var audit = (resp && resp.audit) || [];
+      var rows = audit.map(function (entry) {
+        return "<tr>" +
+          "<td>" + escapeHTML(fmtTime(entry.updatedAt)) + "</td>" +
+          "<td>" + escapeHTML(entry.settingKey || "-") + "</td>" +
+          "<td>" + escapeHTML(entry.oldValue || "-") + "</td>" +
+          "<td>" + escapeHTML(entry.newValue || "-") + "</td>" +
+          '<td class="mono">' + (entry.txHash ? fmtAddr(entry.txHash) : "-") + "</td>" +
+          "<td>" + escapeHTML(entry.updatedBy || "-") + "</td></tr>";
+      }).join("");
+      setHTML("settings-audit-tbody", rows || '<tr><td colspan="6" class="loading">No settings changes yet</td></tr>');
+    });
+  }
+
   function copyBtn(addr) {
     var safe = escapeHTML(addr);
     return ' <button class="copy-btn" onclick="copyAddr(\'' + safe + '\')" title="Copy address">copy</button>';
@@ -328,10 +381,11 @@
           '<td class="mono">' + fmtAddr(r.baseRecipient) + "</td>" +
           "<td>" + escapeHTML(r.amount || "-") + "</td>" +
           '<td class="mono">' + (r.txHash ? fmtAddr(r.txHash) : "-") + "</td>" +
+          "<td>" + escapeHTML(r.rejectionReason || "-") + "</td>" +
           "<td>" + escapeHTML(fmtTime(r.createdAt)) + "</td>" +
           "<td>" + escapeHTML(r.junoHeight || "-") + "</td></tr>";
       }).join("");
-      setHTML("ops-deposits-tbody", rows || '<tr><td colspan="7" class="loading">-</td></tr>');
+      setHTML("ops-deposits-tbody", rows || '<tr><td colspan="8" class="loading">-</td></tr>');
     });
 
     apiFetch("/ops/withdrawals/recent?limit=20", function (resp) {
@@ -372,6 +426,7 @@
     refreshOverview();
     setTimeout(refreshDLQ, 500, "proofs");
     setTimeout(refreshFunds, 1000);
+    setTimeout(refreshSettings, 1250);
     setTimeout(refreshAnalytics, 1500);
     setTimeout(refreshAlerts, 2000);
     setTimeout(refreshOps, 2500);
@@ -379,6 +434,7 @@
     setInterval(refreshOverview, 10000);
     setInterval(function () { refreshDLQ(); }, 15000);
     setInterval(refreshFunds, 30000);
+    setInterval(refreshSettings, 30000);
     setInterval(refreshAnalytics, 30000);
     setInterval(refreshAlerts, 30000);
     setInterval(refreshOps, 15000);
@@ -449,5 +505,36 @@
         if (kind) refreshDLQ(kind);
       });
     });
+
+    var runtimeForm = document.getElementById("settings-runtime-form");
+    if (runtimeForm) {
+      runtimeForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        apiPut("/settings/runtime", {
+          depositMinConfirmations: parseInt(document.getElementById("settings-input-deposit-conf").value, 10),
+          withdrawPlannerMinConfirmations: parseInt(document.getElementById("settings-input-withdraw-planner-conf").value, 10),
+          withdrawBatchConfirmations: parseInt(document.getElementById("settings-input-withdraw-batch-conf").value, 10),
+          updatedBy: document.getElementById("settings-input-updated-by").value.trim() || "backoffice",
+        }, function () {
+          showSettingsStatus("ok", "Runtime confirmation settings updated.");
+          refreshSettings();
+        });
+      });
+    }
+
+    var minDepositForm = document.getElementById("settings-min-deposit-form");
+    if (minDepositForm) {
+      minDepositForm.addEventListener("submit", function (e) {
+        e.preventDefault();
+        apiPost("/settings/min-deposit", {
+          minDepositAmount: document.getElementById("settings-input-min-deposit").value.trim(),
+          updatedBy: document.getElementById("settings-input-min-deposit-updated-by").value.trim() || "backoffice",
+        }, function (resp) {
+          var txHash = resp && resp.data ? resp.data.txHash : "";
+          showSettingsStatus("ok", txHash ? "Min deposit update mined in " + txHash : "Min deposit updated.");
+          refreshSettings();
+        });
+      });
+    }
   });
 })();

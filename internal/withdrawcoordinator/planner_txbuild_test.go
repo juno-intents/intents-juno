@@ -13,8 +13,18 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
+
+type stubWithdrawRuntimeSettingsProvider struct {
+	settings runtimeconfig.Settings
+	err      error
+}
+
+func (s *stubWithdrawRuntimeSettingsProvider) Current() (runtimeconfig.Settings, error) {
+	return s.settings, s.err
+}
 
 func TestTxBuildPlanner_Plan_BuildsOutputsAndParsesPlan(t *testing.T) {
 	t.Parallel()
@@ -161,6 +171,54 @@ func TestTxBuildPlanner_Plan_RejectsInvalidRecipientUA(t *testing.T) {
 	_, err = p.Plan(context.Background(), seq32ForPlanner(0x80), []withdraw.Withdrawal{w})
 	if err == nil || !strings.Contains(err.Error(), "invalid withdrawal recipient UA") {
 		t.Fatalf("expected invalid recipient UA error, got %v", err)
+	}
+}
+
+func TestTxBuildPlanner_Plan_UsesRuntimeConfiguredMinConfirmations(t *testing.T) {
+	t.Parallel()
+
+	cfg := TxBuildPlannerConfig{
+		Binary:           "juno-txbuild",
+		WalletID:         "wallet-1",
+		ChangeAddress:    "j1change",
+		BaseChainID:      8453,
+		BridgeAddress:    common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		MinConfirmations: 1,
+		ExpiryOffset:     40,
+		FeeMultiplier:    1,
+	}
+	p, err := NewTxBuildPlanner(cfg)
+	if err != nil {
+		t.Fatalf("NewTxBuildPlanner: %v", err)
+	}
+	p.WithRuntimeSettings(&stubWithdrawRuntimeSettingsProvider{
+		settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 7,
+			WithdrawBatchConfirmations:      3,
+		},
+	})
+
+	w := withdraw.Withdrawal{
+		ID:          seq32ForPlanner(0x01),
+		Amount:      100,
+		FeeBps:      0,
+		RecipientUA: []byte("j1recipienta"),
+		Expiry:      time.Date(2026, 2, 11, 0, 0, 0, 0, time.UTC).Add(24 * time.Hour),
+	}
+	p.execCommand = func(_ context.Context, _ string, args []string, _ []string) ([]byte, error) {
+		idx := slices.Index(args, "--minconf")
+		if idx < 0 || idx+1 >= len(args) {
+			t.Fatalf("missing --minconf in args: %v", args)
+		}
+		if got := args[idx+1]; got != "7" {
+			t.Fatalf("--minconf: got %q want %q", got, "7")
+		}
+		return []byte(`{"version":"v1","status":"ok","data":{"version":"v0","kind":"send-many"}}`), nil
+	}
+
+	if _, err := p.Plan(context.Background(), seq32ForPlanner(0x80), []withdraw.Withdrawal{w}); err != nil {
+		t.Fatalf("Plan: %v", err)
 	}
 }
 

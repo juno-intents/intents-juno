@@ -33,7 +33,7 @@ func (l *PostgresDepositLister) ListByBaseRecipient(ctx context.Context, recipie
 		SELECT deposit_id, state, commitment, leaf_index, amount, base_recipient,
 			   COALESCE(checkpoint_height, 0), checkpoint_block_hash,
 			   checkpoint_final_orchard_root, COALESCE(checkpoint_base_chain_id, 0),
-			   checkpoint_bridge_contract, proof_seal, tx_hash
+			   checkpoint_bridge_contract, proof_seal, tx_hash, rejection_reason
 		FROM deposit_jobs
 		WHERE base_recipient = $1
 		ORDER BY created_at DESC
@@ -63,7 +63,7 @@ func (l *PostgresDepositLister) GetByTxHash(ctx context.Context, txHash [32]byte
 		SELECT deposit_id, state, commitment, leaf_index, amount, base_recipient,
 			   COALESCE(checkpoint_height, 0), checkpoint_block_hash,
 			   checkpoint_final_orchard_root, COALESCE(checkpoint_base_chain_id, 0),
-			   checkpoint_bridge_contract, proof_seal, tx_hash
+			   checkpoint_bridge_contract, proof_seal, tx_hash, rejection_reason
 		FROM deposit_jobs
 		WHERE tx_hash = $1
 	`, txHash[:])
@@ -80,57 +80,59 @@ func (l *PostgresDepositLister) GetByTxHash(ctx context.Context, txHash [32]byte
 
 func scanDepositJob(rows pgx.Rows) (deposit.Job, error) {
 	var (
-		idRaw        []byte
-		state        int16
-		commitment   []byte
-		leafIndex    int64
-		amount       int64
-		recipientRaw []byte
-		cpHeight     int64
-		cpBlockHash  []byte
-		cpRoot       []byte
-		cpChainID    int64
-		cpBridge     []byte
-		proofSeal    []byte
-		txHash       []byte
+		idRaw           []byte
+		state           int16
+		commitment      []byte
+		leafIndex       int64
+		amount          int64
+		recipientRaw    []byte
+		cpHeight        int64
+		cpBlockHash     []byte
+		cpRoot          []byte
+		cpChainID       int64
+		cpBridge        []byte
+		proofSeal       []byte
+		txHash          []byte
+		rejectionReason *string
 	)
 	err := rows.Scan(&idRaw, &state, &commitment, &leafIndex, &amount, &recipientRaw,
-		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash)
+		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash, &rejectionReason)
 	if err != nil {
 		return deposit.Job{}, fmt.Errorf("bridgeapi: scan deposit: %w", err)
 	}
 	return buildDepositJob(idRaw, state, commitment, leafIndex, amount, recipientRaw,
-		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash)
+		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason)
 }
 
 func scanDepositJobRow(row pgx.Row) (deposit.Job, error) {
 	var (
-		idRaw        []byte
-		state        int16
-		commitment   []byte
-		leafIndex    int64
-		amount       int64
-		recipientRaw []byte
-		cpHeight     int64
-		cpBlockHash  []byte
-		cpRoot       []byte
-		cpChainID    int64
-		cpBridge     []byte
-		proofSeal    []byte
-		txHash       []byte
+		idRaw           []byte
+		state           int16
+		commitment      []byte
+		leafIndex       int64
+		amount          int64
+		recipientRaw    []byte
+		cpHeight        int64
+		cpBlockHash     []byte
+		cpRoot          []byte
+		cpChainID       int64
+		cpBridge        []byte
+		proofSeal       []byte
+		txHash          []byte
+		rejectionReason *string
 	)
 	err := row.Scan(&idRaw, &state, &commitment, &leafIndex, &amount, &recipientRaw,
-		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash)
+		&cpHeight, &cpBlockHash, &cpRoot, &cpChainID, &cpBridge, &proofSeal, &txHash, &rejectionReason)
 	if err != nil {
 		return deposit.Job{}, err
 	}
 	return buildDepositJob(idRaw, state, commitment, leafIndex, amount, recipientRaw,
-		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash)
+		cpHeight, cpBlockHash, cpRoot, cpChainID, cpBridge, proofSeal, txHash, rejectionReason)
 }
 
 func buildDepositJob(idRaw []byte, state int16, commitment []byte, leafIndex, amount int64,
 	recipientRaw []byte, cpHeight int64, cpBlockHash, cpRoot []byte, cpChainID int64,
-	cpBridge, proofSeal, txHash []byte) (deposit.Job, error) {
+	cpBridge, proofSeal, txHash []byte, rejectionReason *string) (deposit.Job, error) {
 
 	id, err := to32(idRaw)
 	if err != nil {
@@ -179,6 +181,9 @@ func buildDepositJob(idRaw []byte, state int16, commitment []byte, leafIndex, am
 	}
 	if len(txHash) == 32 {
 		copy(j.TxHash[:], txHash)
+	}
+	if rejectionReason != nil {
+		j.RejectionReason = *rejectionReason
 	}
 
 	return j, nil

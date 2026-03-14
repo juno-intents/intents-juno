@@ -24,6 +24,8 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
   const isDeposit = type === 'deposit'
   const d = data as DepositStatus
   const w = data as WithdrawalStatus
+  const currentState = isDeposit ? d.state : w.state
+  const statusClass = currentState === 'finalized' ? 'green' : currentState === 'rejected' ? 'red' : 'orange'
 
   return (
     <div className="modal-overlay" onClick={onClose}>
@@ -39,8 +41,8 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
           </div>
           <div className="detail-row">
             <span className="detail-label">Status</span>
-            <span className={`status-badge ${(isDeposit ? d.state : w.state) === 'finalized' ? 'green' : 'orange'}`}>
-              {isDeposit ? d.state : w.state}
+            <span className={`status-badge ${statusClass}`}>
+              {currentState}
             </span>
           </div>
           <div className="detail-row">
@@ -57,6 +59,12 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
             <div className="detail-row">
               <span className="detail-label">Juno Tx</span>
               <span className="detail-value mono">{truncate(d.txHash)}</span>
+            </div>
+          )}
+          {isDeposit && d.rejectionReason && (
+            <div className="detail-row">
+              <span className="detail-label">Rejection Reason</span>
+              <span className="detail-value">{d.rejectionReason}</span>
             </div>
           )}
           {!isDeposit && w.requester && (

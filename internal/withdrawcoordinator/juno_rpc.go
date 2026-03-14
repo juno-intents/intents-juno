@@ -48,6 +48,7 @@ type JunoConfirmer struct {
 	pollInterval     time.Duration
 	maxWait          time.Duration
 	now              func() time.Time
+	runtimeSettings  RuntimeSettingsProvider
 }
 
 var (
@@ -115,6 +116,10 @@ func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {
 	if c.now == nil {
 		c.now = time.Now
 	}
+	minConfirmations, err := currentWithdrawBatchConfirmations(c.runtimeSettings, c.minConfirmations)
+	if err != nil {
+		return err
+	}
 
 	deadline := c.now().Add(c.maxWait)
 	seenTx := false
@@ -130,7 +135,7 @@ func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {
 		tx, err := c.rpc.GetRawTransaction(ctx, txid)
 		if err == nil {
 			seenTx = true
-			if tx.Confirmations >= c.minConfirmations {
+			if tx.Confirmations >= minConfirmations {
 				return nil
 			}
 		} else if !errors.Is(err, junorpc.ErrTxNotFound) {
@@ -156,4 +161,12 @@ func (c *JunoConfirmer) WaitConfirmed(ctx context.Context, txid string) error {
 		case <-t.C:
 		}
 	}
+}
+
+func (c *JunoConfirmer) WithRuntimeSettings(provider RuntimeSettingsProvider) *JunoConfirmer {
+	if c == nil {
+		return nil
+	}
+	c.runtimeSettings = provider
+	return c
 }

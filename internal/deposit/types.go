@@ -16,6 +16,7 @@ const (
 	StateProofReady
 	StateSubmitted
 	StateFinalized
+	StateRejected
 )
 
 func (s State) String() string {
@@ -32,6 +33,8 @@ func (s State) String() string {
 		return "submitted"
 	case StateFinalized:
 		return "finalized"
+	case StateRejected:
+		return "rejected"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(s))
 	}
@@ -60,8 +63,9 @@ type Job struct {
 
 	Checkpoint checkpoint.Checkpoint
 
-	ProofSeal []byte
-	TxHash    [32]byte
+	ProofSeal       []byte
+	TxHash          [32]byte
+	RejectionReason string
 }
 
 type SubmittedBatchAttempt struct {

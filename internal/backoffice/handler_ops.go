@@ -30,6 +30,8 @@ func depositStateLabel(s int16) string {
 		return "submitted"
 	case 6:
 		return "finalized"
+	case 7:
+		return "rejected"
 	default:
 		return fmt.Sprintf("state_%d", s)
 	}
@@ -68,7 +70,7 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := s.cfg.Pool.Query(r.Context(), `
 		SELECT deposit_id, state, created_at, COALESCE(juno_height, 0),
-		       base_recipient, tx_hash, amount
+		       base_recipient, tx_hash, amount, rejection_reason
 		FROM deposit_jobs
 		ORDER BY created_at DESC
 		LIMIT $1`, limit)
@@ -88,7 +90,8 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 		var baseRecipient []byte
 		var txHash []byte
 		var amount int64
-		if err := rows.Scan(&depositID, &state, &createdAt, &junoHeight, &baseRecipient, &txHash, &amount); err != nil {
+		var rejectionReason *string
+		if err := rows.Scan(&depositID, &state, &createdAt, &junoHeight, &baseRecipient, &txHash, &amount, &rejectionReason); err != nil {
 			s.log.Error("scan recent deposit", "err", err)
 			writeError(w, http.StatusInternalServerError, "internal")
 			return
@@ -103,6 +106,9 @@ func (s *Server) handleRecentDeposits(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(txHash) > 0 {
 			entry["txHash"] = "0x" + hex.EncodeToString(txHash)
+		}
+		if rejectionReason != nil {
+			entry["rejectionReason"] = *rejectionReason
 		}
 		items = append(items, entry)
 	}
@@ -199,7 +205,7 @@ func (s *Server) handleStuckBatches(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	threshold := time.Now().UTC().Add(-30 * time.Minute)
 
-	// Stuck deposit jobs: state NOT IN (5=submitted, 6=finalized) and updated_at old.
+	// Stuck deposit jobs: state NOT IN (5=submitted, 6=finalized, 7=rejected) and updated_at old.
 	stuckDeposits, err := s.fetchStuckDeposits(ctx, threshold)
 	if err != nil {
 		s.log.Error("fetch stuck deposits", "err", err)
@@ -227,7 +233,7 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 	rows, err := s.cfg.Pool.Query(ctx, `
 		SELECT deposit_id, state, created_at, updated_at
 		FROM deposit_jobs
-		WHERE state NOT IN (5, 6)
+		WHERE state NOT IN (5, 6, 7)
 		  AND updated_at < $1
 		ORDER BY updated_at ASC
 		LIMIT 100`, threshold)

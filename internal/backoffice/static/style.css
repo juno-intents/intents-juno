@@ -87,7 +87,14 @@ button.small{padding:3px 10px;font-size:.72rem;border-radius:6px}
   background:var(--input);color:var(--text);border:1px solid var(--border);
   padding:6px 10px;border-radius:8px;font-size:.8rem;font-family:inherit;
 }
+.settings-form{display:flex;flex-direction:column;gap:.75rem}
+.settings-form label{display:flex;flex-direction:column;gap:.35rem;font-size:.8rem;color:var(--muted)}
+.settings-form input{
+  background:var(--input);color:var(--text);border:1px solid var(--border);
+  padding:8px 10px;border-radius:8px;font-size:.85rem;font-family:inherit;
+}
 .filters select:focus,.filters input:focus{border-color:var(--accent);outline:none}
+.settings-form input:focus{border-color:var(--accent);outline:none}
 /* Loading */
 .loading{color:var(--muted);font-style:italic;padding:1rem 0;text-align:center;font-size:.85rem}
 /* Section heading */

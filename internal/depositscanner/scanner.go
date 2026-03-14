@@ -240,6 +240,7 @@ func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNot
 		Commitment:       cm,
 		LeafIndex:        leafIndex,
 		Amount:           note.ValueZat,
+		JunoHeight:       note.Height,
 		Memo:             memoBytes,
 		ProofWitnessItem: res.WitnessItem,
 	})

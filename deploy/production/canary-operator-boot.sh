@@ -85,6 +85,8 @@ txsign_runtime_status="passed"
 txsign_runtime_detail="remote juno-txsign supports sign-digest"
 systemd_status="passed"
 systemd_detail="all operator services active"
+deposit_relayer_ready_status="passed"
+deposit_relayer_ready_detail="deposit-relayer /readyz passed"
 allow_local_resolvers="false"
 [[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
@@ -121,6 +123,8 @@ if [[ "$dry_run" == "true" ]]; then
   txsign_runtime_detail="dry run"
   systemd_status="skipped"
   systemd_detail="dry run"
+  deposit_relayer_ready_status="skipped"
+  deposit_relayer_ready_detail="dry run"
 else
   production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
 
@@ -137,6 +141,8 @@ else
     txsign_runtime_detail="blocked by relayer funding failure"
     systemd_status="blocked"
     systemd_detail="blocked by relayer funding failure"
+    deposit_relayer_ready_status="blocked"
+    deposit_relayer_ready_detail="blocked by relayer funding failure"
   else
     relayer_summary=""
     relayer_count=0
@@ -156,6 +162,8 @@ else
         txsign_runtime_detail="blocked by relayer funding failure"
         systemd_status="blocked"
         systemd_detail="blocked by relayer funding failure"
+        deposit_relayer_ready_status="blocked"
+        deposit_relayer_ready_detail="blocked by relayer funding failure"
         break
       fi
     done <<<"$relayer_snapshot"
@@ -169,6 +177,8 @@ else
       txsign_runtime_detail="blocked by relayer funding failure"
       systemd_status="blocked"
       systemd_detail="blocked by relayer funding failure"
+      deposit_relayer_ready_status="blocked"
+      deposit_relayer_ready_detail="blocked by relayer funding failure"
     elif [[ "$relayer_funding_status" == "passed" ]]; then
       relayer_funding_detail="base relayer balances meet minimum $minimum_base_relayer_balance_wei wei: $relayer_summary"
       ssh_target="${operator_user}@${operator_host}"
@@ -214,12 +224,22 @@ else
         systemd_status="blocked"
         systemd_detail="blocked by withdraw config validation failure"
       fi
+
+      if [[ "$systemd_status" == "passed" ]]; then
+        if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'source /etc/intents-juno/operator-stack.env && curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz >/dev/null'" 2>/dev/null; then
+          deposit_relayer_ready_status="failed"
+          deposit_relayer_ready_detail="deposit-relayer /readyz failed"
+        fi
+      else
+        deposit_relayer_ready_status="blocked"
+        deposit_relayer_ready_detail="blocked by service validation failure"
+      fi
     fi
   fi
 fi
 
 ready_for_deploy="true"
-for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$systemd_status"; do
+for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$systemd_status" "$deposit_relayer_ready_status"; do
   if [[ "$status" != "passed" ]]; then
     ready_for_deploy="false"
   fi
@@ -241,6 +261,8 @@ jq -n \
   --arg txsign_runtime_detail "$txsign_runtime_detail" \
   --arg systemd_status "$systemd_status" \
   --arg systemd_detail "$systemd_detail" \
+  --arg deposit_relayer_ready_status "$deposit_relayer_ready_status" \
+  --arg deposit_relayer_ready_detail "$deposit_relayer_ready_detail" \
   --argjson ready_for_deploy "$ready_for_deploy" \
   '{
     version: $version,
@@ -269,6 +291,10 @@ jq -n \
       systemd: {
         status: $systemd_status,
         detail: $systemd_detail
+      },
+      deposit_relayer_ready: {
+        status: $deposit_relayer_ready_status,
+        detail: $deposit_relayer_ready_detail
       }
     }
   }'

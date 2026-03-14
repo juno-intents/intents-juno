@@ -138,7 +138,7 @@ func TestScanner_ValidDeposit(t *testing.T) {
 
 	scan := &stubScan{
 		notes: []witnessextract.WalletNote{
-			{TxID: txid, ActionIndex: 0, Position: &pos, ValueZat: 100000, MemoHex: memoHex},
+			{TxID: txid, ActionIndex: 0, Position: &pos, Height: 77, ValueZat: 100000, MemoHex: memoHex},
 		},
 		witnessResp: makeWitnessResponse(uint32(pos)),
 	}
@@ -161,6 +161,9 @@ func TestScanner_ValidDeposit(t *testing.T) {
 	ev := ingester.events[0]
 	if ev.Amount != 100000 {
 		t.Fatalf("amount: got=%d want=100000", ev.Amount)
+	}
+	if ev.JunoHeight != 77 {
+		t.Fatalf("juno height: got=%d want=77", ev.JunoHeight)
 	}
 	if len(ev.Memo) != memo.MemoLen {
 		t.Fatalf("memo length: got=%d want=%d", len(ev.Memo), memo.MemoLen)

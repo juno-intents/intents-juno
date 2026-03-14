@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 
 	proof_seal BYTEA,
 	tx_hash BYTEA,
+	rejection_reason TEXT,
 	submit_batch_id BYTEA,
 	claimed_by TEXT,
 	claim_expires_at TIMESTAMPTZ,
@@ -33,11 +34,12 @@ CREATE TABLE IF NOT EXISTS deposit_jobs (
 	CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848),
 	CONSTRAINT leaf_index_nonneg CHECK (leaf_index >= 0),
 	CONSTRAINT amount_nonneg CHECK (amount >= 0),
-	CONSTRAINT state_range CHECK (state >= 1 AND state <= 6),
+	CONSTRAINT state_range CHECK (state >= 1 AND state <= 7),
 	CONSTRAINT checkpoint_block_hash_len CHECK (checkpoint_block_hash IS NULL OR octet_length(checkpoint_block_hash) = 32),
 	CONSTRAINT checkpoint_root_len CHECK (checkpoint_final_orchard_root IS NULL OR octet_length(checkpoint_final_orchard_root) = 32),
 	CONSTRAINT checkpoint_bridge_len CHECK (checkpoint_bridge_contract IS NULL OR octet_length(checkpoint_bridge_contract) = 20),
 	CONSTRAINT tx_hash_len CHECK (tx_hash IS NULL OR octet_length(tx_hash) = 32),
+	CONSTRAINT rejection_reason_nonempty CHECK (rejection_reason IS NULL OR rejection_reason <> ''),
 	CONSTRAINT submit_batch_id_len CHECK (submit_batch_id IS NULL OR octet_length(submit_batch_id) = 32),
 	CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
 );
@@ -85,12 +87,15 @@ ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS submit_batch_id BYTEA;
+ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS rejection_reason TEXT;
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS claim_owner_nonempty;
 ALTER TABLE deposit_jobs ADD CONSTRAINT claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS proof_witness_item_len;
 ALTER TABLE deposit_jobs ADD CONSTRAINT proof_witness_item_len CHECK (proof_witness_item IS NULL OR octet_length(proof_witness_item) = 1848);
 ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS submit_batch_id_len;
 ALTER TABLE deposit_jobs ADD CONSTRAINT submit_batch_id_len CHECK (submit_batch_id IS NULL OR octet_length(submit_batch_id) = 32);
+ALTER TABLE deposit_jobs DROP CONSTRAINT IF EXISTS rejection_reason_nonempty;
+ALTER TABLE deposit_jobs ADD CONSTRAINT rejection_reason_nonempty CHECK (rejection_reason IS NULL OR rejection_reason <> '');
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS juno_height BIGINT;
 ALTER TABLE deposit_batch_attempts ADD COLUMN IF NOT EXISTS tx_hash BYTEA;
 ALTER TABLE deposit_batch_attempts ADD COLUMN IF NOT EXISTS claimed_by TEXT;

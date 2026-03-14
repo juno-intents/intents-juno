@@ -9,6 +9,7 @@ export default function StatusTracker({ steps, current }: Props) {
   const [hoveredIdx, setHoveredIdx] = useState<number | null>(null)
   const idx = steps.indexOf(current)
   const isFinalized = current === 'finalized'
+  const isRejected = current === 'rejected'
 
   return (
     <div className="tracker-wrap">
@@ -27,7 +28,9 @@ export default function StatusTracker({ steps, current }: Props) {
         ))}
       </div>
       <div className="progress-label-row">
-        <span className={isFinalized ? 'progress-label-done' : ''}>{isFinalized ? 'finalized' : current || steps[0]}</span>
+        <span className={isFinalized ? 'progress-label-done' : isRejected ? 'progress-label-rejected' : ''}>
+          {isFinalized ? 'finalized' : current || steps[0]}
+        </span>
       </div>
     </div>
   )

@@ -614,6 +614,27 @@ production_default_bridge_min_deposit_amount_zat() {
     "$(production_default_bridge_fee_bps)"
 }
 
+production_default_deposit_min_confirmations() {
+  local value="${PRODUCTION_DEPLOY_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  production_is_positive_integer "$value" \
+    || die "PRODUCTION_DEPLOY_DEPOSIT_MIN_CONFIRMATIONS must be a positive integer"
+  printf '%s\n' "$value"
+}
+
+production_default_withdraw_planner_min_confirmations() {
+  local value="${PRODUCTION_DEPLOY_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  production_is_positive_integer "$value" \
+    || die "PRODUCTION_DEPLOY_WITHDRAW_PLANNER_MIN_CONFIRMATIONS must be a positive integer"
+  printf '%s\n' "$value"
+}
+
+production_default_withdraw_batch_confirmations() {
+  local value="${PRODUCTION_DEPLOY_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
+  production_is_positive_integer "$value" \
+    || die "PRODUCTION_DEPLOY_WITHDRAW_BATCH_CONFIRMATIONS must be a positive integer"
+  printf '%s\n' "$value"
+}
+
 production_required_min_base_relayer_balance_wei() {
   local value="${PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI:-250000000000000}"
   production_is_positive_integer "$value" \
@@ -1351,11 +1372,15 @@ production_render_operator_stack_env() {
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
   local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
+  local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   checkpoint_signer_private_key=""
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
   withdraw_juno_fee_add_zat="$(production_default_withdraw_coordinator_juno_fee_add_zat)"
+  runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
+  runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
+  runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
   withdraw_expiry_safety_margin="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN || true)"
   withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -1415,6 +1440,9 @@ BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_RELAYER_MIN_READY_BALANCE_WEI=$min_base_relayer_balance_wei
+RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
+RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
+RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BASE_EVENT_SCANNER_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_EVENT_SCANNER_START_BLOCK=$base_event_scanner_start_block
@@ -1509,6 +1537,7 @@ production_render_bridge_api_env() {
   local output_file="$4"
 
   local postgres_dsn owallet_ua listen_addr refund_window_seconds min_deposit_amount min_withdraw_amount fee_bps
+  local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -1518,15 +1547,22 @@ production_render_bridge_api_env() {
   min_deposit_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_deposit_amount')"
   min_withdraw_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_withdraw_amount')"
   fee_bps="$(production_json_optional "$app_deploy" '.services.bridge_api.fee_bps')"
+  runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
+  runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
+  runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
 
   cat >"$output_file" <<EOF
 BRIDGE_API_LISTEN_ADDR=$listen_addr
 BRIDGE_API_POSTGRES_DSN=$postgres_dsn
+BRIDGE_API_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BRIDGE_API_BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_API_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BRIDGE_API_OWALLET_UA=$owallet_ua
 BRIDGE_API_REFUND_WINDOW_SECONDS=${refund_window_seconds:-86400}
 BRIDGE_API_MIN_DEPOSIT_AMOUNT=${min_deposit_amount:-0}
+BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
+BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
+BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BRIDGE_API_MIN_WITHDRAW_AMOUNT=${min_withdraw_amount:-0}
 BRIDGE_API_FEE_BPS=${fee_bps:-0}
 EOF
@@ -1547,6 +1583,8 @@ production_render_backoffice_env() {
   local postgres_dsn auth_secret juno_rpc_url juno_rpc_user juno_rpc_pass
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
+  local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
+  local min_deposit_admin_private_key
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -1561,6 +1599,10 @@ production_render_backoffice_env() {
   operator_endpoints="$(jq -r '.operator_endpoints | join(",")' "$app_deploy")"
   base_relayer_signer_addresses="$(production_backoffice_relayer_signer_addresses_csv "$app_deploy")"
   base_relayer_gas_min_wei="$(production_required_min_base_relayer_balance_wei)"
+  runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
+  runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
+  runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
+  min_deposit_admin_private_key="$(production_env_first_value "$resolved_secret_env" MIN_DEPOSIT_ADMIN_PRIVATE_KEY APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY || true)"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -1575,6 +1617,9 @@ BACKOFFICE_OPERATOR_REGISTRY_ADDRESS=$(jq -r '.contracts.operator_registry' "$sh
 BACKOFFICE_OPERATOR_ADDRESSES=$operator_addresses
 BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=$base_relayer_signer_addresses
 BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=$base_relayer_gas_min_wei
+BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
+BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
+BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 EOF
@@ -1598,6 +1643,9 @@ EOF
   fi
   if [[ -n "$operator_endpoints" ]]; then
     printf 'BACKOFFICE_OPERATOR_ENDPOINTS=%s\n' "$operator_endpoints" >>"$output_file"
+  fi
+  if [[ -n "$min_deposit_admin_private_key" ]]; then
+    printf 'MIN_DEPOSIT_ADMIN_PRIVATE_KEY=%s\n' "$min_deposit_admin_private_key" >>"$output_file"
   fi
 }
 

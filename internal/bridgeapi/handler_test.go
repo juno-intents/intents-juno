@@ -13,7 +13,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/deposit"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -56,6 +58,24 @@ type stubWithdrawalLister struct {
 	err      error
 }
 
+type stubRuntimeSettingsProvider struct {
+	settings runtimeconfig.Settings
+	err      error
+}
+
+func (s *stubRuntimeSettingsProvider) Current() (runtimeconfig.Settings, error) {
+	return s.settings, s.err
+}
+
+type stubBridgeSettingsProvider struct {
+	snapshot bridgeconfig.Snapshot
+	err      error
+}
+
+func (s *stubBridgeSettingsProvider) Current() (bridgeconfig.Snapshot, error) {
+	return s.snapshot, s.err
+}
+
 func (s *stubWithdrawalLister) ListByRequester(_ context.Context, _ [20]byte, _, _ int) ([]WithdrawalStatus, int, error) {
 	return s.statuses, s.total, s.err
 }
@@ -73,10 +93,11 @@ func TestHandler_Config(t *testing.T) {
 
 	t.Run("without wjuno", func(t *testing.T) {
 		h, err := NewHandler(Config{
-			BaseChainID:         8453,
-			BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-			OWalletUA:           "u1example",
-			RefundWindowSeconds: 86400,
+			BaseChainID:             8453,
+			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:               "u1example",
+			RefundWindowSeconds:     86400,
+			DepositMinConfirmations: 1,
 			NonceFn: func() (uint64, error) {
 				return 1, nil
 			},
@@ -102,6 +123,9 @@ func TestHandler_Config(t *testing.T) {
 		if out["version"] != "v1" {
 			t.Fatalf("bad version: %v", out["version"])
 		}
+		if got := int(out["depositMinConfirmations"].(float64)); got != 1 {
+			t.Fatalf("depositMinConfirmations: got %d want 1", got)
+		}
 		if _, exists := out["wjunoAddress"]; exists {
 			t.Fatalf("wjunoAddress should be absent when not configured, got %v", out["wjunoAddress"])
 		}
@@ -110,11 +134,12 @@ func TestHandler_Config(t *testing.T) {
 	t.Run("with wjuno", func(t *testing.T) {
 		wjuno := common.HexToAddress("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
 		h, err := NewHandler(Config{
-			BaseChainID:         8453,
-			BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-			WJunoAddress:        wjuno,
-			OWalletUA:           "u1example",
-			RefundWindowSeconds: 86400,
+			BaseChainID:             8453,
+			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			WJunoAddress:            wjuno,
+			OWalletUA:               "u1example",
+			RefundWindowSeconds:     86400,
+			DepositMinConfirmations: 2,
 			NonceFn: func() (uint64, error) {
 				return 1, nil
 			},
@@ -146,6 +171,49 @@ func TestHandler_Config(t *testing.T) {
 		}
 		if !strings.EqualFold(got, wjuno.Hex()) {
 			t.Fatalf("wjunoAddress: got %s want %s", got, wjuno.Hex())
+		}
+	})
+
+	t.Run("prefers runtime and chain-backed settings", func(t *testing.T) {
+		h, err := NewHandler(Config{
+			BaseChainID:             8453,
+			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:               "u1example",
+			RefundWindowSeconds:     86400,
+			DepositMinConfirmations: 1,
+			MinDepositAmount:        7,
+			RuntimeSettings: &stubRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+				DepositMinConfirmations:         9,
+				WithdrawPlannerMinConfirmations: 4,
+				WithdrawBatchConfirmations:      5,
+			}},
+			BridgeSettings: &stubBridgeSettingsProvider{snapshot: bridgeconfig.Snapshot{
+				MinDepositAmount: 42,
+			}},
+			NonceFn: func() (uint64, error) {
+				return 1, nil
+			},
+		}, &stubDepositReader{}, &stubWithdrawalReader{})
+		if err != nil {
+			t.Fatalf("NewHandler: %v", err)
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/config", nil)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status: got %d want %d body=%s", rec.Code, http.StatusOK, rec.Body.String())
+		}
+
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if got := out["minDepositAmount"].(string); got != "42" {
+			t.Fatalf("minDepositAmount: got %s want 42", got)
+		}
+		if got := int(out["depositMinConfirmations"].(float64)); got != 9 {
+			t.Fatalf("depositMinConfirmations: got %d want 9", got)
 		}
 	})
 }

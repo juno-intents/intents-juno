@@ -37,6 +37,31 @@ func NewMemoryStore() *MemoryStore {
 	}
 }
 
+func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[d.DepositID]
+	if !ok {
+		j = Job{
+			Deposit: d,
+			State:   StateSeen,
+		}
+		s.jobs[d.DepositID] = j
+		s.order = append(s.order, d.DepositID)
+		return j, true, nil
+	}
+
+	if !depositIdentityEqual(j.Deposit, d) {
+		return Job{}, false, ErrDepositMismatch
+	}
+	if d.JunoHeight > 0 {
+		j.Deposit.JunoHeight = d.JunoHeight
+	}
+	s.jobs[d.DepositID] = j
+	return cloneJob(j), false, nil
+}
+
 func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -52,16 +77,48 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 		return j, true, nil
 	}
 
-	if !depositEqual(j.Deposit, d) {
+	if !depositIdentityEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
+	}
+	if d.JunoHeight > 0 {
+		j.Deposit.JunoHeight = d.JunoHeight
 	}
 
 	if j.State < StateConfirmed {
 		j.State = StateConfirmed
+		j.RejectionReason = ""
 		s.jobs[d.DepositID] = j
 		delete(s.claim, d.DepositID)
 	}
-	return j, false, nil
+	return cloneJob(j), false, nil
+}
+
+func (s *MemoryStore) PromoteSeenToConfirmed(_ context.Context, tipHeight int64, minConfirmations int64, limit int) ([]Job, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if tipHeight <= 0 || minConfirmations <= 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	out := make([]Job, 0, limit)
+	for _, id := range s.order {
+		if len(out) >= limit {
+			break
+		}
+		j := s.jobs[id]
+		if j.State != StateSeen || j.Deposit.JunoHeight <= 0 {
+			continue
+		}
+		if tipHeight-j.Deposit.JunoHeight+1 < minConfirmations {
+			continue
+		}
+		j.State = StateConfirmed
+		j.RejectionReason = ""
+		s.jobs[id] = j
+		out = append(out, cloneJob(j))
+	}
+	return out, nil
 }
 
 func (s *MemoryStore) Get(_ context.Context, depositID [32]byte) (Job, error) {
@@ -186,6 +243,9 @@ func (s *MemoryStore) MarkProofRequested(_ context.Context, depositID [32]byte, 
 		return ErrNotFound
 	}
 
+	if j.State == StateRejected {
+		return ErrInvalidTransition
+	}
 	if j.State < StateConfirmed {
 		return ErrInvalidTransition
 	}
@@ -209,6 +269,9 @@ func (s *MemoryStore) SetProofReady(_ context.Context, depositID [32]byte, seal 
 		return ErrNotFound
 	}
 
+	if j.State == StateRejected {
+		return ErrInvalidTransition
+	}
 	if j.State < StateProofRequested {
 		return ErrInvalidTransition
 	}
@@ -231,6 +294,9 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 		return ErrNotFound
 	}
 
+	if j.State == StateRejected {
+		return ErrInvalidTransition
+	}
 	if j.State < StateProofReady {
 		return ErrInvalidTransition
 	}
@@ -244,8 +310,44 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 
 	j.State = StateFinalized
 	j.TxHash = txHash
+	j.RejectionReason = ""
 	s.jobs[depositID] = j
 	delete(s.claim, depositID)
+	return nil
+}
+
+func (s *MemoryStore) MarkRejected(_ context.Context, depositID [32]byte, reason string, txHash [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[depositID]
+	if !ok {
+		return ErrNotFound
+	}
+	if j.State == StateFinalized {
+		return ErrInvalidTransition
+	}
+	if j.State == StateRejected {
+		if j.RejectionReason != reason {
+			return ErrDepositMismatch
+		}
+		if txHash != ([32]byte{}) && j.TxHash != ([32]byte{}) && j.TxHash != txHash {
+			return ErrDepositMismatch
+		}
+		return nil
+	}
+	if j.State < StateSeen {
+		return ErrInvalidTransition
+	}
+
+	j.State = StateRejected
+	j.RejectionReason = reason
+	if txHash != ([32]byte{}) {
+		j.TxHash = txHash
+	}
+	s.jobs[depositID] = j
+	delete(s.claim, depositID)
+	delete(s.attemptByDeposit, depositID)
 	return nil
 }
 
@@ -267,6 +369,9 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 		if !ok {
 			return SubmittedBatchAttempt{}, ErrNotFound
 		}
+		if j.State == StateRejected {
+			return SubmittedBatchAttempt{}, ErrInvalidTransition
+		}
 		if j.State < StateConfirmed {
 			return SubmittedBatchAttempt{}, ErrInvalidTransition
 		}
@@ -283,13 +388,13 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 	}
 
 	attempt := SubmittedBatchAttempt{
-		BatchID:             batchID,
-		DepositIDs:          cloneDepositIDs(ids),
-		Owner:               owner,
-		Epoch:               1,
-		Checkpoint:          cp,
-		OperatorSignatures:  clone2DBytes(operatorSignatures),
-		ProofSeal:           append([]byte(nil), seal...),
+		BatchID:            batchID,
+		DepositIDs:         cloneDepositIDs(ids),
+		Owner:              owner,
+		Epoch:              1,
+		Checkpoint:         cp,
+		OperatorSignatures: clone2DBytes(operatorSignatures),
+		ProofSeal:          append([]byte(nil), seal...),
 	}
 	s.attempts[batchID] = attempt
 	s.attemptOrder = append(s.attemptOrder, batchID)
@@ -298,9 +403,10 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 		j := s.jobs[id]
 		j.Checkpoint = cp
 		j.ProofSeal = append([]byte(nil), seal...)
-		if j.State != StateFinalized {
+		if j.State != StateFinalized && j.State != StateRejected {
 			j.State = StateSubmitted
 		}
+		j.RejectionReason = ""
 		s.jobs[id] = j
 		delete(s.claim, id)
 		s.attemptByDeposit[id] = batchID
@@ -366,11 +472,78 @@ func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp
 		j.Checkpoint = cp
 		j.ProofSeal = append([]byte(nil), seal...)
 		j.TxHash = txHash
+		j.RejectionReason = ""
 		s.jobs[id] = j
 		delete(s.claim, id)
 		delete(s.attemptByDeposit, id)
 	}
 	for batchID := range batchIDs {
+		delete(s.attempts, batchID)
+		delete(s.attemptClaim, batchID)
+	}
+	return nil
+}
+
+func (s *MemoryStore) ApplyBatchOutcome(_ context.Context, batchID [32]byte, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	attempt, ok := s.attempts[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+
+	expected := make(map[[32]byte]struct{}, len(attempt.DepositIDs))
+	for _, id := range attempt.DepositIDs {
+		expected[id] = struct{}{}
+	}
+	finalizedSet := make(map[[32]byte]struct{}, len(finalizedIDs))
+	rejectedSet := make(map[[32]byte]struct{}, len(rejectedIDs))
+	for _, id := range uniqueDepositIDs(finalizedIDs) {
+		if _, ok := expected[id]; !ok {
+			return ErrDepositMismatch
+		}
+		finalizedSet[id] = struct{}{}
+	}
+	for _, id := range uniqueDepositIDs(rejectedIDs) {
+		if _, ok := expected[id]; !ok {
+			return ErrDepositMismatch
+		}
+		if _, ok := finalizedSet[id]; ok {
+			return ErrDepositMismatch
+		}
+		rejectedSet[id] = struct{}{}
+	}
+
+	allResolved := true
+	for _, id := range attempt.DepositIDs {
+		j, ok := s.jobs[id]
+		if !ok {
+			return ErrNotFound
+		}
+		switch {
+		case hasID(finalizedSet, id):
+			j.State = StateFinalized
+			j.RejectionReason = ""
+			j.TxHash = txHash
+			delete(s.attemptByDeposit, id)
+		case hasID(rejectedSet, id):
+			j.State = StateRejected
+			j.RejectionReason = rejectionReason
+			j.TxHash = txHash
+			delete(s.attemptByDeposit, id)
+		default:
+			allResolved = false
+			if j.State != StateFinalized && j.State != StateRejected {
+				j.State = StateSubmitted
+				j.TxHash = txHash
+			}
+			s.attemptByDeposit[id] = batchID
+		}
+		delete(s.claim, id)
+		s.jobs[id] = j
+	}
+	if allResolved {
 		delete(s.attempts, batchID)
 		delete(s.attemptClaim, batchID)
 	}
@@ -393,6 +566,12 @@ func uniqueDepositIDs(ids [][32]byte) [][32]byte {
 func cloneDeposit(d Deposit) Deposit {
 	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
 	return d
+}
+
+func cloneJob(j Job) Job {
+	j.Deposit = cloneDeposit(j.Deposit)
+	j.ProofSeal = append([]byte(nil), j.ProofSeal...)
+	return j
 }
 
 func cloneSubmittedBatchAttempt(a SubmittedBatchAttempt) SubmittedBatchAttempt {
@@ -445,11 +624,20 @@ func submittedBatchAttemptEqual(existing SubmittedBatchAttempt, owner string, de
 	return true
 }
 
-func depositEqual(a, b Deposit) bool {
+func depositIdentityEqual(a, b Deposit) bool {
 	return a.DepositID == b.DepositID &&
 		a.Commitment == b.Commitment &&
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
 		a.BaseRecipient == b.BaseRecipient &&
 		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
+}
+
+func depositEqual(a, b Deposit) bool {
+	return depositIdentityEqual(a, b) && a.JunoHeight == b.JunoHeight
+}
+
+func hasID(ids map[[32]byte]struct{}, id [32]byte) bool {
+	_, ok := ids[id]
+	return ok
 }

@@ -86,6 +86,7 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
@@ -189,15 +190,22 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.requests.v1' "shared infra validation includes proof request topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.fulfillments.v1' "shared infra validation includes proof fulfillment topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'proof.failures.v1' "shared infra validation includes proof failure topic"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposits.event.v1' "shared infra validation includes deposit event topic"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposits.event.v2' "shared infra validation includes deposit event topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdrawals.requested.v1' "shared infra validation includes withdrawal topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'ops.alerts.v1' "shared infra validation includes ops alert topic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-rpc-url "$BRIDGE_API_BASE_RPC_URL"' "bridge wrapper passes base rpc url"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--deposit-min-confirmations "${BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "bridge wrapper passes deposit confirmation seed"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--withdraw-planner-min-confirmations "${BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"' "bridge wrapper passes withdraw planner confirmation seed"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--withdraw-batch-confirmations "${BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "bridge wrapper passes withdraw batch confirmation seed"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES:-}" ]]; then' "backoffice wrapper guards relayer signer flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI:-}" ]]; then' "backoffice wrapper guards relayer gas floor flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-signer-addresses "$BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES"' "backoffice wrapper passes relayer signer addresses"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-gas-min-wei "$BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI"' "backoffice wrapper passes relayer gas floor"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--deposit-min-confirmations "${BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "backoffice wrapper passes deposit confirmation seed"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--withdraw-planner-min-confirmations "${BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"' "backoffice wrapper passes withdraw planner confirmation seed"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--withdraw-batch-confirmations "${BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "backoffice wrapper passes withdraw batch confirmation seed"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '/etc/caddy/Caddyfile' "remote writes caddyfile"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'acme_account_email="ops@thejunowallet.com"' "remote configures acme account email"
@@ -216,12 +224,20 @@ EOF
   assert_not_contains "$(cat "$log_dir/aws.log")" '"FromPort":8082' "https deploy must not expose bridge app port"
   assert_not_contains "$(cat "$log_dir/aws.log")" '"FromPort":8090' "https deploy must not expose backoffice app port"
   assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_OWALLET_UA=u1alphaexample" "bridge env owallet ua"
+  assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_BASE_RPC_URL=https://base-sepolia.example.invalid" "bridge env base rpc url"
+  assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS=1" "bridge env deposit confirmation default"
+  assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=1" "bridge env withdraw planner confirmation default"
+  assert_contains "$(cat "$log_dir/bridge-api.env")" "BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS=1" "bridge env withdraw batch confirmation default"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=250000000000000" "backoffice env relayer gas floor"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=1" "backoffice env deposit confirmation default"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=1" "backoffice env withdraw planner confirmation default"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=1" "backoffice env withdraw batch confirmation default"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   rm -rf "$workdir"
 }
 

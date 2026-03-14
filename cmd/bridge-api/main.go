@@ -13,10 +13,14 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeapi"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 )
 
@@ -32,16 +36,20 @@ func main() {
 			pgxpoolutil.DefaultHealthCheckPeriod,
 			"pgxpool health check period",
 		)
+		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
 
 		baseChainID = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
 		wjunoAddr   = flag.String("wjuno-address", "", "WJuno token contract address (optional, returned by /v1/config)")
 		oWalletUA   = flag.String("owallet-ua", "", "oWallet unified address (required)")
 
-		refundWindowSeconds = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
-		minDepositAmount    = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
-		minWithdrawAmount   = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
-		feeBps              = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
+		refundWindowSeconds             = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
+		minDepositAmount                = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+		minWithdrawAmount               = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
+		feeBps                          = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
 
 		rateLimitPerSecond = flag.Float64("rate-limit-per-ip-per-second", 20, "per-IP refill rate for API rate limiting")
 		rateLimitBurst     = flag.Int("rate-limit-burst", 40, "per-IP burst capacity for API rate limiting")
@@ -59,8 +67,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *oWalletUA == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, and --owallet-ua are required")
+	if *postgresDSN == "" || *baseRPCURL == "" || *baseChainID == 0 || *bridgeAddr == "" || *oWalletUA == "" {
+		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-rpc-url, --base-chain-id, --bridge-address, and --owallet-ua are required")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -91,6 +99,10 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: memo cache settings must be > 0")
 		os.Exit(2)
 	}
+	if *depositMinConfirmations <= 0 || *withdrawPlannerMinConfirmations <= 0 || *withdrawBatchConfirmations <= 0 {
+		fmt.Fprintln(os.Stderr, "error: runtime confirmation defaults must be > 0")
+		os.Exit(2)
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -109,6 +121,13 @@ func main() {
 		os.Exit(2)
 	}
 	defer pool.Close()
+
+	baseClient, err := ethclient.DialContext(ctx, *baseRPCURL)
+	if err != nil {
+		log.Error("dial base rpc", "err", err)
+		os.Exit(2)
+	}
+	defer baseClient.Close()
 
 	depositStore, err := depositpg.New(pool)
 	if err != nil {
@@ -129,6 +148,42 @@ func main() {
 		log.Error("ensure withdraw schema", "err", err)
 		os.Exit(2)
 	}
+
+	runtimeStore, err := runtimeconfig.New(pool)
+	if err != nil {
+		log.Error("init runtime settings store", "err", err)
+		os.Exit(2)
+	}
+	if err := runtimeStore.EnsureSchema(ctx); err != nil {
+		log.Error("ensure runtime settings schema", "err", err)
+		os.Exit(2)
+	}
+	if _, err := runtimeStore.EnsureDefaults(ctx, runtimeconfig.Settings{
+		DepositMinConfirmations:         *depositMinConfirmations,
+		WithdrawPlannerMinConfirmations: *withdrawPlannerMinConfirmations,
+		WithdrawBatchConfirmations:      *withdrawBatchConfirmations,
+	}, "bridge-api"); err != nil {
+		log.Error("ensure runtime settings defaults", "err", err)
+		os.Exit(2)
+	}
+	runtimeSettingsCache, err := runtimeconfig.NewCache(runtimeStore, 5*time.Second, log)
+	if err != nil {
+		log.Error("init runtime settings cache", "err", err)
+		os.Exit(2)
+	}
+	go runtimeSettingsCache.Start(ctx)
+
+	bridgeReader, err := bridgeconfig.NewReader(baseClient, common.HexToAddress(*bridgeAddr))
+	if err != nil {
+		log.Error("init bridge settings reader", "err", err)
+		os.Exit(2)
+	}
+	bridgeSettingsCache, err := bridgeconfig.NewCache(bridgeReader, 5*time.Second, log)
+	if err != nil {
+		log.Error("init bridge settings cache", "err", err)
+		os.Exit(2)
+	}
+	go bridgeSettingsCache.Start(ctx)
 
 	withdrawReader, err := bridgeapi.NewPostgresWithdrawalReader(pool)
 	if err != nil {
@@ -160,8 +215,11 @@ func main() {
 		OWalletUA:               *oWalletUA,
 		RefundWindowSeconds:     *refundWindowSeconds,
 		MinDepositAmount:        *minDepositAmount,
+		DepositMinConfirmations: *depositMinConfirmations,
 		MinWithdrawAmount:       *minWithdrawAmount,
 		FeeBps:                  uint32(*feeBps),
+		RuntimeSettings:         runtimeSettingsCache,
+		BridgeSettings:          bridgeSettingsCache,
 		RateLimitPerIPPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:          *rateLimitBurst,
 		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,
@@ -169,8 +227,12 @@ func main() {
 		MemoCacheMaxEntries:     *memoCacheMaxEntries,
 		DepositLister:           depositLister,
 		WithdrawalLister:        withdrawalLister,
-		ReadinessCheck:          pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
-		Now:                     time.Now,
+		ReadinessCheck: healthz.CombineReadinessChecks(
+			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
+			runtimeSettingsCache.Ready,
+			bridgeSettingsCache.Ready,
+		),
+		Now: time.Now,
 	}, depositStore, withdrawReader)
 	if err != nil {
 		log.Error("init bridge api handler", "err", err)

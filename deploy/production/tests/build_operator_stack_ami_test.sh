@@ -143,7 +143,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
 }
 
 test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
-  local script_text hydrator_script withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
+  local script_text hydrator_script deposit_wrapper withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
   script_text="$(cat "$RUNBOOK_PATH")"
 
   assert_contains "$script_text" 'download_release_asset_with_checksum()' "runbook defines checksum downloader"
@@ -184,6 +184,12 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"' "config hydrator persists checkpoint signer kms key id"
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
 
+  deposit_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
+  assert_contains "$deposit_wrapper" 'deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"' "deposit wrapper subscribes to deposits.event.v2 by default"
+  assert_contains "$deposit_wrapper" '--deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "deposit wrapper passes deposit confirmation seed"
+  assert_contains "$deposit_wrapper" '--withdraw-planner-min-confirmations "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"' "deposit wrapper passes withdraw planner confirmation seed"
+  assert_contains "$deposit_wrapper" '--withdraw-batch-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "deposit wrapper passes withdraw batch confirmation seed"
+
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
   assert_contains "$withdraw_wrapper" 'source /etc/intents-juno/operator-stack.env' "withdraw wrapper sources operator env"
   assert_contains "$withdraw_wrapper" 'export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "withdraw wrapper exports AWS SDK env when present"
@@ -196,6 +202,9 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper passes the scanner bearer env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper passes RPC username env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper passes RPC password env name"
+  assert_contains "$withdraw_wrapper" '--deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "withdraw wrapper passes deposit confirmation seed"
+  assert_contains "$withdraw_wrapper" '--juno-minconf "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"' "withdraw wrapper passes withdraw planner confirmation seed"
+  assert_contains "$withdraw_wrapper" '--juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "withdraw wrapper passes withdraw batch confirmation seed"
   assert_contains "$withdraw_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper passes base-relayer auth env name"
   assert_contains "$withdraw_wrapper" '--expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-6h}"' "withdraw wrapper defaults expiry safety margin within the extension bound"
   assert_contains "$withdraw_wrapper" '--max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"' "withdraw wrapper passes the max expiry extension from env"
@@ -431,6 +440,9 @@ WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
+RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=2
+RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=3
+RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=4
 JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
@@ -461,6 +473,9 @@ EOF
   assert_contains "$(cat "$output_file")" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper forwards the scanner bearer env name"
   assert_contains "$(cat "$output_file")" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper forwards RPC username env name"
   assert_contains "$(cat "$output_file")" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper forwards RPC password env name"
+  assert_contains "$(cat "$output_file")" '--deposit-min-confirmations 2' "withdraw wrapper forwards deposit confirmation seed"
+  assert_contains "$(cat "$output_file")" '--juno-minconf 3' "withdraw wrapper forwards withdraw planner confirmation seed"
+  assert_contains "$(cat "$output_file")" '--juno-confirmations 4' "withdraw wrapper forwards withdraw batch confirmation seed"
   assert_contains "$(cat "$output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper forwards base relayer auth env name"
   assert_contains "$(cat "$output_file")" '--expiry-safety-margin 6h' "withdraw wrapper forwards the bounded expiry safety margin"
   assert_contains "$(cat "$output_file")" '--max-expiry-extension 12h' "withdraw wrapper forwards the max expiry extension"

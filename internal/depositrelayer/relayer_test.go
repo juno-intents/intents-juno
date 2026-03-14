@@ -16,7 +16,9 @@ import (
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/dlq"
@@ -25,6 +27,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/memo"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
 type stubSender struct {
@@ -209,6 +212,50 @@ func (s *finalizeFailStore) FinalizeBatch(context.Context, [][32]byte, checkpoin
 	return s.err
 }
 
+type stubDepositRuntimeSettingsProvider struct {
+	settings runtimeconfig.Settings
+	err      error
+}
+
+func (s *stubDepositRuntimeSettingsProvider) Current() (runtimeconfig.Settings, error) {
+	return s.settings, s.err
+}
+
+func (s *stubDepositRuntimeSettingsProvider) Ready(context.Context) error {
+	return s.err
+}
+
+type stubDepositBridgeSettingsProvider struct {
+	snapshot bridgeconfig.Snapshot
+	err      error
+}
+
+func (s *stubDepositBridgeSettingsProvider) Current() (bridgeconfig.Snapshot, error) {
+	return s.snapshot, s.err
+}
+
+func (s *stubDepositBridgeSettingsProvider) Ready(context.Context) error {
+	return s.err
+}
+
+type stubTipHeightProvider struct {
+	height int64
+	err    error
+}
+
+func (s *stubTipHeightProvider) TipHeight(context.Context) (int64, error) {
+	return s.height, s.err
+}
+
+type stubReceiptReader struct {
+	receipt *types.Receipt
+	err     error
+}
+
+func (s *stubReceiptReader) TransactionReceipt(context.Context, common.Hash) (*types.Receipt, error) {
+	return s.receipt, s.err
+}
+
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
@@ -237,6 +284,18 @@ func mustType(t *testing.T, typ string, comps []abi.ArgumentMarshaling) abi.Type
 		t.Fatalf("abi.NewType(%q): %v", typ, err)
 	}
 	return ty
+}
+
+func seq32ForRelayer(b byte) [32]byte {
+	var out [32]byte
+	out[31] = b
+	return out
+}
+
+func to20(addr common.Address) [20]byte {
+	var out [20]byte
+	copy(out[:], addr[:])
+	return out
 }
 
 func TestRelayer_IngestDeposit_RejectsLeafIndexOverflow(t *testing.T) {
@@ -285,6 +344,162 @@ func TestRelayer_IngestDeposit_RejectsLeafIndexOverflow(t *testing.T) {
 	}
 	if !errors.Is(err, idempotency.ErrDepositLeafIndexOverflow) {
 		t.Fatalf("expected ErrDepositLeafIndexOverflow, got %v", err)
+	}
+}
+
+func TestRelayer_RefillFromStore_PromotesSeenAndRejectsBelowMin(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	depID := seq32ForRelayer(0x01)
+	dep := deposit.Deposit{
+		DepositID:     depID,
+		Commitment:    seq32ForRelayer(0x11),
+		LeafIndex:     7,
+		Amount:        99,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000123")),
+		JunoHeight:    10,
+	}
+	if _, _, err := store.UpsertSeen(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertSeen: %v", err)
+	}
+
+	r, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x01"),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+		RuntimeSettings: &stubDepositRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         3,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}},
+		BridgeSettings: &stubDepositBridgeSettingsProvider{snapshot: bridgeconfig.Snapshot{
+			MinDepositAmount: 100,
+		}},
+		TipHeightProvider: &stubTipHeightProvider{height: 12},
+	}, store, &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.checkpoint = &checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x01"),
+		FinalOrchardRoot: common.HexToHash("0x02"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	r.opSigs = [][]byte{[]byte{0x01}}
+
+	if err := r.refillFromStore(context.Background()); err != nil {
+		t.Fatalf("refillFromStore: %v", err)
+	}
+
+	job, err := store.Get(context.Background(), depID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateRejected {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateRejected)
+	}
+	wantReason := "deposit amount is below the current minimum deposit (100)"
+	if job.RejectionReason != wantReason {
+		t.Fatalf("rejection reason: got %q want %q", job.RejectionReason, wantReason)
+	}
+}
+
+func TestRelayer_ApplyBatchOutcomeFromHash_ReconcilesMixedMintedAndSkipped(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	depositA := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0x21),
+		Commitment:    seq32ForRelayer(0x31),
+		LeafIndex:     1,
+		Amount:        500,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}
+	depositB := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0x22),
+		Commitment:    seq32ForRelayer(0x32),
+		LeafIndex:     2,
+		Amount:        700,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000789")),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), depositA); err != nil {
+		t.Fatalf("UpsertConfirmed(A): %v", err)
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), depositB); err != nil {
+		t.Fatalf("UpsertConfirmed(B): %v", err)
+	}
+
+	batchID := seq32ForRelayer(0x40)
+	txHash := seq32ForRelayer(0x41)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0x42),
+		FinalOrchardRoot: seq32ForRelayer(0x43),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := store.MarkBatchSubmitted(context.Background(), "owner-1", batchID, [][32]byte{depositA.DepositID, depositB.DepositID}, cp, nil, []byte{0x01}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	if err := store.SetBatchSubmissionTxHash(context.Background(), batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	mintedTopic := crypto.Keccak256Hash([]byte("Minted(bytes32,address,uint256,uint256,uint256)"))
+	skippedTopic := crypto.Keccak256Hash([]byte("DepositSkipped(bytes32)"))
+	bridge := cp.BridgeContract
+	r, err := New(Config{
+		BaseChainID:       uint32(cp.BaseChainID),
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x01"),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+		ReceiptReader: &stubReceiptReader{receipt: &types.Receipt{
+			Status: types.ReceiptStatusSuccessful,
+			Logs: []*types.Log{
+				{Address: bridge, Topics: []common.Hash{mintedTopic, common.BytesToHash(depositA.DepositID[:])}},
+				{Address: bridge, Topics: []common.Hash{skippedTopic, common.BytesToHash(depositB.DepositID[:])}},
+			},
+		}},
+	}, store, &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := r.applyBatchOutcomeFromHash(context.Background(), batchID, [][32]byte{depositA.DepositID, depositB.DepositID}, cp, []byte{0x01}, txHash); err != nil {
+		t.Fatalf("applyBatchOutcomeFromHash: %v", err)
+	}
+
+	jobA, err := store.Get(context.Background(), depositA.DepositID)
+	if err != nil {
+		t.Fatalf("Get(A): %v", err)
+	}
+	if jobA.State != deposit.StateFinalized {
+		t.Fatalf("jobA state: got %s want %s", jobA.State, deposit.StateFinalized)
+	}
+
+	jobB, err := store.Get(context.Background(), depositB.DepositID)
+	if err != nil {
+		t.Fatalf("Get(B): %v", err)
+	}
+	if jobB.State != deposit.StateRejected {
+		t.Fatalf("jobB state: got %s want %s", jobB.State, deposit.StateRejected)
+	}
+	if jobB.RejectionReason != "deposit skipped by bridge" {
+		t.Fatalf("jobB rejection reason: got %q want %q", jobB.RejectionReason, "deposit skipped by bridge")
 	}
 }
 

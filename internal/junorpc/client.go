@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync/atomic"
@@ -147,6 +148,17 @@ type OrchardAction struct {
 	EncCiphertext [580]byte
 	OutCiphertext [80]byte
 	CV            [32]byte
+}
+
+func (c *Client) TipHeight(ctx context.Context) (int64, error) {
+	info, err := c.GetBlockChainInfo(ctx)
+	if err != nil {
+		return 0, err
+	}
+	if info.Blocks > uint64(math.MaxInt64) {
+		return 0, fmt.Errorf("junorpc: tip height overflows int64")
+	}
+	return int64(info.Blocks), nil
 }
 
 func (c *Client) GetBlockChainInfo(ctx context.Context) (BlockChainInfo, error) {

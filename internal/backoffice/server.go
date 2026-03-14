@@ -13,7 +13,9 @@ import (
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/dlq"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
 // ServerConfig holds all configuration for the backoffice API server.
@@ -26,8 +28,12 @@ type ServerConfig struct {
 	JunoRPCUser string
 	JunoRPCPass string
 
-	DLQStore   dlq.Store
-	AlertStore *alerts.Store
+	DLQStore          dlq.Store
+	AlertStore        *alerts.Store
+	RuntimeStore      RuntimeSettingsStore
+	BridgeSettings    BridgeSettingsProvider
+	SettingsAudit     *SettingsAuditStore
+	MinDepositUpdater MinDepositUpdater
 
 	BridgeAddress              common.Address
 	WJunoAddress               common.Address
@@ -127,6 +133,12 @@ func New(cfg ServerConfig) (*Server, error) {
 	s.mux.HandleFunc("GET /api/analytics/bridges-over-time", s.handleBridgesOverTime)
 	s.mux.HandleFunc("GET /api/analytics/operator-revenue", s.handleOperatorRevenue)
 
+	// Settings routes
+	s.mux.HandleFunc("GET /api/settings/runtime", s.handleRuntimeSettings)
+	s.mux.HandleFunc("PUT /api/settings/runtime", s.handleUpdateRuntimeSettings)
+	s.mux.HandleFunc("GET /api/settings/audit", s.handleSettingsAudit)
+	s.mux.HandleFunc("POST /api/settings/min-deposit", s.handleSetMinDeposit)
+
 	// Alert routes
 	if s.cfg.AlertStore != nil {
 		alerts.RegisterRoutes(s.mux, s.cfg.AlertStore)
@@ -204,6 +216,15 @@ type ServiceEntry struct {
 type OperatorEndpoint struct {
 	Address  common.Address
 	Endpoint string // host:port for gRPC TLS probe
+}
+
+type RuntimeSettingsStore interface {
+	Get(ctx context.Context) (runtimeconfig.Settings, error)
+	Update(ctx context.Context, settings runtimeconfig.Settings, updatedBy string) (runtimeconfig.Settings, error)
+}
+
+type BridgeSettingsProvider interface {
+	Current() (bridgeconfig.Snapshot, error)
 }
 
 func isProbePath(path string) bool {

@@ -40,7 +40,7 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 	return nil
 }
 
-func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit.Job, bool, error) {
+func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job, bool, error) {
 	if s == nil || s.pool == nil {
 		return deposit.Job{}, false, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
@@ -71,36 +71,112 @@ func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit
 			updated_at
 		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now(),now())
 		ON CONFLICT (deposit_id) DO NOTHING
-	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], d.ProofWitnessItem, junoHeight, int16(deposit.StateConfirmed))
+	`, d.DepositID[:], d.Commitment[:], int64(d.LeafIndex), int64(d.Amount), d.BaseRecipient[:], d.ProofWitnessItem, junoHeight, int16(deposit.StateSeen))
 	if err != nil {
-		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: insert: %w", err)
+		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: insert seen: %w", err)
 	}
 	if tag.RowsAffected() == 1 {
-		return deposit.Job{Deposit: cloneDeposit(d), State: deposit.StateConfirmed}, true, nil
+		return deposit.Job{Deposit: cloneDeposit(d), State: deposit.StateSeen}, true, nil
 	}
 
 	job, err := s.Get(ctx, d.DepositID)
 	if err != nil {
 		return deposit.Job{}, false, err
 	}
-	if !depositEqual(job.Deposit, d) {
+	if !depositIdentityEqual(job.Deposit, d) {
 		return deposit.Job{}, false, deposit.ErrDepositMismatch
 	}
+	if d.JunoHeight > 0 && job.Deposit.JunoHeight != d.JunoHeight {
+		_, err = s.pool.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET juno_height = $2, updated_at = now()
+			WHERE deposit_id = $1
+		`, d.DepositID[:], d.JunoHeight)
+		if err != nil {
+			return deposit.Job{}, false, fmt.Errorf("deposit/postgres: update seen juno height: %w", err)
+		}
+		job.Deposit.JunoHeight = d.JunoHeight
+	}
+	return job, false, nil
+}
 
+func (s *Store) UpsertConfirmed(ctx context.Context, d deposit.Deposit) (deposit.Job, bool, error) {
+	job, inserted, err := s.UpsertSeen(ctx, d)
+	if err != nil {
+		return deposit.Job{}, false, err
+	}
+	if inserted {
+		job.State = deposit.StateSeen
+	}
 	if job.State < deposit.StateConfirmed {
 		// Upgrade to confirmed.
 		_, err := s.pool.Exec(ctx, `
 			UPDATE deposit_jobs
-			SET state = $2, updated_at = now()
+			SET state = $2, rejection_reason = NULL, updated_at = now()
 			WHERE deposit_id = $1 AND state < $2
 		`, d.DepositID[:], int16(deposit.StateConfirmed))
 		if err != nil {
 			return deposit.Job{}, false, fmt.Errorf("deposit/postgres: update state: %w", err)
 		}
 		job.State = deposit.StateConfirmed
+		job.RejectionReason = ""
 	}
 
-	return job, false, nil
+	return job, inserted, nil
+}
+
+func (s *Store) PromoteSeenToConfirmed(ctx context.Context, tipHeight int64, minConfirmations int64, limit int) ([]deposit.Job, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if tipHeight <= 0 || minConfirmations <= 0 || limit <= 0 {
+		return nil, nil
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		WITH eligible AS (
+			SELECT deposit_id
+			FROM deposit_jobs
+			WHERE
+				state = $1
+				AND juno_height IS NOT NULL
+				AND juno_height > 0
+				AND ($2 - juno_height + 1) >= $3
+			ORDER BY created_at ASC, deposit_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $4
+		)
+		UPDATE deposit_jobs dj
+		SET state = $5, rejection_reason = NULL, updated_at = now()
+		FROM eligible
+		WHERE dj.deposit_id = eligible.deposit_id
+		RETURNING dj.deposit_id
+	`, int16(deposit.StateSeen), tipHeight, minConfirmations, limit, int16(deposit.StateConfirmed))
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: promote seen to confirmed: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]deposit.Job, 0, limit)
+	for rows.Next() {
+		var idRaw []byte
+		if err := rows.Scan(&idRaw); err != nil {
+			return nil, fmt.Errorf("deposit/postgres: scan promoted row: %w", err)
+		}
+		id, err := to32(idRaw)
+		if err != nil {
+			return nil, err
+		}
+		job, err := s.Get(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, job)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: promote seen rows: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error) {
@@ -117,14 +193,15 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		proofWitnessRaw  []byte
 		state            int16
 
-		cpHeight       *int64
-		cpBlockHashRaw []byte
-		cpRootRaw      []byte
-		cpBaseChainID  *int64
-		cpBridgeRaw    []byte
-		proofSeal      []byte
-		txHashRaw      []byte
-		junoHeight     *int64
+		cpHeight        *int64
+		cpBlockHashRaw  []byte
+		cpRootRaw       []byte
+		cpBaseChainID   *int64
+		cpBridgeRaw     []byte
+		proofSeal       []byte
+		txHashRaw       []byte
+		junoHeight      *int64
+		rejectionReason *string
 	)
 
 	err := s.pool.QueryRow(ctx, `
@@ -143,7 +220,8 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 			checkpoint_bridge_contract,
 			proof_seal,
 			tx_hash,
-			juno_height
+			juno_height,
+			rejection_reason
 		FROM deposit_jobs
 		WHERE deposit_id = $1
 	`, depositID[:]).Scan(
@@ -162,6 +240,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 		&proofSeal,
 		&txHashRaw,
 		&junoHeight,
+		&rejectionReason,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -249,6 +328,9 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 			return deposit.Job{}, err
 		}
 		job.TxHash = tx
+	}
+	if rejectionReason != nil {
+		job.RejectionReason = *rejectionReason
 	}
 
 	return job, nil
@@ -421,6 +503,9 @@ func (s *Store) MarkProofRequested(ctx context.Context, depositID [32]byte, cp c
 	if err != nil {
 		return err
 	}
+	if job.State == deposit.StateRejected {
+		return deposit.ErrInvalidTransition
+	}
 	if job.State < deposit.StateConfirmed {
 		return deposit.ErrInvalidTransition
 	}
@@ -461,6 +546,9 @@ func (s *Store) SetProofReady(ctx context.Context, depositID [32]byte, seal []by
 	if err != nil {
 		return err
 	}
+	if job.State == deposit.StateRejected {
+		return deposit.ErrInvalidTransition
+	}
 	if job.State < deposit.StateProofRequested {
 		return deposit.ErrInvalidTransition
 	}
@@ -489,6 +577,9 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 	if err != nil {
 		return err
 	}
+	if job.State == deposit.StateRejected {
+		return deposit.ErrInvalidTransition
+	}
 	if job.State < deposit.StateProofReady {
 		return deposit.ErrInvalidTransition
 	}
@@ -504,6 +595,7 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 		SET
 			state = $2,
 			tx_hash = $3,
+			rejection_reason = NULL,
 			claimed_by = NULL,
 			claim_expires_at = NULL,
 			updated_at = now()
@@ -511,6 +603,49 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 	`, depositID[:], int16(deposit.StateFinalized), txHash[:])
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: mark finalized: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error {
+	job, err := s.Get(ctx, depositID)
+	if err != nil {
+		return err
+	}
+	if reason == "" {
+		return deposit.ErrInvalidTransition
+	}
+	if job.State == deposit.StateFinalized {
+		return deposit.ErrInvalidTransition
+	}
+	if job.State == deposit.StateRejected {
+		if job.RejectionReason != reason {
+			return deposit.ErrDepositMismatch
+		}
+		if txHash != ([32]byte{}) && job.TxHash != ([32]byte{}) && job.TxHash != txHash {
+			return deposit.ErrDepositMismatch
+		}
+		return nil
+	}
+
+	var rawTxHash []byte
+	if txHash != ([32]byte{}) {
+		rawTxHash = txHash[:]
+	}
+	_, err = s.pool.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET
+			state = $2,
+			tx_hash = $3,
+			rejection_reason = $4,
+			submit_batch_id = NULL,
+			claimed_by = NULL,
+			claim_expires_at = NULL,
+			updated_at = now()
+		WHERE deposit_id = $1
+	`, depositID[:], int16(deposit.StateRejected), rawTxHash, reason)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: mark rejected: %w", err)
 	}
 	return nil
 }
@@ -575,6 +710,9 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 		if !ok {
 			return deposit.SubmittedBatchAttempt{}, deposit.ErrNotFound
 		}
+		if deposit.State(state) == deposit.StateRejected {
+			return deposit.SubmittedBatchAttempt{}, deposit.ErrInvalidTransition
+		}
 		if deposit.State(state) < deposit.StateConfirmed {
 			return deposit.SubmittedBatchAttempt{}, deposit.ErrInvalidTransition
 		}
@@ -590,13 +728,13 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 		}
 	} else {
 		attempt = deposit.SubmittedBatchAttempt{
-			BatchID:             batchID,
-			DepositIDs:          cloneDepositIDs(ids),
-			Owner:               owner,
-			Epoch:               1,
-			Checkpoint:          cp,
-			OperatorSignatures:  clone2DBytes(operatorSignatures),
-			ProofSeal:           append([]byte(nil), seal...),
+			BatchID:            batchID,
+			DepositIDs:         cloneDepositIDs(ids),
+			Owner:              owner,
+			Epoch:              1,
+			Checkpoint:         cp,
+			OperatorSignatures: clone2DBytes(operatorSignatures),
+			ProofSeal:          append([]byte(nil), seal...),
 		}
 		if err := insertSubmittedBatchAttemptTx(ctx, tx, attempt); err != nil {
 			return deposit.SubmittedBatchAttempt{}, err
@@ -617,6 +755,7 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 			checkpoint_base_chain_id = $6,
 			checkpoint_bridge_contract = $7,
 			proof_seal = $8,
+			rejection_reason = NULL,
 			submit_batch_id = $9,
 			claimed_by = NULL,
 			claim_expires_at = NULL,
@@ -678,6 +817,172 @@ func (s *Store) SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, 
 	}
 	if tag.RowsAffected() == 0 {
 		return deposit.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: begin apply batch outcome tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	attempt, found, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return deposit.ErrNotFound
+	}
+	if attempt.TxHash != ([32]byte{}) && attempt.TxHash != txHash {
+		return deposit.ErrDepositMismatch
+	}
+
+	expected := make(map[[32]byte]struct{}, len(attempt.DepositIDs))
+	for _, id := range attempt.DepositIDs {
+		expected[id] = struct{}{}
+	}
+
+	finalizedSet := make(map[[32]byte]struct{}, len(finalizedIDs))
+	for _, id := range uniqueDepositIDs(finalizedIDs) {
+		if _, ok := expected[id]; !ok {
+			return deposit.ErrDepositMismatch
+		}
+		finalizedSet[id] = struct{}{}
+	}
+
+	rejectedSet := make(map[[32]byte]struct{}, len(rejectedIDs))
+	for _, id := range uniqueDepositIDs(rejectedIDs) {
+		if _, ok := expected[id]; !ok {
+			return deposit.ErrDepositMismatch
+		}
+		if _, ok := finalizedSet[id]; ok {
+			return deposit.ErrDepositMismatch
+		}
+		rejectedSet[id] = struct{}{}
+	}
+
+	rawIDs := make([][]byte, 0, len(attempt.DepositIDs))
+	for _, id := range attempt.DepositIDs {
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		rawIDs = append(rawIDs, rawID)
+	}
+
+	rows, err := tx.Query(ctx, `
+		SELECT deposit_id
+		FROM deposit_jobs
+		WHERE deposit_id = ANY($1)
+		FOR UPDATE
+	`, rawIDs)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: lock apply batch outcome rows: %w", err)
+	}
+	defer rows.Close()
+
+	seen := make(map[[32]byte]struct{}, len(attempt.DepositIDs))
+	for rows.Next() {
+		var idRaw []byte
+		if err := rows.Scan(&idRaw); err != nil {
+			return fmt.Errorf("deposit/postgres: scan apply batch outcome row: %w", err)
+		}
+		id, err := to32(idRaw)
+		if err != nil {
+			return err
+		}
+		seen[id] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("deposit/postgres: apply batch outcome rows: %w", err)
+	}
+	for _, id := range attempt.DepositIDs {
+		if _, ok := seen[id]; !ok {
+			return deposit.ErrNotFound
+		}
+	}
+
+	finalizedRaw := make([][]byte, 0, len(finalizedSet))
+	for id := range finalizedSet {
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		finalizedRaw = append(finalizedRaw, rawID)
+	}
+	if len(finalizedRaw) > 0 {
+		_, err = tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = $2,
+				tx_hash = $3,
+				rejection_reason = NULL,
+				submit_batch_id = NULL,
+				claimed_by = NULL,
+				claim_expires_at = NULL,
+				updated_at = now()
+			WHERE deposit_id = ANY($1)
+		`, finalizedRaw, int16(deposit.StateFinalized), txHash[:])
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: update finalized batch outcome rows: %w", err)
+		}
+	}
+
+	rejectedRaw := make([][]byte, 0, len(rejectedSet))
+	for id := range rejectedSet {
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		rejectedRaw = append(rejectedRaw, rawID)
+	}
+	if len(rejectedRaw) > 0 {
+		_, err = tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = $2,
+				tx_hash = $3,
+				rejection_reason = $4,
+				submit_batch_id = NULL,
+				claimed_by = NULL,
+				claim_expires_at = NULL,
+				updated_at = now()
+			WHERE deposit_id = ANY($1)
+		`, rejectedRaw, int16(deposit.StateRejected), txHash[:], rejectionReason)
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: update rejected batch outcome rows: %w", err)
+		}
+	}
+
+	resolvedStateCount := len(finalizedSet) + len(rejectedSet)
+	allResolved := resolvedStateCount == len(attempt.DepositIDs)
+
+	_, err = tx.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET
+			tx_hash = $2,
+			claimed_by = NULL,
+			claim_expires_at = NULL,
+			updated_at = now()
+		WHERE deposit_id = ANY($1)
+			AND state NOT IN ($3, $4)
+	`, rawIDs, txHash[:], int16(deposit.StateFinalized), int16(deposit.StateRejected))
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: update unresolved batch outcome rows: %w", err)
+	}
+
+	if allResolved {
+		_, err = tx.Exec(ctx, `
+			DELETE FROM deposit_batch_attempts
+			WHERE batch_id = $1
+		`, batchID[:])
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: delete batch attempt after outcome: %w", err)
+		}
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("deposit/postgres: commit apply batch outcome tx: %w", err)
 	}
 	return nil
 }
@@ -791,6 +1096,7 @@ func (s *Store) FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp che
 				checkpoint_bridge_contract = $7,
 				proof_seal = $8,
 				tx_hash = $9,
+				rejection_reason = NULL,
 				submit_batch_id = NULL,
 				claimed_by = NULL,
 				claim_expires_at = NULL,
@@ -1038,13 +1344,13 @@ func scanSubmittedBatchAttempt(row scanRow) (deposit.SubmittedBatchAttempt, erro
 	}
 
 	attempt := deposit.SubmittedBatchAttempt{
-		BatchID:             batchID,
-		DepositIDs:          depositIDs,
-		Owner:               owner,
-		Epoch:               uint64(epoch),
-		Checkpoint:          checkpoint.Checkpoint{Height: uint64(checkpointHeight), BlockHash: blockHash, FinalOrchardRoot: root, BaseChainID: uint64(checkpointBaseChainID), BridgeContract: bridge},
-		OperatorSignatures:  operatorSignatures,
-		ProofSeal:           append([]byte(nil), proofSeal...),
+		BatchID:            batchID,
+		DepositIDs:         depositIDs,
+		Owner:              owner,
+		Epoch:              uint64(epoch),
+		Checkpoint:         checkpoint.Checkpoint{Height: uint64(checkpointHeight), BlockHash: blockHash, FinalOrchardRoot: root, BaseChainID: uint64(checkpointBaseChainID), BridgeContract: bridge},
+		OperatorSignatures: operatorSignatures,
+		ProofSeal:          append([]byte(nil), proofSeal...),
 	}
 	if len(txHashRaw) > 0 {
 		attempt.TxHash, err = to32(txHashRaw)
@@ -1127,13 +1433,16 @@ func unmarshalOperatorSignatures(b []byte) ([][]byte, error) {
 }
 
 func depositEqual(a, b deposit.Deposit) bool {
+	return depositIdentityEqual(a, b) && a.JunoHeight == b.JunoHeight
+}
+
+func depositIdentityEqual(a, b deposit.Deposit) bool {
 	return a.DepositID == b.DepositID &&
 		a.Commitment == b.Commitment &&
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
 		a.BaseRecipient == b.BaseRecipient &&
-		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem) &&
-		a.JunoHeight == b.JunoHeight
+		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
 }
 
 var _ deposit.Store = (*Store)(nil)

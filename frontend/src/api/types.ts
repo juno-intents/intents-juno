@@ -6,6 +6,7 @@ export interface BridgeConfig {
   oWalletUA: string
   refundWindowSeconds: number
   minDepositAmount: string
+  depositMinConfirmations: number
   minWithdrawAmount: string
   feeBps: number
 }
@@ -27,6 +28,7 @@ export interface DepositStatus {
   amount: string
   baseRecipient: string
   txHash: string
+  rejectionReason?: string
 }
 
 export interface WithdrawalStatus {

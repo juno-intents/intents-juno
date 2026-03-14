@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import {Test} from "forge-std/Test.sol";
+import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 
 import {Bridge} from "../src/Bridge.sol";
 import {FeeDistributor} from "../src/FeeDistributor.sol";
@@ -54,6 +55,7 @@ contract BridgeTest is Test {
 
     address private owner = address(this);
     address private relayer = makeAddr("relayer");
+    address private minDepositAdmin = makeAddr("minDepositAdmin");
 
     uint256[5] private opPks = [uint256(0xA0), uint256(0xA1), uint256(0xA2), uint256(0xA3), uint256(0xA4)];
 
@@ -143,6 +145,40 @@ contract BridgeTest is Test {
 
         vm.expectRevert(Bridge.ZeroImageId.selector);
         bridge.setImageIds(DEPOSIT_IMAGE_ID, bytes32(0));
+    }
+
+    function test_minDepositAdmin_canUpdateOnlyMinDepositAmount() public {
+        bridge.setMinDepositAdmin(minDepositAdmin);
+
+        vm.prank(minDepositAdmin);
+        bridge.setMinDepositAmount(123_456);
+
+        assertEq(bridge.minDepositAmount(), 123_456);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, minDepositAdmin));
+        vm.prank(minDepositAdmin);
+        bridge.setVerifier(verifier);
+
+        vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, minDepositAdmin));
+        vm.prank(minDepositAdmin);
+        bridge.setParams(FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND, 999, 111);
+    }
+
+    function test_owner_retainsFullParamControlAlongsideMinDepositAdmin() public {
+        bridge.setMinDepositAdmin(minDepositAdmin);
+
+        bridge.setMinDepositAmount(777);
+        assertEq(bridge.minDepositAmount(), 777);
+
+        bridge.setParams(75, 1200, 2 days, 18 hours, 888, 999);
+
+        assertEq(bridge.feeBps(), 75);
+        assertEq(bridge.relayerTipBps(), 1200);
+        assertEq(bridge.refundWindowSeconds(), 2 days);
+        assertEq(bridge.maxExpiryExtensionSeconds(), 18 hours);
+        assertEq(bridge.minDepositAmount(), 888);
+        assertEq(bridge.minWithdrawAmount(), 999);
+        assertEq(bridge.minDepositAdmin(), minDepositAdmin);
     }
 
     function test_mintBatch_mintsNetAndFees_andIsIdempotent() public {

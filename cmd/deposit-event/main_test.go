@@ -44,11 +44,11 @@ func TestBuildDepositEventPayload(t *testing.T) {
 	bridge := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
-	payload, err := buildDepositEventPayload(84532, bridge, recipient, 100000, 99, witness)
+	payload, err := buildDepositEventPayload(84532, bridge, recipient, 100000, 99, 12345, witness)
 	if err != nil {
 		t.Fatalf("buildDepositEventPayload: %v", err)
 	}
-	if payload.Version != "deposits.event.v1" {
+	if payload.Version != "deposits.event.v2" {
 		t.Fatalf("version: got=%q", payload.Version)
 	}
 	if payload.CM != "0x"+cmHex {
@@ -59,6 +59,9 @@ func TestBuildDepositEventPayload(t *testing.T) {
 	}
 	if payload.Amount != 100000 {
 		t.Fatalf("amount: got=%d want=100000", payload.Amount)
+	}
+	if payload.JunoHeight != 12345 {
+		t.Fatalf("juno height: got=%d want=12345", payload.JunoHeight)
 	}
 
 	memoBytes, err := hex.DecodeString(strings.TrimPrefix(payload.Memo, "0x"))

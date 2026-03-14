@@ -17,23 +17,29 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
 var ErrInvalidConfig = errors.New("bridgeapi: invalid config")
 
 type Config struct {
-	BaseChainID         uint32
-	BridgeAddress       common.Address
-	WJunoAddress        common.Address
-	OWalletUA           string
-	RefundWindowSeconds uint64
-	MinDepositAmount    uint64
-	MinWithdrawAmount   uint64
-	FeeBps              uint32
-	NonceFn             func() (uint64, error)
+	BaseChainID             uint32
+	BridgeAddress           common.Address
+	WJunoAddress            common.Address
+	OWalletUA               string
+	RefundWindowSeconds     uint64
+	MinDepositAmount        uint64
+	DepositMinConfirmations int64
+	MinWithdrawAmount       uint64
+	FeeBps                  uint32
+	NonceFn                 func() (uint64, error)
+
+	RuntimeSettings RuntimeSettingsProvider
+	BridgeSettings  BridgeSettingsProvider
 
 	RateLimitPerIPPerSecond float64
 	RateLimitBurst          int
@@ -47,6 +53,14 @@ type Config struct {
 	ReadinessCheck   func(context.Context) error
 
 	Now func() time.Time
+}
+
+type RuntimeSettingsProvider interface {
+	Current() (runtimeconfig.Settings, error)
+}
+
+type BridgeSettingsProvider interface {
+	Current() (bridgeconfig.Snapshot, error)
 }
 
 type DepositReader interface {
@@ -202,21 +216,61 @@ func (h *handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
+	minDepositAmount, err := h.currentMinDepositAmount()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "bridge_settings_not_ready",
+		})
+		return
+	}
+	depositMinConfirmations, err := h.currentDepositMinConfirmations()
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+			"version": "v1",
+			"error":   "runtime_settings_not_ready",
+		})
+		return
+	}
+
 	w.Header().Set("Cache-Control", "no-store")
 	resp := map[string]any{
-		"version":             "v1",
-		"baseChainId":         h.cfg.BaseChainID,
-		"bridgeAddress":       h.cfg.BridgeAddress.Hex(),
-		"oWalletUA":           h.cfg.OWalletUA,
-		"refundWindowSeconds": h.cfg.RefundWindowSeconds,
-		"minDepositAmount":    strconv.FormatUint(h.cfg.MinDepositAmount, 10),
-		"minWithdrawAmount":   strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
-		"feeBps":              h.cfg.FeeBps,
+		"version":                 "v1",
+		"baseChainId":             h.cfg.BaseChainID,
+		"bridgeAddress":           h.cfg.BridgeAddress.Hex(),
+		"oWalletUA":               h.cfg.OWalletUA,
+		"refundWindowSeconds":     h.cfg.RefundWindowSeconds,
+		"minDepositAmount":        strconv.FormatUint(minDepositAmount, 10),
+		"depositMinConfirmations": depositMinConfirmations,
+		"minWithdrawAmount":       strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
+		"feeBps":                  h.cfg.FeeBps,
 	}
 	if h.cfg.WJunoAddress != (common.Address{}) {
 		resp["wjunoAddress"] = h.cfg.WJunoAddress.Hex()
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (h *handler) currentMinDepositAmount() (uint64, error) {
+	if h.cfg.BridgeSettings == nil {
+		return h.cfg.MinDepositAmount, nil
+	}
+	snapshot, err := h.cfg.BridgeSettings.Current()
+	if err != nil {
+		return 0, err
+	}
+	return snapshot.MinDepositAmount, nil
+}
+
+func (h *handler) currentDepositMinConfirmations() (int64, error) {
+	if h.cfg.RuntimeSettings == nil {
+		return h.cfg.DepositMinConfirmations, nil
+	}
+	settings, err := h.cfg.RuntimeSettings.Current()
+	if err != nil {
+		return 0, err
+	}
+	return settings.DepositMinConfirmations, nil
 }
 
 func (h *handler) handleDepositMemo(w http.ResponseWriter, r *http.Request) {
@@ -316,13 +370,14 @@ func (h *handler) handleDepositStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":       "v1",
-		"found":         true,
-		"depositId":     "0x" + hex.EncodeToString(job.Deposit.DepositID[:]),
-		"state":         job.State.String(),
-		"amount":        strconv.FormatUint(job.Deposit.Amount, 10),
-		"baseRecipient": "0x" + hex.EncodeToString(job.Deposit.BaseRecipient[:]),
-		"txHash":        txHash,
+		"version":         "v1",
+		"found":           true,
+		"depositId":       "0x" + hex.EncodeToString(job.Deposit.DepositID[:]),
+		"state":           job.State.String(),
+		"amount":          strconv.FormatUint(job.Deposit.Amount, 10),
+		"baseRecipient":   "0x" + hex.EncodeToString(job.Deposit.BaseRecipient[:]),
+		"txHash":          txHash,
+		"rejectionReason": job.RejectionReason,
 	})
 }
 

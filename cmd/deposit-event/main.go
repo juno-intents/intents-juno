@@ -42,6 +42,7 @@ func runMain(args []string, stdout io.Writer) error {
 	bridgeAddressHex := fs.String("bridge-address", "", "Bridge contract address")
 	recipientHex := fs.String("recipient", "", "Base recipient address")
 	amount := fs.Uint64("amount", 0, "deposit amount")
+	junoHeight := fs.Int64("juno-height", 0, "Juno block height where the deposit was observed")
 	witnessItemFile := fs.String("witness-item-file", "", "deposit witness item file path")
 	nonceRaw := fs.String("nonce", "", "optional memo nonce override")
 	outputPath := fs.String("output", "-", "output path or '-' for stdout")
@@ -61,6 +62,9 @@ func runMain(args []string, stdout io.Writer) error {
 	}
 	if *amount == 0 {
 		return errors.New("--amount must be > 0")
+	}
+	if *junoHeight <= 0 {
+		return errors.New("--juno-height must be > 0")
 	}
 	if strings.TrimSpace(*witnessItemFile) == "" {
 		return errors.New("--witness-item-file is required")
@@ -82,6 +86,7 @@ func runMain(args []string, stdout io.Writer) error {
 		common.HexToAddress(strings.TrimSpace(*recipientHex)),
 		*amount,
 		nonce,
+		*junoHeight,
 		witnessItem,
 	)
 	if err != nil {
@@ -120,8 +125,8 @@ func parseNonce(raw string) (uint64, error) {
 	return nonce, nil
 }
 
-func buildDepositEventPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, witnessItem []byte) (depositEventPayload, error) {
-	return depositevent.BuildPayload(baseChainID, bridge, recipient, amount, nonce, witnessItem)
+func buildDepositEventPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, junoHeight int64, witnessItem []byte) (depositEventPayload, error) {
+	return depositevent.BuildPayload(baseChainID, bridge, recipient, amount, nonce, junoHeight, witnessItem)
 }
 
 func parseDepositWitnessItem(item []byte) (common.Hash, uint64, error) {

@@ -123,6 +123,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     uint96 public relayerTipBps; // portion of fee (in bps) paid to msg.sender
     uint64 public refundWindowSeconds;
     uint64 public maxExpiryExtensionSeconds;
+    address public minDepositAdmin;
     uint256 public minDepositAmount;
     uint256 public minWithdrawAmount;
 
@@ -141,6 +142,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint256 minDepositAmount,
         uint256 minWithdrawAmount
     );
+    event MinDepositAdminUpdated(address indexed minDepositAdmin);
+    event MinDepositAmountUpdated(uint256 minDepositAmount);
     event VerifierUpdated(address indexed verifier);
     event ImageIdsUpdated(bytes32 depositImageId, bytes32 withdrawImageId);
 
@@ -213,6 +216,13 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     }
 
     // -------- Admin --------
+    modifier onlyOwnerOrMinDepositAdmin() {
+        if (msg.sender != owner() && msg.sender != minDepositAdmin) {
+            revert OwnableUnauthorizedAccount(msg.sender);
+        }
+        _;
+    }
+
     function setParams(
         uint96 newFeeBps,
         uint96 newRelayerTipBps,
@@ -241,6 +251,16 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             newMinDepositAmount,
             newMinWithdrawAmount
         );
+    }
+
+    function setMinDepositAdmin(address newMinDepositAdmin) external onlyOwner {
+        minDepositAdmin = newMinDepositAdmin;
+        emit MinDepositAdminUpdated(newMinDepositAdmin);
+    }
+
+    function setMinDepositAmount(uint256 newMinDepositAmount) external onlyOwnerOrMinDepositAdmin {
+        minDepositAmount = newMinDepositAmount;
+        emit MinDepositAmountUpdated(newMinDepositAmount);
     }
 
     function setVerifier(ISP1Verifier newVerifier) external onlyOwner {

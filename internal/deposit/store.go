@@ -15,7 +15,9 @@ var (
 )
 
 type Store interface {
+	UpsertSeen(ctx context.Context, d Deposit) (Job, bool, error)
 	UpsertConfirmed(ctx context.Context, d Deposit) (Job, bool, error)
+	PromoteSeenToConfirmed(ctx context.Context, tipHeight int64, minConfirmations int64, limit int) ([]Job, error)
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
 	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
 	ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Job, error)
@@ -24,9 +26,11 @@ type Store interface {
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error
 	MarkFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
+	MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error
 	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
 	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error
 	// FinalizeBatch atomically transitions the provided deposits to finalized.
 	// Implementations must ensure all-or-nothing behavior for this batch call.
 	FinalizeBatch(ctx context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error
+	ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error
 }

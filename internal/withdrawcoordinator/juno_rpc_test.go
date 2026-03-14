@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
 type stubJunoRPC struct {
@@ -132,6 +133,34 @@ func TestJunoConfirmer_ReturnsMissingWhenNeverSeen(t *testing.T) {
 	err = c.WaitConfirmed(context.Background(), "a")
 	if !errors.Is(err, ErrConfirmationMissing) {
 		t.Fatalf("expected ErrConfirmationMissing, got %v", err)
+	}
+}
+
+func TestJunoConfirmer_UsesRuntimeConfiguredConfirmations(t *testing.T) {
+	t.Parallel()
+
+	rpc := &stubJunoRPC{
+		getSeq: []getResult{
+			{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 1}},
+			{tx: junorpc.RawTransaction{TxID: "a", Confirmations: 3}},
+		},
+	}
+	c, err := NewJunoConfirmer(rpc, 1, 1*time.Millisecond, 100*time.Millisecond)
+	if err != nil {
+		t.Fatalf("NewJunoConfirmer: %v", err)
+	}
+	c.WithRuntimeSettings(&stubWithdrawRuntimeSettingsProvider{
+		settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      3,
+		},
+	})
+	if err := c.WaitConfirmed(context.Background(), "a"); err != nil {
+		t.Fatalf("WaitConfirmed: %v", err)
+	}
+	if rpc.getCalls != 2 {
+		t.Fatalf("getCalls: got %d want %d", rpc.getCalls, 2)
 	}
 }
 

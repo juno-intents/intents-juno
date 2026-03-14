@@ -17,7 +17,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
@@ -32,6 +34,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
@@ -49,11 +52,12 @@ type checkpointPackageV1 struct {
 	CreatedAt       time.Time             `json:"createdAt"`
 }
 
-type depositEventV1 struct {
+type depositEventV2 struct {
 	Version          string `json:"version"`
 	CM               string `json:"cm"`
 	LeafIndex        uint64 `json:"leafIndex"`
 	Amount           uint64 `json:"amount"`
+	JunoHeight       int64  `json:"junoHeight"`
 	Memo             string `json:"memo"`
 	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
 }
@@ -80,6 +84,7 @@ func main() {
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
+		baseRPCURL         = flag.String("base-rpc-url", "", "Base/EVM JSON-RPC URL (required)")
 
 		maxItems      = flag.Int("max-items", 25, "maximum items per mint batch")
 		maxAge        = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
@@ -101,18 +106,22 @@ func main() {
 		queueDriver   = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers  = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
 		queueGroup    = flag.String("queue-group", "deposit-relayer", "queue consumer group (required for kafka)")
-		queueTopics   = flag.String("queue-topics", "deposits.event.v1,checkpoints.packages.v1", "comma-separated queue topics")
+		queueTopics   = flag.String("queue-topics", "deposits.event.v2,checkpoints.package.v1", "comma-separated queue topics")
 		maxLineBytes  = flag.Int("max-line-bytes", 1<<20, "maximum stdin line size for stdio driver (bytes)")
 		queueMaxBytes = flag.Int("queue-max-bytes", 10<<20, "maximum kafka message size for consumer reads (bytes)")
 		ackTimeout    = flag.Duration("queue-ack-timeout", 5*time.Second, "timeout for queue message acknowledgements")
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+
 		scanEnabled       = flag.Bool("scan-enabled", false, "enable juno-scan deposit auto-detection")
 		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")
 		junoScanWalletID  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet ID for the oWallet (required when --scan-enabled)")
 		junoScanBearerEnv = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for juno-scan bearer token")
-		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required when --scan-enabled)")
+		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required)")
 		junoRPCUserEnv    = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var for junocashd RPC user")
 		junoRPCPassEnv    = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var for junocashd RPC password")
 		scanPollInterval  = flag.Duration("scan-poll-interval", 15*time.Second, "juno-scan poll interval")
@@ -121,8 +130,8 @@ func main() {
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
-	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" {
-		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, and --base-relayer-url are required")
+	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" || *baseRPCURL == "" || *junoRPCURL == "" {
+		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, --base-relayer-url, --base-rpc-url, and --juno-rpc-url are required")
 		os.Exit(2)
 	}
 	if *baseChainID > uint64(^uint32(0)) {
@@ -147,6 +156,10 @@ func main() {
 	}
 	if *proofPriority < 0 {
 		fmt.Fprintln(os.Stderr, "error: --proof-priority must be >= 0")
+		os.Exit(2)
+	}
+	if *depositMinConfirmations <= 0 || *withdrawPlannerMinConfirmations <= 0 || *withdrawBatchConfirmations <= 0 {
+		fmt.Fprintln(os.Stderr, "error: runtime confirmation defaults must be > 0")
 		os.Exit(2)
 	}
 
@@ -184,6 +197,12 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: missing base-relayer auth token in env %s\n", *baseRelayerAuthEnv)
 		os.Exit(2)
 	}
+	rpcUser := os.Getenv(*junoRPCUserEnv)
+	rpcPass := os.Getenv(*junoRPCPassEnv)
+	if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
+		fmt.Fprintf(os.Stderr, "error: missing junocashd RPC credentials in env %s/%s\n", *junoRPCUserEnv, *junoRPCPassEnv)
+		os.Exit(2)
+	}
 
 	hc := &http.Client{
 		Timeout: *submitTimeout,
@@ -196,32 +215,33 @@ func main() {
 
 	var (
 		scanClient              *junoscanhttp.Client
-		rpcClient               *junorpc.Client
 		depositWitnessRefresher depositrelayer.DepositWitnessRefresher
+		runtimeSettingsCache    *runtimeconfig.Cache
 	)
+
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+	baseRPCClient, err := ethclient.DialContext(ctx, strings.TrimSpace(*baseRPCURL))
+	if err != nil {
+		log.Error("dial base rpc", "err", err)
+		os.Exit(2)
+	}
+	defer baseRPCClient.Close()
+
+	rpcClient, err := junorpc.New(*junoRPCURL, rpcUser, rpcPass)
+	if err != nil {
+		log.Error("init junorpc client", "err", err)
+		os.Exit(2)
+	}
 	if *scanEnabled {
-		if *junoScanURL == "" || *junoScanWalletID == "" || *junoRPCURL == "" {
-			fmt.Fprintln(os.Stderr, "error: --juno-scan-url, --juno-scan-wallet-id, and --juno-rpc-url are required when --scan-enabled")
-			os.Exit(2)
-		}
-		rpcUser := os.Getenv(*junoRPCUserEnv)
-		rpcPass := os.Getenv(*junoRPCPassEnv)
-		if strings.TrimSpace(rpcUser) == "" || strings.TrimSpace(rpcPass) == "" {
-			fmt.Fprintf(os.Stderr, "error: missing junocashd RPC credentials in env %s/%s\n", *junoRPCUserEnv, *junoRPCPassEnv)
+		if *junoScanURL == "" || *junoScanWalletID == "" {
+			fmt.Fprintln(os.Stderr, "error: --juno-scan-url and --juno-scan-wallet-id are required when --scan-enabled")
 			os.Exit(2)
 		}
 		scanBearer := os.Getenv(*junoScanBearerEnv)
 		scanClient = junoscanhttp.New(*junoScanURL, scanBearer)
-		rpcClient, err = junorpc.New(*junoRPCURL, rpcUser, rpcPass)
-		if err != nil {
-			log.Error("init junorpc client for scanner", "err", err)
-			os.Exit(2)
-		}
 		depositWitnessRefresher = witnessextract.New(scanClient, rpcClient)
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	var (
 		pool          *pgxpool.Pool
@@ -260,6 +280,29 @@ func main() {
 			os.Exit(2)
 		}
 		store = pgStore
+
+		runtimeStore, err := runtimeconfig.New(pool)
+		if err != nil {
+			log.Error("init runtime settings store", "err", err)
+			os.Exit(2)
+		}
+		if err := runtimeStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure runtime settings schema", "err", err)
+			os.Exit(2)
+		}
+		if _, err := runtimeStore.EnsureDefaults(ctx, runtimeconfig.Settings{
+			DepositMinConfirmations:         *depositMinConfirmations,
+			WithdrawPlannerMinConfirmations: *withdrawPlannerMinConfirmations,
+			WithdrawBatchConfirmations:      *withdrawBatchConfirmations,
+		}, "deposit-relayer"); err != nil {
+			log.Error("ensure runtime settings defaults", "err", err)
+			os.Exit(2)
+		}
+		runtimeSettingsCache, err = runtimeconfig.NewCache(runtimeStore, 5*time.Second, log)
+		if err != nil {
+			log.Error("init runtime settings cache", "err", err)
+			os.Exit(2)
+		}
 
 		proofDLQStore, err = dlqpg.New(pool)
 		if err != nil {
@@ -312,6 +355,21 @@ func main() {
 	}
 	defer proofCleanup()
 
+	bridgeReader, err := bridgeconfig.NewReader(baseRPCClient, bridge)
+	if err != nil {
+		log.Error("init bridge settings reader", "err", err)
+		os.Exit(2)
+	}
+	bridgeSettingsCache, err := bridgeconfig.NewCache(bridgeReader, 5*time.Second, log)
+	if err != nil {
+		log.Error("init bridge settings cache", "err", err)
+		os.Exit(2)
+	}
+	go bridgeSettingsCache.Start(ctx)
+	if runtimeSettingsCache != nil {
+		go runtimeSettingsCache.Start(ctx)
+	}
+
 	relayer, err := depositrelayer.New(depositrelayer.Config{
 		BaseChainID:             uint32(*baseChainID),
 		BridgeAddress:           bridge,
@@ -331,6 +389,10 @@ func main() {
 		OWalletIVKBytes:         owalletIVKBytes,
 		DepositWitnessRefresher: depositWitnessRefresher,
 		ReadinessChecker:        baseClient,
+		RuntimeSettings:         runtimeSettingsCache,
+		BridgeSettings:          bridgeSettingsCache,
+		TipHeightProvider:       rpcClient,
+		ReceiptReader:           baseRPCClient,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)
@@ -338,15 +400,14 @@ func main() {
 	}
 
 	go func() {
-		opts := []healthz.Option{}
+		checks := []func(context.Context) error{baseClient.Ready, bridgeSettingsCache.Ready}
 		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(healthz.CombineReadinessChecks(
-				pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
-				baseClient.Ready,
-			)))
-		} else {
-			opts = append(opts, healthz.WithReadinessCheck(baseClient.Ready))
+			checks = append(checks, pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout))
 		}
+		if runtimeSettingsCache != nil {
+			checks = append(checks, runtimeSettingsCache.Ready)
+		}
+		opts := []healthz.Option{healthz.WithReadinessCheck(healthz.CombineReadinessChecks(checks...))}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "deposit-relayer", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
@@ -486,14 +547,14 @@ func main() {
 				}
 				ackMessage(qmsg, *ackTimeout, log)
 
-			case "deposits.event.v1":
-				var depMsg depositEventV1
+			case "deposits.event.v2":
+				var depMsg depositEventV2
 				if err := json.Unmarshal(line, &depMsg); err != nil {
 					log.Error("parse deposit event", "err", err)
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				if depMsg.Version != "deposits.event.v1" {
+				if depMsg.Version != "deposits.event.v2" {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
@@ -521,6 +582,7 @@ func main() {
 					Commitment:       cm,
 					LeafIndex:        depMsg.LeafIndex,
 					Amount:           depMsg.Amount,
+					JunoHeight:       depMsg.JunoHeight,
 					Memo:             memoBytes,
 					ProofWitnessItem: proofWitnessItem,
 				})

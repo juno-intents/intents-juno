@@ -191,13 +191,17 @@ func depositJobToMap(j deposit.Job) map[string]any {
 	if j.TxHash != ([32]byte{}) {
 		txHash = "0x" + hex.EncodeToString(j.TxHash[:])
 	}
-	return map[string]any{
+	out := map[string]any{
 		"depositId":     "0x" + hex.EncodeToString(j.Deposit.DepositID[:]),
 		"state":         j.State.String(),
 		"amount":        strconv.FormatUint(j.Deposit.Amount, 10),
 		"baseRecipient": "0x" + hex.EncodeToString(j.Deposit.BaseRecipient[:]),
 		"txHash":        txHash,
 	}
+	if j.RejectionReason != "" {
+		out["rejectionReason"] = j.RejectionReason
+	}
+	return out
 }
 
 func withdrawalStatusToMap(st WithdrawalStatus) map[string]any {

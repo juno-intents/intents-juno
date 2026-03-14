@@ -11,10 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/juno-intents/intents-juno/internal/batching"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
+	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/dlq"
@@ -23,6 +26,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/memo"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
+	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
 var (
@@ -42,6 +46,24 @@ type ReadinessChecker interface {
 
 type DepositWitnessRefresher interface {
 	RefreshDepositWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error)
+}
+
+type RuntimeSettingsProvider interface {
+	Current() (runtimeconfig.Settings, error)
+	Ready(ctx context.Context) error
+}
+
+type BridgeSettingsProvider interface {
+	Current() (bridgeconfig.Snapshot, error)
+	Ready(ctx context.Context) error
+}
+
+type TipHeightProvider interface {
+	TipHeight(ctx context.Context) (int64, error)
+}
+
+type ReceiptReader interface {
+	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
 }
 
 type Config struct {
@@ -73,6 +95,10 @@ type Config struct {
 
 	DepositWitnessRefresher DepositWitnessRefresher
 	ReadinessChecker        ReadinessChecker
+	RuntimeSettings         RuntimeSettingsProvider
+	BridgeSettings          BridgeSettingsProvider
+	TipHeightProvider       TipHeightProvider
+	ReceiptReader           ReceiptReader
 
 	Now func() time.Time
 }
@@ -81,6 +107,7 @@ type DepositEvent struct {
 	Commitment common.Hash
 	LeafIndex  uint64
 	Amount     uint64
+	JunoHeight int64
 	Memo       []byte
 	// Optional per-deposit witness payload. Layout must match
 	// proverinput.DepositWitnessItemLen.
@@ -112,6 +139,10 @@ type Relayer struct {
 	opSigs     [][]byte
 
 	readinessChecker ReadinessChecker
+	runtimeSettings  RuntimeSettingsProvider
+	bridgeSettings   BridgeSettingsProvider
+	tipHeightReader  TipHeightProvider
+	receiptReader    ReceiptReader
 
 	// pauseChecker is an optional bridge pause checker.
 	pauseChecker PauseChecker
@@ -206,6 +237,10 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		proofAttempts:      make(map[common.Hash]int),
 		quorumVerifier:     quorumVerifier,
 		readinessChecker:   cfg.ReadinessChecker,
+		runtimeSettings:    cfg.RuntimeSettings,
+		bridgeSettings:     cfg.BridgeSettings,
+		tipHeightReader:    cfg.TipHeightProvider,
+		receiptReader:      cfg.ReceiptReader,
 	}, nil
 }
 
@@ -243,6 +278,12 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 	if ev.Amount == 0 {
 		return fmt.Errorf("%w: amount must be > 0", ErrInvalidEvent)
 	}
+	if ev.JunoHeight < 0 {
+		return fmt.Errorf("%w: juno height must be >= 0", ErrInvalidEvent)
+	}
+	if ev.JunoHeight == 0 && r.tipHeightReader != nil {
+		return fmt.Errorf("%w: juno height must be > 0", ErrInvalidEvent)
+	}
 	if len(ev.Memo) != memo.MemoLen {
 		return fmt.Errorf("%w: memo must be %d bytes, got %d", ErrInvalidEvent, memo.MemoLen, len(ev.Memo))
 	}
@@ -261,18 +302,25 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrInvalidEvent, err)
 	}
-	job, _, err := r.store.UpsertConfirmed(ctx, deposit.Deposit{
+	dep := deposit.Deposit{
 		DepositID:        idBytes,
 		Commitment:       [32]byte(ev.Commitment),
 		LeafIndex:        ev.LeafIndex,
 		Amount:           ev.Amount,
 		BaseRecipient:    [20]byte(recipient),
 		ProofWitnessItem: append([]byte(nil), ev.ProofWitnessItem...),
-	})
+		JunoHeight:       ev.JunoHeight,
+	}
+	var job deposit.Job
+	if ev.JunoHeight > 0 {
+		job, _, err = r.store.UpsertSeen(ctx, dep)
+	} else {
+		job, _, err = r.store.UpsertConfirmed(ctx, dep)
+	}
 	if err != nil {
 		return err
 	}
-	if job.State != deposit.StateConfirmed {
+	if job.State != deposit.StateConfirmed && job.State != deposit.StateSeen {
 		return nil
 	}
 	return r.refillFromStore(ctx)
@@ -340,12 +388,26 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	if limit < r.cfg.MaxItems {
 		limit = r.cfg.MaxItems
 	}
+	if err := r.promoteSeenDeposits(ctx, limit); err != nil {
+		return err
+	}
 	jobs, err := r.store.ClaimConfirmed(ctx, r.cfg.Owner, r.cfg.ClaimTTL, limit)
 	if err != nil {
 		return err
 	}
 
+	minDeposit, err := r.currentMinDepositAmount(ctx)
+	if err != nil {
+		return err
+	}
+
 	for _, job := range jobs {
+		if minDeposit > 0 && job.Deposit.Amount < minDeposit {
+			if err := r.store.MarkRejected(ctx, job.Deposit.DepositID, belowMinDepositReason(minDeposit), [32]byte{}); err != nil {
+				return fmt.Errorf("depositrelayer: reject below-min deposit %x: %w", job.Deposit.DepositID[:8], err)
+			}
+			continue
+		}
 		id := common.Hash(job.Deposit.DepositID)
 		if _, ok := r.staged[id]; ok {
 			continue
@@ -387,10 +449,9 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 
 	for _, attempt := range attempts {
 		if attempt.TxHash != ([32]byte{}) {
-			if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, attempt.TxHash); err != nil {
-				return fmt.Errorf("depositrelayer: finalize recovered batch: %w", err)
+			if err := r.reconcileSubmittedAttempt(ctx, attempt); err != nil {
+				return fmt.Errorf("depositrelayer: reconcile recovered batch: %w", err)
 			}
-			delete(r.proofAttempts, common.Hash(attempt.BatchID))
 			continue
 		}
 		if err := r.resubmitSubmittedAttempt(ctx, attempt); err != nil {
@@ -402,9 +463,20 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 
 func (r *Relayer) ready(ctx context.Context) bool {
 	if r.readinessChecker == nil {
-		return true
+		goto runtime
 	}
-	return r.readinessChecker.Ready(ctx) == nil
+	if r.readinessChecker.Ready(ctx) != nil {
+		return false
+	}
+
+runtime:
+	if r.runtimeSettings != nil && r.runtimeSettings.Ready(ctx) != nil {
+		return false
+	}
+	if r.bridgeSettings != nil && r.bridgeSettings.Ready(ctx) != nil {
+		return false
+	}
+	return true
 }
 
 func (r *Relayer) resubmitSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {
@@ -452,11 +524,10 @@ func (r *Relayer) resubmitSubmittedAttempt(ctx context.Context, attempt deposit.
 	if err := r.store.SetBatchSubmissionTxHash(ctx, attempt.BatchID, [32]byte(txHash)); err != nil {
 		return fmt.Errorf("depositrelayer: set batch tx hash: %w", err)
 	}
-	if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, [32]byte(txHash)); err != nil {
-		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
+	if err := r.applyBatchOutcomeFromHash(ctx, attempt.BatchID, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, [32]byte(txHash)); err != nil {
+		return err
 	}
 
-	delete(r.proofAttempts, common.Hash(attempt.BatchID))
 	r.log.Info("resubmitted mintBatch",
 		"checkpointHeight", attempt.Checkpoint.Height,
 		"items", len(items),
@@ -625,8 +696,8 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	if err := r.store.SetBatchSubmissionTxHash(ctx, [32]byte(batchID), [32]byte(txHash)); err != nil {
 		return fmt.Errorf("depositrelayer: set batch tx hash: %w", err)
 	}
-	if err := r.store.FinalizeBatch(ctx, finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
-		return fmt.Errorf("depositrelayer: finalize batch: %w", err)
+	if err := r.applyBatchOutcomeFromHash(ctx, [32]byte(batchID), finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
+		return err
 	}
 
 	// Clear proof attempt counter on success.
@@ -712,4 +783,139 @@ func (r *Relayer) encodePrivateInput(cp checkpoint.Checkpoint, opSigs [][]byte, 
 		return proverinput.EncodeDepositGuestPrivateInput(cp, ivk, witnessItems)
 	}
 	return proverinput.EncodeDepositPrivateInputV1(cp, opSigs, items)
+}
+
+func (r *Relayer) promoteSeenDeposits(ctx context.Context, limit int) error {
+	if r.tipHeightReader == nil {
+		return nil
+	}
+	settings, err := r.currentRuntimeSettings()
+	if err != nil {
+		return err
+	}
+	tipHeight, err := r.tipHeightReader.TipHeight(ctx)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: load juno tip height: %w", err)
+	}
+	if _, err := r.store.PromoteSeenToConfirmed(ctx, tipHeight, settings.DepositMinConfirmations, limit); err != nil {
+		return fmt.Errorf("depositrelayer: promote seen deposits: %w", err)
+	}
+	return nil
+}
+
+func (r *Relayer) currentRuntimeSettings() (runtimeconfig.Settings, error) {
+	if r.runtimeSettings == nil {
+		return runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}, nil
+	}
+	settings, err := r.runtimeSettings.Current()
+	if err != nil {
+		return runtimeconfig.Settings{}, fmt.Errorf("depositrelayer: load runtime settings: %w", err)
+	}
+	return settings, nil
+}
+
+func (r *Relayer) currentMinDepositAmount(ctx context.Context) (uint64, error) {
+	if r.bridgeSettings == nil {
+		return 0, nil
+	}
+	snapshot, err := r.bridgeSettings.Current()
+	if err != nil {
+		return 0, fmt.Errorf("depositrelayer: load bridge settings: %w", err)
+	}
+	return snapshot.MinDepositAmount, nil
+}
+
+func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {
+	if r.receiptReader == nil {
+		if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, attempt.TxHash); err != nil {
+			return fmt.Errorf("depositrelayer: finalize batch without receipt reader: %w", err)
+		}
+		delete(r.proofAttempts, common.Hash(attempt.BatchID))
+		return nil
+	}
+
+	receipt, err := r.receiptReader.TransactionReceipt(ctx, common.Hash(attempt.TxHash))
+	if err != nil {
+		if errors.Is(err, ethereum.NotFound) {
+			return nil
+		}
+		return fmt.Errorf("depositrelayer: fetch receipt for recovered batch: %w", err)
+	}
+	return r.applyBatchOutcome(ctx, attempt.BatchID, attempt.DepositIDs, attempt.TxHash, receipt)
+}
+
+func (r *Relayer) applyBatchOutcomeFromHash(ctx context.Context, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
+	if r.receiptReader == nil {
+		if err := r.store.FinalizeBatch(ctx, depositIDs, cp, seal, txHash); err != nil {
+			return fmt.Errorf("depositrelayer: finalize batch without receipt reader: %w", err)
+		}
+		return nil
+	}
+	receipt, err := r.receiptReader.TransactionReceipt(ctx, common.Hash(txHash))
+	if err != nil {
+		return fmt.Errorf("depositrelayer: fetch receipt for batch: %w", err)
+	}
+	return r.applyBatchOutcome(ctx, batchID, depositIDs, txHash, receipt)
+}
+
+func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depositIDs [][32]byte, txHash [32]byte, receipt *types.Receipt) error {
+	if receipt == nil {
+		return fmt.Errorf("depositrelayer: missing batch receipt")
+	}
+	if receipt.Status != types.ReceiptStatusSuccessful {
+		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
+	}
+
+	finalizedIDs, rejectedIDs, err := bridgeabi.DecodeMintBatchLogOutcomes(receipt.Logs, r.cfg.BridgeAddress)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: decode batch receipt logs: %w", err)
+	}
+
+	if err := r.store.ApplyBatchOutcome(ctx, batchID, txHash, finalizedIDs, rejectedIDs, belowMinDepositReason(0)); err != nil {
+		return fmt.Errorf("depositrelayer: apply batch receipt outcome: %w", err)
+	}
+
+	unresolved := unresolvedDepositIDs(depositIDs, finalizedIDs, rejectedIDs)
+	if len(unresolved) > 0 {
+		r.log.Error("mintBatch receipt left unresolved deposits",
+			"batchID", fmt.Sprintf("%x", batchID[:]),
+			"txHash", fmt.Sprintf("%x", txHash[:]),
+			"unresolved", len(unresolved),
+		)
+	}
+	delete(r.proofAttempts, common.Hash(batchID))
+	return nil
+}
+
+func unresolvedDepositIDs(expected [][32]byte, finalized [][32]byte, rejected [][32]byte) [][32]byte {
+	finalizedSet := make(map[[32]byte]struct{}, len(finalized))
+	for _, id := range finalized {
+		finalizedSet[id] = struct{}{}
+	}
+	rejectedSet := make(map[[32]byte]struct{}, len(rejected))
+	for _, id := range rejected {
+		rejectedSet[id] = struct{}{}
+	}
+	out := make([][32]byte, 0, len(expected))
+	for _, id := range expected {
+		if _, ok := finalizedSet[id]; ok {
+			continue
+		}
+		if _, ok := rejectedSet[id]; ok {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+func belowMinDepositReason(minDeposit uint64) string {
+	if minDeposit == 0 {
+		return "deposit skipped by bridge"
+	}
+	return fmt.Sprintf("deposit amount is below the current minimum deposit (%d)", minDeposit)
 }

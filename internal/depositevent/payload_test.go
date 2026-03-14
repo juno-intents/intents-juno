@@ -44,11 +44,11 @@ func TestBuildPayload(t *testing.T) {
 	bridge := common.HexToAddress("0x1111111111111111111111111111111111111111")
 	recipient := common.HexToAddress("0x2222222222222222222222222222222222222222")
 
-	payload, err := BuildPayload(84532, bridge, recipient, 100000, 99, witness)
+	payload, err := BuildPayload(84532, bridge, recipient, 100000, 99, 12345, witness)
 	if err != nil {
 		t.Fatalf("BuildPayload: %v", err)
 	}
-	if payload.Version != "deposits.event.v1" {
+	if payload.Version != "deposits.event.v2" {
 		t.Fatalf("version: got=%q", payload.Version)
 	}
 	if payload.CM != "0x"+cmHex {
@@ -59,6 +59,9 @@ func TestBuildPayload(t *testing.T) {
 	}
 	if payload.Amount != 100000 {
 		t.Fatalf("amount: got=%d want=100000", payload.Amount)
+	}
+	if payload.JunoHeight != 12345 {
+		t.Fatalf("juno height: got=%d want=12345", payload.JunoHeight)
 	}
 
 	memoBytes, err := hex.DecodeString(strings.TrimPrefix(payload.Memo, "0x"))
@@ -82,5 +85,25 @@ func TestBuildPayload(t *testing.T) {
 	}
 	if payload.DepositID != "0x"+hex.EncodeToString(expectedDepositID[:]) {
 		t.Fatalf("deposit id mismatch: got=%s", payload.DepositID)
+	}
+}
+
+func TestBuildPayload_RejectsMissingJunoHeight(t *testing.T) {
+	t.Parallel()
+
+	witness := make([]byte, proverinput.DepositWitnessItemLen)
+	binary.LittleEndian.PutUint32(witness[depositWitnessLeafIndexOffset:depositWitnessLeafIndexOffset+4], 7)
+
+	_, err := BuildPayload(
+		84532,
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		100000,
+		99,
+		0,
+		witness,
+	)
+	if err == nil {
+		t.Fatalf("expected error")
 	}
 }

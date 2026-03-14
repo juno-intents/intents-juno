@@ -51,8 +51,9 @@ type txbuildOutput struct {
 type execCommandFn func(ctx context.Context, name string, args []string, env []string) ([]byte, error)
 
 type TxBuildPlanner struct {
-	cfg         TxBuildPlannerConfig
-	execCommand execCommandFn
+	cfg             TxBuildPlannerConfig
+	execCommand     execCommandFn
+	runtimeSettings RuntimeSettingsProvider
 }
 
 func NewTxBuildPlanner(cfg TxBuildPlannerConfig) (*TxBuildPlanner, error) {
@@ -91,6 +92,10 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 	if p == nil {
 		return nil, fmt.Errorf("%w: nil planner", ErrInvalidTxBuildPlannerConfig)
 	}
+	minConfirmations, err := currentWithdrawPlannerMinConfirmations(p.runtimeSettings, p.cfg.MinConfirmations)
+	if err != nil {
+		return nil, err
+	}
 
 	recipientHRP, err := bech32HRPFromAddress(p.cfg.ChangeAddress)
 	if err != nil {
@@ -128,7 +133,7 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 		"--account", strconv.FormatUint(uint64(p.cfg.Account), 10),
 		"--outputs-file", tmpPath,
 		"--change-address", p.cfg.ChangeAddress,
-		"--minconf", strconv.FormatInt(p.cfg.MinConfirmations, 10),
+		"--minconf", strconv.FormatInt(minConfirmations, 10),
 		"--expiry-offset", strconv.FormatUint(uint64(p.cfg.ExpiryOffset), 10),
 		"--fee-multiplier", strconv.FormatUint(p.cfg.FeeMultiplier, 10),
 		"--fee-add-zat", strconv.FormatUint(p.cfg.FeeAddZat, 10),
@@ -142,6 +147,14 @@ func (p *TxBuildPlanner) Plan(ctx context.Context, batchID [32]byte, ws []withdr
 		return nil, fmt.Errorf("withdrawcoordinator: txbuild command failed: %w", err)
 	}
 	return parseTxBuildJSONEnvelope(out)
+}
+
+func (p *TxBuildPlanner) WithRuntimeSettings(provider RuntimeSettingsProvider) *TxBuildPlanner {
+	if p == nil {
+		return nil
+	}
+	p.runtimeSettings = provider
+	return p
 }
 
 func buildTxBuildOutputs(batchID [32]byte, ws []withdraw.Withdrawal, baseChainID uint32, bridgeAddress common.Address, recipientHRP string) ([]txbuildOutput, error) {
