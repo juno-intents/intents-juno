@@ -642,6 +642,7 @@ files_to_copy=(
   "$operator_deploy"
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
   "$REPO_ROOT/deploy/operators/dkg/common.sh"
+  "$REPO_ROOT/deploy/operators/dkg/operator-export-kms.sh"
 )
 for tls_file in "${generated_base_relayer_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
@@ -854,6 +855,40 @@ rm -rf "$dkg_stage_dir"
 dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
 juno_txsign_runtime_bin="$runtime_dir/bin/juno-txsign"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
+CHECKPOINT_SIGNER_KMS_KEY_ID="$(env_get_value_remote "CHECKPOINT_SIGNER_KMS_KEY_ID")"
+CHECKPOINT_BLOB_BUCKET="$(env_get_value_remote "CHECKPOINT_BLOB_BUCKET")"
+CHECKPOINT_BLOB_PREFIX="$(env_get_value_remote "CHECKPOINT_BLOB_PREFIX")"
+AWS_REGION="$(env_get_value_remote "AWS_REGION")"
+if [[ -z "$AWS_REGION" ]]; then
+  AWS_REGION="$(env_get_value_remote "AWS_DEFAULT_REGION")"
+fi
+[[ -n "$CHECKPOINT_SIGNER_KMS_KEY_ID" ]] || {
+  echo "operator runtime is missing CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "$CHECKPOINT_BLOB_BUCKET" ]] || {
+  echo "operator runtime is missing CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "$AWS_REGION" ]] || {
+  echo "operator runtime is missing AWS_REGION or AWS_DEFAULT_REGION in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"
+sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export \
+  --workdir "$runtime_dir" \
+  --release-tag "$dkg_release_tag" \
+  --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+  --s3-bucket "${CHECKPOINT_BLOB_BUCKET}" \
+  --s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}" \
+  --s3-sse-kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+  --aws-region "${AWS_REGION}"
+latest_kms_receipt="$(sudo bash -lc 'ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1' _ "$runtime_dir")"
+[[ -n "$latest_kms_receipt" ]] || {
+  echo "operator runtime did not produce a kms export receipt under $runtime_dir/exports" >&2
+  exit 1
+}
+sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"
 if sudo test -e /var/lib/intents-juno/juno-scan.db; then
   sudo systemctl stop juno-scan || true
   sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'

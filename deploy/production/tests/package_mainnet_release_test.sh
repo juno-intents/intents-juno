@@ -94,6 +94,7 @@ EOF
   assert_file_exists "$bundle_root/deploy/production/deploy-operator.sh" "bundled deploy script"
   assert_file_exists "$bundle_root/deploy/production/canary-operator-boot.sh" "bundled canary script"
   assert_file_exists "$bundle_root/deploy/operators/dkg/backup-package.sh" "bundled dkg restore script"
+  assert_file_exists "$bundle_root/deploy/operators/dkg/operator-export-kms.sh" "bundled dkg kms export script"
   assert_file_exists "$bundle_root/bundle/operator/shared-manifest.json" "bundled shared manifest"
   assert_file_exists "$bundle_root/bundle/operator/rollout-state.json" "bundled rollout state"
   assert_file_exists "$bundle_root/bundle/operator/operators/$operator_id/operator-deploy.json" "bundled local operator manifest"

@@ -284,10 +284,12 @@ for operator_manifest in "${operator_manifests[@]}"; do
   cp "$SCRIPT_DIR/lib.sh" "$bundle_root/deploy/production/lib.sh"
   cp "$REPO_ROOT/deploy/operators/dkg/backup-package.sh" "$bundle_root/deploy/operators/dkg/backup-package.sh"
   cp "$REPO_ROOT/deploy/operators/dkg/common.sh" "$bundle_root/deploy/operators/dkg/common.sh"
+  cp "$REPO_ROOT/deploy/operators/dkg/operator-export-kms.sh" "$bundle_root/deploy/operators/dkg/operator-export-kms.sh"
   chmod 0755 \
     "$bundle_root/deploy/production/deploy-operator.sh" \
     "$bundle_root/deploy/production/canary-operator-boot.sh" \
-    "$bundle_root/deploy/operators/dkg/backup-package.sh"
+    "$bundle_root/deploy/operators/dkg/backup-package.sh" \
+    "$bundle_root/deploy/operators/dkg/operator-export-kms.sh"
 
   for peer_manifest in "${operator_manifests[@]}"; do
     peer_id="$(jq -r '.operator_id' "$peer_manifest")"

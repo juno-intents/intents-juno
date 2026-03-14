@@ -70,6 +70,11 @@ EOF
   printf 'backup' >"$tmp/dkg-backup.zip"
   cat >"$shared_manifest" <<JSON
 {
+  "shared_services": {
+    "artifacts": {
+      "checkpoint_blob_bucket": "alpha-dkg-keypackages"
+    }
+  },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
   }
@@ -127,6 +132,9 @@ if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"*
   printf 'Usage: juno-txsign sign-digest [flags]\n'
   exit 0
 fi
+if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
+  exit 0
+fi
 if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
   exit 0
 fi
@@ -152,6 +160,7 @@ EOF
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "operator canary verifies remote max expiry extension"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "operator canary verifies remote juno-txsign path"
   assert_contains "$(cat "$log_file")" "/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help" "operator canary verifies juno-txsign runtime"
+  assert_contains "$(cat "$log_file")" "test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json" "operator canary verifies kms export receipt"
   assert_contains "$(cat "$log_file")" 'curl -fsS http://127.0.0.1:${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz' "operator canary verifies deposit-relayer readiness"
   assert_contains "$(cat "$tmp/cast.log")" "wallet address --private-key" "operator canary derives the base relayer address from the configured key"
   assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x1111111111111111111111111111111111111111" "operator canary checks first base relayer signer funding"
@@ -162,6 +171,7 @@ EOF
   assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x2222222222222222222222222222222222222222=400000000000000" "operator canary reports second relayer balance"
   assert_eq "$(jq -r '.checks.withdraw_config.status' "$output_json")" "passed" "operator canary withdraw config status"
   assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "passed" "operator canary txsign runtime status"
+  assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "passed" "operator canary kms export status"
   assert_eq "$(jq -r '.checks.systemd.status' "$output_json")" "passed" "operator canary systemd status"
   assert_eq "$(jq -r '.checks.deposit_relayer_ready.status' "$output_json")" "passed" "operator canary deposit-relayer readiness status"
 

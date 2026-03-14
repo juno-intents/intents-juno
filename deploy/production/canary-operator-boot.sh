@@ -17,6 +17,7 @@ Checks:
   - Base relayer funding clears the deploy minimum
   - Remote withdraw env points at juno-txsign and includes signer keys
   - Remote juno-txsign runtime supports sign-digest
+  - Remote KMS export receipt exists when checkpoint blob export is configured
   - Remote operator services are active over strict-host-key SSH
 
 Output:
@@ -87,9 +88,12 @@ systemd_status="passed"
 systemd_detail="all operator services active"
 deposit_relayer_ready_status="passed"
 deposit_relayer_ready_detail="deposit-relayer /readyz passed"
+kms_export_status="skipped"
+kms_export_detail="no checkpoint blob bucket configured"
 allow_local_resolvers="false"
 [[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+checkpoint_blob_bucket="$(production_json_optional "$shared_manifest_path" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
 tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
@@ -121,6 +125,8 @@ if [[ "$dry_run" == "true" ]]; then
   withdraw_config_detail="dry run"
   txsign_runtime_status="skipped"
   txsign_runtime_detail="dry run"
+  kms_export_status="skipped"
+  kms_export_detail="dry run"
   systemd_status="skipped"
   systemd_detail="dry run"
   deposit_relayer_ready_status="skipped"
@@ -139,6 +145,8 @@ else
     withdraw_config_detail="blocked by relayer funding failure"
     txsign_runtime_status="blocked"
     txsign_runtime_detail="blocked by relayer funding failure"
+    kms_export_status="blocked"
+    kms_export_detail="blocked by relayer funding failure"
     systemd_status="blocked"
     systemd_detail="blocked by relayer funding failure"
     deposit_relayer_ready_status="blocked"
@@ -160,6 +168,8 @@ else
         withdraw_config_detail="blocked by relayer funding failure"
         txsign_runtime_status="blocked"
         txsign_runtime_detail="blocked by relayer funding failure"
+        kms_export_status="blocked"
+        kms_export_detail="blocked by relayer funding failure"
         systemd_status="blocked"
         systemd_detail="blocked by relayer funding failure"
         deposit_relayer_ready_status="blocked"
@@ -175,6 +185,8 @@ else
       withdraw_config_detail="blocked by relayer funding failure"
       txsign_runtime_status="blocked"
       txsign_runtime_detail="blocked by relayer funding failure"
+      kms_export_status="blocked"
+      kms_export_detail="blocked by relayer funding failure"
       systemd_status="blocked"
       systemd_detail="blocked by relayer funding failure"
       deposit_relayer_ready_status="blocked"
@@ -218,6 +230,21 @@ else
       fi
 
       if [[ "$withdraw_config_status" == "passed" && "$txsign_runtime_status" == "passed" ]]; then
+        if [[ -n "$checkpoint_blob_bucket" ]]; then
+          if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo test -e $runtime_dir/exports/kms-export-receipt.json" 2>/dev/null; then
+            kms_export_status="failed"
+            kms_export_detail="remote kms export receipt is missing: $runtime_dir/exports/kms-export-receipt.json"
+          else
+            kms_export_status="passed"
+            kms_export_detail="remote kms export receipt present"
+          fi
+        fi
+      else
+        kms_export_status="blocked"
+        kms_export_detail="blocked by withdraw config validation failure"
+      fi
+
+      if [[ "$withdraw_config_status" == "passed" && "$txsign_runtime_status" == "passed" && "$kms_export_status" == "passed" ]]; then
         for svc in "${services[@]}"; do
           svc_status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
           if [[ "$svc_status" != "active" ]]; then
@@ -228,7 +255,11 @@ else
         done
       else
         systemd_status="blocked"
-        systemd_detail="blocked by withdraw config validation failure"
+        if [[ "$kms_export_status" != "passed" ]]; then
+          systemd_detail="blocked by kms export validation failure"
+        else
+          systemd_detail="blocked by withdraw config validation failure"
+        fi
       fi
 
       if [[ "$systemd_status" == "passed" ]]; then
@@ -245,11 +276,14 @@ else
 fi
 
 ready_for_deploy="true"
-for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$systemd_status" "$deposit_relayer_ready_status"; do
-  if [[ "$status" != "passed" ]]; then
+for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$kms_export_status" "$systemd_status" "$deposit_relayer_ready_status"; do
+  if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
     ready_for_deploy="false"
   fi
 done
+if [[ "$dry_run" == "true" ]]; then
+  ready_for_deploy="false"
+fi
 
 jq -n \
   --arg version "1" \
@@ -265,6 +299,8 @@ jq -n \
   --arg withdraw_config_detail "$withdraw_config_detail" \
   --arg txsign_runtime_status "$txsign_runtime_status" \
   --arg txsign_runtime_detail "$txsign_runtime_detail" \
+  --arg kms_export_status "$kms_export_status" \
+  --arg kms_export_detail "$kms_export_detail" \
   --arg systemd_status "$systemd_status" \
   --arg systemd_detail "$systemd_detail" \
   --arg deposit_relayer_ready_status "$deposit_relayer_ready_status" \
@@ -293,6 +329,10 @@ jq -n \
       txsign_runtime: {
         status: $txsign_runtime_status,
         detail: $txsign_runtime_detail
+      },
+      kms_export: {
+        status: $kms_export_status,
+        detail: $kms_export_detail
       },
       systemd: {
         status: $systemd_status,
