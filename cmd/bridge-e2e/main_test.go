@@ -2510,6 +2510,64 @@ func TestWaitUint64AtLeastAttempts_ReturnsLastError(t *testing.T) {
 	}
 }
 
+func TestWaitAddressEqualAttempts_RetriesUntilMatch(t *testing.T) {
+	t.Parallel()
+
+	want := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	var calls int
+	got, err := waitAddressEqualAttempts(
+		context.Background(),
+		"bridge owner",
+		want,
+		5,
+		0,
+		func() (common.Address, error) {
+			calls++
+			if calls < 3 {
+				return common.HexToAddress("0x00000000000000000000000000000000000000bb"), nil
+			}
+			return want, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitAddressEqualAttempts: %v", err)
+	}
+	if got != want {
+		t.Fatalf("unexpected value: got=%s want=%s", got.Hex(), want.Hex())
+	}
+	if calls != 3 {
+		t.Fatalf("unexpected calls: got=%d want=3", calls)
+	}
+}
+
+func TestWaitAddressEqualAttempts_ReturnsLastValueOnMismatch(t *testing.T) {
+	t.Parallel()
+
+	want := common.HexToAddress("0x00000000000000000000000000000000000000aa")
+	last := common.HexToAddress("0x00000000000000000000000000000000000000bb")
+	var calls int
+	got, err := waitAddressEqualAttempts(
+		context.Background(),
+		"bridge owner",
+		want,
+		3,
+		0,
+		func() (common.Address, error) {
+			calls++
+			return last, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitAddressEqualAttempts: %v", err)
+	}
+	if got != last {
+		t.Fatalf("unexpected value: got=%s want=%s", got.Hex(), last.Hex())
+	}
+	if calls != 3 {
+		t.Fatalf("unexpected calls: got=%d want=3", calls)
+	}
+}
+
 func TestTransactAuthWithDefaults_UsesDefaultGasLimit(t *testing.T) {
 	t.Parallel()
 

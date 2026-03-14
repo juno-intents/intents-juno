@@ -1465,6 +1465,8 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	const (
 		registryReadRetries      = 8
 		registryReadRetryBackoff = 500 * time.Millisecond
+		ownerReadRetries         = 8
+		ownerReadRetryBackoff    = 500 * time.Millisecond
 	)
 	wantOperatorCount := uint64(len(operatorAddrs))
 	registryOperatorCount, err := waitUint64AtLeastAttempts(
@@ -1484,28 +1486,60 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		return nil, fmt.Errorf("operatorCount mismatch: got=%d want=%d", registryOperatorCount, wantOperatorCount)
 	}
 	if !cfg.ReuseDeployedContracts {
-		if currentOwner, err := callAddress(ctx, wjuno, "owner"); err != nil || currentOwner != timelockAddr {
-			if err != nil {
-				return nil, fmt.Errorf("wjuno owner: %w", err)
-			}
+		if currentOwner, err := waitAddressEqualAttempts(
+			ctx,
+			"wjuno owner",
+			timelockAddr,
+			ownerReadRetries,
+			ownerReadRetryBackoff,
+			func() (common.Address, error) {
+				return callAddress(ctx, wjuno, "owner")
+			},
+		); err != nil {
+			return nil, err
+		} else if currentOwner != timelockAddr {
 			return nil, fmt.Errorf("wjuno owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
 		}
-		if currentOwner, err := callAddress(ctx, fd, "owner"); err != nil || currentOwner != timelockAddr {
-			if err != nil {
-				return nil, fmt.Errorf("fee distributor owner: %w", err)
-			}
+		if currentOwner, err := waitAddressEqualAttempts(
+			ctx,
+			"fee distributor owner",
+			timelockAddr,
+			ownerReadRetries,
+			ownerReadRetryBackoff,
+			func() (common.Address, error) {
+				return callAddress(ctx, fd, "owner")
+			},
+		); err != nil {
+			return nil, err
+		} else if currentOwner != timelockAddr {
 			return nil, fmt.Errorf("fee distributor owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
 		}
-		if currentOwner, err := callAddress(ctx, reg, "owner"); err != nil || currentOwner != timelockAddr {
-			if err != nil {
-				return nil, fmt.Errorf("operator registry owner: %w", err)
-			}
+		if currentOwner, err := waitAddressEqualAttempts(
+			ctx,
+			"operator registry owner",
+			timelockAddr,
+			ownerReadRetries,
+			ownerReadRetryBackoff,
+			func() (common.Address, error) {
+				return callAddress(ctx, reg, "owner")
+			},
+		); err != nil {
+			return nil, err
+		} else if currentOwner != timelockAddr {
 			return nil, fmt.Errorf("operator registry owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
 		}
-		if currentOwner, err := callAddress(ctx, bridge, "owner"); err != nil || currentOwner != timelockAddr {
-			if err != nil {
-				return nil, fmt.Errorf("bridge owner: %w", err)
-			}
+		if currentOwner, err := waitAddressEqualAttempts(
+			ctx,
+			"bridge owner",
+			timelockAddr,
+			ownerReadRetries,
+			ownerReadRetryBackoff,
+			func() (common.Address, error) {
+				return callAddress(ctx, bridge, "owner")
+			},
+		); err != nil {
+			return nil, err
+		} else if currentOwner != timelockAddr {
 			return nil, fmt.Errorf("bridge owner mismatch: got=%s want=%s", currentOwner.Hex(), timelockAddr.Hex())
 		}
 	}
@@ -3440,6 +3474,49 @@ func waitUint64AtLeastAttempts(
 	}
 	var (
 		lastVal uint64
+		lastErr error
+	)
+	for i := 0; i < attempts; i++ {
+		val, err := readFn()
+		if err != nil {
+			lastErr = err
+		} else {
+			lastVal = val
+			lastErr = nil
+			if val == want {
+				return val, nil
+			}
+		}
+		if i == attempts-1 || interval <= 0 {
+			continue
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastVal, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if lastErr != nil {
+		return lastVal, fmt.Errorf("%s read failed after %d attempts: %w", label, attempts, lastErr)
+	}
+	return lastVal, nil
+}
+
+func waitAddressEqualAttempts(
+	ctx context.Context,
+	label string,
+	want common.Address,
+	attempts int,
+	interval time.Duration,
+	readFn func() (common.Address, error),
+) (common.Address, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var (
+		lastVal common.Address
 		lastErr error
 	)
 	for i := 0; i < attempts; i++ {
