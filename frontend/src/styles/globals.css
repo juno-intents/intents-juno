@@ -69,6 +69,7 @@ header {
   display: flex;
   align-items: center;
   gap: 16px;
+  flex-wrap: wrap;
 }
 
 .brand {
@@ -80,11 +81,42 @@ header {
   letter-spacing: 0.05em;
 }
 
-.brand-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--accent);
+.brand-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  object-fit: cover;
+  background: white;
+  border: 1px solid var(--border);
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.secondary-btn,
+.ghost-btn {
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 9px 14px;
+  font-size: 13px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.secondary-btn:hover,
+.ghost-btn:hover {
+  border-color: var(--accent);
+  color: white;
+}
+
+.ghost-btn {
+  padding: 8px 12px;
+  white-space: nowrap;
 }
 
 .status-pill {
@@ -105,6 +137,10 @@ header {
   height: 6px;
   border-radius: 50%;
   background: var(--green);
+}
+
+.status-pill-neutral .dot {
+  background: var(--accent);
 }
 
 .section-label {
@@ -197,6 +233,12 @@ header {
   font-size: 16px;
   font-weight: 700;
   color: var(--accent);
+}
+
+.network-logo {
+  width: 20px;
+  height: 20px;
+  object-fit: contain;
 }
 
 .network-name {
@@ -320,11 +362,47 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 12px;
   color: var(--text-dim);
   margin-bottom: 6px;
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
   font-weight: 500;
 }
 
 .field { margin-bottom: 16px; }
+
+.field-help {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.optional-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(255, 77, 0, 0.12);
+  color: var(--accent);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.info-hint {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 10px;
+  line-height: 1;
+  cursor: help;
+}
 
 .warning-box {
   background: rgba(255,77,0,0.08);
@@ -333,6 +411,17 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   padding: 12px 14px;
   font-size: 13px;
   color: var(--accent);
+  margin: 12px 0;
+  line-height: 1.5;
+}
+
+.error-box {
+  background: rgba(255, 23, 68, 0.08);
+  border: 1px solid rgba(255, 23, 68, 0.25);
+  border-radius: 8px;
+  padding: 12px 14px;
+  font-size: 13px;
+  color: #ff8ea2;
   margin: 12px 0;
   line-height: 1.5;
 }
@@ -542,6 +631,29 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .copy-btn:hover { background: var(--accent); color: white; }
 
+.recent-recipient-row {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.recent-chip {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--mono);
+  cursor: pointer;
+}
+
+.recent-chip:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
 /* CLI command block */
 .cli-block {
   background: var(--bg-input);
@@ -693,7 +805,68 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   line-height: 1.5;
 }
 
+.guide-modal {
+  width: 560px;
+}
+
+.guide-body {
+  display: grid;
+  gap: 16px;
+}
+
+.guide-body section {
+  padding: 14px;
+  border-radius: 10px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+}
+
+.guide-body h3 {
+  font-size: 14px;
+  margin-bottom: 8px;
+}
+
+.guide-body p {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+}
+
 @media (max-width: 900px) {
   .layout { flex-direction: column; }
   .panel-left { width: 100%; min-width: auto; border-right: none; border-bottom: 1px solid var(--border); }
+}
+
+@media (max-width: 640px) {
+  header {
+    height: auto;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .panel-left,
+  .panel-right {
+    padding: 18px;
+  }
+
+  .network-card {
+    padding: 14px 16px;
+  }
+
+  .asset-header,
+  .tx-item-header {
+    align-items: flex-start;
+    gap: 10px;
+    flex-direction: column;
+  }
+
+  .asset-input-row {
+    align-items: stretch;
+    flex-wrap: wrap;
+  }
+
+  .header-actions {
+    width: 100%;
+    justify-content: space-between;
+  }
 }

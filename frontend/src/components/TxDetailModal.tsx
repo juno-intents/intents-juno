@@ -31,7 +31,7 @@ export default function TxDetailModal({ type, data, onClose }: Props) {
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal-content" onClick={(e) => e.stopPropagation()}>
         <div className="modal-header">
-          <span className="modal-title">{isDeposit ? 'Deposit' : 'Withdrawal'} Details</span>
+          <span className="modal-title">{isDeposit ? 'Juno -> Base' : 'Base -> Juno'} Details</span>
           <button className="modal-close" onClick={onClose}>&times;</button>
         </div>
         <div className="modal-body">

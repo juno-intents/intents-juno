@@ -4,6 +4,10 @@ import { useQuery } from '@tanstack/react-query'
 import { formatUnits } from 'viem'
 import { QRCodeSVG } from 'qrcode.react'
 import { getDepositMemo, getConfig } from '../api/bridge'
+import InfoHint from './InfoHint'
+import { runtimeConfig } from '../config/runtime'
+import { validateBaseRecipient, validateDepositAmount } from '../lib/bridgeUi'
+
 function formatJuno(zatoshi: string): string {
   try {
     return formatUnits(BigInt(zatoshi), 8)
@@ -54,21 +58,28 @@ export default function DepositFlow() {
   })
 
   const handleGenerate = () => {
-    if (!effectiveRecipient) return
+    if (!effectiveRecipient || formError) return
     refetch()
     setGenerated(true)
   }
 
   const compactMemo = memo ? compactMemoHex(memo.memoHex) : ''
-  const cliAmount = amount || '10.0'
+  const recipientError = validateBaseRecipient(recipient, address)
+  const amountError = validateDepositAmount(amount, cfg?.minDepositAmount)
+  const formError = recipientError || amountError
+  const cliAmount = amount.trim()
+  const cliModeArg = runtimeConfig.junoCliModeFlag.trim()
+  const qrValue = memo
+    ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}&memo=${compactMemo}` : `?memo=${compactMemo}`}`
+    : ''
 
   const cliCommand = memo
     ? `FROM="YOUR_JUNO_ADDRESS"
 TO="${memo.oWalletUA}"
-AMOUNT=${cliAmount}
+AMOUNT=${cliAmount || '"YOUR_JUNO_AMOUNT"'}
 MEMO="${compactMemo}"
 
-junocash-cli -testnet z_sendmany "$FROM" \
+junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   '[{"address":"'"$TO"'","amount":'"$AMOUNT"',"memo":"'"$MEMO"'"}]'`
     : ''
 
@@ -76,43 +87,56 @@ junocash-cli -testnet z_sendmany "$FROM" \
     <div>
       <div className="network-card">
         <div className="network-endpoint">
-          <div className="network-icon">J</div>
+          <div className="network-icon">
+            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Juno" />
+          </div>
           <div>
             <div className="network-name">Juno</div>
-            <div className="network-label">Source</div>
+            <div className="network-label">Source chain</div>
           </div>
         </div>
         <div className="network-arrow">&rarr;</div>
         <div className="network-endpoint">
-          <div className="network-icon">B</div>
+          <div className="network-icon">
+            <img className="network-logo" src={runtimeConfig.baseLogoUrl} alt="Base" />
+          </div>
           <div>
             <div className="network-name">Base</div>
-            <div className="network-label">Destination</div>
+            <div className="network-label">Destination chain</div>
           </div>
         </div>
       </div>
 
       <div className="card">
         <div className="field">
-          <label className="label">Base Recipient Address</label>
+          <label className="label">
+            Base Recipient Address <InfoHint label="Any Base address works. Leave this blank to use the currently connected wallet." />
+          </label>
           <input
             className="mono"
             placeholder={address ?? '0x...'}
             value={recipient}
             onChange={(e) => setRecipient(e.target.value)}
           />
+          <div className="field-help">
+            Leave blank to deposit to the connected Base wallet.
+          </div>
         </div>
         <div className="field">
-          <label className="label">Amount (JUNO)</label>
+          <label className="label">
+            Amount (JUNO) <span className="optional-pill">Optional</span>{' '}
+            <InfoHint label="The amount only pre-fills the QR code and CLI instructions. The memo is what actually routes the deposit." />
+          </label>
           <input
             type="number"
             step="0.00000001"
             min="0"
-            placeholder="10.0"
+            placeholder="Leave blank to fill this in later"
             value={amount}
             onChange={(e) => setAmount(e.target.value)}
           />
         </div>
+        {formError && <div className="error-box">{formError}</div>}
         {cfg && cfg.feeBps > 0 && (
           <div className="fee-line" style={{ marginTop: 0 }}>
             <span>Bridge fee</span>
@@ -127,10 +151,10 @@ junocash-cli -testnet z_sendmany "$FROM" \
         )}
         {cfg && cfg.minDepositAmount !== '0' && (
           <div className="warning-box" style={{ marginTop: 8, marginBottom: 0 }}>
-            Deposits below {formatJuno(cfg.minDepositAmount)} JUNO will not be processed and funds will be lost.
+            Deposits below {formatJuno(cfg.minDepositAmount)} JUNO are rejected and will not mint on Base.
           </div>
         )}
-        <button className="primary" onClick={handleGenerate} disabled={!effectiveRecipient || isLoading}>
+        <button className="primary" onClick={handleGenerate} disabled={!effectiveRecipient || isLoading || !!formError}>
           {isLoading ? 'Generating...' : 'Generate Deposit Instructions'}
         </button>
       </div>
@@ -141,7 +165,7 @@ junocash-cli -testnet z_sendmany "$FROM" \
             <h3>Send JUNO via CLI</h3>
             <div style={{ display: 'flex', justifyContent: 'center', margin: '16px 0' }}>
               <QRCodeSVG
-                value={`${memo.oWalletUA}?amount=${cliAmount}&memo=${compactMemo}`}
+                value={qrValue}
                 size={180}
                 level="M"
                 includeMargin

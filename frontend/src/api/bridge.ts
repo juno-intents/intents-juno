@@ -1,6 +1,7 @@
 import type { BridgeConfig, DepositMemo, DepositStatus, WithdrawalStatus, ListResponse } from './types'
+import { runtimeConfig } from '../config/runtime'
 
-const BASE = ''
+const BASE = runtimeConfig.apiBaseUrl
 
 async function get<T>(path: string): Promise<T> {
   const res = await fetch(BASE + path)

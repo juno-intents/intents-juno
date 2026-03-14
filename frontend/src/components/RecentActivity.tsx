@@ -62,7 +62,7 @@ export default function RecentActivity({ address }: Props) {
             <div className="tx-item" key={d.depositId} onClick={() => setModalData({ type: 'deposit', data: d })}>
               <div className="tx-item-header">
                 <div className="tx-left">
-                  <div className="tx-type">Deposit</div>
+                  <div className="tx-type">Juno -&gt; Base</div>
                   <div className="tx-id">{d.depositId.slice(0, 10)}...{d.depositId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">
@@ -83,7 +83,7 @@ export default function RecentActivity({ address }: Props) {
             <div className="tx-item" key={w.withdrawalId} onClick={() => setModalData({ type: 'withdrawal', data: w })}>
               <div className="tx-item-header">
                 <div className="tx-left">
-                  <div className="tx-type">Withdrawal</div>
+                  <div className="tx-type">Base -&gt; Juno</div>
                   <div className="tx-id">{w.withdrawalId.slice(0, 10)}...{w.withdrawalId.slice(-6)}</div>
                 </div>
                 <div className="tx-right">

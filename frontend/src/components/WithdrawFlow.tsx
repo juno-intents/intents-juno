@@ -4,6 +4,11 @@ import { useQuery } from '@tanstack/react-query'
 import { parseUnits, formatUnits, maxUint256 } from 'viem'
 import { getConfig, decodeRecipient } from '../api/bridge'
 import { WJUNO_ABI, BRIDGE_ABI } from '../config/contracts'
+import InfoHint from './InfoHint'
+import { runtimeConfig } from '../config/runtime'
+import { parseAmountToZats, upsertRecentRecipients, validateJunoRecipient, validateWithdrawAmount } from '../lib/bridgeUi'
+
+const RECENT_RECIPIENTS_KEY = 'juno-bridge:recent-juno-recipients'
 
 function formatJuno(zatoshi: string): string {
   try {
@@ -19,6 +24,19 @@ export default function WithdrawFlow() {
   const [junoRecipient, setJunoRecipient] = useState('')
   const [step, setStep] = useState<'input' | 'approve' | 'request' | 'success'>('input')
   const [successTxHash, setSuccessTxHash] = useState<string | null>(null)
+  const [decodeError, setDecodeError] = useState<string | null>(null)
+  const [recentRecipients, setRecentRecipients] = useState<string[]>(() => {
+    const raw = window.localStorage.getItem(RECENT_RECIPIENTS_KEY)
+    if (!raw) {
+      return []
+    }
+    try {
+      const parsed = JSON.parse(raw)
+      return Array.isArray(parsed) ? parsed.filter((value): value is string => typeof value === 'string') : []
+    } catch {
+      return []
+    }
+  })
 
   const { data: cfg } = useQuery({
     queryKey: ['bridge-config'],
@@ -79,11 +97,18 @@ export default function WithdrawFlow() {
     }
   }, [approveConfirmed, refetchAllowance])
 
-  const parsedAmount = amount ? parseUnits(amount, 8) : 0n
+  const parsedAmount = parseAmountToZats(amount) ?? 0n
   const hasSufficientAllowance = allowance !== undefined && parsedAmount > 0n && (allowance as bigint) >= parsedAmount
+  const amountError = validateWithdrawAmount(amount, cfg?.minWithdrawAmount, balance as bigint | undefined)
+  const recipientError = validateJunoRecipient(junoRecipient)
+  const formError = decodeError || amountError || recipientError
+
+  useEffect(() => {
+    window.localStorage.setItem(RECENT_RECIPIENTS_KEY, JSON.stringify(recentRecipients))
+  }, [recentRecipients])
 
   const handleApprove = () => {
-    if (!wjunoAddress || !bridgeAddress) return
+    if (!wjunoAddress || !bridgeAddress || formError) return
     approve({
       address: wjunoAddress as `0x${string}`,
       abi: WJUNO_ABI,
@@ -93,10 +118,8 @@ export default function WithdrawFlow() {
     setStep('approve')
   }
 
-  const [decodeError, setDecodeError] = useState<string | null>(null)
-
   const handleRequestWithdraw = async () => {
-    if (!bridgeAddress || !amount || !junoRecipient) return
+    if (!bridgeAddress || !amount || !junoRecipient || formError) return
     setDecodeError(null)
     try {
       const orchardHex = await decodeRecipient(junoRecipient)
@@ -116,6 +139,7 @@ export default function WithdrawFlow() {
 
   useEffect(() => {
     if (step === 'request' && requestConfirmed && requestTxHash) {
+      setRecentRecipients((existing) => upsertRecentRecipients(existing, junoRecipient))
       setSuccessTxHash(requestTxHash)
       setStep('success')
     }
@@ -129,6 +153,13 @@ export default function WithdrawFlow() {
     resetRequest()
   }
 
+  const handleMax = () => {
+    if (balance === undefined) {
+      return
+    }
+    setAmount(formatUnits(balance as bigint, 8))
+  }
+
   if (step === 'success') {
     return (
       <div className="modal-overlay" onClick={handleDismissSuccess}>
@@ -137,7 +168,7 @@ export default function WithdrawFlow() {
             <div className="success-icon">&#10003;</div>
             <div className="success-title">Withdrawal Submitted</div>
             <div className="success-subtitle">
-              Your withdrawal of {amount} JUNO has been submitted on-chain. The bridge operators will process it shortly.
+              Your Base -&gt; Juno withdrawal of {amount} JUNO has been submitted on-chain. The bridge operators will process it shortly.
             </div>
             {successTxHash && (
               <div className="detail-row" style={{ borderBottom: 'none', justifyContent: 'center' }}>
@@ -159,18 +190,22 @@ export default function WithdrawFlow() {
     <div>
       <div className="network-card">
         <div className="network-endpoint">
-          <div className="network-icon">B</div>
+          <div className="network-icon">
+            <img className="network-logo" src={runtimeConfig.baseLogoUrl} alt="Base" />
+          </div>
           <div>
             <div className="network-name">Base</div>
-            <div className="network-label">Source</div>
+            <div className="network-label">Source chain</div>
           </div>
         </div>
         <div className="network-arrow">&rarr;</div>
         <div className="network-endpoint">
-          <div className="network-icon">J</div>
+          <div className="network-icon">
+            <img className="network-logo" src={runtimeConfig.junoLogoUrl} alt="Juno" />
+          </div>
           <div>
             <div className="network-name">Juno</div>
-            <div className="network-label">Destination</div>
+            <div className="network-label">Destination chain</div>
           </div>
         </div>
       </div>
@@ -192,6 +227,9 @@ export default function WithdrawFlow() {
             onChange={(e) => setAmount(e.target.value)}
           />
           <span className="asset-ticker">JUNO</span>
+          <button className="ghost-btn" type="button" onClick={handleMax} disabled={balance === undefined}>
+            Max
+          </button>
         </div>
         {cfg && cfg.feeBps > 0 && (
           <div className="fee-line">
@@ -209,26 +247,41 @@ export default function WithdrawFlow() {
 
       <div className="card">
         <div className="field">
-          <label className="label">Juno Recipient Address</label>
+          <label className="label">
+            Juno Recipient Address <InfoHint label="Use any valid Juno unified address. Recent addresses are saved locally in this browser." />
+          </label>
           <input
             className="mono"
-            placeholder="Juno unified address (jtest1...)"
+            placeholder={`Unified address (${runtimeConfig.baseChain.id === 8453 ? 'juno1...' : 'jtest1...'})`}
             value={junoRecipient}
             onChange={(e) => { setJunoRecipient(e.target.value); setDecodeError(null) }}
           />
-          {decodeError && (
-            <div style={{ color: 'var(--error, #e53e3e)', fontSize: 12, marginTop: 4 }}>
-              {decodeError}
+          {recentRecipients.length > 0 && (
+            <div className="recent-recipient-row">
+              {recentRecipients.map((recent) => (
+                <button
+                  key={recent}
+                  className="recent-chip"
+                  type="button"
+                  onClick={() => {
+                    setJunoRecipient(recent)
+                    setDecodeError(null)
+                  }}
+                >
+                  {recent.slice(0, 12)}...{recent.slice(-8)}
+                </button>
+              ))}
             </div>
           )}
+          {formError && <div className="error-box">{formError}</div>}
         </div>
         {step === 'input' && !hasSufficientAllowance && (
-          <button className="primary" onClick={handleApprove} disabled={!amount || !junoRecipient || !address}>
+          <button className="primary" onClick={handleApprove} disabled={!amount || !junoRecipient || !address || !!formError}>
             Approve wJUNO
           </button>
         )}
         {step === 'input' && hasSufficientAllowance && (
-          <button className="primary" onClick={handleRequestWithdraw} disabled={!amount || !junoRecipient || !address}>
+          <button className="primary" onClick={handleRequestWithdraw} disabled={!amount || !junoRecipient || !address || !!formError}>
             Request Withdrawal
           </button>
         )}
@@ -238,7 +291,7 @@ export default function WithdrawFlow() {
           </button>
         )}
         {step === 'approve' && approveConfirmed && (
-          <button className="primary" onClick={handleRequestWithdraw}>
+          <button className="primary" onClick={handleRequestWithdraw} disabled={!!formError}>
             Request Withdrawal
           </button>
         )}

@@ -1,12 +1,12 @@
 import { http } from 'wagmi'
-import { baseSepolia } from 'wagmi/chains'
 import { getDefaultConfig } from '@rainbow-me/rainbowkit'
+import { runtimeConfig } from './runtime'
 
 export const config = getDefaultConfig({
   appName: 'Juno Bridge',
-  projectId: 'juno-bridge', // WalletConnect project ID placeholder
-  chains: [baseSepolia],
+  projectId: runtimeConfig.walletConnectProjectId,
+  chains: [runtimeConfig.baseChain],
   transports: {
-    [baseSepolia.id]: http(),
+    [runtimeConfig.baseChain.id]: http(),
   },
 })
