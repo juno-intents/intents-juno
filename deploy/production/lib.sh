@@ -539,6 +539,66 @@ production_is_positive_integer() {
   [[ "$value" =~ ^[0-9]+$ ]] && (( value > 0 ))
 }
 
+production_default_withdraw_coordinator_juno_fee_add_zat() {
+  printf '1000000\n'
+}
+
+production_default_bridge_fee_bps() {
+  printf '50\n'
+}
+
+production_default_bridge_relayer_tip_bps() {
+  printf '1000\n'
+}
+
+production_default_bridge_refund_window_seconds() {
+  printf '86400\n'
+}
+
+production_default_bridge_max_expiry_extension_seconds() {
+  printf '43200\n'
+}
+
+production_compute_min_bridge_withdraw_amount_zat() {
+  local fee_add_zat="$1"
+  local fee_bps="$2"
+  local numerator
+
+  production_is_positive_integer "$fee_add_zat" || die "bridge min withdraw fee add must be a positive integer"
+  production_is_positive_integer "$fee_bps" || die "bridge fee bps must be a positive integer"
+  (( fee_bps <= 10000 )) || die "bridge fee bps must be <= 10000"
+
+  numerator=$(( fee_add_zat * 10000 + fee_bps - 1 ))
+  printf '%s\n' $(( numerator / fee_bps ))
+}
+
+production_compute_min_bridge_deposit_amount_zat() {
+  local min_withdraw_amount="$1"
+  local fee_bps="$2"
+  local net_bps numerator
+
+  production_is_positive_integer "$min_withdraw_amount" || die "bridge min withdraw amount must be a positive integer"
+  production_is_positive_integer "$fee_bps" || die "bridge fee bps must be a positive integer"
+  (( fee_bps <= 10000 )) || die "bridge fee bps must be <= 10000"
+  net_bps=$(( 10000 - fee_bps ))
+  (( net_bps > 0 )) || die "bridge fee bps leaves no net deposit amount"
+
+  numerator=$(( (min_withdraw_amount - 1) * 10000 ))
+  printf '%s\n' $(( numerator / net_bps + 1 ))
+}
+
+production_default_bridge_min_withdraw_amount_zat() {
+  production_compute_min_bridge_withdraw_amount_zat \
+    "$(production_default_withdraw_coordinator_juno_fee_add_zat)" \
+    "$(production_default_bridge_fee_bps)"
+}
+
+production_default_bridge_min_deposit_amount_zat() {
+  production_compute_min_bridge_deposit_amount_zat \
+    "$(production_default_bridge_min_withdraw_amount_zat)" \
+    "$(production_default_bridge_fee_bps)"
+}
+
 production_required_min_base_relayer_balance_wei() {
   local value="${PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI:-250000000000000}"
   production_is_positive_integer "$value" \
@@ -718,6 +778,8 @@ production_render_shared_manifest() {
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
+  local bridge_fee_bps bridge_relayer_tip_bps bridge_refund_window_seconds
+  local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
   local summary_owallet_ua completion_owallet_ua effective_owallet_ua base_event_scanner_start_block
@@ -754,6 +816,12 @@ production_render_shared_manifest() {
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
   dkg_prefix="$(production_tf_output_value "$tf_json" "dkg_s3_key_prefix" false)"
+  bridge_fee_bps="$(production_json_required "$bridge_summary" '.bridge_params.fee_bps // .bridge_fee_params.fee_bps')"
+  bridge_relayer_tip_bps="$(production_json_required "$bridge_summary" '.bridge_params.relayer_tip_bps // .bridge_fee_params.relayer_tip_bps')"
+  bridge_refund_window_seconds="$(production_json_required "$bridge_summary" '.bridge_params.refund_window_seconds')"
+  bridge_max_expiry_extension_seconds="$(production_json_required "$bridge_summary" '.bridge_params.max_expiry_extension_seconds')"
+  bridge_min_deposit_amount="$(production_json_required "$bridge_summary" '.bridge_params.min_deposit_amount')"
+  bridge_min_withdraw_amount="$(production_json_required "$bridge_summary" '.bridge_params.min_withdraw_amount')"
 
   operator_ids_csv="$(production_operator_ids_csv "$dkg_summary")"
   [[ -n "$operator_ids_csv" ]] || die "dkg summary does not contain operator ids"
@@ -814,6 +882,12 @@ production_render_shared_manifest() {
     --arg base_rpc_url "$base_rpc_url" \
     --argjson base_chain_id "$base_chain_id" \
     --argjson base_event_scanner_start_block "$base_event_scanner_start_block" \
+    --argjson bridge_fee_bps "$bridge_fee_bps" \
+    --argjson bridge_relayer_tip_bps "$bridge_relayer_tip_bps" \
+    --argjson bridge_refund_window_seconds "$bridge_refund_window_seconds" \
+    --argjson bridge_max_expiry_extension_seconds "$bridge_max_expiry_extension_seconds" \
+    --argjson bridge_min_deposit_amount "$bridge_min_deposit_amount" \
+    --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --arg deposit_image_id "$deposit_image_id" \
     --arg withdraw_image_id "$withdraw_image_id" \
     --arg signer_ufvk "$signer_ufvk" \
@@ -862,6 +936,14 @@ production_render_shared_manifest() {
         wjuno: (if $wjuno_address == "" then null else $wjuno_address end),
         operator_registry: (if $operator_registry == "" then null else $operator_registry end),
         fee_distributor: (if $fee_distributor == "" then null else $fee_distributor end),
+        bridge_params: {
+          fee_bps: $bridge_fee_bps,
+          relayer_tip_bps: $bridge_relayer_tip_bps,
+          refund_window_seconds: $bridge_refund_window_seconds,
+          max_expiry_extension_seconds: $bridge_max_expiry_extension_seconds,
+          min_deposit_amount: $bridge_min_deposit_amount,
+          min_withdraw_amount: $bridge_min_withdraw_amount
+        },
         deposit_image_id: (if $deposit_image_id == "" then null else $deposit_image_id end),
         withdraw_image_id: (if $withdraw_image_id == "" then null else $withdraw_image_id end),
         owallet_ua: (if $effective_owallet_ua == "" then null else $effective_owallet_ua end)
@@ -906,6 +988,7 @@ production_render_app_handoff() {
   local bridge_dns_label ops_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name ops_record_name bridge_public_url ops_public_url
   local bridge_probe_url ops_probe_url bridge_internal_url ops_internal_url
+  local bridge_refund_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json
 
@@ -936,6 +1019,10 @@ production_render_app_handoff() {
   backoffice_listen_addr="$(jq -r '.backoffice_listen // "0.0.0.0:8090"' <<<"$app_json")"
   production_require_loopback_listen_addr "$bridge_listen_addr" "app_host.bridge_api_listen"
   production_require_loopback_listen_addr "$backoffice_listen_addr" "app_host.backoffice_listen"
+  bridge_refund_window_seconds="$(production_json_required "$shared_manifest" '.contracts.bridge_params.refund_window_seconds')"
+  bridge_min_deposit_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_deposit_amount')"
+  bridge_min_withdraw_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_withdraw_amount')"
+  bridge_fee_bps="$(production_json_required "$shared_manifest" '.contracts.bridge_params.fee_bps')"
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
@@ -991,6 +1078,10 @@ production_render_app_handoff() {
     --arg bridge_probe_url "$bridge_probe_url" \
     --arg bridge_internal_url "$bridge_internal_url" \
     --arg bridge_record_name "$bridge_record_name" \
+    --argjson bridge_refund_window_seconds "$bridge_refund_window_seconds" \
+    --argjson bridge_min_deposit_amount "$bridge_min_deposit_amount" \
+    --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
+    --argjson bridge_fee_bps "$bridge_fee_bps" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
     --arg backoffice_public_url "$ops_public_url" \
     --arg backoffice_probe_url "$ops_probe_url" \
@@ -1028,7 +1119,11 @@ production_render_app_handoff() {
           public_url: $bridge_public_url,
           probe_url: $bridge_probe_url,
           internal_url: $bridge_internal_url,
-          record_name: $bridge_record_name
+          record_name: $bridge_record_name,
+          refund_window_seconds: $bridge_refund_window_seconds,
+          min_deposit_amount: $bridge_min_deposit_amount,
+          min_withdraw_amount: $bridge_min_withdraw_amount,
+          fee_bps: $bridge_fee_bps
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,
@@ -1238,13 +1333,14 @@ production_render_operator_stack_env() {
   local output_file="$4"
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
-  local deposit_scan_wallet_id base_event_scanner_start_block
+  local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
   local checkpoint_signer_private_key juno_txsign_signer_keys owallet_ua withdraw_change_address
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   checkpoint_signer_private_key=""
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
+  withdraw_juno_fee_add_zat="$(production_default_withdraw_coordinator_juno_fee_add_zat)"
   withdraw_expiry_safety_margin="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN || true)"
   withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
@@ -1314,7 +1410,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/b
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
-WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000
+WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=$withdraw_juno_fee_add_zat
 WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h
 WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua

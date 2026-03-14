@@ -151,6 +151,12 @@ else
     --rpc-url "$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')" \
     --chain-id "$(production_json_required "$inventory" '.contracts.base_chain_id')" \
     --deployer-key-file "$deployer_key_file" \
+    --fee-bps "$(production_default_bridge_fee_bps)" \
+    --relayer-tip-bps "$(production_default_bridge_relayer_tip_bps)" \
+    --refund-window-seconds "$(production_default_bridge_refund_window_seconds)" \
+    --max-expiry-extension-seconds "$(production_default_bridge_max_expiry_extension_seconds)" \
+    --min-deposit-amount "$(production_default_bridge_min_deposit_amount_zat)" \
+    --min-withdraw-amount "$(production_default_bridge_min_withdraw_amount_zat)" \
     --dkg-summary "$dkg_summary" \
     --output "$bridge_summary"
 fi

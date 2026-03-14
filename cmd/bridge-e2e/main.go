@@ -39,6 +39,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/proverexec"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
 type stringListFlag []string
@@ -57,43 +58,49 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type config struct {
-	RPCURL                      string
-	ChainID                     uint64
-	DeployOnly                  bool
-	ReuseDeployedContracts      bool
-	DeployerKeyHex              string
-	OperatorKeyFiles            []string
-	OperatorAddresses           []common.Address
-	OperatorSignerBin           string
-	OperatorSignerEndpoints     []string
-	OperatorSignerMaxRespBytes  int
-	Threshold                   int
-	ContractsOut                string
-	DepositAmount               uint64
-	WithdrawAmount              uint64
-	DepositCheckpointHeight     uint64
-	DepositCheckpointBlockHash  common.Hash
-	WithdrawCheckpointHeight    uint64
-	WithdrawCheckpointBlockHash common.Hash
-	DepositFinalOrchardRoot     common.Hash
-	WithdrawFinalOrchardRoot    common.Hash
-	Recipient                   common.Address
-	RecipientSet                bool
-	VerifierAddress             common.Address
-	VerifierSet                 bool
-	ExistingWJunoAddress        common.Address
-	ExistingOperatorRegAddress  common.Address
-	ExistingFeeDistributor      common.Address
-	ExistingBridgeAddress       common.Address
-	DepositImageID              common.Hash
-	WithdrawImageID             common.Hash
-	DepositSeal                 []byte
-	WithdrawSeal                []byte
-	ProofInputsOut              string
-	JunoExecutionTxHash         string
-	OutputPath                  string
-	RunTimeout                  time.Duration
-	SP1                         sp1Config
+	RPCURL                          string
+	ChainID                         uint64
+	DeployOnly                      bool
+	ReuseDeployedContracts          bool
+	DeployerKeyHex                  string
+	OperatorKeyFiles                []string
+	OperatorAddresses               []common.Address
+	OperatorSignerBin               string
+	OperatorSignerEndpoints         []string
+	OperatorSignerMaxRespBytes      int
+	Threshold                       int
+	ContractsOut                    string
+	DepositAmount                   uint64
+	WithdrawAmount                  uint64
+	BridgeFeeBps                    uint64
+	BridgeRelayerTipBps             uint64
+	BridgeRefundWindowSeconds       uint64
+	BridgeMaxExpiryExtensionSeconds uint64
+	BridgeMinDepositAmount          uint64
+	BridgeMinWithdrawAmount         uint64
+	DepositCheckpointHeight         uint64
+	DepositCheckpointBlockHash      common.Hash
+	WithdrawCheckpointHeight        uint64
+	WithdrawCheckpointBlockHash     common.Hash
+	DepositFinalOrchardRoot         common.Hash
+	WithdrawFinalOrchardRoot        common.Hash
+	Recipient                       common.Address
+	RecipientSet                    bool
+	VerifierAddress                 common.Address
+	VerifierSet                     bool
+	ExistingWJunoAddress            common.Address
+	ExistingOperatorRegAddress      common.Address
+	ExistingFeeDistributor          common.Address
+	ExistingBridgeAddress           common.Address
+	DepositImageID                  common.Hash
+	WithdrawImageID                 common.Hash
+	DepositSeal                     []byte
+	WithdrawSeal                    []byte
+	ProofInputsOut                  string
+	JunoExecutionTxHash             string
+	OutputPath                      string
+	RunTimeout                      time.Duration
+	SP1                             sp1Config
 }
 
 type sp1Config struct {
@@ -142,8 +149,14 @@ type sp1WaitResult struct {
 }
 
 const (
-	defaultDepositImageIDHex  = "0x000000000000000000000000000000000000000000000000000000000000aa01"
-	defaultWithdrawImageIDHex = "0x000000000000000000000000000000000000000000000000000000000000aa02"
+	defaultDepositImageIDHex                = "0x000000000000000000000000000000000000000000000000000000000000aa01"
+	defaultWithdrawImageIDHex               = "0x000000000000000000000000000000000000000000000000000000000000aa02"
+	bridgeBPSDenominator                    = uint64(10_000)
+	defaultBridgeFeeBps                     = uint64(50)
+	defaultBridgeRelayerTipBps              = uint64(1000)
+	defaultBridgeRefundWindowSeconds        = uint64(24 * 60 * 60)
+	defaultBridgeMaxExpiryExtensionSeconds  = uint64(12 * 60 * 60)
+	defaultWithdrawCoordinatorJunoFeeAddZat = uint64(1_000_000)
 
 	defaultSP1MaxPricePerPGU    = uint64(1000000000000)
 	defaultSP1MinAuctionPeriod  = uint64(85)
@@ -192,6 +205,11 @@ const (
 	withdrawWitnessRecipientRawLen = 43
 )
 
+var (
+	defaultBridgeMinWithdrawAmountZat = mustMinWithdrawAmountForFixedFee(defaultWithdrawCoordinatorJunoFeeAddZat, defaultBridgeFeeBps)
+	defaultBridgeMinDepositAmountZat  = mustMinDepositAmountForNet(defaultBridgeMinWithdrawAmountZat, defaultBridgeFeeBps)
+)
+
 type report struct {
 	GeneratedAtUTC string `json:"generated_at_utc"`
 	RPCURL         string `json:"rpc_url"`
@@ -217,6 +235,15 @@ type report struct {
 			BridgeUpdateSteps []string `json:"bridge_update_steps,omitempty"`
 		} `json:"timelock,omitempty"`
 	} `json:"governance,omitempty"`
+
+	BridgeParams struct {
+		FeeBps                    uint64 `json:"fee_bps"`
+		RelayerTipBps             uint64 `json:"relayer_tip_bps"`
+		RefundWindowSeconds       uint64 `json:"refund_window_seconds"`
+		MaxExpiryExtensionSeconds uint64 `json:"max_expiry_extension_seconds"`
+		MinDepositAmount          uint64 `json:"min_deposit_amount"`
+		MinWithdrawAmount         uint64 `json:"min_withdraw_amount"`
+	} `json:"bridge_params"`
 
 	Operators []string `json:"operators"`
 	Threshold int      `json:"threshold"`
@@ -384,6 +411,61 @@ type expectedBalanceDeltaInput struct {
 	RecipientEqualsOwner bool
 }
 
+func mustMinWithdrawAmountForFixedFee(feeAddZat uint64, feeBps uint64) uint64 {
+	value, err := minWithdrawAmountForFixedFee(feeAddZat, feeBps)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func minWithdrawAmountForFixedFee(feeAddZat uint64, feeBps uint64) (uint64, error) {
+	if feeBps == 0 || feeBps > bridgeBPSDenominator {
+		return 0, fmt.Errorf("invalid fee bps: %d", feeBps)
+	}
+	if feeAddZat == 0 {
+		return 0, nil
+	}
+
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(feeAddZat), new(big.Int).SetUint64(bridgeBPSDenominator))
+	denominator := new(big.Int).SetUint64(feeBps)
+	numerator.Add(numerator, new(big.Int).Sub(denominator, big.NewInt(1)))
+	numerator.Div(numerator, denominator)
+	if !numerator.IsUint64() {
+		return 0, errors.New("min withdraw amount overflow")
+	}
+	return numerator.Uint64(), nil
+}
+
+func mustMinDepositAmountForNet(targetNet uint64, feeBps uint64) uint64 {
+	value, err := minDepositAmountForNet(targetNet, feeBps)
+	if err != nil {
+		panic(err)
+	}
+	return value
+}
+
+func minDepositAmountForNet(targetNet uint64, feeBps uint64) (uint64, error) {
+	if targetNet == 0 {
+		return 0, nil
+	}
+	if feeBps > bridgeBPSDenominator {
+		return 0, fmt.Errorf("invalid fee bps: %d", feeBps)
+	}
+	netBps := bridgeBPSDenominator - feeBps
+	if netBps == 0 {
+		return 0, errors.New("fee bps leaves no net amount")
+	}
+
+	numerator := new(big.Int).Mul(new(big.Int).SetUint64(targetNet-1), new(big.Int).SetUint64(bridgeBPSDenominator))
+	numerator.Div(numerator, new(big.Int).SetUint64(netBps))
+	numerator.Add(numerator, big.NewInt(1))
+	if !numerator.IsUint64() {
+		return 0, errors.New("min deposit amount overflow")
+	}
+	return numerator.Uint64(), nil
+}
+
 type expectedBalanceDelta struct {
 	Owner          *big.Int
 	Recipient      *big.Int
@@ -490,6 +572,12 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.ContractsOut, "contracts-out", "contracts/out", "path to foundry build output directory")
 	fs.Uint64Var(&cfg.DepositAmount, "deposit-amount", 100_000, "mintBatch item amount (wJUNO base units)")
 	fs.Uint64Var(&cfg.WithdrawAmount, "withdraw-amount", 10_000, "request/finalize amount (wJUNO base units)")
+	fs.Uint64Var(&cfg.BridgeFeeBps, "fee-bps", defaultBridgeFeeBps, "bridge fee in basis points")
+	fs.Uint64Var(&cfg.BridgeRelayerTipBps, "relayer-tip-bps", defaultBridgeRelayerTipBps, "bridge relayer tip share in basis points of fee")
+	fs.Uint64Var(&cfg.BridgeRefundWindowSeconds, "refund-window-seconds", defaultBridgeRefundWindowSeconds, "bridge refund window in seconds")
+	fs.Uint64Var(&cfg.BridgeMaxExpiryExtensionSeconds, "max-expiry-extension-seconds", defaultBridgeMaxExpiryExtensionSeconds, "bridge max expiry extension in seconds")
+	fs.Uint64Var(&cfg.BridgeMinDepositAmount, "min-deposit-amount", defaultBridgeMinDepositAmountZat, "bridge minimum deposit amount in Juno base units")
+	fs.Uint64Var(&cfg.BridgeMinWithdrawAmount, "min-withdraw-amount", defaultBridgeMinWithdrawAmountZat, "bridge minimum withdrawal amount in wJUNO base units")
 	fs.Uint64Var(&cfg.DepositCheckpointHeight, "deposit-checkpoint-height", 0, "Juno checkpoint height used for deposit checkpoint signing")
 	fs.StringVar(&depositCheckpointBlockHashHex, "deposit-checkpoint-block-hash", "", "Juno checkpoint block hash for deposit checkpoint signing (bytes32 hex)")
 	fs.Uint64Var(&cfg.WithdrawCheckpointHeight, "withdraw-checkpoint-height", 0, "Juno checkpoint height used for withdraw checkpoint signing (defaults to --deposit-checkpoint-height)")
@@ -567,6 +655,31 @@ func parseArgs(args []string) (config, error) {
 	}
 	if cfg.WithdrawAmount > cfg.DepositAmount {
 		return cfg, errors.New("--withdraw-amount must be <= --deposit-amount")
+	}
+	if cfg.BridgeFeeBps == 0 || cfg.BridgeFeeBps > bridgeBPSDenominator {
+		return cfg, errors.New("--fee-bps must be between 1 and 10000")
+	}
+	if cfg.BridgeRelayerTipBps > bridgeBPSDenominator {
+		return cfg, errors.New("--relayer-tip-bps must be <= 10000")
+	}
+	if cfg.BridgeRefundWindowSeconds == 0 {
+		return cfg, errors.New("--refund-window-seconds must be > 0")
+	}
+	if cfg.BridgeMaxExpiryExtensionSeconds == 0 {
+		return cfg, errors.New("--max-expiry-extension-seconds must be > 0")
+	}
+	if cfg.BridgeMinWithdrawAmount == 0 {
+		return cfg, errors.New("--min-withdraw-amount must be > 0")
+	}
+	if cfg.BridgeMinDepositAmount == 0 {
+		return cfg, errors.New("--min-deposit-amount must be > 0")
+	}
+	_, minDepositNet, err := withdraw.ComputeFeeAndNet(cfg.BridgeMinDepositAmount, uint32(cfg.BridgeFeeBps))
+	if err != nil {
+		return cfg, fmt.Errorf("validate bridge deposit minimum: %w", err)
+	}
+	if minDepositNet < cfg.BridgeMinWithdrawAmount {
+		return cfg, fmt.Errorf("--min-deposit-amount net=%d must cover --min-withdraw-amount=%d", minDepositNet, cfg.BridgeMinWithdrawAmount)
 	}
 	if cfg.RunTimeout <= 0 {
 		return cfg, errors.New("--run-timeout must be > 0")
@@ -1158,10 +1271,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	verifierAddr := cfg.VerifierAddress
 	depositImageID := cfg.DepositImageID
 	withdrawImageID := cfg.WithdrawImageID
-	const feeBps uint64 = 50
-	const tipBps uint64 = 1000
-	const refundWindowSeconds uint64 = 24 * 60 * 60
-	const maxExtendSeconds uint64 = 12 * 60 * 60
 	const timelockDelaySeconds uint64 = 0
 
 	var wjunoAddr common.Address
@@ -1209,12 +1318,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			verifierAddr,
 			depositImageID,
 			withdrawImageID,
-			new(big.Int).SetUint64(feeBps),
-			new(big.Int).SetUint64(tipBps),
-			refundWindowSeconds,
-			maxExtendSeconds,
-			big.NewInt(0),
-			big.NewInt(0),
+			new(big.Int).SetUint64(cfg.BridgeFeeBps),
+			new(big.Int).SetUint64(cfg.BridgeRelayerTipBps),
+			cfg.BridgeRefundWindowSeconds,
+			cfg.BridgeMaxExpiryExtensionSeconds,
+			new(big.Int).SetUint64(cfg.BridgeMinDepositAmount),
+			new(big.Int).SetUint64(cfg.BridgeMinWithdrawAmount),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("deploy bridge: %w", err)
@@ -1228,7 +1337,19 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	bridge := bind.NewBoundContract(bridgeAddr, bridgeABI, client, client, client)
 
 	if cfg.ReuseDeployedContracts {
-		if err := validateReusedBridgeConfig(ctx, bridge, verifierAddr, depositImageID, withdrawImageID); err != nil {
+		if err := validateReusedBridgeConfig(
+			ctx,
+			bridge,
+			verifierAddr,
+			depositImageID,
+			withdrawImageID,
+			cfg.BridgeFeeBps,
+			cfg.BridgeRelayerTipBps,
+			cfg.BridgeRefundWindowSeconds,
+			cfg.BridgeMaxExpiryExtensionSeconds,
+			cfg.BridgeMinDepositAmount,
+			cfg.BridgeMinWithdrawAmount,
+		); err != nil {
 			return nil, err
 		}
 	}
@@ -1417,11 +1538,39 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if err != nil {
 		return nil, fmt.Errorf("bridge relayerTipBps: %w", err)
 	}
-	if feeBpsOnChain != feeBps {
-		return nil, fmt.Errorf("bridge feeBps mismatch: got=%d want=%d", feeBpsOnChain, feeBps)
+	if feeBpsOnChain != cfg.BridgeFeeBps {
+		return nil, fmt.Errorf("bridge feeBps mismatch: got=%d want=%d", feeBpsOnChain, cfg.BridgeFeeBps)
 	}
-	if relayerTipBpsOnChain != tipBps {
-		return nil, fmt.Errorf("bridge relayerTipBps mismatch: got=%d want=%d", relayerTipBpsOnChain, tipBps)
+	if relayerTipBpsOnChain != cfg.BridgeRelayerTipBps {
+		return nil, fmt.Errorf("bridge relayerTipBps mismatch: got=%d want=%d", relayerTipBpsOnChain, cfg.BridgeRelayerTipBps)
+	}
+	refundWindowSecondsOnChain, err := callUint64(ctx, bridge, "refundWindowSeconds")
+	if err != nil {
+		return nil, fmt.Errorf("bridge refundWindowSeconds: %w", err)
+	}
+	if refundWindowSecondsOnChain != cfg.BridgeRefundWindowSeconds {
+		return nil, fmt.Errorf("bridge refundWindowSeconds mismatch: got=%d want=%d", refundWindowSecondsOnChain, cfg.BridgeRefundWindowSeconds)
+	}
+	maxExpiryExtensionSecondsOnChain, err := callUint64(ctx, bridge, "maxExpiryExtensionSeconds")
+	if err != nil {
+		return nil, fmt.Errorf("bridge maxExpiryExtensionSeconds: %w", err)
+	}
+	if maxExpiryExtensionSecondsOnChain != cfg.BridgeMaxExpiryExtensionSeconds {
+		return nil, fmt.Errorf("bridge maxExpiryExtensionSeconds mismatch: got=%d want=%d", maxExpiryExtensionSecondsOnChain, cfg.BridgeMaxExpiryExtensionSeconds)
+	}
+	minDepositAmountOnChain, err := callUint64(ctx, bridge, "minDepositAmount")
+	if err != nil {
+		return nil, fmt.Errorf("bridge minDepositAmount: %w", err)
+	}
+	if minDepositAmountOnChain != cfg.BridgeMinDepositAmount {
+		return nil, fmt.Errorf("bridge minDepositAmount mismatch: got=%d want=%d", minDepositAmountOnChain, cfg.BridgeMinDepositAmount)
+	}
+	minWithdrawAmountOnChain, err := callUint64(ctx, bridge, "minWithdrawAmount")
+	if err != nil {
+		return nil, fmt.Errorf("bridge minWithdrawAmount: %w", err)
+	}
+	if minWithdrawAmountOnChain != cfg.BridgeMinWithdrawAmount {
+		return nil, fmt.Errorf("bridge minWithdrawAmount mismatch: got=%d want=%d", minWithdrawAmountOnChain, cfg.BridgeMinWithdrawAmount)
 	}
 	if cfg.DeployOnly {
 		rep := &report{
@@ -1438,6 +1587,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Contracts.OperatorRegistry = regAddr.Hex()
 		rep.Contracts.FeeDistributor = fdAddr.Hex()
 		rep.Contracts.Bridge = bridgeAddr.Hex()
+		rep.BridgeParams.FeeBps = cfg.BridgeFeeBps
+		rep.BridgeParams.RelayerTipBps = cfg.BridgeRelayerTipBps
+		rep.BridgeParams.RefundWindowSeconds = cfg.BridgeRefundWindowSeconds
+		rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
+		rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
+		rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
 		if timelockAddr != (common.Address{}) {
 			rep.Governance.Timelock.Address = timelockAddr.Hex()
 			rep.Governance.Timelock.MinDelaySeconds = timelockDelaySeconds
@@ -1928,6 +2083,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Contracts.OperatorRegistry = regAddr.Hex()
 	rep.Contracts.FeeDistributor = fdAddr.Hex()
 	rep.Contracts.Bridge = bridgeAddr.Hex()
+	rep.BridgeParams.FeeBps = cfg.BridgeFeeBps
+	rep.BridgeParams.RelayerTipBps = cfg.BridgeRelayerTipBps
+	rep.BridgeParams.RefundWindowSeconds = cfg.BridgeRefundWindowSeconds
+	rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
+	rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
+	rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
 	if timelockAddr != (common.Address{}) {
 		rep.Governance.Timelock.Address = timelockAddr.Hex()
 		rep.Governance.Timelock.MinDelaySeconds = timelockDelaySeconds
@@ -3132,6 +3293,12 @@ func validateReusedBridgeConfig(
 	expectedVerifier common.Address,
 	expectedDepositImageID common.Hash,
 	expectedWithdrawImageID common.Hash,
+	expectedFeeBps uint64,
+	expectedRelayerTipBps uint64,
+	expectedRefundWindowSeconds uint64,
+	expectedMaxExpiryExtensionSeconds uint64,
+	expectedMinDepositAmount uint64,
+	expectedMinWithdrawAmount uint64,
 ) error {
 	onChainVerifier, err := callAddress(ctx, bridge, "verifier")
 	if err != nil {
@@ -3167,6 +3334,48 @@ func validateReusedBridgeConfig(
 			onChainWithdrawImageID.Hex(),
 			expectedWithdrawImageID.Hex(),
 		)
+	}
+	onChainFeeBps, err := callUint64FromCaller(ctx, bridge, "feeBps")
+	if err != nil {
+		return fmt.Errorf("read bridge feeBps: %w", err)
+	}
+	if onChainFeeBps != expectedFeeBps {
+		return fmt.Errorf("reused bridge feeBps mismatch: got=%d want=%d", onChainFeeBps, expectedFeeBps)
+	}
+	onChainRelayerTipBps, err := callUint64FromCaller(ctx, bridge, "relayerTipBps")
+	if err != nil {
+		return fmt.Errorf("read bridge relayerTipBps: %w", err)
+	}
+	if onChainRelayerTipBps != expectedRelayerTipBps {
+		return fmt.Errorf("reused bridge relayerTipBps mismatch: got=%d want=%d", onChainRelayerTipBps, expectedRelayerTipBps)
+	}
+	onChainRefundWindowSeconds, err := callUint64FromCaller(ctx, bridge, "refundWindowSeconds")
+	if err != nil {
+		return fmt.Errorf("read bridge refundWindowSeconds: %w", err)
+	}
+	if onChainRefundWindowSeconds != expectedRefundWindowSeconds {
+		return fmt.Errorf("reused bridge refundWindowSeconds mismatch: got=%d want=%d", onChainRefundWindowSeconds, expectedRefundWindowSeconds)
+	}
+	onChainMaxExpiryExtensionSeconds, err := callUint64FromCaller(ctx, bridge, "maxExpiryExtensionSeconds")
+	if err != nil {
+		return fmt.Errorf("read bridge maxExpiryExtensionSeconds: %w", err)
+	}
+	if onChainMaxExpiryExtensionSeconds != expectedMaxExpiryExtensionSeconds {
+		return fmt.Errorf("reused bridge maxExpiryExtensionSeconds mismatch: got=%d want=%d", onChainMaxExpiryExtensionSeconds, expectedMaxExpiryExtensionSeconds)
+	}
+	onChainMinDepositAmount, err := callUint64FromCaller(ctx, bridge, "minDepositAmount")
+	if err != nil {
+		return fmt.Errorf("read bridge minDepositAmount: %w", err)
+	}
+	if onChainMinDepositAmount != expectedMinDepositAmount {
+		return fmt.Errorf("reused bridge minDepositAmount mismatch: got=%d want=%d", onChainMinDepositAmount, expectedMinDepositAmount)
+	}
+	onChainMinWithdrawAmount, err := callUint64FromCaller(ctx, bridge, "minWithdrawAmount")
+	if err != nil {
+		return fmt.Errorf("read bridge minWithdrawAmount: %w", err)
+	}
+	if onChainMinWithdrawAmount != expectedMinWithdrawAmount {
+		return fmt.Errorf("reused bridge minWithdrawAmount mismatch: got=%d want=%d", onChainMinWithdrawAmount, expectedMinWithdrawAmount)
 	}
 	return nil
 }
@@ -3307,6 +3516,29 @@ func callAddress(ctx context.Context, c contractCaller, method string, args ...a
 		return common.BytesToAddress(v[:]), nil
 	default:
 		return common.Address{}, fmt.Errorf("unexpected %s type: %T", method, res[0])
+	}
+}
+
+func callUint64FromCaller(ctx context.Context, c contractCaller, method string, args ...any) (uint64, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, method, args...); err != nil {
+		return 0, err
+	}
+	if len(res) != 1 {
+		return 0, fmt.Errorf("unexpected %s result count: %d", method, len(res))
+	}
+	switch v := res[0].(type) {
+	case *big.Int:
+		if v == nil {
+			return 0, nil
+		}
+		return v.Uint64(), nil
+	case uint64:
+		return v, nil
+	case uint32:
+		return uint64(v), nil
+	default:
+		return 0, fmt.Errorf("unexpected %s type: %T", method, res[0])
 	}
 }
 

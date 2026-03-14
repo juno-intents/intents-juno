@@ -31,6 +31,14 @@
     "wjuno": "0x3333333333333333333333333333333333333333",
     "operator_registry": "0x4444444444444444444444444444444444444444",
     "fee_distributor": "0x5555555555555555555555555555555555555555",
+    "bridge_params": {
+      "fee_bps": 50,
+      "relayer_tip_bps": 1000,
+      "refund_window_seconds": 86400,
+      "max_expiry_extension_seconds": 43200,
+      "min_deposit_amount": 201005025,
+      "min_withdraw_amount": 200000000
+    },
     "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",
     "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02",
     "owallet_ua": "u1alphaexample"
