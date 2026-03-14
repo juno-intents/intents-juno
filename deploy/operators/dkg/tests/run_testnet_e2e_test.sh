@@ -582,6 +582,17 @@ test_live_bridge_flow_retries_transient_bridge_api_write_failures() {
   assert_contains "$script_text" "bridge-api write retrying" "bridge-api retry helper logs retry context for transient failures"
 }
 
+test_live_bridge_flow_retries_transient_bridge_api_read_failures() {
+  local script_text
+  script_text="$(cat "$TARGET_SCRIPT")"
+
+  assert_contains "$script_text" "bridge_api_get_with_retry() {" "run-testnet-e2e defines retry helper for bridge-api read endpoints"
+  assert_contains "$script_text" "bridge-api read retrying" "bridge-api read retry helper logs retry context for transient failures"
+  assert_contains "$script_text" 'bridge_api_get_with_retry "${bridge_api_url}/v1/deposits?baseRecipient=${bridge_recipient_address}&limit=10&offset=0" "deposit auto-detection listing"' "deposit auto-detection listing uses bridge-api GET retry helper"
+  assert_contains "$script_text" 'bridge_api_get_with_retry "${bridge_api_url}/v1/status/deposit/${run_deposit_id}" "deposit status poll"' "deposit status polling uses bridge-api GET retry helper"
+  assert_contains "$script_text" 'bridge_api_get_with_retry "${bridge_api_url}/v1/status/withdrawal/${run_withdrawal_id}" "withdrawal status poll"' "withdrawal status polling uses bridge-api GET retry helper"
+}
+
 test_bridge_address_prediction_parses_cast_labeled_output() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
@@ -1203,6 +1214,7 @@ test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_generation_binds_memos_to_predicted_bridge_domain
   test_live_bridge_flow_uses_bridge_api_and_real_juno_deposit_submission
   test_live_bridge_flow_retries_transient_bridge_api_write_failures
+  test_live_bridge_flow_retries_transient_bridge_api_read_failures
   test_bridge_address_prediction_parses_cast_labeled_output
   test_direct_cli_user_proof_uses_bridge_specific_witness_generation
   test_direct_cli_user_proof_uses_queue_submission_mode

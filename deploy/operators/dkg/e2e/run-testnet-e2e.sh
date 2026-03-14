@@ -247,6 +247,56 @@ bridge_api_post_json_with_retry() {
   return 1
 }
 
+bridge_api_get_with_retry() {
+  local url="$1"
+  local operation_label="$2"
+  local max_attempts="${3:-8}"
+  local retry_sleep_seconds="${4:-3}"
+  local attempt curl_status http_status response_file response_preview
+
+  [[ "$max_attempts" =~ ^[0-9]+$ ]] || die "bridge-api retry max attempts must be numeric"
+  (( max_attempts > 0 )) || die "bridge-api retry max attempts must be > 0"
+  [[ "$retry_sleep_seconds" =~ ^[0-9]+$ ]] || die "bridge-api retry sleep seconds must be numeric"
+  (( retry_sleep_seconds >= 0 )) || die "bridge-api retry sleep seconds must be >= 0"
+
+  response_file="$(mktemp)"
+  for attempt in $(seq 1 "$max_attempts"); do
+    : >"$response_file"
+    set +e
+    http_status="$(
+      curl -sS \
+        -o "$response_file" \
+        -w '%{http_code}' \
+        "$url"
+    )"
+    curl_status=$?
+    set -e
+
+    if (( curl_status == 0 )) && [[ "$http_status" =~ ^2[0-9][0-9]$ ]]; then
+      cat "$response_file"
+      rm -f "$response_file"
+      return 0
+    fi
+
+    response_preview="$(tr '\r\n' ' ' <"$response_file" | tr -s ' ' | cut -c1-400)"
+    if (( attempt < max_attempts )) && { (( curl_status != 0 )) || [[ "$http_status" =~ ^5[0-9][0-9]$ ]] || [[ "$http_status" == "429" ]]; }; then
+      log "bridge-api read retrying label=$operation_label attempt=${attempt}/${max_attempts} curl_status=$curl_status http_status=${http_status:-000} response_preview=${response_preview:-<empty>}"
+      sleep "$retry_sleep_seconds"
+      continue
+    fi
+
+    if [[ -s "$response_file" ]]; then
+      cat "$response_file" >&2
+    fi
+    log "bridge-api read failed label=$operation_label attempt=${attempt}/${max_attempts} curl_status=$curl_status http_status=${http_status:-000}"
+    rm -f "$response_file"
+    return 1
+  done
+
+  rm -f "$response_file"
+  return 1
+}
+
 latest_checkpoint_height_from_log() {
   local relayer_log_path="$1"
   [[ -f "$relayer_log_path" ]] || return 0
@@ -7315,7 +7365,7 @@ command_run() {
       local run_deposit_poll_deadline_epoch run_deposit_poll_resp run_deposit_poll_data
       run_deposit_poll_deadline_epoch=$(( $(date +%s) + 900 ))
       while true; do
-        run_deposit_poll_resp="$(curl -fsS "${bridge_api_url}/v1/deposits?baseRecipient=${bridge_recipient_address}&limit=10&offset=0" 2>/dev/null || true)"
+        run_deposit_poll_resp="$(bridge_api_get_with_retry "${bridge_api_url}/v1/deposits?baseRecipient=${bridge_recipient_address}&limit=10&offset=0" "deposit auto-detection listing" || true)"
         if [[ -n "$run_deposit_poll_resp" ]]; then
           run_deposit_poll_data="$(jq -r '.data[0] // empty' <<<"$run_deposit_poll_resp" 2>/dev/null || true)"
           if [[ -n "$run_deposit_poll_data" ]]; then
@@ -7378,7 +7428,7 @@ command_run() {
 
       wait_bridge_api_deposit_finalized() {
         local status_json found state now_epoch
-        status_json="$(curl -fsS "${bridge_api_url}/v1/status/deposit/${run_deposit_id}" || true)"
+        status_json="$(bridge_api_get_with_retry "${bridge_api_url}/v1/status/deposit/${run_deposit_id}" "deposit status poll" || true)"
         [[ -n "$status_json" ]] || return 1
         found="$(jq -r '.found // false' <<<"$status_json" 2>/dev/null || true)"
         state="$(jq -r '.state // empty' <<<"$status_json" 2>/dev/null || true)"
@@ -7540,7 +7590,7 @@ command_run() {
     if (( relayer_status == 0 )); then
       wait_bridge_api_withdraw_finalized() {
         local status_json found state
-        status_json="$(curl -fsS "${bridge_api_url}/v1/status/withdrawal/${run_withdrawal_id}" || true)"
+        status_json="$(bridge_api_get_with_retry "${bridge_api_url}/v1/status/withdrawal/${run_withdrawal_id}" "withdrawal status poll" || true)"
         [[ -n "$status_json" ]] || return 1
         found="$(jq -r '.found // false' <<<"$status_json" 2>/dev/null || true)"
         state="$(jq -r '.state // empty' <<<"$status_json" 2>/dev/null || true)"
