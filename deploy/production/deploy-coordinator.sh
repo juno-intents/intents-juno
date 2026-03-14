@@ -147,7 +147,8 @@ if [[ -n "$existing_bridge_summary" ]]; then
   cp "$existing_bridge_summary" "$bridge_summary"
 else
   log "Deploying bridge contracts"
-  "$bridge_deploy_binary" deploy \
+  "$bridge_deploy_binary" \
+    --deploy-only \
     --rpc-url "$(production_json_required "$inventory" '.contracts.base_rpc_url | select(type == "string" and length > 0)')" \
     --chain-id "$(production_json_required "$inventory" '.contracts.base_chain_id')" \
     --deployer-key-file "$deployer_key_file" \
