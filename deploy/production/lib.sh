@@ -921,9 +921,12 @@ production_render_shared_manifest() {
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
 
   postgres_endpoint="$(production_tf_output_value "$tf_json" "shared_postgres_endpoint" true)"
+  postgres_cluster_arn="$(production_tf_output_value "$tf_json" "shared_postgres_cluster_arn" false)"
   postgres_port="$(production_tf_output_value "$tf_json" "shared_postgres_port" true)"
+  kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
+  ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
   dkg_prefix="$(production_tf_output_value "$tf_json" "dkg_s3_key_prefix" false)"
   bridge_fee_bps="$(production_json_required "$bridge_summary" '.bridge_params.fee_bps // .bridge_fee_params.fee_bps')"
@@ -984,11 +987,14 @@ production_render_shared_manifest() {
     --arg public_subdomain "$public_subdomain" \
     --arg dns_mode "$dns_mode" \
     --arg postgres_endpoint "$postgres_endpoint" \
+    --arg postgres_cluster_arn "$postgres_cluster_arn" \
     --arg postgres_port "$postgres_port" \
+    --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
     --arg kafka_auth_mode "aws-msk-iam" \
     --arg kafka_auth_aws_region "$aws_region" \
     --arg ipfs_api_url "$ipfs_api_url" \
+    --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
     --arg dkg_bucket "$dkg_bucket" \
     --arg dkg_prefix "$dkg_prefix" \
     --arg base_rpc_url "$base_rpc_url" \
@@ -1024,9 +1030,11 @@ production_render_shared_manifest() {
         terraform_dir: $terraform_dir,
         postgres: {
           endpoint: $postgres_endpoint,
+          cluster_arn: (if $postgres_cluster_arn == "" then null else $postgres_cluster_arn end),
           port: ($postgres_port | tonumber)
         },
         kafka: {
+          cluster_arn: (if $kafka_cluster_arn == "" then null else $kafka_cluster_arn end),
           bootstrap_brokers: $kafka_brokers,
           tls: true,
           auth: {
@@ -1036,7 +1044,8 @@ production_render_shared_manifest() {
           min_insync_replicas: 2
         },
         ipfs: {
-          api_url: $ipfs_api_url
+          api_url: $ipfs_api_url,
+          target_group_arn: (if $ipfs_target_group_arn == "" then null else $ipfs_target_group_arn end)
         },
         artifacts: {
           checkpoint_blob_bucket: (if $dkg_bucket == "" then null else $dkg_bucket end),

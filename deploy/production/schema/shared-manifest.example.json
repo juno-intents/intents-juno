@@ -8,9 +8,11 @@
     "terraform_dir": "deploy/shared/terraform/production-shared",
     "postgres": {
       "endpoint": "alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com",
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared",
       "port": 5432
     },
     "kafka": {
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1",
       "bootstrap_brokers": "b-1.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098,b-2.alpha-shared.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098",
       "tls": true,
       "auth": {
@@ -20,11 +22,13 @@
       "min_insync_replicas": 2
     },
     "ipfs": {
-      "api_url": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001"
+      "api_url": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
     },
     "artifacts": {
       "checkpoint_blob_bucket": "alpha-dkg-keypackages",
-      "checkpoint_blob_prefix": "dkg/keypackages"
+      "checkpoint_blob_prefix": "dkg/keypackages",
+      "object_lock_required": true
     }
   },
   "contracts": {

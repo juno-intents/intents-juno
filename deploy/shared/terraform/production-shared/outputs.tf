@@ -3,6 +3,11 @@ output "shared_postgres_endpoint" {
   value       = aws_rds_cluster.shared.endpoint
 }
 
+output "shared_postgres_cluster_arn" {
+  description = "Aurora Postgres cluster ARN."
+  value       = aws_rds_cluster.shared.arn
+}
+
 output "shared_postgres_reader_endpoint" {
   description = "Aurora Postgres reader endpoint hostname."
   value       = aws_rds_cluster.shared.reader_endpoint
@@ -21,6 +26,11 @@ output "shared_kafka_port" {
 output "shared_kafka_bootstrap_brokers" {
   description = "MSK bootstrap brokers for SASL/IAM clients."
   value       = aws_msk_cluster.shared.bootstrap_brokers_sasl_iam
+}
+
+output "shared_kafka_cluster_arn" {
+  description = "MSK cluster ARN."
+  value       = aws_msk_cluster.shared.arn
 }
 
 output "shared_kafka_bootstrap_brokers_tls" {
@@ -68,6 +78,11 @@ output "shared_ipfs_nlb_dns" {
 output "shared_ipfs_api_url" {
   description = "IPFS API URL exposed by the internal NLB."
   value       = "http://${aws_lb.ipfs.dns_name}:${var.shared_ipfs_api_port}"
+}
+
+output "shared_ipfs_target_group_arn" {
+  description = "IPFS API target group ARN."
+  value       = aws_lb_target_group.ipfs_api.arn
 }
 
 output "shared_ipfs_instance_profile" {

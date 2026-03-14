@@ -29,6 +29,45 @@ jobs:
         with:
           node-version: "22"
 
+      - name: Resolve release tag and frontend build inputs
+        env:
+          FRONTEND_WALLETCONNECT_PROJECT_ID: ${{ secrets.FRONTEND_WALLETCONNECT_PROJECT_ID != '' && secrets.FRONTEND_WALLETCONNECT_PROJECT_ID || vars.FRONTEND_WALLETCONNECT_PROJECT_ID }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ github.event.inputs.release_tag }}"
+          if [[ -z "$release_tag" ]]; then
+            release_tag="${GITHUB_REF_NAME}"
+          fi
+          [[ -n "$release_tag" ]] || {
+            echo "release tag is required" >&2
+            exit 1
+          }
+
+          case "$release_tag" in
+            *-mainnet)
+              base_chain_id=8453
+              ;;
+            *-testnet)
+              base_chain_id=84532
+              ;;
+            *)
+              echo "release tag must end with -mainnet or -testnet: $release_tag" >&2
+              exit 1
+              ;;
+          esac
+
+          [[ -n "${FRONTEND_WALLETCONNECT_PROJECT_ID:-}" ]] || {
+            echo "FRONTEND_WALLETCONNECT_PROJECT_ID secret or variable is required for release builds" >&2
+            exit 1
+          }
+
+          echo "::add-mask::$FRONTEND_WALLETCONNECT_PROJECT_ID"
+          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
+          echo "VITE_BASE_CHAIN_ID=$base_chain_id" >>"$GITHUB_ENV"
+          echo "VITE_WALLETCONNECT_PROJECT_ID=$FRONTEND_WALLETCONNECT_PROJECT_ID" >>"$GITHUB_ENV"
+
       - name: Build embedded frontend and linux amd64 binaries
         shell: bash
         run: |
@@ -43,23 +82,15 @@ jobs:
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/bridge-api_linux_amd64 ./cmd/bridge-api
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/backoffice_linux_amd64 ./cmd/backoffice
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/shared-infra-e2e_linux_amd64 ./cmd/shared-infra-e2e
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .ci/out/bridge-deploy_linux_amd64 ./cmd/bridge-deploy
 
           (
             cd .ci/out
             sha256sum bridge-api_linux_amd64 > bridge-api_linux_amd64.sha256
             sha256sum backoffice_linux_amd64 > backoffice_linux_amd64.sha256
             sha256sum shared-infra-e2e_linux_amd64 > shared-infra-e2e_linux_amd64.sha256
+            sha256sum bridge-deploy_linux_amd64 > bridge-deploy_linux_amd64.sha256
           )
-
-      - name: Resolve release tag
-        shell: bash
-        run: |
-          set -euo pipefail
-          release_tag="${{ github.event.inputs.release_tag }}"
-          if [[ -z "$release_tag" ]]; then
-            release_tag="${GITHUB_REF_NAME}"
-          fi
-          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
 
       - name: Create or update release
         env:
@@ -77,6 +108,8 @@ jobs:
               .ci/out/backoffice_linux_amd64.sha256 \
               .ci/out/shared-infra-e2e_linux_amd64 \
               .ci/out/shared-infra-e2e_linux_amd64.sha256 \
+              .ci/out/bridge-deploy_linux_amd64 \
+              .ci/out/bridge-deploy_linux_amd64.sha256 \
               --clobber
           else
             gh release create "$tag" \
@@ -86,6 +119,8 @@ jobs:
               .ci/out/backoffice_linux_amd64.sha256 \
               .ci/out/shared-infra-e2e_linux_amd64 \
               .ci/out/shared-infra-e2e_linux_amd64.sha256 \
+              .ci/out/bridge-deploy_linux_amd64 \
+              .ci/out/bridge-deploy_linux_amd64.sha256 \
               --title "$tag" \
               --notes "Release ${tag}"
           fi

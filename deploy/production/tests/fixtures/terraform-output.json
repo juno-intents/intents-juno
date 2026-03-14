@@ -2,14 +2,23 @@
   "shared_postgres_endpoint": {
     "value": "alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com"
   },
+  "shared_postgres_cluster_arn": {
+    "value": "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared"
+  },
   "shared_postgres_port": {
     "value": 5432
+  },
+  "shared_kafka_cluster_arn": {
+    "value": "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1"
   },
   "shared_kafka_bootstrap_brokers": {
     "value": "b-1.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098,b-2.alpha.abcdefghijkl.c2.kafka.us-east-1.amazonaws.com:9098"
   },
   "shared_ipfs_api_url": {
     "value": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001"
+  },
+  "shared_ipfs_target_group_arn": {
+    "value": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
   },
   "dkg_s3_bucket": {
     "value": "alpha-dkg-keypackages"
