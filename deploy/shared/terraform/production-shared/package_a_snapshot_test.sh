@@ -36,7 +36,9 @@ main() {
 
   assert_contains "$main_tf" 'check "distinct_proof_secret_arns"' "distinct proof secret ARN guard"
   assert_contains "$main_tf" 'check "proof_service_image_ecr_scope"' "explicit ECR image repository scope guard"
+  assert_contains "$main_tf" 'check "shared_ecs_private_subnets_when_no_public_ip"' "shared ecs subnet/public-ip compatibility guard"
   assert_contains "$main_tf" 'shared_proof_service_image_ecr_repository_arn must be set when shared_proof_service_image points at an explicit ECR repository.' "explicit ECR image scope message"
+  assert_contains "$main_tf" 'shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false.' "production-shared fails closed on public shared subnets without public IPs"
 
   assert_not_contains "$main_tf" 'AmazonECSTaskExecutionRolePolicy' "managed ECS execution policy removed"
   assert_contains "$main_tf" 'sid = "AllowECRAuthorizationToken"' "execution role keeps required ECR auth token call"
@@ -50,6 +52,7 @@ main() {
   assert_contains "$main_tf" 'resources = [var.shared_sp1_requestor_secret_arn]' "requestor secret scope uses only requestor ARN"
   assert_contains "$main_tf" 'resources = [var.shared_sp1_funder_secret_arn]' "funder secret scope uses only funder ARN"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "production-shared exposes shared proof requestor address input"
+  assert_contains "$variables_tf" 'At least two private subnet IDs in distinct AZs for Aurora, MSK, ECS, and the IPFS NLB.' "production-shared documents private shared subnet requirement"
   assert_contains "$variables_tf" 'variable "shared_base_chain_id"' "production-shared exposes base chain id input"
   assert_contains "$variables_tf" 'variable "shared_deposit_image_id"' "production-shared exposes deposit image id input"
   assert_contains "$variables_tf" 'variable "shared_withdraw_image_id"' "production-shared exposes withdraw image id input"

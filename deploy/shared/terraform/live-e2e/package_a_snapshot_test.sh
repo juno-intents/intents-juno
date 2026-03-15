@@ -28,6 +28,7 @@ main() {
   assert_contains "$variables_tf" 'variable "shared_deposit_image_id"' "live-e2e exposes deposit image id input"
   assert_contains "$variables_tf" 'variable "shared_withdraw_image_id"' "live-e2e exposes withdraw image id input"
   assert_contains "$variables_tf" $'variable "shared_ecs_desired_count" {\n  description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."\n  type        = number\n  default     = 1' "live-e2e enables proof services by default"
+  assert_contains "$variables_tf" 'If empty, the first two private subnets in distinct AZs in the selected VPC are used.' "live-e2e documents private shared subnet auto-selection"
 
   assert_contains "$main_tf" '"/usr/local/bin/proof-requestor"' "live-e2e requestor still launches proof-requestor binary"
   assert_contains "$main_tf" '"--postgres-dsn"' "live-e2e requestor command includes postgres dsn"
@@ -58,6 +59,10 @@ main() {
   assert_not_contains "$main_tf" 'repository_url}:latest' "live-e2e no longer defaults proof services to empty terraform-managed latest tag"
   assert_contains "$main_tf" '!local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""' "live-e2e gates active proof services behind runtime contract"
   assert_contains "$main_tf" 'shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0' "live-e2e blocks active proof services without requestor address"
+  assert_contains "$main_tf" 'private_subnets_by_az' "live-e2e derives shared subnets from private subnets only"
+  assert_contains "$main_tf" 'if !s.map_public_ip_on_launch' "live-e2e filters public subnets out of shared subnet auto-selection"
+  assert_contains "$main_tf" 'check "shared_ecs_private_subnets_when_no_public_ip"' "live-e2e guards shared ECS subnet/public-ip compatibility"
+  assert_contains "$main_tf" 'shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false.' "live-e2e fails closed on public shared subnets without public IPs"
 
   printf 'live_e2e package_a_snapshot_test: PASS\n'
 }

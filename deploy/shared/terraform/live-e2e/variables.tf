@@ -100,7 +100,7 @@ variable "subnet_id" {
 }
 
 variable "shared_subnet_ids" {
-  description = "Optional subnet IDs used by shared Aurora/MSK/ECS/IPFS resources. If empty, the first two subnets in the selected VPC are used."
+  description = "Optional subnet IDs used by shared Aurora/MSK/ECS/IPFS resources. If empty, the first two private subnets in distinct AZs in the selected VPC are used."
   type        = list(string)
   default     = []
 }

@@ -53,21 +53,31 @@ data "aws_subnet" "all_vpc" {
 }
 
 locals {
-  # Group subnets by AZ, pick one per AZ (sorted for determinism).
-  subnets_by_az = {
+  # Group private subnets by AZ, pick one private subnet per AZ (sorted for determinism).
+  private_subnets_by_az = {
     for s in data.aws_subnet.all_vpc :
     s.availability_zone => s.id...
+    if !s.map_public_ip_on_launch
   }
-  one_per_az = sort([for az, ids in local.subnets_by_az : sort(ids)[0]])
+  private_one_per_az = sort([for az, ids in local.private_subnets_by_az : sort(ids)[0]])
 
   shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (
-    length(local.one_per_az) >= 2 ? slice(local.one_per_az, 0, 2) : local.one_per_az
+    length(local.private_one_per_az) >= 2 ? slice(local.private_one_per_az, 0, 2) : local.private_one_per_az
   )
 }
 
 data "aws_subnet" "shared" {
   for_each = var.provision_shared_services ? toset(local.shared_subnets) : toset([])
   id       = each.value
+}
+
+check "shared_ecs_private_subnets_when_no_public_ip" {
+  assert {
+    condition = !var.provision_shared_services || var.shared_ecs_assign_public_ip || alltrue([
+      for subnet in data.aws_subnet.shared : !subnet.map_public_ip_on_launch
+    ])
+    error_message = "shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false."
+  }
 }
 
 locals {

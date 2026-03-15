@@ -23,6 +23,15 @@ data "aws_subnet" "shared" {
   id       = each.value
 }
 
+check "shared_ecs_private_subnets_when_no_public_ip" {
+  assert {
+    condition = var.shared_ecs_assign_public_ip || alltrue([
+      for subnet in data.aws_subnet.shared : !subnet.map_public_ip_on_launch
+    ])
+    error_message = "shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false."
+  }
+}
+
 data "aws_ami" "ubuntu" {
   most_recent = true
   owners      = ["099720109477"]
