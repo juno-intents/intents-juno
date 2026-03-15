@@ -45,6 +45,8 @@ const (
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 	defaultRunTimeout                      = 20 * time.Minute
 	legacyValueTransferGasLimit            = uint64(21_000)
+	ephemeralFundingReadRetries            = 8
+	ephemeralFundingReadBackoff            = 500 * time.Millisecond
 )
 
 type stringListFlag []string
@@ -482,6 +484,11 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 			return nil, fmt.Errorf("fund ephemeral deployer: %w", err)
 		}
 		rep.Transactions.FundEphemeral = fundTx.Hex()
+		if _, err := waitBigIntAtLeastAttempts(ctx, "ephemeral deployer balance", cfg.EphemeralFundingAmountWei, ephemeralFundingReadRetries, ephemeralFundingReadBackoff, func() (*big.Int, error) {
+			return client.BalanceAt(ctx, deployerAddr, nil)
+		}); err != nil {
+			return nil, fmt.Errorf("wait for ephemeral deployer funding: %w", err)
+		}
 	} else {
 		var err error
 		deployerKey, err = parsePrivateKeyHex(cfg.DeployerKeyHex)
@@ -1311,6 +1318,54 @@ func waitAddressEqualAttempts(
 		return lastVal, fmt.Errorf("%s read failed after %d attempts: %w", label, attempts, lastErr)
 	}
 	return lastVal, fmt.Errorf("%s mismatch: got=%s want=%s", label, lastVal.Hex(), want.Hex())
+}
+
+func waitBigIntAtLeastAttempts(
+	ctx context.Context,
+	label string,
+	want *big.Int,
+	attempts int,
+	interval time.Duration,
+	readFn func() (*big.Int, error),
+) (*big.Int, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	if want == nil {
+		want = big.NewInt(0)
+	}
+	lastVal := big.NewInt(0)
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		val, err := readFn()
+		if err != nil {
+			lastErr = err
+		} else {
+			lastErr = nil
+			if val == nil {
+				lastVal = big.NewInt(0)
+			} else {
+				lastVal = new(big.Int).Set(val)
+			}
+			if lastVal.Cmp(want) >= 0 {
+				return lastVal, nil
+			}
+		}
+		if i == attempts-1 || interval <= 0 {
+			continue
+		}
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return lastVal, ctx.Err()
+		case <-timer.C:
+		}
+	}
+	if lastErr != nil {
+		return lastVal, fmt.Errorf("%s read failed after %d attempts: %w", label, attempts, lastErr)
+	}
+	return lastVal, fmt.Errorf("%s mismatch: got=%s want_at_least=%s", label, lastVal.String(), want.String())
 }
 
 func callUint64(ctx context.Context, c *bind.BoundContract, method string, args ...any) (uint64, error) {

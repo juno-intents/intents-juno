@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"math/big"
 	"testing"
 
@@ -184,5 +185,54 @@ func TestBuildLegacyValueTransferTx_UsesProvidedGasPrice(t *testing.T) {
 	}
 	if tx.Value().Cmp(value) != 0 {
 		t.Fatalf("value = %s, want %s", tx.Value().String(), value.String())
+	}
+}
+
+func TestWaitBigIntAtLeastAttempts(t *testing.T) {
+	t.Parallel()
+
+	values := []*big.Int{big.NewInt(0), big.NewInt(5), big.NewInt(10)}
+	idx := 0
+
+	got, err := waitBigIntAtLeastAttempts(
+		context.Background(),
+		"ephemeral balance",
+		big.NewInt(10),
+		len(values),
+		0,
+		func() (*big.Int, error) {
+			current := new(big.Int).Set(values[idx])
+			if idx < len(values)-1 {
+				idx++
+			}
+			return current, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("waitBigIntAtLeastAttempts: %v", err)
+	}
+	if got.Cmp(big.NewInt(10)) != 0 {
+		t.Fatalf("balance = %s, want 10", got.String())
+	}
+}
+
+func TestWaitBigIntAtLeastAttemptsMismatch(t *testing.T) {
+	t.Parallel()
+
+	got, err := waitBigIntAtLeastAttempts(
+		context.Background(),
+		"ephemeral balance",
+		big.NewInt(10),
+		2,
+		0,
+		func() (*big.Int, error) {
+			return big.NewInt(5), nil
+		},
+	)
+	if err == nil {
+		t.Fatalf("waitBigIntAtLeastAttempts: got nil error, want error")
+	}
+	if got.Cmp(big.NewInt(5)) != 0 {
+		t.Fatalf("balance = %s, want 5", got.String())
 	}
 }
