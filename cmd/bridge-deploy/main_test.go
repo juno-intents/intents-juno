@@ -3,6 +3,8 @@ package main
 import (
 	"math/big"
 	"testing"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestParseArgs_ValidDirectDeployer(t *testing.T) {
@@ -150,5 +152,37 @@ func TestSweepValueWei(t *testing.T) {
 				t.Fatalf("value = %s, want %s", got.String(), tt.want)
 			}
 		})
+	}
+}
+
+func TestLegacyValueTransferFeeWei(t *testing.T) {
+	t.Parallel()
+
+	gasPrice := big.NewInt(7)
+	want := big.NewInt(147000)
+
+	got := legacyValueTransferFeeWei(gasPrice)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("fee = %s, want %s", got.String(), want.String())
+	}
+}
+
+func TestBuildLegacyValueTransferTx_UsesProvidedGasPrice(t *testing.T) {
+	t.Parallel()
+
+	to := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	value := big.NewInt(12345)
+	gasPrice := big.NewInt(987654321)
+
+	tx := buildLegacyValueTransferTx(9, to, value, gasPrice)
+
+	if tx.Gas() != legacyValueTransferGasLimit {
+		t.Fatalf("gas limit = %d, want %d", tx.Gas(), legacyValueTransferGasLimit)
+	}
+	if tx.GasPrice().Cmp(gasPrice) != 0 {
+		t.Fatalf("gas price = %s, want %s", tx.GasPrice().String(), gasPrice.String())
+	}
+	if tx.Value().Cmp(value) != 0 {
+		t.Fatalf("value = %s, want %s", tx.Value().String(), value.String())
 	}
 }

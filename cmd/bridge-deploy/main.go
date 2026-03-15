@@ -44,6 +44,7 @@ const (
 	defaultRetryGasPriceWei                = int64(2_000_000_000)
 	defaultRetryGasTipCapWei               = int64(500_000_000)
 	defaultRunTimeout                      = 20 * time.Minute
+	legacyValueTransferGasLimit            = uint64(21_000)
 )
 
 type stringListFlag []string
@@ -728,10 +729,10 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 		if err != nil {
 			return nil, fmt.Errorf("suggest sweep gas price: %w", err)
 		}
-		fee := new(big.Int).Mul(gasPrice, big.NewInt(21_000))
+		fee := legacyValueTransferFeeWei(gasPrice)
 		value, ok := sweepValueWei(balance, fee)
 		if ok {
-			sweepTx, err := sendValueTx(ctx, client, deployerKey, chainID, cfg.SweepRecipient, value)
+			sweepTx, err := sendValueTxWithGasPrice(ctx, client, deployerKey, chainID, cfg.SweepRecipient, value, gasPrice)
 			if err != nil {
 				return nil, fmt.Errorf("sweep ephemeral deployer: %w", err)
 			}
@@ -1021,16 +1022,20 @@ func revokeTimelockRole(ctx context.Context, backend txBackend, auth *bind.Trans
 }
 
 func sendValueTx(ctx context.Context, client *ethclient.Client, key *ecdsa.PrivateKey, chainID *big.Int, to common.Address, value *big.Int) (common.Hash, error) {
+	gasPrice, err := client.SuggestGasPrice(ctx)
+	if err != nil {
+		return common.Hash{}, fmt.Errorf("suggest gas price: %w", err)
+	}
+	return sendValueTxWithGasPrice(ctx, client, key, chainID, to, value, gasPrice)
+}
+
+func sendValueTxWithGasPrice(ctx context.Context, client *ethclient.Client, key *ecdsa.PrivateKey, chainID *big.Int, to common.Address, value, gasPrice *big.Int) (common.Hash, error) {
 	from := crypto.PubkeyToAddress(key.PublicKey)
 	nonce, err := client.PendingNonceAt(ctx, from)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("read pending nonce: %w", err)
 	}
-	gasPrice, err := client.SuggestGasPrice(ctx)
-	if err != nil {
-		return common.Hash{}, fmt.Errorf("suggest gas price: %w", err)
-	}
-	tx := types.NewTransaction(nonce, to, value, 21_000, gasPrice, nil)
+	tx := buildLegacyValueTransferTx(nonce, to, value, gasPrice)
 	signed, err := types.SignTx(tx, types.LatestSignerForChainID(chainID), key)
 	if err != nil {
 		return common.Hash{}, fmt.Errorf("sign tx: %w", err)
@@ -1046,6 +1051,17 @@ func sendValueTx(ctx context.Context, client *ethclient.Client, key *ecdsa.Priva
 		return common.Hash{}, fmt.Errorf("value transfer reverted: %s", signed.Hash().Hex())
 	}
 	return signed.Hash(), nil
+}
+
+func buildLegacyValueTransferTx(nonce uint64, to common.Address, value, gasPrice *big.Int) *types.Transaction {
+	return types.NewTransaction(nonce, to, value, legacyValueTransferGasLimit, gasPrice, nil)
+}
+
+func legacyValueTransferFeeWei(gasPrice *big.Int) *big.Int {
+	if gasPrice == nil {
+		return big.NewInt(0)
+	}
+	return new(big.Int).Mul(new(big.Int).Set(gasPrice), new(big.Int).SetUint64(legacyValueTransferGasLimit))
 }
 
 func sweepValueWei(balance, fee *big.Int) (*big.Int, bool) {
