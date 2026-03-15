@@ -107,6 +107,8 @@ min_deposit_admin_status="passed"
 min_deposit_admin_detail="configured signer matches on-chain minDepositAdmin"
 shared_proof_services_status="passed"
 shared_proof_services_detail="shared proof ECS services active"
+http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
+http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
 
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 tmp_dir="$(mktemp -d)"
@@ -115,6 +117,47 @@ cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+
+http_get_with_retry() {
+  local url="$1"
+  local label="$2"
+  shift 2
+  local response_file error_file
+  local curl_status attempt
+
+  response_file="$(mktemp)"
+  error_file="$(mktemp)"
+  for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
+    : >"$response_file"
+    : >"$error_file"
+    set +e
+    curl -fsS "$@" "$url" >"$response_file" 2>"$error_file"
+    curl_status=$?
+    set -e
+
+    if (( curl_status == 0 )); then
+      cat "$response_file"
+      rm -f "$response_file"
+      rm -f "$error_file"
+      return 0
+    fi
+
+    if (( attempt < http_retry_max_attempts )); then
+      sleep "$http_retry_sleep_seconds"
+    fi
+  done
+
+  if [[ -s "$response_file" ]]; then
+    cat "$response_file" >&2
+  fi
+  if [[ -s "$error_file" ]]; then
+    cat "$error_file" >&2
+  fi
+  printf 'http probe failed label=%s url=%s\n' "$label" "$url" >&2
+  rm -f "$response_file"
+  rm -f "$error_file"
+  return 1
+}
 
 if [[ "$dry_run" == "true" ]]; then
   input_status="skipped"
@@ -149,12 +192,12 @@ else
     fi
   done
 
-  if ! curl -fsS "${bridge_probe_url}/readyz" >/dev/null; then
+  if ! http_get_with_retry "${bridge_probe_url}/readyz" "bridge readyz" >/dev/null; then
     bridge_ready_status="failed"
     bridge_ready_detail="bridge-api /readyz failed"
   fi
 
-  bridge_config_json="$(curl -fsS "${bridge_probe_url}/v1/config" 2>/dev/null || true)"
+  bridge_config_json="$(http_get_with_retry "${bridge_probe_url}/v1/config" "bridge config" || true)"
   if [[ -z "$bridge_config_json" ]] \
     || ! jq -e '.bridgeAddress | select(type == "string" and length > 0)' >/dev/null <<<"$bridge_config_json" \
     || ! jq -e '.oWalletUA | select(type == "string" and length > 0)' >/dev/null <<<"$bridge_config_json" \
@@ -164,18 +207,18 @@ else
     bridge_config_detail="bridge-api /v1/config missing bridgeAddress, oWalletUA, minDepositAmount, or depositMinConfirmations"
   fi
 
-  bridge_html="$(curl -fsS "${bridge_probe_url}/" 2>/dev/null || true)"
+  bridge_html="$(http_get_with_retry "${bridge_probe_url}/" "bridge frontend html" || true)"
   if [[ "$bridge_html" != *"<html"* && "$bridge_html" != *"<!doctype html"* ]]; then
     bridge_frontend_status="failed"
     bridge_frontend_detail="bridge frontend did not return HTML"
   fi
 
-  if ! curl -fsS "${backoffice_probe_url}/readyz" >/dev/null; then
+  if ! http_get_with_retry "${backoffice_probe_url}/readyz" "backoffice readyz" >/dev/null; then
     backoffice_ready_status="failed"
     backoffice_ready_detail="backoffice /readyz failed"
   fi
 
-  backoffice_html="$(curl -fsS "${backoffice_probe_url}/" 2>/dev/null || true)"
+  backoffice_html="$(http_get_with_retry "${backoffice_probe_url}/" "backoffice html" || true)"
   if [[ "$backoffice_html" != *"JUNO BACKOFFICE"* ]]; then
     backoffice_ui_status="failed"
     backoffice_ui_detail="backoffice UI did not return expected marker"
@@ -196,7 +239,12 @@ else
   fi
 
   if [[ "$backoffice_ready_status" == "passed" && -n "${auth_secret:-}" ]]; then
-    backoffice_settings_json="$(curl -fsS -H "Authorization: Bearer ${auth_secret}" "${backoffice_probe_url}/api/settings/runtime" 2>/dev/null || true)"
+    backoffice_settings_json="$(
+      http_get_with_retry \
+        "${backoffice_probe_url}/api/settings/runtime" \
+        "backoffice settings api" \
+        -H "Authorization: Bearer ${auth_secret}" || true
+    )"
     if [[ -z "$backoffice_settings_json" ]] \
       || ! jq -e '.data.minDepositAmount | select(type == "string" and test("^[0-9]+$"))' >/dev/null <<<"$backoffice_settings_json" \
       || ! jq -e '.data.minDepositAdmin | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_settings_json" \
