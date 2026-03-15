@@ -203,7 +203,7 @@ if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
   exit 0
 fi
 if [[ "\$1" == "balance" ]]; then
-  printf '300000000000000\n'
+  printf '1300000000000000\n'
   exit 0
 fi
 printf 'unexpected cast invocation: %s\n' "\$*" >&2

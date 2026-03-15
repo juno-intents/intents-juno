@@ -729,7 +729,7 @@ production_default_withdraw_batch_confirmations() {
 }
 
 production_required_min_base_relayer_balance_wei() {
-  local value="${PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI:-250000000000000}"
+  local value="${PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI:-1000000000000000}"
   production_is_positive_integer "$value" \
     || die "PRODUCTION_DEPLOY_MIN_BASE_RELAYER_BALANCE_WEI must be a positive integer"
   printf '%s\n' "$value"

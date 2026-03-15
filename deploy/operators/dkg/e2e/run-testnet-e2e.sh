@@ -6737,7 +6737,7 @@ command_run() {
           --rpc-url "$base_rpc_url" \
           --chain-id "$base_chain_id" \
           --listen "0.0.0.0:${base_relayer_port}" \
-          --min-ready-balance-wei "${BASE_RELAYER_MIN_READY_BALANCE_WEI:-250000000000000}"
+          --min-ready-balance-wei "${BASE_RELAYER_MIN_READY_BALANCE_WEI:-1000000000000000}"
     )"
   else
     (

@@ -46,7 +46,7 @@ write_inventory_fixture() {
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
-  local first_balance_wei="${3:-300000000000000}"
+  local first_balance_wei="${3:-1300000000000000}"
   local second_balance_wei="${4:-$first_balance_wei}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
@@ -950,7 +950,7 @@ EOF
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" "rendered env withdraw coordinator tss ca"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem" "rendered env withdraw coordinator client cert"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key" "rendered env withdraw coordinator client key"
-  assert_contains "$(cat "$output_env")" "BASE_RELAYER_MIN_READY_BALANCE_WEI=250000000000000" "rendered env base relayer readiness balance floor"
+  assert_contains "$(cat "$output_env")" "BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000" "rendered env base relayer readiness balance floor"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "rendered env withdraw coordinator extend signer"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"
@@ -1668,7 +1668,7 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=250000000000000" "backoffice env relayer signer balance floor"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=1000000000000000" "backoffice env relayer signer balance floor"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS=1" "backoffice env deposit confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=1" "backoffice env withdraw planner confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=1" "backoffice env withdraw batch confirmation default"
@@ -1745,11 +1745,11 @@ test_require_base_relayer_balance_validates_all_configured_keys() {
 BASE_RELAYER_PRIVATE_KEYS=0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
 EOF
 
-  write_fake_cast "$fake_bin/cast" "$workdir/cast.log" "300000000000000" "1000"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log" "1300000000000000" "1000"
   old_path="$PATH"
   PATH="$fake_bin:$PATH"
   set +e
-  output="$( ( production_require_base_relayer_balance "$workdir/operator-secrets.resolved.env" "https://base-sepolia.example.invalid" "250000000000000" ) 2>&1 )"
+  output="$( ( production_require_base_relayer_balance "$workdir/operator-secrets.resolved.env" "https://base-sepolia.example.invalid" "1000000000000000" ) 2>&1 )"
   status=$?
   set -e
   PATH="$old_path"
@@ -1758,7 +1758,7 @@ EOF
     printf 'expected production_require_base_relayer_balance to fail when any configured relayer signer is underfunded\n' >&2
     exit 1
   fi
-  assert_contains "$output" "0x2222222222222222222222222222222222222222 balance 1000 wei is below minimum 250000000000000 wei" "relayer balance check reports the failing signer"
+  assert_contains "$output" "0x2222222222222222222222222222222222222222 balance 1000 wei is below minimum 1000000000000000 wei" "relayer balance check reports the failing signer"
   assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "relayer balance check probes the first signer"
   assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "relayer balance check probes the second signer"
 

@@ -158,7 +158,7 @@ EOF
 printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -402,7 +402,7 @@ printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 printf '10.0.0.11\n'
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -653,7 +653,7 @@ EOF
 printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
@@ -737,7 +737,7 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES=5 \
@@ -836,7 +836,7 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \

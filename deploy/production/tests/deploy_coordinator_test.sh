@@ -160,7 +160,7 @@ APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
@@ -209,7 +209,7 @@ APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
@@ -257,7 +257,7 @@ EOF
 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$log_dir/bridge.log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
@@ -312,7 +312,7 @@ EOF
 0x59c6995e998f97a5a0044966f09453883f4b8f3359aa4fcf3e4a76fb3f8d5c11
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
@@ -406,7 +406,7 @@ APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   inventory_path="$workdir/inventory.json"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
 
   (
     cd "$workdir"
@@ -462,7 +462,7 @@ EOF
   "juno_shielded_address": "u1coordinatorfallback"
 }
 EOF
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
@@ -518,7 +518,7 @@ EOF
     exit 1
   fi
 
-  assert_contains "$output" "base relayer 0x1111111111111111111111111111111111111111 balance 1000 wei is below minimum 250000000000000 wei" "underfunded relayer error"
+  assert_contains "$output" "base relayer 0x1111111111111111111111111111111111111111 balance 1000 wei is below minimum 1000000000000000 wei" "underfunded relayer error"
   [[ ! -e "$output_dir/alpha/shared-manifest.json" ]] || {
     printf 'expected no shared manifest when relayer funding preflight fails\n' >&2
     exit 1
@@ -549,7 +549,7 @@ APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_bridge_deploy_binary "$fake_bin/bridge-e2e" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
   if output="$(
@@ -597,7 +597,7 @@ APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
 APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \

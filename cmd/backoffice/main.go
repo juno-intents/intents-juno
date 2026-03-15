@@ -71,7 +71,7 @@ func main() {
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
 
 		operatorGasMinWeiStr    = flag.String("operator-gas-min-wei", "500000000000000000", "Min operator ETH balance (wei)")
-		baseRelayerGasMinWeiStr = flag.String("base-relayer-gas-min-wei", "250000000000000", "Min Base relayer signer ETH balance (wei)")
+		baseRelayerGasMinWeiStr = flag.String("base-relayer-gas-min-wei", "1000000000000000", "Min Base relayer signer ETH balance (wei)")
 		proverFundsMinWeiStr    = flag.String("prover-funds-min-wei", "1000000000000000000", "Min prover ETH balance (wei)")
 	)
 	flag.Parse()

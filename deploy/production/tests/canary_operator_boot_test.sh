@@ -140,7 +140,7 @@ if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-1830
 fi
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000" "400000000000000"
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1300000000000000" "1400000000000000"
   chmod 0755 "$fake_bin/ssh"
 
   (
@@ -167,8 +167,8 @@ EOF
   assert_contains "$(cat "$tmp/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "operator canary checks second base relayer signer funding"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "operator canary ready flag"
   assert_eq "$(jq -r '.checks.relayer_funding.status' "$output_json")" "passed" "operator canary relayer funding status"
-  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x1111111111111111111111111111111111111111=300000000000000" "operator canary reports first relayer balance"
-  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x2222222222222222222222222222222222222222=400000000000000" "operator canary reports second relayer balance"
+  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x1111111111111111111111111111111111111111=1300000000000000" "operator canary reports first relayer balance"
+  assert_contains "$(jq -r '.checks.relayer_funding.detail' "$output_json")" "0x2222222222222222222222222222222222222222=1400000000000000" "operator canary reports second relayer balance"
   assert_eq "$(jq -r '.checks.withdraw_config.status' "$output_json")" "passed" "operator canary withdraw config status"
   assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "passed" "operator canary txsign runtime status"
   assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "passed" "operator canary kms export status"
@@ -221,7 +221,7 @@ JSON
 printf 'ssh should not be called when relayer funding is insufficient\n' >&2
 exit 1
 EOF
-  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000" "1000"
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1300000000000000" "1000"
   chmod 0755 "$fake_bin/ssh"
 
   (
@@ -322,7 +322,7 @@ if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-1830
 fi
 exit 0
 EOF
-  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000"
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1300000000000000"
   chmod 0755 "$fake_bin/ssh"
 
   (
