@@ -402,6 +402,9 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	}
 
 	for _, job := range jobs {
+		if !checkpointCoversDepositHeight(*r.checkpoint, job.Deposit) {
+			continue
+		}
 		if minDeposit > 0 && job.Deposit.Amount < minDeposit {
 			if err := r.store.MarkRejected(ctx, job.Deposit.DepositID, belowMinDepositReason(minDeposit), [32]byte{}); err != nil {
 				return fmt.Errorf("depositrelayer: reject below-min deposit %x: %w", job.Deposit.DepositID[:8], err)
@@ -432,6 +435,13 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 		r.unstageBatch(batch)
 	}
 	return nil
+}
+
+func checkpointCoversDepositHeight(cp checkpoint.Checkpoint, dep deposit.Deposit) bool {
+	if dep.JunoHeight <= 0 {
+		return true
+	}
+	return cp.Height >= uint64(dep.JunoHeight)
 }
 
 func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
