@@ -47,6 +47,7 @@ const (
 	legacyValueTransferGasLimit            = uint64(21_000)
 	ephemeralFundingReadRetries            = 8
 	ephemeralFundingReadBackoff            = 500 * time.Millisecond
+	sweepValueSafetyBufferWei              = int64(1_000)
 )
 
 type stringListFlag []string
@@ -736,7 +737,7 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 		if err != nil {
 			return nil, fmt.Errorf("suggest sweep gas price: %w", err)
 		}
-		fee := legacyValueTransferFeeWei(gasPrice)
+		fee := sweepReservedFeeWei(gasPrice)
 		value, ok := sweepValueWei(balance, fee)
 		if ok {
 			sweepTx, err := sendValueTxWithGasPrice(ctx, client, deployerKey, chainID, cfg.SweepRecipient, value, gasPrice)
@@ -1069,6 +1070,10 @@ func legacyValueTransferFeeWei(gasPrice *big.Int) *big.Int {
 		return big.NewInt(0)
 	}
 	return new(big.Int).Mul(new(big.Int).Set(gasPrice), new(big.Int).SetUint64(legacyValueTransferGasLimit))
+}
+
+func sweepReservedFeeWei(gasPrice *big.Int) *big.Int {
+	return new(big.Int).Add(legacyValueTransferFeeWei(gasPrice), big.NewInt(sweepValueSafetyBufferWei))
 }
 
 func sweepValueWei(balance, fee *big.Int) (*big.Int, bool) {

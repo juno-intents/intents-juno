@@ -168,6 +168,18 @@ func TestLegacyValueTransferFeeWei(t *testing.T) {
 	}
 }
 
+func TestSweepReservedFeeWei_IncludesSafetyBuffer(t *testing.T) {
+	t.Parallel()
+
+	gasPrice := big.NewInt(7)
+	want := new(big.Int).Add(big.NewInt(147000), big.NewInt(sweepValueSafetyBufferWei))
+
+	got := sweepReservedFeeWei(gasPrice)
+	if got.Cmp(want) != 0 {
+		t.Fatalf("reserved fee = %s, want %s", got.String(), want.String())
+	}
+}
+
 func TestBuildLegacyValueTransferTx_UsesProvidedGasPrice(t *testing.T) {
 	t.Parallel()
 
