@@ -1655,13 +1655,11 @@ EOF
   deposit_image_id="$(jq -r '.contracts.deposit_image_id // empty' "$shared_manifest")"
   withdraw_image_id="$(jq -r '.contracts.withdraw_image_id // empty' "$shared_manifest")"
 
-  if [[ "$signer_driver" == "aws-kms" ]]; then
-    if [[ -n "$checkpoint_blob_bucket" ]]; then
-      printf 'CHECKPOINT_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
-    fi
-    if [[ -n "$checkpoint_blob_prefix" ]]; then
-      printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
-    fi
+  if [[ -n "$checkpoint_blob_bucket" ]]; then
+    printf 'CHECKPOINT_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
+  fi
+  if [[ -n "$checkpoint_blob_prefix" ]]; then
+    printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
   fi
   if [[ -n "$deposit_image_id" ]]; then
     printf 'DEPOSIT_IMAGE_ID=%s\n' "$deposit_image_id" >>"$output_file"

@@ -1216,6 +1216,7 @@ EOF
   seeded_key="$(production_normalize_ecdsa_private_key "$(cat "$workdir/operator.key")")"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview env preserves local checkpoint signer mode"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=$seeded_key" "preview env carries operator-scoped checkpoint signer key"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "preview env still stages the checkpoint package bucket for config hydration"
   assert_contains "$(cat "$output_env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=none" "preview env uses unauthenticated kafka transport"
   rm -rf "$workdir"
 }
