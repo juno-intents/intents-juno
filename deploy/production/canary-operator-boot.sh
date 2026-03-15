@@ -91,11 +91,17 @@ deposit_relayer_ready_detail="deposit-relayer /readyz passed"
 kms_export_status="skipped"
 kms_export_detail="no checkpoint blob bucket configured"
 allow_local_resolvers="false"
-[[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+if production_environment_allows_local_secret_resolvers "$environment"; then
+  allow_local_resolvers="true"
+fi
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 checkpoint_blob_bucket="$(production_json_optional "$operator_deploy" '.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 if [[ -z "$checkpoint_blob_bucket" ]]; then
   checkpoint_blob_bucket="$(production_json_optional "$shared_manifest_path" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
+fi
+checkpoint_signer_driver="$(production_json_optional "$operator_deploy" '.checkpoint_signer_driver')"
+if [[ -z "$checkpoint_signer_driver" ]]; then
+  checkpoint_signer_driver="aws-kms"
 fi
 minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
 tmp_dir="$(mktemp -d)"
@@ -201,12 +207,18 @@ else
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000"
-      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+      elif [[ "$checkpoint_signer_driver" == "aws-kms" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing CHECKPOINT_SIGNER_DRIVER=aws-kms"
-      elif ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+      elif [[ "$checkpoint_signer_driver" == "aws-kms" ]] && ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY"
+      elif [[ "$checkpoint_signer_driver" == "local-env" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=local-env$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env is missing CHECKPOINT_SIGNER_DRIVER=local-env"
+      elif [[ "$checkpoint_signer_driver" == "local-env" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -qE '^CHECKPOINT_SIGNER_PRIVATE_KEY=0x[0-9a-fA-F]{64}$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env must contain an operator-scoped CHECKPOINT_SIGNER_PRIVATE_KEY"
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h"
@@ -233,7 +245,7 @@ else
       fi
 
       if [[ "$withdraw_config_status" == "passed" && "$txsign_runtime_status" == "passed" ]]; then
-        if [[ -n "$checkpoint_blob_bucket" ]]; then
+        if [[ -n "$checkpoint_blob_bucket" && "$checkpoint_signer_driver" == "aws-kms" ]]; then
           if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo test -e $runtime_dir/exports/kms-export-receipt.json" 2>/dev/null; then
             kms_export_status="failed"
             kms_export_detail="remote kms export receipt is missing: $runtime_dir/exports/kms-export-receipt.json"
@@ -241,13 +253,16 @@ else
             kms_export_status="passed"
             kms_export_detail="remote kms export receipt present"
           fi
+        elif [[ "$checkpoint_signer_driver" == "local-env" ]]; then
+          kms_export_status="skipped"
+          kms_export_detail="preview local checkpoint signer mode does not export to kms"
         fi
       else
         kms_export_status="blocked"
         kms_export_detail="blocked by withdraw config validation failure"
       fi
 
-      if [[ "$withdraw_config_status" == "passed" && "$txsign_runtime_status" == "passed" && "$kms_export_status" == "passed" ]]; then
+      if [[ "$withdraw_config_status" == "passed" && "$txsign_runtime_status" == "passed" && ( "$kms_export_status" == "passed" || "$kms_export_status" == "skipped" ) ]]; then
         for svc in "${services[@]}"; do
           svc_status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
           if [[ "$svc_status" != "active" ]]; then
@@ -258,7 +273,7 @@ else
         done
       else
         systemd_status="blocked"
-        if [[ "$kms_export_status" != "passed" ]]; then
+        if [[ "$kms_export_status" != "passed" && "$kms_export_status" != "skipped" ]]; then
           systemd_detail="blocked by kms export validation failure"
         else
           systemd_detail="blocked by withdraw config validation failure"

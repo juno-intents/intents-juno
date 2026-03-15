@@ -241,9 +241,109 @@ EOF
   rm -rf "$tmp"
 }
 
+test_operator_boot_canary_allows_preview_local_checkpoint_signer() {
+  local tmp fake_bin log_file manifest output_json shared_manifest
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/ssh.log"
+  manifest="$tmp/operator-deploy.json"
+  output_json="$tmp/output.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  mkdir -p "$fake_bin"
+
+  printf '203.0.113.11 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBundleHostKey\n' >"$tmp/known_hosts"
+  cat >"$tmp/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://preview
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x0123456789012345678901234567890123456789012345678901234567890123
+EOF
+  printf 'backup' >"$tmp/dkg-backup.zip"
+  cat >"$shared_manifest" <<JSON
+{
+  "shared_services": {
+    "artifacts": {}
+  },
+  "contracts": {
+    "base_rpc_url": "https://base-sepolia.example.invalid"
+  }
+}
+JSON
+
+  cat >"$manifest" <<JSON
+{
+  "environment": "preview",
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "operator_host": "203.0.113.11",
+  "operator_user": "intents-juno",
+  "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+  "shared_manifest_path": "$shared_manifest",
+  "checkpoint_signer_driver": "local-env",
+  "dkg_backup_zip": "$tmp/dkg-backup.zip",
+  "known_hosts_file": "$tmp/known_hosts",
+  "secret_contract_file": "$tmp/operator-secrets.env"
+}
+JSON
+
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_file"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=local-env$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -qE '^CHECKPOINT_SIGNER_PRIVATE_KEY=0x[0-9a-fA-F]{64}\$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"* ]]; then
+  printf 'Usage: juno-txsign sign-digest [flags]\n'
+  exit 0
+fi
+if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "300000000000000"
+  chmod 0755 "$fake_bin/ssh"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-operator-boot.sh \
+      --operator-deploy "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview canary verifies local checkpoint signer mode"
+  assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_PRIVATE_KEY=0x" "preview canary verifies operator-scoped checkpoint signer key"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview canary ready flag"
+  assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "skipped" "preview canary skips kms export checks for local signers"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_operator_boot_canary_checks_services_over_strict_ssh
   test_operator_boot_canary_rejects_underfunded_relayer
+  test_operator_boot_canary_allows_preview_local_checkpoint_signer
 }
 
 main "$@"

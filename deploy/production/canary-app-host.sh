@@ -60,7 +60,9 @@ fi
 manifest_dir="$(cd "$(dirname "$app_deploy")" && pwd)"
 environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
 allow_local_resolvers="false"
-[[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+if production_environment_allows_local_secret_resolvers "$environment"; then
+  allow_local_resolvers="true"
+fi
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 known_hosts_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.known_hosts_file | select(type == "string" and length > 0)')")"
 secret_contract_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.secret_contract_file | select(type == "string" and length > 0)')")"

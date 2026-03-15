@@ -53,7 +53,9 @@ done
 manifest_dir="$(cd "$(dirname "$operator_deploy")" && pwd)"
 environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
 allow_local_resolvers="false"
-[[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+if production_environment_allows_local_secret_resolvers "$environment"; then
+  allow_local_resolvers="true"
+fi
 
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
@@ -859,37 +861,49 @@ sudo chown -R intents-juno:intents-juno "$runtime_dir"
 CHECKPOINT_SIGNER_KMS_KEY_ID="$(env_get_value_remote "CHECKPOINT_SIGNER_KMS_KEY_ID")"
 CHECKPOINT_BLOB_BUCKET="$(env_get_value_remote "CHECKPOINT_BLOB_BUCKET")"
 CHECKPOINT_BLOB_PREFIX="$(env_get_value_remote "CHECKPOINT_BLOB_PREFIX")"
+CHECKPOINT_SIGNER_DRIVER_REMOTE="$(printf '%s' "$(env_get_value_remote "CHECKPOINT_SIGNER_DRIVER")" | tr '[:upper:]' '[:lower:]')"
 AWS_REGION="$(env_get_value_remote "AWS_REGION")"
 if [[ -z "$AWS_REGION" ]]; then
   AWS_REGION="$(env_get_value_remote "AWS_DEFAULT_REGION")"
 fi
-[[ -n "$CHECKPOINT_SIGNER_KMS_KEY_ID" ]] || {
-  echo "operator runtime is missing CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
-[[ -n "$CHECKPOINT_BLOB_BUCKET" ]] || {
-  echo "operator runtime is missing CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
-[[ -n "$AWS_REGION" ]] || {
-  echo "operator runtime is missing AWS_REGION or AWS_DEFAULT_REGION in /etc/intents-juno/operator-stack.env" >&2
-  exit 1
-}
-sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"
-sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export \
-  --workdir "$runtime_dir" \
-  --release-tag "$dkg_release_tag" \
-  --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
-  --s3-bucket "${CHECKPOINT_BLOB_BUCKET}" \
-  --s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}" \
-  --s3-sse-kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
-  --aws-region "${AWS_REGION}"
-latest_kms_receipt="$(sudo bash -lc 'ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1' _ "$runtime_dir")"
-[[ -n "$latest_kms_receipt" ]] || {
-  echo "operator runtime did not produce a kms export receipt under $runtime_dir/exports" >&2
-  exit 1
-}
-sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"
+case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
+  aws-kms)
+    [[ -n "$CHECKPOINT_SIGNER_KMS_KEY_ID" ]] || {
+      echo "operator runtime is missing CHECKPOINT_SIGNER_KMS_KEY_ID in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
+    [[ -n "$CHECKPOINT_BLOB_BUCKET" ]] || {
+      echo "operator runtime is missing CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
+    [[ -n "$AWS_REGION" ]] || {
+      echo "operator runtime is missing AWS_REGION or AWS_DEFAULT_REGION in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
+    sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"
+    sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export \
+      --workdir "$runtime_dir" \
+      --release-tag "$dkg_release_tag" \
+      --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+      --s3-bucket "${CHECKPOINT_BLOB_BUCKET}" \
+      --s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}" \
+      --s3-sse-kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+      --aws-region "${AWS_REGION}"
+    latest_kms_receipt="$(sudo bash -lc 'ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1' _ "$runtime_dir")"
+    [[ -n "$latest_kms_receipt" ]] || {
+      echo "operator runtime did not produce a kms export receipt under $runtime_dir/exports" >&2
+      exit 1
+    }
+    sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"
+    ;;
+  local-env)
+    :
+    ;;
+  *)
+    echo "operator runtime is missing a supported CHECKPOINT_SIGNER_DRIVER in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+    ;;
+esac
 if sudo test -e /var/lib/intents-juno/juno-scan.db; then
   sudo systemctl stop juno-scan || true
   sudo bash -lc 'chown -R intents-juno:intents-juno /var/lib/intents-juno/juno-scan.db'
@@ -998,22 +1012,25 @@ kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]
 case "$kafka_auth_mode" in
   aws-msk-iam)
     export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+      if [[ -n "${AWS_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+      elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+      else
+        echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  none)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
     ;;
   *)
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
 signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
@@ -1036,8 +1053,18 @@ case "${signer_driver}" in
       --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"
     )
     ;;
+  local-env)
+    [[ -n "${CHECKPOINT_SIGNER_PRIVATE_KEY:-}" ]] || {
+      echo "checkpoint-signer requires CHECKPOINT_SIGNER_PRIVATE_KEY in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=local-env" >&2
+      exit 1
+    }
+    signer_args=()
+    if [[ "$checkpoint_signer_supports_signer_driver" == true ]]; then
+      signer_args+=(--signer-driver "${signer_driver}")
+    fi
+    ;;
   *)
-    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be aws-kms or local-env in /etc/intents-juno/operator-stack.env" >&2
     exit 1
     ;;
 esac
@@ -1191,22 +1218,25 @@ kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]
 case "$kafka_auth_mode" in
   aws-msk-iam)
     export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+      if [[ -n "${AWS_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+      elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+      else
+        echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  none)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
     ;;
   *)
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
@@ -1406,22 +1436,25 @@ kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]
 case "$kafka_auth_mode" in
   aws-msk-iam)
     export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+      if [[ -n "${AWS_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+      elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+      else
+        echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  none)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
     ;;
   *)
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
 txbuild_bin="${WITHDRAW_COORDINATOR_TXBUILD_BIN:-juno-txbuild}"
 command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
@@ -1572,22 +1605,25 @@ kafka_auth_mode="$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]
 case "$kafka_auth_mode" in
   aws-msk-iam)
     export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+      if [[ -n "${AWS_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+      elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+      else
+        echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  none)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
     ;;
   *)
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
@@ -1678,22 +1714,27 @@ case "${JUNO_QUEUE_KAFKA_TLS:-}" in
   true|1|yes) export JUNO_QUEUE_KAFKA_TLS="true" ;;
 esac
 case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
-  aws-msk-iam) export JUNO_QUEUE_KAFKA_AUTH_MODE="aws-msk-iam" ;;
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE="aws-msk-iam"
+    if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+      if [[ -n "${AWS_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+      elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+        export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+      else
+        echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  none)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE="none"
+    ;;
   *)
-    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
     exit 1
     ;;
 esac
-if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
-  if [[ -n "${AWS_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
-  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
-    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
-  else
-    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
-    exit 1
-  fi
-fi
 
 exec /usr/local/bin/base-event-scanner "${args[@]}"
 EOF_BASE_EVENT_SCANNER_WRAPPER

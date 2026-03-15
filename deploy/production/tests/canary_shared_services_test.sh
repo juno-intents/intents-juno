@@ -182,9 +182,68 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_allows_preview_none_kafka_auth() {
+  local tmp manifest fake_bin output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "preview",
+  "shared_services": {
+    "postgres": {
+      "endpoint": "postgres.preview.internal",
+      "port": 5432
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.preview.internal:9094",
+      "auth": {
+        "mode": "none",
+        "aws_region": "us-east-1"
+      }
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.preview.internal"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview shared canary accepts kafka auth none"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "preview shared canary kafka status"
+  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "preview" "preview shared canary reports preview kafka transport"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
+  test_shared_services_canary_allows_preview_none_kafka_auth
 }
 
 main "$@"

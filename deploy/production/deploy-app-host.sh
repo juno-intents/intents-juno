@@ -74,7 +74,9 @@ secret_contract_file="$(production_abs_path "$manifest_dir" "$secret_contract_fi
 
 environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
 allow_local_resolvers="false"
-[[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+if production_environment_allows_local_secret_resolvers "$environment"; then
+  allow_local_resolvers="true"
+fi
 
 app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
 app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
@@ -181,7 +183,16 @@ kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_s
 if [[ "$kafka_tls_enabled" != "true" ]]; then
   kafka_tls_enabled="false"
 fi
-[[ "$shared_kafka_auth_mode" == "aws-msk-iam" ]] || die "shared manifest kafka.auth.mode must be aws-msk-iam"
+case "$shared_kafka_auth_mode" in
+  aws-msk-iam)
+    ;;
+  none)
+    [[ "$environment" == "preview" ]] || die "shared manifest kafka.auth.mode=none is only allowed for preview"
+    ;;
+  *)
+    die "unsupported shared manifest kafka.auth.mode: $shared_kafka_auth_mode"
+    ;;
+esac
 
 download_release_asset "bridge-api_linux_amd64"
 download_release_asset "backoffice_linux_amd64"

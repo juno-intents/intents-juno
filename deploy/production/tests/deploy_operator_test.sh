@@ -72,6 +72,16 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_dkg_summary_with_operator_key() {
+  local target="$1"
+  local operator_key_file="$2"
+  jq \
+    --arg operator_key_file "$operator_key_file" \
+    '
+      .operators[0].operator_key_file = $operator_key_file
+    ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$target"
+}
+
 test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
   local workdir output_dir manifest shared_manifest log_dir fake_bin state_file
   workdir="$(mktemp -d)"
@@ -743,6 +753,106 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_allows_preview_local_checkpoint_signer() {
+  local workdir output_dir manifest log_dir fake_bin state_file dkg_summary_with_key seeded_key
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'preview-backup' >"$workdir/dkg-backup.zip"
+  printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
+  export TEST_PREVIEW_CHECKPOINT_POSTGRES_DSN="postgres://preview?sslmode=require"
+  export TEST_PREVIEW_BASE_RELAYER_KEYS="0x1111111111111111111111111111111111111111111111111111111111111111"
+  export TEST_PREVIEW_BASE_RELAYER_AUTH_TOKEN="preview-token"
+  export TEST_PREVIEW_JUNO_RPC_USER="juno"
+  export TEST_PREVIEW_JUNO_RPC_PASS="rpcpass"
+  export TEST_PREVIEW_WALLET_ID="wallet-op1"
+  export TEST_PREVIEW_JUNO_TXSIGN_SIGNER_KEYS="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=env:TEST_PREVIEW_CHECKPOINT_POSTGRES_DSN
+BASE_RELAYER_PRIVATE_KEYS=env:TEST_PREVIEW_BASE_RELAYER_KEYS
+BASE_RELAYER_AUTH_TOKEN=env:TEST_PREVIEW_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=env:TEST_PREVIEW_JUNO_RPC_USER
+JUNO_RPC_PASS=env:TEST_PREVIEW_JUNO_RPC_PASS
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=env:TEST_PREVIEW_WALLET_ID
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=env:TEST_PREVIEW_WALLET_ID
+JUNO_TXSIGN_SIGNER_KEYS=env:TEST_PREVIEW_JUNO_TXSIGN_SIGNER_KEYS
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.public_subdomain = "preview.intents-testing.thejunowallet.com"
+    | .operators[0].checkpoint_signer_driver = "local-env"
+    | .operators[0].checkpoint_signer_kms_key_id = null
+    | .operators[0].checkpoint_blob_bucket = null
+    | .operators[0].checkpoint_blob_prefix = null
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary_with_key="$workdir/dkg-summary.with-key.json"
+  write_dkg_summary_with_operator_key "$dkg_summary_with_key" "$workdir/operator.key"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary_with_key" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$dkg_summary_with_key" "$output_dir/preview" "$workdir"
+
+  manifest="$output_dir/preview/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/preview/rollout-state.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+for arg in "\$@"; do
+  if [[ -f "\$arg" ]]; then
+    cp "\$arg" "$log_dir/\$(basename "\$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "300000000000000"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  seeded_key="$(production_normalize_ecdsa_private_key "$(cat "$workdir/operator.key")")"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview operator env stages local checkpoint signer mode"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=$seeded_key" "preview operator env stages the operator-scoped checkpoint signer key"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=none" "preview operator env stages kafka auth none"
+  assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=" "preview operator env omits checkpoint signer kms key id"
+  assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=" "preview operator env omits checkpoint package export bucket"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export JUNO_QUEUE_KAFKA_AUTH_MODE=none' "preview deploy writes wrappers for kafka auth none"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "preview local signer rollout succeeds"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_stages_distributed_dkg_server_tls
@@ -750,6 +860,7 @@ main() {
   test_deploy_operator_rejects_underfunded_base_relayer_before_rollout
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
+  test_deploy_operator_allows_preview_local_checkpoint_signer
 }
 
 main "$@"

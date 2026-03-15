@@ -71,6 +71,7 @@ ipfs_api_url="$(production_json_required "$shared_manifest" '.shared_services.ip
 ipfs_target_group_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.target_group_arn | select(type == "string" and length > 0)')"
 checkpoint_blob_bucket="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 artifacts_object_lock_required="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.object_lock_required')"
+environment="$(production_json_required "$shared_manifest" '.environment | select(type == "string" and length > 0)')"
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
   artifacts_object_lock_required="false"
@@ -91,7 +92,7 @@ kafka_status="passed"
 ipfs_status="passed"
 artifacts_status="skipped"
 postgres_detail="reachable"
-kafka_detail="all brokers reachable with aws-msk-iam"
+kafka_detail="all brokers reachable"
 ipfs_detail="api reachable"
 artifacts_detail="no artifact bucket configured"
 
@@ -107,9 +108,13 @@ if [[ "$dry_run" == "true" ]]; then
   ipfs_detail="dry run"
   artifacts_detail="dry run"
 else
-  if [[ "$kafka_auth_mode" != "aws-msk-iam" ]]; then
+  if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
+    kafka_detail="all brokers reachable with aws-msk-iam"
+  elif [[ "$environment" == "preview" && "$kafka_auth_mode" == "none" ]]; then
+    kafka_detail="all brokers reachable with preview kafka transport"
+  else
     kafka_status="failed"
-    kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam"
+    kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam (or none for preview)"
   fi
 
   if ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then

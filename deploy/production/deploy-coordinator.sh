@@ -127,7 +127,9 @@ withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_
 bridge_verifier_address="$(production_bridge_verifier_address "$inventory")"
 bridge_threshold="$(production_threshold "$dkg_summary")"
 allow_local_resolvers="false"
-[[ "$env_slug" == "alpha" ]] && allow_local_resolvers="true"
+if production_environment_allows_local_secret_resolvers "$env_slug"; then
+  allow_local_resolvers="true"
+fi
 inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
 inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
 terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"

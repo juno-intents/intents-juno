@@ -716,6 +716,28 @@ production_required_min_base_relayer_balance_wei() {
   printf '%s\n' "$value"
 }
 
+production_environment_allows_local_secret_resolvers() {
+  local environment="$1"
+  case "$environment" in
+    alpha|preview) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+production_environment_allows_local_checkpoint_signer() {
+  local environment="$1"
+  [[ "$environment" == "preview" ]]
+}
+
+production_kafka_auth_mode_for_environment() {
+  local environment="$1"
+  if [[ "$environment" == "preview" ]]; then
+    printf 'none\n'
+  else
+    printf 'aws-msk-iam\n'
+  fi
+}
+
 production_base_relayer_private_keys() {
   local env_file="$1"
   local base_relayer_private_keys
@@ -775,7 +797,9 @@ production_backoffice_relayer_signer_addresses_csv() {
 
   environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
   allow_local_resolvers="false"
-  [[ "$environment" == "alpha" ]] && allow_local_resolvers="true"
+  if production_environment_allows_local_secret_resolvers "$environment"; then
+    allow_local_resolvers="true"
+  fi
 
   tmp_dir="$(mktemp -d)"
   addresses_file="$tmp_dir/base-relayer-addresses.txt"
@@ -1027,7 +1051,7 @@ production_render_shared_manifest() {
     --arg postgres_port "$postgres_port" \
     --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
-    --arg kafka_auth_mode "aws-msk-iam" \
+    --arg kafka_auth_mode "$(production_kafka_auth_mode_for_environment "$env_slug")" \
     --arg kafka_auth_aws_region "$aws_region" \
     --arg ipfs_api_url "$ipfs_api_url" \
     --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
@@ -1384,8 +1408,13 @@ production_render_operator_handoffs() {
       aws-kms)
         [[ -n "$checkpoint_signer_kms_key_id" ]] || die "operator $operator_id uses checkpoint_signer_driver=aws-kms but checkpoint_signer_kms_key_id is empty"
         ;;
+      local-env)
+        production_environment_allows_local_checkpoint_signer "$env_slug" \
+          || die "operator $operator_id must use checkpoint_signer_driver=aws-kms outside preview (got: $checkpoint_signer_driver)"
+        checkpoint_signer_kms_key_id=""
+        ;;
       *)
-        die "operator $operator_id must use checkpoint_signer_driver=aws-kms in production (got: $checkpoint_signer_driver)"
+        die "unsupported checkpoint signer driver for operator $operator_id: $checkpoint_signer_driver"
         ;;
     esac
 
@@ -1422,7 +1451,12 @@ production_render_operator_handoffs() {
       operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
       [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
       production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
-      production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
+      if [[ "$checkpoint_signer_driver" == "local-env" ]]; then
+        production_seed_local_checkpoint_signer_secret "$secrets_dst" "$dkg_summary" "$operator_id" \
+          || die "operator $operator_id is missing operator_key_file required for preview local checkpoint signer mode"
+      else
+        production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
+      fi
     fi
 
     if [[ -n "$backup_zip_src" ]]; then
@@ -1488,7 +1522,7 @@ production_render_operator_stack_env() {
   local resolved_secret_env="$3"
   local output_file="$4"
 
-  local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region
+  local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
   local juno_txsign_signer_keys owallet_ua withdraw_change_address
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
@@ -1508,6 +1542,7 @@ production_render_operator_stack_env() {
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
+  environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
   operator_address="$(production_json_optional "$operator_deploy" '.operator_address')"
@@ -1537,8 +1572,14 @@ production_render_operator_stack_env() {
         die "resolved secret env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=aws-kms"
       fi
       ;;
+    local-env)
+      production_environment_allows_local_checkpoint_signer "$environment" \
+        || die "unsupported checkpoint signer driver in operator deploy manifest outside preview: $signer_driver"
+      grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$resolved_secret_env" \
+        || die "resolved secret env must contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=local-env"
+      ;;
     *)
-      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver (production requires aws-kms)"
+      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver"
       ;;
   esac
 
@@ -1614,11 +1655,13 @@ EOF
   deposit_image_id="$(jq -r '.contracts.deposit_image_id // empty' "$shared_manifest")"
   withdraw_image_id="$(jq -r '.contracts.withdraw_image_id // empty' "$shared_manifest")"
 
-  if [[ -n "$checkpoint_blob_bucket" ]]; then
-    printf 'CHECKPOINT_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
-  fi
-  if [[ -n "$checkpoint_blob_prefix" ]]; then
-    printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
+  if [[ "$signer_driver" == "aws-kms" ]]; then
+    if [[ -n "$checkpoint_blob_bucket" ]]; then
+      printf 'CHECKPOINT_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
+    fi
+    if [[ -n "$checkpoint_blob_prefix" ]]; then
+      printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
+    fi
   fi
   if [[ -n "$deposit_image_id" ]]; then
     printf 'DEPOSIT_IMAGE_ID=%s\n' "$deposit_image_id" >>"$output_file"
@@ -1634,16 +1677,28 @@ EOF
     printf 'DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232\n' >>"$output_file"
   fi
 
-  awk -F= '
-    $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
-    $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
-    $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
-    $1 == "OPERATOR_ADDRESS" { next }
-    $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
-    $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
-    $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
-    { print }
-  ' "$resolved_secret_env" >>"$output_file"
+  if [[ "$signer_driver" == "aws-kms" ]]; then
+    awk -F= '
+      $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
+      $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
+      $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
+      $1 == "OPERATOR_ADDRESS" { next }
+      $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
+      $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
+      $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
+      { print }
+    ' "$resolved_secret_env" >>"$output_file"
+  else
+    awk -F= '
+      $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
+      $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
+      $1 == "OPERATOR_ADDRESS" { next }
+      $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
+      $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
+      $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
+      { print }
+    ' "$resolved_secret_env" >>"$output_file"
+  fi
 
   local required_env_key
   for required_env_key in CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS; do
