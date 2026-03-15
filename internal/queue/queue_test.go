@@ -286,7 +286,7 @@ func TestAWSMSKIAMMechanism_StartFormatsOAuthBearerInitialResponse(t *testing.T)
 	}
 }
 
-func TestKafkaTLSConfigPinsKafkaTLS12(t *testing.T) {
+func TestKafkaTLSConfigRequiresAtLeastTLS12WithoutCappingNewerVersions(t *testing.T) {
 	t.Parallel()
 
 	cfg := kafkaTLSConfig()
@@ -296,8 +296,8 @@ func TestKafkaTLSConfigPinsKafkaTLS12(t *testing.T) {
 	if cfg.MinVersion != tls.VersionTLS12 {
 		t.Fatalf("MinVersion = %d, want %d", cfg.MinVersion, tls.VersionTLS12)
 	}
-	if cfg.MaxVersion != tls.VersionTLS12 {
-		t.Fatalf("MaxVersion = %d, want %d", cfg.MaxVersion, tls.VersionTLS12)
+	if cfg.MaxVersion != 0 {
+		t.Fatalf("MaxVersion = %d, want 0 (uncapped)", cfg.MaxVersion)
 	}
 }
 
