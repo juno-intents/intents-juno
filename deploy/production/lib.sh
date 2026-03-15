@@ -151,21 +151,40 @@ production_aws_resolve_private_ip() {
   fi
 }
 
+production_default_dkg_port_for_index() {
+  local operator_index="$1"
+  [[ "$operator_index" =~ ^[0-9]+$ ]] || die "invalid operator index for dkg port: $operator_index"
+  printf '%s\n' "$((18442 + operator_index))"
+}
+
+production_default_dkg_endpoint_for_operator_json() {
+  local operator_json="$1"
+  local endpoint_host operator_index endpoint_port
+
+  endpoint_host="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
+  operator_index="$(jq -r '.index // empty' <<<"$operator_json")"
+  [[ -n "$endpoint_host" ]] || return 1
+  [[ -n "$operator_index" ]] || return 1
+  endpoint_port="$(production_default_dkg_port_for_index "$operator_index")"
+  printf 'https://%s:%s\n' "$endpoint_host" "$endpoint_port"
+}
+
 production_default_operator_endpoints_json() {
   local inventory="$1"
   local shared_manifest="${2:-}"
   local operator_count index operator_json endpoint_addr endpoint_host endpoint_profile endpoint_region
-  local operator_id dkg_endpoint endpoint_port parsed_endpoint
+  local operator_id dkg_endpoint endpoint_port parsed_endpoint operator_index
 
   operator_count="$(jq -r '.operators | length' "$inventory")"
   for ((index = 0; index < operator_count; index++)); do
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id // empty' <<<"$operator_json")"
+    operator_index="$(jq -r '.index // empty' <<<"$operator_json")"
     endpoint_addr="$(jq -r '.operator_address // .operator_id // empty' <<<"$operator_json")"
     endpoint_host="$(jq -r '.private_endpoint // .operator_probe_host // .public_endpoint // .operator_host // empty' <<<"$operator_json")"
     endpoint_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
     endpoint_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
-    endpoint_port="18443"
+    endpoint_port="$(production_default_dkg_port_for_index "$operator_index")"
 
     if [[ -n "$shared_manifest" && -f "$shared_manifest" && -n "$operator_id" ]]; then
       dkg_endpoint="$(jq -r --arg operator_id "$operator_id" '.operator_roster[] | select(.operator_id == $operator_id) | .dkg_endpoint // empty' "$shared_manifest")"
@@ -1004,24 +1023,49 @@ production_render_shared_manifest() {
   [[ -n "$operator_ids_csv" ]] || die "dkg summary does not contain operator ids"
   threshold="$(production_threshold "$dkg_summary")"
   operators_json="$(jq -c '[.operators[].operator_id]' "$dkg_summary")"
-  roster_json="$(jq -c --slurpfile dkg_summary "$dkg_summary" '
-    .operators
-    | map(
-        . as $operator
-        | {
-            index,
-            operator_id,
-            aws_profile,
-            aws_region,
-            account_id,
-            public_dns_label,
-            dkg_endpoint: (
-              ($dkg_summary[0].operators // [])
-              | map(select(.operator_id == $operator.operator_id))[0].endpoint // null
+  roster_json="$(
+    jq -c '.operators' "$inventory" | jq -c '
+      map({
+        index,
+        operator_id,
+        aws_profile,
+        aws_region,
+        account_id,
+        public_dns_label,
+        public_endpoint,
+        operator_host
+      })
+    ' | while IFS= read -r operators_json_line; do
+      jq -cn \
+        --argjson operators "$operators_json_line" \
+        --slurpfile dkg_summary "$dkg_summary" '
+          $operators
+          | map(
+              . as $operator
+              | {
+                  index: $operator.index,
+                  operator_id: $operator.operator_id,
+                  aws_profile: $operator.aws_profile,
+                  aws_region: $operator.aws_region,
+                  account_id: $operator.account_id,
+                  public_dns_label: $operator.public_dns_label,
+                  dkg_endpoint: (
+                    (
+                      ($dkg_summary[0].operators // [])
+                      | map(select(.operator_id == $operator.operator_id))[0].endpoint
+                    ) // (
+                      if (($operator.public_endpoint // $operator.operator_host // "") | length) > 0 and ($operator.index != null) then
+                        "https://\(($operator.public_endpoint // $operator.operator_host)):\(18442 + ($operator.index | tonumber))"
+                      else
+                        null
+                      end
+                    )
+                  )
+                }
             )
-          }
-      )
-  ' "$inventory")"
+        '
+    done
+  )"
   secret_keys_json="$(production_secret_keys_json "$inventory" "$inventory_dir")"
   governance_json="$(jq -c '.governance // null' "$bridge_summary")"
   inventory_owallet_ua="$(production_json_optional "$inventory" '.contracts.owallet_ua')"

@@ -522,6 +522,95 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints() {
+  local workdir shared_manifest dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators += [
+      {
+        "index": 2,
+        "operator_id": "0x6666666666666666666666666666666666666666",
+        "operator_address": "0x8888888888888888888888888888888888888888",
+        "checkpoint_signer_driver": "aws-kms",
+        "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/66666666-2222-3333-4444-555555555555",
+        "aws_profile": "juno",
+        "aws_region": "us-east-1",
+        "account_id": "021490342184",
+        "operator_host": "203.0.113.12",
+        "operator_user": "ubuntu",
+        "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+        "public_dns_label": "op2",
+        "public_endpoint": "203.0.113.12",
+        "known_hosts_file": "'"$workdir"'/known_hosts",
+        "dkg_backup_zip": "'"$workdir"'/dkg-backup.zip",
+        "secret_contract_file": "'"$workdir"'/operator-secrets.env"
+      },
+      {
+        "index": 3,
+        "operator_id": "0x7777777777777777777777777777777777777777",
+        "operator_address": "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "checkpoint_signer_driver": "aws-kms",
+        "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/77777777-2222-3333-4444-555555555555",
+        "aws_profile": "juno",
+        "aws_region": "us-east-1",
+        "account_id": "021490342184",
+        "operator_host": "203.0.113.13",
+        "operator_user": "ubuntu",
+        "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+        "public_dns_label": "op3",
+        "public_endpoint": "203.0.113.13",
+        "known_hosts_file": "'"$workdir"'/known_hosts",
+        "dkg_backup_zip": "'"$workdir"'/dkg-backup.zip",
+        "secret_contract_file": "'"$workdir"'/operator-secrets.env"
+      }
+    ]
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '
+    .operators[0] |= del(.endpoint)
+    | .operators[1] |= del(.endpoint)
+    | .operators[2] |= del(.endpoint)
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+
+  assert_eq "$(jq -r '.operator_roster[0].dkg_endpoint' "$shared_manifest")" "https://203.0.113.11:18443" "shared manifest defaults first operator dkg endpoint"
+  assert_eq "$(jq -r '.operator_roster[1].dkg_endpoint' "$shared_manifest")" "https://203.0.113.12:18444" "shared manifest defaults second operator dkg endpoint"
+  assert_eq "$(jq -r '.operator_roster[2].dkg_endpoint' "$shared_manifest")" "https://203.0.113.13:18445" "shared manifest defaults third operator dkg endpoint"
+  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff defaults first operator endpoint port"
+  assert_eq "$(jq -r '.operator_endpoints[1]' "$workdir/output/app/app-deploy.json")" "0x8888888888888888888888888888888888888888=203.0.113.12:18444" "app handoff defaults second operator endpoint port"
+  assert_eq "$(jq -r '.operator_endpoints[2]' "$workdir/output/app/app-deploy.json")" "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa=203.0.113.13:18445" "app handoff defaults third operator endpoint port"
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_prefers_inventory_owallet_ua() {
   local workdir shared_manifest bridge_summary_no_ua
   workdir="$(mktemp -d)"
@@ -1782,6 +1871,7 @@ main() {
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
+  test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
 }
