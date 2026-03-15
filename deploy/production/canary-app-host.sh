@@ -52,7 +52,7 @@ for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 if [[ "$dry_run" != "true" ]]; then
-  for cmd in ssh curl cast; do
+  for cmd in ssh curl cast aws; do
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
 fi
@@ -76,6 +76,9 @@ bridge_probe_url="$(production_json_required "$app_deploy" '.services.bridge_api
 backoffice_probe_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
+shared_ecs_cluster_arn="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.cluster_arn')"
+shared_proof_requestor_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_requestor_service_name')"
+shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_funder_service_name')"
 
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
@@ -102,6 +105,8 @@ backoffice_settings_status="passed"
 backoffice_settings_detail="backoffice runtime settings API passed"
 min_deposit_admin_status="passed"
 min_deposit_admin_detail="configured signer matches on-chain minDepositAdmin"
+shared_proof_services_status="passed"
+shared_proof_services_detail="shared proof ECS services active"
 
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 tmp_dir="$(mktemp -d)"
@@ -130,6 +135,8 @@ if [[ "$dry_run" == "true" ]]; then
   backoffice_settings_detail="dry run"
   min_deposit_admin_status="skipped"
   min_deposit_admin_detail="dry run"
+  shared_proof_services_status="skipped"
+  shared_proof_services_detail="dry run"
 else
   production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
   ssh_target="${app_user}@${app_host}"
@@ -206,6 +213,27 @@ else
     backoffice_settings_status="blocked"
     backoffice_settings_detail="blocked by backoffice readiness failure"
   fi
+
+  if [[ -z "$shared_ecs_cluster_arn" || -z "$shared_proof_requestor_service_name" || -z "$shared_proof_funder_service_name" ]]; then
+    shared_proof_services_status="failed"
+    shared_proof_services_detail="shared manifest is missing ECS proof service metadata"
+  else
+    [[ -n "$aws_region" ]] || die "app deploy manifest is missing aws_region"
+    aws_args=()
+    [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
+    aws_args+=(--region "$aws_region")
+    ecs_services_json="$(AWS_PAGER="" aws "${aws_args[@]}" ecs describe-services \
+      --cluster "$shared_ecs_cluster_arn" \
+      --services "$shared_proof_requestor_service_name" "$shared_proof_funder_service_name" 2>/dev/null || true)"
+    if [[ -z "$ecs_services_json" ]] \
+      || ! jq -e '
+        .services | length == 2
+        and all(.[]; (.desiredCount // 0) >= 1 and (.runningCount // 0) >= 1)
+      ' >/dev/null <<<"$ecs_services_json"; then
+      shared_proof_services_status="failed"
+      shared_proof_services_detail="shared proof ECS services do not have desiredCount/runningCount >= 1"
+    fi
+  fi
 fi
 
 ready_for_test="true"
@@ -218,7 +246,8 @@ for status in \
   "$backoffice_ready_status" \
   "$backoffice_ui_status" \
   "$backoffice_settings_status" \
-  "$min_deposit_admin_status"; do
+  "$min_deposit_admin_status" \
+  "$shared_proof_services_status"; do
   if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
     ready_for_test="false"
   fi
@@ -252,6 +281,8 @@ jq -n \
   --arg backoffice_settings_detail "$backoffice_settings_detail" \
   --arg min_deposit_admin_status "$min_deposit_admin_status" \
   --arg min_deposit_admin_detail "$min_deposit_admin_detail" \
+  --arg shared_proof_services_status "$shared_proof_services_status" \
+  --arg shared_proof_services_detail "$shared_proof_services_detail" \
   --argjson ready_for_test "$ready_for_test" \
   '{
     version: $version,
@@ -297,6 +328,10 @@ jq -n \
       min_deposit_admin: {
         status: $min_deposit_admin_status,
         detail: $min_deposit_admin_detail
+      },
+      shared_proof_services: {
+        status: $shared_proof_services_status,
+        detail: $shared_proof_services_detail
       }
     }
   }'

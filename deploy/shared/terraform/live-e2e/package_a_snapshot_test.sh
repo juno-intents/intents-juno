@@ -17,6 +17,7 @@ main() {
   assert_contains "$variables_tf" 'variable "shared_base_chain_id"' "live-e2e exposes base chain id input for proof request IDs"
   assert_contains "$variables_tf" 'variable "shared_deposit_image_id"' "live-e2e exposes deposit image id input"
   assert_contains "$variables_tf" 'variable "shared_withdraw_image_id"' "live-e2e exposes withdraw image id input"
+  assert_contains "$variables_tf" $'variable "shared_ecs_desired_count" {\n  description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."\n  type        = number\n  default     = 1' "live-e2e enables proof services by default"
 
   assert_contains "$main_tf" '"/usr/local/bin/proof-requestor"' "live-e2e requestor still launches proof-requestor binary"
   assert_contains "$main_tf" '"--postgres-dsn"' "live-e2e requestor command includes postgres dsn"

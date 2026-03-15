@@ -948,6 +948,7 @@ production_render_shared_manifest() {
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
+  local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
   local bridge_fee_bps bridge_relayer_tip_bps bridge_refund_window_seconds
   local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
@@ -985,6 +986,9 @@ production_render_shared_manifest() {
   postgres_port="$(production_tf_output_value "$tf_json" "shared_postgres_port" true)"
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
+  ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
+  proof_requestor_service_name="$(production_tf_output_value "$tf_json" "shared_proof_requestor_service_name" false)"
+  proof_funder_service_name="$(production_tf_output_value "$tf_json" "shared_proof_funder_service_name" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
@@ -1053,6 +1057,9 @@ production_render_shared_manifest() {
     --arg kafka_brokers "$kafka_brokers" \
     --arg kafka_auth_mode "$(production_kafka_auth_mode_for_environment "$env_slug")" \
     --arg kafka_auth_aws_region "$aws_region" \
+    --arg ecs_cluster_arn "$ecs_cluster_arn" \
+    --arg proof_requestor_service_name "$proof_requestor_service_name" \
+    --arg proof_funder_service_name "$proof_funder_service_name" \
     --arg ipfs_api_url "$ipfs_api_url" \
     --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
     --arg dkg_bucket "$dkg_bucket" \
@@ -1102,6 +1109,11 @@ production_render_shared_manifest() {
             aws_region: $kafka_auth_aws_region
           },
           min_insync_replicas: 2
+        },
+        ecs: {
+          cluster_arn: (if $ecs_cluster_arn == "" then null else $ecs_cluster_arn end),
+          proof_requestor_service_name: (if $proof_requestor_service_name == "" then null else $proof_requestor_service_name end),
+          proof_funder_service_name: (if $proof_funder_service_name == "" then null else $proof_funder_service_name end)
         },
         ipfs: {
           api_url: $ipfs_api_url,

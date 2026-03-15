@@ -239,7 +239,7 @@ variable "shared_msk_broker_ebs_volume_size_gb" {
 variable "shared_ecs_desired_count" {
   description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."
   type        = number
-  default     = 0
+  default     = 1
 
   validation {
     condition     = var.shared_ecs_desired_count >= 0

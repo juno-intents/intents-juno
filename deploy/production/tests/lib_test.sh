@@ -173,7 +173,7 @@ EOF
 }
 
 test_render_shared_manifest_and_handoffs() {
-  local workdir inventory shared_manifest handoff_dir dkg_summary
+  local workdir inventory shared_manifest handoff_dir dkg_summary tf_json
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
   printf 'secret' >"$workdir/secret.txt"
@@ -215,13 +215,25 @@ EOF
     | .operators[1].operator_key_file = "op2.key"
     | .operators[2].operator_key_file = "op3.key"
   ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = {
+      value: "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared"
+    }
+    | .shared_proof_requestor_service_name = {
+      value: "alpha-proof-requestor"
+    }
+    | .shared_proof_funder_service_name = {
+      value: "alpha-proof-funder"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
     "$workdir/inventory.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
     "$dkg_summary" \
-    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$tf_json" \
     "$shared_manifest" \
     "$workdir"
   assert_eq "$(jq -r '.contracts.juno_network' "$shared_manifest")" "testnet" "juno network"
@@ -236,6 +248,9 @@ EOF
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
   assert_eq "$(jq -r '.shared_services.ipfs.target_group_arn' "$shared_manifest")" "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111" "ipfs target group arn"
+  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "proof requestor service name"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "alpha-proof-funder" "proof funder service name"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
