@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$REPO_ROOT/deploy/production/tests/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 main() {
   local main_tf variables_tf
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
@@ -42,6 +52,10 @@ main() {
   assert_contains "$main_tf" 'name  = "SP1_DEPOSIT_PROGRAM_VKEY"' "live-e2e proof task env includes deposit vkey"
   assert_contains "$main_tf" 'name  = "SP1_WITHDRAW_PROGRAM_VKEY"' "live-e2e proof task env includes withdraw vkey"
 
+  assert_contains "$variables_tf" 'Required when provision_shared_services is true' "live-e2e documents explicit proof image requirement"
+  assert_contains "$main_tf" 'shared_proof_service_image must be set when provision_shared_services=true.' "live-e2e fails closed without explicit proof image"
+  assert_contains "$main_tf" 'shared_proof_service_image         = trimspace(var.shared_proof_service_image)' "live-e2e uses explicit proof image input directly"
+  assert_not_contains "$main_tf" 'repository_url}:latest' "live-e2e no longer defaults proof services to empty terraform-managed latest tag"
   assert_contains "$main_tf" '!local.shared_proof_runtime_enabled || local.shared_sp1_requestor_address != ""' "live-e2e gates active proof services behind runtime contract"
   assert_contains "$main_tf" 'shared_sp1_requestor_address must be set when shared_ecs_desired_count > 0' "live-e2e blocks active proof services without requestor address"
 

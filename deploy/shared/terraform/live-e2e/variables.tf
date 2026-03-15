@@ -266,7 +266,7 @@ variable "shared_ecs_assign_public_ip" {
 }
 
 variable "shared_proof_service_image" {
-  description = "Container image URI for shared proof services (proof-requestor/proof-funder). If empty, use the Terraform-managed ECR repo with :latest."
+  description = "Container image URI for shared proof services (proof-requestor/proof-funder). Required when provision_shared_services is true."
   type        = string
   default     = ""
 }

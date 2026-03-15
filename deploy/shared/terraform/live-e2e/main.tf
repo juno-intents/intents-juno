@@ -685,7 +685,7 @@ resource "aws_ecr_repository" "proof_services" {
 }
 
 locals {
-  shared_proof_service_image         = trimspace(var.shared_proof_service_image) != "" ? trimspace(var.shared_proof_service_image) : try("${aws_ecr_repository.proof_services[0].repository_url}:latest", "")
+  shared_proof_service_image         = trimspace(var.shared_proof_service_image)
   shared_sp1_requestor_secret_arn    = trimspace(var.shared_sp1_requestor_secret_arn)
   shared_sp1_funder_secret_arn       = trimspace(var.shared_sp1_funder_secret_arn)
   shared_sp1_requestor_address       = trimspace(var.shared_sp1_requestor_address)
@@ -891,7 +891,7 @@ resource "aws_ecs_task_definition" "proof_requestor" {
   lifecycle {
     precondition {
       condition     = local.shared_proof_service_image != ""
-      error_message = "shared proof service image must not be empty."
+      error_message = "shared_proof_service_image must be set when provision_shared_services=true."
     }
     precondition {
       condition     = local.shared_sp1_requestor_secret_arn != ""
@@ -955,7 +955,7 @@ resource "aws_ecs_task_definition" "proof_funder" {
   lifecycle {
     precondition {
       condition     = local.shared_proof_service_image != ""
-      error_message = "shared proof service image must not be empty."
+      error_message = "shared_proof_service_image must be set when provision_shared_services=true."
     }
     precondition {
       condition     = local.shared_sp1_requestor_secret_arn != ""
