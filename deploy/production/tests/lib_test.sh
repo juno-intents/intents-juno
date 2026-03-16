@@ -1970,6 +1970,35 @@ EOF
   rm -rf "$workdir"
 }
 
+test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root() {
+  local workdir fakebin log_file output_file expected_repo_root
+  workdir="$(mktemp -d)"
+  fakebin="$workdir/go"
+  log_file="$workdir/go.log"
+  output_file="$workdir/output.json"
+  expected_repo_root="$REPO_ROOT"
+
+  cat >"$fakebin" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'pwd=%s\n' "\$PWD" >"$log_file"
+printf 'args=%s\n' "\$*" >>"$log_file"
+printf '{"keyArn":"arn:aws:kms:us-east-1:021490342184:key/test"}\n'
+EOF
+  chmod +x "$fakebin"
+
+  (
+    cd "$workdir"
+    PATH="$workdir:$PATH" \
+      "$REPO_ROOT/deploy/production/provision-checkpoint-signer-kms.sh" --operator-id op1 >"$output_file"
+  )
+
+  assert_contains "$(cat "$log_file")" "pwd=$expected_repo_root" "checkpoint signer kms wrapper runs from repo root"
+  assert_contains "$(cat "$log_file")" "args=run ./cmd/provision-checkpoint-signer-kms --operator-id op1" "checkpoint signer kms wrapper uses module-relative go run"
+  assert_contains "$(cat "$output_file")" '"keyArn":"arn:aws:kms:us-east-1:021490342184:key/test"' "checkpoint signer kms wrapper preserves command output"
+  rm -rf "$workdir"
+}
+
 main() {
   setup_default_checkpoint_signer_kms_provisioner
   trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
@@ -2003,6 +2032,7 @@ main() {
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
+  test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
 }
 
 main "$@"
