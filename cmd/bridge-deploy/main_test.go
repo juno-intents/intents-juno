@@ -180,6 +180,18 @@ func TestSweepReservedFeeWei_IncludesSafetyBuffer(t *testing.T) {
 	}
 }
 
+func TestSweepReservedFeeWei_LeavesSweepHeadroom(t *testing.T) {
+	t.Parallel()
+
+	gasPrice := big.NewInt(7)
+	minHeadroom := new(big.Int).Add(big.NewInt(147000), big.NewInt(10_000))
+
+	got := sweepReservedFeeWei(gasPrice)
+	if got.Cmp(minHeadroom) < 0 {
+		t.Fatalf("reserved fee = %s, want at least %s", got.String(), minHeadroom.String())
+	}
+}
+
 func TestBuildLegacyValueTransferTx_UsesProvidedGasPrice(t *testing.T) {
 	t.Parallel()
 

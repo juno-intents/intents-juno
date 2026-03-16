@@ -47,7 +47,7 @@ const (
 	legacyValueTransferGasLimit            = uint64(21_000)
 	ephemeralFundingReadRetries            = 8
 	ephemeralFundingReadBackoff            = 500 * time.Millisecond
-	sweepValueSafetyBufferWei              = int64(1_000)
+	sweepValueSafetyBufferWei              = int64(100_000)
 )
 
 type stringListFlag []string
@@ -729,9 +729,9 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 	}
 
 	if cfg.UseEphemeralDeployer {
-		balance, err := client.BalanceAt(ctx, deployerAddr, nil)
+		balance, err := client.PendingBalanceAt(ctx, deployerAddr)
 		if err != nil {
-			return nil, fmt.Errorf("read ephemeral deployer balance: %w", err)
+			return nil, fmt.Errorf("read pending ephemeral deployer balance: %w", err)
 		}
 		gasPrice, err := client.SuggestGasPrice(ctx)
 		if err != nil {
