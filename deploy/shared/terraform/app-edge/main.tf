@@ -286,9 +286,10 @@ resource "aws_cloudfront_distribution" "backoffice" {
 }
 
 resource "aws_route53_record" "bridge_alias_a" {
-  zone_id = var.zone_id
-  name    = var.bridge_record_name
-  type    = "A"
+  zone_id         = var.zone_id
+  name            = var.bridge_record_name
+  type            = "A"
+  allow_overwrite = true
 
   alias {
     name                   = aws_cloudfront_distribution.bridge.domain_name
@@ -298,9 +299,10 @@ resource "aws_route53_record" "bridge_alias_a" {
 }
 
 resource "aws_route53_record" "bridge_alias_aaaa" {
-  zone_id = var.zone_id
-  name    = var.bridge_record_name
-  type    = "AAAA"
+  zone_id         = var.zone_id
+  name            = var.bridge_record_name
+  type            = "AAAA"
+  allow_overwrite = true
 
   alias {
     name                   = aws_cloudfront_distribution.bridge.domain_name
@@ -310,9 +312,10 @@ resource "aws_route53_record" "bridge_alias_aaaa" {
 }
 
 resource "aws_route53_record" "backoffice_alias_a" {
-  zone_id = var.zone_id
-  name    = var.backoffice_record_name
-  type    = "A"
+  zone_id         = var.zone_id
+  name            = var.backoffice_record_name
+  type            = "A"
+  allow_overwrite = true
 
   alias {
     name                   = aws_cloudfront_distribution.backoffice.domain_name
@@ -322,9 +325,10 @@ resource "aws_route53_record" "backoffice_alias_a" {
 }
 
 resource "aws_route53_record" "backoffice_alias_aaaa" {
-  zone_id = var.zone_id
-  name    = var.backoffice_record_name
-  type    = "AAAA"
+  zone_id         = var.zone_id
+  name            = var.backoffice_record_name
+  type            = "AAAA"
+  allow_overwrite = true
 
   alias {
     name                   = aws_cloudfront_distribution.backoffice.domain_name
