@@ -351,7 +351,10 @@ func loadDigestSigner(ctx context.Context, driver, kmsKeyID, operatorKeyEnv stri
 func holdLease(ctx context.Context, store leases.Store, name, owner string, ttl time.Duration) (bool, error) {
 	if _, ok, err := store.Renew(ctx, name, owner, ttl); err == nil && ok {
 		return true, nil
-	} else if err != nil && !errors.Is(err, leases.ErrNotFound) && !errors.Is(err, leases.ErrNotOwner) {
+	} else if err != nil &&
+		!errors.Is(err, leases.ErrNotFound) &&
+		!errors.Is(err, leases.ErrNotOwner) &&
+		!errors.Is(err, leases.ErrExpired) {
 		return false, err
 	}
 	_, ok, err := store.TryAcquire(ctx, name, owner, ttl)

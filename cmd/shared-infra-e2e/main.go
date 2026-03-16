@@ -3,12 +3,14 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
 	"os"
@@ -102,6 +104,8 @@ type postgresCheckpointPackageSource struct{}
 const (
 	checkpointIPFSMaxResponseLen = 1 << 20
 )
+
+var errNoCheckpointPackage = errors.New("no operator checkpoint package with IPFS CID found in checkpoint_packages")
 
 type kafkaAdminClient interface {
 	Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
@@ -575,6 +579,9 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 	}
 	rec, err := source.Latest(ctx, cfg.PostgresDSN, cfg.CheckpointMinPersistedAt)
 	if err != nil {
+		if errors.Is(err, errNoCheckpointPackage) {
+			return probeCheckpointIPFS(ctx, cfg)
+		}
 		return checkpointReport{}, fmt.Errorf("load latest checkpoint package: %w", err)
 	}
 
@@ -609,29 +616,41 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 		FetchRoundTripMS:   fetchMS,
 	}
 
-	// Optional: verify CID is also fetchable via public IPFS gateway.
-	gwURL := strings.TrimSpace(cfg.CheckpointIPFSGatewayURL)
-	if gwURL != "" {
-		gwStart := time.Now()
-		gwFetchURL := strings.TrimRight(gwURL, "/") + "/ipfs/" + rec.IPFSCID
-		gwReq, gwErr := http.NewRequestWithContext(ctx, http.MethodGet, gwFetchURL, nil)
-		if gwErr == nil {
-			gwClient := &http.Client{Timeout: 30 * time.Second}
-			gwResp, gwErr := gwClient.Do(gwReq)
-			rep.GatewayRoundTripMS = time.Since(gwStart).Milliseconds()
-			if gwErr != nil {
-				rep.GatewayWarning = fmt.Sprintf("gateway fetch failed (non-fatal): %v", gwErr)
-			} else {
-				_ = gwResp.Body.Close()
-				if gwResp.StatusCode >= 200 && gwResp.StatusCode < 300 {
-					rep.GatewayReachable = true
-				} else {
-					rep.GatewayWarning = fmt.Sprintf("gateway returned status %d (non-fatal)", gwResp.StatusCode)
-				}
-			}
-		}
-	}
+	attachCheckpointGatewayProbe(ctx, cfg.CheckpointIPFSGatewayURL, rec.IPFSCID, &rep)
 
+	return rep, nil
+}
+
+func probeCheckpointIPFS(ctx context.Context, cfg config) (checkpointReport, error) {
+	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.ipfs.v1","generated_at":"%s"}`, time.Now().UTC().Format(time.RFC3339Nano)))
+	publishStarted := time.Now()
+	cid, err := addIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, payload)
+	publishMS := time.Since(publishStarted).Milliseconds()
+	if err != nil {
+		return checkpointReport{}, err
+	}
+	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, cid); err != nil {
+		return checkpointReport{}, err
+	}
+	fetchStarted := time.Now()
+	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, cid)
+	fetchMS := time.Since(fetchStarted).Milliseconds()
+	if err != nil {
+		return checkpointReport{}, err
+	}
+	if !bytes.Equal(gotPayload, payload) {
+		return checkpointReport{}, fmt.Errorf("ipfs probe payload mismatch: cid=%s", cid)
+	}
+	digest := sha256.Sum256(payload)
+	rep := checkpointReport{
+		Digest:             "0x" + hex.EncodeToString(digest[:]),
+		CID:                cid,
+		SignerCount:        0,
+		Threshold:          0,
+		PublishRoundTripMS: publishMS,
+		FetchRoundTripMS:   fetchMS,
+	}
+	attachCheckpointGatewayProbe(ctx, cfg.CheckpointIPFSGatewayURL, cid, &rep)
 	return rep, nil
 }
 
@@ -677,9 +696,9 @@ func (postgresCheckpointPackageSource) Latest(ctx context.Context, postgresDSN s
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			if minPersistedAt.IsZero() {
-				return checkpointPackageRecord{}, errors.New("no operator checkpoint package with IPFS CID found in checkpoint_packages")
+				return checkpointPackageRecord{}, errNoCheckpointPackage
 			}
-			return checkpointPackageRecord{}, fmt.Errorf("no operator checkpoint package with IPFS CID found in checkpoint_packages persisted_at >= %s", minPersistedAt.UTC().Format(time.RFC3339))
+			return checkpointPackageRecord{}, fmt.Errorf("%w persisted_at >= %s", errNoCheckpointPackage, minPersistedAt.UTC().Format(time.RFC3339))
 		}
 		return checkpointPackageRecord{}, fmt.Errorf("query checkpoint package: %w", err)
 	}
@@ -893,4 +912,87 @@ func fetchIPFSPayload(ctx context.Context, apiURL string, cid string) ([]byte, e
 		return nil, fmt.Errorf("ipfs cat failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
 	}
 	return raw, nil
+}
+
+func addIPFSPayload(ctx context.Context, apiURL string, payload []byte) (string, error) {
+	if len(payload) == 0 {
+		return "", errors.New("ipfs add payload is required")
+	}
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", "shared-infra-e2e.json")
+	if err != nil {
+		return "", fmt.Errorf("build ipfs add body: %w", err)
+	}
+	if _, err := part.Write(payload); err != nil {
+		return "", fmt.Errorf("write ipfs add payload: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("finalize ipfs add body: %w", err)
+	}
+
+	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/add?pin=true&quieter=true"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	if err != nil {
+		return "", fmt.Errorf("build ipfs add request: %w", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("call ipfs add: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, checkpointIPFSMaxResponseLen))
+	if err != nil {
+		return "", fmt.Errorf("read ipfs add response: %w", err)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return "", fmt.Errorf("ipfs add failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	}
+
+	lines := bytes.Split(bytes.TrimSpace(raw), []byte{'\n'})
+	if len(lines) == 0 {
+		return "", errors.New("ipfs add response is empty")
+	}
+	var out struct {
+		Hash string `json:"Hash"`
+	}
+	if err := json.Unmarshal(lines[len(lines)-1], &out); err != nil {
+		return "", fmt.Errorf("parse ipfs add response: %w", err)
+	}
+	out.Hash = strings.TrimSpace(out.Hash)
+	if out.Hash == "" {
+		return "", errors.New("ipfs add response hash is empty")
+	}
+	return out.Hash, nil
+}
+
+func attachCheckpointGatewayProbe(ctx context.Context, gatewayURL string, cid string, rep *checkpointReport) {
+	if rep == nil {
+		return
+	}
+	gwURL := strings.TrimSpace(gatewayURL)
+	if gwURL == "" {
+		return
+	}
+	gwStart := time.Now()
+	gwFetchURL := strings.TrimRight(gwURL, "/") + "/ipfs/" + cid
+	gwReq, gwErr := http.NewRequestWithContext(ctx, http.MethodGet, gwFetchURL, nil)
+	if gwErr != nil {
+		return
+	}
+	gwClient := &http.Client{Timeout: 30 * time.Second}
+	gwResp, gwErr := gwClient.Do(gwReq)
+	rep.GatewayRoundTripMS = time.Since(gwStart).Milliseconds()
+	if gwErr != nil {
+		rep.GatewayWarning = fmt.Sprintf("gateway fetch failed (non-fatal): %v", gwErr)
+		return
+	}
+	_ = gwResp.Body.Close()
+	if gwResp.StatusCode >= 200 && gwResp.StatusCode < 300 {
+		rep.GatewayReachable = true
+		return
+	}
+	rep.GatewayWarning = fmt.Sprintf("gateway returned status %d (non-fatal)", gwResp.StatusCode)
 }

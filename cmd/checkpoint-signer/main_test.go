@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/leases"
 )
 
 func TestLoadDigestSigner_LocalEnv(t *testing.T) {
@@ -41,5 +44,84 @@ func TestLoadDigestSigner_RejectsUnknownDriver(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported signer driver") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+type stubLeaseStore struct {
+	renewLease leases.Lease
+	renewOK    bool
+	renewErr   error
+
+	acquireLease leases.Lease
+	acquireOK    bool
+	acquireErr   error
+
+	renewCalls   int
+	acquireCalls int
+}
+
+func (s *stubLeaseStore) TryAcquire(_ context.Context, _ string, _ string, _ time.Duration) (leases.Lease, bool, error) {
+	s.acquireCalls++
+	return s.acquireLease, s.acquireOK, s.acquireErr
+}
+
+func (s *stubLeaseStore) Renew(_ context.Context, _ string, _ string, _ time.Duration) (leases.Lease, bool, error) {
+	s.renewCalls++
+	return s.renewLease, s.renewOK, s.renewErr
+}
+
+func (s *stubLeaseStore) Release(_ context.Context, _ string, _ string) error {
+	return nil
+}
+
+func (s *stubLeaseStore) Get(_ context.Context, _ string) (leases.Lease, error) {
+	return leases.Lease{}, leases.ErrNotFound
+}
+
+func TestHoldLease_ReacquiresExpiredLease(t *testing.T) {
+	t.Parallel()
+
+	store := &stubLeaseStore{
+		renewErr:   leases.ErrExpired,
+		acquireOK:  true,
+		acquireLease: leases.Lease{
+			Name:      "checkpoint-signer",
+			Owner:     "node-a",
+			Version:   2,
+			ExpiresAt: time.Now().Add(15 * time.Second),
+		},
+	}
+
+	ok, err := holdLease(context.Background(), store, "checkpoint-signer", "node-a", 15*time.Second)
+	if err != nil {
+		t.Fatalf("holdLease: %v", err)
+	}
+	if !ok {
+		t.Fatalf("expected lease reacquire to succeed")
+	}
+	if store.renewCalls != 1 {
+		t.Fatalf("renew calls: got %d want 1", store.renewCalls)
+	}
+	if store.acquireCalls != 1 {
+		t.Fatalf("acquire calls: got %d want 1", store.acquireCalls)
+	}
+}
+
+func TestHoldLease_PropagatesUnexpectedRenewError(t *testing.T) {
+	t.Parallel()
+
+	store := &stubLeaseStore{
+		renewErr: errors.New("boom"),
+	}
+
+	ok, err := holdLease(context.Background(), store, "checkpoint-signer", "node-a", 15*time.Second)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if ok {
+		t.Fatalf("expected no leadership on unexpected error")
+	}
+	if store.acquireCalls != 0 {
+		t.Fatalf("acquire calls: got %d want 0", store.acquireCalls)
 	}
 }

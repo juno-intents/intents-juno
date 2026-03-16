@@ -772,3 +772,114 @@ func TestCheckCheckpointIPFSWithSource_ForwardsMinPersistedAt(t *testing.T) {
 		t.Fatalf("min persisted at mismatch: got=%s want=%s", got.UTC().Format(time.RFC3339), minPersistedAt.UTC().Format(time.RFC3339))
 	}
 }
+
+func TestCheckCheckpointIPFSWithSource_ProbesIPFSWhenNoCheckpointPackageExists(t *testing.T) {
+	t.Parallel()
+
+	source := &stubCheckpointPackageSource{
+		err: errNoCheckpointPackage,
+	}
+
+	var addedPayload []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/add":
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("ParseMultipartForm: %v", err)
+			}
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("FormFile: %v", err)
+			}
+			defer file.Close()
+			addedPayload, err = io.ReadAll(file)
+			if err != nil {
+				t.Fatalf("ReadAll(file): %v", err)
+			}
+			_, _ = io.WriteString(w, `{"Name":"shared-infra-e2e.json","Hash":"bafyprobe","Size":"42"}`)
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"bafyprobe":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(addedPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rep, err := checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL: srv.URL,
+	}, source)
+	if err != nil {
+		t.Fatalf("checkCheckpointIPFSWithSource: %v", err)
+	}
+	if rep.CID != "bafyprobe" {
+		t.Fatalf("cid mismatch: got %q want %q", rep.CID, "bafyprobe")
+	}
+	if rep.SignerCount != 0 {
+		t.Fatalf("signer count mismatch: got %d want 0", rep.SignerCount)
+	}
+	if rep.Threshold != 0 {
+		t.Fatalf("threshold mismatch: got %d want 0", rep.Threshold)
+	}
+	if len(addedPayload) == 0 {
+		t.Fatalf("expected probe payload to be uploaded")
+	}
+	if source.Calls() != 1 {
+		t.Fatalf("source calls: got %d want 1", source.Calls())
+	}
+}
+
+func TestCheckCheckpointIPFSWithSource_ProbesIPFSWhenNoFreshCheckpointPackageExists(t *testing.T) {
+	t.Parallel()
+
+	source := &stubCheckpointPackageSource{
+		err: fmt.Errorf("%w persisted_at >= %s", errNoCheckpointPackage, time.Date(2026, 3, 16, 12, 0, 0, 0, time.UTC).Format(time.RFC3339)),
+	}
+
+	var (
+		addCalls     int
+		addedPayload []byte
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v0/add":
+			addCalls++
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("ParseMultipartForm: %v", err)
+			}
+			file, _, err := r.FormFile("file")
+			if err != nil {
+				t.Fatalf("FormFile: %v", err)
+			}
+			defer file.Close()
+			addedPayload, err = io.ReadAll(file)
+			if err != nil {
+				t.Fatalf("ReadAll(file): %v", err)
+			}
+			_, _ = io.WriteString(w, `{"Name":"shared-infra-e2e.json","Hash":"bafyfreshprobe","Size":"42"}`)
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"bafyfreshprobe":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = w.Write(addedPayload)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	rep, err := checkCheckpointIPFSWithSource(context.Background(), config{
+		PostgresDSN:          "postgresql://postgres:postgres@127.0.0.1:5432/intents_e2e?sslmode=disable",
+		CheckpointIPFSAPIURL: srv.URL,
+	}, source)
+	if err != nil {
+		t.Fatalf("checkCheckpointIPFSWithSource: %v", err)
+	}
+	if rep.CID != "bafyfreshprobe" {
+		t.Fatalf("cid mismatch: got %q want %q", rep.CID, "bafyfreshprobe")
+	}
+	if addCalls != 1 {
+		t.Fatalf("add calls: got %d want 1", addCalls)
+	}
+}
