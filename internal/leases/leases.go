@@ -11,6 +11,7 @@ var (
 	ErrInvalidInput = errors.New("leases: invalid input")
 	ErrNotFound     = errors.New("leases: not found")
 	ErrNotOwner     = errors.New("leases: not owner")
+	ErrExpired      = errors.New("leases: expired")
 )
 
 // Lease is a named, expiring ownership record.
@@ -19,6 +20,7 @@ var (
 type Lease struct {
 	Name      string
 	Owner     string
+	Version   int64
 	ExpiresAt time.Time
 }
 

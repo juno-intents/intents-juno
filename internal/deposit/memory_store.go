@@ -521,6 +521,12 @@ func (s *MemoryStore) ApplyBatchOutcome(_ context.Context, batchID [32]byte, txH
 		if !ok {
 			return ErrNotFound
 		}
+		if j.State == StateFinalized || j.State == StateRejected {
+			delete(s.claim, id)
+			delete(s.attemptByDeposit, id)
+			s.jobs[id] = j
+			continue
+		}
 		switch {
 		case hasID(finalizedSet, id):
 			j.State = StateFinalized

@@ -62,19 +62,21 @@ func (s *Store) TryAcquire(ctx context.Context, name, owner string, ttl time.Dur
 
 	var (
 		gotOwner string
+		version  int64
 		expires  time.Time
 	)
 
 	err := s.pool.QueryRow(ctx, `
-		INSERT INTO leases (name, owner, expires_at, created_at, updated_at)
-		VALUES ($1,$2, now() + ($3::bigint * interval '1 millisecond'), now(), now())
+		INSERT INTO leases (name, owner, version, expires_at, created_at, updated_at)
+		VALUES ($1,$2, 1, now() + ($3::bigint * interval '1 millisecond'), now(), now())
 		ON CONFLICT (name) DO UPDATE
 		SET owner = EXCLUDED.owner,
+			version = leases.version + 1,
 			expires_at = EXCLUDED.expires_at,
 			updated_at = now()
 		WHERE leases.expires_at <= now()
-		RETURNING owner, expires_at
-	`, name, owner, ttlMS).Scan(&gotOwner, &expires)
+		RETURNING owner, version, expires_at
+	`, name, owner, ttlMS).Scan(&gotOwner, &version, &expires)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			// Someone else currently holds it; return the current lease.
@@ -90,6 +92,7 @@ func (s *Store) TryAcquire(ctx context.Context, name, owner string, ttl time.Dur
 	return leases.Lease{
 		Name:      name,
 		Owner:     gotOwner,
+		Version:   version,
 		ExpiresAt: expires,
 	}, true, nil
 }
@@ -106,15 +109,16 @@ func (s *Store) Renew(ctx context.Context, name, owner string, ttl time.Duration
 
 	var (
 		gotOwner string
+		version  int64
 		expires  time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
 		UPDATE leases
 		SET expires_at = now() + ($3::bigint * interval '1 millisecond'),
 			updated_at = now()
-		WHERE name = $1 AND owner = $2
-		RETURNING owner, expires_at
-	`, name, owner, ttlMS).Scan(&gotOwner, &expires)
+		WHERE name = $1 AND owner = $2 AND expires_at > now()
+		RETURNING owner, version, expires_at
+	`, name, owner, ttlMS).Scan(&gotOwner, &version, &expires)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			l, gerr := s.Get(ctx, name)
@@ -127,6 +131,9 @@ func (s *Store) Renew(ctx context.Context, name, owner string, ttl time.Duration
 			if l.Owner != owner {
 				return leases.Lease{}, false, leases.ErrNotOwner
 			}
+			if !l.ExpiresAt.After(time.Now()) {
+				return leases.Lease{}, false, leases.ErrExpired
+			}
 			return leases.Lease{}, false, fmt.Errorf("leases/postgres: renew: unexpected no rows")
 		}
 		return leases.Lease{}, false, fmt.Errorf("leases/postgres: renew: %w", err)
@@ -135,6 +142,7 @@ func (s *Store) Renew(ctx context.Context, name, owner string, ttl time.Duration
 	return leases.Lease{
 		Name:      name,
 		Owner:     gotOwner,
+		Version:   version,
 		ExpiresAt: expires,
 	}, true, nil
 }
@@ -147,7 +155,12 @@ func (s *Store) Release(ctx context.Context, name, owner string) error {
 		return leases.ErrInvalidInput
 	}
 
-	tag, err := s.pool.Exec(ctx, `DELETE FROM leases WHERE name = $1 AND owner = $2`, name, owner)
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE leases
+		SET expires_at = now(),
+			updated_at = now()
+		WHERE name = $1 AND owner = $2 AND expires_at > now()
+	`, name, owner)
 	if err != nil {
 		return fmt.Errorf("leases/postgres: release: %w", err)
 	}
@@ -166,6 +179,9 @@ func (s *Store) Release(ctx context.Context, name, owner string) error {
 	if l.Owner != owner {
 		return leases.ErrNotOwner
 	}
+	if !l.ExpiresAt.After(time.Now()) {
+		return nil
+	}
 	return nil
 }
 
@@ -179,9 +195,10 @@ func (s *Store) Get(ctx context.Context, name string) (leases.Lease, error) {
 
 	var (
 		owner     string
+		version   int64
 		expiresAt time.Time
 	)
-	err := s.pool.QueryRow(ctx, `SELECT owner, expires_at FROM leases WHERE name = $1`, name).Scan(&owner, &expiresAt)
+	err := s.pool.QueryRow(ctx, `SELECT owner, version, expires_at FROM leases WHERE name = $1`, name).Scan(&owner, &version, &expiresAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return leases.Lease{}, leases.ErrNotFound
@@ -192,6 +209,7 @@ func (s *Store) Get(ctx context.Context, name string) (leases.Lease, error) {
 	return leases.Lease{
 		Name:      name,
 		Owner:     owner,
+		Version:   version,
 		ExpiresAt: expiresAt,
 	}, nil
 }

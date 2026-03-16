@@ -35,9 +35,14 @@ func (s *MemoryStore) TryAcquire(_ context.Context, name, owner string, ttl time
 	now := s.now()
 	l, ok := s.leases[name]
 	if !ok || !l.ExpiresAt.After(now) {
+		version := int64(1)
+		if ok && l.Version > 0 {
+			version = l.Version + 1
+		}
 		out := Lease{
 			Name:      name,
 			Owner:     owner,
+			Version:   version,
 			ExpiresAt: now.Add(ttl),
 		}
 		s.leases[name] = out
@@ -63,10 +68,13 @@ func (s *MemoryStore) Renew(_ context.Context, name, owner string, ttl time.Dura
 	}
 
 	now := s.now()
-	// Allow renewing even if already expired; the caller still owns it in memory until stolen.
+	if !l.ExpiresAt.After(now) {
+		return Lease{}, false, ErrExpired
+	}
 	out := Lease{
 		Name:      name,
 		Owner:     owner,
+		Version:   l.Version,
 		ExpiresAt: now.Add(ttl),
 	}
 	s.leases[name] = out
@@ -88,7 +96,12 @@ func (s *MemoryStore) Release(_ context.Context, name, owner string) error {
 	if l.Owner != owner {
 		return ErrNotOwner
 	}
-	delete(s.leases, name)
+	now := s.now()
+	if !l.ExpiresAt.After(now) {
+		return nil
+	}
+	l.ExpiresAt = now
+	s.leases[name] = l
 	return nil
 }
 

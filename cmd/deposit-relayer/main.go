@@ -80,7 +80,7 @@ func main() {
 		threshold   = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 
 		depositImageID = flag.String("deposit-image-id", "", "deposit zkVM image id (bytes32 hex, required)")
-		owalletIVK     = flag.String("owallet-ivk", "", "optional 64-byte OWallet IVK hex for binary guest private input mode")
+		owalletIVK     = flag.String("owallet-ivk", "", "64-byte OWallet IVK hex for binary guest private input mode (required)")
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
@@ -174,8 +174,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: parse --owallet-ivk: %v\n", err)
 		os.Exit(2)
 	}
-	if n := len(owalletIVKBytes); n != 0 && n != 64 {
-		fmt.Fprintf(os.Stderr, "error: --owallet-ivk must be 64 bytes when set, got %d\n", n)
+	if n := len(owalletIVKBytes); n != 64 {
+		fmt.Fprintf(os.Stderr, "error: --owallet-ivk must be exactly 64 bytes, got %d\n", n)
 		os.Exit(2)
 	}
 	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)

@@ -29,7 +29,7 @@ type Config struct {
 	// ReadinessCheck is evaluated for /readyz. Nil means always ready.
 	ReadinessCheck func(context.Context) error
 
-	// AllowedContracts limits /v1/send targets. Empty means allow any address.
+	// AllowedContracts limits /v1/send targets. Empty means /v1/send fails closed.
 	AllowedContracts []common.Address
 
 	// MaxBodyBytes limits request sizes to prevent memory DoS. Defaults to 1 MiB.
@@ -192,11 +192,13 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			value = v
 		}
 
-		if len(allowedContracts) > 0 {
-			if _, ok := allowedContracts[to]; !ok {
-				writeJSON(w, http.StatusForbidden, map[string]any{"error": "contract_not_allowed"})
-				return
-			}
+		if len(allowedContracts) == 0 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "contract_allowlist_not_configured"})
+			return
+		}
+		if _, ok := allowedContracts[to]; !ok {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "contract_not_allowed"})
+			return
 		}
 
 		timeout := time.Duration(cfg.MaxWaitSeconds) * time.Second

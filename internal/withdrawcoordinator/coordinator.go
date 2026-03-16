@@ -15,6 +15,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/batching"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/dlq"
+	"github.com/juno-intents/intents-juno/internal/leases"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
@@ -22,6 +23,7 @@ import (
 var (
 	ErrInvalidConfig        = errors.New("withdrawcoordinator: invalid config")
 	ErrRebroadcastExhausted = errors.New("withdrawcoordinator: rebroadcast attempts exhausted")
+	ErrLeadershipLost       = errors.New("withdrawcoordinator: leadership lost")
 )
 
 const (
@@ -82,7 +84,8 @@ type Config struct {
 	// DLQStore is an optional dead-letter queue store. If nil, DLQ insertion is skipped.
 	DLQStore dlq.Store
 
-	ExpiryPolicy policy.WithdrawExpiryConfig
+	ExpiryPolicy     policy.WithdrawExpiryConfig
+	LeaderLeaseStore leases.Store
 
 	Now func() time.Time
 }
@@ -107,6 +110,9 @@ type Coordinator struct {
 	// This prevents duplicate re-claims (after claim TTL expiry) from being
 	// appended multiple times before a flush occurs.
 	pendingIDs map[[32]byte]struct{}
+
+	leaderLeaseStore leases.Store
+	currentLeader    leases.Lease
 }
 
 func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, txChecker TxChecker, log *slog.Logger) (*Coordinator, error) {
@@ -170,16 +176,17 @@ func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broad
 	}
 
 	return &Coordinator{
-		cfg:         cfg,
-		store:       store,
-		planner:     planner,
-		signer:      signer,
-		broadcaster: broadcaster,
-		confirmer:   confirmer,
-		txChecker:   txChecker,
-		log:         log,
-		batcher:     b,
-		pendingIDs:  make(map[[32]byte]struct{}),
+		cfg:              cfg,
+		store:            store,
+		planner:          planner,
+		signer:           signer,
+		broadcaster:      broadcaster,
+		confirmer:        confirmer,
+		txChecker:        txChecker,
+		log:              log,
+		batcher:          b,
+		pendingIDs:       make(map[[32]byte]struct{}),
+		leaderLeaseStore: cfg.LeaderLeaseStore,
 	}, nil
 }
 
@@ -201,6 +208,37 @@ func (c *Coordinator) WithBlobStore(store blobstore.Store) *Coordinator {
 	return c
 }
 
+func (c *Coordinator) SetLeaderLease(lease leases.Lease) {
+	c.currentLeader = lease
+}
+
+func (c *Coordinator) ClearLeaderLease() {
+	c.currentLeader = leases.Lease{}
+}
+
+func (c *Coordinator) assertLeadership(ctx context.Context) error {
+	if c.leaderLeaseStore == nil {
+		return nil
+	}
+	if c.currentLeader.Name == "" || c.currentLeader.Owner == "" || c.currentLeader.Version <= 0 {
+		return fmt.Errorf("%w: missing current leader lease", ErrInvalidConfig)
+	}
+	lease, err := c.leaderLeaseStore.Get(ctx, c.currentLeader.Name)
+	if err != nil {
+		if errors.Is(err, leases.ErrNotFound) {
+			return ErrLeadershipLost
+		}
+		return err
+	}
+	if lease.Owner != c.currentLeader.Owner || lease.Version != c.currentLeader.Version {
+		return ErrLeadershipLost
+	}
+	if !lease.ExpiresAt.After(c.cfg.Now()) {
+		return ErrLeadershipLost
+	}
+	return nil
+}
+
 func (c *Coordinator) IngestWithdrawRequested(ctx context.Context, w withdraw.Withdrawal) error {
 	_, _, err := c.store.UpsertRequested(ctx, w)
 	return err
@@ -210,6 +248,10 @@ func (c *Coordinator) IngestWithdrawRequested(ctx context.Context, w withdraw.Wi
 // - resume in-progress batches from durable state
 // - claim new withdrawals and flush on maxItems/maxAge
 func (c *Coordinator) Tick(ctx context.Context) error {
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
+
 	if err := c.resume(ctx); err != nil {
 		return err
 	}
@@ -220,6 +262,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 		toClaim = 0
 	}
 	if toClaim > 0 {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
 		ws, err := c.store.ClaimUnbatched(ctx, c.cfg.Owner, c.cfg.ClaimTTL, toClaim)
 		if err != nil {
 			return err
@@ -231,6 +276,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 			c.pendingIDs[w.ID] = struct{}{}
 			batch, ok := c.batcher.Add(w.ID, w)
 			if ok {
+				if err := c.assertLeadership(ctx); err != nil {
+					return err
+				}
 				c.releasePending(batch.Items)
 				if err := c.processNewBatch(ctx, batch); err != nil {
 					return err
@@ -240,6 +288,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	}
 
 	if batch, ok := c.batcher.FlushDue(); ok {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
 		c.releasePending(batch.Items)
 		if err := c.processNewBatch(ctx, batch); err != nil {
 			return err
@@ -266,6 +317,9 @@ func (c *Coordinator) resume(ctx context.Context) error {
 			return err
 		}
 		for _, b := range batches {
+			if err := c.assertLeadership(ctx); err != nil {
+				return err
+			}
 			if err := c.signBatch(ctx, b.ID); err != nil {
 				return err
 			}
@@ -278,6 +332,9 @@ func (c *Coordinator) resume(ctx context.Context) error {
 		return err
 	}
 	for _, b := range signedBatches {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
 		if err := c.broadcastBatch(ctx, b.ID); err != nil {
 			return err
 		}
@@ -289,6 +346,9 @@ func (c *Coordinator) resume(ctx context.Context) error {
 		return err
 	}
 	for _, b := range bcast {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
 		if err := c.confirmBatch(ctx, b.ID); err != nil {
 			return err
 		}
@@ -311,6 +371,9 @@ func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[
 	batchID := batching.WithdrawalBatchIDV1(ids)
 	plan, err := c.planner.Plan(ctx, batchID, withdrawals)
 	if err != nil {
+		return err
+	}
+	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
 
@@ -355,6 +418,9 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 	}
 
 	c.log.Info("batch signing", "batch_id", hex.EncodeToString(batchID[:]))
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
 	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
 	if err != nil {
 		if allowReplan {
@@ -369,6 +435,9 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 		if dlqErr := c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error()); dlqErr != nil {
 			return dlqErr
 		}
+		return err
+	}
+	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
 	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
@@ -397,6 +466,9 @@ func (c *Coordinator) maybeReplanBatchAfterSigningFailure(ctx context.Context, b
 
 	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
 	if err != nil {
+		return false, err
+	}
+	if err := c.assertLeadership(ctx); err != nil {
 		return false, err
 	}
 	if bytes.Equal(plan, b.TxPlan) {
@@ -443,8 +515,14 @@ func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) erro
 	}
 
 	c.log.Info("batch broadcasting", "batch_id", hex.EncodeToString(batchID[:]))
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
 	txid, err := c.broadcaster.Broadcast(ctx, b.SignedTx)
 	if err != nil {
+		return err
+	}
+	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
 	if err := c.store.SetBatchBroadcasted(ctx, batchID, txid); err != nil {
@@ -469,6 +547,9 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 		return err
 	}
 	c.log.Info("batch confirming", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
 	if err := c.confirmer.WaitConfirmed(ctx, b.JunoTxID); err != nil {
 		if errors.Is(err, ErrConfirmationPending) {
 			return nil
@@ -519,7 +600,7 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			if !b.NextRebroadcastAt.IsZero() && now.Before(b.NextRebroadcastAt) {
 				return nil
 			}
-			return c.replanAndRebroadcastBatch(ctx, b.ID)
+			return c.rebroadcastSignedBatch(ctx, b.ID)
 		}
 		return err
 	}
@@ -527,6 +608,9 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 }
 
 func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, withdrawalIDs [][32]byte, junoTxID string) error {
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
 	if c.paidMarker == nil {
 		return fmt.Errorf("%w: nil paid marker", ErrInvalidConfig)
 	}
@@ -578,7 +662,7 @@ func (c *Coordinator) waitOneBlockAndRecheck(ctx context.Context, txid string) (
 	return c.txChecker.TxStatus(ctx, txid)
 }
 
-func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32]byte) error {
+func (c *Coordinator) rebroadcastSignedBatch(ctx context.Context, batchID [32]byte) error {
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -586,43 +670,28 @@ func (c *Coordinator) replanAndRebroadcastBatch(ctx context.Context, batchID [32
 	if b.State != withdraw.BatchStateBroadcasted {
 		return nil
 	}
-
-	withdrawals := make([]withdraw.Withdrawal, 0, len(b.WithdrawalIDs))
-	for _, wid := range b.WithdrawalIDs {
-		w, err := c.store.GetWithdrawal(ctx, wid)
-		if err != nil {
-			return err
-		}
-		withdrawals = append(withdrawals, w)
+	if len(b.SignedTx) == 0 {
+		return fmt.Errorf("withdrawcoordinator: missing signed tx for rebroadcast batch %x", b.ID[:8])
 	}
 
-	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
+	c.log.Info("rebroadcasting existing signed batch", "batch_id", hex.EncodeToString(batchID[:]), "attempt", b.RebroadcastAttempts+1)
+	if err := c.assertLeadership(ctx); err != nil {
+		return err
+	}
+	txid, err := c.broadcaster.Broadcast(ctx, b.SignedTx)
 	if err != nil {
 		return err
 	}
-	if err := c.store.ResetBatchPlanned(ctx, b.ID, plan); err != nil {
-		if !errors.Is(err, withdraw.ErrInvalidTransition) {
-			return err
-		}
-		b2, err2 := c.store.GetBatch(ctx, b.ID)
-		if err2 != nil {
-			return err2
-		}
-		// Another worker progressed the batch.
-		if b2.State != withdraw.BatchStateBroadcasted {
-			return nil
-		}
+	if txid == "" {
+		return fmt.Errorf("withdrawcoordinator: rebroadcast returned empty txid")
+	}
+	if b.JunoTxID != "" && txid != b.JunoTxID {
+		return fmt.Errorf("withdrawcoordinator: rebroadcast txid mismatch: got %s want %s", txid, b.JunoTxID)
+	}
+	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
-	c.log.Info("batch replanned for rebroadcast", "batch_id", hex.EncodeToString(batchID[:]), "attempt", b.RebroadcastAttempts+1)
-	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
-		return err
-	}
-
-	if err := c.signBatch(ctx, b.ID); err != nil {
-		return err
-	}
-	if err := c.broadcastBatch(ctx, b.ID); err != nil {
+	if err := c.store.SetBatchBroadcasted(ctx, b.ID, txid); err != nil {
 		return err
 	}
 
@@ -662,6 +731,9 @@ func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][3
 	}
 
 	for _, p := range plans {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
 		if err := c.extender.Extend(ctx, p.IDs, p.NewExpiry); err != nil {
 			return err
 		}

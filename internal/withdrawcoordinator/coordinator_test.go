@@ -12,6 +12,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/batching"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/dlq"
+	"github.com/juno-intents/intents-juno/internal/leases"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -23,6 +24,24 @@ func (p *stubPlanner) Plan(_ context.Context, batchID [32]byte, withdrawals []wi
 	_ = batchID
 	_ = withdrawals
 	p.calls++
+	return []byte(`{"v":1}`), nil
+}
+
+type leaseStealingPlanner struct {
+	leaseStore leases.Store
+	now        *time.Time
+	ttl        time.Duration
+	calls      int
+}
+
+func (p *leaseStealingPlanner) Plan(ctx context.Context, _ [32]byte, _ []withdraw.Withdrawal) ([]byte, error) {
+	p.calls++
+	*p.now = (*p.now).Add(p.ttl + time.Second)
+	if _, ok, err := p.leaseStore.TryAcquire(ctx, "withdraw-coordinator", "b", p.ttl); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, errors.New("failed to steal leader lease")
+	}
 	return []byte(`{"v":1}`), nil
 }
 
@@ -75,11 +94,15 @@ func (s *txPlanAwareSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) (
 
 type stubBroadcaster struct {
 	calls int
+	txid  string
 }
 
 func (b *stubBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, error) {
 	_ = rawTx
 	b.calls++
+	if b.txid != "" {
+		return b.txid, nil
+	}
 	return "tx1", nil
 }
 
@@ -209,7 +232,7 @@ func TestCoordinator_BuildsSignsBroadcastsAndConfirms_OnMaxItems(t *testing.T) {
 	store := withdraw.NewMemoryStore(nowFn)
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-old"}
 	confirmer := &stubConfirmer{}
 
 	c, err := newCoordinatorForTest(Config{
@@ -278,7 +301,7 @@ func TestCoordinator_ResumeFromPlannedBatch(t *testing.T) {
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-old"}
 	confirmer := &stubConfirmer{}
 
 	c, err := newCoordinatorForTest(Config{
@@ -297,6 +320,58 @@ func TestCoordinator_ResumeFromPlannedBatch(t *testing.T) {
 	}
 	if signer.calls != 1 || broadcaster.calls != 1 || confirmer.calls != 1 {
 		t.Fatalf("unexpected resume calls: signer=%d broadcaster=%d confirmer=%d", signer.calls, broadcaster.calls, confirmer.calls)
+	}
+}
+
+func TestCoordinator_TickRejectsStaleLeaderLeaseAfterPlannerPause(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+	lease, ok, err := leaseStore.TryAcquire(ctx, "withdraw-coordinator", "a", 10*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire leader lease: ok=%v err=%v", ok, err)
+	}
+
+	store := withdraw.NewMemoryStore(nowFn)
+	planner := &leaseStealingPlanner{
+		leaseStore: leaseStore,
+		now:        &now,
+		ttl:        10 * time.Second,
+	}
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:            "a",
+		MaxItems:         1,
+		MaxAge:           3 * time.Minute,
+		ClaimTTL:         10 * time.Second,
+		LeaderLeaseStore: leaseStore,
+		Now:              nowFn,
+	}, store, planner, &stubSigner{}, &stubBroadcaster{txid: "tx1"}, &stubConfirmer{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.SetLeaderLease(lease)
+
+	w := withdraw.Withdrawal{ID: seq32(0x31), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if err := c.IngestWithdrawRequested(ctx, w); err != nil {
+		t.Fatalf("IngestWithdrawRequested: %v", err)
+	}
+
+	err = c.Tick(ctx)
+	if !errors.Is(err, ErrLeadershipLost) {
+		t.Fatalf("expected ErrLeadershipLost, got %v", err)
+	}
+
+	planned, err := store.ListBatchesByState(ctx, withdraw.BatchStatePlanned)
+	if err != nil {
+		t.Fatalf("ListBatchesByState: %v", err)
+	}
+	if len(planned) != 0 {
+		t.Fatalf("expected no planned batches after leadership loss, got %d", len(planned))
 	}
 }
 
@@ -377,7 +452,7 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-old"}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationPending}}
 	c, err := newCoordinatorForTest(Config{
 		Owner:    "a",
@@ -401,14 +476,14 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	if b.State != withdraw.BatchStateBroadcasted {
 		t.Fatalf("expected batch to be re-broadcasted, got %s", b.State)
 	}
-	if b.JunoTxID != "tx1" {
-		t.Fatalf("expected rebroadcast txid, got %q", b.JunoTxID)
+	if b.JunoTxID != "tx-old" {
+		t.Fatalf("expected rebroadcast to keep original txid, got %q", b.JunoTxID)
 	}
-	if planner.calls != 1 {
-		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	if planner.calls != 0 {
+		t.Fatalf("planner calls: got %d want 0", planner.calls)
 	}
-	if signer.calls != 1 {
-		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	if signer.calls != 0 {
+		t.Fatalf("signer calls: got %d want 0", signer.calls)
 	}
 	if broadcaster.calls != 1 {
 		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
@@ -439,7 +514,7 @@ func TestCoordinator_ReplansWhenSigningPlanTurnsStale(t *testing.T) {
 
 	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":2}`)}}
 	signer := &txPlanAwareSigner{}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-old"}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending}}
 	dlqStore := dlq.NewMemoryStore(nil)
 
@@ -530,7 +605,7 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-old"}
 	confirmer := &stubConfirmer{
 		errs: []error{
 			ErrConfirmationMissing, // first tick triggers rebroadcast
@@ -551,14 +626,14 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick #1: %v", err)
 	}
-	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 {
-		t.Fatalf("expected one recovery cycle after first tick")
+	if planner.calls != 0 || signer.calls != 0 || broadcaster.calls != 1 {
+		t.Fatalf("expected one rebroadcast without replanning after first tick")
 	}
 
 	if err := c.Tick(ctx); err != nil {
 		t.Fatalf("Tick #2: %v", err)
 	}
-	if planner.calls != 1 || signer.calls != 1 || broadcaster.calls != 1 {
+	if planner.calls != 0 || signer.calls != 0 || broadcaster.calls != 1 {
 		t.Fatalf("expected no additional recovery during backoff window")
 	}
 }

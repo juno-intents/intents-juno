@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -53,6 +54,45 @@ func (p *staticProofRequester) RequestProof(_ context.Context, req proofclient.R
 	p.gotReq.Journal = append([]byte(nil), req.Journal...)
 	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
 	return p.res, nil
+}
+
+type blockingProofRequester struct {
+	res proofclient.Result
+
+	enterOnce sync.Once
+	enterCh   chan struct{}
+	releaseCh chan struct{}
+}
+
+func newBlockingProofRequester(res proofclient.Result) *blockingProofRequester {
+	return &blockingProofRequester{
+		res:       res,
+		enterCh:   make(chan struct{}),
+		releaseCh: make(chan struct{}),
+	}
+}
+
+func (p *blockingProofRequester) RequestProof(ctx context.Context, _ proofclient.Request) (proofclient.Result, error) {
+	p.enterOnce.Do(func() { close(p.enterCh) })
+	select {
+	case <-ctx.Done():
+		return proofclient.Result{}, ctx.Err()
+	case <-p.releaseCh:
+		return p.res, nil
+	}
+}
+
+func (p *blockingProofRequester) waitEntered(t *testing.T, timeout time.Duration) {
+	t.Helper()
+	select {
+	case <-p.enterCh:
+	case <-time.After(timeout):
+		t.Fatalf("timeout waiting for proof requester entry")
+	}
+}
+
+func (p *blockingProofRequester) release() {
+	close(p.releaseCh)
 }
 
 type recordingWitnessExtractor struct {
@@ -106,6 +146,49 @@ type failSetFinalizedStore struct {
 
 func (s *failSetFinalizedStore) SetBatchFinalized(context.Context, [32]byte, string) error {
 	return s.err
+}
+
+type trackingLeaseStore struct {
+	leases.Store
+
+	mu         sync.Mutex
+	renewCalls int
+	failAfter  int
+	renewErr   error
+}
+
+func (s *trackingLeaseStore) Renew(ctx context.Context, name, owner string, ttl time.Duration) (leases.Lease, bool, error) {
+	s.mu.Lock()
+	s.renewCalls++
+	call := s.renewCalls
+	failAfter := s.failAfter
+	renewErr := s.renewErr
+	s.mu.Unlock()
+	if failAfter > 0 && call >= failAfter {
+		if renewErr == nil {
+			renewErr = leases.ErrNotOwner
+		}
+		return leases.Lease{}, false, renewErr
+	}
+	return s.Store.Renew(ctx, name, owner, ttl)
+}
+
+func (s *trackingLeaseStore) RenewCalls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.renewCalls
+}
+
+func (s *trackingLeaseStore) waitForRenewals(t *testing.T, want int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if s.RenewCalls() >= want {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("timeout waiting for %d renewals, got %d", want, s.RenewCalls())
 }
 
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
@@ -317,9 +400,9 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 		t.Fatalf("base tx hash: got %q want %q", b.BaseTxHash, "0xabc")
 	}
 
-	// Lease should be released on success.
-	if _, err := leaseStore.Get(ctx, batchLeaseName(batchID)); err == nil {
-		t.Fatalf("expected lease to be released")
+	// Lease should be immediately acquirable on success.
+	if _, ok, err := leaseStore.TryAcquire(ctx, batchLeaseName(batchID), "other", 10*time.Second); err != nil || !ok {
+		t.Fatalf("expected lease to be released, ok=%v err=%v", ok, err)
 	}
 }
 
@@ -1263,6 +1346,171 @@ func TestFinalizer_TickContinuesAfterBatchError(t *testing.T) {
 	// This test verifies Tick doesn't stop at the first error.
 	if failExtractor.calls < 2 {
 		t.Fatalf("expected witness extractor called at least 2 times (both batches), got %d", failExtractor.calls)
+	}
+}
+
+func TestFinalizer_RenewsBatchLeaseWhileProofInFlight(t *testing.T) {
+	t.Parallel()
+
+	nowFn := time.Now
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := &trackingLeaseStore{Store: leases.NewMemoryStore(nowFn)}
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x40), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x50)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+		FinalOrchardRoot: common.Hash{},
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	prover := newBlockingProofRequester(proofclient.Result{Seal: []byte{0x99}})
+
+	f, err := New(Config{
+		Owner:               "f1",
+		LeaseTTL:            60 * time.Millisecond,
+		LeaseRenewInterval:  15 * time.Millisecond,
+		MaxBatches:          10,
+		BaseChainID:         31337,
+		BridgeAddress:       bridgeAddr,
+		WithdrawImageID:     common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   1,
+		GasLimit:            123_000,
+		ProofRequestTimeout: time.Second,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- f.IngestCheckpoint(ctx, CheckpointPackage{
+			Checkpoint:         cp,
+			OperatorSignatures: checkpointSigs,
+		})
+	}()
+
+	prover.waitEntered(t, time.Second)
+	leaseStore.waitForRenewals(t, 1, time.Second)
+	prover.release()
+
+	if err := <-errCh; err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected 1 send call, got %d", sender.calls)
+	}
+	if leaseStore.RenewCalls() < 1 {
+		t.Fatalf("expected at least one lease renewal, got %d", leaseStore.RenewCalls())
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateFinalized {
+		t.Fatalf("expected finalized, got %s", b.State)
+	}
+}
+
+func TestFinalizer_AbortsWhenLeaseRenewalFails(t *testing.T) {
+	t.Parallel()
+
+	nowFn := time.Now
+	baseLeaseStore := leases.NewMemoryStore(nowFn)
+	leaseStore := &trackingLeaseStore{
+		Store:     baseLeaseStore,
+		failAfter: 1,
+		renewErr:  leases.ErrNotOwner,
+	}
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x60), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x70)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+		FinalOrchardRoot: common.Hash{},
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	prover := newBlockingProofRequester(proofclient.Result{Seal: []byte{0x99}})
+
+	f, err := New(Config{
+		Owner:               "f1",
+		LeaseTTL:            60 * time.Millisecond,
+		LeaseRenewInterval:  15 * time.Millisecond,
+		MaxBatches:          10,
+		BaseChainID:         31337,
+		BridgeAddress:       bridgeAddr,
+		WithdrawImageID:     common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   1,
+		GasLimit:            123_000,
+		ProofRequestTimeout: time.Second,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- f.IngestCheckpoint(ctx, CheckpointPackage{
+			Checkpoint:         cp,
+			OperatorSignatures: checkpointSigs,
+		})
+	}()
+
+	prover.waitEntered(t, time.Second)
+	leaseStore.waitForRenewals(t, 1, time.Second)
+
+	err = <-errCh
+	if err == nil || !strings.Contains(err.Error(), "renew batch lease") {
+		t.Fatalf("expected lease renewal error, got %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected no send calls after lease loss, got %d", sender.calls)
+	}
+	if _, ok, acquireErr := baseLeaseStore.TryAcquire(ctx, batchLeaseName(batchID), "other", 10*time.Second); acquireErr != nil || !ok {
+		t.Fatalf("expected lease to be released after failure, ok=%v err=%v", ok, acquireErr)
 	}
 }
 

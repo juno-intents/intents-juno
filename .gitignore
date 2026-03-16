@@ -48,3 +48,4 @@ target/
 
 # Terraform (live e2e)
 /deploy/shared/terraform/live-e2e/.terraform/
+/deploy/shared/terraform/app-edge/.terraform/

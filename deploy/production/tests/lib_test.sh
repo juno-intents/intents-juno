@@ -87,6 +87,70 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_checkpoint_signer_kms_provisioner() {
+  local target="$1"
+  local log_file="$2"
+  local provisioned_key_arn="${3:-arn:aws:kms:us-east-1:021490342184:key/provisioned}"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'checkpoint-kms-provisioner %s\n' "\$*" >>"$log_file"
+key_arn="$provisioned_key_arn"
+alias_name=""
+operator_address=""
+reused=false
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --operator-address)
+      operator_address="\$2"
+      shift 2
+      ;;
+    --alias-name)
+      alias_name="\$2"
+      shift 2
+      ;;
+    --key-id)
+      key_arn="\$2"
+      reused=true
+      shift 2
+      ;;
+    --operator-id|--aws-profile|--aws-region|--account-id|--private-key|--description)
+      shift 2
+      ;;
+    *)
+      printf 'unexpected checkpoint kms provisioner arg: %s\n' "\$1" >&2
+      exit 1
+      ;;
+  esac
+done
+printf '{"keyId":"%s","keyArn":"%s","aliasName":"%s","operatorAddress":"%s","reused":%s}\n' \
+  "\${key_arn##*/}" \
+  "\$key_arn" \
+  "\$alias_name" \
+  "\$operator_address" \
+  "\$reused"
+EOF
+  chmod +x "$target"
+}
+
+setup_default_checkpoint_signer_kms_provisioner() {
+  local workdir fake_bin fake_log
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/fake-checkpoint-kms-provisioner.sh"
+  fake_log="$workdir/checkpoint-kms-provisioner.log"
+  write_fake_checkpoint_signer_kms_provisioner "$fake_bin" "$fake_log"
+  export PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN="$fake_bin"
+  export TEST_DEFAULT_CHECKPOINT_SIGNER_KMS_PROVISIONER_DIR="$workdir"
+}
+
+cleanup_default_checkpoint_signer_kms_provisioner() {
+  if [[ -n "${TEST_DEFAULT_CHECKPOINT_SIGNER_KMS_PROVISIONER_DIR:-}" ]]; then
+    rm -rf "$TEST_DEFAULT_CHECKPOINT_SIGNER_KMS_PROVISIONER_DIR"
+    unset TEST_DEFAULT_CHECKPOINT_SIGNER_KMS_PROVISIONER_DIR
+  fi
+  unset PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN
+}
+
 test_render_operator_handoffs_preserves_dkg_tls_dir() {
   local workdir shared_manifest handoff_dir
   workdir="$(mktemp -d)"
@@ -1109,6 +1173,74 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_handoffs_provisions_missing_checkpoint_signer_kms_key() {
+  local workdir shared_manifest dkg_summary handoff_dir fake_bin fake_log old_provisioner
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/fake-checkpoint-kms-provisioner.sh"
+  fake_log="$workdir/checkpoint-kms-provisioner.log"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/op1.key" <<'EOF'
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cat >"$workdir/op2.key" <<'EOF'
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$workdir/op3.key" <<'EOF'
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '(.operators[] | .checkpoint_signer_kms_key_id) = null' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '
+    .operators[0].operator_key_file = "op1.key"
+    | .operators[1].operator_key_file = "op2.key"
+    | .operators[2].operator_key_file = "op3.key"
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  write_fake_checkpoint_signer_kms_provisioner "$fake_bin" "$fake_log"
+  old_provisioner="${PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN:-}"
+  export PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN="$fake_bin"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary" "$workdir/output" "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/provisioned" "handoff provisions missing checkpoint signer kms key id"
+  assert_contains "$(cat "$fake_log")" '--operator-address 0x9999999999999999999999999999999999999999' "provisioner receives operator address"
+  assert_contains "$(cat "$fake_log")" '--private-key 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "provisioner receives operator signer private key"
+  assert_not_contains "$(cat "$handoff_dir/operator-secrets.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "handoff still omits local checkpoint signer key material after kms provisioning"
+
+  if [[ -n "$old_provisioner" ]]; then
+    export PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN="$old_provisioner"
+  else
+    unset PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk() {
   local workdir shared_manifest handoff_dir fake_bin derived_ivk derived_ovk old_path
   workdir="$(mktemp -d)"
@@ -1627,6 +1759,11 @@ EOF
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
   assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "https://ops.alpha.intents-testing.thejunowallet.com" "backoffice public url"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
+  assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
+  assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"
+  assert_eq "$(jq -r '.edge.origin_endpoint' "$app_manifest")" "203.0.113.21" "edge origin endpoint"
+  assert_eq "$(jq -r '.edge.origin_http_port' "$app_manifest")" "80" "edge origin port"
+  assert_eq "$(jq -r '.edge.rate_limit' "$app_manifest")" "2000" "edge rate limit"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
 
   resolved_env="$workdir/resolved-app.env"
@@ -1834,6 +1971,8 @@ EOF
 }
 
 main() {
+  setup_default_checkpoint_signer_kms_provisioner
+  trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
   test_resolve_secret_contract_allows_alpha_literals
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
@@ -1846,6 +1985,7 @@ main() {
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_handoffs_rejects_local_checkpoint_signer_driver
   test_render_operator_handoffs_preserves_secure_preview_signer_configuration
+  test_render_operator_handoffs_provisions_missing_checkpoint_signer_kms_key
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir

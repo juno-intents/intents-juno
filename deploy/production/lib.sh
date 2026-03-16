@@ -481,6 +481,82 @@ production_dkg_operator_signer_key_hex() {
   production_normalize_ecdsa_private_key "$(cat "$operator_key_file")"
 }
 
+production_checkpoint_signer_kms_provisioner_bin() {
+  local override="${PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN:-}"
+  if [[ -n "$override" ]]; then
+    printf '%s\n' "$override"
+    return 0
+  fi
+  printf '%s\n' "$REPO_ROOT/deploy/production/provision-checkpoint-signer-kms.sh"
+}
+
+production_operator_checkpoint_signer_kms_alias() {
+  local environment="$1"
+  local operator_id="$2"
+  printf 'alias/intents-juno-%s-checkpoint-signer-%s\n' \
+    "$(production_safe_slug "${environment,,}")" \
+    "$(production_safe_slug "${operator_id,,}")"
+}
+
+production_resolve_checkpoint_signer_kms_key_id() {
+  local environment="$1"
+  local dkg_summary="$2"
+  local operator_json="$3"
+
+  local operator_id operator_address aws_profile aws_region account_id explicit_key_id
+  local alias_name operator_key_hex provisioner_bin result_json key_arn
+  local -a provision_cmd=()
+
+  operator_id="$(jq -r '.operator_id | select(type == "string" and length > 0)' <<<"$operator_json")"
+  operator_address="$(jq -r '.operator_address // .operator_id // empty' <<<"$operator_json")"
+  aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
+  aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
+  account_id="$(jq -r '.account_id // empty' <<<"$operator_json")"
+  explicit_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
+
+  [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "operator $operator_id is missing a valid operator address for checkpoint signer kms"
+
+  provisioner_bin="$(production_checkpoint_signer_kms_provisioner_bin)"
+  [[ -x "$provisioner_bin" ]] || die "checkpoint signer kms provisioner not found or not executable: $provisioner_bin"
+
+  provision_cmd=(
+    "$provisioner_bin"
+    --operator-id "$operator_id"
+    --operator-address "$operator_address"
+  )
+  if [[ -n "$aws_profile" ]]; then
+    provision_cmd+=(--aws-profile "$aws_profile")
+  fi
+  if [[ -n "$aws_region" ]]; then
+    provision_cmd+=(--aws-region "$aws_region")
+  fi
+  if [[ -n "$account_id" ]]; then
+    provision_cmd+=(--account-id "$account_id")
+  fi
+  if [[ -n "$explicit_key_id" ]]; then
+    provision_cmd+=(--key-id "$explicit_key_id")
+  else
+    alias_name="$(production_operator_checkpoint_signer_kms_alias "$environment" "$operator_id")"
+    operator_key_hex="$(production_dkg_operator_signer_key_hex "$dkg_summary" "$operator_id" || true)"
+    [[ -n "$operator_key_hex" ]] || die "operator $operator_id is missing operator_key_file; cannot provision checkpoint signer kms key"
+    provision_cmd+=(
+      --alias-name "$alias_name"
+      --private-key "$operator_key_hex"
+      --description "intents-juno checkpoint signer for $environment $operator_id"
+    )
+  fi
+
+  result_json="$(mktemp)"
+  if ! "${provision_cmd[@]}" >"$result_json"; then
+    rm -f "$result_json"
+    die "failed to resolve checkpoint signer kms key for operator $operator_id"
+  fi
+  key_arn="$(jq -r '.keyArn // empty' "$result_json")"
+  rm -f "$result_json"
+  [[ "$key_arn" =~ ^arn:aws:kms:[^:]+:[0-9]{12}:key/.+$ ]] || die "invalid checkpoint signer kms key arn for operator $operator_id: $key_arn"
+  printf '%s\n' "$key_arn"
+}
+
 production_operator_txsign_signer_key() {
   local dkg_summary="$1"
   local operator_id="$2"
@@ -1226,6 +1302,8 @@ production_render_app_handoff() {
   local bridge_refund_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json
+  local edge_enabled edge_state_path edge_origin_record_name edge_origin_endpoint
+  local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -1284,6 +1362,13 @@ production_render_app_handoff() {
   ops_probe_url="$ops_public_url"
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
   ops_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
+  edge_enabled="true"
+  edge_state_path=""
+  edge_origin_record_name="origin.${public_subdomain}"
+  edge_origin_endpoint="$public_endpoint"
+  edge_origin_http_port=80
+  edge_rate_limit=2000
+  edge_enable_shield_advanced="false"
 
   app_dir="$(production_app_dir "$output_dir")"
   mkdir -p "$app_dir"
@@ -1329,6 +1414,13 @@ production_render_app_handoff() {
     --argjson operator_addresses "$operator_addresses_json" \
     --argjson service_urls "$service_urls_json" \
     --argjson operator_endpoints "$operator_endpoints_json" \
+    --arg edge_enabled "$edge_enabled" \
+    --arg edge_state_path "$app_dir/edge.tfstate" \
+    --arg edge_origin_record_name "$edge_origin_record_name" \
+    --arg edge_origin_endpoint "$edge_origin_endpoint" \
+    --argjson edge_origin_http_port "$edge_origin_http_port" \
+    --argjson edge_rate_limit "$edge_rate_limit" \
+    --arg edge_enable_shield_advanced "$edge_enable_shield_advanced" \
     '{
       version: $version,
       environment: $environment,
@@ -1372,6 +1464,15 @@ production_render_app_handoff() {
         mode: $dns_mode,
         zone_id: $zone_id,
         ttl_seconds: $ttl_seconds
+      },
+      edge: {
+        enabled: ($edge_enabled == "true"),
+        state_path: $edge_state_path,
+        origin_record_name: $edge_origin_record_name,
+        origin_endpoint: $edge_origin_endpoint,
+        origin_http_port: $edge_origin_http_port,
+        rate_limit: $edge_rate_limit,
+        enable_shield_advanced: ($edge_enable_shield_advanced == "true")
       }
     }' >"$manifest_path"
 }
@@ -1456,7 +1557,7 @@ production_render_operator_handoffs() {
 
     case "$checkpoint_signer_driver" in
       aws-kms)
-        [[ -n "$checkpoint_signer_kms_key_id" ]] || die "operator $operator_id uses checkpoint_signer_driver=aws-kms but checkpoint_signer_kms_key_id is empty"
+        checkpoint_signer_kms_key_id="$(production_resolve_checkpoint_signer_kms_key_id "$env_slug" "$dkg_summary" "$operator_json")"
         ;;
       *)
         die "operator $operator_id must use checkpoint_signer_driver=aws-kms (got: $checkpoint_signer_driver)"

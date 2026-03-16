@@ -395,3 +395,9 @@ variable "dkg_s3_key_prefix" {
   type        = string
   default     = "dkg/keypackages"
 }
+
+variable "alarm_actions" {
+  description = "Optional CloudWatch alarm action ARNs."
+  type        = list(string)
+  default     = []
+}

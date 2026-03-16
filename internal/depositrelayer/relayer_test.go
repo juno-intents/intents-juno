@@ -214,6 +214,18 @@ func (s *finalizeFailStore) FinalizeBatch(context.Context, [][32]byte, checkpoin
 	return s.err
 }
 
+func testOWalletIVKBytes() []byte {
+	ivk := make([]byte, 64)
+	for i := range ivk {
+		ivk[i] = byte(i + 1)
+	}
+	return ivk
+}
+
+func testDepositWitnessItem() []byte {
+	return bytes.Repeat([]byte{0x7a}, proverinput.DepositWitnessItemLen)
+}
+
 type stubDepositRuntimeSettingsProvider struct {
 	settings runtimeconfig.Settings
 	err      error
@@ -324,6 +336,7 @@ func TestRelayer_IngestDeposit_RejectsLeafIndexOverflow(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -349,6 +362,49 @@ func TestRelayer_IngestDeposit_RejectsLeafIndexOverflow(t *testing.T) {
 	}
 }
 
+func TestRelayer_NewRejectsInvalidOWalletIVKLength(t *testing.T) {
+	t.Parallel()
+
+	operatorKey := mustOperatorKey(t)
+
+	_, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   []byte{0x01},
+		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{}, nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
+func TestRelayer_NewRejectsMissingOWalletIVK(t *testing.T) {
+	t.Parallel()
+
+	operatorKey := mustOperatorKey(t)
+
+	_, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{}, nil)
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
 func TestRelayer_RefillFromStore_PromotesSeenAndRejectsBelowMin(t *testing.T) {
 	t.Parallel()
 
@@ -370,6 +426,7 @@ func TestRelayer_RefillFromStore_PromotesSeenAndRejectsBelowMin(t *testing.T) {
 		BaseChainID:       31337,
 		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
 		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
 		OperatorThreshold: 1,
 		MaxItems:          10,
@@ -463,6 +520,7 @@ func TestRelayer_ApplyBatchOutcomeFromHash_ReconcilesMixedMintedAndSkipped(t *te
 		BaseChainID:       uint32(cp.BaseChainID),
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
 		OperatorThreshold: 1,
 		MaxItems:          10,
@@ -546,6 +604,7 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -566,10 +625,11 @@ func TestRelayer_SubmitsOnMaxItems(t *testing.T) {
 	}
 
 	if err := r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	}); err != nil {
 		t.Fatalf("IngestDeposit: %v", err)
 	}
@@ -685,6 +745,7 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -704,10 +765,11 @@ func TestRelayer_DedupesDeposits(t *testing.T) {
 	}
 
 	dep := DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	}
 	if err := r.IngestDeposit(ctx, dep); err != nil {
 		t.Fatalf("IngestDeposit #1: %v", err)
@@ -748,11 +810,12 @@ func TestRelayer_ProcessesConfirmedDepositsFromStore(t *testing.T) {
 
 	store := deposit.NewMemoryStore()
 	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
-		DepositID:     depositID,
-		Commitment:    [32]byte(cm),
-		LeafIndex:     7,
-		Amount:        1000,
-		BaseRecipient: [20]byte(recipient),
+		DepositID:        depositID,
+		Commitment:       [32]byte(cm),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    [20]byte(recipient),
+		ProofWitnessItem: testDepositWitnessItem(),
 	}); err != nil {
 		t.Fatalf("UpsertConfirmed: %v", err)
 	}
@@ -765,6 +828,7 @@ func TestRelayer_ProcessesConfirmedDepositsFromStore(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -817,6 +881,7 @@ func TestRelayer_DoesNotClaimDepositsWhenBaseRelayerNotReady(t *testing.T) {
 		BaseChainID:       uint32(cp.BaseChainID),
 		BridgeAddress:     bridgeAddr,
 		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -921,6 +986,7 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -940,10 +1006,11 @@ func TestRelayer_SubmitFailsOnRevertedReceipt(t *testing.T) {
 	}
 
 	err = r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatalf("expected error")
@@ -994,6 +1061,7 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1009,10 +1077,11 @@ func TestRelayer_QueuesUntilCheckpoint(t *testing.T) {
 	t.Cleanup(cancel)
 
 	if err := r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	}); err != nil {
 		t.Fatalf("IngestDeposit: %v", err)
 	}
@@ -1051,6 +1120,7 @@ func TestRelayer_RejectsInvalidOperatorSignature(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1118,6 +1188,7 @@ func TestRelayer_FinalizeStoreFailureLeavesDepositSubmitted(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1137,10 +1208,11 @@ func TestRelayer_FinalizeStoreFailureLeavesDepositSubmitted(t *testing.T) {
 	}
 
 	err = r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatalf("expected ingest error")
@@ -1185,6 +1257,7 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1200,6 +1273,7 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1223,11 +1297,12 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 	}
 
 	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
-		DepositID:     depositID,
-		Commitment:    [32]byte(cm),
-		LeafIndex:     7,
-		Amount:        1000,
-		BaseRecipient: [20]byte(recipient),
+		DepositID:        depositID,
+		Commitment:       [32]byte(cm),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    [20]byte(recipient),
+		ProofWitnessItem: testDepositWitnessItem(),
 	}); err != nil {
 		t.Fatalf("UpsertConfirmed: %v", err)
 	}
@@ -1306,6 +1381,7 @@ func TestRelayer_RetriesSubmittedDepositsOnLaterFlush(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1325,10 +1401,11 @@ func TestRelayer_RetriesSubmittedDepositsOnLaterFlush(t *testing.T) {
 	}
 
 	err = r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatalf("expected initial submit error")
@@ -1402,6 +1479,7 @@ func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) 
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1421,10 +1499,11 @@ func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) 
 		t.Fatalf("r1 IngestCheckpoint: %v", err)
 	}
 	err = r1.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatalf("expected initial submit error")
@@ -1447,6 +1526,7 @@ func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) 
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -1922,6 +2002,7 @@ func TestRelayer_DLQ_ProofAttemptsExhausted(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -2015,6 +2096,7 @@ func TestRelayer_DLQInsertFailureKeepsProofAttemptsRetryable(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -2036,10 +2118,11 @@ func TestRelayer_DLQInsertFailureKeepsProofAttemptsRetryable(t *testing.T) {
 	}
 
 	err = r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatal("expected dlq persistence error")
@@ -2133,6 +2216,7 @@ func TestRelayer_DLQ_BridgeTxReverted(t *testing.T) {
 		BaseChainID:       baseChainID,
 		BridgeAddress:     bridge,
 		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		MaxItems:          1,
@@ -2153,10 +2237,11 @@ func TestRelayer_DLQ_BridgeTxReverted(t *testing.T) {
 	}
 
 	err = r.IngestDeposit(ctx, DepositEvent{
-		Commitment: cm,
-		LeafIndex:  7,
-		Amount:     1000,
-		Memo:       memoBytes[:],
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
 	})
 	if err == nil {
 		t.Fatalf("expected error from reverted tx")

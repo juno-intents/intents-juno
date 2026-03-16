@@ -52,23 +52,23 @@ func NewLeaderElector(store leases.Store, leaseName, owner string, ttl time.Dura
 }
 
 // Tick attempts to renew leadership if already held, otherwise tries to acquire it.
-func (l *LeaderElector) Tick(ctx context.Context) (bool, error) {
+func (l *LeaderElector) Tick(ctx context.Context) (leases.Lease, bool, error) {
 	if l == nil || l.store == nil {
-		return false, fmt.Errorf("%w: nil leader elector", ErrInvalidConfig)
+		return leases.Lease{}, false, fmt.Errorf("%w: nil leader elector", ErrInvalidConfig)
 	}
 	if l.readinessChecker != nil {
 		if err := l.readinessChecker.Ready(ctx); err != nil {
-			return false, nil
+			return leases.Lease{}, false, nil
 		}
 	}
 
-	if _, ok, err := l.store.Renew(ctx, l.name, l.owner, l.ttl); err == nil && ok {
-		return true, nil
+	if lease, ok, err := l.store.Renew(ctx, l.name, l.owner, l.ttl); err == nil && ok {
+		return lease, true, nil
 	}
 
-	_, ok, err := l.store.TryAcquire(ctx, l.name, l.owner, l.ttl)
+	lease, ok, err := l.store.TryAcquire(ctx, l.name, l.owner, l.ttl)
 	if err != nil {
-		return false, err
+		return leases.Lease{}, false, err
 	}
-	return ok, nil
+	return lease, ok, nil
 }

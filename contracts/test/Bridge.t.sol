@@ -468,6 +468,171 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
+    function test_finalizeWithdrawBatch_skipsRefundedItemsAndFinalizesRemaining() public {
+        address alice = makeAddr("alice");
+        address bob = makeAddr("bob");
+        uint256 amount = 100_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+        vm.prank(address(bridge));
+        token.mint(bob, amount);
+
+        bytes memory uaAlice = bytes("uaddr1-alice");
+        bytes memory uaBob = bytes("uaddr1-bob");
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 widAlice = bridge.requestWithdraw(amount, uaAlice);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        token.approve(address(bridge), amount);
+        bytes32 widBob = bridge.requestWithdraw(amount, uaBob);
+        vm.stopPrank();
+
+        bytes32[] memory ids = new bytes32[](1);
+        ids[0] = widAlice;
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
+        bridge.markWithdrawPaidBatch(ids, paidSigs);
+
+        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        bridge.refund(widBob);
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 tip = (fee * TIP_BPS) / 10_000;
+        uint256 feeToDist = fee - tip;
+        uint256 net = amount - fee;
+
+        Bridge.Checkpoint memory cp = _checkpoint();
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](2);
+        items[0] = Bridge.FinalizeItem({withdrawalId: widAlice, recipientUAHash: keccak256(uaAlice), netAmount: net});
+        items[1] = Bridge.FinalizeItem({withdrawalId: widBob, recipientUAHash: keccak256(uaBob), netAmount: net});
+        bytes memory journal = abi.encode(
+            Bridge.WithdrawJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: items
+            })
+        );
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
+
+        bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"06", journal);
+
+        assertEq(token.balanceOf(relayer), tip);
+        assertEq(token.balanceOf(address(distributor)), feeToDist);
+        assertEq(token.balanceOf(address(bridge)), 0);
+
+        (,,,, bool finalizedAlice,,) = bridge.getWithdrawal(widAlice);
+        (,,,, bool finalizedBob, bool refundedBob,) = bridge.getWithdrawal(widBob);
+        assertTrue(finalizedAlice);
+        assertFalse(finalizedBob);
+        assertTrue(refundedBob);
+    }
+
+    function test_mintBatch_allowsDistinctBatchesAtSameCheckpoint() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        Bridge.MintItem[] memory itemsA = new Bridge.MintItem[](1);
+        itemsA[0] = Bridge.MintItem({
+            depositId: keccak256("deposit-same-cp-a"),
+            recipient: makeAddr("alice"),
+            amount: 100_000
+        });
+        bytes memory journalA = abi.encode(
+            Bridge.DepositJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: itemsA
+            })
+        );
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journalA, true);
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"0a", journalA);
+
+        Bridge.MintItem[] memory itemsB = new Bridge.MintItem[](1);
+        itemsB[0] = Bridge.MintItem({
+            depositId: keccak256("deposit-same-cp-b"),
+            recipient: makeAddr("bob"),
+            amount: 100_000
+        });
+        bytes memory journalB = abi.encode(
+            Bridge.DepositJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: itemsB
+            })
+        );
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journalB, true);
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"0b", journalB);
+
+        assertTrue(bridge.depositUsed(itemsA[0].depositId));
+        assertTrue(bridge.depositUsed(itemsB[0].depositId));
+    }
+
+    function test_mintBatch_revertsOnCheckpointHeightRegression() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        bytes memory journal = _depositJournal(cp, 1);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"0c", journal);
+
+        Bridge.Checkpoint memory stale = Bridge.Checkpoint({
+            height: cp.height - 1,
+            blockHash: bytes32(uint256(0x1234)),
+            finalOrchardRoot: bytes32(uint256(0x5678)),
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract
+        });
+        bytes memory staleJournal = _depositJournal(stale, 1);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, staleJournal, true);
+        bytes[] memory staleSigs = _sortedSigs(bridge.checkpointDigest(stale), _firstN(3));
+
+        vm.expectRevert(abi.encodeWithSelector(Bridge.CheckpointHeightRegression.selector, stale.height, cp.height));
+        vm.prank(relayer);
+        bridge.mintBatch(stale, staleSigs, hex"0d", staleJournal);
+    }
+
+    function test_mintBatch_revertsOnConflictingCheckpointAtSameHeight() public {
+        Bridge.Checkpoint memory cp = _checkpoint();
+        bytes[] memory sigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+
+        bytes memory journal = _depositJournal(cp, 1);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, journal, true);
+        vm.prank(relayer);
+        bridge.mintBatch(cp, sigs, hex"0e", journal);
+
+        Bridge.Checkpoint memory conflicting = Bridge.Checkpoint({
+            height: cp.height,
+            blockHash: bytes32(uint256(0xabc123)),
+            finalOrchardRoot: bytes32(uint256(0xdef456)),
+            baseChainId: cp.baseChainId,
+            bridgeContract: cp.bridgeContract
+        });
+        bytes memory conflictingJournal = _depositJournal(conflicting, 1);
+        verifier.setExpected(DEPOSIT_IMAGE_ID, conflictingJournal, true);
+        bytes[] memory conflictingSigs = _sortedSigs(bridge.checkpointDigest(conflicting), _firstN(3));
+
+        vm.expectRevert(
+            abi.encodeWithSelector(
+                Bridge.CheckpointConflict.selector, conflicting.height, conflicting.blockHash, conflicting.finalOrchardRoot
+            )
+        );
+        vm.prank(relayer);
+        bridge.mintBatch(conflicting, conflictingSigs, hex"0f", conflictingJournal);
+    }
+
     function test_mintBatch_revertsOnTooManyItems() public {
         Bridge.Checkpoint memory cp = _checkpoint();
         uint256 itemCount = bridge.MAX_BATCH_SIZE() + 1;

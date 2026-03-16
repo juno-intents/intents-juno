@@ -195,7 +195,7 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.MaxReplacements, "max-replacements", 3, "maximum number of replacement transactions")
 	fs.IntVar(&cfg.BumpPercent, "bump-percent", 15, "replacement fee bump percentage")
 	fs.Int64Var(&cfg.MaxFeeCapGwei, "max-fee-cap-gwei", 0, "maximum gas fee cap in gwei (0 disables the cap)")
-	fs.StringVar(&allowedContractsRaw, "allowed-contracts", "", "comma-separated list of allowed contract addresses")
+	fs.StringVar(&allowedContractsRaw, "allowed-contracts", "", "comma-separated list of allowed contract addresses (required)")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "PEM certificate for HTTPS listener")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "PEM private key for HTTPS listener")
 	fs.Uint64Var(&cfg.MinReadyBalanceWei, "min-ready-balance-wei", 0, "minimum per-signer balance required for /readyz in wei (0 disables readiness balance checks)")
@@ -244,6 +244,9 @@ func parseConfig(args []string) (config, error) {
 			}
 			cfg.AllowedContracts = append(cfg.AllowedContracts, common.HexToAddress(item))
 		}
+	}
+	if len(cfg.AllowedContracts) == 0 {
+		return config{}, fmt.Errorf("--allowed-contracts must contain at least one address")
 	}
 
 	return cfg, nil

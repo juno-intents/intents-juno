@@ -50,6 +50,9 @@ func TestStore_TryAcquireRenewRelease(t *testing.T) {
 	if !ok || l.Owner != "a" {
 		t.Fatalf("unexpected lease after acquire: ok=%v owner=%q", ok, l.Owner)
 	}
+	if l.Version != 1 {
+		t.Fatalf("version after acquire: got %d want 1", l.Version)
+	}
 
 	l2, ok, err := s.TryAcquire(ctx, "leader", "b", 2*time.Second)
 	if err != nil {
@@ -63,8 +66,12 @@ func TestStore_TryAcquireRenewRelease(t *testing.T) {
 		t.Fatalf("expected ErrNotOwner on renew by b: ok=%v err=%v", ok, err)
 	}
 
-	if _, ok, err := s.Renew(ctx, "leader", "a", 3*time.Second); err != nil || !ok {
+	lRenew, ok, err := s.Renew(ctx, "leader", "a", 3*time.Second)
+	if err != nil || !ok {
 		t.Fatalf("expected renew by a: ok=%v err=%v", ok, err)
+	}
+	if lRenew.Version != 1 {
+		t.Fatalf("version after renew: got %d want 1", lRenew.Version)
 	}
 
 	if err := s.Release(ctx, "leader", "b"); !errors.Is(err, leases.ErrNotOwner) {
@@ -79,9 +86,12 @@ func TestStore_TryAcquireRenewRelease(t *testing.T) {
 		t.Fatalf("Release #2: %v", err)
 	}
 
-	_, ok, err = s.TryAcquire(ctx, "leader", "b", 1*time.Second)
+	lAcquire, ok, err := s.TryAcquire(ctx, "leader", "b", 1*time.Second)
 	if err != nil || !ok {
 		t.Fatalf("expected acquire by b: ok=%v err=%v", ok, err)
+	}
+	if lAcquire.Version != 2 {
+		t.Fatalf("version after reacquire: got %d want 2", lAcquire.Version)
 	}
 
 	// After expiry, a new owner can steal.
@@ -92,6 +102,53 @@ func TestStore_TryAcquireRenewRelease(t *testing.T) {
 	}
 	if !ok || l3.Owner != "c" {
 		t.Fatalf("expected steal by c: ok=%v owner=%q", ok, l3.Owner)
+	}
+	if l3.Version != 3 {
+		t.Fatalf("version after steal: got %d want 3", l3.Version)
+	}
+}
+
+func TestStore_ReacquireAfterExpiryBySameOwnerIncrementsVersion(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	l1, ok, err := s.TryAcquire(ctx, "leader", "a", 1*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire: ok=%v err=%v", ok, err)
+	}
+	if l1.Version != 1 {
+		t.Fatalf("initial version: got %d want 1", l1.Version)
+	}
+
+	time.Sleep(1100 * time.Millisecond)
+	l2, ok, err := s.TryAcquire(ctx, "leader", "a", 1*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire after expiry: ok=%v err=%v", ok, err)
+	}
+	if l2.Version != 2 {
+		t.Fatalf("reacquire version: got %d want 2", l2.Version)
 	}
 }
 

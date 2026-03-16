@@ -53,6 +53,12 @@ func TestHandler_SendParsesRequestAndReturnsResult(t *testing.T) {
 		},
 	}
 	h := NewHandler(sender, Config{AuthToken: "secret", MaxBodyBytes: 1024, MaxWaitSeconds: 60})
+	h = NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{wantTo},
+	})
 
 	body := map[string]any{
 		"to":        wantTo.Hex(),
@@ -161,6 +167,29 @@ func TestHandler_RejectsSendOutsideAllowlist(t *testing.T) {
 	}
 }
 
+func TestHandler_RejectsSendWhenAllowlistIsMissing(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:      "secret",
+		MaxBodyBytes:   1024,
+		MaxWaitSeconds: 60,
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
+	}
+}
+
 func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T) {
 	t.Parallel()
 
@@ -181,6 +210,7 @@ func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T)
 		MaxWaitSeconds:     60,
 		IdempotencyTTL:     time.Minute,
 		IdempotencyMaxKeys: 8,
+		AllowedContracts:   []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
 		Now: func() time.Time {
 			return now
 		},
@@ -221,6 +251,7 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 		AuthToken:                  "secret",
 		MaxBodyBytes:               1024,
 		MaxWaitSeconds:             60,
+		AllowedContracts:           []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
 		RateLimitPerSecond:         1,
 		RateLimitBurst:             1,
 		RateLimitMaxTrackedClients: 4,
@@ -252,6 +283,7 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 	hIP := NewHandler(sender, Config{
 		MaxBodyBytes:               1024,
 		MaxWaitSeconds:             60,
+		AllowedContracts:           []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
 		RateLimitPerSecond:         1,
 		RateLimitBurst:             1,
 		RateLimitMaxTrackedClients: 4,

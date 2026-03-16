@@ -28,6 +28,9 @@ func TestMemoryStore_TryAcquireRenewReleaseAndSteal(t *testing.T) {
 	if l.Owner != "a" {
 		t.Fatalf("owner: got %q want %q", l.Owner, "a")
 	}
+	if l.Version != 1 {
+		t.Fatalf("version: got %d want 1", l.Version)
+	}
 	if !l.ExpiresAt.Equal(now.Add(10 * time.Second)) {
 		t.Fatalf("expiresAt: got %v want %v", l.ExpiresAt, now.Add(10*time.Second))
 	}
@@ -52,6 +55,9 @@ func TestMemoryStore_TryAcquireRenewReleaseAndSteal(t *testing.T) {
 	}
 	if !ok {
 		t.Fatalf("expected ok=true on renew by owner")
+	}
+	if l3.Version != 1 {
+		t.Fatalf("renew version: got %d want 1", l3.Version)
 	}
 	if !l3.ExpiresAt.Equal(now.Add(10 * time.Second)) {
 		t.Fatalf("renew expiresAt: got %v want %v", l3.ExpiresAt, now.Add(10*time.Second))
@@ -88,6 +94,9 @@ func TestMemoryStore_TryAcquireRenewReleaseAndSteal(t *testing.T) {
 	if !ok || l4.Owner != "b" {
 		t.Fatalf("expected owner b after acquire: ok=%v owner=%q", ok, l4.Owner)
 	}
+	if l4.Version != 2 {
+		t.Fatalf("version after release reacquire: got %d want 2", l4.Version)
+	}
 
 	// Steal after expiry.
 	now = now.Add(11 * time.Second)
@@ -100,6 +109,36 @@ func TestMemoryStore_TryAcquireRenewReleaseAndSteal(t *testing.T) {
 	}
 	if l5.Owner != "c" {
 		t.Fatalf("owner after steal: got %q want %q", l5.Owner, "c")
+	}
+	if l5.Version != 3 {
+		t.Fatalf("version after steal: got %d want 3", l5.Version)
+	}
+}
+
+func TestMemoryStore_ReacquireAfterExpiryBySameOwnerIncrementsVersion(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	s := NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	l1, ok, err := s.TryAcquire(ctx, "leader", "a", 5*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire: ok=%v err=%v", ok, err)
+	}
+	if l1.Version != 1 {
+		t.Fatalf("initial version: got %d want 1", l1.Version)
+	}
+
+	now = now.Add(6 * time.Second)
+	l2, ok, err := s.TryAcquire(ctx, "leader", "a", 5*time.Second)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire after expiry: ok=%v err=%v", ok, err)
+	}
+	if l2.Version != 2 {
+		t.Fatalf("reacquire version: got %d want 2", l2.Version)
 	}
 }
 

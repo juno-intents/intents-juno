@@ -45,6 +45,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error ExpiryExtensionTooLarge();
     error BadJournalDomain();
     error BelowMinimumAmount();
+    error CheckpointHeightRegression(uint64 receivedHeight, uint64 lastAcceptedHeight);
+    error CheckpointConflict(uint64 height, bytes32 blockHash, bytes32 finalOrchardRoot);
 
     // -------- Types --------
     struct Checkpoint {
@@ -127,6 +129,10 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     address public minDepositAdmin;
     uint256 public minDepositAmount;
     uint256 public minWithdrawAmount;
+    uint64 public lastAcceptedCheckpointHeight;
+    bytes32 public lastAcceptedCheckpointBlockHash;
+    bytes32 public lastAcceptedCheckpointFinalOrchardRoot;
+    bool private checkpointAccepted;
 
     uint256 public withdrawNonce;
 
@@ -336,6 +342,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         bytes calldata journal
     ) external whenNotPaused nonReentrant {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
+        _validateCheckpointProgress(checkpoint);
 
         DepositJournal memory dj = abi.decode(journal, (DepositJournal));
         MintItem[] memory items = dj.items;
@@ -381,6 +388,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
             emit Minted(it.depositId, it.recipient, it.amount, fee, tip);
         }
+        _recordCheckpoint(checkpoint);
     }
 
     function requestWithdraw(uint256 amount, bytes calldata junoRecipientUA)
@@ -482,6 +490,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         bytes calldata journal
     ) external whenNotPaused nonReentrant {
         _verifyCheckpointSigs(checkpoint, operatorSigs);
+        _validateCheckpointProgress(checkpoint);
 
         WithdrawJournal memory wj = abi.decode(journal, (WithdrawJournal));
         FinalizeItem[] memory items = wj.items;
@@ -505,7 +514,10 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 emit WithdrawFinalizedSkipped(it.withdrawalId);
                 continue;
             }
-            if (w.refunded) revert WithdrawalRefunded();
+            if (w.refunded) {
+                emit WithdrawFinalizedSkipped(it.withdrawalId);
+                continue;
+            }
             if (!withdrawalPaid[it.withdrawalId] && block.timestamp >= w.expiry) revert WithdrawalExpired();
 
             if (it.recipientUAHash != keccak256(w.recipientUA)) revert WithdrawalRecipientMismatch();
@@ -527,6 +539,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             w.finalized = true;
             emit WithdrawFinalized(it.withdrawalId, expectedNet, fee, tip);
         }
+        _recordCheckpoint(checkpoint);
     }
 
     /// @notice Refund remains callable while paused so expired withdrawals can still be recovered
@@ -571,6 +584,31 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     // -------- Internals --------
     function _verifyCheckpointSigs(Checkpoint calldata checkpoint, bytes[] calldata operatorSigs) internal view {
         _verifyOperatorSigs(checkpointDigest(checkpoint), operatorSigs);
+    }
+
+    function _validateCheckpointProgress(Checkpoint calldata checkpoint) internal view {
+        if (!checkpointAccepted) return;
+        if (checkpoint.height < lastAcceptedCheckpointHeight) {
+            revert CheckpointHeightRegression(checkpoint.height, lastAcceptedCheckpointHeight);
+        }
+        if (
+            checkpoint.height == lastAcceptedCheckpointHeight
+                && (
+                    checkpoint.blockHash != lastAcceptedCheckpointBlockHash
+                        || checkpoint.finalOrchardRoot != lastAcceptedCheckpointFinalOrchardRoot
+                )
+        ) {
+            revert CheckpointConflict(checkpoint.height, checkpoint.blockHash, checkpoint.finalOrchardRoot);
+        }
+    }
+
+    function _recordCheckpoint(Checkpoint calldata checkpoint) internal {
+        if (!checkpointAccepted || checkpoint.height > lastAcceptedCheckpointHeight) {
+            checkpointAccepted = true;
+            lastAcceptedCheckpointHeight = checkpoint.height;
+            lastAcceptedCheckpointBlockHash = checkpoint.blockHash;
+            lastAcceptedCheckpointFinalOrchardRoot = checkpoint.finalOrchardRoot;
+        }
     }
 
     function _verifyOperatorSigs(bytes32 digest, bytes[] calldata operatorSigs) internal view {

@@ -331,3 +331,9 @@ variable "shared_ipfs_container_image" {
   type        = string
   default     = "ipfs/kubo:v0.32.1"
 }
+
+variable "alarm_actions" {
+  description = "Optional CloudWatch alarm action ARNs."
+  type        = list(string)
+  default     = []
+}

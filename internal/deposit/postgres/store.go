@@ -600,9 +600,14 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 			claim_expires_at = NULL,
 			updated_at = now()
 		WHERE deposit_id = $1
-	`, depositID[:], int16(deposit.StateFinalized), txHash[:])
+		  AND state >= $4
+		  AND state NOT IN ($2, $5)
+	`, depositID[:], int16(deposit.StateFinalized), txHash[:], int16(deposit.StateProofReady), int16(deposit.StateRejected))
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: mark finalized: %w", err)
+	}
+	if err := s.ensureTerminalState(ctx, depositID, deposit.StateFinalized, txHash, ""); err != nil {
+		return err
 	}
 	return nil
 }
@@ -643,9 +648,30 @@ func (s *Store) MarkRejected(ctx context.Context, depositID [32]byte, reason str
 			claim_expires_at = NULL,
 			updated_at = now()
 		WHERE deposit_id = $1
-	`, depositID[:], int16(deposit.StateRejected), rawTxHash, reason)
+		  AND state NOT IN ($2, $5)
+	`, depositID[:], int16(deposit.StateRejected), rawTxHash, reason, int16(deposit.StateFinalized))
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: mark rejected: %w", err)
+	}
+	if err := s.ensureTerminalState(ctx, depositID, deposit.StateRejected, txHash, reason); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) ensureTerminalState(ctx context.Context, depositID [32]byte, wantState deposit.State, wantTxHash [32]byte, wantReason string) error {
+	job, err := s.Get(ctx, depositID)
+	if err != nil {
+		return err
+	}
+	if job.State != wantState {
+		return deposit.ErrInvalidTransition
+	}
+	if wantTxHash != ([32]byte{}) && job.TxHash != wantTxHash {
+		return deposit.ErrDepositMismatch
+	}
+	if wantState == deposit.StateRejected && job.RejectionReason != wantReason {
+		return deposit.ErrDepositMismatch
 	}
 	return nil
 }
@@ -924,7 +950,8 @@ func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash 
 				claim_expires_at = NULL,
 				updated_at = now()
 			WHERE deposit_id = ANY($1)
-		`, finalizedRaw, int16(deposit.StateFinalized), txHash[:])
+				AND state NOT IN ($4, $5)
+		`, finalizedRaw, int16(deposit.StateFinalized), txHash[:], int16(deposit.StateFinalized), int16(deposit.StateRejected))
 		if err != nil {
 			return fmt.Errorf("deposit/postgres: update finalized batch outcome rows: %w", err)
 		}
@@ -948,7 +975,8 @@ func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash 
 				claim_expires_at = NULL,
 				updated_at = now()
 			WHERE deposit_id = ANY($1)
-		`, rejectedRaw, int16(deposit.StateRejected), txHash[:], rejectionReason)
+				AND state NOT IN ($5, $6)
+		`, rejectedRaw, int16(deposit.StateRejected), txHash[:], rejectionReason, int16(deposit.StateFinalized), int16(deposit.StateRejected))
 		if err != nil {
 			return fmt.Errorf("deposit/postgres: update rejected batch outcome rows: %w", err)
 		}

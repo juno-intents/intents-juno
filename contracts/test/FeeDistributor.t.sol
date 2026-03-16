@@ -79,16 +79,26 @@ contract FeeDistributorTest is Test {
         assertEq(distributor.bridge(), newBridge);
     }
 
-    function test_depositFees_revertsWhenNoWeight() public {
-        // Remove both operators (weight -> 0).
+    function test_depositFees_buffersWhenNoWeight_andDistributesWhenOperatorReturns() public {
         registry.setOperator(op1, op1Fee, 0, false);
         registry.setOperator(op2, op2Fee, 0, false);
 
         vm.startPrank(bridge);
-        token.mint(address(distributor), 1);
-        vm.expectRevert(FeeDistributor.NoOperators.selector);
-        distributor.depositFees(1);
+        token.mint(address(distributor), 40);
+        distributor.depositFees(40);
         vm.stopPrank();
+
+        assertEq(distributor.pendingUndistributedFees(), 40);
+        assertEq(distributor.pendingReward(op1), 0);
+        assertEq(distributor.pendingReward(op2), 0);
+
+        registry.setOperator(op1, op1Fee, 1, true);
+
+        assertEq(distributor.pendingUndistributedFees(), 0);
+        assertEq(distributor.pendingReward(op1), 40);
+
+        distributor.claim(op1);
+        assertEq(token.balanceOf(op1Fee), 40);
     }
 
     function test_operatorUpdate_harvestsPendingToOldRecipientBeforeSwitch() public {

@@ -44,5 +44,14 @@
     "mode": "public-zone",
     "zone_id": "Z01169511CVMQJAD7T3TJ",
     "ttl_seconds": 60
+  },
+  "edge": {
+    "enabled": true,
+    "state_path": "production-output/alpha/app/edge.tfstate",
+    "origin_record_name": "origin.alpha.intents-testing.thejunowallet.com",
+    "origin_endpoint": "203.0.113.21",
+    "origin_http_port": 80,
+    "rate_limit": 2000,
+    "enable_shield_advanced": false
   }
 }

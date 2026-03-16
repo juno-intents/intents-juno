@@ -50,3 +50,15 @@ func TestParseConfig_ParsesIngressHardeningFlags(t *testing.T) {
 		t.Fatalf("allowed contracts: got %d want 2", len(cfg.AllowedContracts))
 	}
 }
+
+func TestParseConfig_RequiresAllowedContracts(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig([]string{
+		"--rpc-url", "http://127.0.0.1:8545",
+		"--chain-id", "8453",
+	})
+	if err == nil {
+		t.Fatal("expected allowed contracts validation error")
+	}
+}

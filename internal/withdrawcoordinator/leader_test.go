@@ -38,39 +38,51 @@ func TestLeaderElector_Tick_AcquireRenewSteal(t *testing.T) {
 
 	ctx := context.Background()
 
-	leader, err := a.Tick(ctx)
+	lease, leader, err := a.Tick(ctx)
 	if err != nil {
 		t.Fatalf("a.Tick: %v", err)
 	}
 	if !leader {
 		t.Fatalf("expected a to acquire leadership")
 	}
+	if lease.Version != 1 {
+		t.Fatalf("expected version 1, got %d", lease.Version)
+	}
 
-	leader, err = b.Tick(ctx)
+	lease, leader, err = b.Tick(ctx)
 	if err != nil {
 		t.Fatalf("b.Tick: %v", err)
 	}
 	if leader {
 		t.Fatalf("expected b to not be leader while a lease is valid")
 	}
+	if lease.Version != 1 {
+		t.Fatalf("expected observed version 1 while held by a, got %d", lease.Version)
+	}
 
 	now = now.Add(5 * time.Second)
-	leader, err = a.Tick(ctx)
+	lease, leader, err = a.Tick(ctx)
 	if err != nil {
 		t.Fatalf("a.Tick renew: %v", err)
 	}
 	if !leader {
 		t.Fatalf("expected a to remain leader")
 	}
+	if lease.Version != 1 {
+		t.Fatalf("expected renewed version 1, got %d", lease.Version)
+	}
 
 	// After expiry, b can steal.
 	now = now.Add(11 * time.Second)
-	leader, err = b.Tick(ctx)
+	lease, leader, err = b.Tick(ctx)
 	if err != nil {
 		t.Fatalf("b.Tick steal: %v", err)
 	}
 	if !leader {
 		t.Fatalf("expected b to steal leadership after expiry")
+	}
+	if lease.Version != 2 {
+		t.Fatalf("expected stolen version 2, got %d", lease.Version)
 	}
 }
 
@@ -94,7 +106,7 @@ func TestLeaderElector_Tick_SkipsLeadershipWhenNotReady(t *testing.T) {
 
 	ctx := context.Background()
 
-	leader, err := a.Tick(ctx)
+	_, leader, err := a.Tick(ctx)
 	if err != nil {
 		t.Fatalf("a.Tick: %v", err)
 	}
@@ -105,11 +117,14 @@ func TestLeaderElector_Tick_SkipsLeadershipWhenNotReady(t *testing.T) {
 		t.Fatalf("expected readiness checks")
 	}
 
-	leader, err = b.Tick(ctx)
+	lease, leader, err := b.Tick(ctx)
 	if err != nil {
 		t.Fatalf("b.Tick: %v", err)
 	}
 	if !leader {
 		t.Fatalf("expected ready peer to acquire leadership")
+	}
+	if lease.Version != 1 {
+		t.Fatalf("expected acquired version 1, got %d", lease.Version)
 	}
 }

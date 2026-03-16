@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -62,8 +63,9 @@ type PauseChecker interface {
 }
 
 type Config struct {
-	Owner    string
-	LeaseTTL time.Duration
+	Owner              string
+	LeaseTTL           time.Duration
+	LeaseRenewInterval time.Duration
 
 	MaxBatches int
 
@@ -115,6 +117,12 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 	}
 	if cfg.LeaseTTL <= 0 {
 		return nil, fmt.Errorf("%w: LeaseTTL must be > 0", ErrInvalidConfig)
+	}
+	if cfg.LeaseRenewInterval <= 0 {
+		cfg.LeaseRenewInterval = cfg.LeaseTTL / 3
+	}
+	if cfg.LeaseRenewInterval <= 0 || cfg.LeaseRenewInterval >= cfg.LeaseTTL {
+		return nil, fmt.Errorf("%w: LeaseRenewInterval must be > 0 and < LeaseTTL", ErrInvalidConfig)
 	}
 	if cfg.MaxBatches <= 0 {
 		return nil, fmt.Errorf("%w: MaxBatches must be > 0", ErrInvalidConfig)
@@ -264,11 +272,15 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	} else if !ok {
 		return nil
 	}
-	defer func() { _ = f.leaseStore.Release(context.Background(), leaseName, f.cfg.Owner) }()
+	workCtx, heartbeat := f.startLeaseHeartbeat(ctx, leaseName)
+	defer func() {
+		heartbeat.Stop()
+		_ = f.releaseLease(context.Background(), leaseName)
+	}()
 
 	// Bridge pause check: if paused, skip finalization.
 	if f.pauseChecker != nil {
-		paused, err := f.pauseChecker.IsPaused(ctx)
+		paused, err := f.pauseChecker.IsPaused(workCtx)
 		if err != nil {
 			f.log.Warn("bridge pause check error (fail-safe: skipping finalize)", "err", err)
 		}
@@ -278,17 +290,17 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		}
 	}
 
-	b, err := f.store.GetBatch(ctx, batchID)
+	b, err := f.store.GetBatch(workCtx, batchID)
 	if err != nil {
-		return err
+		return heartbeat.Wrap(err)
 	}
 	if b.State != withdraw.BatchStateConfirmed && b.State != withdraw.BatchStateFinalizing {
 		// Already progressed.
 		return nil
 	}
 	if b.State == withdraw.BatchStateConfirmed {
-		if err := f.store.MarkBatchFinalizing(ctx, batchID); err != nil {
-			return err
+		if err := f.store.MarkBatchFinalizing(workCtx, batchID); err != nil {
+			return heartbeat.Wrap(err)
 		}
 	}
 
@@ -297,9 +309,9 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	items := make([]bridgeabi.FinalizeItem, 0, len(b.WithdrawalIDs))
 	witnessItems := make([][]byte, 0, len(b.WithdrawalIDs))
 	for idx, wid := range b.WithdrawalIDs {
-		w, err := f.store.GetWithdrawal(ctx, wid)
+		w, err := f.store.GetWithdrawal(workCtx, wid)
 		if err != nil {
-			return err
+			return heartbeat.Wrap(err)
 		}
 
 		_, net, err := withdraw.ComputeFeeAndNet(w.Amount, w.FeeBps)
@@ -323,7 +335,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 				return fmt.Errorf("withdrawfinalizer: checkpoint height %d exceeds int64 for anchor binding", cp.Height)
 			}
 			anchorHeight := int64(cp.Height)
-			extracted, err := f.witnessExtractor.ExtractWithdrawWitness(ctx, WithdrawWitnessExtractRequest{
+			extracted, err := f.witnessExtractor.ExtractWithdrawWitness(workCtx, WithdrawWitnessExtractRequest{
 				TxHash:           b.JunoTxID,
 				ActionIndex:      uint32(idx),
 				ExpectedValueZat: &net,
@@ -332,7 +344,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 				RecipientUA:      append([]byte(nil), w.RecipientUA...),
 			})
 			if err != nil {
-				return fmt.Errorf("withdrawfinalizer: extract proof witness item: %w", err)
+				return heartbeat.Wrap(fmt.Errorf("withdrawfinalizer: extract proof witness item: %w", err))
 			}
 			if len(extracted) == 0 {
 				return fmt.Errorf("withdrawfinalizer: empty extracted proof witness item for batch index %d", idx)
@@ -349,22 +361,22 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		Items:            items,
 	})
 	if err != nil {
-		return err
+		return heartbeat.Wrap(err)
 	}
-	if err := f.persistProofJournalArtifact(ctx, batchID, journal); err != nil {
-		return err
+	if err := f.persistProofJournalArtifact(workCtx, batchID, journal); err != nil {
+		return heartbeat.Wrap(err)
 	}
 
 	privateInput, err := f.encodePrivateInput(cp, items, witnessItems)
 	if err != nil {
-		return err
+		return heartbeat.Wrap(err)
 	}
-	if err := f.persistProofPrivateInputArtifact(ctx, batchID, privateInput); err != nil {
-		return err
+	if err := f.persistProofPrivateInputArtifact(workCtx, batchID, privateInput); err != nil {
+		return heartbeat.Wrap(err)
 	}
 
 	jobID := idempotency.ProofJobIDV1("withdraw", common.Hash(batchID), f.cfg.WithdrawImageID, journal, privateInput)
-	pctx, cancel := context.WithTimeout(ctx, f.cfg.ProofRequestTimeout)
+	pctx, cancel := context.WithTimeout(workCtx, f.cfg.ProofRequestTimeout)
 	defer cancel()
 
 	proofRes, err := f.prover.RequestProof(pctx, proofclient.Request{
@@ -377,18 +389,21 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		Priority:     f.cfg.ProofPriority,
 	})
 	if err != nil {
-		return err
+		return heartbeat.Wrap(err)
 	}
 	seal := proofRes.Seal
 	if len(seal) == 0 {
 		return fmt.Errorf("withdrawfinalizer: empty proof seal from proof requester")
 	}
-	if err := f.persistProofSealArtifact(ctx, batchID, seal); err != nil {
-		return err
+	if err := f.persistProofSealArtifact(workCtx, batchID, seal); err != nil {
+		return heartbeat.Wrap(err)
 	}
 
 	calldata, err := bridgeabi.PackFinalizeWithdrawBatchCalldata(cp, f.opSigs, seal, journal)
 	if err != nil {
+		return heartbeat.Wrap(err)
+	}
+	if err := heartbeat.Err(); err != nil {
 		return err
 	}
 
@@ -398,9 +413,9 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		GasLimit: f.cfg.GasLimit,
 	}
 
-	res, err := f.sender.Send(ctx, req)
+	res, err := f.sender.Send(workCtx, req)
 	if err != nil {
-		return err
+		return heartbeat.Wrap(err)
 	}
 	if res.TxHash == "" {
 		return fmt.Errorf("withdrawfinalizer: base-relayer did not return a tx hash")
@@ -419,16 +434,17 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return fmt.Errorf("withdrawfinalizer: finalizeWithdrawBatch tx reverted")
 	}
 
-	if err := f.store.SetBatchFinalized(ctx, batchID, res.TxHash); err != nil {
+	if err := heartbeat.Err(); err != nil {
+		return err
+	}
+	if err := f.store.SetBatchFinalized(workCtx, batchID, res.TxHash); err != nil {
 		// If another worker won the race, treat it as success.
-		b2, err2 := f.store.GetBatch(ctx, batchID)
+		b2, err2 := f.store.GetBatch(workCtx, batchID)
 		if err2 == nil && b2.State == withdraw.BatchStateFinalized {
 			return nil
 		}
-		return err
+		return heartbeat.Wrap(err)
 	}
-
-	_ = f.leaseStore.Release(ctx, leaseName, f.cfg.Owner)
 
 	f.log.Info("submitted finalizeWithdrawBatch",
 		"checkpointHeight", cp.Height,
@@ -436,6 +452,80 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+type leaseHeartbeat struct {
+	cancel context.CancelFunc
+	done   chan struct{}
+
+	mu  sync.Mutex
+	err error
+}
+
+func (f *Finalizer) startLeaseHeartbeat(ctx context.Context, leaseName string) (context.Context, *leaseHeartbeat) {
+	workCtx, cancel := context.WithCancel(ctx)
+	h := &leaseHeartbeat{
+		cancel: cancel,
+		done:   make(chan struct{}),
+	}
+
+	go func() {
+		ticker := time.NewTicker(f.cfg.LeaseRenewInterval)
+		defer ticker.Stop()
+		defer close(h.done)
+		for {
+			select {
+			case <-workCtx.Done():
+				return
+			case <-ticker.C:
+				if _, ok, err := f.leaseStore.Renew(workCtx, leaseName, f.cfg.Owner, f.cfg.LeaseTTL); err != nil {
+					h.setErr(fmt.Errorf("withdrawfinalizer: renew batch lease %s: %w", leaseName, err))
+					return
+				} else if !ok {
+					h.setErr(fmt.Errorf("withdrawfinalizer: renew batch lease %s: %w", leaseName, leases.ErrNotOwner))
+					return
+				}
+			}
+		}
+	}()
+
+	return workCtx, h
+}
+
+func (h *leaseHeartbeat) setErr(err error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.err != nil {
+		return
+	}
+	h.err = err
+	h.cancel()
+}
+
+func (h *leaseHeartbeat) Err() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.err
+}
+
+func (h *leaseHeartbeat) Wrap(err error) error {
+	if leaseErr := h.Err(); leaseErr != nil {
+		return leaseErr
+	}
+	return err
+}
+
+func (h *leaseHeartbeat) Stop() {
+	h.cancel()
+	<-h.done
+}
+
+func (f *Finalizer) releaseLease(ctx context.Context, leaseName string) error {
+	err := f.leaseStore.Release(ctx, leaseName, f.cfg.Owner)
+	if errors.Is(err, leases.ErrNotOwner) {
+		return nil
+	}
+	return err
 }
 
 func batchLeaseName(batchID [32]byte) string {

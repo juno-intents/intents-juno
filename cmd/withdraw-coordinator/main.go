@@ -26,6 +26,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/policy"
@@ -471,13 +472,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	var elector *withdrawcoordinator.LeaderElector
+	var (
+		elector          *withdrawcoordinator.LeaderElector
+		leaderLeaseStore leases.Store
+	)
 	if *leaderElection {
 		leaseStore, err := leasespg.New(pool)
 		if err != nil {
 			log.Error("init lease store", "err", err)
 			os.Exit(2)
 		}
+		leaderLeaseStore = leaseStore
 		if err := leaseStore.EnsureSchema(ctx); err != nil {
 			log.Error("ensure lease schema", "err", err)
 			os.Exit(2)
@@ -510,7 +515,8 @@ func main() {
 			MaxExtension: *maxExtension,
 			MaxBatch:     *maxExtendBatch,
 		},
-		Now: time.Now,
+		LeaderLeaseStore: leaderLeaseStore,
+		Now:              time.Now,
 	}, store, planner, signer, broadcaster, confirmer, junoConfirmer, log)
 	if err != nil {
 		log.Error("init coordinator", "err", err)
@@ -576,19 +582,24 @@ func main() {
 			}
 		case <-t.C:
 			if elector != nil {
-				leader, err := elector.Tick(ctx)
+				lease, leader, err := elector.Tick(ctx)
 				if err != nil {
 					log.Error("leader election tick", "err", err)
+					coord.ClearLeaderLease()
 					continue
 				}
 				if !leader {
 					log.Info("not leader, skipping tick")
+					coord.ClearLeaderLease()
 					continue
 				}
+				coord.SetLeaderLease(lease)
 			}
 
 			if err := coord.Tick(ctx); err != nil {
-				if errors.Is(err, withdrawcoordinator.ErrRebroadcastExhausted) {
+				if errors.Is(err, withdrawcoordinator.ErrLeadershipLost) {
+					log.Warn("leadership lost during tick", "err", err)
+				} else if errors.Is(err, withdrawcoordinator.ErrRebroadcastExhausted) {
 					log.Error("CRITICAL: rebroadcast attempts exhausted, manual intervention required", "err", err)
 				} else {
 					log.Error("tick", "err", err)

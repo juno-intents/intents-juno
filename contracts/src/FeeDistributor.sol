@@ -26,6 +26,7 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
 
     uint256 public totalWeight;
     uint256 public accFeePerWeight; // scaled by 1e18
+    uint256 public pendingUndistributedFees;
 
     struct OperatorData {
         address feeRecipient;
@@ -38,6 +39,7 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
 
     event BridgeSet(address indexed bridge);
     event FeesDeposited(uint256 amount, uint256 accFeePerWeight);
+    event FeesBuffered(uint256 amount, uint256 pendingUndistributedFees);
     event Claimed(address indexed operator, address indexed recipient, uint256 amount);
     event OperatorUpdated(address indexed operator, address indexed feeRecipient, uint96 weight, bool active);
 
@@ -59,10 +61,13 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
         if (amount == 0) return;
 
         uint256 tw = totalWeight;
-        if (tw == 0) revert NoOperators();
+        if (tw == 0) {
+            pendingUndistributedFees += amount;
+            emit FeesBuffered(amount, pendingUndistributedFees);
+            return;
+        }
 
-        accFeePerWeight += (amount * ACC_SCALE) / tw;
-        emit FeesDeposited(amount, accFeePerWeight);
+        _distributeFees(amount, tw);
     }
 
     /// @notice Returns pending fees for a given operator address.
@@ -124,6 +129,17 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
         op.weight = effectiveNewWeight;
         op.rewardDebt = (uint256(effectiveNewWeight) * accFeePerWeight) / ACC_SCALE;
 
+        if (pendingUndistributedFees != 0 && totalWeight != 0) {
+            _distributeFees(0, totalWeight);
+        }
+
         emit OperatorUpdated(operator, feeRecipient, effectiveNewWeight, active);
+    }
+
+    function _distributeFees(uint256 amount, uint256 tw) internal {
+        uint256 totalAmount = amount + pendingUndistributedFees;
+        pendingUndistributedFees = 0;
+        accFeePerWeight += (totalAmount * ACC_SCALE) / tw;
+        emit FeesDeposited(totalAmount, accFeePerWeight);
     }
 }

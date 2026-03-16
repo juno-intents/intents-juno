@@ -90,6 +90,10 @@ dns_mode="$(production_json_optional "$app_deploy" '.dns.mode')"
 zone_id="$(production_json_optional "$app_deploy" '.dns.zone_id')"
 ttl_seconds="$(production_json_optional "$app_deploy" '.dns.ttl_seconds')"
 acme_account_email="${ACME_ACCOUNT_EMAIL:-ops@thejunowallet.com}"
+edge_enabled="$(production_json_optional "$app_deploy" '.edge.enabled')"
+if [[ "$edge_enabled" != "true" ]]; then
+  edge_enabled="false"
+fi
 
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
@@ -161,6 +165,31 @@ ensure_security_group_ingress() {
   die "failed to authorize security group ingress on port $port"
 }
 
+revoke_security_group_ingress() {
+  local port="$1"
+  [[ -n "$security_group_id" && -n "$aws_region" ]] || return 0
+
+  local -a aws_args=(aws)
+  [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
+  aws_args+=(--region "$aws_region")
+
+  local output status
+  set +e
+  output="$(AWS_PAGER="" "${aws_args[@]}" ec2 revoke-security-group-ingress \
+    --group-id "$security_group_id" \
+    --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":${port},\"ToPort\":${port},\"IpRanges\":[{\"CidrIp\":\"0.0.0.0/0\",\"Description\":\"intents-juno app\"}]}]" 2>&1)"
+  status=$?
+  set -e
+  if [[ $status -eq 0 ]]; then
+    return 0
+  fi
+  if [[ "$output" == *"InvalidPermission.NotFound"* || "$output" == *"does not exist"* ]]; then
+    return 0
+  fi
+  printf '%s\n' "$output" >&2
+  die "failed to revoke security group ingress on port $port"
+}
+
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
 production_render_bridge_api_env "$shared_manifest_path" "$app_deploy" "$resolved_env" "$bridge_env"
 production_render_backoffice_env "$shared_manifest_path" "$app_deploy" "$resolved_env" "$backoffice_env"
@@ -200,15 +229,20 @@ if [[ "$dry_run" == "true" ]]; then
   exit 0
 fi
 
-if [[ "$public_scheme" == "https" ]]; then
+if [[ "$public_scheme" == "https" && "$edge_enabled" == "false" ]]; then
   ensure_security_group_ingress 80
   ensure_security_group_ingress 443
 else
-  ensure_security_group_ingress "$bridge_port"
-  ensure_security_group_ingress "$backoffice_port"
+  if [[ "$edge_enabled" == "true" ]]; then
+    revoke_security_group_ingress 80
+    revoke_security_group_ingress 443
+  else
+    ensure_security_group_ingress "$bridge_port"
+    ensure_security_group_ingress "$backoffice_port"
+  fi
 fi
 
-if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
+if [[ "$edge_enabled" == "false" && "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
   production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
   production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
 fi
@@ -401,7 +435,25 @@ if [[ "\$public_scheme" == "https" ]]; then
     sudo apt-get install -y caddy
   fi
   caddyfile_tmp="\$(mktemp)"
-  cat >"\$caddyfile_tmp" <<CADDY
+  if [[ "$edge_enabled" == "true" ]]; then
+    cat >"\$caddyfile_tmp" <<CADDY
+{
+  auto_https off
+}
+
+:80 {
+  encode zstd gzip
+  handle_path /bridge* {
+    reverse_proxy 127.0.0.1:$bridge_port
+  }
+  handle_path /ops* {
+    reverse_proxy 127.0.0.1:$backoffice_port
+  }
+  respond "not found" 404
+}
+CADDY
+  else
+    cat >"\$caddyfile_tmp" <<CADDY
 {
   email \$acme_account_email
 }
@@ -416,6 +468,7 @@ if [[ "\$public_scheme" == "https" ]]; then
   reverse_proxy 127.0.0.1:$backoffice_port
 }
 CADDY
+  fi
   sudo install -m 0644 "\$caddyfile_tmp" /etc/caddy/Caddyfile
   rm -f "\$caddyfile_tmp"
 fi
@@ -435,4 +488,7 @@ ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active bridge-api"
 ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active backoffice"
 if [[ "$public_scheme" == "https" ]]; then
   ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active caddy"
+fi
+if [[ "$edge_enabled" == "true" ]]; then
+  bash "$SCRIPT_DIR/provision-app-edge.sh" --app-deploy "$app_deploy"
 fi

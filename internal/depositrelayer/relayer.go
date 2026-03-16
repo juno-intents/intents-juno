@@ -70,8 +70,8 @@ type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
 	DepositImageID common.Hash
-	// Optional 64-byte OWallet IVK. When set, relayer requires per-deposit
-	// witness items and builds binary guest input for real deposit proofs.
+	// 64-byte OWallet IVK used to build binary guest input for real deposit
+	// proofs. Missing IVK fails closed.
 	OWalletIVKBytes []byte
 
 	OperatorAddresses []common.Address
@@ -195,8 +195,8 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	if cfg.MaxProofAttempts == 0 {
 		cfg.MaxProofAttempts = 3
 	}
-	if n := len(cfg.OWalletIVKBytes); n != 0 && n != 64 {
-		return nil, fmt.Errorf("%w: OWalletIVKBytes must be 64 bytes when set", ErrInvalidConfig)
+	if len(cfg.OWalletIVKBytes) != 64 {
+		return nil, fmt.Errorf("%w: OWalletIVKBytes must be exactly 64 bytes", ErrInvalidConfig)
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -782,17 +782,20 @@ func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {
 }
 
 func (r *Relayer) encodePrivateInput(cp checkpoint.Checkpoint, opSigs [][]byte, items []bridgeabi.MintItem, witnessItems [][]byte) ([]byte, error) {
-	if len(r.cfg.OWalletIVKBytes) == 64 {
-		var ivk [64]byte
-		copy(ivk[:], r.cfg.OWalletIVKBytes)
-		for i, w := range witnessItems {
-			if len(w) == 0 {
-				return nil, fmt.Errorf("depositrelayer: missing proof witness item for batch index %d", i)
-			}
-		}
-		return proverinput.EncodeDepositGuestPrivateInput(cp, ivk, witnessItems)
+	_ = opSigs
+	_ = items
+
+	if len(r.cfg.OWalletIVKBytes) != 64 {
+		return nil, fmt.Errorf("depositrelayer: missing required OWallet IVK")
 	}
-	return proverinput.EncodeDepositPrivateInputV1(cp, opSigs, items)
+	var ivk [64]byte
+	copy(ivk[:], r.cfg.OWalletIVKBytes)
+	for i, w := range witnessItems {
+		if len(w) == 0 {
+			return nil, fmt.Errorf("depositrelayer: missing proof witness item for batch index %d", i)
+		}
+	}
+	return proverinput.EncodeDepositGuestPrivateInput(cp, ivk, witnessItems)
 }
 
 func (r *Relayer) promoteSeenDeposits(ctx context.Context, limit int) error {

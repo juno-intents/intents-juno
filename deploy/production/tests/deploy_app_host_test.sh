@@ -105,6 +105,8 @@ EOF
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
+  jq '.edge.enabled = false' "$app_manifest" >"$workdir/output/app/app-deploy.direct.json"
+  app_manifest="$workdir/output/app/app-deploy.direct.json"
 
   printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
   printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
@@ -282,6 +284,8 @@ EOF
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
+  jq '.edge.enabled = false' "$app_manifest" >"$workdir/output/app/app-deploy.direct.json"
+  app_manifest="$workdir/output/app/app-deploy.direct.json"
 
   printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
   printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
@@ -405,6 +409,8 @@ EOF
   production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   app_manifest="$workdir/output/app/app-deploy.json"
+  jq '.edge.enabled = false' "$app_manifest" >"$workdir/output/app/app-deploy.direct.json"
+  app_manifest="$workdir/output/app/app-deploy.direct.json"
 
   printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
   printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
@@ -463,6 +469,127 @@ EOF
       --release-tag "$release_tag" >/dev/null
 
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_kafka_auth_mode="aws-msk-iam"' "preview app deploy passes kafka auth iam to shared infra validation"
+  rm -rf "$workdir"
+}
+
+test_deploy_app_host_provisions_edge_and_uses_origin_proxy() {
+  local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  assets_dir="$workdir/assets"
+  mkdir -p "$fake_bin" "$log_dir" "$assets_dir"
+  release_tag="app-binaries-v0.1.0-testnet"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  printf 'bridge-api-binary\n' >"$assets_dir/bridge-api_linux_amd64"
+  printf 'backoffice-binary\n' >"$assets_dir/backoffice_linux_amd64"
+  printf 'shared-infra-e2e-binary\n' >"$assets_dir/shared-infra-e2e_linux_amd64"
+  (
+    cd "$assets_dir"
+    sha256sum bridge-api_linux_amd64 >bridge-api_linux_amd64.sha256
+    sha256sum backoffice_linux_amd64 >backoffice_linux_amd64.sha256
+    sha256sum shared-infra-e2e_linux_amd64 >shared-infra-e2e_linux_amd64.sha256
+  )
+
+  cat >"$fake_bin/gh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+pattern=""
+dir=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --pattern)
+      pattern="$2"
+      shift 2
+      ;;
+    --dir)
+      dir="$2"
+      shift 2
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+cp "$TEST_ASSETS_DIR/$pattern" "$dir/$pattern"
+EOF
+  cat >"$fake_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+printf 'scp %s\n' "$*" >>"$TEST_LOG_DIR/scp.log"
+for arg in "$@"; do
+  if [[ -f "$arg" ]]; then
+    cp "$arg" "$TEST_LOG_DIR/$(basename "$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+fi
+cat >>"$TEST_LOG_DIR/ssh.stdin" || true
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
+exit 0
+EOF
+  cat >"$fake_bin/terraform" <<'EOF'
+#!/usr/bin/env bash
+printf 'terraform %s\n' "$*" >>"$TEST_LOG_DIR/terraform.log"
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  chmod +x "$fake_bin/gh" "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws" "$fake_bin/terraform"
+
+  TEST_LOG_DIR="$log_dir" TEST_ASSETS_DIR="$assets_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/deploy-app-host.sh" \
+      --app-deploy "$app_manifest" \
+      --release-tag "$release_tag" >/dev/null
+
+  assert_contains "$(cat "$log_dir/terraform.log")" "init" "edge terraform init"
+  assert_contains "$(cat "$log_dir/terraform.log")" "apply" "edge terraform apply"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'auto_https off' "edge caddy disables direct tls"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /bridge*' "edge caddy bridge origin route"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /ops*' "edge caddy backoffice origin route"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "edge path does not publish direct dns records"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "edge path does not open direct public ingress"
+  assert_contains "$(cat "$log_dir/aws.log")" "revoke-security-group-ingress" "edge path revokes legacy direct ingress"
   rm -rf "$workdir"
 }
 
@@ -568,6 +695,7 @@ main() {
   test_deploy_app_host_uses_release_assets_and_updates_remote_runtime
   test_deploy_app_host_allows_missing_backoffice_juno_rpc_url
   test_deploy_app_host_preserves_preview_iam_kafka_auth
+  test_deploy_app_host_provisions_edge_and_uses_origin_proxy
   test_deploy_app_host_rejects_non_https_manifest
   test_deploy_app_host_rejects_non_loopback_listeners
 }

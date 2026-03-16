@@ -5,6 +5,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"errors"
 	"net"
 	"os/exec"
 	"strings"
@@ -141,6 +142,172 @@ func TestStore_StateMachine(t *testing.T) {
 	_, _, err = s.UpsertConfirmed(ctx, d2)
 	if err == nil {
 		t.Fatalf("expected mismatch error")
+	}
+}
+
+func TestStore_MarkRejectedDoesNotOverrideFinalizedState(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var id [32]byte
+	id[0] = 0x09
+	var cm [32]byte
+	cm[0] = 0x09
+	var recip [20]byte
+	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000456").Bytes())
+
+	d := deposit.Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        9,
+		Amount:           1000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: bytes.Repeat([]byte{0x01}, 1848),
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if err := s.MarkProofRequested(ctx, id, cp); err != nil {
+		t.Fatalf("MarkProofRequested: %v", err)
+	}
+	if err := s.SetProofReady(ctx, id, []byte{0x02}); err != nil {
+		t.Fatalf("SetProofReady: %v", err)
+	}
+
+	var txHash [32]byte
+	txHash[0] = 0x77
+	if err := s.MarkFinalized(ctx, id, txHash); err != nil {
+		t.Fatalf("MarkFinalized: %v", err)
+	}
+	if err := s.MarkRejected(ctx, id, "skipped", txHash); !errors.Is(err, deposit.ErrInvalidTransition) {
+		t.Fatalf("MarkRejected after finalized: got %v want %v", err, deposit.ErrInvalidTransition)
+	}
+
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateFinalized {
+		t.Fatalf("state: got %v want %v", job.State, deposit.StateFinalized)
+	}
+	if job.TxHash != txHash {
+		t.Fatalf("tx hash changed: got %x want %x", job.TxHash, txHash)
+	}
+}
+
+func TestStore_ApplyBatchOutcomeDoesNotOverrideRejectedState(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var id [32]byte
+	id[0] = 0x0a
+	var cm [32]byte
+	cm[0] = 0x0a
+	var recip [20]byte
+	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000456").Bytes())
+
+	d := deposit.Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        10,
+		Amount:           1000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: bytes.Repeat([]byte{0x01}, 1848),
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0xbb}
+	if _, err := s.MarkBatchSubmitted(ctx, "owner-a", batchID, [][32]byte{id}, cp, [][]byte{[]byte{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	var rejectedTxHash [32]byte
+	rejectedTxHash[0] = 0x55
+	if err := s.MarkRejected(ctx, id, "deposit skipped by bridge", rejectedTxHash); err != nil {
+		t.Fatalf("MarkRejected: %v", err)
+	}
+
+	var outcomeTxHash [32]byte
+	outcomeTxHash[0] = 0x66
+	if err := s.ApplyBatchOutcome(ctx, batchID, outcomeTxHash, [][32]byte{id}, nil, "deposit skipped by bridge"); err != nil {
+		t.Fatalf("ApplyBatchOutcome: %v", err)
+	}
+
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateRejected {
+		t.Fatalf("state: got %v want %v", job.State, deposit.StateRejected)
+	}
+	if job.TxHash != rejectedTxHash {
+		t.Fatalf("tx hash changed: got %x want %x", job.TxHash, rejectedTxHash)
+	}
+	if job.RejectionReason != "deposit skipped by bridge" {
+		t.Fatalf("rejection reason: got %q", job.RejectionReason)
 	}
 }
 

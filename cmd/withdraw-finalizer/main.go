@@ -85,11 +85,12 @@ func main() {
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
 
-		owner        = flag.String("owner", "", "unique finalizer owner id (required; used for DB leases)")
-		leaseTTL     = flag.Duration("lease-ttl", 30*time.Second, "per-batch lease TTL")
-		maxBatches   = flag.Int("max-batches", 10, "maximum batches to finalize per tick")
-		tickInterval = flag.Duration("tick-interval", 1*time.Second, "finalizer tick interval")
-		gasLimit     = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
+		owner              = flag.String("owner", "", "unique finalizer owner id (required; used for DB leases)")
+		leaseTTL           = flag.Duration("lease-ttl", 30*time.Second, "per-batch lease TTL")
+		leaseRenewInterval = flag.Duration("lease-renew-interval", 10*time.Second, "per-batch lease renew interval; must be less than --lease-ttl")
+		maxBatches         = flag.Int("max-batches", 10, "maximum batches to finalize per tick")
+		tickInterval       = flag.Duration("tick-interval", 1*time.Second, "finalizer tick interval")
+		gasLimit           = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 
 		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
 
@@ -128,8 +129,12 @@ func main() {
 		fmt.Fprintln(os.Stderr, "error: --bridge-address must be a valid hex address")
 		os.Exit(2)
 	}
-	if *leaseTTL <= 0 || *maxBatches <= 0 || *tickInterval <= 0 || *submitTimeout <= 0 {
+	if *leaseTTL <= 0 || *leaseRenewInterval <= 0 || *maxBatches <= 0 || *tickInterval <= 0 || *submitTimeout <= 0 {
 		fmt.Fprintln(os.Stderr, "error: durations and --max-batches must be > 0")
+		os.Exit(2)
+	}
+	if *leaseRenewInterval >= *leaseTTL {
+		fmt.Fprintln(os.Stderr, "error: --lease-renew-interval must be less than --lease-ttl")
 		os.Exit(2)
 	}
 	if *maxLineBytes <= 0 || *queueMaxBytes <= 0 {
@@ -300,6 +305,7 @@ func main() {
 	f, err := withdrawfinalizer.New(withdrawfinalizer.Config{
 		Owner:               *owner,
 		LeaseTTL:            *leaseTTL,
+		LeaseRenewInterval:  *leaseRenewInterval,
 		MaxBatches:          *maxBatches,
 		BaseChainID:         *baseChainID,
 		BridgeAddress:       bridge,
@@ -343,6 +349,7 @@ func main() {
 		"proofFailureTopic", *proofFailureTopic,
 		"maxBatches", *maxBatches,
 		"leaseTTL", leaseTTL.String(),
+		"leaseRenewInterval", leaseRenewInterval.String(),
 		"tickInterval", tickInterval.String(),
 		"queueDriver", *queueDriver,
 		"blobDriver", normalizeBlobDriver(*blobDriver),
