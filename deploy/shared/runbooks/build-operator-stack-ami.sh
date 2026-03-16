@@ -498,6 +498,7 @@ BASE_RELAYER_URL=http://127.0.0.1:18081
 BASE_RELAYER_PRIVATE_KEYS=
 BASE_RELAYER_AUTH_TOKEN=
 BASE_RELAYER_ALLOWED_CONTRACTS=__BOOTSTRAP_BRIDGE_ADDRESS__
+BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605
 BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000
 BASE_RELAYER_RATE_LIMIT_PER_SECOND=20
 BASE_RELAYER_RATE_LIMIT_BURST=40
@@ -1525,6 +1526,10 @@ source /etc/intents-juno/operator-stack.env
   echo "base-relayer requires BASE_RELAYER_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${BASE_RELAYER_ALLOWED_SELECTORS:-}" ]] || {
+  echo "base-relayer requires BASE_RELAYER_ALLOWED_SELECTORS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 export BASE_RELAYER_PRIVATE_KEYS
 export BASE_RELAYER_AUTH_TOKEN
 [[ -n "${BASE_RELAYER_TLS_CERT_FILE:-}" || -n "${BASE_RELAYER_TLS_KEY_FILE:-}" ]] && {
@@ -1553,6 +1558,7 @@ args=(
 if [[ -n "${BASE_RELAYER_ALLOWED_CONTRACTS:-}" ]]; then
   args+=(--allowed-contracts "${BASE_RELAYER_ALLOWED_CONTRACTS}")
 fi
+args+=(--allowed-selectors "${BASE_RELAYER_ALLOWED_SELECTORS}")
 if [[ -n "${BASE_RELAYER_TLS_CERT_FILE:-}" ]]; then
   args+=(--tls-cert-file "${BASE_RELAYER_TLS_CERT_FILE}" --tls-key-file "${BASE_RELAYER_TLS_KEY_FILE}")
 fi

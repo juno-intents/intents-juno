@@ -34,6 +34,7 @@ type config struct {
 	BumpPercent                int
 	MaxFeeCapGwei              int64
 	AllowedContracts           []common.Address
+	AllowedSelectors           [][]byte
 	TLSCertFile                string
 	TLSKeyFile                 string
 	MinReadyBalanceWei         uint64
@@ -130,6 +131,7 @@ func main() {
 		ReadinessCheck:             httpapi.MinSignerBalanceReadinessCheck(client, signerAddrs, new(big.Int).SetUint64(cfg.MinReadyBalanceWei)),
 		AuthToken:                  authToken,
 		AllowedContracts:           cfg.AllowedContracts,
+		AllowedSelectors:           cfg.AllowedSelectors,
 		MaxBodyBytes:               1 << 20,
 		MaxWaitSeconds:             300,
 		IdempotencyTTL:             cfg.IdempotencyTTL,
@@ -182,6 +184,7 @@ func parseConfig(args []string) (config, error) {
 	var (
 		cfg                 config
 		allowedContractsRaw string
+		allowedSelectorsRaw string
 	)
 	fs.StringVar(&cfg.RPCURL, "rpc-url", "", "Base/EVM JSON-RPC URL (required)")
 	fs.Uint64Var(&cfg.ChainID, "chain-id", 0, "EVM chain id (required)")
@@ -196,6 +199,7 @@ func parseConfig(args []string) (config, error) {
 	fs.IntVar(&cfg.BumpPercent, "bump-percent", 15, "replacement fee bump percentage")
 	fs.Int64Var(&cfg.MaxFeeCapGwei, "max-fee-cap-gwei", 0, "maximum gas fee cap in gwei (0 disables the cap)")
 	fs.StringVar(&allowedContractsRaw, "allowed-contracts", "", "comma-separated list of allowed contract addresses (required)")
+	fs.StringVar(&allowedSelectorsRaw, "allowed-selectors", "", "comma-separated list of allowed calldata selectors (required)")
 	fs.StringVar(&cfg.TLSCertFile, "tls-cert-file", "", "PEM certificate for HTTPS listener")
 	fs.StringVar(&cfg.TLSKeyFile, "tls-key-file", "", "PEM private key for HTTPS listener")
 	fs.Uint64Var(&cfg.MinReadyBalanceWei, "min-ready-balance-wei", 0, "minimum per-signer balance required for /readyz in wei (0 disables readiness balance checks)")
@@ -247,6 +251,25 @@ func parseConfig(args []string) (config, error) {
 	}
 	if len(cfg.AllowedContracts) == 0 {
 		return config{}, fmt.Errorf("--allowed-contracts must contain at least one address")
+	}
+	if raw := strings.TrimSpace(allowedSelectorsRaw); raw != "" {
+		for _, item := range strings.Split(raw, ",") {
+			item = strings.TrimSpace(item)
+			if item == "" {
+				continue
+			}
+			if !strings.HasPrefix(item, "0x") || len(item) != 10 {
+				return config{}, fmt.Errorf("invalid allowed selector %q", item)
+			}
+			selector := common.FromHex(item)
+			if len(selector) != 4 {
+				return config{}, fmt.Errorf("invalid allowed selector %q", item)
+			}
+			cfg.AllowedSelectors = append(cfg.AllowedSelectors, selector)
+		}
+	}
+	if len(cfg.AllowedSelectors) == 0 {
+		return config{}, fmt.Errorf("--allowed-selectors must contain at least one selector")
 	}
 
 	return cfg, nil

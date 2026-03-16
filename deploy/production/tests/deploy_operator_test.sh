@@ -309,6 +309,7 @@ EOF
   assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key" "deploy derives the base relayer address from the configured key"
   assert_contains "$(cat "$log_dir/cast.log")" "balance --rpc-url" "deploy verifies base relayer funding before rollout"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_CONTRACTS=0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333,0x4444444444444444444444444444444444444444,0x5555555555555555555555555555555555555555" "allowlist injected"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605" "selector allowlist injected"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_PER_SECOND=20" "rate limit refill default"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_BURST=40" "rate limit burst default"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS=10000" "rate limit capacity default"

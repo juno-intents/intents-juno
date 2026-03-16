@@ -1185,6 +1185,7 @@ EOF
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem" "rendered env withdraw coordinator client cert"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key" "rendered env withdraw coordinator client key"
   assert_contains "$(cat "$output_env")" "BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000" "rendered env base relayer readiness balance floor"
+  assert_contains "$(cat "$output_env")" "BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605" "rendered env base relayer selector allowlist"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "rendered env withdraw coordinator extend signer"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"

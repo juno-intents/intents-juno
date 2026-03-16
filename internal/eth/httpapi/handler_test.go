@@ -43,6 +43,7 @@ func TestHandler_RequiresBearerTokenWhenConfigured(t *testing.T) {
 
 func TestHandler_SendParsesRequestAndReturnsResult(t *testing.T) {
 	wantTo := common.HexToAddress("0x0000000000000000000000000000000000000001")
+	wantSelector := []byte{0x53, 0xa5, 0x8a, 0x48}
 
 	sender := &stubSender{
 		res: eth.SendResult{
@@ -58,12 +59,12 @@ func TestHandler_SendParsesRequestAndReturnsResult(t *testing.T) {
 		MaxBodyBytes:     1024,
 		MaxWaitSeconds:   60,
 		AllowedContracts: []common.Address{wantTo},
+		AllowedSelectors: [][]byte{wantSelector},
 	})
 
 	body := map[string]any{
 		"to":        wantTo.Hex(),
-		"data":      "0x0102",
-		"value_wei": "123",
+		"data":      "0x53a58a480102",
 		"gas_limit": 55555,
 	}
 	b, _ := json.Marshal(body)
@@ -79,14 +80,88 @@ func TestHandler_SendParsesRequestAndReturnsResult(t *testing.T) {
 	if sender.gotReq.To != wantTo {
 		t.Fatalf("To: got %s want %s", sender.gotReq.To, wantTo)
 	}
-	if len(sender.gotReq.Data) != 2 || sender.gotReq.Data[0] != 0x01 || sender.gotReq.Data[1] != 0x02 {
+	if len(sender.gotReq.Data) != 6 || sender.gotReq.Data[0] != 0x53 || sender.gotReq.Data[1] != 0xa5 || sender.gotReq.Data[4] != 0x01 || sender.gotReq.Data[5] != 0x02 {
 		t.Fatalf("Data: got %x", sender.gotReq.Data)
 	}
-	if sender.gotReq.Value == nil || sender.gotReq.Value.String() != "123" {
+	if sender.gotReq.Value == nil || sender.gotReq.Value.String() != "0" {
 		t.Fatalf("Value: got %v", sender.gotReq.Value)
 	}
 	if sender.gotReq.GasLimit != 55555 {
 		t.Fatalf("GasLimit: got %d want %d", sender.gotReq.GasLimit, 55555)
+	}
+}
+
+func TestHandler_RejectsSendWhenSelectorIsNotAllowed(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors: [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001","data":"0x01020304"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusForbidden, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
+	}
+}
+
+func TestHandler_RejectsSendWhenSelectorAllowlistIsMissing(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
+	}
+}
+
+func TestHandler_RejectsNonZeroValue(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors: [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48","value_wei":"1"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusBadRequest {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusBadRequest, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
 	}
 }
 
@@ -211,12 +286,13 @@ func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T)
 		IdempotencyTTL:     time.Minute,
 		IdempotencyMaxKeys: 8,
 		AllowedContracts:   []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors:   [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
 		Now: func() time.Time {
 			return now
 		},
 	})
 
-	body := []byte(`{"to":"0x0000000000000000000000000000000000000001","gas_limit":21000}`)
+	body := []byte(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48","gas_limit":21000}`)
 	req1 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
 	req1.Header.Set("Authorization", "Bearer secret")
 	req1.Header.Set("Idempotency-Key", "abc123")
@@ -252,6 +328,7 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 		MaxBodyBytes:               1024,
 		MaxWaitSeconds:             60,
 		AllowedContracts:           []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors:           [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
 		RateLimitPerSecond:         1,
 		RateLimitBurst:             1,
 		RateLimitMaxTrackedClients: 4,
@@ -260,7 +337,7 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 		},
 	})
 
-	body := []byte(`{"to":"0x0000000000000000000000000000000000000001"}`)
+	body := []byte(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48"}`)
 	req1 := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader(body))
 	req1.Header.Set("Authorization", "Bearer secret")
 	req1.RemoteAddr = "203.0.113.9:1234"
@@ -284,6 +361,7 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 		MaxBodyBytes:               1024,
 		MaxWaitSeconds:             60,
 		AllowedContracts:           []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors:           [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
 		RateLimitPerSecond:         1,
 		RateLimitBurst:             1,
 		RateLimitMaxTrackedClients: 4,

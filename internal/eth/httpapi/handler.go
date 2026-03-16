@@ -32,6 +32,9 @@ type Config struct {
 	// AllowedContracts limits /v1/send targets. Empty means /v1/send fails closed.
 	AllowedContracts []common.Address
 
+	// AllowedSelectors limits /v1/send calldata selectors. Empty means /v1/send fails closed.
+	AllowedSelectors [][]byte
+
 	// MaxBodyBytes limits request sizes to prevent memory DoS. Defaults to 1 MiB.
 	MaxBodyBytes int64
 
@@ -92,6 +95,15 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 	allowedContracts := make(map[common.Address]struct{}, len(cfg.AllowedContracts))
 	for _, addr := range cfg.AllowedContracts {
 		allowedContracts[addr] = struct{}{}
+	}
+	allowedSelectors := make(map[[4]byte]struct{}, len(cfg.AllowedSelectors))
+	for _, selector := range cfg.AllowedSelectors {
+		if len(selector) != 4 {
+			continue
+		}
+		var key [4]byte
+		copy(key[:], selector)
+		allowedSelectors[key] = struct{}{}
 	}
 	limiter := newClientRateLimiter(cfg.RateLimitPerSecond, cfg.RateLimitBurst, cfg.RateLimitMaxTrackedClients)
 	idempotency := newIdempotencyCache(cfg.IdempotencyTTL, cfg.IdempotencyMaxKeys)
@@ -191,6 +203,10 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			}
 			value = v
 		}
+		if value.Sign() != 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "nonzero_value_not_allowed"})
+			return
+		}
 
 		if len(allowedContracts) == 0 {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "contract_allowlist_not_configured"})
@@ -198,6 +214,20 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 		}
 		if _, ok := allowedContracts[to]; !ok {
 			writeJSON(w, http.StatusForbidden, map[string]any{"error": "contract_not_allowed"})
+			return
+		}
+		if len(allowedSelectors) == 0 {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "selector_allowlist_not_configured"})
+			return
+		}
+		if len(data) < 4 {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"error": "missing_selector"})
+			return
+		}
+		var selector [4]byte
+		copy(selector[:], data[:4])
+		if _, ok := allowedSelectors[selector]; !ok {
+			writeJSON(w, http.StatusForbidden, map[string]any{"error": "selector_not_allowed"})
 			return
 		}
 

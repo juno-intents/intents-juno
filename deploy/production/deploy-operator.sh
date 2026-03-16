@@ -507,6 +507,10 @@ derive_base_relayer_allowlist() {
   ' "$shared_manifest"
 }
 
+derive_base_relayer_selector_allowlist() {
+  printf '0x53a58a48,0xec70b605\n'
+}
+
 derive_base_relayer_url() {
   local listen_addr="$1"
   local scheme="$2"
@@ -530,7 +534,7 @@ prepare_base_relayer_env() {
   local shared_manifest="$1"
   local env_file="$2"
   local staging_dir="$3"
-  local cert_b64 key_b64 cert_file key_file listen_addr scheme allowlist
+  local cert_b64 key_b64 cert_file key_file listen_addr scheme allowlist selector_allowlist
 
   if ! env_has_key "$env_file" "BASE_RELAYER_LISTEN_ADDR"; then
     set_env_value_local "$env_file" "BASE_RELAYER_LISTEN_ADDR" "127.0.0.1:18081"
@@ -545,6 +549,12 @@ prepare_base_relayer_env() {
     allowlist="$(derive_base_relayer_allowlist "$shared_manifest")"
     if [[ -n "$allowlist" ]]; then
       set_env_value_local "$env_file" "BASE_RELAYER_ALLOWED_CONTRACTS" "$allowlist"
+    fi
+  fi
+  if ! env_has_key "$env_file" "BASE_RELAYER_ALLOWED_SELECTORS"; then
+    selector_allowlist="$(derive_base_relayer_selector_allowlist)"
+    if [[ -n "$selector_allowlist" ]]; then
+      set_env_value_local "$env_file" "BASE_RELAYER_ALLOWED_SELECTORS" "$selector_allowlist"
     fi
   fi
   if ! env_has_key "$env_file" "BASE_RELAYER_RATE_LIMIT_PER_SECOND"; then

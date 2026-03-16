@@ -264,12 +264,15 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   local base_relayer_wrapper
   base_relayer_wrapper="$(extract_block "cat > /tmp/intents-juno-base-relayer.sh <<'EOF_BASE_RELAYER'" "EOF_BASE_RELAYER")"
   assert_contains "$base_relayer_wrapper" '--min-ready-balance-wei "${BASE_RELAYER_MIN_READY_BALANCE_WEI:-1000000000000000}"' "base-relayer wrapper enforces the readiness balance floor"
+  assert_contains "$base_relayer_wrapper" 'base-relayer requires BASE_RELAYER_ALLOWED_SELECTORS in /etc/intents-juno/operator-stack.env' "base-relayer wrapper requires selector allowlist"
+  assert_contains "$base_relayer_wrapper" '--allowed-selectors "${BASE_RELAYER_ALLOWED_SELECTORS}"' "base-relayer wrapper forwards selector allowlist"
 
   assert_not_contains "$script_text" 'rpc_user: $junocash_rpc_user' "bootstrap metadata does not publish RPC username"
   assert_not_contains "$script_text" 'rpc_password: $junocash_rpc_pass' "bootstrap metadata does not publish RPC password"
   assert_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=' "bootstrap env leaves base-event-scanner start block unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
   assert_contains "$script_text" 'BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000' "bootstrap env pins the base relayer readiness balance floor"
+  assert_contains "$script_text" 'BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605' "bootstrap env pins the base relayer selector allowlist"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h' "bootstrap env pins the withdraw expiry safety margin"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h' "bootstrap env pins the withdraw max expiry extension"
 }

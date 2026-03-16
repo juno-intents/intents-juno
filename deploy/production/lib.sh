@@ -302,6 +302,10 @@ EOF
   rm -rf "$tmp_dir"
 }
 
+production_base_relayer_allowed_selectors() {
+  printf '0x53a58a48,0xec70b605\n'
+}
+
 production_rewrite_operator_handoffs_dkg_tls_dir() {
   local output_dir="$1"
   local dkg_tls_dir="$2"
@@ -2012,6 +2016,7 @@ BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BASE_RELAYER_MIN_READY_BALANCE_WEI=$min_base_relayer_balance_wei
+BASE_RELAYER_ALLOWED_SELECTORS=$(production_base_relayer_allowed_selectors)
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
 RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
