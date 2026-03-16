@@ -252,6 +252,20 @@ func TestSweepEphemeralDeployerWithRetry_AdjustsForObservedShortfall(t *testing.
 	}
 }
 
+func TestInsufficientFundsShortageWei_ParsesOvershotFormat(t *testing.T) {
+	t.Parallel()
+
+	shortage, ok := insufficientFundsShortageWei(errors.New(
+		"send tx: insufficient funds for gas * price + value: balance 10759993571077681, tx cost 10759994195683386, overshot 624605705",
+	))
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	if shortage.Cmp(big.NewInt(624605705)) != 0 {
+		t.Fatalf("shortage = %s, want 624605705", shortage.String())
+	}
+}
+
 func TestBuildLegacyValueTransferTx_UsesProvidedGasPrice(t *testing.T) {
 	t.Parallel()
 

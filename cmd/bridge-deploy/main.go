@@ -1148,8 +1148,18 @@ func insufficientFundsShortageWei(err error) (*big.Int, bool) {
 	if err == nil {
 		return big.NewInt(0), false
 	}
-	const marker = "insufficient funds for gas * price + value: have "
 	message := err.Error()
+	if shortage, ok := parseInsufficientFundsHaveWant(message); ok {
+		return shortage, true
+	}
+	if shortage, ok := parseInsufficientFundsOvershot(message); ok {
+		return shortage, true
+	}
+	return big.NewInt(0), false
+}
+
+func parseInsufficientFundsHaveWant(message string) (*big.Int, bool) {
+	const marker = "insufficient funds for gas * price + value: have "
 	idx := strings.Index(message, marker)
 	if idx < 0 {
 		return big.NewInt(0), false
@@ -1170,6 +1180,26 @@ func insufficientFundsShortageWei(err error) (*big.Int, bool) {
 		return big.NewInt(0), true
 	}
 	return new(big.Int).Sub(want, have), true
+}
+
+func parseInsufficientFundsOvershot(message string) (*big.Int, bool) {
+	const marker = "insufficient funds for gas * price + value: balance "
+	idx := strings.Index(message, marker)
+	if idx < 0 {
+		return big.NewInt(0), false
+	}
+	fields := strings.Fields(strings.ReplaceAll(message[idx+len(marker):], ",", ""))
+	if len(fields) < 6 || fields[1] != "tx" || fields[2] != "cost" || fields[4] != "overshot" {
+		return big.NewInt(0), false
+	}
+	shortage, ok := new(big.Int).SetString(fields[5], 10)
+	if !ok {
+		return big.NewInt(0), false
+	}
+	if shortage.Sign() < 0 {
+		return big.NewInt(0), false
+	}
+	return shortage, true
 }
 
 func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *bind.TransactOpts {
