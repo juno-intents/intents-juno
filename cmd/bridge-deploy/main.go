@@ -1077,6 +1077,17 @@ func sweepEphemeralDeployerWithRetry(ctx context.Context, readBalance sweepBalan
 		if err == nil {
 			return txHash, true, nil
 		}
+		if isRetriableNonceError(err) {
+			if attempt+1 >= sweepRetryAttempts {
+				return common.Hash{}, false, err
+			}
+			select {
+			case <-ctx.Done():
+				return common.Hash{}, false, ctx.Err()
+			case <-time.After(sweepRetryBackoff):
+			}
+			continue
+		}
 
 		shortage, ok := insufficientFundsShortageWei(err)
 		if !ok {
