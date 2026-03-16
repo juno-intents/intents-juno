@@ -195,121 +195,115 @@ resource "aws_iam_role" "live_e2e" {
   tags = local.common_tags
 }
 
-data "aws_iam_policy_document" "live_e2e_inline" {
-  statement {
-    sid    = "AllowDKGBucketList"
-    effect = "Allow"
-    actions = [
-      "s3:GetBucketLocation",
-      "s3:ListBucket"
-    ]
-    resources = [
-      aws_s3_bucket.dkg_keypackages.arn
-    ]
-  }
-
-  statement {
-    sid    = "AllowDKGBucketObjects"
-    effect = "Allow"
-    actions = [
-      "s3:GetObject",
-      "s3:PutObject",
-      "s3:DeleteObject",
-      "s3:AbortMultipartUpload",
-      "s3:ListBucketMultipartUploads",
-      "s3:ListMultipartUploadParts"
-    ]
-    resources = [
-      "${aws_s3_bucket.dkg_keypackages.arn}/*"
-    ]
-  }
-
-  statement {
-    sid    = "AllowDKGKMS"
-    effect = "Allow"
-    actions = [
-      "kms:Encrypt",
-      "kms:Decrypt",
-      "kms:ReEncrypt*",
-      "kms:GenerateDataKey*",
-      "kms:DescribeKey"
-    ]
-    resources = [
-      aws_kms_key.dkg.arn
-    ]
-  }
-
-  dynamic "statement" {
-    for_each = length(local.allowed_checkpoint_signer_kms_key_arns) > 0 ? [1] : []
-    content {
-      sid    = "AllowCheckpointSignerKMS"
-      effect = "Allow"
-      actions = [
-        "kms:GetPublicKey",
-        "kms:Sign"
-      ]
-      resources = local.allowed_checkpoint_signer_kms_key_arns
-    }
-  }
-
-  dynamic "statement" {
-    for_each = var.provision_shared_services ? [1] : []
-    content {
-      sid    = "AllowSharedECSServiceRollout"
-      effect = "Allow"
-      actions = [
-        "ecs:DescribeClusters",
-        "ecs:DescribeServices",
-        "ecs:DescribeTaskDefinition",
-        "ecs:RegisterTaskDefinition",
-        "ecs:UpdateService"
-      ]
-      resources = ["*"]
-    }
-  }
-
-  dynamic "statement" {
-    for_each = var.provision_shared_services ? [1] : []
-    content {
-      sid    = "AllowPassSharedECSTaskExecutionRole"
-      effect = "Allow"
-      actions = [
-        "iam:PassRole"
-      ]
-      resources = [
-        aws_iam_role.ecs_task_execution[0].arn
-      ]
-
-      condition {
-        test     = "StringEquals"
-        variable = "iam:PassedToService"
-        values   = ["ecs-tasks.amazonaws.com"]
+locals {
+  live_e2e_inline_policy_statements = concat(
+    [
+      {
+        Sid    = "AllowDKGBucketList"
+        Effect = "Allow"
+        Action = [
+          "s3:GetBucketLocation",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.dkg_keypackages.arn
+        ]
+      },
+      {
+        Sid    = "AllowDKGBucketObjects"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:AbortMultipartUpload",
+          "s3:ListBucketMultipartUploads",
+          "s3:ListMultipartUploadParts"
+        ]
+        Resource = [
+          "${aws_s3_bucket.dkg_keypackages.arn}/*"
+        ]
+      },
+      {
+        Sid    = "AllowDKGKMS"
+        Effect = "Allow"
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = [
+          aws_kms_key.dkg.arn
+        ]
+      },
+      {
+        Sid    = "AllowCheckpointSignerKMS"
+        Effect = "Allow"
+        Action = [
+          "kms:GetPublicKey",
+          "kms:Sign"
+        ]
+        Resource = local.allowed_checkpoint_signer_kms_key_arns
       }
-    }
-  }
-
-  dynamic "statement" {
-    for_each = var.provision_shared_services ? [1] : []
-    content {
-      sid    = "AllowSharedECSLogTail"
-      effect = "Allow"
-      actions = [
-        "logs:DescribeLogGroups",
-        "logs:DescribeLogStreams",
-        "logs:FilterLogEvents",
-        "logs:GetLogEvents"
-      ]
-      resources = ["*"]
-    }
-  }
+    ],
+    [
+      for statement_json in(
+        var.provision_shared_services ? [
+          jsonencode({
+            Sid    = "AllowSharedECSServiceRollout"
+            Effect = "Allow"
+            Action = [
+              "ecs:DescribeClusters",
+              "ecs:DescribeServices",
+              "ecs:DescribeTaskDefinition",
+              "ecs:RegisterTaskDefinition",
+              "ecs:UpdateService"
+            ]
+            Resource = "*"
+          }),
+          jsonencode({
+            Sid    = "AllowPassSharedECSTaskExecutionRole"
+            Effect = "Allow"
+            Action = [
+              "iam:PassRole"
+            ]
+            Resource = [
+              aws_iam_role.ecs_task_execution[0].arn
+            ]
+            Condition = {
+              StringEquals = {
+                "iam:PassedToService" = "ecs-tasks.amazonaws.com"
+              }
+            }
+          }),
+          jsonencode({
+            Sid    = "AllowSharedECSLogTail"
+            Effect = "Allow"
+            Action = [
+              "logs:DescribeLogGroups",
+              "logs:DescribeLogStreams",
+              "logs:FilterLogEvents",
+              "logs:GetLogEvents"
+            ]
+            Resource = "*"
+          })
+        ] : []
+      ) : jsondecode(statement_json)
+    ]
+  )
 }
 
 resource "aws_iam_role_policy" "live_e2e_inline" {
   count = local.managed_instance_profile_enabled ? 1 : 0
 
-  name   = "${local.resource_name}-instance-inline"
-  role   = aws_iam_role.live_e2e[0].id
-  policy = data.aws_iam_policy_document.live_e2e_inline.json
+  name = "${local.resource_name}-instance-inline"
+  role = aws_iam_role.live_e2e[0].id
+  policy = jsonencode({
+    Version   = "2012-10-17"
+    Statement = local.live_e2e_inline_policy_statements
+  })
 }
 
 resource "aws_iam_instance_profile" "live_e2e" {
