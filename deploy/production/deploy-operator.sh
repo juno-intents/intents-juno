@@ -865,6 +865,7 @@ rm -rf "$dkg_stage_dir"
 dkg_admin_runtime_bin="$runtime_dir/bin/dkg-admin"
 juno_txsign_runtime_bin="$runtime_dir/bin/juno-txsign"
 sudo chown -R intents-juno:intents-juno "$runtime_dir"
+source "$remote_stage_dir/common.sh"
 CHECKPOINT_SIGNER_KMS_KEY_ID="$(env_get_value_remote "CHECKPOINT_SIGNER_KMS_KEY_ID")"
 CHECKPOINT_BLOB_BUCKET="$(env_get_value_remote "CHECKPOINT_BLOB_BUCKET")"
 CHECKPOINT_BLOB_PREFIX="$(env_get_value_remote "CHECKPOINT_BLOB_PREFIX")"
@@ -893,6 +894,7 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
       exit 1
     }
     sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"
+    ensure_command aws
     sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export \
       --workdir "$runtime_dir" \
       --release-tag "$dkg_release_tag" \
