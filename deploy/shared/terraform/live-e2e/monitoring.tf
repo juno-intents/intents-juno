@@ -127,9 +127,9 @@ resource "aws_cloudwatch_metric_alarm" "operator_status" {
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "shared_postgres_writer_cpu" {
-  count               = var.provision_shared_services ? 1 : 0
-  alarm_name          = "${local.resource_name}-aurora-writer-cpu"
+resource "aws_cloudwatch_metric_alarm" "shared_postgres_instance_cpu" {
+  for_each            = var.provision_shared_services ? aws_rds_cluster_instance.shared : {}
+  alarm_name          = "${local.resource_name}-${each.value.availability_zone}-aurora-cpu"
   comparison_operator = "GreaterThanThreshold"
   evaluation_periods  = 2
   metric_name         = "CPUUtilization"
@@ -137,12 +137,12 @@ resource "aws_cloudwatch_metric_alarm" "shared_postgres_writer_cpu" {
   period              = 300
   statistic           = "Average"
   threshold           = 85
-  alarm_description   = "Aurora writer CPU is elevated."
+  alarm_description   = "Aurora instance CPU is elevated."
   alarm_actions       = var.alarm_actions
   ok_actions          = var.alarm_actions
 
   dimensions = {
-    DBInstanceIdentifier = aws_rds_cluster_instance.shared[0].identifier
+    DBInstanceIdentifier = each.value.identifier
   }
 }
 

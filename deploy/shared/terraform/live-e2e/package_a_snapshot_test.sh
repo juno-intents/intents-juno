@@ -18,9 +18,10 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf
+  local main_tf variables_tf monitoring_tf
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
+  monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
 
   assert_contains "$variables_tf" 'variable "shared_sp1_funder_secret_arn"' "live-e2e exposes distinct proof funder secret input"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "live-e2e exposes shared proof requestor address input"
@@ -89,6 +90,9 @@ main() {
   assert_contains "$main_tf" 'if !s.map_public_ip_on_launch' "live-e2e filters public subnets out of shared subnet auto-selection"
   assert_contains "$main_tf" 'check "shared_ecs_private_subnets_when_no_public_ip"' "live-e2e guards shared ECS subnet/public-ip compatibility"
   assert_contains "$main_tf" 'shared proof services require private shared_subnet_ids when shared_ecs_assign_public_ip=false.' "live-e2e fails closed on public shared subnets without public IPs"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "shared_postgres_instance_cpu"' "live-e2e monitors Aurora CPU per instance"
+  assert_contains "$monitoring_tf" 'var.provision_shared_services ? aws_rds_cluster_instance.shared : {}' "live-e2e derives Aurora CPU alarms from the keyed cluster instances"
+  assert_not_contains "$monitoring_tf" 'aws_rds_cluster_instance.shared[0].identifier' "live-e2e no longer indexes keyed Aurora instances numerically"
 
   printf 'live_e2e package_a_snapshot_test: PASS\n'
 }
