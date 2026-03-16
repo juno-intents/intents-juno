@@ -208,6 +208,9 @@ required_kafka_topics_csv="$(
     | awk 'NF && !seen[$0]++' \
     | paste -sd, -
 )"
+shared_infra_check_max_attempts="${PRODUCTION_SHARED_INFRA_CHECK_MAX_ATTEMPTS:-5}"
+shared_infra_check_sleep_seconds="${PRODUCTION_SHARED_INFRA_CHECK_SLEEP_SECONDS:-10}"
+shared_infra_check_timeout="${PRODUCTION_SHARED_INFRA_CHECK_TIMEOUT:-180s}"
 kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_services.kafka.tls')"
 if [[ "$kafka_tls_enabled" != "true" ]]; then
   kafka_tls_enabled="false"
@@ -278,6 +281,9 @@ shared_kafka_brokers="$shared_kafka_brokers"
 shared_kafka_auth_mode="$shared_kafka_auth_mode"
 shared_kafka_auth_aws_region="$shared_kafka_auth_aws_region"
 shared_required_kafka_topics="$required_kafka_topics_csv"
+shared_infra_check_max_attempts="$shared_infra_check_max_attempts"
+shared_infra_check_sleep_seconds="$shared_infra_check_sleep_seconds"
+shared_infra_check_timeout="$shared_infra_check_timeout"
 shared_ipfs_api_url="$shared_ipfs_api_url"
 shared_checkpoint_operators="$checkpoint_operators_csv"
 shared_checkpoint_threshold="$checkpoint_threshold"
@@ -296,18 +302,35 @@ sudo install -m 0755 "\$remote_stage_dir/shared-infra-e2e_linux_amd64" "\$shared
 sudo install -m 0640 -o root -g intents-juno "\$remote_stage_dir/bridge-api.env" "\$bridge_api_env"
 sudo install -m 0640 -o root -g intents-juno "\$remote_stage_dir/backoffice.env" "\$backoffice_env"
 
-sudo -u intents-juno env \
-  JUNO_QUEUE_KAFKA_TLS="\$kafka_tls_enabled" \
-  JUNO_QUEUE_KAFKA_AUTH_MODE="\$shared_kafka_auth_mode" \
-  JUNO_QUEUE_KAFKA_AWS_REGION="\$shared_kafka_auth_aws_region" \
-  "\$shared_infra_e2e_bin" \
-    --postgres-dsn "\$shared_postgres_dsn" \
-    --kafka-brokers "\$shared_kafka_brokers" \
-    --required-kafka-topics "\$shared_required_kafka_topics" \
-    --checkpoint-ipfs-api-url "\$shared_ipfs_api_url" \
-    --checkpoint-operators "\$shared_checkpoint_operators" \
-    --checkpoint-threshold "\$shared_checkpoint_threshold" \
-    --output "\$shared_infra_report"
+run_shared_infra_e2e() {
+  sudo -u intents-juno env \
+    JUNO_QUEUE_KAFKA_TLS="\$kafka_tls_enabled" \
+    JUNO_QUEUE_KAFKA_AUTH_MODE="\$shared_kafka_auth_mode" \
+    JUNO_QUEUE_KAFKA_AWS_REGION="\$shared_kafka_auth_aws_region" \
+    "\$shared_infra_e2e_bin" \
+      --postgres-dsn "\$shared_postgres_dsn" \
+      --kafka-brokers "\$shared_kafka_brokers" \
+      --required-kafka-topics "\$shared_required_kafka_topics" \
+      --checkpoint-ipfs-api-url "\$shared_ipfs_api_url" \
+      --checkpoint-operators "\$shared_checkpoint_operators" \
+      --checkpoint-threshold "\$shared_checkpoint_threshold" \
+      --timeout "\$shared_infra_check_timeout" \
+      --output "\$shared_infra_report"
+}
+
+for ((shared_infra_attempt = 1; shared_infra_attempt <= shared_infra_check_max_attempts; shared_infra_attempt++)); do
+  if run_shared_infra_e2e; then
+    break
+  fi
+  if (( shared_infra_attempt == shared_infra_check_max_attempts )); then
+    exit 1
+  fi
+  printf 'shared-infra-e2e attempt %d/%d failed; retrying in %ss\n' \
+    "\$shared_infra_attempt" \
+    "\$shared_infra_check_max_attempts" \
+    "\$shared_infra_check_sleep_seconds" >&2
+  sleep "\$shared_infra_check_sleep_seconds"
+done
 
 bridge_wrapper_tmp="\$(mktemp)"
 cat >"\$bridge_wrapper_tmp" <<'WRAP'
