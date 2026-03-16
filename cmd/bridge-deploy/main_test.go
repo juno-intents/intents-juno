@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -189,6 +190,65 @@ func TestSweepReservedFeeWei_LeavesSweepHeadroom(t *testing.T) {
 	got := sweepReservedFeeWei(gasPrice)
 	if got.Cmp(minHeadroom) < 0 {
 		t.Fatalf("reserved fee = %s, want at least %s", got.String(), minHeadroom.String())
+	}
+}
+
+func TestSweepEphemeralDeployerWithRetry_AdjustsForObservedShortfall(t *testing.T) {
+	t.Parallel()
+
+	balance := big.NewInt(1_000_000)
+	gasPrice := big.NewInt(7)
+	firstValue := new(big.Int).Sub(balance, sweepReservedFeeWei(gasPrice))
+	shortage := big.NewInt(10_000)
+	secondReserve := new(big.Int).Add(
+		sweepReservedFeeWei(gasPrice),
+		new(big.Int).Add(shortage, big.NewInt(sweepValueSafetyBufferWei)),
+	)
+	secondValue := new(big.Int).Sub(balance, secondReserve)
+	wantHash := common.HexToHash("0x1")
+	attempts := 0
+
+	gotHash, swept, err := sweepEphemeralDeployerWithRetry(
+		context.Background(),
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(balance), nil
+		},
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(gasPrice), nil
+		},
+		func(_ context.Context, value, gotGasPrice *big.Int) (common.Hash, error) {
+			attempts++
+			if gotGasPrice.Cmp(gasPrice) != 0 {
+				t.Fatalf("gas price = %s, want %s", gotGasPrice.String(), gasPrice.String())
+			}
+			switch attempts {
+			case 1:
+				if value.Cmp(firstValue) != 0 {
+					t.Fatalf("first value = %s, want %s", value.String(), firstValue.String())
+				}
+				return common.Hash{}, errors.New("send tx: insufficient funds for gas * price + value: have 890000 want 900000")
+			case 2:
+				if value.Cmp(secondValue) != 0 {
+					t.Fatalf("second value = %s, want %s", value.String(), secondValue.String())
+				}
+				return wantHash, nil
+			default:
+				t.Fatalf("unexpected sweep attempt %d", attempts)
+				return common.Hash{}, nil
+			}
+		},
+	)
+	if err != nil {
+		t.Fatalf("sweepEphemeralDeployerWithRetry: %v", err)
+	}
+	if !swept {
+		t.Fatalf("swept = false, want true")
+	}
+	if gotHash != wantHash {
+		t.Fatalf("hash = %s, want %s", gotHash.Hex(), wantHash.Hex())
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 
