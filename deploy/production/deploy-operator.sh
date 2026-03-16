@@ -677,6 +677,13 @@ runtime_dir="$2"
 base_chain_id="$3"
 bridge_address="$4"
 
+if ! getent group intents-juno >/dev/null 2>&1; then
+  sudo groupadd --system intents-juno
+fi
+if ! id -u intents-juno >/dev/null 2>&1; then
+  sudo useradd --system --create-home --home-dir /var/lib/intents-juno --shell /usr/sbin/nologin --gid intents-juno intents-juno
+fi
+
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno || true
 sudo install -d -m 0750 -o root -g intents-juno /etc/intents-juno/base-relayer || true
 sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir" || true
