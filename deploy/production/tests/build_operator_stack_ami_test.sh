@@ -103,6 +103,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   assert_contains "$script_text" 'sudo chown -R intents-juno:intents-juno \' "builder reowns reused runtime trees from prior source AMIs"
   assert_contains "$script_text" '/var/lib/intents-juno/junocashd \' "builder reowns junocashd state recursively"
   assert_contains "$script_text" '/var/lib/intents-juno/juno-scan \' "builder reowns juno-scan state recursively"
+  assert_contains "$script_text" '/var/lib/intents-juno/juno-scan.db \' "builder reowns juno-scan rocksdb state recursively"
   assert_contains "$script_text" '/var/lib/intents-juno/operator-runtime \' "builder reowns operator runtime state recursively"
   assert_contains "$script_text" '/var/lib/intents-juno/tss-signer' "builder reowns tss signer state recursively"
   assert_contains "$script_text" 'sudo chown root:intents-juno /etc/intents-juno/operator-stack.env' "builder seeds operator env with intents-juno group access"
@@ -365,6 +366,82 @@ EOF
   rm -rf "$tmp"
 }
 
+test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness() {
+  local tmp env_file fake_bin output_file sequence_file count_file wrapper_text
+  tmp="$(mktemp -d)"
+  env_file="$tmp/operator-stack.env"
+  fake_bin="$tmp/bin"
+  output_file="$tmp/juno-scan.args"
+  sequence_file="$tmp/juno-scan.sequence"
+  count_file="$tmp/juno-scan.count"
+  mkdir -p "$fake_bin"
+
+  cat >"$env_file" <<'EOF'
+JUNO_RPC_USER=rpc-user
+JUNO_RPC_PASS=rpc-pass
+JUNO_SCAN_UA_HRP=jtest
+JUNO_SCAN_CONFIRMATIONS=1
+EOF
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-juno-scan.sh <<'EOF_SCAN'" \
+    "EOF_SCAN" \
+    "$tmp/intents-juno-juno-scan.sh" \
+    "$env_file"
+  python3 - "$tmp/intents-juno-juno-scan.sh" "$fake_bin/juno-scan" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+path.write_text(path.read_text().replace("/usr/local/bin/juno-scan", sys.argv[2]))
+EOF
+
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+count=0
+if [[ -f "$count_file" ]]; then
+  count="\$(cat "$count_file")"
+fi
+count="\$((count + 1))"
+printf '%s\n' "\$count" >"$count_file"
+printf 'curl-%s\n' "\$count" >>"$sequence_file"
+case "\$count" in
+  1)
+    exit 7
+    ;;
+  2)
+    printf '%s\n' '{"result":null,"error":{"code":-28,"message":"Loading block index..."},"id":"juno-scan-ready"}'
+    ;;
+  *)
+    printf '%s\n' '{"result":123,"error":null,"id":"juno-scan-ready"}'
+    ;;
+esac
+EOF
+
+  cat >"$fake_bin/sleep" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'sleep-%s\n' "\${1:-}" >>"$sequence_file"
+EOF
+
+  cat >"$fake_bin/juno-scan" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >"$output_file"
+printf 'scan\n' >>"$sequence_file"
+EOF
+  chmod 0755 "$fake_bin/curl" "$fake_bin/sleep" "$fake_bin/juno-scan"
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-juno-scan.sh"
+
+  assert_eq "$(cat "$count_file")" "3" "juno-scan wrapper retries until junocashd rpc is ready"
+  assert_eq "$(cat "$sequence_file")" $'curl-1\nsleep-5\ncurl-2\nsleep-5\ncurl-3\nscan' "juno-scan wrapper waits through transport and loading-block-index failures before starting the scanner"
+  assert_contains "$(cat "$output_file")" '-db-path /var/lib/intents-juno/juno-scan.db' "juno-scan wrapper uses the dedicated rocksdb state directory"
+
+  rm -rf "$tmp"
+}
+
 test_build_operator_stack_ami_wrapper_smoke() {
   local tmp env_file fake_bin output_file stderr_file signer_output_file signer_stderr_file
   local spendauth_output_file spendauth_pwd_file
@@ -452,6 +529,7 @@ AWS_REGION=us-east-1
 AWS_DEFAULT_REGION=us-east-1
 AWS_PROFILE=alpha-testnet
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   render_wrapper \
@@ -527,6 +605,7 @@ AWS_REGION=us-east-1
 AWS_DEFAULT_REGION=us-east-1
 AWS_PROFILE=alpha-testnet
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   render_wrapper \
@@ -583,7 +662,10 @@ BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=aws-kms
 CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
 OPERATOR_ADDRESS=0x2222222222222222222222222222222222222222
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh"
@@ -602,7 +684,10 @@ BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=local-env
 CHECKPOINT_SIGNER_PRIVATE_KEY=4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a
 OPERATOR_ADDRESS=0x3333333333333333333333333333333333333333
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
@@ -636,7 +721,10 @@ BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=aws-kms
 CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:111111111111:key/abc
 OPERATOR_ADDRESS=0x3333333333333333333333333333333333333333
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
@@ -655,7 +743,10 @@ BASE_CHAIN_ID=84532
 BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 CHECKPOINT_SIGNER_DRIVER=aws-kms
 OPERATOR_ADDRESS=0x4444444444444444444444444444444444444444
+AWS_REGION=us-east-1
+AWS_DEFAULT_REGION=us-east-1
 JUNO_QUEUE_KAFKA_TLS=true
+JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
 EOF
 
   if PATH="$fake_bin:$PATH" "$tmp/intents-juno-checkpoint-signer.sh" >"$tmp/signer.stdout" 2>"$signer_stderr_file"; then
@@ -729,6 +820,7 @@ main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
+  test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
   test_build_operator_stack_ami_wrapper_smoke
 }
 

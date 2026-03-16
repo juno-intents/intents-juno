@@ -444,11 +444,13 @@ write_stack_config() {
   sudo install -d -m 0750 -o intents-juno -g intents-juno \
     /var/lib/intents-juno/junocashd \
     /var/lib/intents-juno/juno-scan \
+    /var/lib/intents-juno/juno-scan.db \
     /var/lib/intents-juno/operator-runtime \
     /var/lib/intents-juno/tss-signer
   sudo chown -R intents-juno:intents-juno \
     /var/lib/intents-juno/junocashd \
     /var/lib/intents-juno/juno-scan \
+    /var/lib/intents-juno/juno-scan.db \
     /var/lib/intents-juno/operator-runtime \
     /var/lib/intents-juno/tss-signer
 
@@ -971,6 +973,26 @@ EOF_CONFIG_HYDRATOR
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+
+wait_for_junocashd_rpc() {
+  local rpc_payload rpc_response
+  rpc_payload='{"jsonrpc":"1.0","id":"juno-scan-ready","method":"getblockcount","params":[]}'
+  while true; do
+    rpc_response="$(
+      curl -sS --max-time 5 \
+        --user "${JUNO_RPC_USER}:${JUNO_RPC_PASS}" \
+        --header 'content-type: text/plain;' \
+        --data-binary "$rpc_payload" \
+        http://127.0.0.1:18232/ 2>/dev/null || true
+    )"
+    if [[ -n "$rpc_response" && "$rpc_response" == *'"error":null'* ]]; then
+      return 0
+    fi
+    sleep 5
+  done
+}
+
+wait_for_junocashd_rpc
 exec /usr/local/bin/juno-scan \
   -rpc-url http://127.0.0.1:18232 \
   -rpc-user "\$JUNO_RPC_USER" \
