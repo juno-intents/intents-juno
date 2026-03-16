@@ -678,6 +678,16 @@ resource "aws_msk_cluster" "shared" {
         volume_size = var.shared_msk_broker_ebs_volume_size_gb
       }
     }
+
+    connectivity_info {
+      vpc_connectivity {
+        client_authentication {
+          sasl {
+            iam = true
+          }
+        }
+      }
+    }
   }
 
   client_authentication {
