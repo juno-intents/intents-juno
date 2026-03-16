@@ -109,9 +109,13 @@ locals {
 
   managed_instance_profile_enabled = var.iam_instance_profile == ""
   instance_profile_name            = local.managed_instance_profile_enabled ? aws_iam_instance_profile.live_e2e[0].name : var.iam_instance_profile
-  allowed_checkpoint_signer_kms_key_arns = sort(distinct([
-    for arn in var.allowed_checkpoint_signer_kms_key_arns : trimspace(arn)
-  ]))
+  allowed_checkpoint_signer_kms_key_arns = sort(distinct(concat(
+    [aws_kms_key.dkg.arn],
+    [
+      for arn in var.allowed_checkpoint_signer_kms_key_arns : trimspace(arn)
+      if trimspace(arn) != ""
+    ]
+  )))
 
   resource_slug           = trim(replace(lower(local.resource_name), "_", "-"), "-")
   ipfs_lb_name            = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")

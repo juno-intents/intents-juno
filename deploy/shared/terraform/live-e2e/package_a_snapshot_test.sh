@@ -29,6 +29,7 @@ main() {
   assert_contains "$variables_tf" 'variable "shared_withdraw_image_id"' "live-e2e exposes withdraw image id input"
   assert_contains "$variables_tf" $'variable "shared_ecs_desired_count" {\n  description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."\n  type        = number\n  default     = 1' "live-e2e enables proof services by default"
   assert_contains "$variables_tf" 'If empty, the first two private subnets in distinct AZs in the selected VPC are used.' "live-e2e documents private shared subnet auto-selection"
+  assert_contains "$main_tf" $'allowed_checkpoint_signer_kms_key_arns = sort(distinct(concat(\n    [aws_kms_key.dkg.arn],' "live-e2e auto-includes the managed dkg kms key in checkpoint signer allowlists"
 
   assert_contains "$main_tf" '"/usr/local/bin/proof-requestor"' "live-e2e requestor still launches proof-requestor binary"
   assert_contains "$main_tf" '"--postgres-dsn"' "live-e2e requestor command includes postgres dsn"
