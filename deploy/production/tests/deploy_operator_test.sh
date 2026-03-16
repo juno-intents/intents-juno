@@ -112,6 +112,7 @@ EOF
   jq '
     .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
     | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
@@ -249,7 +250,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"' "remote deploy exports with the staged kms key"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-bucket "${CHECKPOINT_BLOB_BUCKET}"' "remote deploy exports with the staged checkpoint bucket"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}"' "remote deploy exports with the staged checkpoint prefix"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-sse-kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"' "remote deploy stores exported checkpoint packages under kms-backed s3 encryption"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-sse-kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}"' "remote deploy stores exported checkpoint packages under the blob sse kms key"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'latest_kms_receipt="$(sudo bash -lc '\''ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1'\'' _ "$runtime_dir")"' "remote deploy captures the latest kms export receipt"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"' "remote deploy publishes a stable latest kms export receipt path"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"' "remote deploy stages signer ufvk file"
@@ -268,6 +269,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active juno-scan" "deploy verifies juno-scan after restarting it"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "kms signer driver staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "kms signer key id staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff" "checkpoint blob sse kms key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999" "operator address staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_USER=juno" "juno rpc user staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_RPC_PASS=rpcpass" "juno rpc pass staged"

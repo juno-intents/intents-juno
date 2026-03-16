@@ -271,6 +271,7 @@ EOF
   jq '
     .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
     | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
   dkg_summary="$workdir/dkg-summary.json"
@@ -315,6 +316,7 @@ EOF
   assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "proof requestor service name"
   assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "alpha-proof-funder" "proof funder service name"
+  assert_eq "$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id' "$shared_manifest")" "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "shared manifest checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
@@ -334,6 +336,7 @@ EOF
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "handoff signer kms key id"
   assert_eq "$(jq -r '.checkpoint_blob_bucket' "$handoff_dir/operator-deploy.json")" "alpha-op1-dkg-keypackages" "handoff checkpoint blob bucket"
   assert_eq "$(jq -r '.checkpoint_blob_prefix' "$handoff_dir/operator-deploy.json")" "operators/op1/checkpoint-packages" "handoff checkpoint blob prefix"
+  assert_eq "$(jq -r '.checkpoint_blob_sse_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff" "handoff checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
   assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff derives operator endpoint probes"
   rm -rf "$workdir"
@@ -364,6 +367,7 @@ EOF
   jq '
     .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
     | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
@@ -385,8 +389,10 @@ EOF
 
   assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env prefers operator checkpoint bucket"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_PREFIX=operators/op1/checkpoint-packages" "operator env prefers operator checkpoint prefix"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff" "operator env prefers operator checkpoint blob sse kms key id"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "operator env does not fall back to shared checkpoint bucket when operator bucket is set"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_PREFIX=dkg/keypackages" "operator env does not fall back to shared checkpoint prefix when operator prefix is set"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "operator env does not fall back to shared checkpoint blob sse kms key id when operator key is set"
   rm -rf "$workdir"
 }
 

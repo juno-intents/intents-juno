@@ -1043,6 +1043,7 @@ production_render_shared_manifest() {
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
   local summary_owallet_ua completion_owallet_ua effective_owallet_ua base_event_scanner_start_block
+  local dkg_kms_key_arn
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
@@ -1082,6 +1083,7 @@ production_render_shared_manifest() {
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
   dkg_prefix="$(production_tf_output_value "$tf_json" "dkg_s3_key_prefix" false)"
+  dkg_kms_key_arn="$(production_tf_output_value "$tf_json" "dkg_kms_key_arn" false)"
   bridge_fee_bps="$(production_json_required "$bridge_summary" '.bridge_params.fee_bps // .bridge_fee_params.fee_bps')"
   bridge_relayer_tip_bps="$(production_json_required "$bridge_summary" '.bridge_params.relayer_tip_bps // .bridge_fee_params.relayer_tip_bps')"
   bridge_refund_window_seconds="$(production_json_required "$bridge_summary" '.bridge_params.refund_window_seconds')"
@@ -1178,6 +1180,7 @@ production_render_shared_manifest() {
     --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
     --arg dkg_bucket "$dkg_bucket" \
     --arg dkg_prefix "$dkg_prefix" \
+    --arg dkg_kms_key_arn "$dkg_kms_key_arn" \
     --arg base_rpc_url "$base_rpc_url" \
     --argjson base_chain_id "$base_chain_id" \
     --argjson base_event_scanner_start_block "$base_event_scanner_start_block" \
@@ -1235,7 +1238,8 @@ production_render_shared_manifest() {
         },
         artifacts: {
           checkpoint_blob_bucket: (if $dkg_bucket == "" then null else $dkg_bucket end),
-          checkpoint_blob_prefix: (if $dkg_prefix == "" then null else $dkg_prefix end)
+          checkpoint_blob_prefix: (if $dkg_prefix == "" then null else $dkg_prefix end),
+          checkpoint_blob_sse_kms_key_id: (if $dkg_kms_key_arn == "" then null else $dkg_kms_key_arn end)
         }
       },
       contracts: {
@@ -1536,7 +1540,7 @@ production_render_operator_handoffs() {
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
     local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index operator_txsign_signer_key
-    local checkpoint_blob_bucket checkpoint_blob_prefix
+    local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     operator_index="$(jq -r '.index' <<<"$operator_json")"
@@ -1552,6 +1556,7 @@ production_render_operator_handoffs() {
     checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
     checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
     checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' <<<"$operator_json")"
+    checkpoint_blob_sse_kms_key_id="$(jq -r '.checkpoint_blob_sse_kms_key_id // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
 
@@ -1613,6 +1618,7 @@ production_render_operator_handoffs() {
       --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
       --arg checkpoint_blob_bucket "$checkpoint_blob_bucket" \
       --arg checkpoint_blob_prefix "$checkpoint_blob_prefix" \
+      --arg checkpoint_blob_sse_kms_key_id "$checkpoint_blob_sse_kms_key_id" \
       --arg operator_address "$operator_address" \
       --arg known_hosts_file "$known_hosts_dst" \
       --arg secret_contract_file "$secrets_dst" \
@@ -1635,6 +1641,7 @@ production_render_operator_handoffs() {
         checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end),
         checkpoint_blob_bucket: (if $checkpoint_blob_bucket == "" then null else $checkpoint_blob_bucket end),
         checkpoint_blob_prefix: (if $checkpoint_blob_prefix == "" then null else $checkpoint_blob_prefix end),
+        checkpoint_blob_sse_kms_key_id: (if $checkpoint_blob_sse_kms_key_id == "" then null else $checkpoint_blob_sse_kms_key_id end),
         operator_index: $operator.index,
         aws_profile: $operator.aws_profile,
         aws_region: $operator.aws_region,
@@ -1778,14 +1785,18 @@ EOF
     printf 'AWS_DEFAULT_REGION=%s\n' "$aws_region" >>"$output_file"
   fi
 
-  local checkpoint_blob_bucket checkpoint_blob_prefix deposit_image_id withdraw_image_id
+  local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id deposit_image_id withdraw_image_id
   checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' "$operator_deploy")"
   checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' "$operator_deploy")"
+  checkpoint_blob_sse_kms_key_id="$(jq -r '.checkpoint_blob_sse_kms_key_id // empty' "$operator_deploy")"
   if [[ -z "$checkpoint_blob_bucket" ]]; then
     checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
   fi
   if [[ -z "$checkpoint_blob_prefix" ]]; then
     checkpoint_blob_prefix="$(jq -r '.shared_services.artifacts.checkpoint_blob_prefix // empty' "$shared_manifest")"
+  fi
+  if [[ -z "$checkpoint_blob_sse_kms_key_id" ]]; then
+    checkpoint_blob_sse_kms_key_id="$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id // empty' "$shared_manifest")"
   fi
   deposit_image_id="$(jq -r '.contracts.deposit_image_id // empty' "$shared_manifest")"
   withdraw_image_id="$(jq -r '.contracts.withdraw_image_id // empty' "$shared_manifest")"
@@ -1795,6 +1806,9 @@ EOF
   fi
   if [[ -n "$checkpoint_blob_prefix" ]]; then
     printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
+  fi
+  if [[ -n "$checkpoint_blob_sse_kms_key_id" ]]; then
+    printf 'CHECKPOINT_BLOB_SSE_KMS_KEY_ID=%s\n' "$checkpoint_blob_sse_kms_key_id" >>"$output_file"
   fi
   if [[ -n "$deposit_image_id" ]]; then
     printf 'DEPOSIT_IMAGE_ID=%s\n' "$deposit_image_id" >>"$output_file"

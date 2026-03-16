@@ -25,5 +25,8 @@
   },
   "dkg_s3_key_prefix": {
     "value": "dkg/keypackages"
+  },
+  "dkg_kms_key_arn": {
+    "value": "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
   }
 }

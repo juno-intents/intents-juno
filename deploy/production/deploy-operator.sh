@@ -861,6 +861,7 @@ sudo chown -R intents-juno:intents-juno "$runtime_dir"
 CHECKPOINT_SIGNER_KMS_KEY_ID="$(env_get_value_remote "CHECKPOINT_SIGNER_KMS_KEY_ID")"
 CHECKPOINT_BLOB_BUCKET="$(env_get_value_remote "CHECKPOINT_BLOB_BUCKET")"
 CHECKPOINT_BLOB_PREFIX="$(env_get_value_remote "CHECKPOINT_BLOB_PREFIX")"
+CHECKPOINT_BLOB_SSE_KMS_KEY_ID="$(env_get_value_remote "CHECKPOINT_BLOB_SSE_KMS_KEY_ID")"
 CHECKPOINT_SIGNER_DRIVER_REMOTE="$(printf '%s' "$(env_get_value_remote "CHECKPOINT_SIGNER_DRIVER")" | tr '[:upper:]' '[:lower:]')"
 AWS_REGION="$(env_get_value_remote "AWS_REGION")"
 if [[ -z "$AWS_REGION" ]]; then
@@ -876,6 +877,10 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
       echo "operator runtime is missing CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
       exit 1
     }
+    [[ -n "$CHECKPOINT_BLOB_SSE_KMS_KEY_ID" ]] || {
+      echo "operator runtime is missing CHECKPOINT_BLOB_SSE_KMS_KEY_ID in /etc/intents-juno/operator-stack.env" >&2
+      exit 1
+    }
     [[ -n "$AWS_REGION" ]] || {
       echo "operator runtime is missing AWS_REGION or AWS_DEFAULT_REGION in /etc/intents-juno/operator-stack.env" >&2
       exit 1
@@ -887,7 +892,7 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
       --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
       --s3-bucket "${CHECKPOINT_BLOB_BUCKET}" \
       --s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}" \
-      --s3-sse-kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+      --s3-sse-kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}" \
       --aws-region "${AWS_REGION}"
     latest_kms_receipt="$(sudo bash -lc 'ls -1t "$1"/exports/kms-export-receipt-*.json 2>/dev/null | head -n1' _ "$runtime_dir")"
     [[ -n "$latest_kms_receipt" ]] || {

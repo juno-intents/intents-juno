@@ -486,6 +486,7 @@ CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
 CHECKPOINT_PACKAGE_TOPIC=checkpoints.packages.v1
 CHECKPOINT_BLOB_BUCKET=
 CHECKPOINT_BLOB_PREFIX=checkpoint-packages
+CHECKPOINT_BLOB_SSE_KMS_KEY_ID=
 CHECKPOINT_IPFS_API_URL=
 JUNO_QUEUE_KAFKA_TLS=true
 JUNO_DEV_MODE=false
@@ -749,6 +750,7 @@ json_lookup() {
       // (if $key == "CHECKPOINT_KAFKA_BROKERS" then ((.checkpoint.kafka_brokers // empty) | if type == "array" then join(",") else tostring end) else empty end)
       // (if $key == "CHECKPOINT_BLOB_BUCKET" then (.checkpoint.blob_bucket // empty) else empty end)
       // (if $key == "CHECKPOINT_BLOB_PREFIX" then (.checkpoint.blob_prefix // empty) else empty end)
+      // (if $key == "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" then (.checkpoint.blob_sse_kms_key_id // .checkpoint.blob_kms_key_id // empty) else empty end)
       // (if $key == "CHECKPOINT_IPFS_API_URL" then (.checkpoint.ipfs_api_url // empty) else empty end)
       // (if $key == "CHECKPOINT_SIGNATURE_TOPIC" then (.checkpoint.signature_topic // empty) else empty end)
       // (if $key == "CHECKPOINT_PACKAGE_TOPIC" then (.checkpoint.package_topic // empty) else empty end)
@@ -810,6 +812,7 @@ checkpoint_postgres_dsn="$(resolve_value "CHECKPOINT_POSTGRES_DSN" "$(read_env_v
 checkpoint_kafka_brokers="$(resolve_value "CHECKPOINT_KAFKA_BROKERS" "$(read_env_value CHECKPOINT_KAFKA_BROKERS || true)" || true)"
 checkpoint_blob_bucket="$(resolve_value "CHECKPOINT_BLOB_BUCKET" "$(read_env_value CHECKPOINT_BLOB_BUCKET || true)" || true)"
 checkpoint_blob_prefix="$(resolve_value "CHECKPOINT_BLOB_PREFIX" "$(read_env_value CHECKPOINT_BLOB_PREFIX || true)" || true)"
+checkpoint_blob_sse_kms_key_id="$(resolve_value "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$(read_env_value CHECKPOINT_BLOB_SSE_KMS_KEY_ID || true)" || true)"
 checkpoint_ipfs_api_url="$(resolve_value "CHECKPOINT_IPFS_API_URL" "$(read_env_value CHECKPOINT_IPFS_API_URL || true)" || true)"
 checkpoint_signature_topic="$(resolve_value "CHECKPOINT_SIGNATURE_TOPIC" "$(read_env_value CHECKPOINT_SIGNATURE_TOPIC || true)" || true)"
 checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env_value CHECKPOINT_PACKAGE_TOPIC || true)" || true)"
@@ -833,6 +836,7 @@ pcr2="$(resolve_value "TSS_NITRO_EXPECTED_PCR2" "$(read_env_value TSS_NITRO_EXPE
 required_key "CHECKPOINT_POSTGRES_DSN" "$checkpoint_postgres_dsn"
 required_key "CHECKPOINT_KAFKA_BROKERS" "$checkpoint_kafka_brokers"
 required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
+required_key "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$checkpoint_blob_sse_kms_key_id"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
 required_key "JUNO_RPC_USER" "$juno_rpc_user"
 required_key "JUNO_RPC_PASS" "$juno_rpc_pass"
@@ -905,6 +909,7 @@ chmod 0600 "$tmp_env"
 set_env_value "$tmp_env" CHECKPOINT_POSTGRES_DSN "$checkpoint_postgres_dsn"
 set_env_value "$tmp_env" CHECKPOINT_KAFKA_BROKERS "$checkpoint_kafka_brokers"
 set_env_value "$tmp_env" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
+set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_kms_key_id"
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
 set_env_value "$tmp_env" JUNO_RPC_USER "$juno_rpc_user"
 set_env_value "$tmp_env" JUNO_RPC_PASS "$juno_rpc_pass"

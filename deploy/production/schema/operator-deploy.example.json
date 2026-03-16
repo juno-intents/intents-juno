@@ -9,6 +9,7 @@
   "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
   "checkpoint_blob_bucket": "alpha-op1-dkg-keypackages",
   "checkpoint_blob_prefix": "operators/op1/checkpoint-packages",
+  "checkpoint_blob_sse_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
   "operator_index": 1,
   "aws_profile": "juno",
   "aws_region": "us-east-1",
