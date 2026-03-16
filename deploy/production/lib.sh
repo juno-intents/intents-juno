@@ -237,6 +237,91 @@ production_current_postgres_dsn() {
   printf 'postgres://%s:%s@%s:%s/%s?sslmode=require\n' "$user" "$password" "$endpoint" "$port" "$db"
 }
 
+production_generate_dkg_tls_bundle() {
+  local tls_dir="$1"
+  local tmp_dir server_ext client_ext
+
+  have_cmd openssl || die "required command not found: openssl"
+  mkdir -p "$tls_dir"
+  tmp_dir="$(mktemp -d)"
+  server_ext="$tmp_dir/server.ext"
+  client_ext="$tmp_dir/coordinator-client.ext"
+
+  cat >"$server_ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:localhost,IP:127.0.0.1
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+
+  cat >"$client_ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:coordinator-client
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EOF
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/ca.key" \
+    -out "$tls_dir/ca.pem" \
+    -days 3650 \
+    -subj "/CN=Juno DKG Deploy CA" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/server.key" \
+    -out "$tmp_dir/server.csr" \
+    -subj "/CN=localhost" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$tmp_dir/server.csr" \
+    -CA "$tls_dir/ca.pem" \
+    -CAkey "$tls_dir/ca.key" \
+    -CAcreateserial \
+    -out "$tls_dir/server.pem" \
+    -days 3650 \
+    -sha256 \
+    -extfile "$server_ext" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/coordinator-client.key" \
+    -out "$tmp_dir/coordinator-client.csr" \
+    -subj "/CN=coordinator-client" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$tmp_dir/coordinator-client.csr" \
+    -CA "$tls_dir/ca.pem" \
+    -CAkey "$tls_dir/ca.key" \
+    -CAcreateserial \
+    -out "$tls_dir/coordinator-client.pem" \
+    -days 3650 \
+    -sha256 \
+    -extfile "$client_ext" >/dev/null 2>&1
+
+  chmod 0600 \
+    "$tls_dir/ca.key" \
+    "$tls_dir/server.key" \
+    "$tls_dir/coordinator-client.key" || true
+  rm -rf "$tmp_dir"
+}
+
+production_rewrite_operator_handoffs_dkg_tls_dir() {
+  local output_dir="$1"
+  local dkg_tls_dir="$2"
+  local manifest rel_path tmp_manifest
+
+  [[ -d "$output_dir/operators" ]] || return 0
+  for manifest in "$output_dir"/operators/*/operator-deploy.json; do
+    [[ -f "$manifest" ]] || continue
+    rel_path="$(python3 - <<'PY' "$dkg_tls_dir" "$(dirname "$manifest")"
+import os
+import sys
+print(os.path.relpath(sys.argv[1], sys.argv[2]))
+PY
+)"
+    tmp_manifest="$(mktemp)"
+    jq --arg dkg_tls_dir "$rel_path" '.dkg_tls_dir = $dkg_tls_dir' "$manifest" >"$tmp_manifest"
+    mv "$tmp_manifest" "$manifest"
+  done
+}
+
 production_refresh_operator_secret_contract() {
   local inventory="$1"
   local inventory_dir="$2"

@@ -81,6 +81,13 @@ rewrite_operator_manifest_for_bundle() {
     '
       .shared_manifest_path = "../../shared-manifest.json"
       | .rollout_state_file = "../../rollout-state.json"
+      | .dkg_tls_dir = (
+          if (.dkg_tls_dir // "" | tostring | length) > 0 then
+            "../../dkg-tls"
+          else
+            null
+          end
+        )
       | if .operator_id == $local_operator_id then
           .known_hosts_file = "./known_hosts"
           | .secret_contract_file = "./operator-secrets.env"
@@ -331,6 +338,8 @@ output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 shared_manifest="$handoff_dir/shared-manifest.json"
 rollout_state="$handoff_dir/rollout-state.json"
 operators_dir="$handoff_dir/operators"
+dkg_tls_dir=""
+dkg_tls_present="false"
 
 [[ -f "$shared_manifest" ]] || die "shared manifest not found: $shared_manifest"
 [[ -f "$rollout_state" ]] || die "rollout state not found: $rollout_state"
@@ -343,6 +352,33 @@ operator_entries_tmp="$(mktemp)"
 
 mapfile -t operator_manifests < <(find "$operators_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
 (( ${#operator_manifests[@]} > 0 )) || die "no operator deploy manifests found under $operators_dir"
+
+if [[ -d "$handoff_dir/dkg-tls" ]]; then
+  dkg_tls_dir="$handoff_dir/dkg-tls"
+else
+  mapfile -t dkg_tls_candidates < <(
+    for operator_manifest in "${operator_manifests[@]}"; do
+      manifest_dir="$(cd "$(dirname "$operator_manifest")" && pwd)"
+      manifest_dkg_tls_dir="$(jq -r '.dkg_tls_dir // empty' "$operator_manifest")"
+      [[ -n "$manifest_dkg_tls_dir" ]] || continue
+      production_abs_path "$manifest_dir" "$manifest_dkg_tls_dir"
+    done | LC_ALL=C sort -u
+  )
+  if (( ${#dkg_tls_candidates[@]} > 1 )); then
+    die "operator manifests disagree on dkg_tls_dir: ${dkg_tls_candidates[*]}"
+  elif (( ${#dkg_tls_candidates[@]} == 1 )); then
+    dkg_tls_dir="${dkg_tls_candidates[0]}"
+  fi
+fi
+
+if [[ -n "$dkg_tls_dir" ]]; then
+  [[ -d "$dkg_tls_dir" ]] || die "dkg tls dir not found: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/ca.pem" ]] || die "dkg tls dir missing ca.pem: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/ca.key" ]] || die "dkg tls dir missing ca.key: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/coordinator-client.pem" ]] || die "dkg tls dir missing coordinator-client.pem: $dkg_tls_dir"
+  [[ -f "$dkg_tls_dir/coordinator-client.key" ]] || die "dkg tls dir missing coordinator-client.key: $dkg_tls_dir"
+  dkg_tls_present="true"
+fi
 
 for operator_manifest in "${operator_manifests[@]}"; do
   operator_id="$(jq -r '.operator_id' "$operator_manifest")"
@@ -390,6 +426,13 @@ for operator_manifest in "${operator_manifests[@]}"; do
   cp "$shared_manifest" "$bundle_operator_root/shared-manifest.json"
   write_sha256_file "$bundle_operator_root/shared-manifest.json" "$bundle_operator_root/shared-manifest.sha256"
   cp "$rollout_state" "$bundle_operator_root/rollout-state.json"
+  if [[ "$dkg_tls_present" == "true" ]]; then
+    mkdir -p "$bundle_operator_root/dkg-tls"
+    cp "$dkg_tls_dir/ca.pem" "$bundle_operator_root/dkg-tls/ca.pem"
+    cp "$dkg_tls_dir/ca.key" "$bundle_operator_root/dkg-tls/ca.key"
+    cp "$dkg_tls_dir/coordinator-client.pem" "$bundle_operator_root/dkg-tls/coordinator-client.pem"
+    cp "$dkg_tls_dir/coordinator-client.key" "$bundle_operator_root/dkg-tls/coordinator-client.key"
+  fi
   cp "$SCRIPT_DIR/deploy-operator.sh" "$bundle_root/deploy/production/deploy-operator.sh"
   cp "$SCRIPT_DIR/canary-operator-boot.sh" "$bundle_root/deploy/production/canary-operator-boot.sh"
   cp "$SCRIPT_DIR/lib.sh" "$bundle_root/deploy/production/lib.sh"

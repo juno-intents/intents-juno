@@ -97,6 +97,8 @@ done
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+coordinator_inventory="$inventory"
+generated_dkg_tls_dir=""
 if [[ -z "$existing_bridge_summary" ]]; then
   if [[ -n "$deployer_key_file" && -n "$funder_key_file" ]]; then
     die "use only one of --deployer-key-file or --funder-key-file"
@@ -141,6 +143,13 @@ else
   output_dir="$output_root/$env_slug"
 fi
 mkdir -p "$output_dir"
+
+if [[ -z "$(production_json_optional "$inventory" '.dkg_tls_dir | select(type == "string" and length > 0)')" ]]; then
+  generated_dkg_tls_dir="$output_dir/dkg-tls"
+  production_generate_dkg_tls_bundle "$generated_dkg_tls_dir"
+  coordinator_inventory="$output_dir/inventory.render.json"
+  jq --arg dkg_tls_dir "$generated_dkg_tls_dir" '.dkg_tls_dir = $dkg_tls_dir' "$inventory" >"$coordinator_inventory"
+fi
 
 minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
 preflight_secret_dir="$(mktemp -d)"
@@ -254,9 +263,12 @@ fi
 production_refresh_bridge_summary_owallet_ua "$bridge_summary" "$dkg_summary" "$dkg_completion"
 
 shared_manifest="$output_dir/shared-manifest.json"
-production_render_shared_manifest "$inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
-production_render_operator_handoffs "$inventory" "$shared_manifest" "$dkg_summary" "$output_dir" "$inventory_dir"
-production_render_app_handoff "$inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
+production_render_shared_manifest "$coordinator_inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
+production_render_operator_handoffs "$coordinator_inventory" "$shared_manifest" "$dkg_summary" "$output_dir" "$inventory_dir"
+if [[ -n "$generated_dkg_tls_dir" ]]; then
+  production_rewrite_operator_handoffs_dkg_tls_dir "$output_dir" "$generated_dkg_tls_dir"
+fi
+production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
 
 log "shared manifest: $shared_manifest"
 log "rollout state: $output_dir/rollout-state.json"

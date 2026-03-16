@@ -46,7 +46,7 @@ write_inventory_fixture() {
 }
 
 test_package_mainnet_release_renders_self_contained_operator_bundle() {
-  local workdir handoff_dir release_dir shared_manifest bundle_zip extract_dir
+  local workdir handoff_dir release_dir shared_manifest bundle_zip extract_dir dkg_tls_dir
   local operator_id operator_slug bundle_root deploy_log cast_log fake_bin local_manifest
 
   workdir="$(mktemp -d)"
@@ -73,6 +73,34 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  dkg_tls_dir="$workdir/dkg-tls"
+  mkdir -p "$dkg_tls_dir"
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$dkg_tls_dir/ca.key" \
+    -out "$dkg_tls_dir/ca.pem" \
+    -days 365 >/dev/null 2>&1 \
+    -subj "/CN=test-dkg-ca"
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$dkg_tls_dir/coordinator-client.key" \
+    -out "$workdir/coordinator-client.csr" \
+    -subj "/CN=coordinator-client" >/dev/null 2>&1
+  cat >"$workdir/coordinator-client.ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:coordinator-client
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EOF
+  openssl x509 -req \
+    -in "$workdir/coordinator-client.csr" \
+    -CA "$dkg_tls_dir/ca.pem" \
+    -CAkey "$dkg_tls_dir/ca.key" \
+    -CAcreateserial \
+    -out "$dkg_tls_dir/coordinator-client.pem" \
+    -days 365 \
+    -sha256 \
+    -extfile "$workdir/coordinator-client.ext" >/dev/null 2>&1
+  jq --arg dkg_tls_dir "$dkg_tls_dir" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   mkdir -p "$handoff_dir"
   shared_manifest="$handoff_dir/shared-manifest.json"
@@ -109,6 +137,10 @@ EOF
   assert_file_exists "$bundle_root/deploy/operators/dkg/operator-export-kms.sh" "bundled dkg kms export script"
   assert_file_exists "$bundle_root/bundle/operator/shared-manifest.json" "bundled shared manifest"
   assert_file_exists "$bundle_root/bundle/operator/rollout-state.json" "bundled rollout state"
+  assert_file_exists "$bundle_root/bundle/operator/dkg-tls/ca.pem" "bundled dkg ca cert"
+  assert_file_exists "$bundle_root/bundle/operator/dkg-tls/ca.key" "bundled dkg ca key"
+  assert_file_exists "$bundle_root/bundle/operator/dkg-tls/coordinator-client.pem" "bundled dkg coordinator client cert"
+  assert_file_exists "$bundle_root/bundle/operator/dkg-tls/coordinator-client.key" "bundled dkg coordinator client key"
   assert_file_exists "$bundle_root/bundle/operator/operators/$operator_id/operator-deploy.json" "bundled local operator manifest"
   assert_file_exists "$bundle_root/bundle/operator/operators/$operator_id/known_hosts" "bundled known_hosts"
   assert_file_exists "$bundle_root/bundle/operator/operators/$operator_id/operator-secrets.env" "bundled operator secrets"
@@ -120,6 +152,7 @@ EOF
   local_manifest="$bundle_root/bundle/operator/operators/$operator_id/operator-deploy.json"
   assert_eq "$(jq -r '.shared_manifest_path' "$local_manifest")" "../../shared-manifest.json" "local manifest rewrites shared manifest path"
   assert_eq "$(jq -r '.rollout_state_file' "$local_manifest")" "../../rollout-state.json" "local manifest rewrites rollout state path"
+  assert_eq "$(jq -r '.dkg_tls_dir' "$local_manifest")" "../../dkg-tls" "local manifest rewrites dkg tls dir"
   assert_eq "$(jq -r '.secret_contract_file' "$local_manifest")" "./operator-secrets.env" "local manifest rewrites secret contract path"
   assert_eq "$(jq -r '.dkg_backup_zip' "$local_manifest")" "./dkg-backup.zip" "local manifest rewrites backup path"
 
