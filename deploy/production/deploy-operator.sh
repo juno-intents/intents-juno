@@ -896,11 +896,8 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
     }
     sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"
     ;;
-  local-env)
-    :
-    ;;
   *)
-    echo "operator runtime is missing a supported CHECKPOINT_SIGNER_DRIVER in /etc/intents-juno/operator-stack.env" >&2
+    echo "operator runtime must set CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
     exit 1
     ;;
 esac
@@ -1023,11 +1020,8 @@ case "$kafka_auth_mode" in
       fi
     fi
     ;;
-  none)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
-    ;;
   *)
-    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
+    echo "checkpoint-signer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" >&2
     exit 1
     ;;
 esac
@@ -1053,18 +1047,8 @@ case "${signer_driver}" in
       --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"
     )
     ;;
-  local-env)
-    [[ -n "${CHECKPOINT_SIGNER_PRIVATE_KEY:-}" ]] || {
-      echo "checkpoint-signer requires CHECKPOINT_SIGNER_PRIVATE_KEY in /etc/intents-juno/operator-stack.env when CHECKPOINT_SIGNER_DRIVER=local-env" >&2
-      exit 1
-    }
-    signer_args=()
-    if [[ "$checkpoint_signer_supports_signer_driver" == true ]]; then
-      signer_args+=(--signer-driver "${signer_driver}")
-    fi
-    ;;
   *)
-    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER to be aws-kms or local-env in /etc/intents-juno/operator-stack.env" >&2
+    echo "checkpoint-signer requires CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
     exit 1
     ;;
 esac
@@ -1229,11 +1213,8 @@ case "$kafka_auth_mode" in
       fi
     fi
     ;;
-  none)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
-    ;;
   *)
-    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
+    echo "deposit-relayer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" >&2
     exit 1
     ;;
 esac
@@ -1447,11 +1428,8 @@ case "$kafka_auth_mode" in
       fi
     fi
     ;;
-  none)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
-    ;;
   *)
-    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
+    echo "withdraw-coordinator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" >&2
     exit 1
     ;;
 esac
@@ -1616,11 +1594,8 @@ case "$kafka_auth_mode" in
       fi
     fi
     ;;
-  none)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE=none
-    ;;
   *)
-    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
+    echo "withdraw-finalizer requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" >&2
     exit 1
     ;;
 esac
@@ -1727,11 +1702,8 @@ case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:
       fi
     fi
     ;;
-  none)
-    export JUNO_QUEUE_KAFKA_AUTH_MODE="none"
-    ;;
   *)
-    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE to be aws-msk-iam or none" >&2
+    echo "base-event-scanner requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" >&2
     exit 1
     ;;
 esac

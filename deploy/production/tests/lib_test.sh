@@ -1065,11 +1065,10 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_handoffs_allows_preview_local_checkpoint_signer_driver() {
-  local workdir shared_manifest handoff_dir dkg_summary_with_key seeded_key
+test_render_operator_handoffs_preserves_secure_preview_signer_configuration() {
+  local workdir shared_manifest handoff_dir
   workdir="$(mktemp -d)"
   printf 'preview-backup' >"$workdir/dkg-backup.zip"
-  printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
@@ -1089,29 +1088,24 @@ EOF
   jq '
     .environment = "preview"
     | .shared_services.public_subdomain = "preview.intents-testing.thejunowallet.com"
-    | .operators[0].checkpoint_signer_driver = "local-env"
-    | .operators[0].checkpoint_signer_kms_key_id = null
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
-  dkg_summary_with_key="$workdir/dkg-summary.with-key.json"
-  write_dkg_summary_with_operator_key "$dkg_summary_with_key" "$workdir/operator.key"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
     "$workdir/inventory.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-    "$dkg_summary_with_key" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary_with_key" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
 
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
-  seeded_key="$(production_normalize_ecdsa_private_key "$(cat "$workdir/operator.key")")"
-  assert_eq "$(jq -r '.shared_services.kafka.auth.mode' "$shared_manifest")" "none" "preview shared manifest uses unauthenticated kafka transport"
-  assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "local-env" "preview handoff preserves local checkpoint signer mode"
-  assert_eq "$(jq -r '.checkpoint_signer_kms_key_id // ""' "$handoff_dir/operator-deploy.json")" "" "preview handoff omits kms signer key"
-  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=literal:$seeded_key" "preview handoff seeds operator-scoped checkpoint signer key"
+  assert_eq "$(jq -r '.shared_services.kafka.auth.mode' "$shared_manifest")" "aws-msk-iam" "preview shared manifest uses authenticated kafka transport"
+  assert_eq "$(jq -r '.checkpoint_signer_driver' "$handoff_dir/operator-deploy.json")" "aws-kms" "preview handoff preserves kms checkpoint signer mode"
+  assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "preview handoff preserves kms signer key"
+  assert_not_contains "$(cat "$handoff_dir/operator-secrets.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "preview handoff omits local checkpoint signer key material"
   rm -rf "$workdir"
 }
 
@@ -1270,11 +1264,10 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_operator_stack_env_allows_preview_local_checkpoint_signer_driver() {
-  local workdir shared_manifest handoff_dir resolved_env output_env dkg_summary_with_key seeded_key
+test_render_operator_stack_env_preserves_secure_preview_signer_configuration() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
   printf 'preview-backup' >"$workdir/dkg-backup.zip"
-  printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
@@ -1295,33 +1288,29 @@ EOF
   jq '
     .environment = "preview"
     | .shared_services.public_subdomain = "preview.intents-testing.thejunowallet.com"
-    | .operators[0].checkpoint_signer_driver = "local-env"
-    | .operators[0].checkpoint_signer_kms_key_id = null
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
-  dkg_summary_with_key="$workdir/dkg-summary.with-key.json"
-  write_dkg_summary_with_operator_key "$dkg_summary_with_key" "$workdir/operator.key"
 
   shared_manifest="$workdir/shared-manifest.json"
   production_render_shared_manifest \
     "$workdir/inventory.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-    "$dkg_summary_with_key" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$shared_manifest" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary_with_key" "$workdir/output" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
 
   resolved_env="$workdir/resolved.env"
   output_env="$workdir/operator-stack.env"
   production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
   production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
-  seeded_key="$(production_normalize_ecdsa_private_key "$(cat "$workdir/operator.key")")"
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview env preserves local checkpoint signer mode"
-  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=$seeded_key" "preview env carries operator-scoped checkpoint signer key"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "preview env preserves kms checkpoint signer mode"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "preview env carries the checkpoint signer kms key"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "preview env omits local checkpoint signer key material"
   assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "preview env still stages the checkpoint package bucket for config hydration"
-  assert_contains "$(cat "$output_env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=none" "preview env uses unauthenticated kafka transport"
+  assert_contains "$(cat "$output_env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" "preview env uses authenticated kafka transport"
   rm -rf "$workdir"
 }
 
@@ -1856,13 +1845,13 @@ main() {
   test_render_shared_manifest_uses_completion_fallback_for_signer_ufvk
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_handoffs_rejects_local_checkpoint_signer_driver
-  test_render_operator_handoffs_allows_preview_local_checkpoint_signer_driver
+  test_render_operator_handoffs_preserves_secure_preview_signer_configuration
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
-  test_render_operator_stack_env_allows_preview_local_checkpoint_signer_driver
+  test_render_operator_stack_env_preserves_secure_preview_signer_configuration
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_withdraw_expiry_overrides

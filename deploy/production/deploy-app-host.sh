@@ -186,9 +186,6 @@ fi
 case "$shared_kafka_auth_mode" in
   aws-msk-iam)
     ;;
-  none)
-    [[ "$environment" == "preview" ]] || die "shared manifest kafka.auth.mode=none is only allowed for preview"
-    ;;
   *)
     die "unsupported shared manifest kafka.auth.mode: $shared_kafka_auth_mode"
     ;;

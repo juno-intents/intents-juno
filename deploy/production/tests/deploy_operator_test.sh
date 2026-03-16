@@ -753,8 +753,8 @@ EOF
   rm -rf "$workdir"
 }
 
-test_deploy_operator_allows_preview_local_checkpoint_signer() {
-  local workdir output_dir manifest log_dir fake_bin state_file dkg_summary_with_key seeded_key
+test_deploy_operator_preserves_secure_preview_signer_configuration() {
+  local workdir output_dir manifest log_dir fake_bin state_file
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   log_dir="$workdir/logs"
@@ -762,7 +762,6 @@ test_deploy_operator_allows_preview_local_checkpoint_signer() {
   mkdir -p "$log_dir" "$fake_bin"
 
   printf 'preview-backup' >"$workdir/dkg-backup.zip"
-  printf '0123456789012345678901234567890123456789012345678901234567890123' >"$workdir/operator.key"
   export TEST_PREVIEW_CHECKPOINT_POSTGRES_DSN="postgres://preview?sslmode=require"
   export TEST_PREVIEW_BASE_RELAYER_KEYS="0x1111111111111111111111111111111111111111111111111111111111111111"
   export TEST_PREVIEW_BASE_RELAYER_AUTH_TOKEN="preview-token"
@@ -786,23 +785,17 @@ EOF
   jq '
     .environment = "preview"
     | .shared_services.public_subdomain = "preview.intents-testing.thejunowallet.com"
-    | .operators[0].checkpoint_signer_driver = "local-env"
-    | .operators[0].checkpoint_signer_kms_key_id = null
-    | .operators[0].checkpoint_blob_bucket = null
-    | .operators[0].checkpoint_blob_prefix = null
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
-  dkg_summary_with_key="$workdir/dkg-summary.with-key.json"
-  write_dkg_summary_with_operator_key "$dkg_summary_with_key" "$workdir/operator.key"
 
   production_render_shared_manifest \
     "$workdir/inventory.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-    "$dkg_summary_with_key" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
     "$workdir/shared-manifest.json" \
     "$workdir"
-  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$dkg_summary_with_key" "$output_dir/preview" "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/preview" "$workdir"
 
   manifest="$output_dir/preview/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
   state_file="$output_dir/preview/rollout-state.json"
@@ -842,14 +835,13 @@ EOF
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" >/dev/null
 
-  seeded_key="$(production_normalize_ecdsa_private_key "$(cat "$workdir/operator.key")")"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview operator env stages local checkpoint signer mode"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=$seeded_key" "preview operator env stages the operator-scoped checkpoint signer key"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "preview operator env stages the checkpoint package bucket required by config hydration"
-  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=none" "preview operator env stages kafka auth none"
-  assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=" "preview operator env omits checkpoint signer kms key id"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export JUNO_QUEUE_KAFKA_AUTH_MODE=none' "preview deploy writes wrappers for kafka auth none"
-  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "preview local signer rollout succeeds"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "preview operator env stages kms checkpoint signer mode"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "preview operator env stages the checkpoint signer kms key"
+  assert_not_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "preview operator env omits local checkpoint signer key material"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "preview operator env stages the checkpoint package bucket required by config hydration"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam" "preview operator env stages kafka auth iam"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam' "preview deploy writes wrappers for kafka auth iam"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "preview secure signer rollout succeeds"
   rm -rf "$workdir"
 }
 
@@ -860,7 +852,7 @@ main() {
   test_deploy_operator_rejects_underfunded_base_relayer_before_rollout
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
-  test_deploy_operator_allows_preview_local_checkpoint_signer
+  test_deploy_operator_preserves_secure_preview_signer_configuration
 }
 
 main "$@"

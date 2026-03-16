@@ -360,7 +360,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_deploy_app_host_allows_preview_none_kafka_auth() {
+test_deploy_app_host_preserves_preview_iam_kafka_auth() {
   local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
@@ -462,7 +462,7 @@ EOF
       --app-deploy "$app_manifest" \
       --release-tag "$release_tag" >/dev/null
 
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_kafka_auth_mode="none"' "preview app deploy passes kafka auth none to shared infra validation"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_kafka_auth_mode="aws-msk-iam"' "preview app deploy passes kafka auth iam to shared infra validation"
   rm -rf "$workdir"
 }
 
@@ -567,7 +567,7 @@ EOF
 main() {
   test_deploy_app_host_uses_release_assets_and_updates_remote_runtime
   test_deploy_app_host_allows_missing_backoffice_juno_rpc_url
-  test_deploy_app_host_allows_preview_none_kafka_auth
+  test_deploy_app_host_preserves_preview_iam_kafka_auth
   test_deploy_app_host_rejects_non_https_manifest
   test_deploy_app_host_rejects_non_loopback_listeners
 }

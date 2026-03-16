@@ -110,11 +110,9 @@ if [[ "$dry_run" == "true" ]]; then
 else
   if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
     kafka_detail="all brokers reachable with aws-msk-iam"
-  elif [[ "$environment" == "preview" && "$kafka_auth_mode" == "none" ]]; then
-    kafka_detail="all brokers reachable with preview kafka transport"
   else
     kafka_status="failed"
-    kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam (or none for preview)"
+    kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam"
   fi
 
   if ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then

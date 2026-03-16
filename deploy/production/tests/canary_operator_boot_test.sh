@@ -241,7 +241,7 @@ EOF
   rm -rf "$tmp"
 }
 
-test_operator_boot_canary_allows_preview_local_checkpoint_signer() {
+test_operator_boot_canary_preserves_secure_preview_signer_configuration() {
   local tmp fake_bin log_file manifest output_json shared_manifest
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
@@ -256,13 +256,14 @@ test_operator_boot_canary_allows_preview_local_checkpoint_signer() {
 CHECKPOINT_POSTGRES_DSN=literal:postgres://preview
 BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0x0123456789012345678901234567890123456789012345678901234567890123
 EOF
   printf 'backup' >"$tmp/dkg-backup.zip"
   cat >"$shared_manifest" <<JSON
 {
   "shared_services": {
-    "artifacts": {}
+    "artifacts": {
+      "checkpoint_blob_bucket": "preview-op1-dkg-keypackages"
+    }
   },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
@@ -278,7 +279,8 @@ JSON
   "operator_user": "intents-juno",
   "runtime_dir": "/var/lib/intents-juno/operator-runtime",
   "shared_manifest_path": "$shared_manifest",
-  "checkpoint_signer_driver": "local-env",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
   "dkg_backup_zip": "$tmp/dkg-backup.zip",
   "known_hosts_file": "$tmp/known_hosts",
   "secret_contract_file": "$tmp/operator-secrets.env"
@@ -295,10 +297,13 @@ fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=local-env$'"* ]]; then
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$'"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"grep -qE '^CHECKPOINT_SIGNER_PRIVATE_KEY=0x[0-9a-fA-F]{64}\$'"* ]]; then
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY='"* ]]; then
+  exit 1
+fi
+if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
   exit 0
 fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$'"* ]]; then
@@ -332,10 +337,10 @@ EOF
       --operator-deploy "$manifest" >"$output_json"
   )
 
-  assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_DRIVER=local-env" "preview canary verifies local checkpoint signer mode"
-  assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_PRIVATE_KEY=0x" "preview canary verifies operator-scoped checkpoint signer key"
+  assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "preview canary verifies kms checkpoint signer mode"
+  assert_contains "$(cat "$log_file")" "test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json" "preview canary verifies kms export receipt"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview canary ready flag"
-  assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "skipped" "preview canary skips kms export checks for local signers"
+  assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "passed" "preview canary requires kms export checks"
 
   rm -rf "$tmp"
 }
@@ -343,7 +348,7 @@ EOF
 main() {
   test_operator_boot_canary_checks_services_over_strict_ssh
   test_operator_boot_canary_rejects_underfunded_relayer
-  test_operator_boot_canary_allows_preview_local_checkpoint_signer
+  test_operator_boot_canary_preserves_secure_preview_signer_configuration
 }
 
 main "$@"

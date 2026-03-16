@@ -744,17 +744,11 @@ production_environment_allows_local_secret_resolvers() {
 }
 
 production_environment_allows_local_checkpoint_signer() {
-  local environment="$1"
-  [[ "$environment" == "preview" ]]
+  return 1
 }
 
 production_kafka_auth_mode_for_environment() {
-  local environment="$1"
-  if [[ "$environment" == "preview" ]]; then
-    printf 'none\n'
-  else
-    printf 'aws-msk-iam\n'
-  fi
+  printf 'aws-msk-iam\n'
 }
 
 production_base_relayer_private_keys() {
@@ -1464,13 +1458,8 @@ production_render_operator_handoffs() {
       aws-kms)
         [[ -n "$checkpoint_signer_kms_key_id" ]] || die "operator $operator_id uses checkpoint_signer_driver=aws-kms but checkpoint_signer_kms_key_id is empty"
         ;;
-      local-env)
-        production_environment_allows_local_checkpoint_signer "$env_slug" \
-          || die "operator $operator_id must use checkpoint_signer_driver=aws-kms outside preview (got: $checkpoint_signer_driver)"
-        checkpoint_signer_kms_key_id=""
-        ;;
       *)
-        die "unsupported checkpoint signer driver for operator $operator_id: $checkpoint_signer_driver"
+        die "operator $operator_id must use checkpoint_signer_driver=aws-kms (got: $checkpoint_signer_driver)"
         ;;
     esac
 
@@ -1507,12 +1496,7 @@ production_render_operator_handoffs() {
       operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
       [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
       production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
-      if [[ "$checkpoint_signer_driver" == "local-env" ]]; then
-        production_seed_local_checkpoint_signer_secret "$secrets_dst" "$dkg_summary" "$operator_id" \
-          || die "operator $operator_id is missing operator_key_file required for preview local checkpoint signer mode"
-      else
-        production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
-      fi
+      production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
     fi
 
     if [[ -n "$backup_zip_src" ]]; then
@@ -1628,14 +1612,8 @@ production_render_operator_stack_env() {
         die "resolved secret env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=aws-kms"
       fi
       ;;
-    local-env)
-      production_environment_allows_local_checkpoint_signer "$environment" \
-        || die "unsupported checkpoint signer driver in operator deploy manifest outside preview: $signer_driver"
-      grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' "$resolved_secret_env" \
-        || die "resolved secret env must contain CHECKPOINT_SIGNER_PRIVATE_KEY when checkpoint_signer_driver=local-env"
-      ;;
     *)
-      die "unsupported checkpoint signer driver in operator deploy manifest: $signer_driver"
+      die "operator deploy manifest must use checkpoint_signer_driver=aws-kms (got: $signer_driver)"
       ;;
   esac
 

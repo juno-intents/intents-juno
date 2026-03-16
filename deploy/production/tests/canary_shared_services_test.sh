@@ -182,7 +182,7 @@ EOF
   rm -rf "$tmp"
 }
 
-test_shared_services_canary_allows_preview_none_kafka_auth() {
+test_shared_services_canary_requires_preview_iam_kafka_auth() {
   local tmp manifest fake_bin output_json
   tmp="$(mktemp -d)"
   manifest="$tmp/shared-manifest.json"
@@ -194,6 +194,8 @@ test_shared_services_canary_allows_preview_none_kafka_auth() {
 {
   "environment": "preview",
   "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
     "postgres": {
       "endpoint": "postgres.preview.internal",
       "port": 5432
@@ -201,7 +203,7 @@ test_shared_services_canary_allows_preview_none_kafka_auth() {
     "kafka": {
       "bootstrap_brokers": "broker-1.preview.internal:9094",
       "auth": {
-        "mode": "none",
+        "mode": "aws-msk-iam",
         "aws_region": "us-east-1"
       }
     },
@@ -224,7 +226,21 @@ EOF
 #!/usr/bin/env bash
 exit 0
 EOF
-  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl"
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "--profile" ]]; then
+  shift 2
+fi
+if [[ "$1" == "--region" ]]; then
+  shift 2
+fi
+if [[ "$1" == "sts" && "$2" == "get-caller-identity" ]]; then
+  printf '%s\n' '{"Account":"021490342184"}'
+  exit 0
+fi
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws"
 
   (
     cd "$REPO_ROOT"
@@ -233,9 +249,9 @@ EOF
       --shared-manifest "$manifest" >"$output_json"
   )
 
-  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview shared canary accepts kafka auth none"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview shared canary accepts kafka auth iam"
   assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "preview shared canary kafka status"
-  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "preview" "preview shared canary reports preview kafka transport"
+  assert_contains "$(jq -r '.checks.kafka.detail' "$output_json")" "aws-msk-iam" "preview shared canary reports kafka iam transport"
 
   rm -rf "$tmp"
 }
@@ -243,7 +259,7 @@ EOF
 main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
-  test_shared_services_canary_allows_preview_none_kafka_auth
+  test_shared_services_canary_requires_preview_iam_kafka_auth
 }
 
 main "$@"

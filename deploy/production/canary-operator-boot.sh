@@ -213,12 +213,6 @@ else
       elif [[ "$checkpoint_signer_driver" == "aws-kms" ]] && ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY=' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env must not contain CHECKPOINT_SIGNER_PRIVATE_KEY"
-      elif [[ "$checkpoint_signer_driver" == "local-env" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=local-env$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
-        withdraw_config_status="failed"
-        withdraw_config_detail="remote operator env is missing CHECKPOINT_SIGNER_DRIVER=local-env"
-      elif [[ "$checkpoint_signer_driver" == "local-env" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -qE '^CHECKPOINT_SIGNER_PRIVATE_KEY=0x[0-9a-fA-F]{64}$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
-        withdraw_config_status="failed"
-        withdraw_config_detail="remote operator env must contain an operator-scoped CHECKPOINT_SIGNER_PRIVATE_KEY"
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h"
@@ -253,9 +247,9 @@ else
             kms_export_status="passed"
             kms_export_detail="remote kms export receipt present"
           fi
-        elif [[ "$checkpoint_signer_driver" == "local-env" ]]; then
-          kms_export_status="skipped"
-          kms_export_detail="preview local checkpoint signer mode does not export to kms"
+        else
+          kms_export_status="failed"
+          kms_export_detail="checkpoint signer kms export requires checkpoint_blob_bucket for aws-kms mode"
         fi
       else
         kms_export_status="blocked"
