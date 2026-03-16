@@ -272,6 +272,35 @@ locals {
       for statement_json in(
         var.provision_shared_services ? [
           jsonencode({
+            Sid    = "AllowSharedMSKConnect"
+            Effect = "Allow"
+            Action = [
+              "kafka-cluster:Connect",
+              "kafka-cluster:DescribeCluster",
+              "kafka-cluster:DescribeClusterDynamicConfiguration"
+            ]
+            Resource = [aws_msk_cluster.shared[0].arn]
+          }),
+          jsonencode({
+            Sid    = "AllowSharedMSKTopicAccess"
+            Effect = "Allow"
+            Action = [
+              "kafka-cluster:DescribeTopic",
+              "kafka-cluster:ReadData",
+              "kafka-cluster:WriteData"
+            ]
+            Resource = ["${local.shared_kafka_topic_arn_prefix}/*"]
+          }),
+          jsonencode({
+            Sid    = "AllowSharedMSKGroupAccess"
+            Effect = "Allow"
+            Action = [
+              "kafka-cluster:AlterGroup",
+              "kafka-cluster:DescribeGroup"
+            ]
+            Resource = ["${local.shared_kafka_group_arn_prefix}/*"]
+          }),
+          jsonencode({
             Sid    = "AllowSharedECSServiceRollout"
             Effect = "Allow"
             Action = [
