@@ -950,34 +950,6 @@ spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"
 deposit_relayer_script="/usr/local/bin/intents-juno-deposit-relayer.sh"
 withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
 base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
-[[ -f "$checkpoint_signer_script" ]] || {
-  echo "checkpoint signer wrapper is missing: $checkpoint_signer_script" >&2
-  exit 1
-}
-[[ -f "$checkpoint_aggregator_script" ]] || {
-  echo "checkpoint aggregator wrapper is missing: $checkpoint_aggregator_script" >&2
-  exit 1
-}
-[[ -f "$dkg_admin_serve_script" ]] || {
-  echo "dkg-admin wrapper is missing: $dkg_admin_serve_script" >&2
-  exit 1
-}
-[[ -f "$spendauth_signer_script" ]] || {
-  echo "spendauth signer wrapper is missing: $spendauth_signer_script" >&2
-  exit 1
-}
-[[ -f "$deposit_relayer_script" ]] || {
-  echo "deposit-relayer wrapper is missing: $deposit_relayer_script" >&2
-  exit 1
-}
-[[ -f "$withdraw_coordinator_script" ]] || {
-  echo "withdraw-coordinator wrapper is missing: $withdraw_coordinator_script" >&2
-  exit 1
-}
-[[ -f "$base_event_scanner_script" ]] || {
-  echo "base-event-scanner wrapper is missing: $base_event_scanner_script" >&2
-  exit 1
-}
 
 signer_tmp="$(mktemp)"
 cat >"$signer_tmp" <<'EOF_SIGNER_WRAPPER'
