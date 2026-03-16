@@ -44,13 +44,13 @@ output "shared_postgres_port" {
 }
 
 output "shared_kafka_port" {
-  description = "MSK TLS Kafka TCP port."
+  description = "MSK SASL/IAM Kafka port."
   value       = var.shared_kafka_port
 }
 
 output "shared_kafka_bootstrap_brokers" {
-  description = "MSK bootstrap brokers (TLS) as comma-separated host:port values."
-  value       = try(aws_msk_cluster.shared[0].bootstrap_brokers_tls, null)
+  description = "MSK bootstrap brokers for SASL/IAM clients."
+  value       = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, null)
 }
 
 output "shared_ecs_cluster_arn" {

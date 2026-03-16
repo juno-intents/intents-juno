@@ -203,13 +203,13 @@ variable "shared_aurora_instance_class" {
 }
 
 variable "shared_kafka_port" {
-  description = "MSK TLS bootstrap TCP port exposed to the runner."
+  description = "MSK SASL/IAM bootstrap port exposed to clients."
   type        = number
-  default     = 9094
+  default     = 9098
 
   validation {
-    condition     = var.shared_kafka_port == 9094
-    error_message = "shared_kafka_port must be 9094 for MSK TLS bootstrap brokers."
+    condition     = var.shared_kafka_port == 9098
+    error_message = "shared_kafka_port must be 9098 for MSK IAM bootstrap brokers."
   }
 }
 

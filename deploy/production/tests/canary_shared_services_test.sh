@@ -201,7 +201,7 @@ test_shared_services_canary_requires_preview_iam_kafka_auth() {
       "port": 5432
     },
     "kafka": {
-      "bootstrap_brokers": "broker-1.preview.internal:9094",
+      "bootstrap_brokers": "broker-1.preview.internal:9098",
       "auth": {
         "mode": "aws-msk-iam",
         "aws_region": "us-east-1"
