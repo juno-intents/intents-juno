@@ -107,6 +107,190 @@ production_tf_output_value() {
   printf '%s\n' "$value"
 }
 
+production_inventory_terraform_dir() {
+  local inventory="$1"
+  local inventory_dir="$2"
+  local terraform_dir
+
+  terraform_dir="$(production_json_optional "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+  [[ -n "$terraform_dir" ]] || return 1
+  production_abs_path "$inventory_dir" "$terraform_dir"
+}
+
+production_inventory_tfvars_value() {
+  local inventory="$1"
+  local inventory_dir="$2"
+  local key="$3"
+  local default_value="${4:-}"
+  local terraform_dir tfvars_json tfvars_path value=""
+
+  terraform_dir="$(production_inventory_terraform_dir "$inventory" "$inventory_dir" 2>/dev/null || true)"
+  if [[ -n "$terraform_dir" ]]; then
+    tfvars_json="$terraform_dir/terraform.tfvars.json"
+    tfvars_path="$terraform_dir/terraform.tfvars"
+
+    if [[ -f "$tfvars_json" ]]; then
+      value="$(jq -r --arg key "$key" '.[$key] // empty' "$tfvars_json" 2>/dev/null || true)"
+    fi
+    if [[ -z "$value" && -f "$tfvars_path" ]]; then
+      value="$(
+        awk -F= -v want="$key" '
+          $1 ~ "^[[:space:]]*" want "[[:space:]]*$" {
+            value = substr($0, index($0, "=") + 1)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", value)
+            gsub(/^"/, "", value)
+            gsub(/"$/, "", value)
+            print value
+            exit
+          }
+        ' "$tfvars_path"
+      )"
+    fi
+  fi
+
+  if [[ -z "$value" ]]; then
+    value="$default_value"
+  fi
+  printf '%s\n' "$value"
+}
+
+production_parse_postgres_dsn_field() {
+  local dsn="$1"
+  local field="$2"
+  local rest auth host_db host_port db_query user password db port=""
+
+  [[ "$dsn" == postgres://* ]] || return 1
+  rest="${dsn#postgres://}"
+  [[ "$rest" == *@*/* ]] || return 1
+
+  auth="${rest%%@*}"
+  host_db="${rest#*@}"
+  user="${auth%%:*}"
+  password="${auth#*:}"
+  if [[ "$password" == "$auth" ]]; then
+    return 1
+  fi
+
+  host_port="${host_db%%/*}"
+  db_query="${host_db#*/}"
+  db="${db_query%%\?*}"
+  if [[ "$host_port" == *:* ]]; then
+    port="${host_port##*:}"
+  fi
+
+  case "$field" in
+    user)
+      [[ -n "$user" ]] || return 1
+      printf '%s\n' "$user"
+      ;;
+    password)
+      [[ -n "$password" ]] || return 1
+      printf '%s\n' "$password"
+      ;;
+    db)
+      [[ -n "$db" ]] || return 1
+      printf '%s\n' "$db"
+      ;;
+    port)
+      [[ -n "$port" ]] || return 1
+      printf '%s\n' "$port"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+production_current_postgres_dsn() {
+  local inventory="$1"
+  local inventory_dir="$2"
+  local shared_manifest="$3"
+  local existing_dsn="$4"
+  local endpoint port user password db
+
+  endpoint="$(production_json_optional "$shared_manifest" '.shared_services.postgres.endpoint | select(type == "string" and length > 0)')"
+  port="$(production_json_optional "$shared_manifest" '.shared_services.postgres.port')"
+  if [[ -z "$endpoint" || -z "$port" ]]; then
+    printf '%s\n' "$existing_dsn"
+    return 0
+  fi
+
+  user="$(production_inventory_tfvars_value "$inventory" "$inventory_dir" shared_postgres_user "")"
+  password="$(production_inventory_tfvars_value "$inventory" "$inventory_dir" shared_postgres_password "")"
+  db="$(production_inventory_tfvars_value "$inventory" "$inventory_dir" shared_postgres_db "")"
+
+  if [[ -z "$user" ]]; then
+    user="$(production_parse_postgres_dsn_field "$existing_dsn" user 2>/dev/null || true)"
+  fi
+  if [[ -z "$password" ]]; then
+    password="$(production_parse_postgres_dsn_field "$existing_dsn" password 2>/dev/null || true)"
+  fi
+  if [[ -z "$db" ]]; then
+    db="$(production_parse_postgres_dsn_field "$existing_dsn" db 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$user" || -z "$password" || -z "$db" ]]; then
+    printf '%s\n' "$existing_dsn"
+    return 0
+  fi
+
+  printf 'postgres://%s:%s@%s:%s/%s?sslmode=require\n' "$user" "$password" "$endpoint" "$port" "$db"
+}
+
+production_refresh_operator_secret_contract() {
+  local inventory="$1"
+  local inventory_dir="$2"
+  local shared_manifest="$3"
+  local operator_json="$4"
+  local secret_contract_file="$5"
+  local current_dsn existing_dsn checkpoint_blob_bucket
+
+  [[ -f "$secret_contract_file" ]] || return 0
+
+  existing_dsn="$(production_env_first_value "$secret_contract_file" CHECKPOINT_POSTGRES_DSN APP_POSTGRES_DSN || true)"
+  existing_dsn="${existing_dsn#literal:}"
+  if [[ -n "$existing_dsn" ]]; then
+    current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
+    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
+  fi
+
+  checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
+  if [[ -z "$checkpoint_blob_bucket" ]]; then
+    checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
+  fi
+  if [[ -n "$checkpoint_blob_bucket" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_BLOB_BUCKET "$checkpoint_blob_bucket"
+    production_secret_contract_upsert_literal "$secret_contract_file" WITHDRAW_BLOB_BUCKET "$checkpoint_blob_bucket"
+  fi
+}
+
+production_refresh_app_secret_contract() {
+  local inventory="$1"
+  local inventory_dir="$2"
+  local shared_manifest="$3"
+  local secret_contract_file="$4"
+  local current_dsn existing_dsn updated_any="false"
+
+  [[ -f "$secret_contract_file" ]] || return 0
+
+  existing_dsn="$(production_env_first_value "$secret_contract_file" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
+  existing_dsn="${existing_dsn#literal:}"
+  [[ -n "$existing_dsn" ]] || return 0
+
+  current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
+  if grep -q '^APP_POSTGRES_DSN=' "$secret_contract_file"; then
+    production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+    updated_any="true"
+  fi
+  if grep -q '^CHECKPOINT_POSTGRES_DSN=' "$secret_contract_file"; then
+    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
+    updated_any="true"
+  fi
+  if [[ "$updated_any" != "true" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+  fi
+}
+
 production_aws_describe_instance_field() {
   local profile="$1"
   local region="$2"
@@ -1380,6 +1564,7 @@ production_render_app_handoff() {
   secret_contract_dst="$app_dir/app-secrets.env"
   cp "$known_hosts_src" "$known_hosts_dst"
   cp "$secret_contract_src" "$secret_contract_dst"
+  production_refresh_app_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$secret_contract_dst"
   manifest_path="$app_dir/app-deploy.json"
 
   jq -n \
@@ -1583,6 +1768,7 @@ production_render_operator_handoffs() {
       [[ -f "$secrets_src" ]] || die "secret contract file not found: $secrets_src"
       secrets_dst="$handoff_dir/operator-secrets.env"
       cp "$secrets_src" "$secrets_dst"
+      production_refresh_operator_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$operator_json" "$secrets_dst"
       if ! grep -q '^DEPOSIT_OWALLET_IVK=' "$secrets_dst" || ! grep -q '^WITHDRAW_OWALLET_OVK=' "$secrets_dst"; then
         local -a derived_owallet_keys
         if [[ -z "$derived_deposit_owallet_ivk" || -z "$derived_withdraw_owallet_ovk" ]]; then

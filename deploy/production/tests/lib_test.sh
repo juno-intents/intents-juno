@@ -43,6 +43,17 @@ write_inventory_fixture() {
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
+write_terraform_tfvars_fixture() {
+  local terraform_dir="$1"
+  mkdir -p "$terraform_dir"
+  cat >"$terraform_dir/terraform.tfvars" <<'EOF'
+shared_postgres_user = "postgres"
+shared_postgres_password = "postgres"
+shared_postgres_db = "intents_e2e"
+shared_postgres_port = 5432
+EOF
+}
+
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
@@ -393,6 +404,159 @@ EOF
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-dkg-keypackages" "operator env does not fall back to shared checkpoint bucket when operator bucket is set"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_PREFIX=dkg/keypackages" "operator env does not fall back to shared checkpoint prefix when operator prefix is set"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_SSE_KMS_KEY_ID=arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "operator env does not fall back to shared checkpoint blob sse kms key id when operator key is set"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_retargets_runtime_values_from_shared_manifest() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://operator:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+CHECKPOINT_BLOB_BUCKET=literal:stale-checkpoint-bucket
+WITHDRAW_BLOB_BUCKET=literal:stale-withdraw-bucket
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://app:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_POSTGRES_DSN=postgres://operator:pw@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents?sslmode=require" "operator env retargets postgres dsn to the shared manifest endpoint"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env keeps the current deployment checkpoint bucket"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_BLOB_BUCKET=alpha-op1-dkg-keypackages" "operator env derives withdraw blob bucket from the current deployment artifact bucket"
+  assert_not_contains "$(cat "$output_env")" "old-preview.cluster.example.internal" "operator env drops stale secret-contract postgres hosts"
+  assert_not_contains "$(cat "$output_env")" "stale-withdraw-bucket" "operator env drops stale secret-contract withdraw buckets"
+  rm -rf "$workdir"
+}
+
+test_render_operator_handoffs_refreshes_deployment_bound_secret_contracts() {
+  local workdir shared_manifest handoff_dir rendered_secrets
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://operator:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+CHECKPOINT_BLOB_BUCKET=literal:stale-checkpoint-bucket
+WITHDRAW_BLOB_BUCKET=literal:stale-withdraw-bucket
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_terraform_tfvars_fixture "$workdir/terraform"
+  jq --arg terraform_dir "$workdir/terraform" '
+    .shared_services.terraform_dir = $terraform_dir
+    | .operators[0].checkpoint_blob_bucket = "alpha-op1-dkg-keypackages"
+    | .operators[0].checkpoint_blob_prefix = "operators/op1/checkpoint-packages"
+    | .operators[0].checkpoint_blob_sse_kms_key_id = "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  rendered_secrets="$handoff_dir/operator-secrets.env"
+
+  assert_contains "$(cat "$rendered_secrets")" "CHECKPOINT_POSTGRES_DSN=literal:postgres://postgres:postgres@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents_e2e?sslmode=require" "operator handoff retargets postgres dsn to current deployment settings"
+  assert_contains "$(cat "$rendered_secrets")" "CHECKPOINT_BLOB_BUCKET=literal:alpha-op1-dkg-keypackages" "operator handoff refreshes checkpoint blob bucket"
+  assert_contains "$(cat "$rendered_secrets")" "WITHDRAW_BLOB_BUCKET=literal:alpha-op1-dkg-keypackages" "operator handoff refreshes withdraw blob bucket"
+  assert_not_contains "$(cat "$rendered_secrets")" "old-preview.cluster.example.internal" "operator handoff drops stale postgres hosts"
+  assert_not_contains "$(cat "$rendered_secrets")" "stale-withdraw-bucket" "operator handoff drops stale withdraw bucket"
+  rm -rf "$workdir"
+}
+
+test_render_app_handoff_refreshes_deployment_bound_secret_contracts() {
+  local workdir shared_manifest rendered_secrets
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+APP_POSTGRES_DSN=literal:postgres://app:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+CHECKPOINT_POSTGRES_DSN=literal:postgres://app:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_terraform_tfvars_fixture "$workdir/terraform"
+  jq --arg terraform_dir "$workdir/terraform" '.shared_services.terraform_dir = $terraform_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  rendered_secrets="$workdir/output/app/app-secrets.env"
+
+  assert_contains "$(cat "$rendered_secrets")" "APP_POSTGRES_DSN=literal:postgres://postgres:postgres@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents_e2e?sslmode=require" "app handoff refreshes app postgres dsn"
+  assert_contains "$(cat "$rendered_secrets")" "CHECKPOINT_POSTGRES_DSN=literal:postgres://postgres:postgres@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents_e2e?sslmode=require" "app handoff refreshes fallback postgres dsn"
+  assert_not_contains "$(cat "$rendered_secrets")" "old-preview.cluster.example.internal" "app handoff drops stale postgres hosts"
   rm -rf "$workdir"
 }
 
@@ -1773,7 +1937,7 @@ EOF
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
 
   resolved_env="$workdir/resolved-app.env"
-  production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
+  production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
   bridge_env="$workdir/bridge-api.env"
   backoffice_env="$workdir/backoffice.env"
   fake_bin="$workdir/bin"
@@ -1850,7 +2014,7 @@ EOF
   assert_eq "$(jq -r '.juno_rpc_url' "$app_manifest")" "null" "app manifest omits juno rpc url"
 
   resolved_env="$workdir/resolved-app.env"
-  production_resolve_secret_contract "$workdir/app-secrets.env" "true" "" "" "$resolved_env"
+  production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
   backoffice_env="$workdir/backoffice.env"
   fake_bin="$workdir/bin"
   mkdir -p "$fake_bin"
@@ -1894,6 +2058,62 @@ EOF
   assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "relayer balance check probes the first signer"
   assert_contains "$(cat "$workdir/cast.log")" "balance --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222" "relayer balance check probes the second signer"
 
+  rm -rf "$workdir"
+}
+
+test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest() {
+  local workdir shared_manifest app_manifest resolved_env bridge_env backoffice_env fake_bin old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://operator:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://app:pw@old-preview.cluster.example.internal:5432/intents?sslmode=require
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  resolved_env="$workdir/resolved-app.env"
+  production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
+  bridge_env="$workdir/bridge-api.env"
+  backoffice_env="$workdir/backoffice.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
+  production_render_bridge_api_env "$shared_manifest" "$app_manifest" "$resolved_env" "$bridge_env"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$bridge_env")" "BRIDGE_API_POSTGRES_DSN=postgres://app:pw@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents?sslmode=require" "bridge env retargets postgres dsn to the shared manifest endpoint"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_POSTGRES_DSN=postgres://app:pw@alpha-shared.cluster-abcdefghijkl.us-east-1.rds.amazonaws.com:5432/intents?sslmode=require" "backoffice env retargets postgres dsn to the shared manifest endpoint"
+  assert_not_contains "$(cat "$bridge_env")" "old-preview.cluster.example.internal" "bridge env drops stale secret-contract postgres hosts"
+  assert_not_contains "$(cat "$backoffice_env")" "old-preview.cluster.example.internal" "backoffice env drops stale secret-contract postgres hosts"
   rm -rf "$workdir"
 }
 
@@ -2025,6 +2245,7 @@ main() {
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir
   test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage
+  test_render_operator_stack_env_retargets_runtime_values_from_shared_manifest
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_preserves_secure_preview_signer_configuration
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
@@ -2035,6 +2256,7 @@ main() {
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
+  test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
