@@ -889,7 +889,7 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
     sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export \
       --workdir "$runtime_dir" \
       --release-tag "$dkg_release_tag" \
-      --kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}" \
+      --kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}" \
       --s3-bucket "${CHECKPOINT_BLOB_BUCKET}" \
       --s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}" \
       --s3-sse-kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}" \

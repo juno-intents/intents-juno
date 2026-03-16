@@ -247,7 +247,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf' "remote deploy stages junocashd rpc config"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -d -m 0750 -o intents-juno -g intents-juno "$runtime_dir/exports"' "remote deploy creates runtime export receipt dir"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo -u intents-juno bash "$remote_stage_dir/operator-export-kms.sh" export' "remote deploy exports restored dkg package to kms"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--kms-key-id "${CHECKPOINT_SIGNER_KMS_KEY_ID}"' "remote deploy exports with the staged kms key"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}"' "remote deploy exports with the blob kms key"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-bucket "${CHECKPOINT_BLOB_BUCKET}"' "remote deploy exports with the staged checkpoint bucket"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-key-prefix "${CHECKPOINT_BLOB_PREFIX:-dkg/keypackages}"' "remote deploy exports with the staged checkpoint prefix"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--s3-sse-kms-key-id "${CHECKPOINT_BLOB_SSE_KMS_KEY_ID}"' "remote deploy stores exported checkpoint packages under the blob sse kms key"
