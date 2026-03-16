@@ -24,15 +24,15 @@ data "aws_subnets" "selected_vpc" {
 }
 
 locals {
-  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.selected_vpc.ids[0]
+  bootstrap_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.selected_vpc.ids[0]
 }
 
-data "aws_subnet" "selected" {
-  id = local.selected_subnet_id
+data "aws_subnet" "bootstrap" {
+  id = local.bootstrap_subnet_id
 }
 
 locals {
-  selected_vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_subnet.selected.vpc_id
+  selected_vpc_id = var.vpc_id != "" ? var.vpc_id : data.aws_subnet.bootstrap.vpc_id
 }
 
 data "aws_vpc" "selected" {
@@ -53,6 +53,13 @@ data "aws_subnet" "all_vpc" {
 }
 
 locals {
+  public_subnets_by_az = {
+    for s in data.aws_subnet.all_vpc :
+    s.availability_zone => s.id...
+    if s.map_public_ip_on_launch
+  }
+  public_one_per_az = sort([for az, ids in local.public_subnets_by_az : sort(ids)[0]])
+
   # Group private subnets by AZ, pick one private subnet per AZ (sorted for determinism).
   private_subnets_by_az = {
     for s in data.aws_subnet.all_vpc :
@@ -61,9 +68,21 @@ locals {
   }
   private_one_per_az = sort([for az, ids in local.private_subnets_by_az : sort(ids)[0]])
 
+  selected_subnet_id = var.subnet_id != "" ? var.subnet_id : local.public_one_per_az[0]
   shared_subnets = length(var.shared_subnet_ids) > 0 ? sort(var.shared_subnet_ids) : (
     length(local.private_one_per_az) >= 2 ? slice(local.private_one_per_az, 0, 2) : local.private_one_per_az
   )
+}
+
+data "aws_subnet" "selected" {
+  id = local.selected_subnet_id
+}
+
+check "runner_operator_public_subnet_default" {
+  assert {
+    condition     = var.subnet_id != "" || length(local.public_one_per_az) > 0
+    error_message = "runner/operator hosts require at least one public subnet unless subnet_id is set explicitly."
+  }
 }
 
 data "aws_subnet" "shared" {

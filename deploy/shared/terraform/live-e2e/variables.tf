@@ -108,13 +108,13 @@ variable "shared_subnet_ids" {
 variable "runner_associate_public_ip_address" {
   description = "Whether to associate a public IPv4 address to the runner EC2 instance."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "operator_associate_public_ip_address" {
   description = "Whether to associate public IPv4 addresses to operator EC2 instances."
   type        = bool
-  default     = false
+  default     = true
 }
 
 variable "iam_instance_profile" {
