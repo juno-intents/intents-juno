@@ -388,10 +388,8 @@ func checkPostgres(ctx context.Context, cfg config) (postgresReport, error) {
 }
 
 func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
-	for _, requiredTopic := range cfg.RequiredKafkaTopics {
-		if err := checkKafkaTopicMetadata(ctx, cfg.KafkaBrokers, requiredTopic); err != nil {
-			return kafkaReport{}, fmt.Errorf("inspect required topic %s: %w", requiredTopic, err)
-		}
+	if err := checkKafkaTopicsMetadata(ctx, cfg.KafkaBrokers, cfg.RequiredKafkaTopics); err != nil {
+		return kafkaReport{}, fmt.Errorf("inspect required topics: %w", err)
 	}
 
 	topic := fmt.Sprintf("%s.%d", cfg.TopicPrefix, time.Now().UTC().UnixNano())
@@ -482,17 +480,21 @@ func newKafkaAutoTopicWriter(brokers []string) (*kafka.Writer, error) {
 }
 
 func checkKafkaTopicMetadata(ctx context.Context, brokers []string, topic string) error {
-	return checkKafkaTopicMetadataWithFactory(ctx, brokers, topic, newKafkaAdminClient)
+	return checkKafkaTopicsMetadataWithFactory(ctx, brokers, []string{topic}, newKafkaAdminClient)
 }
 
-func checkKafkaTopicMetadataWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
+func checkKafkaTopicsMetadata(ctx context.Context, brokers []string, topics []string) error {
+	return checkKafkaTopicsMetadataWithFactory(ctx, brokers, topics, newKafkaAdminClient)
+}
+
+func checkKafkaTopicsMetadataWithFactory(ctx context.Context, brokers []string, topics []string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
 	brokers = parseBrokers(strings.Join(brokers, ","))
 	if len(brokers) == 0 {
 		return errors.New("kafka topic metadata check requires at least one broker")
 	}
-	topic = strings.TrimSpace(topic)
-	if topic == "" {
-		return errors.New("kafka topic is required")
+	topics = parseBrokers(strings.Join(topics, ","))
+	if len(topics) == 0 {
+		return nil
 	}
 	var lastErr error
 	for _, broker := range brokers {
@@ -501,11 +503,17 @@ func checkKafkaTopicMetadataWithFactory(ctx context.Context, brokers []string, t
 			lastErr = fmt.Errorf("new admin client for %s: %w", broker, err)
 			continue
 		}
-		if _, err := kafkaTopicExists(ctx, client, topic); err != nil {
-			lastErr = fmt.Errorf("metadata topic %s via %s: %w", topic, broker, err)
+		brokerCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		missingTopics, err := kafkaTopicsMissing(brokerCtx, client, topics)
+		cancel()
+		if err != nil {
+			lastErr = fmt.Errorf("metadata topics via %s: %w", broker, err)
 			continue
 		}
-		return nil
+		if len(missingTopics) == 0 {
+			return nil
+		}
+		lastErr = fmt.Errorf("metadata topics via %s: missing %s", broker, strings.Join(missingTopics, ", "))
 	}
 	if lastErr == nil {
 		lastErr = errors.New("unable to inspect kafka topic metadata")
@@ -562,23 +570,45 @@ func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic st
 }
 
 func kafkaTopicExists(ctx context.Context, client kafkaAdminClient, topic string) (bool, error) {
-	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
+	missing, err := kafkaTopicsMissing(ctx, client, []string{topic})
 	if err != nil {
 		return false, err
 	}
+	return len(missing) == 0, nil
+}
+
+func kafkaTopicsMissing(ctx context.Context, client kafkaAdminClient, topics []string) ([]string, error) {
+	topics = parseBrokers(strings.Join(topics, ","))
+	if len(topics) == 0 {
+		return nil, nil
+	}
+	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: topics})
+	if err != nil {
+		return nil, err
+	}
+	metadataByTopic := make(map[string]kafka.Topic, len(meta.Topics))
 	for _, topicMeta := range meta.Topics {
-		if topicMeta.Name != topic {
+		metadataByTopic[topicMeta.Name] = topicMeta
+	}
+	missing := make([]string, 0)
+	for _, topic := range topics {
+		topicMeta, ok := metadataByTopic[topic]
+		if !ok {
+			missing = append(missing, topic)
 			continue
 		}
 		if topicMeta.Error != nil {
 			if errors.Is(topicMeta.Error, kafka.UnknownTopicOrPartition) {
-				return false, nil
+				missing = append(missing, topic)
+				continue
 			}
-			return false, topicMeta.Error
+			return nil, topicMeta.Error
 		}
-		return len(topicMeta.Partitions) > 0, nil
+		if len(topicMeta.Partitions) == 0 {
+			missing = append(missing, topic)
+		}
 	}
-	return false, nil
+	return missing, nil
 }
 
 func isTopicAlreadyExistsError(err error) bool {

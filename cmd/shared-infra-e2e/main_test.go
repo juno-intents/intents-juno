@@ -355,6 +355,98 @@ func TestEnsureKafkaTopicWithFactory_ReturnsAutoCreateMetadataError(t *testing.T
 	}
 }
 
+func TestCheckKafkaTopicsMetadataWithFactory_ReturnsWhenAllTopicsPresent(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{{
+			Topics: []kafka.Topic{
+				{
+					Name: "proof.requests.v1",
+					Partitions: []kafka.Partition{{
+						Topic: "proof.requests.v1",
+						ID:    0,
+					}},
+				},
+				{
+					Name: "proof.fulfillments.v1",
+					Partitions: []kafka.Partition{{
+						Topic: "proof.fulfillments.v1",
+						ID:    0,
+					}},
+				},
+			},
+		}},
+	}
+
+	err := checkKafkaTopicsMetadataWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098"},
+		[]string{"proof.requests.v1", "proof.fulfillments.v1"},
+		func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+			return client, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("checkKafkaTopicsMetadataWithFactory: %v", err)
+	}
+	if client.metadataCalls != 1 {
+		t.Fatalf("metadata calls: got=%d want=1", client.metadataCalls)
+	}
+}
+
+func TestCheckKafkaTopicsMetadataWithFactory_FallsBackToNextBrokerAfterTimeout(t *testing.T) {
+	t.Parallel()
+
+	clients := map[string]*stubKafkaAdminClient{
+		"broker-1:9098": {
+			metadataErrs: []error{context.DeadlineExceeded},
+		},
+		"broker-2:9098": {
+			metadataResponses: []*kafka.MetadataResponse{{
+				Topics: []kafka.Topic{
+					{
+						Name: "proof.requests.v1",
+						Partitions: []kafka.Partition{{
+							Topic: "proof.requests.v1",
+							ID:    0,
+						}},
+					},
+					{
+						Name: "proof.fulfillments.v1",
+						Partitions: []kafka.Partition{{
+							Topic: "proof.fulfillments.v1",
+							ID:    0,
+						}},
+					},
+				},
+			}},
+		},
+	}
+
+	err := checkKafkaTopicsMetadataWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098", "broker-2:9098"},
+		[]string{"proof.requests.v1", "proof.fulfillments.v1"},
+		func(broker string, _ time.Duration) (kafkaAdminClient, error) {
+			client, ok := clients[broker]
+			if !ok {
+				t.Fatalf("unexpected broker: %s", broker)
+			}
+			return client, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("checkKafkaTopicsMetadataWithFactory: %v", err)
+	}
+	if clients["broker-1:9098"].metadataCalls != 1 {
+		t.Fatalf("broker-1 metadata calls: got=%d want=1", clients["broker-1:9098"].metadataCalls)
+	}
+	if clients["broker-2:9098"].metadataCalls != 1 {
+		t.Fatalf("broker-2 metadata calls: got=%d want=1", clients["broker-2:9098"].metadataCalls)
+	}
+}
+
 func TestCheckCheckpointIPFSWithSource_RejectsMismatchedSignatureSet(t *testing.T) {
 	t.Parallel()
 
