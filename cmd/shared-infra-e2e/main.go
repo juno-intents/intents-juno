@@ -109,7 +109,6 @@ var errNoCheckpointPackage = errors.New("no operator checkpoint package with IPF
 
 type kafkaAdminClient interface {
 	Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
-	CreateTopics(ctx context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error)
 }
 
 var newKafkaAdminClient = func(broker string, timeout time.Duration) (kafkaAdminClient, error) {
@@ -390,8 +389,8 @@ func checkPostgres(ctx context.Context, cfg config) (postgresReport, error) {
 
 func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	for _, requiredTopic := range cfg.RequiredKafkaTopics {
-		if err := ensureKafkaTopic(ctx, cfg.KafkaBrokers, requiredTopic); err != nil {
-			return kafkaReport{}, fmt.Errorf("ensure required topic %s: %w", requiredTopic, err)
+		if err := checkKafkaTopicMetadata(ctx, cfg.KafkaBrokers, requiredTopic); err != nil {
+			return kafkaReport{}, fmt.Errorf("inspect required topic %s: %w", requiredTopic, err)
 		}
 	}
 
@@ -400,18 +399,16 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.kafka.v1","time":"%s"}`,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	))
-	if err := ensureKafkaTopic(ctx, cfg.KafkaBrokers, topic); err != nil {
-		return kafkaReport{}, fmt.Errorf("ensure topic: %w", err)
-	}
-
-	producer, err := queue.NewProducer(queue.ProducerConfig{
-		Driver:  queue.DriverKafka,
-		Brokers: cfg.KafkaBrokers,
-	})
+	producer, err := newKafkaAutoTopicWriter(cfg.KafkaBrokers)
 	if err != nil {
 		return kafkaReport{}, fmt.Errorf("new producer: %w", err)
 	}
 	defer func() { _ = producer.Close() }()
+
+	start := time.Now()
+	if err := producer.WriteMessages(ctx, kafka.Message{Topic: topic, Value: payload}); err != nil {
+		return kafkaReport{}, fmt.Errorf("publish: %w", err)
+	}
 
 	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
 		Driver:        queue.DriverKafka,
@@ -425,11 +422,6 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 		return kafkaReport{}, fmt.Errorf("new consumer: %w", err)
 	}
 	defer func() { _ = consumer.Close() }()
-
-	start := time.Now()
-	if err := producer.Publish(ctx, topic, payload); err != nil {
-		return kafkaReport{}, fmt.Errorf("publish: %w", err)
-	}
 
 	msgCh := consumer.Messages()
 	errCh := consumer.Errors()
@@ -475,6 +467,52 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	}
 }
 
+func newKafkaAutoTopicWriter(brokers []string) (*kafka.Writer, error) {
+	transport, err := queue.NewKafkaTransportFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return &kafka.Writer{
+		Addr:                   kafka.TCP(brokers...),
+		BatchTimeout:           10 * time.Millisecond,
+		RequiredAcks:           kafka.RequireAll,
+		AllowAutoTopicCreation: true,
+		Transport:              transport,
+	}, nil
+}
+
+func checkKafkaTopicMetadata(ctx context.Context, brokers []string, topic string) error {
+	return checkKafkaTopicMetadataWithFactory(ctx, brokers, topic, newKafkaAdminClient)
+}
+
+func checkKafkaTopicMetadataWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
+	brokers = parseBrokers(strings.Join(brokers, ","))
+	if len(brokers) == 0 {
+		return errors.New("kafka topic metadata check requires at least one broker")
+	}
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("kafka topic is required")
+	}
+	var lastErr error
+	for _, broker := range brokers {
+		client, err := clientFactory(broker, 10*time.Second)
+		if err != nil {
+			lastErr = fmt.Errorf("new admin client for %s: %w", broker, err)
+			continue
+		}
+		if _, err := kafkaTopicExists(ctx, client, topic); err != nil {
+			lastErr = fmt.Errorf("metadata topic %s via %s: %w", topic, broker, err)
+			continue
+		}
+		return nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("unable to inspect kafka topic metadata")
+	}
+	return lastErr
+}
+
 func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error {
 	return ensureKafkaTopicWithFactory(ctx, brokers, topic, newKafkaAdminClient)
 }
@@ -506,33 +544,15 @@ func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic st
 			return nil
 		}
 
-		resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{
-			Topics: []kafka.TopicConfig{{
-				Topic:             topic,
-				NumPartitions:     1,
-				ReplicationFactor: 1,
-			}},
-		})
-		if err != nil {
-			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, err)
-			continue
-		}
-
-		topicErr := resp.Errors[topic]
-		if topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
-			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, topicErr)
-			continue
-		}
-
 		exists, err = kafkaTopicExists(ctx, client, topic)
 		if err == nil && exists {
 			return nil
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("verify topic %s via %s: %w", topic, broker, err)
+			lastErr = fmt.Errorf("refresh topic metadata %s via %s: %w", topic, broker, err)
 			continue
 		}
-		lastErr = fmt.Errorf("verify topic %s via %s: topic metadata still absent after create", topic, broker)
+		lastErr = fmt.Errorf("verify topic %s via %s: topic metadata still absent after retry", topic, broker)
 	}
 
 	if lastErr == nil {

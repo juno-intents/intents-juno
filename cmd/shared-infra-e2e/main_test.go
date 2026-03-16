@@ -30,17 +30,19 @@ type stubKafkaAdminClient struct {
 
 func (s *stubKafkaAdminClient) Metadata(_ context.Context, _ *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
 	s.metadataCalls++
-	if len(s.metadataErrs) > 0 {
-		err := s.metadataErrs[0]
-		s.metadataErrs = s.metadataErrs[1:]
-		return nil, err
-	}
 	if len(s.metadataResponses) == 0 {
+		if len(s.metadataErrs) > 0 {
+			err := s.metadataErrs[0]
+			s.metadataErrs = s.metadataErrs[1:]
+			return nil, err
+		}
 		return &kafka.MetadataResponse{}, nil
 	}
 	resp := s.metadataResponses[0]
 	if len(s.metadataResponses) > 1 {
 		s.metadataResponses = s.metadataResponses[1:]
+	} else {
+		s.metadataResponses = nil
 	}
 	return resp, nil
 }
@@ -292,7 +294,7 @@ func TestEnsureKafkaTopicWithFactory_ReturnsWhenTopicAlreadyExists(t *testing.T)
 	}
 }
 
-func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicWithoutControllerLookup(t *testing.T) {
+func TestEnsureKafkaTopicWithFactory_AutoCreatesMissingTopicViaMetadata(t *testing.T) {
 	t.Parallel()
 
 	client := &stubKafkaAdminClient{
@@ -313,11 +315,6 @@ func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicWithoutControllerLookup(
 				}},
 			},
 		},
-		createResponse: &kafka.CreateTopicsResponse{
-			Errors: map[string]error{
-				"checkpoints.signatures.v1": nil,
-			},
-		},
 	}
 
 	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
@@ -326,38 +323,34 @@ func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicWithoutControllerLookup(
 	if err != nil {
 		t.Fatalf("ensureKafkaTopicWithFactory: %v", err)
 	}
-	if client.createCalls != 1 {
-		t.Fatalf("create calls: got=%d want=1", client.createCalls)
+	if client.createCalls != 0 {
+		t.Fatalf("create calls: got=%d want=0", client.createCalls)
 	}
-	if client.metadataCalls < 2 {
-		t.Fatalf("metadata calls: got=%d want>=2", client.metadataCalls)
+	if client.metadataCalls != 2 {
+		t.Fatalf("metadata calls: got=%d want=2", client.metadataCalls)
 	}
 }
 
-func TestEnsureKafkaTopicWithFactory_ReturnsCreateTopicError(t *testing.T) {
+func TestEnsureKafkaTopicWithFactory_ReturnsAutoCreateMetadataError(t *testing.T) {
 	t.Parallel()
 
-	client := &stubKafkaAdminClient{
-		metadataResponses: []*kafka.MetadataResponse{{
-			Topics: []kafka.Topic{{
-				Name:  "checkpoints.signatures.v1",
-				Error: kafka.UnknownTopicOrPartition,
-			}},
-		}},
-		createResponse: &kafka.CreateTopicsResponse{
-			Errors: map[string]error{
-				"checkpoints.signatures.v1": kafka.InvalidReplicationFactor,
-			},
-		},
-	}
-
 	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
-		return client, nil
+		return &stubKafkaAdminClient{
+			metadataResponses: []*kafka.MetadataResponse{
+				{
+					Topics: []kafka.Topic{{
+						Name:  "checkpoints.signatures.v1",
+						Error: kafka.UnknownTopicOrPartition,
+					}},
+				},
+			},
+			metadataErrs: []error{kafka.InvalidReplicationFactor},
+		}, nil
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "create topic checkpoints.signatures.v1 via broker-1:9098") {
+	if !strings.Contains(err.Error(), "refresh topic metadata checkpoints.signatures.v1 via broker-1:9098") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
