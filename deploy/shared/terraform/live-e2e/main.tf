@@ -242,6 +242,7 @@ locals {
         Sid    = "AllowCheckpointSignerKMS"
         Effect = "Allow"
         Action = [
+          "kms:DescribeKey",
           "kms:GetPublicKey",
           "kms:Sign"
         ]

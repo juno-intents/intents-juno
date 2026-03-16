@@ -31,6 +31,7 @@ main() {
   assert_contains "$variables_tf" 'If empty, the first two private subnets in distinct AZs in the selected VPC are used.' "live-e2e documents private shared subnet auto-selection"
   assert_contains "$main_tf" $'allowed_checkpoint_signer_kms_key_arns = sort(distinct(concat(\n    [aws_kms_key.dkg.arn],' "live-e2e auto-includes the managed dkg kms key in checkpoint signer allowlists"
   assert_contains "$main_tf" 'Sid    = "AllowCheckpointSignerKMS"' "live-e2e always renders checkpoint signer kms permissions"
+  assert_contains "$main_tf" '"kms:DescribeKey"' "live-e2e checkpoint signer kms policy allows restore preflight DescribeKey"
   assert_contains "$main_tf" 'Resource = local.allowed_checkpoint_signer_kms_key_arns' "live-e2e checkpoint signer kms policy uses the full allowlist"
   assert_not_contains "$main_tf" 'for_each = length(local.allowed_checkpoint_signer_kms_key_arns) > 0 ? [1] : []' "live-e2e no longer hides checkpoint signer kms permissions behind a dynamic block"
 
