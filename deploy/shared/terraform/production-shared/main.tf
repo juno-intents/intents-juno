@@ -67,9 +67,10 @@ locals {
   shared_deposit_image_id_hex                  = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
-  shared_kafka_bootstrap_brokers               = aws_msk_cluster.shared.bootstrap_brokers_sasl_iam
-  shared_kafka_topic_arn_prefix                = replace(aws_msk_cluster.shared.arn, ":cluster/", ":topic/")
-  shared_kafka_group_arn_prefix                = replace(aws_msk_cluster.shared.arn, ":cluster/", ":group/")
+  shared_kafka_cluster_arn                    = coalesce(aws_msk_cluster.shared.arn, "")
+  shared_kafka_bootstrap_brokers               = coalesce(aws_msk_cluster.shared.bootstrap_brokers_sasl_iam, "")
+  shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
+  shared_kafka_group_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":group/")
   shared_proof_request_topic                   = "proof.requests.v1"
   shared_proof_result_topic                    = "proof.fulfillments.v1"
   shared_proof_failure_topic                   = "proof.failures.v1"
