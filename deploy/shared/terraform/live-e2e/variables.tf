@@ -222,7 +222,7 @@ variable "shared_msk_kafka_version" {
 variable "shared_msk_broker_instance_type" {
   description = "MSK broker instance type."
   type        = string
-  default     = "kafka.t3.small"
+  default     = "kafka.m5.large"
 }
 
 variable "shared_msk_broker_ebs_volume_size_gb" {
