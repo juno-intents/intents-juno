@@ -19,6 +19,43 @@ import (
 	"github.com/segmentio/kafka-go"
 )
 
+type stubKafkaAdminClient struct {
+	metadataResponses []*kafka.MetadataResponse
+	metadataErrs      []error
+	createResponse    *kafka.CreateTopicsResponse
+	createErr         error
+	metadataCalls     int
+	createCalls       int
+}
+
+func (s *stubKafkaAdminClient) Metadata(_ context.Context, _ *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+	s.metadataCalls++
+	if len(s.metadataErrs) > 0 {
+		err := s.metadataErrs[0]
+		s.metadataErrs = s.metadataErrs[1:]
+		return nil, err
+	}
+	if len(s.metadataResponses) == 0 {
+		return &kafka.MetadataResponse{}, nil
+	}
+	resp := s.metadataResponses[0]
+	if len(s.metadataResponses) > 1 {
+		s.metadataResponses = s.metadataResponses[1:]
+	}
+	return resp, nil
+}
+
+func (s *stubKafkaAdminClient) CreateTopics(_ context.Context, _ *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+	s.createCalls++
+	if s.createErr != nil {
+		return nil, s.createErr
+	}
+	if s.createResponse == nil {
+		return &kafka.CreateTopicsResponse{Errors: map[string]error{}}, nil
+	}
+	return s.createResponse, nil
+}
+
 func TestParseArgs_Valid(t *testing.T) {
 	t.Parallel()
 
@@ -226,6 +263,102 @@ func TestIsTopicAlreadyExistsError(t *testing.T) {
 				t.Fatalf("isTopicAlreadyExistsError() = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnsureKafkaTopicWithFactory_ReturnsWhenTopicAlreadyExists(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{{
+			Topics: []kafka.Topic{{
+				Name: "checkpoints.signatures.v1",
+				Partitions: []kafka.Partition{{
+					Topic: "checkpoints.signatures.v1",
+					ID:    0,
+				}},
+			}},
+		}},
+	}
+
+	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+		return client, nil
+	})
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicWithFactory: %v", err)
+	}
+	if client.createCalls != 0 {
+		t.Fatalf("create calls: got=%d want=0", client.createCalls)
+	}
+}
+
+func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicWithoutControllerLookup(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{
+			{
+				Topics: []kafka.Topic{{
+					Name:  "checkpoints.signatures.v1",
+					Error: kafka.UnknownTopicOrPartition,
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name: "checkpoints.signatures.v1",
+					Partitions: []kafka.Partition{{
+						Topic: "checkpoints.signatures.v1",
+						ID:    0,
+					}},
+				}},
+			},
+		},
+		createResponse: &kafka.CreateTopicsResponse{
+			Errors: map[string]error{
+				"checkpoints.signatures.v1": nil,
+			},
+		},
+	}
+
+	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+		return client, nil
+	})
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicWithFactory: %v", err)
+	}
+	if client.createCalls != 1 {
+		t.Fatalf("create calls: got=%d want=1", client.createCalls)
+	}
+	if client.metadataCalls < 2 {
+		t.Fatalf("metadata calls: got=%d want>=2", client.metadataCalls)
+	}
+}
+
+func TestEnsureKafkaTopicWithFactory_ReturnsCreateTopicError(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{{
+			Topics: []kafka.Topic{{
+				Name:  "checkpoints.signatures.v1",
+				Error: kafka.UnknownTopicOrPartition,
+			}},
+		}},
+		createResponse: &kafka.CreateTopicsResponse{
+			Errors: map[string]error{
+				"checkpoints.signatures.v1": kafka.InvalidReplicationFactor,
+			},
+		},
+	}
+
+	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+		return client, nil
+	})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !strings.Contains(err.Error(), "create topic checkpoints.signatures.v1 via broker-1:9098") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 

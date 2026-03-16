@@ -285,9 +285,13 @@ locals {
             Sid    = "AllowSharedMSKTopicAccess"
             Effect = "Allow"
             Action = [
+              "kafka-cluster:CreateTopic",
               "kafka-cluster:DescribeTopic",
+              "kafka-cluster:DescribeTopicDynamicConfiguration",
+              "kafka-cluster:AlterTopic",
               "kafka-cluster:ReadData",
-              "kafka-cluster:WriteData"
+              "kafka-cluster:WriteData",
+              "kafka-cluster:WriteDataIdempotently"
             ]
             Resource = ["${local.shared_kafka_topic_arn_prefix}/*"]
           }),

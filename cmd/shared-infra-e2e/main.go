@@ -103,6 +103,23 @@ const (
 	checkpointIPFSMaxResponseLen = 1 << 20
 )
 
+type kafkaAdminClient interface {
+	Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
+	CreateTopics(ctx context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error)
+}
+
+var newKafkaAdminClient = func(broker string, timeout time.Duration) (kafkaAdminClient, error) {
+	transport, err := queue.NewKafkaTransportFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return &kafka.Client{
+		Addr:      kafka.TCP(broker),
+		Timeout:   timeout,
+		Transport: transport,
+	}, nil
+}
+
 func main() {
 	if err := runMain(os.Args[1:], os.Stdout); err != nil {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
@@ -455,6 +472,10 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 }
 
 func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error {
+	return ensureKafkaTopicWithFactory(ctx, brokers, topic, newKafkaAdminClient)
+}
+
+func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
 	brokers = parseBrokers(strings.Join(brokers, ","))
 	if len(brokers) == 0 {
 		return errors.New("kafka topic creation requires at least one broker")
@@ -463,55 +484,77 @@ func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error
 	if topic == "" {
 		return errors.New("kafka topic is required")
 	}
-
-	dialer, err := queue.NewKafkaDialerFromEnv(10 * time.Second)
-	if err != nil {
-		return err
-	}
 	var lastErr error
 
 	for _, broker := range brokers {
-		conn, err := dialer.DialContext(ctx, "tcp", broker)
+		client, err := clientFactory(broker, 10*time.Second)
 		if err != nil {
-			lastErr = fmt.Errorf("dial broker %s: %w", broker, err)
+			lastErr = fmt.Errorf("new admin client for %s: %w", broker, err)
 			continue
 		}
 
-		controller, err := conn.Controller()
-		_ = conn.Close()
+		exists, err := kafkaTopicExists(ctx, client, topic)
 		if err != nil {
-			lastErr = fmt.Errorf("lookup controller via %s: %w", broker, err)
+			lastErr = fmt.Errorf("metadata topic %s via %s: %w", topic, broker, err)
 			continue
 		}
-
-		controllerAddr := fmt.Sprintf("%s:%d", controller.Host, controller.Port)
-		controllerConn, err := dialer.DialContext(ctx, "tcp", controllerAddr)
-		if err != nil {
-			lastErr = fmt.Errorf("dial controller %s: %w", controllerAddr, err)
-			continue
-		}
-
-		err = controllerConn.CreateTopics(kafka.TopicConfig{
-			Topic:             topic,
-			NumPartitions:     1,
-			ReplicationFactor: 1,
-		})
-		closeErr := controllerConn.Close()
-
-		if err == nil || isTopicAlreadyExistsError(err) {
+		if exists {
 			return nil
 		}
-		if closeErr != nil {
-			lastErr = fmt.Errorf("create topic %s via %s: %w (close: %v)", topic, controllerAddr, err, closeErr)
+
+		resp, err := client.CreateTopics(ctx, &kafka.CreateTopicsRequest{
+			Topics: []kafka.TopicConfig{{
+				Topic:             topic,
+				NumPartitions:     1,
+				ReplicationFactor: 1,
+			}},
+		})
+		if err != nil {
+			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, err)
 			continue
 		}
-		lastErr = fmt.Errorf("create topic %s via %s: %w", topic, controllerAddr, err)
+
+		topicErr := resp.Errors[topic]
+		if topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
+			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, topicErr)
+			continue
+		}
+
+		exists, err = kafkaTopicExists(ctx, client, topic)
+		if err == nil && exists {
+			return nil
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("verify topic %s via %s: %w", topic, broker, err)
+			continue
+		}
+		lastErr = fmt.Errorf("verify topic %s via %s: topic metadata still absent after create", topic, broker)
 	}
 
 	if lastErr == nil {
 		lastErr = errors.New("unable to create kafka topic")
 	}
 	return lastErr
+}
+
+func kafkaTopicExists(ctx context.Context, client kafkaAdminClient, topic string) (bool, error) {
+	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: []string{topic}})
+	if err != nil {
+		return false, err
+	}
+	for _, topicMeta := range meta.Topics {
+		if topicMeta.Name != topic {
+			continue
+		}
+		if topicMeta.Error != nil {
+			if errors.Is(topicMeta.Error, kafka.UnknownTopicOrPartition) {
+				return false, nil
+			}
+			return false, topicMeta.Error
+		}
+		return len(topicMeta.Partitions) > 0, nil
+	}
+	return false, nil
 }
 
 func isTopicAlreadyExistsError(err error) bool {
