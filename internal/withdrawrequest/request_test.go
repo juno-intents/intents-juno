@@ -1,6 +1,7 @@
 package withdrawrequest
 
 import (
+	"context"
 	"encoding/hex"
 	"math/big"
 	"strings"
@@ -10,6 +11,19 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 )
+
+type stubHeaderByNumberClient struct {
+	header    *types.Header
+	err       error
+	lastBlock *big.Int
+}
+
+func (s *stubHeaderByNumberClient) HeaderByNumber(_ context.Context, number *big.Int) (*types.Header, error) {
+	if number != nil {
+		s.lastBlock = new(big.Int).Set(number)
+	}
+	return s.header, s.err
+}
 
 func TestParseFixedHex(t *testing.T) {
 	t.Parallel()
@@ -94,5 +108,54 @@ func TestParseWithdrawRequestedEvent(t *testing.T) {
 	}
 	if event.LogIndex != logEntry.Index {
 		t.Fatalf("log index mismatch: got=%d want=%d", event.LogIndex, logEntry.Index)
+	}
+}
+
+func TestCanonicalizeRequestedEvent_UsesReceiptMetadataBeforeHeaderLookup(t *testing.T) {
+	t.Parallel()
+
+	wantBlockHash := common.HexToHash("0x" + strings.Repeat("77", 32))
+	wantTxHash := common.HexToHash("0x" + strings.Repeat("88", 32))
+	receipt := &types.Receipt{
+		BlockHash:   wantBlockHash,
+		BlockNumber: big.NewInt(456),
+		TxHash:      wantTxHash,
+	}
+	reader := &stubHeaderByNumberClient{}
+
+	got, err := canonicalizeRequestedEvent(context.Background(), reader, receipt, RequestedEvent{})
+	if err != nil {
+		t.Fatalf("canonicalizeRequestedEvent: %v", err)
+	}
+	if got.BlockHash != wantBlockHash {
+		t.Fatalf("block hash mismatch: got=%s want=%s", got.BlockHash.Hex(), wantBlockHash.Hex())
+	}
+	if got.BlockNumber != 456 {
+		t.Fatalf("block number mismatch: got=%d want=456", got.BlockNumber)
+	}
+	if got.TxHash != wantTxHash {
+		t.Fatalf("tx hash mismatch: got=%s want=%s", got.TxHash.Hex(), wantTxHash.Hex())
+	}
+	if reader.lastBlock != nil {
+		t.Fatalf("expected no header lookup when receipt has canonical block hash")
+	}
+}
+
+func TestCanonicalizeRequestedEvent_FallsBackToHeaderLookup(t *testing.T) {
+	t.Parallel()
+
+	header := &types.Header{Number: big.NewInt(789), Time: 12345}
+	receipt := &types.Receipt{BlockNumber: big.NewInt(789)}
+	reader := &stubHeaderByNumberClient{header: header}
+
+	got, err := canonicalizeRequestedEvent(context.Background(), reader, receipt, RequestedEvent{})
+	if err != nil {
+		t.Fatalf("canonicalizeRequestedEvent: %v", err)
+	}
+	if got.BlockHash != header.Hash() {
+		t.Fatalf("block hash mismatch: got=%s want=%s", got.BlockHash.Hex(), header.Hash().Hex())
+	}
+	if reader.lastBlock == nil || reader.lastBlock.Uint64() != 789 {
+		t.Fatalf("expected header lookup for block 789, got %v", reader.lastBlock)
 	}
 }

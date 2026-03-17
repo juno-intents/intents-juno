@@ -64,6 +64,10 @@ type Payload struct {
 	RequestTxHash    string `json:"requestTxHash"`
 }
 
+type headerByNumberClient interface {
+	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
+}
+
 func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, error) {
 	if strings.TrimSpace(cfg.RPCURL) == "" {
 		return Payload{}, errors.New("rpc url is required")
@@ -161,6 +165,10 @@ func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, e
 	if err != nil {
 		return Payload{}, err
 	}
+	event, err = canonicalizeRequestedEvent(ctx, client, requestReceipt, event)
+	if err != nil {
+		return Payload{}, err
+	}
 
 	payload := Payload{
 		Version:        "withdrawals.requested.v2",
@@ -182,6 +190,39 @@ func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, e
 		payload.ProofWitnessItem = "0x" + hex.EncodeToString(req.ProofWitnessItem)
 	}
 	return payload, nil
+}
+
+func canonicalizeRequestedEvent(ctx context.Context, client headerByNumberClient, receipt *types.Receipt, event RequestedEvent) (RequestedEvent, error) {
+	if receipt == nil {
+		return RequestedEvent{}, errors.New("missing requestWithdraw receipt")
+	}
+	if event.BlockHash == (common.Hash{}) {
+		if receipt.BlockHash != (common.Hash{}) {
+			event.BlockHash = receipt.BlockHash
+		} else if receipt.BlockNumber != nil {
+			if client == nil {
+				return RequestedEvent{}, errors.New("missing client for requestWithdraw block lookup")
+			}
+			header, err := client.HeaderByNumber(ctx, receipt.BlockNumber)
+			if err != nil {
+				return RequestedEvent{}, fmt.Errorf("lookup requestWithdraw block header: %w", err)
+			}
+			if header == nil {
+				return RequestedEvent{}, errors.New("requestWithdraw block header missing")
+			}
+			event.BlockHash = header.Hash()
+		}
+	}
+	if event.BlockHash == (common.Hash{}) {
+		return RequestedEvent{}, errors.New("requestWithdraw canonical block hash missing")
+	}
+	if event.BlockNumber == 0 && receipt.BlockNumber != nil {
+		event.BlockNumber = receipt.BlockNumber.Uint64()
+	}
+	if event.TxHash == (common.Hash{}) && receipt.TxHash != (common.Hash{}) {
+		event.TxHash = receipt.TxHash
+	}
+	return event, nil
 }
 
 func ParsePrivateKeyHex(raw string) (*ecdsa.PrivateKey, error) {
