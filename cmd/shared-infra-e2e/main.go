@@ -397,11 +397,14 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	}
 
 	topic := fmt.Sprintf("%s.%d", cfg.TopicPrefix, time.Now().UTC().UnixNano())
+	if err := ensureKafkaTopic(ctx, cfg.KafkaBrokers, topic); err != nil {
+		return kafkaReport{}, fmt.Errorf("ensure probe topic: %w", err)
+	}
 	group := fmt.Sprintf("%s.group.%s", cfg.TopicPrefix, uuid.NewString())
 	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.kafka.v1","time":"%s"}`,
 		time.Now().UTC().Format(time.RFC3339Nano),
 	))
-	producer, err := newKafkaAutoTopicWriter(cfg.KafkaBrokers)
+	producer, err := newKafkaWriter(cfg.KafkaBrokers)
 	if err != nil {
 		return kafkaReport{}, fmt.Errorf("new producer: %w", err)
 	}
@@ -469,17 +472,16 @@ func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
 	}
 }
 
-func newKafkaAutoTopicWriter(brokers []string) (*kafka.Writer, error) {
+func newKafkaWriter(brokers []string) (*kafka.Writer, error) {
 	transport, err := queue.NewKafkaTransportFromEnv()
 	if err != nil {
 		return nil, err
 	}
 	return &kafka.Writer{
-		Addr:                   kafka.TCP(brokers...),
-		BatchTimeout:           10 * time.Millisecond,
-		RequiredAcks:           kafka.RequireAll,
-		AllowAutoTopicCreation: true,
-		Transport:              transport,
+		Addr:         kafka.TCP(brokers...),
+		BatchTimeout: 10 * time.Millisecond,
+		RequiredAcks: kafka.RequireAll,
+		Transport:    transport,
 	}, nil
 }
 
@@ -663,9 +665,28 @@ func kafkaTopicsMissing(ctx context.Context, client kafkaAdminClient, topics []s
 		}
 		if len(topicMeta.Partitions) == 0 {
 			missing = append(missing, topic)
+			continue
+		}
+		if !kafkaTopicPartitionsReady(topicMeta.Partitions) {
+			missing = append(missing, topic)
 		}
 	}
 	return missing, nil
+}
+
+func kafkaTopicPartitionsReady(partitions []kafka.Partition) bool {
+	if len(partitions) == 0 {
+		return false
+	}
+	for _, partition := range partitions {
+		if partition.Error != nil {
+			return false
+		}
+		if partition.Leader.Host == "" || partition.Leader.Port == 0 {
+			return false
+		}
+	}
+	return true
 }
 
 func isTopicAlreadyExistsError(err error) bool {

@@ -280,6 +280,11 @@ func TestEnsureKafkaTopicWithFactory_ReturnsWhenTopicAlreadyExists(t *testing.T)
 				Partitions: []kafka.Partition{{
 					Topic: "checkpoints.signatures.v1",
 					ID:    0,
+					Leader: kafka.Broker{
+						ID:   1,
+						Host: "broker-1",
+						Port: 9098,
+					},
 				}},
 			}},
 		}},
@@ -313,6 +318,11 @@ func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicViaAdminAPI(t *testing.T
 					Partitions: []kafka.Partition{{
 						Topic: "checkpoints.signatures.v1",
 						ID:    0,
+						Leader: kafka.Broker{
+							ID:   1,
+							Host: "broker-1",
+							Port: 9098,
+						},
 					}},
 				}},
 			},
@@ -336,6 +346,60 @@ func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicViaAdminAPI(t *testing.T
 	}
 	if client.metadataCalls != 2 {
 		t.Fatalf("metadata calls: got=%d want=2", client.metadataCalls)
+	}
+}
+
+func TestEnsureKafkaTopicWithFactory_WaitsForLeaderAssignment(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{
+			{
+				Topics: []kafka.Topic{{
+					Name:  "shared.infra.e2e.probe",
+					Error: kafka.UnknownTopicOrPartition,
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name: "shared.infra.e2e.probe",
+					Partitions: []kafka.Partition{{
+						Topic: "shared.infra.e2e.probe",
+						ID:    0,
+						Leader: kafka.Broker{
+							ID: 1,
+						},
+					}},
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name: "shared.infra.e2e.probe",
+					Partitions: []kafka.Partition{{
+						Topic: "shared.infra.e2e.probe",
+						ID:    0,
+						Leader: kafka.Broker{
+							ID:   1,
+							Host: "broker-1",
+							Port: 9098,
+						},
+					}},
+				}},
+			},
+		},
+	}
+
+	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "shared.infra.e2e.probe", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+		return client, nil
+	})
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicWithFactory: %v", err)
+	}
+	if client.createCalls != 1 {
+		t.Fatalf("create calls: got=%d want=1", client.createCalls)
+	}
+	if client.metadataCalls != 3 {
+		t.Fatalf("metadata calls: got=%d want=3", client.metadataCalls)
 	}
 }
 
@@ -391,6 +455,11 @@ func TestEnsureKafkaTopicsWithFactory_CreatesEveryRequiredTopic(t *testing.T) {
 						Partitions: []kafka.Partition{{
 							Topic: "proof.requests.v1",
 							ID:    0,
+							Leader: kafka.Broker{
+								ID:   1,
+								Host: "broker-1",
+								Port: 9098,
+							},
 						}},
 					},
 					{
@@ -398,6 +467,11 @@ func TestEnsureKafkaTopicsWithFactory_CreatesEveryRequiredTopic(t *testing.T) {
 						Partitions: []kafka.Partition{{
 							Topic: "ops.alerts.v1",
 							ID:    0,
+							Leader: kafka.Broker{
+								ID:   1,
+								Host: "broker-1",
+								Port: 9098,
+							},
 						}},
 					},
 				},
@@ -441,6 +515,11 @@ func TestCheckKafkaTopicsMetadataWithFactory_ReturnsWhenAllTopicsPresent(t *test
 					Partitions: []kafka.Partition{{
 						Topic: "proof.requests.v1",
 						ID:    0,
+						Leader: kafka.Broker{
+							ID:   1,
+							Host: "broker-1",
+							Port: 9098,
+						},
 					}},
 				},
 				{
@@ -448,6 +527,11 @@ func TestCheckKafkaTopicsMetadataWithFactory_ReturnsWhenAllTopicsPresent(t *test
 					Partitions: []kafka.Partition{{
 						Topic: "proof.fulfillments.v1",
 						ID:    0,
+						Leader: kafka.Broker{
+							ID:   1,
+							Host: "broker-1",
+							Port: 9098,
+						},
 					}},
 				},
 			},
@@ -485,6 +569,11 @@ func TestCheckKafkaTopicsMetadataWithFactory_FallsBackToNextBrokerAfterTimeout(t
 						Partitions: []kafka.Partition{{
 							Topic: "proof.requests.v1",
 							ID:    0,
+							Leader: kafka.Broker{
+								ID:   2,
+								Host: "broker-2",
+								Port: 9098,
+							},
 						}},
 					},
 					{
@@ -492,6 +581,11 @@ func TestCheckKafkaTopicsMetadataWithFactory_FallsBackToNextBrokerAfterTimeout(t
 						Partitions: []kafka.Partition{{
 							Topic: "proof.fulfillments.v1",
 							ID:    0,
+							Leader: kafka.Broker{
+								ID:   2,
+								Host: "broker-2",
+								Port: 9098,
+							},
 						}},
 					},
 				},
