@@ -189,7 +189,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$remote_stage_dir/shared-infra-e2e_linux_amd64" "$shared_infra_e2e_bin"' "remote installs shared infra binary"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'JUNO_QUEUE_KAFKA_TLS="$kafka_tls_enabled"' "shared infra validation carries kafka tls setting"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_infra_check_max_attempts="' "shared infra validation configures retry attempts"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_infra_check_timeout="' "shared infra validation configures retry timeout"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'shared_infra_check_timeout="420s"' "shared infra validation uses the extended default timeout budget"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'run_shared_infra_e2e() {' "shared infra validation uses retry helper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'for ((shared_infra_attempt = 1; shared_infra_attempt <= shared_infra_check_max_attempts; shared_infra_attempt++)); do' "shared infra validation retries transient failures"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--timeout "$shared_infra_check_timeout"' "shared infra validation passes explicit timeout"

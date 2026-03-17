@@ -210,7 +210,7 @@ required_kafka_topics_csv="$(
 )"
 shared_infra_check_max_attempts="${PRODUCTION_SHARED_INFRA_CHECK_MAX_ATTEMPTS:-5}"
 shared_infra_check_sleep_seconds="${PRODUCTION_SHARED_INFRA_CHECK_SLEEP_SECONDS:-10}"
-shared_infra_check_timeout="${PRODUCTION_SHARED_INFRA_CHECK_TIMEOUT:-180s}"
+shared_infra_check_timeout="${PRODUCTION_SHARED_INFRA_CHECK_TIMEOUT:-420s}"
 kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_services.kafka.tls')"
 if [[ "$kafka_tls_enabled" != "true" ]]; then
   kafka_tls_enabled="false"
