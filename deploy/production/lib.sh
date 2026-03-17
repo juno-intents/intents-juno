@@ -399,7 +399,7 @@ production_materialize_operator_dkg_backup_zip() {
 }
 
 production_base_relayer_allowed_selectors() {
-  printf '0x53a58a48,0xec70b605\n'
+  printf '0x53a58a48,0xec70b605,0xfe097d57\n'
 }
 
 production_rewrite_operator_handoffs_dkg_tls_dir() {

@@ -284,7 +284,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=' "bootstrap env leaves base-event-scanner start block unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
   assert_contains "$script_text" 'BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000' "bootstrap env pins the base relayer readiness balance floor"
-  assert_contains "$script_text" 'BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605' "bootstrap env pins the base relayer selector allowlist"
+  assert_contains "$script_text" 'BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605,0xfe097d57' "bootstrap env pins the base relayer selector allowlist"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h' "bootstrap env pins the withdraw expiry safety margin"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h' "bootstrap env pins the withdraw max expiry extension"
 }

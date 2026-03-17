@@ -31,7 +31,7 @@ func TestParseConfig_ParsesIngressHardeningFlags(t *testing.T) {
 		"--rpc-url", "http://127.0.0.1:8545",
 		"--chain-id", "8453",
 		"--allowed-contracts", "0x0000000000000000000000000000000000000001,0x0000000000000000000000000000000000000002",
-		"--allowed-selectors", "0x53a58a48,0xec70b605",
+		"--allowed-selectors", "0x53a58a48,0xec70b605,0xfe097d57",
 		"--tls-cert-file", "/tmp/server.pem",
 		"--tls-key-file", "/tmp/server.key",
 		"--rate-limit-per-second", "5",
@@ -50,8 +50,8 @@ func TestParseConfig_ParsesIngressHardeningFlags(t *testing.T) {
 	if len(cfg.AllowedContracts) != 2 {
 		t.Fatalf("allowed contracts: got %d want 2", len(cfg.AllowedContracts))
 	}
-	if len(cfg.AllowedSelectors) != 2 {
-		t.Fatalf("allowed selectors: got %d want 2", len(cfg.AllowedSelectors))
+	if len(cfg.AllowedSelectors) != 3 {
+		t.Fatalf("allowed selectors: got %d want 3", len(cfg.AllowedSelectors))
 	}
 }
 

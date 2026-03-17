@@ -6739,7 +6739,7 @@ command_run() {
           --chain-id "$base_chain_id" \
           --listen "0.0.0.0:${base_relayer_port}" \
           --allowed-contracts "$bridge_address" \
-          --allowed-selectors "0x53a58a48,0xec70b605" \
+          --allowed-selectors "0x53a58a48,0xec70b605,0xfe097d57" \
           --min-ready-balance-wei "${BASE_RELAYER_MIN_READY_BALANCE_WEI:-1000000000000000}"
     )"
   else
@@ -6752,7 +6752,7 @@ command_run() {
           --chain-id "$base_chain_id" \
           --listen "127.0.0.1:${base_relayer_port}" \
           --allowed-contracts "$bridge_address" \
-          --allowed-selectors "0x53a58a48,0xec70b605" \
+          --allowed-selectors "0x53a58a48,0xec70b605,0xfe097d57" \
           >"$base_relayer_log" 2>&1
     ) &
     base_relayer_pid="$!"

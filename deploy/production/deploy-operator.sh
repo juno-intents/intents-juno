@@ -531,7 +531,7 @@ derive_base_relayer_allowlist() {
 }
 
 derive_base_relayer_selector_allowlist() {
-  printf '0x53a58a48,0xec70b605\n'
+  printf '0x53a58a48,0xec70b605,0xfe097d57\n'
 }
 
 derive_base_relayer_url() {
