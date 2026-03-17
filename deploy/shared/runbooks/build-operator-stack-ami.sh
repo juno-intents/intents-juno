@@ -473,6 +473,8 @@ CFG
   cat > /tmp/operator-stack.env <<ENV
 JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
+JUNO_RPC_BIND=127.0.0.1
+JUNO_RPC_ALLOW_IPS=127.0.0.1
 JUNO_SCAN_UA_HRP=jtest
 JUNO_SCAN_CONFIRMATIONS=1
 CHECKPOINT_SIGNER_DRIVER=aws-kms
@@ -824,6 +826,8 @@ operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_
 juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
+juno_rpc_bind="$(resolve_value "JUNO_RPC_BIND" "$(read_env_value JUNO_RPC_BIND || true)" || true)"
+juno_rpc_allow_ips="$(resolve_value "JUNO_RPC_ALLOW_IPS" "$(read_env_value JUNO_RPC_ALLOW_IPS || true)" || true)"
 checkpoint_operators="$(resolve_value "CHECKPOINT_OPERATORS" "$(read_env_value CHECKPOINT_OPERATORS || true)" || true)"
 checkpoint_threshold="$(resolve_value "CHECKPOINT_THRESHOLD" "$(read_env_value CHECKPOINT_THRESHOLD || true)" || true)"
 kafka_tls="$(resolve_value "JUNO_QUEUE_KAFKA_TLS" "$(read_env_value JUNO_QUEUE_KAFKA_TLS || true)" || true)"
@@ -842,6 +846,7 @@ required_key "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$checkpoint_blob_sse_kms_key_id"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
 required_key "JUNO_RPC_USER" "$juno_rpc_user"
 required_key "JUNO_RPC_PASS" "$juno_rpc_pass"
+required_key "JUNO_RPC_BIND" "$juno_rpc_bind"
 required_key "JUNO_TXSIGN_SIGNER_KEYS" "$juno_txsign_signer_keys"
 required_key "CHECKPOINT_OPERATORS" "$checkpoint_operators"
 required_key "CHECKPOINT_THRESHOLD" "$checkpoint_threshold"
@@ -915,6 +920,8 @@ set_env_value "$tmp_env" CHECKPOINT_BLOB_SSE_KMS_KEY_ID "$checkpoint_blob_sse_km
 set_env_value "$tmp_env" CHECKPOINT_IPFS_API_URL "$checkpoint_ipfs_api_url"
 set_env_value "$tmp_env" JUNO_RPC_USER "$juno_rpc_user"
 set_env_value "$tmp_env" JUNO_RPC_PASS "$juno_rpc_pass"
+set_env_value "$tmp_env" JUNO_RPC_BIND "$juno_rpc_bind"
+set_env_value "$tmp_env" JUNO_RPC_ALLOW_IPS "$juno_rpc_allow_ips"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
@@ -954,8 +961,17 @@ txindex=1
 txunpaidactionlimit=10000
 daemon=0
 listen=1
-rpcbind=127.0.0.1
+rpcbind=${juno_rpc_bind}
 rpcallowip=127.0.0.1
+CFG
+IFS=',' read -r -a rpc_allow_ip_entries <<< "$juno_rpc_allow_ips"
+for allow_ip in "${rpc_allow_ip_entries[@]}"; do
+  allow_ip="${allow_ip//[[:space:]]/}"
+  [[ -n "$allow_ip" ]] || continue
+  [[ "$allow_ip" == "127.0.0.1" ]] && continue
+  printf 'rpcallowip=%s\n' "$allow_ip" >> "$tmp_junocashd_conf"
+done
+cat >> "$tmp_junocashd_conf" <<CFG
 rpcport=18232
 rpcuser=${juno_rpc_user}
 rpcpassword=${juno_rpc_pass}

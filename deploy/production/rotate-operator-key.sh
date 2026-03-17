@@ -89,6 +89,28 @@ delete_env_key_local() {
   mv "$tmp" "$file"
 }
 
+extract_build_runbook_block() {
+  local source_file="$1"
+  local start_marker="$2"
+  local end_marker="$3"
+  local output_file="$4"
+
+  awk -v start_marker="$start_marker" -v end_marker="$end_marker" '
+    index($0, start_marker) > 0 {
+      capture = 1
+      next
+    }
+    capture && $0 == end_marker {
+      exit
+    }
+    capture {
+      print
+    }
+  ' "$source_file" >"$output_file"
+
+  [[ -s "$output_file" ]] || die "failed to extract embedded block from $source_file"
+}
+
 derive_base_relayer_allowlist() {
   local shared_manifest="$1"
   jq -r '
@@ -298,6 +320,7 @@ tmp_dir="$(mktemp -d)"
 resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
 junocashd_conf="$tmp_dir/junocashd.conf"
+config_hydrator_stage="$tmp_dir/intents-juno-config-hydrator.sh"
 generated_base_relayer_tls_files=()
 
 cleanup() {
@@ -308,6 +331,12 @@ trap cleanup EXIT
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
 production_render_junocashd_conf "$merged_env" "$junocashd_conf"
+extract_build_runbook_block \
+  "$SCRIPT_DIR/../shared/runbooks/build-operator-stack-ami.sh" \
+  "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" \
+  "EOF_CONFIG_HYDRATOR" \
+  "$config_hydrator_stage"
+chmod 0755 "$config_hydrator_stage"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 
 if [[ "$dry_run" == "true" ]]; then
@@ -336,7 +365,7 @@ fi
 capture_remote_operator_evidence "$output_dir/pre.json"
 
 remote_stage_dir="/tmp/intents-juno-rotate-$(production_safe_slug "$operator_id")"
-files_to_copy=("$merged_env" "$junocashd_conf")
+files_to_copy=("$merged_env" "$junocashd_conf" "$config_hydrator_stage")
 for tls_file in "${generated_base_relayer_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
@@ -368,46 +397,7 @@ sudo rm -f /etc/intents-juno/checkpoint-signer.key
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.env" /etc/intents-juno/operator-stack.env
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
-if [[ -f "$config_hydrator_script" ]] && {
-  grep -Fq 'install -m 0600 "$tmp" "$file"' "$config_hydrator_script" ||
-  grep -Fq 'install -m 0640 -o root -g intents-juno "$tmp_env" "$stack_env_file"' "$config_hydrator_script" ||
-  ! grep -Fq 'txunpaidactionlimit=10000' "$config_hydrator_script"
-}; then
-  hydrator_tmp="$(mktemp)"
-  awk '
-    BEGIN {
-      unpaid_action_limit = 0
-    }
-    $0 == "txindex=1" {
-      print
-      if (!unpaid_action_limit) {
-        print "txunpaidactionlimit=10000"
-        unpaid_action_limit = 1
-      }
-      next
-    }
-    $0 == "txunpaidactionlimit=10000" {
-      if (!unpaid_action_limit) {
-        print
-        unpaid_action_limit = 1
-      }
-      next
-    }
-    $0 == "  install -m 0600 \"$tmp\" \"$file\"" {
-      print "  cat \"$tmp\" > \"$file\""
-      print "  chmod 0640 \"$file\""
-      next
-    }
-    $0 == "install -m 0640 -o root -g intents-juno \"$tmp_env\" \"$stack_env_file\"" {
-      print "cat \"$tmp_env\" > \"$stack_env_file\""
-      print "chmod 0640 \"$stack_env_file\""
-      next
-    }
-    { print }
-  ' "$config_hydrator_script" >"$hydrator_tmp"
-  sudo install -m 0755 "$hydrator_tmp" "$config_hydrator_script"
-  rm -f "$hydrator_tmp"
-fi
+sudo install -m 0755 "$remote_stage_dir/intents-juno-config-hydrator.sh" "$config_hydrator_script"
 sudo systemctl restart intents-juno-config-hydrator.service
 for svc in checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
   sudo systemctl restart "$svc"

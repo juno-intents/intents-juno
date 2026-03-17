@@ -103,12 +103,13 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// MPC wallet balance (Juno RPC z_gettotalbalance).
-	if strings.TrimSpace(s.cfg.OWalletUA) != "" && strings.TrimSpace(s.cfg.JunoRPCURL) == "" {
+	junoRPCURLs := s.configuredJunoRPCURLs()
+	if strings.TrimSpace(s.cfg.OWalletUA) != "" && len(junoRPCURLs) == 0 {
 		resp["mpcWallet"] = map[string]any{
 			"address": strings.TrimSpace(s.cfg.OWalletUA),
 			"error":   "Juno RPC not configured on app host",
 		}
-	} else if s.cfg.JunoRPCURL != "" {
+	} else if len(junoRPCURLs) > 0 {
 		mpcBalance, mpcErr := s.fetchJunoMPCBalance(ctx)
 		if mpcErr != nil {
 			s.log.Warn("fetch juno mpc balance", "err", mpcErr)
@@ -305,6 +306,33 @@ func decodeVarint(buf []byte, i int) (uint64, int) {
 // fetchJunoMPCBalance calls z_gettotalbalance on the Juno RPC to retrieve the
 // MPC wallet balance. Uses raw JSON-RPC.
 func (s *Server) fetchJunoMPCBalance(ctx context.Context) (map[string]any, error) {
+	urls := s.configuredJunoRPCURLs()
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("juno rpc not configured")
+	}
+
+	errs := make([]string, 0, len(urls))
+	seenErrs := make(map[string]struct{}, len(urls))
+	for _, rpcURL := range urls {
+		balance, err := s.fetchJunoMPCBalanceFromURL(ctx, rpcURL)
+		if err == nil {
+			return balance, nil
+		}
+		msg := err.Error()
+		if _, ok := seenErrs[msg]; ok {
+			continue
+		}
+		seenErrs[msg] = struct{}{}
+		errs = append(errs, msg)
+	}
+
+	if len(errs) == 1 {
+		return nil, fmt.Errorf("%s", errs[0])
+	}
+	return nil, fmt.Errorf("all juno rpc endpoints failed: %s", strings.Join(errs, "; "))
+}
+
+func (s *Server) fetchJunoMPCBalanceFromURL(ctx context.Context, rpcURL string) (map[string]any, error) {
 	reqBody, err := json.Marshal(map[string]any{
 		"jsonrpc": "1.0",
 		"id":      "backoffice",
@@ -315,7 +343,7 @@ func (s *Server) fetchJunoMPCBalance(ctx context.Context) (map[string]any, error
 		return nil, fmt.Errorf("marshal rpc request: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, s.cfg.JunoRPCURL, bytes.NewReader(reqBody))
+	httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, rpcURL, bytes.NewReader(reqBody))
 	if err != nil {
 		return nil, fmt.Errorf("create rpc request: %w", err)
 	}

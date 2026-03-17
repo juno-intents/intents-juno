@@ -39,9 +39,10 @@ func main() {
 		)
 		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
 
-		junoRPCURL  = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, for MPC wallet balance)")
-		junoRPCUser = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
-		junoRPCPass = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
+		junoRPCURL     = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, for MPC wallet balance)")
+		junoRPCURLsRaw = flag.String("juno-rpc-urls", "", "Comma-separated Juno RPC URLs (optional, tried in order for MPC wallet balance)")
+		junoRPCUser    = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
+		junoRPCPass    = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
 
 		authSecret = flag.String("auth-secret", "", "Bearer token for API auth (required)")
 
@@ -218,6 +219,11 @@ func main() {
 	if s := strings.TrimSpace(*feeDistAddr); s != "" && common.IsHexAddress(s) {
 		feeDistributor = common.HexToAddress(s)
 	}
+	junoRPCURLs := splitCSVStrings(*junoRPCURLsRaw)
+	if single := strings.TrimSpace(*junoRPCURL); single != "" {
+		junoRPCURLs = append([]string{single}, junoRPCURLs...)
+	}
+	junoRPCURLs = uniqueStrings(junoRPCURLs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -353,6 +359,7 @@ func main() {
 		SP1RPCURL:  strings.TrimSpace(*sp1RPCURL),
 
 		JunoRPCURL:  strings.TrimSpace(*junoRPCURL),
+		JunoRPCURLs: junoRPCURLs,
 		JunoRPCUser: strings.TrimSpace(*junoRPCUser),
 		JunoRPCPass: strings.TrimSpace(*junoRPCPass),
 
@@ -427,4 +434,34 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpSrv.Shutdown(shutdownCtx)
+}
+
+func splitCSVStrings(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	values := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if value := strings.TrimSpace(part); value != "" {
+			values = append(values, value)
+		}
+	}
+	return values
+}
+
+func uniqueStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }

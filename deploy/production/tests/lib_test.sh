@@ -2015,8 +2015,9 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=1" "backoffice env withdraw batch confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env omits unusable loopback juno rpc url"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user when loopback url is filtered"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass when loopback url is filtered"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env falls back to operator juno rpc when the explicit url is loopback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for derived fallback urls"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
   rm -rf "$workdir"
@@ -2072,9 +2073,9 @@ EOF
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
   PATH="$old_path"
 
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env derives juno rpc fallback urls from operator endpoints"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for derived fallback urls"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses still render without juno rpc"
   rm -rf "$workdir"
 }
@@ -2127,13 +2128,13 @@ EOF
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
   PATH="$old_path"
 
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=https://juno-rpc.example.invalid" "backoffice env preserves non-loopback juno rpc url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=https://juno-rpc.example.invalid" "backoffice env preserves non-loopback juno rpc url as the preferred fallback entry"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for non-loopback url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for non-loopback url"
   rm -rf "$workdir"
 }
 
-test_render_backoffice_env_omits_private_operator_juno_rpc_fallback() {
+test_render_backoffice_env_uses_private_operator_juno_rpc_fallback() {
   local workdir shared_manifest app_manifest resolved_env backoffice_env
   local fake_bin old_path
   workdir="$(mktemp -d)"
@@ -2189,9 +2190,9 @@ EOF
   production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
   PATH="$old_path"
 
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits private operator juno rpc fallback"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user without an explicit routable rpc url"
-  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass without an explicit routable rpc url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://10.0.0.12:18232" "backoffice env derives private operator juno rpc fallback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for private operator fallback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for private operator fallback"
   rm -rf "$workdir"
 }
 
@@ -2421,7 +2422,7 @@ main() {
   test_render_app_handoff_and_envs
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
   test_render_backoffice_env_preserves_non_loopback_juno_rpc_url
-  test_render_backoffice_env_omits_private_operator_juno_rpc_fallback
+  test_render_backoffice_env_uses_private_operator_juno_rpc_fallback
   test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme

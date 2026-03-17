@@ -455,24 +455,75 @@ production_refresh_app_secret_contract() {
   local shared_manifest="$3"
   local secret_contract_file="$4"
   local current_dsn existing_dsn updated_any="false"
+  local app_juno_rpc_user app_juno_rpc_pass operator_secret_json operator_secret_rel operator_secret_file
+  local operator_aws_profile operator_aws_region allow_local_resolvers="false"
+  local operator_juno_rpc_user="" operator_juno_rpc_pass="" candidate_user_raw candidate_pass_raw candidate_user candidate_pass
 
   [[ -f "$secret_contract_file" ]] || return 0
 
   existing_dsn="$(production_env_first_value "$secret_contract_file" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   existing_dsn="${existing_dsn#literal:}"
-  [[ -n "$existing_dsn" ]] || return 0
+  if [[ -n "$existing_dsn" ]]; then
+    current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
+    if grep -q '^APP_POSTGRES_DSN=' "$secret_contract_file"; then
+      production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+      updated_any="true"
+    fi
+    if grep -q '^CHECKPOINT_POSTGRES_DSN=' "$secret_contract_file"; then
+      production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
+      updated_any="true"
+    fi
+    if [[ "$updated_any" != "true" ]]; then
+      production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+    fi
+  fi
 
-  current_dsn="$(production_current_postgres_dsn "$inventory" "$inventory_dir" "$shared_manifest" "$existing_dsn")"
-  if grep -q '^APP_POSTGRES_DSN=' "$secret_contract_file"; then
-    production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
-    updated_any="true"
+  app_juno_rpc_user="$(production_env_first_value "$secret_contract_file" JUNO_RPC_USER APP_JUNO_RPC_USER || true)"
+  app_juno_rpc_pass="$(production_env_first_value "$secret_contract_file" JUNO_RPC_PASS APP_JUNO_RPC_PASS || true)"
+  if [[ -n "$app_juno_rpc_user" && -n "$app_juno_rpc_pass" ]]; then
+    return 0
   fi
-  if grep -q '^CHECKPOINT_POSTGRES_DSN=' "$secret_contract_file"; then
-    production_secret_contract_upsert_literal "$secret_contract_file" CHECKPOINT_POSTGRES_DSN "$current_dsn"
-    updated_any="true"
+
+  if production_environment_allows_local_secret_resolvers "$(production_json_optional "$inventory" '.environment')"; then
+    allow_local_resolvers="true"
   fi
-  if [[ "$updated_any" != "true" ]]; then
-    production_secret_contract_upsert_literal "$secret_contract_file" APP_POSTGRES_DSN "$current_dsn"
+
+  while IFS= read -r operator_secret_json; do
+    operator_secret_rel="$(jq -r '.secret_contract_file // empty' <<<"$operator_secret_json")"
+    [[ -n "$operator_secret_rel" ]] || continue
+    operator_secret_file="$(production_abs_path "$inventory_dir" "$operator_secret_rel")"
+    [[ -f "$operator_secret_file" ]] || continue
+    operator_aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_secret_json")"
+    operator_aws_region="$(jq -r '.aws_region // empty' <<<"$operator_secret_json")"
+
+    candidate_user_raw="$(production_env_first_value "$operator_secret_file" JUNO_RPC_USER APP_JUNO_RPC_USER || true)"
+    if [[ -n "$candidate_user_raw" ]]; then
+      production_validate_secret_resolver "$candidate_user_raw" "$allow_local_resolvers"
+      candidate_user="$(production_resolve_secret_value "$candidate_user_raw" "$operator_aws_profile" "$operator_aws_region")"
+      if [[ -z "$operator_juno_rpc_user" ]]; then
+        operator_juno_rpc_user="$candidate_user"
+      elif [[ "$operator_juno_rpc_user" != "$candidate_user" ]]; then
+        die "operator secret contracts disagree on JUNO_RPC_USER"
+      fi
+    fi
+
+    candidate_pass_raw="$(production_env_first_value "$operator_secret_file" JUNO_RPC_PASS APP_JUNO_RPC_PASS || true)"
+    if [[ -n "$candidate_pass_raw" ]]; then
+      production_validate_secret_resolver "$candidate_pass_raw" "$allow_local_resolvers"
+      candidate_pass="$(production_resolve_secret_value "$candidate_pass_raw" "$operator_aws_profile" "$operator_aws_region")"
+      if [[ -z "$operator_juno_rpc_pass" ]]; then
+        operator_juno_rpc_pass="$candidate_pass"
+      elif [[ "$operator_juno_rpc_pass" != "$candidate_pass" ]]; then
+        die "operator secret contracts disagree on JUNO_RPC_PASS"
+      fi
+    fi
+  done < <(jq -c '.operators[]?' "$inventory")
+
+  if [[ -z "$app_juno_rpc_user" && -n "$operator_juno_rpc_user" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" JUNO_RPC_USER "$operator_juno_rpc_user"
+  fi
+  if [[ -z "$app_juno_rpc_pass" && -n "$operator_juno_rpc_pass" ]]; then
+    production_secret_contract_upsert_literal "$secret_contract_file" JUNO_RPC_PASS "$operator_juno_rpc_pass"
   fi
 }
 
@@ -571,6 +622,36 @@ production_default_operator_endpoints_json() {
     fi
     printf '%s=%s:%s\n' "$endpoint_addr" "$endpoint_host" "$endpoint_port"
   done | jq -R -s 'split("\n") | map(select(length > 0))'
+}
+
+production_backoffice_juno_rpc_urls_csv() {
+  local app_deploy="$1"
+  local explicit_url operator_endpoint endpoint_host_port endpoint_host candidate existing
+  local -a urls=()
+
+  explicit_url="$(production_json_optional "$app_deploy" '.juno_rpc_url')"
+  if [[ -n "$explicit_url" ]] && ! production_is_loopback_url "$explicit_url"; then
+    urls+=("$explicit_url")
+  fi
+
+  while IFS= read -r operator_endpoint; do
+    [[ -n "$operator_endpoint" ]] || continue
+    endpoint_host_port="${operator_endpoint#*=}"
+    endpoint_host="$(production_host_from_listen_addr "$endpoint_host_port")"
+    candidate="http://${endpoint_host}:18232"
+    production_is_loopback_url "$candidate" && continue
+    for existing in "${urls[@]}"; do
+      if [[ "$existing" == "$candidate" ]]; then
+        continue 2
+      fi
+    done
+    urls+=("$candidate")
+  done < <(jq -r '.operator_endpoints[]? // empty' "$app_deploy")
+
+  if (( ${#urls[@]} > 0 )); then
+    local IFS=,
+    printf '%s\n' "${urls[*]}"
+  fi
 }
 
 production_validate_secret_resolver() {
@@ -1029,6 +1110,11 @@ production_require_loopback_listen_addr() {
       die "$field_name must bind loopback: $listen_addr"
       ;;
   esac
+}
+
+production_is_loopback_url() {
+  local url="$1"
+  [[ "$url" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:|/|$) ]]
 }
 
 production_endpoint_host() {
@@ -2300,11 +2386,11 @@ production_render_backoffice_env() {
   local resolved_secret_env="$3"
   local output_file="$4"
 
-  local postgres_dsn auth_secret juno_rpc_url juno_rpc_user juno_rpc_pass
+  local postgres_dsn auth_secret juno_rpc_url juno_rpc_urls juno_rpc_user juno_rpc_pass
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc effective_juno_rpc_url
+  local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -2326,7 +2412,7 @@ production_render_backoffice_env() {
   sp1_requestor_address="$(production_json_optional "$shared_manifest" '.shared_services.proof.requestor_address')"
   sp1_rpc_url="$(production_json_optional "$shared_manifest" '.shared_services.proof.rpc_url')"
   render_juno_rpc="false"
-  effective_juno_rpc_url="$juno_rpc_url"
+  juno_rpc_urls="$(production_backoffice_juno_rpc_urls_csv "$app_deploy" || true)"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -2355,12 +2441,9 @@ EOF
   if [[ -n "$sp1_rpc_url" ]]; then
     printf 'BACKOFFICE_SP1_RPC_URL=%s\n' "$sp1_rpc_url" >>"$output_file"
   fi
-  if [[ -n "$effective_juno_rpc_url" && "$effective_juno_rpc_url" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:|/|$) ]]; then
-    effective_juno_rpc_url=""
-  fi
-  if [[ -n "$effective_juno_rpc_url" ]]; then
+  if [[ -n "$juno_rpc_urls" ]]; then
     render_juno_rpc="true"
-    printf 'BACKOFFICE_JUNO_RPC_URL=%s\n' "$effective_juno_rpc_url" >>"$output_file"
+    printf 'BACKOFFICE_JUNO_RPC_URLS=%s\n' "$juno_rpc_urls" >>"$output_file"
   fi
   local fee_distributor
   fee_distributor="$(production_json_optional "$shared_manifest" '.contracts.fee_distributor')"

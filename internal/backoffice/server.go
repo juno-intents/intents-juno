@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -25,6 +26,7 @@ type ServerConfig struct {
 	SP1RPCURL  string // Succinct prover network gRPC URL (e.g. rpc.mainnet.succinct.xyz)
 
 	JunoRPCURL  string
+	JunoRPCURLs []string
 	JunoRPCUser string
 	JunoRPCPass string
 
@@ -230,4 +232,26 @@ type BridgeSettingsProvider interface {
 
 func isProbePath(path string) bool {
 	return path == "/healthz" || path == "/livez" || path == "/readyz"
+}
+
+func (s *Server) configuredJunoRPCURLs() []string {
+	urls := make([]string, 0, len(s.cfg.JunoRPCURLs)+1)
+	seen := make(map[string]struct{}, len(s.cfg.JunoRPCURLs)+1)
+	appendURL := func(raw string) {
+		url := strings.TrimSpace(raw)
+		if url == "" {
+			return
+		}
+		if _, ok := seen[url]; ok {
+			return
+		}
+		seen[url] = struct{}{}
+		urls = append(urls, url)
+	}
+
+	for _, url := range s.cfg.JunoRPCURLs {
+		appendURL(url)
+	}
+	appendURL(s.cfg.JunoRPCURL)
+	return urls
 }

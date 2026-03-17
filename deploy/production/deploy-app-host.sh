@@ -386,7 +386,9 @@ fi
 if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
   args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
 fi
-if [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
+if [[ -n "\${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
+  args+=(--juno-rpc-urls "\$BACKOFFICE_JUNO_RPC_URLS")
+elif [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
   args+=(--juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL")
 fi
 if [[ -n "\${BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS:-}" ]]; then

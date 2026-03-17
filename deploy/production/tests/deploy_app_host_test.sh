@@ -250,6 +250,9 @@ EOF
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=1" "backoffice env withdraw batch confirmation default"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env omits unusable loopback juno rpc url"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env renders juno rpc fallback urls from operator endpoints"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for fallback urls"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for fallback urls"
   assert_contains "$(cat "$log_dir/backoffice.env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   rm -rf "$workdir"
 }
@@ -361,15 +364,16 @@ EOF
       --app-deploy "$app_manifest" \
       --release-tag "$release_tag" >/dev/null
 
-  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URL=" "backoffice env omits juno rpc url"
-  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
-  assert_not_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env derives juno rpc fallback urls when explicit juno rpc is missing"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for fallback urls"
+  assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for fallback urls"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env still carries relayer signer addresses"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then' "backoffice wrapper guards juno rpc flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then' "backoffice wrapper guards juno rpc urls flag"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-rpc-urls "$BACKOFFICE_JUNO_RPC_URLS"' "backoffice wrapper passes juno rpc fallback urls"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_USER:-}" ]]; then' "backoffice wrapper guards juno rpc user flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_PASS:-}" ]]; then' "backoffice wrapper guards juno rpc pass flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-relayer-signer-addresses "$BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES"' "backoffice wrapper still passes relayer signer addresses without juno rpc"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation still runs when backoffice juno rpc is omitted"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--required-kafka-topics "$shared_required_kafka_topics"' "shared infra validation still runs when backoffice juno rpc falls back to operator endpoints"
   rm -rf "$workdir"
 }
 
