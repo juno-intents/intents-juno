@@ -265,6 +265,30 @@ func TestHandler_RejectsSendWhenAllowlistIsMissing(t *testing.T) {
 	}
 }
 
+func TestHandler_RejectsSendWhenContractAllowlistIsEmpty(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedSelectors: [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusServiceUnavailable, rr.Body.String())
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called: got %d want 0", sender.calls)
+	}
+}
+
 func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T) {
 	t.Parallel()
 

@@ -76,3 +76,27 @@ func TestParseConfig_RequiresAllowlists(t *testing.T) {
 		t.Fatal("expected allowed selectors validation error")
 	}
 }
+
+func TestParseConfig_RejectsEmptyAllowlists(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseConfig([]string{
+		"--rpc-url", "http://127.0.0.1:8545",
+		"--chain-id", "8453",
+		"--allowed-contracts", " , ",
+		"--allowed-selectors", "0x53a58a48",
+	})
+	if err == nil {
+		t.Fatal("expected empty allowed contracts validation error")
+	}
+
+	_, err = parseConfig([]string{
+		"--rpc-url", "http://127.0.0.1:8545",
+		"--chain-id", "8453",
+		"--allowed-contracts", "0x0000000000000000000000000000000000000001",
+		"--allowed-selectors", " , ",
+	})
+	if err == nil {
+		t.Fatal("expected empty allowed selectors validation error")
+	}
+}
