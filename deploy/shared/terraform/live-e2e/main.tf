@@ -279,7 +279,7 @@ locals {
               "kafka-cluster:DescribeCluster",
               "kafka-cluster:DescribeClusterDynamicConfiguration"
             ]
-            Resource = [aws_msk_cluster.shared[0].arn]
+            Resource = [local.shared_kafka_cluster_arn]
           }),
           jsonencode({
             Sid    = "AllowSharedMSKTopicAccess"
@@ -800,8 +800,8 @@ locals {
   shared_deposit_image_id_hex        = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex       = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), try(aws_rds_cluster.shared[0].endpoint, ""), var.shared_postgres_port, urlencode(var.shared_postgres_db))
-  shared_kafka_cluster_arn           = coalesce(try(aws_msk_cluster.shared[0].arn, null), "")
-  shared_kafka_bootstrap_brokers     = coalesce(try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, null), "")
+  shared_kafka_cluster_arn           = length(aws_msk_cluster.shared) > 0 ? aws_msk_cluster.shared[0].arn : ""
+  shared_kafka_bootstrap_brokers     = length(aws_msk_cluster.shared) > 0 ? aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam : ""
   shared_kafka_topic_arn_prefix      = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
   shared_kafka_group_arn_prefix      = replace(local.shared_kafka_cluster_arn, ":cluster/", ":group/")
   shared_proof_request_topic         = "proof.requests.v1"
@@ -958,7 +958,7 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
       "kafka-cluster:DescribeCluster",
       "kafka-cluster:DescribeClusterDynamicConfiguration",
     ]
-    resources = [aws_msk_cluster.shared[0].arn]
+    resources = [local.shared_kafka_cluster_arn]
   }
 
   statement {
@@ -1008,7 +1008,7 @@ data "aws_iam_policy_document" "proof_funder_task_access" {
       "kafka-cluster:DescribeCluster",
       "kafka-cluster:DescribeClusterDynamicConfiguration",
     ]
-    resources = [aws_msk_cluster.shared[0].arn]
+    resources = [local.shared_kafka_cluster_arn]
   }
 
   statement {
