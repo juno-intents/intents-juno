@@ -68,6 +68,11 @@ type headerByNumberClient interface {
 	HeaderByNumber(ctx context.Context, number *big.Int) (*types.Header, error)
 }
 
+const (
+	requestWithdrawHeaderLookupAttempts = 5
+	requestWithdrawHeaderLookupInterval = 250 * time.Millisecond
+)
+
 func RequestWithdrawal(ctx context.Context, cfg Config, req Request) (Payload, error) {
 	if strings.TrimSpace(cfg.RPCURL) == "" {
 		return Payload{}, errors.New("rpc url is required")
@@ -200,15 +205,9 @@ func canonicalizeRequestedEvent(ctx context.Context, client headerByNumberClient
 		if receipt.BlockHash != (common.Hash{}) {
 			event.BlockHash = receipt.BlockHash
 		} else if receipt.BlockNumber != nil {
-			if client == nil {
-				return RequestedEvent{}, errors.New("missing client for requestWithdraw block lookup")
-			}
-			header, err := client.HeaderByNumber(ctx, receipt.BlockNumber)
+			header, err := lookupRequestWithdrawHeader(ctx, client, receipt.BlockNumber)
 			if err != nil {
-				return RequestedEvent{}, fmt.Errorf("lookup requestWithdraw block header: %w", err)
-			}
-			if header == nil {
-				return RequestedEvent{}, errors.New("requestWithdraw block header missing")
+				return RequestedEvent{}, err
 			}
 			event.BlockHash = header.Hash()
 		}
@@ -223,6 +222,42 @@ func canonicalizeRequestedEvent(ctx context.Context, client headerByNumberClient
 		event.TxHash = receipt.TxHash
 	}
 	return event, nil
+}
+
+func lookupRequestWithdrawHeader(ctx context.Context, client headerByNumberClient, blockNumber *big.Int) (*types.Header, error) {
+	if client == nil {
+		return nil, errors.New("missing client for requestWithdraw block lookup")
+	}
+
+	var lastErr error
+	for attempt := 1; attempt <= requestWithdrawHeaderLookupAttempts; attempt++ {
+		header, err := client.HeaderByNumber(ctx, blockNumber)
+		if err == nil && header != nil {
+			return header, nil
+		}
+		if err != nil {
+			lastErr = fmt.Errorf("lookup requestWithdraw block header: %w", err)
+		} else {
+			lastErr = errors.New("requestWithdraw block header missing")
+		}
+		if attempt == requestWithdrawHeaderLookupAttempts {
+			break
+		}
+		timer := time.NewTimer(requestWithdrawHeaderLookupInterval)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			if lastErr != nil {
+				return nil, lastErr
+			}
+			return nil, ctx.Err()
+		case <-timer.C:
+		}
+	}
+
+	return nil, lastErr
 }
 
 func ParsePrivateKeyHex(raw string) (*ecdsa.PrivateKey, error) {

@@ -3,6 +3,7 @@ package withdrawrequest
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -16,11 +17,31 @@ type stubHeaderByNumberClient struct {
 	header    *types.Header
 	err       error
 	lastBlock *big.Int
+	headers   []*types.Header
+	errs      []error
+	calls     int
 }
 
 func (s *stubHeaderByNumberClient) HeaderByNumber(_ context.Context, number *big.Int) (*types.Header, error) {
 	if number != nil {
 		s.lastBlock = new(big.Int).Set(number)
+	}
+	if len(s.headers) > 0 || len(s.errs) > 0 {
+		idx := s.calls
+		s.calls++
+		var header *types.Header
+		var err error
+		if idx < len(s.headers) {
+			header = s.headers[idx]
+		} else if len(s.headers) > 0 {
+			header = s.headers[len(s.headers)-1]
+		}
+		if idx < len(s.errs) {
+			err = s.errs[idx]
+		} else if len(s.errs) > 0 {
+			err = s.errs[len(s.errs)-1]
+		}
+		return header, err
 	}
 	return s.header, s.err
 }
@@ -157,5 +178,25 @@ func TestCanonicalizeRequestedEvent_FallsBackToHeaderLookup(t *testing.T) {
 	}
 	if reader.lastBlock == nil || reader.lastBlock.Uint64() != 789 {
 		t.Fatalf("expected header lookup for block 789, got %v", reader.lastBlock)
+	}
+}
+
+func TestCanonicalizeRequestedEvent_RetriesTransientHeaderLookupMiss(t *testing.T) {
+	header := &types.Header{Number: big.NewInt(789), Time: 12345}
+	receipt := &types.Receipt{BlockNumber: big.NewInt(789)}
+	reader := &stubHeaderByNumberClient{
+		headers: []*types.Header{nil, header},
+		errs:    []error{errors.New("not found"), nil},
+	}
+
+	got, err := canonicalizeRequestedEvent(context.Background(), reader, receipt, RequestedEvent{})
+	if err != nil {
+		t.Fatalf("canonicalizeRequestedEvent: %v", err)
+	}
+	if got.BlockHash != header.Hash() {
+		t.Fatalf("block hash mismatch: got=%s want=%s", got.BlockHash.Hex(), header.Hash().Hex())
+	}
+	if reader.calls < 2 {
+		t.Fatalf("expected retry after transient header miss, got %d calls", reader.calls)
 	}
 }
