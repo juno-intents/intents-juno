@@ -8,6 +8,9 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
 )
 
 func TestNewConsumerValidation(t *testing.T) {
@@ -256,33 +259,42 @@ func TestNewConsumer_RejectsKafkaAuthWithoutTLS(t *testing.T) {
 	}
 }
 
-func TestAWSMSKIAMMechanism_StartFormatsOAuthBearerInitialResponse(t *testing.T) {
-	t.Parallel()
+func TestKafkaSASLMechanismFromEnv_UsesAWSMSKIAMV2(t *testing.T) {
+	t.Setenv(envKafkaTLS, "true")
+	t.Setenv(envKafkaAuthMode, "aws-msk-iam")
+	t.Setenv(envKafkaAWSRegion, "us-east-1")
 
-	mech := awsMSKIAMMechanism{
-		region: "us-east-1",
-		tokenProvider: func(context.Context, string) (string, error) {
-			return "token-123", nil
-		},
+	originalLoader := loadAWSMSKIAMConfig
+	t.Cleanup(func() {
+		loadAWSMSKIAMConfig = originalLoader
+	})
+
+	loadCalled := false
+	loadAWSMSKIAMConfig = func(_ context.Context, region string) (aws.Config, error) {
+		loadCalled = true
+		if region != "us-east-1" {
+			t.Fatalf("region = %q, want us-east-1", region)
+		}
+		return aws.Config{
+			Region: region,
+			Credentials: aws.NewCredentialsCache(
+				credentials.NewStaticCredentialsProvider("test-access-key", "test-secret-key", "test-session-token"),
+			),
+		}, nil
 	}
 
-	session, initial, err := mech.Start(context.Background())
+	mech, err := kafkaSASLMechanismFromEnv()
 	if err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("kafkaSASLMechanismFromEnv: %v", err)
 	}
-	if session == nil {
-		t.Fatal("expected session")
+	if !loadCalled {
+		t.Fatal("expected aws msk iam config loader to be called")
 	}
-	if got, want := string(initial), "n,,\x01auth=Bearer token-123\x01\x01"; got != want {
-		t.Fatalf("initial response mismatch: got=%q want=%q", got, want)
+	if mech == nil {
+		t.Fatal("expected mechanism")
 	}
-	if done, response, err := session.Next(context.Background(), nil); err != nil {
-		t.Fatalf("Next(nil): %v", err)
-	} else if !done || response != nil {
-		t.Fatalf("Next(nil) = done=%v response=%v, want done=true response=nil", done, response)
-	}
-	if _, _, err := session.Next(context.Background(), []byte("unexpected")); err == nil {
-		t.Fatal("expected challenge error")
+	if got, want := mech.Name(), "AWS_MSK_IAM"; got != want {
+		t.Fatalf("mechanism name = %q, want %q", got, want)
 	}
 }
 

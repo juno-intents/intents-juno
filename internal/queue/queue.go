@@ -192,7 +192,7 @@ func kafkaSASLMechanismFromEnv() (sasl.Mechanism, error) {
 		if region == "" {
 			return nil, errors.New("kafka aws-msk-iam auth requires JUNO_QUEUE_KAFKA_AWS_REGION or AWS_REGION")
 		}
-		return newAWSMSKIAMMechanism(region), nil
+		return newAWSMSKIAMMechanism(region)
 	default:
 		return nil, fmt.Errorf("unsupported kafka auth mode %q", mode)
 	}
