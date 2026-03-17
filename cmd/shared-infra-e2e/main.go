@@ -534,26 +534,16 @@ func ensureKafkaTopics(ctx context.Context, brokers []string, topics []string) e
 }
 
 func ensureKafkaTopicsWithFactory(ctx context.Context, brokers []string, topics []string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
-	topics = parseBrokers(strings.Join(topics, ","))
-	for _, topic := range topics {
-		if err := ensureKafkaTopicWithFactory(ctx, brokers, topic, clientFactory); err != nil {
-			return fmt.Errorf("%s: %w", topic, err)
-		}
-	}
-	return nil
-}
-
-func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
 	brokers = parseBrokers(strings.Join(brokers, ","))
 	if len(brokers) == 0 {
 		return errors.New("kafka topic creation requires at least one broker")
 	}
-	topic = strings.TrimSpace(topic)
-	if topic == "" {
-		return errors.New("kafka topic is required")
+	topics = parseBrokers(strings.Join(topics, ","))
+	if len(topics) == 0 {
+		return nil
 	}
-	var lastErr error
 
+	var lastErr error
 	for _, broker := range brokers {
 		client, err := clientFactory(broker, 10*time.Second)
 		if err != nil {
@@ -561,62 +551,79 @@ func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic st
 			continue
 		}
 
-		exists, err := kafkaTopicExists(ctx, client, topic)
+		inspectCtx, inspectCancel := context.WithTimeout(ctx, 15*time.Second)
+		missingTopics, err := kafkaTopicsMissing(inspectCtx, client, topics)
+		inspectCancel()
 		if err != nil {
-			lastErr = fmt.Errorf("metadata topic %s via %s: %w", topic, broker, err)
+			lastErr = fmt.Errorf("metadata topics via %s: %w", broker, err)
 			continue
 		}
-		if exists {
+		if len(missingTopics) == 0 {
 			return nil
 		}
 
-		createCtx, createCancel := context.WithTimeout(ctx, 15*time.Second)
-		createResp, err := client.CreateTopics(createCtx, &kafka.CreateTopicsRequest{
-			Addr: kafka.TCP(broker),
-			Topics: []kafka.TopicConfig{{
+		createReq := &kafka.CreateTopicsRequest{
+			Addr:   kafka.TCP(broker),
+			Topics: make([]kafka.TopicConfig, len(missingTopics)),
+		}
+		for i, topic := range missingTopics {
+			createReq.Topics[i] = kafka.TopicConfig{
 				Topic:             topic,
 				NumPartitions:     -1,
 				ReplicationFactor: -1,
-			}},
-		})
+			}
+		}
+
+		createCtx, createCancel := context.WithTimeout(ctx, 15*time.Second)
+		createResp, err := client.CreateTopics(createCtx, createReq)
 		createCancel()
 		if err != nil {
-			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, err)
+			lastErr = fmt.Errorf("create topics via %s: %w", broker, err)
 			continue
 		}
 		if createResp != nil {
-			if topicErr := createResp.Errors[topic]; topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
-				lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, topicErr)
+			failedTopics := make([]string, 0)
+			for _, topic := range missingTopics {
+				if topicErr := createResp.Errors[topic]; topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
+					failedTopics = append(failedTopics, fmt.Sprintf("%s: %v", topic, topicErr))
+				}
+			}
+			if len(failedTopics) > 0 {
+				lastErr = fmt.Errorf("create topics via %s: %s", broker, strings.Join(failedTopics, "; "))
 				continue
 			}
 		}
 
 		verifyCtx, verifyCancel := context.WithTimeout(ctx, 15*time.Second)
 		err = runWithRetry(verifyCtx, time.Second, func(stepCtx context.Context) error {
-			exists, err = kafkaTopicExists(stepCtx, client, topic)
+			stillMissing, err := kafkaTopicsMissing(stepCtx, client, topics)
 			if err != nil {
 				return err
 			}
-			if !exists {
-				return kafka.UnknownTopicOrPartition
+			if len(stillMissing) > 0 {
+				return fmt.Errorf("missing %s", strings.Join(stillMissing, ", "))
 			}
 			return nil
 		})
 		verifyCancel()
-		if err == nil && exists {
+		if err == nil {
 			return nil
 		}
-		if err != nil {
-			lastErr = fmt.Errorf("verify topic %s via %s: %w", topic, broker, err)
-			continue
-		}
-		lastErr = fmt.Errorf("verify topic %s via %s: topic metadata still absent after retry", topic, broker)
+		lastErr = fmt.Errorf("verify topics via %s: %w", broker, err)
 	}
 
 	if lastErr == nil {
-		lastErr = errors.New("unable to create kafka topic")
+		lastErr = errors.New("unable to create kafka topics")
 	}
 	return lastErr
+}
+
+func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
+	topic = strings.TrimSpace(topic)
+	if topic == "" {
+		return errors.New("kafka topic is required")
+	}
+	return ensureKafkaTopicsWithFactory(ctx, brokers, []string{topic}, clientFactory)
 }
 
 func kafkaTopicExists(ctx context.Context, client kafkaAdminClient, topic string) (bool, error) {

@@ -24,6 +24,7 @@ type stubKafkaAdminClient struct {
 	metadataErrs      []error
 	createResponse    *kafka.CreateTopicsResponse
 	createErr         error
+	createRequests    []*kafka.CreateTopicsRequest
 	metadataCalls     int
 	createCalls       int
 }
@@ -47,8 +48,9 @@ func (s *stubKafkaAdminClient) Metadata(_ context.Context, _ *kafka.MetadataRequ
 	return resp, nil
 }
 
-func (s *stubKafkaAdminClient) CreateTopics(_ context.Context, _ *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+func (s *stubKafkaAdminClient) CreateTopics(_ context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
 	s.createCalls++
+	s.createRequests = append(s.createRequests, req)
 	if s.createErr != nil {
 		return nil, s.createErr
 	}
@@ -326,6 +328,12 @@ func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicViaAdminAPI(t *testing.T
 	if client.createCalls != 1 {
 		t.Fatalf("create calls: got=%d want=1", client.createCalls)
 	}
+	if got := len(client.createRequests); got != 1 {
+		t.Fatalf("create requests: got=%d want=1", got)
+	}
+	if got := len(client.createRequests[0].Topics); got != 1 {
+		t.Fatalf("create request topics: got=%d want=1", got)
+	}
 	if client.metadataCalls != 2 {
 		t.Fatalf("metadata calls: got=%d want=2", client.metadataCalls)
 	}
@@ -354,7 +362,7 @@ func TestEnsureKafkaTopicWithFactory_ReturnsCreateTopicsError(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "create topic checkpoints.signatures.v1 via broker-1:9098") {
+	if !strings.Contains(err.Error(), "create topics via broker-1:9098") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
@@ -365,34 +373,34 @@ func TestEnsureKafkaTopicsWithFactory_CreatesEveryRequiredTopic(t *testing.T) {
 	client := &stubKafkaAdminClient{
 		metadataResponses: []*kafka.MetadataResponse{
 			{
-				Topics: []kafka.Topic{{
-					Name:  "proof.requests.v1",
-					Error: kafka.UnknownTopicOrPartition,
-				}},
+				Topics: []kafka.Topic{
+					{
+						Name:  "proof.requests.v1",
+						Error: kafka.UnknownTopicOrPartition,
+					},
+					{
+						Name:  "ops.alerts.v1",
+						Error: kafka.UnknownTopicOrPartition,
+					},
+				},
 			},
 			{
-				Topics: []kafka.Topic{{
-					Name: "proof.requests.v1",
-					Partitions: []kafka.Partition{{
-						Topic: "proof.requests.v1",
-						ID:    0,
-					}},
-				}},
-			},
-			{
-				Topics: []kafka.Topic{{
-					Name:  "ops.alerts.v1",
-					Error: kafka.UnknownTopicOrPartition,
-				}},
-			},
-			{
-				Topics: []kafka.Topic{{
-					Name: "ops.alerts.v1",
-					Partitions: []kafka.Partition{{
-						Topic: "ops.alerts.v1",
-						ID:    0,
-					}},
-				}},
+				Topics: []kafka.Topic{
+					{
+						Name: "proof.requests.v1",
+						Partitions: []kafka.Partition{{
+							Topic: "proof.requests.v1",
+							ID:    0,
+						}},
+					},
+					{
+						Name: "ops.alerts.v1",
+						Partitions: []kafka.Partition{{
+							Topic: "ops.alerts.v1",
+							ID:    0,
+						}},
+					},
+				},
 			},
 		},
 	}
@@ -408,11 +416,17 @@ func TestEnsureKafkaTopicsWithFactory_CreatesEveryRequiredTopic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ensureKafkaTopicsWithFactory: %v", err)
 	}
-	if client.createCalls != 2 {
-		t.Fatalf("create calls: got=%d want=2", client.createCalls)
+	if client.createCalls != 1 {
+		t.Fatalf("create calls: got=%d want=1", client.createCalls)
 	}
-	if client.metadataCalls != 4 {
-		t.Fatalf("metadata calls: got=%d want=4", client.metadataCalls)
+	if got := len(client.createRequests); got != 1 {
+		t.Fatalf("create requests: got=%d want=1", got)
+	}
+	if got := len(client.createRequests[0].Topics); got != 2 {
+		t.Fatalf("create request topics: got=%d want=2", got)
+	}
+	if client.metadataCalls != 2 {
+		t.Fatalf("metadata calls: got=%d want=2", client.metadataCalls)
 	}
 }
 
