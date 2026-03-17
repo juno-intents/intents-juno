@@ -313,7 +313,7 @@ else
 
   if [[ "$require_funds_check" == "true" ]]; then
     backoffice_funds_status="passed"
-    backoffice_funds_detail="backoffice funds API reports prover and MPC wallet details"
+    backoffice_funds_detail="backoffice funds API reports prover and MPC wallet runtime balances"
     if [[ "$backoffice_ready_status" == "passed" && -n "${auth_secret:-}" ]]; then
       backoffice_funds_json="$(
         http_get_with_retry \
@@ -328,6 +328,20 @@ else
         || ! jq -e '.prover.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
         backoffice_funds_status="failed"
         backoffice_funds_detail="backoffice funds API missing prover or MPC wallet fields"
+      elif ! jq -e '
+        (.prover.error // "") == ""
+        and (
+          if .prover.network == "succinct" then
+            ((.prover.creditsRaw // .prover.creditsFormatted // "") | type == "string" and length > 0)
+          else
+            ((.prover.balanceWei // .prover.balanceEth // "") | type == "string" and length > 0)
+          end
+        )
+        and (.mpcWallet.error // "") == ""
+        and ((.mpcWallet.total // .mpcWallet.balance // "") | type == "string" and length > 0)
+      ' >/dev/null <<<"$backoffice_funds_json"; then
+        backoffice_funds_status="failed"
+        backoffice_funds_detail="backoffice funds API reports prover or MPC wallet runtime error"
       elif [[ -n "$shared_proof_requestor_address" ]] \
         && ! jq -e --arg requestor "${shared_proof_requestor_address,,}" '
           .prover.address | type == "string" and ascii_downcase == $requestor

@@ -160,7 +160,7 @@ case "$url" in
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
-    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -307,6 +307,111 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_blocks_backoffice_funds_runtime_errors() {
+  local workdir fake_bin shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = {
+      value: "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared"
+    }
+    | .shared_proof_requestor_service_name = {
+      value: "alpha-proof-requestor"
+    }
+    | .shared_proof_funder_service_name = {
+      value: "alpha-proof-funder"
+    }
+    | .shared_sp1_requestor_address = {
+      value: "0x4444444444444444444444444444444444444444"
+    }
+    | .shared_sp1_rpc_url = {
+      value: "https://rpc.mainnet.succinct.xyz"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  output_json="$workdir/canary.json"
+
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${@: -1}"
+case "$url" in
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz|https://ops.alpha.intents-testing.thejunowallet.com/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","network":"succinct","error":"grpc http status 500"},"mpcWallet":{"address":"jtest1exampleaddress","error":"juno rpc call: context deadline exceeded"}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
+  write_fake_aws "$fake_bin/aws" 1 1
+  chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+
+  PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "false" "app canary blocks funds runtime errors"
+  assert_eq "$(jq -r '.checks.backoffice_funds.status' "$output_json")" "failed" "backoffice funds runtime errors failed"
+  assert_contains "$(jq -r '.checks.backoffice_funds.detail' "$output_json")" "runtime error" "backoffice funds detail explains runtime error"
+  rm -rf "$workdir"
+}
+
 test_canary_app_host_blocks_bridge_config_contract_mismatch() {
   local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
   workdir="$(mktemp -d)"
@@ -385,7 +490,7 @@ case "$url" in
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
-    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -487,7 +592,7 @@ case "$url" in
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
-    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -588,7 +693,7 @@ case "$url" in
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
-    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -704,7 +809,7 @@ case "$url" in
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
-    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -786,6 +891,7 @@ EOF
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
   test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc
+  test_canary_app_host_blocks_backoffice_funds_runtime_errors
   test_canary_app_host_blocks_bridge_config_contract_mismatch
   test_canary_app_host_rejects_missing_shared_proof_capacity
   test_canary_app_host_blocks_deposit_memo_probe_failure
