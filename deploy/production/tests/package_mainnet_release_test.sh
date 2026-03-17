@@ -47,7 +47,7 @@ write_inventory_fixture() {
 
 test_package_mainnet_release_renders_self_contained_operator_bundle() {
   local workdir handoff_dir release_dir shared_manifest bundle_zip extract_dir dkg_tls_dir
-  local operator_id operator_slug bundle_root deploy_log cast_log fake_bin local_manifest
+  local operator_id operator_slug bundle_root deploy_log cast_log fake_bin local_manifest bundled_backup_fingerprint bundled_tls_fingerprint
 
   workdir="$(mktemp -d)"
   handoff_dir="$workdir/output/alpha"
@@ -55,7 +55,8 @@ test_package_mainnet_release_renders_self_contained_operator_bundle() {
   operator_id="0x1111111111111111111111111111111111111111"
   operator_slug="$(production_safe_slug "$operator_id")"
 
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_tls_dir "$workdir/source-dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/source-dkg-tls"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
@@ -74,31 +75,7 @@ JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   dkg_tls_dir="$workdir/dkg-tls"
-  mkdir -p "$dkg_tls_dir"
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$dkg_tls_dir/ca.key" \
-    -out "$dkg_tls_dir/ca.pem" \
-    -days 365 >/dev/null 2>&1 \
-    -subj "/CN=test-dkg-ca"
-  openssl req -newkey rsa:2048 -nodes \
-    -keyout "$dkg_tls_dir/coordinator-client.key" \
-    -out "$workdir/coordinator-client.csr" \
-    -subj "/CN=coordinator-client" >/dev/null 2>&1
-  cat >"$workdir/coordinator-client.ext" <<'EOF'
-basicConstraints=CA:FALSE
-subjectAltName=DNS:coordinator-client
-keyUsage=digitalSignature,keyEncipherment
-extendedKeyUsage=clientAuth
-EOF
-  openssl x509 -req \
-    -in "$workdir/coordinator-client.csr" \
-    -CA "$dkg_tls_dir/ca.pem" \
-    -CAkey "$dkg_tls_dir/ca.key" \
-    -CAcreateserial \
-    -out "$dkg_tls_dir/coordinator-client.pem" \
-    -days 365 \
-    -sha256 \
-    -extfile "$workdir/coordinator-client.ext" >/dev/null 2>&1
+  write_test_dkg_tls_dir "$dkg_tls_dir"
   jq --arg dkg_tls_dir "$dkg_tls_dir" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
@@ -155,6 +132,9 @@ EOF
   assert_eq "$(jq -r '.dkg_tls_dir' "$local_manifest")" "../../dkg-tls" "local manifest rewrites dkg tls dir"
   assert_eq "$(jq -r '.secret_contract_file' "$local_manifest")" "./operator-secrets.env" "local manifest rewrites secret contract path"
   assert_eq "$(jq -r '.dkg_backup_zip' "$local_manifest")" "./dkg-backup.zip" "local manifest rewrites backup path"
+  bundled_tls_fingerprint="$(test_certificate_sha256_hex "$bundle_root/bundle/operator/dkg-tls/coordinator-client.pem")"
+  bundled_backup_fingerprint="$(unzip -p "$bundle_root/bundle/operator/operators/$operator_id/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+  assert_eq "$bundled_backup_fingerprint" "$bundled_tls_fingerprint" "bundled backup package matches the bundled shared dkg tls"
 
   deploy_log="$workdir/deploy.log"
   cat >"$bundle_root/deploy/production/deploy-operator.sh" <<EOF

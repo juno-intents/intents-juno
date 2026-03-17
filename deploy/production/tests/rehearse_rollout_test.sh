@@ -78,7 +78,7 @@ write_operator_inputs() {
   local op
   for op in op1 op2 op3; do
     mkdir -p "$workdir/operators/$op"
-    printf 'backup-%s' "$op" >"$workdir/operators/$op/dkg-backup.zip"
+    write_test_dkg_backup_zip "$workdir/operators/$op/dkg-backup.zip"
     cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/operators/$op/known_hosts"
     cat >"$workdir/operators/$op/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha

@@ -163,10 +163,11 @@ cleanup_default_checkpoint_signer_kms_provisioner() {
 }
 
 test_render_operator_handoffs_preserves_dkg_tls_dir() {
-  local workdir shared_manifest handoff_dir
+  local workdir shared_manifest handoff_dir rendered_backup admin_config_path bundled_fingerprint shared_fingerprint
   workdir="$(mktemp -d)"
-  mkdir -p "$workdir/dkg-tls"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_tls_dir "$workdir/source-dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/source-dkg-tls"
+  write_test_dkg_tls_dir "$workdir/dkg-tls"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token
@@ -200,6 +201,14 @@ EOF
 
   handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
   assert_eq "$(jq -r '.dkg_tls_dir' "$handoff_dir/operator-deploy.json")" "$workdir/dkg-tls" "operator deploy preserves dkg tls dir"
+  assert_eq "$(jq -r '.dkg_backup_zip' "$handoff_dir/operator-deploy.json")" "$handoff_dir/dkg-backup.zip" "operator deploy rewrites backup package into the handoff dir"
+  assert_file_exists "$handoff_dir/dkg-backup.zip" "operator handoff renders a local backup package"
+  shared_fingerprint="$(test_certificate_sha256_hex "$workdir/dkg-tls/coordinator-client.pem")"
+  bundled_fingerprint="$(unzip -p "$handoff_dir/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+  assert_eq "$bundled_fingerprint" "$shared_fingerprint" "rendered backup package uses the shared coordinator client cert"
+  admin_config_path="$workdir/rendered-admin-config.json"
+  unzip -p "$handoff_dir/dkg-backup.zip" payload/admin-config.json >"$admin_config_path"
+  assert_eq "$(jq -r '.grpc.coordinator_client_cert_sha256' "$admin_config_path")" "$shared_fingerprint" "rendered backup admin-config matches the shared coordinator cert fingerprint"
   rm -rf "$workdir"
 }
 

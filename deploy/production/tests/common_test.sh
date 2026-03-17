@@ -68,6 +68,154 @@ append_default_owallet_proof_keys() {
   fi
 }
 
+test_certificate_sha256_hex() {
+  local cert_path="$1"
+  openssl x509 -in "$cert_path" -noout -fingerprint -sha256 \
+    | cut -d= -f2 \
+    | tr -d ':' \
+    | tr 'A-F' 'a-f'
+}
+
+write_test_dkg_tls_dir() {
+  local tls_dir="$1"
+  local tmp_dir server_ext client_ext
+
+  mkdir -p "$tls_dir"
+  tmp_dir="$(mktemp -d)"
+  server_ext="$tmp_dir/server.ext"
+  client_ext="$tmp_dir/coordinator-client.ext"
+
+  cat >"$server_ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:localhost,IP:127.0.0.1
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+EOF
+
+  cat >"$client_ext" <<'EOF'
+basicConstraints=CA:FALSE
+subjectAltName=DNS:coordinator-client
+keyUsage=digitalSignature,keyEncipherment
+extendedKeyUsage=clientAuth
+EOF
+
+  openssl req -x509 -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/ca.key" \
+    -out "$tls_dir/ca.pem" \
+    -days 3650 \
+    -subj "/CN=Test DKG CA" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/server.key" \
+    -out "$tmp_dir/server.csr" \
+    -subj "/CN=localhost" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$tmp_dir/server.csr" \
+    -CA "$tls_dir/ca.pem" \
+    -CAkey "$tls_dir/ca.key" \
+    -CAcreateserial \
+    -out "$tls_dir/server.pem" \
+    -days 3650 \
+    -sha256 \
+    -extfile "$server_ext" >/dev/null 2>&1
+
+  openssl req -newkey rsa:2048 -nodes \
+    -keyout "$tls_dir/coordinator-client.key" \
+    -out "$tmp_dir/coordinator-client.csr" \
+    -subj "/CN=coordinator-client" >/dev/null 2>&1
+  openssl x509 -req \
+    -in "$tmp_dir/coordinator-client.csr" \
+    -CA "$tls_dir/ca.pem" \
+    -CAkey "$tls_dir/ca.key" \
+    -CAcreateserial \
+    -out "$tls_dir/coordinator-client.pem" \
+    -days 3650 \
+    -sha256 \
+    -extfile "$client_ext" >/dev/null 2>&1
+
+  chmod 0600 "$tls_dir/ca.key" "$tls_dir/server.key" "$tls_dir/coordinator-client.key" || true
+  rm -rf "$tmp_dir"
+}
+
+write_test_dkg_backup_zip() {
+  local output_path="$1"
+  local tls_source_dir="${2:-}"
+  local tmp runtime bundle_tls backup_dir exports_dir client_fingerprint
+
+  tmp="$(mktemp -d)"
+  runtime="$tmp/runtime"
+  bundle_tls="$runtime/bundle/tls"
+  backup_dir="$tmp/backup"
+  exports_dir="$tmp/exports"
+
+  mkdir -p "$bundle_tls" "$runtime/bin" "$backup_dir" "$exports_dir"
+
+  if [[ -n "$tls_source_dir" ]]; then
+    cp "$tls_source_dir/ca.pem" "$bundle_tls/ca.pem"
+    cp "$tls_source_dir/ca.key" "$bundle_tls/ca.key"
+    cp "$tls_source_dir/server.pem" "$bundle_tls/server.pem"
+    cp "$tls_source_dir/server.key" "$bundle_tls/server.key"
+    cp "$tls_source_dir/coordinator-client.pem" "$bundle_tls/coordinator-client.pem"
+    cp "$tls_source_dir/coordinator-client.key" "$bundle_tls/coordinator-client.key"
+  else
+    write_test_dkg_tls_dir "$bundle_tls"
+  fi
+
+  client_fingerprint="$(test_certificate_sha256_hex "$bundle_tls/coordinator-client.pem")"
+  jq -n \
+    --arg operator_id "0x1111111111111111111111111111111111111111" \
+    --arg ceremony_id "11111111-1111-1111-1111-111111111111" \
+    --arg fingerprint "$client_fingerprint" \
+    '{
+      operator_id: $operator_id,
+      identifier: 1,
+      threshold: 2,
+      max_signers: 3,
+      network: "testnet",
+      ceremony_id: $ceremony_id,
+      roster_hash_hex: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      roster: {
+        roster_version: 1,
+        operators: []
+      },
+      state_dir: "./state",
+      grpc: {
+        listen_addr: "0.0.0.0:18443",
+        tls_ca_cert_pem_path: "./tls/ca.pem",
+        tls_server_cert_pem_path: "./tls/server.pem",
+        tls_server_key_pem_path: "./tls/server.key",
+        coordinator_client_cert_sha256: $fingerprint,
+        tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+        tls_client_key_pem_path: "./tls/coordinator-client.key"
+      }
+    }' >"$runtime/bundle/admin-config.json"
+
+  cat >"$runtime/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$runtime/bin/dkg-admin"
+
+  printf 'AGE-SECRET-KEY-1QQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQ\n' >"$backup_dir/age-identity.txt"
+  printf '{"encryption_backend":"age","ciphertext_b64":"Y2lwaGVydGV4dA=="}\n' >"$exports_dir/keypackage-backup.json"
+  printf '{"receipt_version":"key_import_receipt_v1"}\n' >"$exports_dir/keypackage-backup.json.KeyImportReceipt.json"
+
+  (
+    cd "$REPO_ROOT"
+    deploy/operators/dkg/backup-package.sh create \
+      --workdir "$runtime" \
+      --age-identity-file "$backup_dir/age-identity.txt" \
+      --age-backup-file "$exports_dir/keypackage-backup.json" \
+      --admin-config "$runtime/bundle/admin-config.json" \
+      --coordinator-client-cert "$bundle_tls/coordinator-client.pem" \
+      --coordinator-client-key "$bundle_tls/coordinator-client.key" \
+      --output "$output_path" \
+      --force
+  )
+
+  rm -rf "$tmp"
+}
+
 ensure_fake_checkpoint_signer_kms_provisioner() {
   local workdir fake_bin
   if [[ -n "${PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN:-}" ]]; then

@@ -302,6 +302,110 @@ EOF
   rm -rf "$tmp_dir"
 }
 
+production_certificate_sha256_hex() {
+  local cert_path="$1"
+
+  have_cmd openssl || die "required command not found: openssl"
+  openssl x509 -in "$cert_path" -noout -fingerprint -sha256 \
+    | cut -d= -f2 \
+    | tr -d ':' \
+    | tr 'A-F' 'a-f'
+}
+
+production_materialize_operator_dkg_backup_zip() {
+  local backup_zip_src="$1"
+  local backup_zip_dst="$2"
+  local dkg_tls_dir="${3:-}"
+  local tmp_dir tmp_json coordinator_client_fingerprint
+
+  [[ -f "$backup_zip_src" ]] || die "dkg backup zip not found: $backup_zip_src"
+  mkdir -p "$(dirname "$backup_zip_dst")"
+
+  if [[ -z "$dkg_tls_dir" ]]; then
+    if [[ "$backup_zip_src" != "$backup_zip_dst" ]]; then
+      cp "$backup_zip_src" "$backup_zip_dst"
+    fi
+    return 0
+  fi
+
+  [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
+  for required in ca.pem server.pem server.key coordinator-client.pem coordinator-client.key; do
+    [[ -f "$dkg_tls_dir/$required" ]] || die "dkg_tls_dir missing required file: $dkg_tls_dir/$required"
+  done
+  have_cmd unzip || die "required command not found: unzip"
+  have_cmd zip || die "required command not found: zip"
+
+  tmp_dir="$(mktemp -d)"
+  unzip -q "$backup_zip_src" -d "$tmp_dir" || {
+    rm -rf "$tmp_dir"
+    die "failed to unpack dkg backup zip: $backup_zip_src"
+  }
+
+  [[ -f "$tmp_dir/manifest.json" ]] || {
+    rm -rf "$tmp_dir"
+    die "dkg backup zip missing manifest.json: $backup_zip_src"
+  }
+  [[ -f "$tmp_dir/payload/admin-config.json" ]] || {
+    rm -rf "$tmp_dir"
+    die "dkg backup zip missing payload/admin-config.json: $backup_zip_src"
+  }
+
+  mkdir -p "$tmp_dir/payload/tls"
+  cp "$dkg_tls_dir/ca.pem" "$tmp_dir/payload/tls/ca.pem"
+  cp "$dkg_tls_dir/server.pem" "$tmp_dir/payload/tls/server.pem"
+  cp "$dkg_tls_dir/server.key" "$tmp_dir/payload/tls/server.key"
+  cp "$dkg_tls_dir/coordinator-client.pem" "$tmp_dir/payload/tls/coordinator-client.pem"
+  cp "$dkg_tls_dir/coordinator-client.key" "$tmp_dir/payload/tls/coordinator-client.key"
+  chmod 0600 "$tmp_dir/payload/tls/server.key" "$tmp_dir/payload/tls/coordinator-client.key" || true
+
+  coordinator_client_fingerprint="$(production_certificate_sha256_hex "$dkg_tls_dir/coordinator-client.pem")"
+  tmp_json="$(mktemp)"
+  jq \
+    --arg fingerprint "$coordinator_client_fingerprint" \
+    '.grpc = ((.grpc // {}) + {
+      coordinator_client_cert_sha256: $fingerprint,
+      tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+      tls_client_key_pem_path: "./tls/coordinator-client.key"
+    })' \
+    "$tmp_dir/payload/admin-config.json" >"$tmp_json"
+  mv "$tmp_json" "$tmp_dir/payload/admin-config.json"
+
+  tmp_json="$(mktemp)"
+  jq \
+    --arg tls_ca_path "$dkg_tls_dir/ca.pem" \
+    --arg tls_server_cert_path "$dkg_tls_dir/server.pem" \
+    --arg tls_server_key_path "$dkg_tls_dir/server.key" \
+    --arg coordinator_client_cert_path "$dkg_tls_dir/coordinator-client.pem" \
+    --arg coordinator_client_key_path "$dkg_tls_dir/coordinator-client.key" \
+    '.includes = ((.includes // {}) + {
+      tls_ca_cert: "payload/tls/ca.pem",
+      tls_server_cert: "payload/tls/server.pem",
+      tls_server_key: "payload/tls/server.key",
+      coordinator_client_cert: "payload/tls/coordinator-client.pem",
+      coordinator_client_key: "payload/tls/coordinator-client.key"
+    })
+    | .source_paths = ((.source_paths // {}) + {
+      tls_ca_cert: $tls_ca_path,
+      tls_server_cert: $tls_server_cert_path,
+      tls_server_key: $tls_server_key_path,
+      coordinator_client_cert: $coordinator_client_cert_path,
+      coordinator_client_key: $coordinator_client_key_path
+    })' \
+    "$tmp_dir/manifest.json" >"$tmp_json"
+  mv "$tmp_json" "$tmp_dir/manifest.json"
+
+  rm -f "$backup_zip_dst"
+  (
+    cd "$tmp_dir"
+    zip -qr "$backup_zip_dst" manifest.json payload
+  ) || {
+    rm -rf "$tmp_dir"
+    die "failed to pack normalized dkg backup zip: $backup_zip_dst"
+  }
+
+  rm -rf "$tmp_dir"
+}
+
 production_base_relayer_allowed_selectors() {
   printf '0x53a58a48,0xec70b605\n'
 }
@@ -1812,7 +1916,7 @@ production_render_operator_handoffs() {
   operator_count="$(jq -r '.operators | length' "$inventory")"
   for ((index = 0; index < operator_count; index++)); do
     local operator_json operator_id handoff_dir known_hosts_src secrets_src backup_zip_src
-    local known_hosts_dst secrets_dst manifest_path public_dns_name public_endpoint
+    local known_hosts_dst secrets_dst backup_zip_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index operator_txsign_signer_key
     local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
@@ -1882,6 +1986,9 @@ production_render_operator_handoffs() {
 
     if [[ -n "$backup_zip_src" ]]; then
       backup_zip_src="$(production_abs_path "$inventory_dir" "$backup_zip_src")"
+      backup_zip_dst="$handoff_dir/dkg-backup.zip"
+      production_materialize_operator_dkg_backup_zip "$backup_zip_src" "$backup_zip_dst" "$dkg_tls_dir"
+      backup_zip_src="$backup_zip_dst"
     fi
 
     jq -n \

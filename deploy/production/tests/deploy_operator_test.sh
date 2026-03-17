@@ -338,7 +338,8 @@ test_deploy_operator_stages_distributed_dkg_server_tls() {
   fake_bin="$workdir/bin"
   mkdir -p "$log_dir" "$fake_bin" "$workdir/dkg-tls"
 
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_tls_dir "$workdir/source-dkg-tls"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/source-dkg-tls"
   cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
   key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
   cat >"$workdir/operator-secrets.env" <<'EOF'
@@ -360,22 +361,7 @@ EOF
   jq --arg dkg_tls_dir "$workdir/dkg-tls" '.dkg_tls_dir = $dkg_tls_dir' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
-  openssl req -x509 -newkey rsa:2048 -nodes \
-    -keyout "$workdir/dkg-tls/ca.key" \
-    -out "$workdir/dkg-tls/ca.pem" \
-    -subj "/CN=Test DKG CA" \
-    -days 1 >/dev/null 2>&1
-  openssl req -newkey rsa:2048 -nodes \
-    -keyout "$workdir/dkg-tls/coordinator-client.key" \
-    -out "$workdir/dkg-tls/coordinator-client.csr" \
-    -subj "/CN=coordinator-client" >/dev/null 2>&1
-  openssl x509 -req \
-    -in "$workdir/dkg-tls/coordinator-client.csr" \
-    -CA "$workdir/dkg-tls/ca.pem" \
-    -CAkey "$workdir/dkg-tls/ca.key" \
-    -CAcreateserial \
-    -out "$workdir/dkg-tls/coordinator-client.pem" \
-    -days 1 >/dev/null 2>&1
+  write_test_dkg_tls_dir "$workdir/dkg-tls"
 
   production_render_shared_manifest \
     "$workdir/inventory.json" \

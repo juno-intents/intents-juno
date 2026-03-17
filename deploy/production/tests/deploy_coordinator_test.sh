@@ -145,7 +145,7 @@ test_deploy_coordinator_generates_handoffs() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -194,7 +194,7 @@ test_deploy_coordinator_supports_run_label() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -239,7 +239,7 @@ test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -286,7 +286,7 @@ test_deploy_coordinator_uses_bridge_e2e_deploy_contract() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -341,7 +341,7 @@ test_deploy_coordinator_forwards_ephemeral_funder_mode() {
   log_dir="$workdir/log"
   bridge_log="$log_dir/bridge.log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -387,7 +387,7 @@ test_deploy_coordinator_rejects_direct_deployer_outside_alpha() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -437,7 +437,7 @@ test_deploy_coordinator_normalizes_relative_output_paths() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -480,7 +480,7 @@ test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -535,7 +535,7 @@ test_deploy_coordinator_rejects_underfunded_operator_before_render() {
   fake_bin="$workdir/bin"
   log_dir="$workdir/log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -581,7 +581,7 @@ test_deploy_coordinator_rejects_legacy_bridge_e2e_binary() {
   log_dir="$workdir/log"
   bridge_log="$log_dir/bridge.log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
@@ -629,7 +629,7 @@ test_deploy_coordinator_invokes_production_bridge_deploy_binary() {
   log_dir="$workdir/log"
   bridge_log="$log_dir/bridge.log"
   mkdir -p "$fake_bin" "$log_dir"
-  printf 'backup' >"$workdir/dkg-backup.zip"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
