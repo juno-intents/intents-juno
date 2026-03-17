@@ -92,6 +92,22 @@ func (s *txPlanAwareSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) (
 	}
 }
 
+type resigningSigner struct {
+	calls int
+	plans []string
+}
+
+func (s *resigningSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
+	s.calls++
+	s.plans = append(s.plans, string(txPlan))
+	switch string(txPlan) {
+	case `{"v":2}`:
+		return []byte{0x02}, nil
+	default:
+		return nil, errors.New("unexpected tx plan")
+	}
+}
+
 type stubBroadcaster struct {
 	calls int
 	txid  string
@@ -104,6 +120,76 @@ func (b *stubBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, er
 		return b.txid, nil
 	}
 	return "tx1", nil
+}
+
+type staleThenSuccessBroadcaster struct {
+	calls   int
+	payload [][]byte
+}
+
+func (b *staleThenSuccessBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, error) {
+	b.calls++
+	b.payload = append(b.payload, append([]byte(nil), rawTx...))
+	switch {
+	case len(rawTx) == 1 && rawTx[0] == 0x01:
+		return "", errors.New("junorpc: rpc error code -26: tx-expiring-soon: expiryheight is 127844 but should be at least 127876 to avoid transaction expiring soon")
+	case len(rawTx) == 1 && rawTx[0] == 0x02:
+		return "tx-new", nil
+	default:
+		return "", errors.New("unexpected raw tx")
+	}
+}
+
+type txAwareBroadcaster struct {
+	calls int
+}
+
+func (b *txAwareBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, error) {
+	b.calls++
+	switch {
+	case bytes.Equal(rawTx, []byte{0x01}):
+		return "", errors.New("junorpc: rpc error code -26: tx-expiring-soon: expiryheight is 127844 but should be at least 127876 to avoid transaction expiring soon")
+	case bytes.Equal(rawTx, []byte{0x02}):
+		return "tx-replanned", nil
+	default:
+		return "", errors.New("unexpected signed tx payload")
+	}
+}
+
+type sequenceSigner struct {
+	calls int
+	plans []string
+}
+
+func (s *sequenceSigner) Sign(_ context.Context, _ [32]byte, txPlan []byte) ([]byte, error) {
+	s.calls++
+	s.plans = append(s.plans, string(txPlan))
+	switch string(txPlan) {
+	case `{"v":1}`:
+		return []byte{0x01}, nil
+	case `{"v":2}`:
+		return []byte{0x02}, nil
+	default:
+		return nil, errors.New("unexpected tx plan")
+	}
+}
+
+type txPlanAwareBroadcaster struct {
+	calls int
+	rawTx [][]byte
+}
+
+func (b *txPlanAwareBroadcaster) Broadcast(_ context.Context, rawTx []byte) (string, error) {
+	b.calls++
+	b.rawTx = append(b.rawTx, append([]byte(nil), rawTx...))
+	switch {
+	case len(rawTx) == 1 && rawTx[0] == 0x01:
+		return "", errors.New("junorpc: rpc error code -26: tx-expiring-soon: expiryheight is 127844 but should be at least 127876 to avoid transaction expiring soon")
+	case len(rawTx) == 1 && rawTx[0] == 0x02:
+		return "tx-fresh", nil
+	default:
+		return "", errors.New("unexpected raw tx")
+	}
 }
 
 type flakyDLQStore struct {
@@ -567,6 +653,81 @@ func TestCoordinator_ReplansWhenSigningPlanTurnsStale(t *testing.T) {
 	}
 }
 
+func TestCoordinator_ReplansSignedBatchWhenBroadcastTxTurnsStale(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x12), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x7b)
+	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := store.MarkBatchSigning(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := store.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+
+	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":2}`)}}
+	signer := &txPlanAwareSigner{}
+	broadcaster := &txPlanAwareBroadcaster{}
+	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending}}
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:    "a",
+		MaxItems: 10,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.broadcastBatch(ctx, batchID); err != nil {
+		t.Fatalf("broadcastBatch: %v", err)
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected batch to recover to broadcasted, got %s", b.State)
+	}
+	if b.JunoTxID != "tx-fresh" {
+		t.Fatalf("juno txid: got %q want %q", b.JunoTxID, "tx-fresh")
+	}
+	if got, want := string(b.TxPlan), `{"v":2}`; got != want {
+		t.Fatalf("tx plan after recovery: got %q want %q", got, want)
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	}
+	if signer.calls != 1 {
+		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	}
+	if broadcaster.calls != 2 {
+		t.Fatalf("broadcaster calls: got %d want 2", broadcaster.calls)
+	}
+	if len(broadcaster.rawTx) != 2 || broadcaster.rawTx[0][0] != 0x01 || broadcaster.rawTx[1][0] != 0x02 {
+		t.Fatalf("unexpected raw tx sequence: %v", broadcaster.rawTx)
+	}
+}
+
 func TestSigningSessionIDV1_DiffersAcrossPlans(t *testing.T) {
 	t.Parallel()
 
@@ -635,6 +796,79 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 	}
 	if planner.calls != 0 || signer.calls != 0 || broadcaster.calls != 1 {
 		t.Fatalf("expected no additional recovery during backoff window")
+	}
+}
+
+func TestCoordinator_ReplansSignedBatchAfterTxExpiringSoonBroadcastError(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{
+		ID:          seq32(0x91),
+		Amount:      1,
+		FeeBps:      0,
+		RecipientUA: []byte{0x01},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if _, _, err := store.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+
+	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":1}`), []byte(`{"v":2}`)}}
+	signer := &sequenceSigner{}
+	broadcaster := &txAwareBroadcaster{}
+	confirmer := &stubConfirmer{}
+	paidMarker := &stubPaidMarker{}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, planner, signer, broadcaster, confirmer, &stubTxChecker{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.WithPaidMarker(paidMarker)
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	if planner.calls != 2 {
+		t.Fatalf("planner calls: got %d want 2", planner.calls)
+	}
+	if signer.calls != 2 {
+		t.Fatalf("signer calls: got %d want 2", signer.calls)
+	}
+	if got, want := signer.plans, []string{`{"v":1}`, `{"v":2}`}; !bytes.Equal([]byte(strings.Join(got, ",")), []byte(strings.Join(want, ","))) {
+		t.Fatalf("signer plans: got %v want %v", got, want)
+	}
+	if broadcaster.calls != 2 {
+		t.Fatalf("broadcaster calls: got %d want 2", broadcaster.calls)
+	}
+
+	b, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{w.ID}))
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateConfirmed {
+		t.Fatalf("batch state: got %s want %s", b.State, withdraw.BatchStateConfirmed)
+	}
+	if got, want := string(b.TxPlan), `{"v":2}`; got != want {
+		t.Fatalf("tx plan after recovery: got %q want %q", got, want)
+	}
+	if got, want := b.JunoTxID, "tx-replanned"; got != want {
+		t.Fatalf("juno txid: got %q want %q", got, want)
+	}
+	if paidMarker.calls != 1 {
+		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
 	}
 }
 

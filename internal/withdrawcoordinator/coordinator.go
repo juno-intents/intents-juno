@@ -499,6 +499,10 @@ func (c *Coordinator) maybeReplanBatchAfterSigningFailure(ctx context.Context, b
 }
 
 func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) error {
+	return c.broadcastBatchWithRetry(ctx, batchID, true)
+}
+
+func (c *Coordinator) broadcastBatchWithRetry(ctx context.Context, batchID [32]byte, allowReplan bool) error {
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -520,6 +524,15 @@ func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) erro
 	}
 	txid, err := c.broadcaster.Broadcast(ctx, b.SignedTx)
 	if err != nil {
+		if allowReplan {
+			replanned, replanErr := c.maybeReplanBatchAfterBroadcastFailure(ctx, b, err)
+			if replanErr != nil {
+				return replanErr
+			}
+			if replanned {
+				return c.broadcastBatchWithRetry(ctx, batchID, false)
+			}
+		}
 		return err
 	}
 	if err := c.assertLeadership(ctx); err != nil {
@@ -530,6 +543,57 @@ func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) erro
 	}
 	c.log.Info("batch broadcasted", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", txid)
 	return nil
+}
+
+func (c *Coordinator) maybeReplanBatchAfterBroadcastFailure(ctx context.Context, b withdraw.Batch, broadcastErr error) (bool, error) {
+	if !isStaleBroadcastTxError(broadcastErr) {
+		return false, nil
+	}
+
+	withdrawals := make([]withdraw.Withdrawal, 0, len(b.WithdrawalIDs))
+	for _, wid := range b.WithdrawalIDs {
+		w, err := c.store.GetWithdrawal(ctx, wid)
+		if err != nil {
+			return false, err
+		}
+		withdrawals = append(withdrawals, w)
+	}
+
+	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
+	if err != nil {
+		return false, err
+	}
+	if err := c.assertLeadership(ctx); err != nil {
+		return false, err
+	}
+	if bytes.Equal(plan, b.TxPlan) {
+		return false, nil
+	}
+	if err := c.store.ResetBatchPlanned(ctx, b.ID, plan); err != nil {
+		if !errors.Is(err, withdraw.ErrInvalidTransition) {
+			return false, err
+		}
+		b2, err2 := c.store.GetBatch(ctx, b.ID)
+		if err2 != nil {
+			return false, err2
+		}
+		if b2.State != withdraw.BatchStateSigned {
+			return false, nil
+		}
+		return false, err
+	}
+	c.log.Info(
+		"batch replanned after broadcast failure",
+		"batch_id", hex.EncodeToString(b.ID[:]),
+		"error", broadcastErr.Error(),
+	)
+	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
+		return false, err
+	}
+	if err := c.signBatch(ctx, b.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error {
@@ -758,6 +822,16 @@ func isStaleSigningTxPlanError(err error) bool {
 		return false
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "note_decrypt_failed")
+}
+
+func isStaleBroadcastTxError(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "tx-expiring-soon") ||
+		strings.Contains(lower, "expiryheight") ||
+		strings.Contains(lower, "transaction expired")
 }
 
 func (c *Coordinator) rebroadcastBackoff(attempts uint32) time.Duration {

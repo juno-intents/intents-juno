@@ -110,6 +110,9 @@ fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
   exit 0
 fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240$'"* ]]; then
+  exit 0
+fi
 if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$'"* ]]; then
   exit 0
 fi
@@ -155,6 +158,7 @@ EOF
   assert_contains "$(cat "$log_file")" "systemctl is-active checkpoint-signer" "operator canary checks checkpoint signer"
   assert_contains "$(cat "$log_file")" "systemctl is-active withdraw-finalizer" "operator canary checks withdraw finalizer"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "operator canary verifies remote juno fee floor"
+  assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240" "operator canary verifies remote juno expiry offset"
   assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "operator canary verifies the production kms signer mode"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "operator canary verifies remote expiry safety margin"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "operator canary verifies remote max expiry extension"
@@ -295,6 +299,9 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   exit 0
 fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240$'"* ]]; then
   exit 0
 fi
 if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$'"* ]]; then

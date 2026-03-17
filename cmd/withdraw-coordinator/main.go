@@ -130,7 +130,7 @@ func main() {
 		junoCoinType            = flag.Uint("juno-coin-type", 0, "ZIP-32 coin type for juno-txbuild")
 		junoAccount             = flag.Uint("juno-account", 0, "unified account id for juno-txbuild")
 		junoMinConf             = flag.Int64("juno-minconf", 1, "minimum confirmations for juno-txbuild input note selection")
-		junoExpiryOffset        = flag.Uint("juno-expiry-offset", 40, "juno tx expiry offset (min 4)")
+		junoExpiryOffset        = flag.Uint("juno-expiry-offset", 240, "juno tx expiry offset (min 4)")
 		junoFeeMultiplier       = flag.Uint64("juno-fee-multiplier", 1, "juno-txbuild fee multiplier")
 		junoFeeAddZat           = flag.Uint64("juno-fee-add-zat", 0, "juno-txbuild extra absolute fee")
 		junoMinChangeZat        = flag.Uint64("juno-min-change-zat", 0, "juno-txbuild min change amount")
@@ -740,6 +740,9 @@ func parseWithdrawRequestedMessage(line []byte) (withdrawRequestedMessage, error
 		if strings.TrimSpace(raw.BlockHash) == "" {
 			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing blockHash")
 		}
+		if isZeroHash32(raw.BlockHash) {
+			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 zero blockHash")
+		}
 		if strings.TrimSpace(raw.TxHash) == "" {
 			return withdrawRequestedMessage{}, errors.New("withdrawals.requested.v2 missing txHash")
 		}
@@ -815,6 +818,14 @@ func parseHash32(s string) ([32]byte, error) {
 	var out [32]byte
 	copy(out[:], b)
 	return out, nil
+}
+
+func isZeroHash32(s string) bool {
+	h, err := parseHash32(s)
+	if err != nil {
+		return false
+	}
+	return h == ([32]byte{})
 }
 
 func parseAddr20(s string) ([20]byte, error) {

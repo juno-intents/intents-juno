@@ -149,6 +149,25 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
 		t.Fatalf("SetBatchSigned: %v", err)
 	}
+	if err := s.ResetBatchPlanned(ctx, batchID, []byte(`{"v":"broadcast-replanned"}`)); err != nil {
+		t.Fatalf("ResetBatchPlanned from signed: %v", err)
+	}
+	bSignedReset, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch after ResetBatchPlanned from signed: %v", err)
+	}
+	if bSignedReset.State != withdraw.BatchStatePlanned {
+		t.Fatalf("state after ResetBatchPlanned from signed: got %s want %s", bSignedReset.State, withdraw.BatchStatePlanned)
+	}
+	if got, want := string(bSignedReset.TxPlan), `{"v":"broadcast-replanned"}`; got != want {
+		t.Fatalf("tx plan after ResetBatchPlanned from signed: got %q want %q", got, want)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+		t.Fatalf("MarkBatchSigning after ResetBatchPlanned from signed: %v", err)
+	}
+	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned after ResetBatchPlanned from signed: %v", err)
+	}
 	if err := s.SetBatchSigned(ctx, batchID, []byte{0x02}); !errors.Is(err, withdraw.ErrBatchMismatch) {
 		t.Fatalf("expected ErrBatchMismatch, got %v", err)
 	}

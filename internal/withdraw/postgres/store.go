@@ -573,15 +573,15 @@ func (s *Store) ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan 
 	if err != nil {
 		return err
 	}
-	if state != withdraw.BatchStateBroadcasted {
+	if state != withdraw.BatchStateSigned && state != withdraw.BatchStateBroadcasted {
 		return withdraw.ErrInvalidTransition
 	}
 
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
 		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, next_rebroadcast_at = NULL, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
-	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateBroadcasted))
+		WHERE batch_id = $1 AND state IN ($4, $5)
+	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateSigned), int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: reset planned: %w", err)
 	}

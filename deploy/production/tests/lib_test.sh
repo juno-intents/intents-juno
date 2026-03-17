@@ -1198,6 +1198,7 @@ EOF
   assert_contains "$(cat "$output_env")" "BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605" "rendered env base relayer selector allowlist"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "rendered env withdraw coordinator extend signer"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000" "rendered env withdraw coordinator juno fee floor"
+  assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240" "rendered env withdraw coordinator juno expiry offset"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "rendered env withdraw coordinator expiry safety margin"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "rendered env withdraw coordinator max expiry extension"
   assert_contains "$(cat "$output_env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "rendered env uses only the operator-scoped juno txsign signer key"

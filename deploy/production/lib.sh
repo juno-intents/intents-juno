@@ -2129,6 +2129,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/b
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
+WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=$withdraw_juno_fee_add_zat
 WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h
 WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h

@@ -335,7 +335,7 @@ func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, txP
 	if !ok {
 		return ErrNotFound
 	}
-	if b.State != BatchStateBroadcasted {
+	if b.State != BatchStateSigned && b.State != BatchStateBroadcasted {
 		return ErrInvalidTransition
 	}
 

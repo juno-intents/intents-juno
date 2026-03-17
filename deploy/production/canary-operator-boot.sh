@@ -207,6 +207,9 @@ else
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000"
+      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+        withdraw_config_status="failed"
+        withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240"
       elif [[ "$checkpoint_signer_driver" == "aws-kms" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing CHECKPOINT_SIGNER_DRIVER=aws-kms"

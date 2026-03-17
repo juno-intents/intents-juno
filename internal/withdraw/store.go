@@ -112,6 +112,8 @@ type Store interface {
 	ResetBatchSigning(ctx context.Context, batchID [32]byte, txPlan []byte) error
 	SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error
 	SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error
+	// ResetBatchPlanned discards stale signed/broadcast metadata and returns a batch
+	// to planned so it can be re-signed with a fresh tx plan.
 	ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error
 	SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, attempts uint32, next time.Time) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte) error
