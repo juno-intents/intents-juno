@@ -73,7 +73,7 @@ func main() {
 		operators       = flag.String("operators", "", "comma-separated operator addresses for checkpoint quorum verification (required)")
 		threshold       = flag.Int("operator-threshold", 0, "operator signature threshold for checkpoint quorum verification (required)")
 		withdrawImageID = flag.String("withdraw-image-id", "", "withdraw zkVM image id (bytes32 hex, required)")
-		owalletOVK      = flag.String("owallet-ovk", "", "optional 32-byte OWallet OVK hex for binary guest private input mode")
+		owalletOVK      = flag.String("owallet-ovk", "", "required 32-byte OWallet OVK hex for binary guest private input mode")
 		witnessExtract  = flag.Bool("withdraw-witness-extractor-enabled", false, "enable withdraw witness extraction from juno batch tx via juno-scan + junocashd (auto-enabled with --owallet-ovk)")
 		junoScanURL     = flag.String("juno-scan-url", "", "juno-scan base URL for witness extraction")
 		junoScanWallet  = flag.String("juno-scan-wallet-id", "", "juno-scan wallet id for witness extraction")
@@ -169,8 +169,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: parse --owallet-ovk: %v\n", err)
 		os.Exit(2)
 	}
-	if n := len(owalletOVKBytes); n != 0 && n != 32 {
-		fmt.Fprintf(os.Stderr, "error: --owallet-ovk must be 32 bytes when set, got %d\n", n)
+	if err := validateWithdrawProofInputConfig(owalletOVKBytes); err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
 	operatorAddrs, err := checkpoint.ParseOperatorAddressesCSV(*operators)
@@ -912,6 +912,13 @@ func decodeHexBytesOptional(s string) ([]byte, error) {
 		return nil, fmt.Errorf("decode hex: %w", err)
 	}
 	return b, nil
+}
+
+func validateWithdrawProofInputConfig(owalletOVKBytes []byte) error {
+	if len(owalletOVKBytes) != 32 {
+		return fmt.Errorf("--owallet-ovk is required and must be 32 bytes, got %d", len(owalletOVKBytes))
+	}
+	return nil
 }
 
 func parseHash32Strict(s string) (common.Hash, error) {

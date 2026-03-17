@@ -12,6 +12,49 @@ import (
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
+func TestValidateWithdrawProofInputConfig_RequiresOWalletOVK(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		ovk       []byte
+		wantError string
+	}{
+		{
+			name:      "missing",
+			ovk:       nil,
+			wantError: "--owallet-ovk is required",
+		},
+		{
+			name:      "wrong length",
+			ovk:       []byte{0x01},
+			wantError: "--owallet-ovk is required",
+		},
+		{
+			name: "valid",
+			ovk:  bytes.Repeat([]byte{0x42}, 32),
+		},
+	}
+
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := validateWithdrawProofInputConfig(tc.ovk)
+			if tc.wantError == "" {
+				if err != nil {
+					t.Fatalf("validateWithdrawProofInputConfig: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+				t.Fatalf("validateWithdrawProofInputConfig() error = %v, want substring %q", err, tc.wantError)
+			}
+		})
+	}
+}
+
 func TestValidateWithdrawWitnessExtractorConfig_DisabledAllowsEmpty(t *testing.T) {
 	t.Parallel()
 
