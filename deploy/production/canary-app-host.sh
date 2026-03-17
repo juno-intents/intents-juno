@@ -95,6 +95,8 @@ bridge_ready_status="passed"
 bridge_ready_detail="bridge-api /readyz passed"
 bridge_config_status="passed"
 bridge_config_detail="bridge-api /v1/config passed"
+deposit_memo_status="passed"
+deposit_memo_detail="bridge-api /v1/deposit-memo passed"
 bridge_frontend_status="passed"
 bridge_frontend_detail="bridge frontend HTML served"
 backoffice_ready_status="passed"
@@ -109,6 +111,7 @@ shared_proof_services_status="passed"
 shared_proof_services_detail="shared proof ECS services active"
 http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
 http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
+deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 tmp_dir="$(mktemp -d)"
@@ -168,6 +171,8 @@ if [[ "$dry_run" == "true" ]]; then
   bridge_ready_detail="dry run"
   bridge_config_status="skipped"
   bridge_config_detail="dry run"
+  deposit_memo_status="skipped"
+  deposit_memo_detail="dry run"
   bridge_frontend_status="skipped"
   bridge_frontend_detail="dry run"
   backoffice_ready_status="skipped"
@@ -205,6 +210,21 @@ else
     || ! jq -e '.depositMinConfirmations | select(type == "number" and . > 0)' >/dev/null <<<"$bridge_config_json"; then
     bridge_config_status="failed"
     bridge_config_detail="bridge-api /v1/config missing bridgeAddress, oWalletUA, minDepositAmount, or depositMinConfirmations"
+  fi
+
+  deposit_memo_json="$(
+    http_get_with_retry \
+      "${bridge_probe_url}/v1/deposit-memo?baseRecipient=${deposit_probe_base_recipient}" \
+      "bridge deposit memo" || true
+  )"
+  if [[ -z "$deposit_memo_json" ]] \
+    || ! jq -e --arg recipient "${deposit_probe_base_recipient,,}" '
+      (.baseRecipient | ascii_downcase) == $recipient
+      and (.nonce | type == "string" and test("^[0-9]+$"))
+      and (.memoHex | type == "string" and test("^[0-9a-fA-F]{1024}$"))
+    ' >/dev/null <<<"$deposit_memo_json"; then
+    deposit_memo_status="failed"
+    deposit_memo_detail="bridge-api /v1/deposit-memo missing baseRecipient, nonce, or memoHex"
   fi
 
   bridge_html="$(http_get_with_retry "${bridge_probe_url}/" "bridge frontend html" || true)"
@@ -290,6 +310,7 @@ for status in \
   "$systemd_status" \
   "$bridge_ready_status" \
   "$bridge_config_status" \
+  "$deposit_memo_status" \
   "$bridge_frontend_status" \
   "$backoffice_ready_status" \
   "$backoffice_ui_status" \
@@ -319,6 +340,8 @@ jq -n \
   --arg bridge_ready_detail "$bridge_ready_detail" \
   --arg bridge_config_status "$bridge_config_status" \
   --arg bridge_config_detail "$bridge_config_detail" \
+  --arg deposit_memo_status "$deposit_memo_status" \
+  --arg deposit_memo_detail "$deposit_memo_detail" \
   --arg bridge_frontend_status "$bridge_frontend_status" \
   --arg bridge_frontend_detail "$bridge_frontend_detail" \
   --arg backoffice_ready_status "$backoffice_ready_status" \
@@ -356,6 +379,10 @@ jq -n \
       bridge_config: {
         status: $bridge_config_status,
         detail: $bridge_config_detail
+      },
+      deposit_memo: {
+        status: $deposit_memo_status,
+        detail: $deposit_memo_detail
       },
       bridge_frontend: {
         status: $bridge_frontend_status,
