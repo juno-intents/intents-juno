@@ -234,6 +234,7 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 		FeeBps:      uint32(feeBpsAtReq),
 		RecipientUA: append([]byte(nil), recipientUA...),
 		Expiry:      time.Unix(int64(expiry), 0).UTC(),
+		ProofWitnessItem: testWithdrawWitnessItem(),
 	}
 	if _, _, err := store.UpsertRequested(ctx, w); err != nil {
 		t.Fatalf("UpsertRequested: %v", err)
@@ -285,6 +286,7 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 3,
 		GasLimit:          500_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, client, &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}, nil)
 	if err != nil {
 		t.Fatalf("New finalizer: %v", err)

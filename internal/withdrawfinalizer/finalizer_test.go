@@ -211,6 +211,18 @@ func mustSignedCheckpoint(t *testing.T, cp checkpoint.Checkpoint) ([]common.Addr
 	return []common.Address{addr}, [][]byte{sig}
 }
 
+func testOWalletOVKBytes() []byte {
+	ovk := make([]byte, 32)
+	for i := range ovk {
+		ovk[i] = byte(0x80 + i)
+	}
+	return ovk
+}
+
+func testWithdrawWitnessItem() []byte {
+	return bytes.Repeat([]byte{0x66}, proverinput.WithdrawWitnessItemLen)
+}
+
 func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 	t.Parallel()
 
@@ -281,7 +293,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x10)
@@ -328,6 +340,7 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -417,7 +430,7 @@ func TestFinalizer_TickReturnsDecodedRevertReason(t *testing.T) {
 
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x10)
@@ -463,6 +476,7 @@ func TestFinalizer_TickReturnsDecodedRevertReason(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -491,7 +505,7 @@ func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
 
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x10)
@@ -538,6 +552,7 @@ func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -574,7 +589,7 @@ func TestFinalizer_SetBatchFinalizedFailureLeavesBatchFinalizing(t *testing.T) {
 
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = baseStore.UpsertRequested(ctx, w)
 	_, _ = baseStore.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x10)
@@ -619,6 +634,7 @@ func TestFinalizer_SetBatchFinalizedFailureLeavesBatchFinalizing(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -655,7 +671,7 @@ func TestFinalizer_TickResumesFinalizingBatch(t *testing.T) {
 
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x10)
@@ -701,6 +717,7 @@ func TestFinalizer_TickResumesFinalizingBatch(t *testing.T) {
 		OperatorAddresses: operatorAddrs,
 		OperatorThreshold: 1,
 		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -947,6 +964,86 @@ func TestFinalizer_UsesBinaryGuestInputWhenConfigured(t *testing.T) {
 	}
 	if !bytes.Equal(prover.gotReq.PrivateInput, wantInput) {
 		t.Fatalf("proof requester private input mismatch")
+	}
+}
+
+func TestFinalizer_ErrorsWhenOVKMissing(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	witness := bytes.Repeat([]byte{0x66}, proverinput.WithdrawWitnessItemLen)
+	w := withdraw.Withdrawal{
+		ID:               seq32(0x00),
+		Amount:           1000,
+		FeeBps:           50,
+		RecipientUA:      []byte{0x01},
+		Expiry:           now.Add(24 * time.Hour),
+		ProofWitnessItem: witness,
+	}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	batchID := seq32(0x10)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID)
+	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.SetBatchConfirmed(ctx, batchID)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	sender := &recordingSender{
+		res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}},
+	}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.Hash{},
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	err = f.IngestCheckpoint(ctx, CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: checkpointSigs,
+	})
+	if err == nil {
+		t.Fatalf("expected missing ovk error")
+	}
+	if !strings.Contains(err.Error(), "missing required OWallet OVK") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender calls: got %d want 0", sender.calls)
+	}
+	if len(prover.gotReq.PrivateInput) != 0 {
+		t.Fatalf("expected no proof request private input, got %x", prover.gotReq.PrivateInput)
 	}
 }
 
@@ -1357,7 +1454,7 @@ func TestFinalizer_RenewsBatchLeaseWhileProofInFlight(t *testing.T) {
 	leaseStore := &trackingLeaseStore{Store: leases.NewMemoryStore(nowFn)}
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x40), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x40), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x50)
@@ -1398,6 +1495,7 @@ func TestFinalizer_RenewsBatchLeaseWhileProofInFlight(t *testing.T) {
 		OperatorThreshold:   1,
 		GasLimit:            123_000,
 		ProofRequestTimeout: time.Second,
+		OWalletOVKBytes:     testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -1446,7 +1544,7 @@ func TestFinalizer_AbortsWhenLeaseRenewalFails(t *testing.T) {
 	store := withdraw.NewMemoryStore(nowFn)
 	ctx := context.Background()
 
-	w := withdraw.Withdrawal{ID: seq32(0x60), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour)}
+	w := withdraw.Withdrawal{ID: seq32(0x60), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
 	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
 	batchID := seq32(0x70)
@@ -1487,6 +1585,7 @@ func TestFinalizer_AbortsWhenLeaseRenewalFails(t *testing.T) {
 		OperatorThreshold:   1,
 		GasLimit:            123_000,
 		ProofRequestTimeout: time.Second,
+		OWalletOVKBytes:     testOWalletOVKBytes(),
 	}, store, leaseStore, sender, prover, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)

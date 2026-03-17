@@ -72,8 +72,8 @@ type Config struct {
 	BaseChainID     uint64
 	BridgeAddress   common.Address
 	WithdrawImageID common.Hash
-	// Optional 32-byte OWallet OVK. When set, finalizer requires per-withdrawal
-	// witness items and builds binary guest input for real withdraw proofs.
+	// 32-byte OWallet OVK used to build binary guest input for real withdraw
+	// proofs. Missing OVK fails closed.
 	OWalletOVKBytes []byte
 
 	OperatorAddresses []common.Address
@@ -593,6 +593,8 @@ func (f *Finalizer) persistProofSealArtifact(ctx context.Context, batchID [32]by
 }
 
 func (f *Finalizer) encodePrivateInput(cp checkpoint.Checkpoint, items []bridgeabi.FinalizeItem, witnessItems [][]byte) ([]byte, error) {
+	_ = items
+
 	if len(f.cfg.OWalletOVKBytes) == 32 {
 		var ovk [32]byte
 		copy(ovk[:], f.cfg.OWalletOVKBytes)
@@ -603,5 +605,5 @@ func (f *Finalizer) encodePrivateInput(cp checkpoint.Checkpoint, items []bridgea
 		}
 		return proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, witnessItems)
 	}
-	return proverinput.EncodeWithdrawPrivateInputV1(cp, f.opSigs, items)
+	return nil, fmt.Errorf("withdrawfinalizer: missing required OWallet OVK")
 }
