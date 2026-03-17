@@ -1,12 +1,14 @@
 package bridgeabi
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"math/big"
 	"strings"
 	"sync"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
@@ -25,6 +27,10 @@ type FinalizeItem struct {
 	WithdrawalId    common.Hash
 	RecipientUAHash common.Hash
 	NetAmount       *big.Int
+}
+
+type LogFilterer interface {
+	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
 // DepositJournal mirrors Bridge.DepositJournal (contracts/src/Bridge.sol).
@@ -366,6 +372,94 @@ func DecodeMintBatchLogOutcomes(logs []*types.Log, bridge common.Address) ([][32
 		}
 	}
 	return finalized, rejected, nil
+}
+
+func FindMintedDepositTxHashes(
+	ctx context.Context,
+	filterer LogFilterer,
+	bridge common.Address,
+	depositIDs [][32]byte,
+	toBlock *big.Int,
+) (map[[32]byte][32]byte, error) {
+	if err := initABI(); err != nil {
+		return nil, err
+	}
+	if filterer == nil {
+		return nil, fmt.Errorf("%w: nil log filterer", ErrInvalidInput)
+	}
+	if bridge == (common.Address{}) {
+		return nil, fmt.Errorf("%w: nil bridge address", ErrInvalidInput)
+	}
+	ids := uniqueDepositIDs(depositIDs)
+	if len(ids) == 0 {
+		return map[[32]byte][32]byte{}, nil
+	}
+
+	mintedEvent, ok := bridgeABI.Events["Minted"]
+	if !ok {
+		return nil, fmt.Errorf("%w: missing Minted event", ErrInvalidInput)
+	}
+
+	topics := make([]common.Hash, 0, len(ids))
+	for _, id := range ids {
+		topics = append(topics, common.BytesToHash(id[:]))
+	}
+
+	logs, err := filterer.FilterLogs(ctx, ethereum.FilterQuery{
+		Addresses: []common.Address{bridge},
+		Topics:    [][]common.Hash{{mintedEvent.ID}, topics},
+		ToBlock:   toBlock,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("bridgeabi: filter minted deposit logs: %w", err)
+	}
+
+	byDeposit := make(map[[32]byte]types.Log, len(ids))
+	for _, lg := range logs {
+		if lg.Address != bridge || len(lg.Topics) == 0 || lg.Topics[0] != mintedEvent.ID {
+			continue
+		}
+		if len(lg.Topics) < 2 {
+			return nil, fmt.Errorf("%w: Minted log missing indexed deposit id", ErrInvalidInput)
+		}
+		depositID := [32]byte(lg.Topics[1])
+		prev, ok := byDeposit[depositID]
+		if !ok || logComesEarlier(lg, prev) {
+			byDeposit[depositID] = lg
+		}
+	}
+
+	out := make(map[[32]byte][32]byte, len(byDeposit))
+	for depositID, lg := range byDeposit {
+		out[depositID] = [32]byte(lg.TxHash)
+	}
+	return out, nil
+}
+
+func logComesEarlier(a, b types.Log) bool {
+	if a.BlockNumber != b.BlockNumber {
+		return a.BlockNumber < b.BlockNumber
+	}
+	if a.TxIndex != b.TxIndex {
+		return a.TxIndex < b.TxIndex
+	}
+	return a.Index < b.Index
+}
+
+func uniqueDepositIDs(ids [][32]byte) [][32]byte {
+	if len(ids) <= 1 {
+		return append([][32]byte(nil), ids...)
+	}
+	seen := make(map[[32]byte]struct{}, len(ids))
+	out := make([][32]byte, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	return out
 }
 
 const bridgeABIJSON = `[

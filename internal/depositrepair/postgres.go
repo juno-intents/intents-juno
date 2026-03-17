@@ -124,6 +124,25 @@ func (s *PostgresStore) ApplyTxHashOutcome(
 	return nil
 }
 
+func (s *PostgresStore) RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error {
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET
+			state = 6,
+			tx_hash = $2,
+			rejection_reason = NULL,
+			updated_at = now()
+		WHERE deposit_id = $1
+	`, depositID[:], txHash[:])
+	if err != nil {
+		return fmt.Errorf("depositrepair/postgres: repair finalized deposit: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("depositrepair/postgres: repair finalized deposit: no rows updated")
+	}
+	return nil
+}
+
 func toRawIDs(ids [][32]byte) [][]byte {
 	out := make([][]byte, 0, len(ids))
 	for _, id := range ids {

@@ -64,6 +64,7 @@ type TipHeightProvider interface {
 
 type ReceiptReader interface {
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
 type Config struct {
@@ -887,12 +888,21 @@ func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depos
 	if err != nil {
 		return fmt.Errorf("depositrelayer: decode batch receipt logs: %w", err)
 	}
+	recoveredFinalized, rejectedIDs, err := r.resolveDuplicateSkippedDeposits(ctx, rejectedIDs, receipt.BlockNumber)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: reconcile skipped deposits: %w", err)
+	}
 
 	if err := r.store.ApplyBatchOutcome(ctx, batchID, txHash, finalizedIDs, rejectedIDs, belowMinDepositReason(0)); err != nil {
 		return fmt.Errorf("depositrelayer: apply batch receipt outcome: %w", err)
 	}
+	for depositID, mintedTxHash := range recoveredFinalized {
+		if err := r.store.MarkFinalized(ctx, depositID, mintedTxHash); err != nil {
+			return fmt.Errorf("depositrelayer: finalize duplicate skipped deposit %x: %w", depositID[:], err)
+		}
+	}
 
-	unresolved := unresolvedDepositIDs(depositIDs, finalizedIDs, rejectedIDs)
+	unresolved := unresolvedDepositIDs(depositIDs, appendRecoveredFinalized(finalizedIDs, recoveredFinalized), rejectedIDs)
 	if len(unresolved) > 0 {
 		r.log.Error("mintBatch receipt left unresolved deposits",
 			"batchID", fmt.Sprintf("%x", batchID[:]),
@@ -902,6 +912,36 @@ func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depos
 	}
 	delete(r.proofAttempts, common.Hash(batchID))
 	return nil
+}
+
+func (r *Relayer) resolveDuplicateSkippedDeposits(ctx context.Context, rejectedIDs [][32]byte, toBlock *big.Int) (map[[32]byte][32]byte, [][32]byte, error) {
+	if len(rejectedIDs) == 0 {
+		return map[[32]byte][32]byte{}, nil, nil
+	}
+	mintedTxHashes, err := bridgeabi.FindMintedDepositTxHashes(ctx, r.receiptReader, r.cfg.BridgeAddress, rejectedIDs, toBlock)
+	if err != nil {
+		return nil, nil, err
+	}
+	stillRejected := make([][32]byte, 0, len(rejectedIDs))
+	for _, depositID := range rejectedIDs {
+		if _, ok := mintedTxHashes[depositID]; ok {
+			continue
+		}
+		stillRejected = append(stillRejected, depositID)
+	}
+	return mintedTxHashes, stillRejected, nil
+}
+
+func appendRecoveredFinalized(finalizedIDs [][32]byte, recovered map[[32]byte][32]byte) [][32]byte {
+	if len(recovered) == 0 {
+		return finalizedIDs
+	}
+	out := make([][32]byte, 0, len(finalizedIDs)+len(recovered))
+	out = append(out, finalizedIDs...)
+	for depositID := range recovered {
+		out = append(out, depositID)
+	}
+	return out
 }
 
 func unresolvedDepositIDs(expected [][32]byte, finalized [][32]byte, rejected [][32]byte) [][32]byte {

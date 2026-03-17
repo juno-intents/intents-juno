@@ -3,7 +3,9 @@ package depositrepair
 import (
 	"context"
 	"fmt"
+	"math/big"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
@@ -11,18 +13,20 @@ import (
 
 type ReceiptReader interface {
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
+	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
 type Store interface {
 	ListTxHashes(ctx context.Context, limit int) ([][32]byte, error)
 	ListDepositIDsByTxHash(ctx context.Context, txHash [32]byte) ([][32]byte, error)
 	ApplyTxHashOutcome(ctx context.Context, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error
+	RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
 }
 
 type Repairer struct {
-	store   Store
+	store    Store
 	receipts ReceiptReader
-	bridge  common.Address
+	bridge   common.Address
 }
 
 type Result struct {
@@ -38,9 +42,9 @@ func New(store Store, receipts ReceiptReader, bridge common.Address) (*Repairer,
 		return nil, fmt.Errorf("depositrepair: invalid config")
 	}
 	return &Repairer{
-		store:   store,
+		store:    store,
 		receipts: receipts,
-		bridge:  bridge,
+		bridge:   bridge,
 	}, nil
 }
 
@@ -88,13 +92,52 @@ func (r *Repairer) RepairTxHash(ctx context.Context, txHash [32]byte) (Result, e
 	if err != nil {
 		return Result{}, fmt.Errorf("depositrepair: decode receipt logs: %w", err)
 	}
+	recoveredFinalized, rejectedIDs, err := r.resolveDuplicateSkippedDeposits(ctx, rejectedIDs, receipt.BlockNumber)
+	if err != nil {
+		return Result{}, fmt.Errorf("depositrepair: reconcile skipped deposits: %w", err)
+	}
 	if err := r.store.ApplyTxHashOutcome(ctx, txHash, finalizedIDs, rejectedIDs, "deposit skipped by bridge"); err != nil {
 		return Result{}, err
 	}
-	result.FinalizedCount = len(finalizedIDs)
+	for depositID, mintedTxHash := range recoveredFinalized {
+		if err := r.store.RepairFinalized(ctx, depositID, mintedTxHash); err != nil {
+			return Result{}, fmt.Errorf("depositrepair: repair finalized deposit %x: %w", depositID[:], err)
+		}
+	}
+	result.FinalizedCount = len(finalizedIDs) + len(recoveredFinalized)
 	result.RejectedCount = len(rejectedIDs)
-	result.UnresolvedCount = len(unresolvedDepositIDs(depositIDs, finalizedIDs, rejectedIDs))
+	result.UnresolvedCount = len(unresolvedDepositIDs(depositIDs, appendRecoveredFinalized(finalizedIDs, recoveredFinalized), rejectedIDs))
 	return result, nil
+}
+
+func (r *Repairer) resolveDuplicateSkippedDeposits(ctx context.Context, rejectedIDs [][32]byte, toBlock *big.Int) (map[[32]byte][32]byte, [][32]byte, error) {
+	if len(rejectedIDs) == 0 {
+		return map[[32]byte][32]byte{}, nil, nil
+	}
+	mintedTxHashes, err := bridgeabi.FindMintedDepositTxHashes(ctx, r.receipts, r.bridge, rejectedIDs, toBlock)
+	if err != nil {
+		return nil, nil, err
+	}
+	stillRejected := make([][32]byte, 0, len(rejectedIDs))
+	for _, depositID := range rejectedIDs {
+		if _, ok := mintedTxHashes[depositID]; ok {
+			continue
+		}
+		stillRejected = append(stillRejected, depositID)
+	}
+	return mintedTxHashes, stillRejected, nil
+}
+
+func appendRecoveredFinalized(finalizedIDs [][32]byte, recovered map[[32]byte][32]byte) [][32]byte {
+	if len(recovered) == 0 {
+		return finalizedIDs
+	}
+	out := make([][32]byte, 0, len(finalizedIDs)+len(recovered))
+	out = append(out, finalizedIDs...)
+	for depositID := range recovered {
+		out = append(out, depositID)
+	}
+	return out
 }
 
 func unresolvedDepositIDs(expected, finalized, rejected [][32]byte) [][32]byte {
