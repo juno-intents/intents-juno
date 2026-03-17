@@ -1,0 +1,13 @@
+<svg width="64" height="64" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="juno-icon-bg" x1="12" y1="10" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FF7A3D"/>
+      <stop offset="1" stop-color="#FF4D00"/>
+    </linearGradient>
+  </defs>
+  <circle cx="32" cy="32" r="30" fill="url(#juno-icon-bg)"/>
+  <path
+    d="M38 17.5V39C38 47.833 33.167 52.25 25.25 52.25C18.083 52.25 13.25 48.167 12.75 41.75H21.25C21.667 44.5 23.083 45.875 25.5 45.875C28.667 45.875 30.25 43.583 30.25 39V17.5H38Z"
+    fill="white"
+  />
+</svg>

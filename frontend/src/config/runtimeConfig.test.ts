@@ -52,4 +52,9 @@ describe('resolveRuntimeConfig', () => {
     expect(cfg.apiBaseUrl).toBe('https://bridge.example')
     expect(cfg.isMainnet).toBe(true)
   })
+
+  it('uses a bundled Juno logo asset instead of a brittle remote icon URL', () => {
+    const cfg = resolveRuntimeConfig({ DEV: true })
+    expect(cfg.junoLogoUrl).toBe('/juno-icon.svg')
+  })
 })
