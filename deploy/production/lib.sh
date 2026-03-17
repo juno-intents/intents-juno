@@ -1684,7 +1684,7 @@ production_render_app_handoff() {
   local bridge_refund_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json
-  local edge_enabled edge_state_path edge_origin_record_name edge_origin_endpoint
+  local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -1745,7 +1745,10 @@ production_render_app_handoff() {
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
   ops_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
   edge_enabled="true"
-  edge_state_path=""
+  edge_output_root="$(dirname "$output_dir")"
+  edge_state_dir="$edge_output_root/edge-state"
+  mkdir -p "$edge_state_dir"
+  edge_state_path="$edge_state_dir/${env_slug}.tfstate"
   edge_origin_record_name="origin.${public_subdomain}"
   edge_origin_endpoint="$public_endpoint"
   edge_origin_http_port=80
@@ -1798,7 +1801,7 @@ production_render_app_handoff() {
     --argjson service_urls "$service_urls_json" \
     --argjson operator_endpoints "$operator_endpoints_json" \
     --arg edge_enabled "$edge_enabled" \
-    --arg edge_state_path "$app_dir/edge.tfstate" \
+    --arg edge_state_path "$edge_state_path" \
     --arg edge_origin_record_name "$edge_origin_record_name" \
     --arg edge_origin_endpoint "$edge_origin_endpoint" \
     --argjson edge_origin_http_port "$edge_origin_http_port" \
