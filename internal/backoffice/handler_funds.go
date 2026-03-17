@@ -86,7 +86,12 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// MPC wallet balance (Juno RPC z_gettotalbalance).
-	if s.cfg.JunoRPCURL != "" {
+	if strings.TrimSpace(s.cfg.OWalletUA) != "" && strings.TrimSpace(s.cfg.JunoRPCURL) == "" {
+		resp["mpcWallet"] = map[string]any{
+			"address": strings.TrimSpace(s.cfg.OWalletUA),
+			"error":   "Juno RPC not configured on app host",
+		}
+	} else if s.cfg.JunoRPCURL != "" {
 		mpcBalance, mpcErr := s.fetchJunoMPCBalance(ctx)
 		if mpcErr != nil {
 			s.log.Warn("fetch juno mpc balance", "err", mpcErr)

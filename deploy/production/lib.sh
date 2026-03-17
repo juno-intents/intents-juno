@@ -1407,6 +1407,7 @@ production_render_shared_manifest() {
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
   local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
+  local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_refund_window_seconds
   local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
@@ -1448,6 +1449,8 @@ production_render_shared_manifest() {
   ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
   proof_requestor_service_name="$(production_tf_output_value "$tf_json" "shared_proof_requestor_service_name" false)"
   proof_funder_service_name="$(production_tf_output_value "$tf_json" "shared_proof_funder_service_name" false)"
+  shared_sp1_requestor_address="$(production_tf_output_value "$tf_json" "shared_sp1_requestor_address" false)"
+  shared_sp1_rpc_url="$(production_tf_output_value "$tf_json" "shared_sp1_rpc_url" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
@@ -1545,6 +1548,8 @@ production_render_shared_manifest() {
     --arg ecs_cluster_arn "$ecs_cluster_arn" \
     --arg proof_requestor_service_name "$proof_requestor_service_name" \
     --arg proof_funder_service_name "$proof_funder_service_name" \
+    --arg shared_sp1_requestor_address "$shared_sp1_requestor_address" \
+    --arg shared_sp1_rpc_url "$shared_sp1_rpc_url" \
     --arg ipfs_api_url "$ipfs_api_url" \
     --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
     --arg dkg_bucket "$dkg_bucket" \
@@ -1600,6 +1605,10 @@ production_render_shared_manifest() {
           cluster_arn: (if $ecs_cluster_arn == "" then null else $ecs_cluster_arn end),
           proof_requestor_service_name: (if $proof_requestor_service_name == "" then null else $proof_requestor_service_name end),
           proof_funder_service_name: (if $proof_funder_service_name == "" then null else $proof_funder_service_name end)
+        },
+        proof: {
+          requestor_address: (if $shared_sp1_requestor_address == "" then null else $shared_sp1_requestor_address end),
+          rpc_url: (if $shared_sp1_rpc_url == "" then null else $shared_sp1_rpc_url end)
         },
         ipfs: {
           api_url: $ipfs_api_url,
@@ -2283,7 +2292,7 @@ production_render_backoffice_env() {
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  local min_deposit_admin_private_key
+  local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -2302,6 +2311,9 @@ production_render_backoffice_env() {
   runtime_withdraw_planner_min_confirmations="$(production_default_withdraw_planner_min_confirmations)"
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
   min_deposit_admin_private_key="$(production_env_first_value "$resolved_secret_env" MIN_DEPOSIT_ADMIN_PRIVATE_KEY APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY || true)"
+  sp1_requestor_address="$(production_json_optional "$shared_manifest" '.shared_services.proof.requestor_address')"
+  sp1_rpc_url="$(production_json_optional "$shared_manifest" '.shared_services.proof.rpc_url')"
+  render_juno_rpc="false"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -2324,7 +2336,14 @@ BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$sh
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 EOF
 
-  if [[ -n "$juno_rpc_url" ]]; then
+  if [[ -n "$sp1_requestor_address" ]]; then
+    printf 'BACKOFFICE_SP1_REQUESTOR_ADDRESS=%s\n' "$sp1_requestor_address" >>"$output_file"
+  fi
+  if [[ -n "$sp1_rpc_url" ]]; then
+    printf 'BACKOFFICE_SP1_RPC_URL=%s\n' "$sp1_rpc_url" >>"$output_file"
+  fi
+  if [[ -n "$juno_rpc_url" && ! "$juno_rpc_url" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:|/|$) ]]; then
+    render_juno_rpc="true"
     printf 'BACKOFFICE_JUNO_RPC_URL=%s\n' "$juno_rpc_url" >>"$output_file"
   fi
   local fee_distributor
@@ -2332,10 +2351,10 @@ EOF
   if [[ -n "$fee_distributor" ]]; then
     printf 'BACKOFFICE_FEE_DISTRIBUTOR_ADDRESS=%s\n' "$fee_distributor" >>"$output_file"
   fi
-  if [[ -n "$juno_rpc_user" ]]; then
+  if [[ "$render_juno_rpc" == "true" && -n "$juno_rpc_user" ]]; then
     printf 'BACKOFFICE_JUNO_RPC_USER=%s\n' "$juno_rpc_user" >>"$output_file"
   fi
-  if [[ -n "$juno_rpc_pass" ]]; then
+  if [[ "$render_juno_rpc" == "true" && -n "$juno_rpc_pass" ]]; then
     printf 'BACKOFFICE_JUNO_RPC_PASS=%s\n' "$juno_rpc_pass" >>"$output_file"
   fi
   if [[ -n "$service_urls" ]]; then

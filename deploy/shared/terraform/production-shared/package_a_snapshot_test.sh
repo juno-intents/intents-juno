@@ -18,9 +18,10 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf password_block key_rotation failover min_healthy_count max_healthy_count rollback_count
+  local main_tf variables_tf outputs_tf password_block key_rotation failover min_healthy_count max_healthy_count rollback_count
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
+  outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
   password_block="$(awk '
     /variable "shared_postgres_password" \{/ { in_block = 1 }
     in_block { print }
@@ -55,6 +56,8 @@ main() {
   assert_contains "$main_tf" 'resources = [var.shared_sp1_requestor_secret_arn]' "requestor secret scope uses only requestor ARN"
   assert_contains "$main_tf" 'resources = [var.shared_sp1_funder_secret_arn]' "funder secret scope uses only funder ARN"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "production-shared exposes shared proof requestor address input"
+  assert_contains "$outputs_tf" 'output "shared_sp1_requestor_address"' "production-shared exports shared proof requestor address"
+  assert_contains "$outputs_tf" 'output "shared_sp1_rpc_url"' "production-shared exports shared sp1 rpc url"
   assert_contains "$variables_tf" 'At least two private subnet IDs in distinct AZs for Aurora, MSK, ECS, and the IPFS NLB.' "production-shared documents private shared subnet requirement"
   assert_contains "$variables_tf" $'variable "shared_msk_broker_instance_type" {\n  description = "MSK broker instance type."\n  type        = string\n  default     = "kafka.m5.large"' "production-shared defaults MSK to an IAM-ready broker class"
   assert_contains "$variables_tf" 'variable "shared_base_chain_id"' "production-shared exposes base chain id input"

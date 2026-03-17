@@ -372,6 +372,7 @@ args=(
   --bridge-address "\$BACKOFFICE_BRIDGE_ADDRESS"
   --wjuno-address "\$BACKOFFICE_WJUNO_ADDRESS"
   --operator-registry-address "\$BACKOFFICE_OPERATOR_REGISTRY_ADDRESS"
+  --owallet-ua "\$BACKOFFICE_OWALLET_UA"
   --operator-addresses "\$BACKOFFICE_OPERATOR_ADDRESSES"
   --deposit-min-confirmations "\${BACKOFFICE_DEPOSIT_MIN_CONFIRMATIONS:-1}"
   --withdraw-planner-min-confirmations "\${BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
@@ -379,6 +380,12 @@ args=(
   --kafka-brokers "\$BACKOFFICE_KAFKA_BROKERS"
   --ipfs-api-url "\$BACKOFFICE_IPFS_API_URL"
 )
+if [[ -n "\${BACKOFFICE_SP1_REQUESTOR_ADDRESS:-}" ]]; then
+  args+=(--sp1-requestor-address "\$BACKOFFICE_SP1_REQUESTOR_ADDRESS")
+fi
+if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
+  args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
+fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
   args+=(--juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL")
 fi

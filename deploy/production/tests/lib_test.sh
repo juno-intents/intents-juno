@@ -1689,6 +1689,8 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
 
@@ -1881,6 +1883,8 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   jq '.operators += [{"index":2,"operator_id":"0x6666666666666666666666666666666666666666","aws_profile":"juno","aws_region":"us-east-1","account_id":"021490342184","operator_host":"203.0.113.12","operator_user":"ubuntu","runtime_dir":"/var/lib/intents-juno/operator-runtime","public_dns_label":"op2","public_endpoint":"203.0.113.12","known_hosts_file":"known_hosts","dkg_backup_zip":"dkg-backup.zip","secret_contract_file":"operator-secrets.env"}]' "$workdir/inventory.json" >"$workdir/inventory.next"
@@ -1974,6 +1978,8 @@ EOF
   assert_contains "$(cat "$bridge_env")" "BRIDGE_API_FEE_BPS=50" "bridge env fee bps"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "backoffice env auth secret"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OWALLET_UA=u1alphaexample" "backoffice env mpc address"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_REQUESTOR_ADDRESS=0x1234567890abcdef1234567890abcdef12345678" "backoffice env prover requestor address"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SP1_RPC_URL=https://rpc.mainnet.succinct.xyz" "backoffice env sp1 rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ADDRESSES=0x9999999999999999999999999999999999999999" "backoffice env operator addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI=1000000000000000" "backoffice env relayer signer balance floor"
@@ -1981,8 +1987,9 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=1" "backoffice env withdraw planner confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=1" "backoffice env withdraw batch confirmation default"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env juno rpc url"
-  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env juno rpc user"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env omits unusable loopback juno rpc url"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user when loopback url is filtered"
+  assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass when loopback url is filtered"
   assert_contains "$(cat "$backoffice_env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_SERVICE_URLS=bridge-api=http://127.0.0.1:8082/readyz" "backoffice env service urls"
   rm -rf "$workdir"
@@ -2006,6 +2013,8 @@ EOF
   cat >"$workdir/app-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   jq 'del(.app_host.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
@@ -2040,6 +2049,60 @@ EOF
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=" "backoffice env omits juno rpc user"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=" "backoffice env omits juno rpc pass"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env relayer signer addresses still render without juno rpc"
+  rm -rf "$workdir"
+}
+
+test_render_backoffice_env_preserves_non_loopback_juno_rpc_url() {
+  local workdir shared_manifest app_manifest resolved_env backoffice_env
+  local fake_bin old_path
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '.app_host.juno_rpc_url = "https://juno-rpc.example.invalid"' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  resolved_env="$workdir/resolved-app.env"
+  production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
+  backoffice_env="$workdir/backoffice.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=https://juno-rpc.example.invalid" "backoffice env preserves non-loopback juno rpc url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for non-loopback url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for non-loopback url"
   rm -rf "$workdir"
 }
 
@@ -2268,6 +2331,7 @@ main() {
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
+  test_render_backoffice_env_preserves_non_loopback_juno_rpc_url
   test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme

@@ -53,6 +53,16 @@ output "shared_proof_funder_service_name" {
   value       = aws_ecs_service.proof_funder.name
 }
 
+output "shared_sp1_requestor_address" {
+  description = "Shared SP1 requestor address used by proof services."
+  value       = var.shared_sp1_requestor_address
+}
+
+output "shared_sp1_rpc_url" {
+  description = "Shared SP1 RPC URL used by proof services."
+  value       = var.shared_sp1_rpc_url
+}
+
 output "shared_proof_services_ecr_repository_url" {
   description = "ECR repository URL that stores the proof-services image."
   value       = aws_ecr_repository.proof_services.repository_url
