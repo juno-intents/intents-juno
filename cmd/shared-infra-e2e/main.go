@@ -109,6 +109,7 @@ var errNoCheckpointPackage = errors.New("no operator checkpoint package with IPF
 
 type kafkaAdminClient interface {
 	Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
+	CreateTopics(ctx context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error)
 }
 
 var newKafkaAdminClient = func(broker string, timeout time.Duration) (kafkaAdminClient, error) {
@@ -388,6 +389,9 @@ func checkPostgres(ctx context.Context, cfg config) (postgresReport, error) {
 }
 
 func checkKafka(ctx context.Context, cfg config) (kafkaReport, error) {
+	if err := ensureKafkaTopics(ctx, cfg.KafkaBrokers, cfg.RequiredKafkaTopics); err != nil {
+		return kafkaReport{}, fmt.Errorf("ensure required topics: %w", err)
+	}
 	if err := checkKafkaTopicsMetadata(ctx, cfg.KafkaBrokers, cfg.RequiredKafkaTopics); err != nil {
 		return kafkaReport{}, fmt.Errorf("inspect required topics: %w", err)
 	}
@@ -525,6 +529,20 @@ func ensureKafkaTopic(ctx context.Context, brokers []string, topic string) error
 	return ensureKafkaTopicWithFactory(ctx, brokers, topic, newKafkaAdminClient)
 }
 
+func ensureKafkaTopics(ctx context.Context, brokers []string, topics []string) error {
+	return ensureKafkaTopicsWithFactory(ctx, brokers, topics, newKafkaAdminClient)
+}
+
+func ensureKafkaTopicsWithFactory(ctx context.Context, brokers []string, topics []string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
+	topics = parseBrokers(strings.Join(topics, ","))
+	for _, topic := range topics {
+		if err := ensureKafkaTopicWithFactory(ctx, brokers, topic, clientFactory); err != nil {
+			return fmt.Errorf("%s: %w", topic, err)
+		}
+	}
+	return nil
+}
+
 func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic string, clientFactory func(string, time.Duration) (kafkaAdminClient, error)) error {
 	brokers = parseBrokers(strings.Join(brokers, ","))
 	if len(brokers) == 0 {
@@ -552,12 +570,44 @@ func ensureKafkaTopicWithFactory(ctx context.Context, brokers []string, topic st
 			return nil
 		}
 
-		exists, err = kafkaTopicExists(ctx, client, topic)
+		createCtx, createCancel := context.WithTimeout(ctx, 15*time.Second)
+		createResp, err := client.CreateTopics(createCtx, &kafka.CreateTopicsRequest{
+			Addr: kafka.TCP(broker),
+			Topics: []kafka.TopicConfig{{
+				Topic:             topic,
+				NumPartitions:     -1,
+				ReplicationFactor: -1,
+			}},
+		})
+		createCancel()
+		if err != nil {
+			lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, err)
+			continue
+		}
+		if createResp != nil {
+			if topicErr := createResp.Errors[topic]; topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
+				lastErr = fmt.Errorf("create topic %s via %s: %w", topic, broker, topicErr)
+				continue
+			}
+		}
+
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, 15*time.Second)
+		err = runWithRetry(verifyCtx, time.Second, func(stepCtx context.Context) error {
+			exists, err = kafkaTopicExists(stepCtx, client, topic)
+			if err != nil {
+				return err
+			}
+			if !exists {
+				return kafka.UnknownTopicOrPartition
+			}
+			return nil
+		})
+		verifyCancel()
 		if err == nil && exists {
 			return nil
 		}
 		if err != nil {
-			lastErr = fmt.Errorf("refresh topic metadata %s via %s: %w", topic, broker, err)
+			lastErr = fmt.Errorf("verify topic %s via %s: %w", topic, broker, err)
 			continue
 		}
 		lastErr = fmt.Errorf("verify topic %s via %s: topic metadata still absent after retry", topic, broker)

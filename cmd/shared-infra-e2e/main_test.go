@@ -294,7 +294,7 @@ func TestEnsureKafkaTopicWithFactory_ReturnsWhenTopicAlreadyExists(t *testing.T)
 	}
 }
 
-func TestEnsureKafkaTopicWithFactory_AutoCreatesMissingTopicViaMetadata(t *testing.T) {
+func TestEnsureKafkaTopicWithFactory_CreatesMissingTopicViaAdminAPI(t *testing.T) {
 	t.Parallel()
 
 	client := &stubKafkaAdminClient{
@@ -323,15 +323,15 @@ func TestEnsureKafkaTopicWithFactory_AutoCreatesMissingTopicViaMetadata(t *testi
 	if err != nil {
 		t.Fatalf("ensureKafkaTopicWithFactory: %v", err)
 	}
-	if client.createCalls != 0 {
-		t.Fatalf("create calls: got=%d want=0", client.createCalls)
+	if client.createCalls != 1 {
+		t.Fatalf("create calls: got=%d want=1", client.createCalls)
 	}
 	if client.metadataCalls != 2 {
 		t.Fatalf("metadata calls: got=%d want=2", client.metadataCalls)
 	}
 }
 
-func TestEnsureKafkaTopicWithFactory_ReturnsAutoCreateMetadataError(t *testing.T) {
+func TestEnsureKafkaTopicWithFactory_ReturnsCreateTopicsError(t *testing.T) {
 	t.Parallel()
 
 	err := ensureKafkaTopicWithFactory(context.Background(), []string{"broker-1:9098"}, "checkpoints.signatures.v1", func(_ string, _ time.Duration) (kafkaAdminClient, error) {
@@ -344,14 +344,75 @@ func TestEnsureKafkaTopicWithFactory_ReturnsAutoCreateMetadataError(t *testing.T
 					}},
 				},
 			},
-			metadataErrs: []error{kafka.InvalidReplicationFactor},
+			createResponse: &kafka.CreateTopicsResponse{
+				Errors: map[string]error{
+					"checkpoints.signatures.v1": kafka.InvalidReplicationFactor,
+				},
+			},
 		}, nil
 	})
 	if err == nil {
 		t.Fatalf("expected error")
 	}
-	if !strings.Contains(err.Error(), "refresh topic metadata checkpoints.signatures.v1 via broker-1:9098") {
+	if !strings.Contains(err.Error(), "create topic checkpoints.signatures.v1 via broker-1:9098") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestEnsureKafkaTopicsWithFactory_CreatesEveryRequiredTopic(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataResponses: []*kafka.MetadataResponse{
+			{
+				Topics: []kafka.Topic{{
+					Name:  "proof.requests.v1",
+					Error: kafka.UnknownTopicOrPartition,
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name: "proof.requests.v1",
+					Partitions: []kafka.Partition{{
+						Topic: "proof.requests.v1",
+						ID:    0,
+					}},
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name:  "ops.alerts.v1",
+					Error: kafka.UnknownTopicOrPartition,
+				}},
+			},
+			{
+				Topics: []kafka.Topic{{
+					Name: "ops.alerts.v1",
+					Partitions: []kafka.Partition{{
+						Topic: "ops.alerts.v1",
+						ID:    0,
+					}},
+				}},
+			},
+		},
+	}
+
+	err := ensureKafkaTopicsWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098"},
+		[]string{"proof.requests.v1", "ops.alerts.v1"},
+		func(_ string, _ time.Duration) (kafkaAdminClient, error) {
+			return client, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicsWithFactory: %v", err)
+	}
+	if client.createCalls != 2 {
+		t.Fatalf("create calls: got=%d want=2", client.createCalls)
+	}
+	if client.metadataCalls != 4 {
+		t.Fatalf("metadata calls: got=%d want=4", client.metadataCalls)
 	}
 }
 
