@@ -13,6 +13,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/leases"
+	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -1066,6 +1067,16 @@ func (m *stubPaidMarker) MarkPaid(_ context.Context, withdrawalIDs [][32]byte) e
 	return m.err
 }
 
+type failingExpiryExtender struct {
+	calls int
+	err   error
+}
+
+func (e *failingExpiryExtender) Extend(_ context.Context, _ [][32]byte, _ time.Time) error {
+	e.calls++
+	return e.err
+}
+
 func (c *stubTxChecker) TxStatus(_ context.Context, txid string) (string, error) {
 	_ = txid
 	c.calls++
@@ -1461,6 +1472,97 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 	}
 	if status != withdraw.WithdrawalStatusBatched {
 		t.Fatalf("status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
+	}
+}
+
+func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+
+	store := withdraw.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	stuck := withdraw.Withdrawal{ID: seq32(0x20), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(30 * time.Second)}
+	_, _, _ = store.UpsertRequested(ctx, stuck)
+	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	stuckBatchID := seq32(0x86)
+	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+		ID:            stuckBatchID,
+		WithdrawalIDs: [][32]byte{stuck.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, stuckBatchID)
+	_ = store.SetBatchSigned(ctx, stuckBatchID, []byte{0x01})
+	_ = store.SetBatchBroadcasted(ctx, stuckBatchID, "tx-stuck")
+
+	fresh := withdraw.Withdrawal{ID: seq32(0x21), Amount: 2, FeeBps: 0, RecipientUA: []byte{0x02}, Expiry: now.Add(24 * time.Hour)}
+	_, _, _ = store.UpsertRequested(ctx, fresh)
+
+	planner := &stubPlanner{}
+	signer := &stubSigner{}
+	broadcaster := &stubBroadcaster{txid: "tx-fresh"}
+	confirmer := &stubConfirmer{errs: []error{
+		ErrConfirmationPending,
+		ErrConfirmationPending,
+		ErrConfirmationPending,
+		ErrConfirmationPending,
+	}}
+	extender := &failingExpiryExtender{err: errors.New("extend signer unavailable")}
+
+	c, err := New(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   3 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+		ExpiryPolicy: policy.WithdrawExpiryConfig{
+			SafetyMargin: 2 * time.Minute,
+			MaxExtension: time.Hour,
+			MaxBatch:     10,
+		},
+	}, store, planner, signer, broadcaster, confirmer, &stubTxChecker{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.WithExpiryExtender(extender)
+
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected Tick error")
+	}
+	if !strings.Contains(err.Error(), "extend signer unavailable") {
+		t.Fatalf("expected extend signer error, got %v", err)
+	}
+	if extender.calls == 0 {
+		t.Fatal("expected expiry extender to be called")
+	}
+	if planner.calls != 1 {
+		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	}
+	if signer.calls != 1 {
+		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	}
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	}
+
+	status, err := store.GetWithdrawalStatus(ctx, fresh.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus: %v", err)
+	}
+	if status != withdraw.WithdrawalStatusBatched {
+		t.Fatalf("fresh status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
+	}
+
+	freshBatch, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{fresh.ID}))
+	if err != nil {
+		t.Fatalf("GetBatch(fresh): %v", err)
+	}
+	if freshBatch.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("fresh batch state: got %s want %s", freshBatch.State, withdraw.BatchStateBroadcasted)
 	}
 }
 

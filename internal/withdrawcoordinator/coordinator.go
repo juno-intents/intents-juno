@@ -252,8 +252,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 		return err
 	}
 
+	var tickErr error
 	if err := c.resume(ctx); err != nil {
-		return err
+		tickErr = err
 	}
 
 	// Claim new work to fill the in-progress batch.
@@ -277,11 +278,11 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 			batch, ok := c.batcher.Add(w.ID, w)
 			if ok {
 				if err := c.assertLeadership(ctx); err != nil {
-					return err
+					return errors.Join(tickErr, err)
 				}
 				c.releasePending(batch.Items)
 				if err := c.processNewBatch(ctx, batch); err != nil {
-					return err
+					return errors.Join(tickErr, err)
 				}
 			}
 		}
@@ -289,14 +290,17 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 
 	if batch, ok := c.batcher.FlushDue(); ok {
 		if err := c.assertLeadership(ctx); err != nil {
-			return err
+			return errors.Join(tickErr, err)
 		}
 		c.releasePending(batch.Items)
 		if err := c.processNewBatch(ctx, batch); err != nil {
-			return err
+			return errors.Join(tickErr, err)
 		}
 	}
 
+	if tickErr != nil {
+		return tickErr
+	}
 	return c.resume(ctx)
 }
 
