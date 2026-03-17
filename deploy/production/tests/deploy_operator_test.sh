@@ -362,6 +362,7 @@ EOF
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   write_test_dkg_tls_dir "$workdir/dkg-tls"
+  rm -f "$workdir/dkg-tls/server.pem" "$workdir/dkg-tls/server.key"
 
   production_render_shared_manifest \
     "$workdir/inventory.json" \

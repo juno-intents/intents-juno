@@ -168,6 +168,7 @@ test_render_operator_handoffs_preserves_dkg_tls_dir() {
   write_test_dkg_tls_dir "$workdir/source-dkg-tls"
   write_test_dkg_backup_zip "$workdir/dkg-backup.zip" "$workdir/source-dkg-tls"
   write_test_dkg_tls_dir "$workdir/dkg-tls"
+  rm -f "$workdir/dkg-tls/server.pem" "$workdir/dkg-tls/server.key"
   cat >"$workdir/operator-secrets.env" <<'EOF'
 CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
 BASE_RELAYER_AUTH_TOKEN=literal:token

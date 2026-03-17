@@ -329,7 +329,7 @@ production_materialize_operator_dkg_backup_zip() {
   fi
 
   [[ -d "$dkg_tls_dir" ]] || die "dkg_tls_dir not found: $dkg_tls_dir"
-  for required in ca.pem server.pem server.key coordinator-client.pem coordinator-client.key; do
+  for required in ca.pem coordinator-client.pem coordinator-client.key; do
     [[ -f "$dkg_tls_dir/$required" ]] || die "dkg_tls_dir missing required file: $dkg_tls_dir/$required"
   done
   have_cmd unzip || die "required command not found: unzip"
@@ -352,11 +352,9 @@ production_materialize_operator_dkg_backup_zip() {
 
   mkdir -p "$tmp_dir/payload/tls"
   cp "$dkg_tls_dir/ca.pem" "$tmp_dir/payload/tls/ca.pem"
-  cp "$dkg_tls_dir/server.pem" "$tmp_dir/payload/tls/server.pem"
-  cp "$dkg_tls_dir/server.key" "$tmp_dir/payload/tls/server.key"
   cp "$dkg_tls_dir/coordinator-client.pem" "$tmp_dir/payload/tls/coordinator-client.pem"
   cp "$dkg_tls_dir/coordinator-client.key" "$tmp_dir/payload/tls/coordinator-client.key"
-  chmod 0600 "$tmp_dir/payload/tls/server.key" "$tmp_dir/payload/tls/coordinator-client.key" || true
+  chmod 0600 "$tmp_dir/payload/tls/coordinator-client.key" || true
 
   coordinator_client_fingerprint="$(production_certificate_sha256_hex "$dkg_tls_dir/coordinator-client.pem")"
   tmp_json="$(mktemp)"
@@ -373,21 +371,15 @@ production_materialize_operator_dkg_backup_zip() {
   tmp_json="$(mktemp)"
   jq \
     --arg tls_ca_path "$dkg_tls_dir/ca.pem" \
-    --arg tls_server_cert_path "$dkg_tls_dir/server.pem" \
-    --arg tls_server_key_path "$dkg_tls_dir/server.key" \
     --arg coordinator_client_cert_path "$dkg_tls_dir/coordinator-client.pem" \
     --arg coordinator_client_key_path "$dkg_tls_dir/coordinator-client.key" \
     '.includes = ((.includes // {}) + {
       tls_ca_cert: "payload/tls/ca.pem",
-      tls_server_cert: "payload/tls/server.pem",
-      tls_server_key: "payload/tls/server.key",
       coordinator_client_cert: "payload/tls/coordinator-client.pem",
       coordinator_client_key: "payload/tls/coordinator-client.key"
     })
     | .source_paths = ((.source_paths // {}) + {
       tls_ca_cert: $tls_ca_path,
-      tls_server_cert: $tls_server_cert_path,
-      tls_server_key: $tls_server_key_path,
       coordinator_client_cert: $coordinator_client_cert_path,
       coordinator_client_key: $coordinator_client_key_path
     })' \
