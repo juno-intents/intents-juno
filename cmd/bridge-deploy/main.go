@@ -47,7 +47,7 @@ const (
 	legacyValueTransferGasLimit            = uint64(21_000)
 	ephemeralFundingReadRetries            = 8
 	ephemeralFundingReadBackoff            = 500 * time.Millisecond
-	sweepRetryAttempts                     = 3
+	sweepRetryAttempts                     = 5
 	sweepRetryBackoff                      = 500 * time.Millisecond
 	sweepValueSafetyBufferWei              = int64(100_000)
 )

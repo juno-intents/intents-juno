@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/big"
 	"testing"
 
@@ -249,6 +250,80 @@ func TestSweepEphemeralDeployerWithRetry_AdjustsForObservedShortfall(t *testing.
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestSweepEphemeralDeployerWithRetry_ToleratesMultipleObservedShortfalls(t *testing.T) {
+	t.Parallel()
+
+	balance := big.NewInt(1_000_000)
+	gasPrice := big.NewInt(7)
+	shortages := []*big.Int{
+		big.NewInt(10_000),
+		big.NewInt(20_000),
+		big.NewInt(30_000),
+	}
+	wantHash := common.HexToHash("0x4")
+	attempts := 0
+
+	gotHash, swept, err := sweepEphemeralDeployerWithRetry(
+		context.Background(),
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(balance), nil
+		},
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(gasPrice), nil
+		},
+		func(_ context.Context, value, gotGasPrice *big.Int) (common.Hash, error) {
+			attempts++
+			if gotGasPrice.Cmp(gasPrice) != 0 {
+				t.Fatalf("gas price = %s, want %s", gotGasPrice.String(), gasPrice.String())
+			}
+			if attempts <= len(shortages) {
+				shortage := shortages[attempts-1]
+				wantReserve := sweepReservedFeeWei(gasPrice)
+				if attempts == 1 {
+					wantReserve = sweepReservedFeeWei(gasPrice)
+				} else {
+					prevShortage := shortages[attempts-2]
+					wantReserve = new(big.Int).Add(
+						sweepReservedFeeWei(gasPrice),
+						new(big.Int).Add(prevShortage, big.NewInt(sweepValueSafetyBufferWei)),
+					)
+				}
+				wantValue := new(big.Int).Sub(balance, wantReserve)
+				if value.Cmp(wantValue) != 0 {
+					t.Fatalf("attempt %d value = %s, want %s", attempts, value.String(), wantValue.String())
+				}
+				return common.Hash{}, fmt.Errorf(
+					"send tx: insufficient funds for gas * price + value: balance %s, tx cost %s, overshot %s",
+					balance.String(),
+					new(big.Int).Add(balance, shortage).String(),
+					shortage.String(),
+				)
+			}
+			wantReserve := new(big.Int).Add(
+				sweepReservedFeeWei(gasPrice),
+				new(big.Int).Add(shortages[len(shortages)-1], big.NewInt(sweepValueSafetyBufferWei)),
+			)
+			wantValue := new(big.Int).Sub(balance, wantReserve)
+			if value.Cmp(wantValue) != 0 {
+				t.Fatalf("final value = %s, want %s", value.String(), wantValue.String())
+			}
+			return wantHash, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("sweepEphemeralDeployerWithRetry: %v", err)
+	}
+	if !swept {
+		t.Fatalf("swept = false, want true")
+	}
+	if gotHash != wantHash {
+		t.Fatalf("hash = %s, want %s", gotHash.Hex(), wantHash.Hex())
+	}
+	if attempts != len(shortages)+1 {
+		t.Fatalf("attempts = %d, want %d", attempts, len(shortages)+1)
 	}
 }
 
