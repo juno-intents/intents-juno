@@ -60,6 +60,56 @@ func TestMemoryStore_UpsertConfirmed_DedupesAndRejectsMismatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_UpsertSeen_RefreshesWitnessWithoutMismatch(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x11
+
+	var cm [32]byte
+	cm[0] = 0xbb
+
+	var recip [20]byte
+	recip[19] = 0x02
+
+	original := Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        9,
+		Amount:           2000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: []byte{0x01, 0x02, 0x03},
+		JunoHeight:       101,
+	}
+
+	if _, created, err := s.UpsertSeen(ctx, original); err != nil {
+		t.Fatalf("UpsertSeen #1: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	refreshed := original
+	refreshed.ProofWitnessItem = []byte{0x04, 0x05, 0x06}
+	refreshed.JunoHeight = 202
+
+	job, created, err := s.UpsertSeen(ctx, refreshed)
+	if err != nil {
+		t.Fatalf("UpsertSeen #2: %v", err)
+	}
+	if created {
+		t.Fatalf("expected created=false")
+	}
+	if !bytes.Equal(job.Deposit.ProofWitnessItem, refreshed.ProofWitnessItem) {
+		t.Fatalf("witness = %x, want %x", job.Deposit.ProofWitnessItem, refreshed.ProofWitnessItem)
+	}
+	if job.Deposit.JunoHeight != refreshed.JunoHeight {
+		t.Fatalf("juno height = %d, want %d", job.Deposit.JunoHeight, refreshed.JunoHeight)
+	}
+}
+
 func TestMemoryStore_Get_DefensiveCopyWitness(t *testing.T) {
 	t.Parallel()
 

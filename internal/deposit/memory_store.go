@@ -55,6 +55,9 @@ func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error
 	if !depositIdentityEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
 	}
+	if j.State < StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(j.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
+		j.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	}
 	if d.JunoHeight > 0 {
 		j.Deposit.JunoHeight = d.JunoHeight
 	}
@@ -79,6 +82,9 @@ func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, 
 
 	if !depositIdentityEqual(j.Deposit, d) {
 		return Job{}, false, ErrDepositMismatch
+	}
+	if j.State < StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(j.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
+		j.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
 	}
 	if d.JunoHeight > 0 {
 		j.Deposit.JunoHeight = d.JunoHeight
@@ -635,8 +641,7 @@ func depositIdentityEqual(a, b Deposit) bool {
 		a.Commitment == b.Commitment &&
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
-		a.BaseRecipient == b.BaseRecipient &&
-		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
+		a.BaseRecipient == b.BaseRecipient
 }
 
 func depositEqual(a, b Deposit) bool {

@@ -4505,6 +4505,7 @@ command_run() {
   local withdraw_coordinator_juno_change_address=""
   local witness_extraction_wallet_id=""
   local withdraw_coordinator_juno_fee_add_zat="${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"
+  local deposit_relayer_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
   local withdraw_coordinator_max_age="${WITHDRAW_COORDINATOR_MAX_AGE:-30s}"
   local withdraw_coordinator_expiry_safety_margin="${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-4h}"
@@ -6786,6 +6787,7 @@ command_run() {
           --deposit-image-id "$bridge_deposit_image_id" \
           --owallet-ivk "$sp1_deposit_owallet_ivk_hex" \
           --base-relayer-url "$base_relayer_url" \
+          --max-items "$deposit_relayer_max_items" \
           --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
           --proof-driver queue \
           --proof-request-topic "$proof_request_topic" \
@@ -6925,6 +6927,7 @@ command_run() {
             --deposit-image-id "$bridge_deposit_image_id" \
             --owallet-ivk "$sp1_deposit_owallet_ivk_hex" \
             --base-relayer-url "$base_relayer_url" \
+            --max-items "$deposit_relayer_max_items" \
             --owner "testnet-e2e-deposit-relayer-${proof_topic_seed}" \
             --proof-driver queue \
             --proof-request-topic "$proof_request_topic" \

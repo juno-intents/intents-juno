@@ -1235,6 +1235,7 @@ esac
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
+deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
 deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
@@ -1261,6 +1262,7 @@ args=(
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
   --base-rpc-url "${deposit_base_rpc_url}"
   --juno-rpc-url "${deposit_juno_rpc_url}"
+  --max-items "${deposit_max_items}"
   --owner "${deposit_owner}"
   --proof-driver queue
   --proof-request-topic "${PROOF_REQUEST_TOPIC:-proof.requests.v1}"

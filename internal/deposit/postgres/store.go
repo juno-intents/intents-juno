@@ -86,6 +86,17 @@ func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job,
 	if !depositIdentityEqual(job.Deposit, d) {
 		return deposit.Job{}, false, deposit.ErrDepositMismatch
 	}
+	if job.State < deposit.StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(job.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
+		_, err = s.pool.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET proof_witness_item = $2, updated_at = now()
+			WHERE deposit_id = $1
+		`, d.DepositID[:], d.ProofWitnessItem)
+		if err != nil {
+			return deposit.Job{}, false, fmt.Errorf("deposit/postgres: update seen proof witness item: %w", err)
+		}
+		job.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	}
 	if d.JunoHeight > 0 && job.Deposit.JunoHeight != d.JunoHeight {
 		_, err = s.pool.Exec(ctx, `
 			UPDATE deposit_jobs
@@ -1469,8 +1480,7 @@ func depositIdentityEqual(a, b deposit.Deposit) bool {
 		a.Commitment == b.Commitment &&
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
-		a.BaseRecipient == b.BaseRecipient &&
-		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
+		a.BaseRecipient == b.BaseRecipient
 }
 
 var _ deposit.Store = (*Store)(nil)

@@ -145,6 +145,143 @@ func TestStore_StateMachine(t *testing.T) {
 	}
 }
 
+func TestStore_UpsertSeen_RefreshesWitnessWithoutMismatch(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var id [32]byte
+	id[0] = 0x21
+	var cm [32]byte
+	cm[0] = 0xcc
+	var recip [20]byte
+	recip[19] = 0x03
+
+	original := deposit.Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        11,
+		Amount:           3000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: bytes.Repeat([]byte{0x01}, 1848),
+		JunoHeight:       111,
+	}
+
+	if _, created, err := s.UpsertSeen(ctx, original); err != nil {
+		t.Fatalf("UpsertSeen #1: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	refreshed := original
+	refreshed.ProofWitnessItem = bytes.Repeat([]byte{0x02}, 1848)
+	refreshed.JunoHeight = 222
+
+	job, created, err := s.UpsertSeen(ctx, refreshed)
+	if err != nil {
+		t.Fatalf("UpsertSeen #2: %v", err)
+	}
+	if created {
+		t.Fatalf("expected created=false")
+	}
+	if !bytes.Equal(job.Deposit.ProofWitnessItem, refreshed.ProofWitnessItem) {
+		t.Fatalf("witness = %x, want %x", job.Deposit.ProofWitnessItem[:8], refreshed.ProofWitnessItem[:8])
+	}
+	if job.Deposit.JunoHeight != refreshed.JunoHeight {
+		t.Fatalf("juno height = %d, want %d", job.Deposit.JunoHeight, refreshed.JunoHeight)
+	}
+}
+
+func TestStore_UpsertSeen_AllowsWitnessRefresh(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var id [32]byte
+	id[0] = 0x22
+	var cm [32]byte
+	cm[0] = 0xcc
+	var recip [20]byte
+	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000789").Bytes())
+
+	original := deposit.Deposit{
+		DepositID:        id,
+		Commitment:       cm,
+		LeafIndex:        11,
+		Amount:           3000,
+		BaseRecipient:    recip,
+		ProofWitnessItem: bytes.Repeat([]byte{0x01}, 1848),
+		JunoHeight:       123,
+	}
+	if _, created, err := s.UpsertSeen(ctx, original); err != nil {
+		t.Fatalf("UpsertSeen #1: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	refreshed := original
+	refreshed.ProofWitnessItem = bytes.Repeat([]byte{0x02}, 1848)
+	refreshed.JunoHeight = 456
+
+	job, created, err := s.UpsertSeen(ctx, refreshed)
+	if err != nil {
+		t.Fatalf("UpsertSeen #2: %v", err)
+	}
+	if created {
+		t.Fatalf("expected created=false")
+	}
+	if !bytes.Equal(job.Deposit.ProofWitnessItem, refreshed.ProofWitnessItem) {
+		t.Fatalf("witness mismatch")
+	}
+	if job.Deposit.JunoHeight != refreshed.JunoHeight {
+		t.Fatalf("juno height = %d, want %d", job.Deposit.JunoHeight, refreshed.JunoHeight)
+	}
+}
+
 func TestStore_MarkRejectedDoesNotOverrideFinalizedState(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

@@ -1139,10 +1139,12 @@ test_run_deposit_auto_detection_polls_bridge_api_deposits_listing() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
+  assert_contains "$script_text" 'local deposit_relayer_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"' "deposit relayer runtime caps live proof batches to one item by default"
   assert_contains "$script_text" "waiting for deposit-relayer auto-scanner to detect deposit" "run-testnet-e2e logs explicit auto-scanner wait before polling deposits listing"
   assert_contains "$script_text" '/v1/deposits?baseRecipient=' "run-testnet-e2e polls bridge-api deposits listing for auto-detected deposit"
   assert_contains "$script_text" "deposit auto-detected depositId=" "run-testnet-e2e logs deposit ID once auto-detected"
   assert_contains "$script_text" "deposit auto-detection timed out" "run-testnet-e2e fails explicitly on auto-detection timeout"
+  assert_contains "$script_text" '--max-items "$deposit_relayer_max_items" \' "deposit-relayer launch passes explicit max-items override"
   assert_contains "$script_text" "--scan-enabled" "deposit-relayer launch enables auto-scanner"
   assert_contains "$script_text" "--juno-scan-wallet-id" "deposit-relayer launch configures juno-scan wallet ID for auto-scanner"
   assert_contains "$script_text" "--scan-poll-interval" "deposit-relayer launch configures scan poll interval"

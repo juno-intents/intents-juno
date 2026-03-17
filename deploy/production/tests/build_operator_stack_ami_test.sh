@@ -190,7 +190,9 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
 
   deposit_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
+  assert_contains "$deposit_wrapper" 'deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"' "deposit wrapper defaults to single-item batches with env override"
   assert_contains "$deposit_wrapper" 'deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"' "deposit wrapper subscribes to deposits.event.v2 by default"
+  assert_contains "$deposit_wrapper" '--max-items "${deposit_max_items}"' "deposit wrapper passes the deposit batch size override"
   assert_contains "$deposit_wrapper" '--deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "deposit wrapper passes deposit confirmation seed"
   assert_contains "$deposit_wrapper" '--withdraw-planner-min-confirmations "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"' "deposit wrapper passes withdraw planner confirmation seed"
   assert_contains "$deposit_wrapper" '--withdraw-batch-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "deposit wrapper passes withdraw batch confirmation seed"
