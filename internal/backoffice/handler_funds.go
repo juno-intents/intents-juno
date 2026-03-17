@@ -23,6 +23,20 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]any{
 		"version": "v1",
+		"prover": map[string]any{
+			"error":   "SP1 requestor not configured on app host",
+			"network": "succinct",
+		},
+	}
+	if strings.TrimSpace(s.cfg.OWalletUA) != "" {
+		resp["mpcWallet"] = map[string]any{
+			"address": strings.TrimSpace(s.cfg.OWalletUA),
+			"error":   "Juno RPC not configured on app host",
+		}
+	} else {
+		resp["mpcWallet"] = map[string]any{
+			"error": "MPC wallet address not configured on app host",
+		}
 	}
 
 	// Operator balances.
@@ -44,6 +58,7 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 				resp["prover"] = map[string]any{
 					"address": s.cfg.SP1RequestorAddress.Hex(),
 					"error":   proverErr.Error(),
+					"network": "succinct",
 				}
 			} else {
 				creditsBig, ok := new(big.Int).SetString(credits, 10)
@@ -64,8 +79,10 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 				resp["prover"] = map[string]any{
 					"address": s.cfg.SP1RequestorAddress.Hex(),
 					"error":   proverErr.Error(),
+					"network": "base",
 				}
 			} else {
+				prover["network"] = "base"
 				resp["prover"] = prover
 			}
 		}

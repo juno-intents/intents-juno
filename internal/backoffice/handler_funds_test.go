@@ -390,3 +390,164 @@ func TestHandleFundsIncludesConfiguredMPCWalletAddressWithoutJunoRPC(t *testing.
 		t.Fatalf("mpc error = %q, want %q", body.MPCWallet.Error, "Juno RPC not configured on app host")
 	}
 }
+
+func TestHandleFundsIncludesProverPlaceholderWhenUnconfigured(t *testing.T) {
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x0",
+		}); err != nil {
+			t.Fatalf("encode eth rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	baseClient, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer baseClient.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient: baseClient,
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Prover struct {
+			Error   string `json:"error"`
+			Network string `json:"network"`
+		} `json:"prover"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Prover.Error != "SP1 requestor not configured on app host" {
+		t.Fatalf("prover error = %q, want %q", body.Prover.Error, "SP1 requestor not configured on app host")
+	}
+	if body.Prover.Network != "succinct" {
+		t.Fatalf("prover network = %q, want %q", body.Prover.Network, "succinct")
+	}
+}
+
+func TestHandleFundsMarksSuccinctNetworkOnProverError(t *testing.T) {
+	sp1RPC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer sp1RPC.Close()
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x0",
+		}); err != nil {
+			t.Fatalf("encode eth rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	baseClient, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer baseClient.Close()
+
+	requestor := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:          baseClient,
+			SP1RPCURL:           sp1RPC.URL,
+			SP1RequestorAddress: requestor,
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Prover struct {
+			Address string `json:"address"`
+			Error   string `json:"error"`
+			Network string `json:"network"`
+		} `json:"prover"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.Prover.Address != requestor.Hex() {
+		t.Fatalf("prover address = %q, want %q", body.Prover.Address, requestor.Hex())
+	}
+	if body.Prover.Network != "succinct" {
+		t.Fatalf("prover network = %q, want %q", body.Prover.Network, "succinct")
+	}
+	if body.Prover.Error != "grpc http status 500" {
+		t.Fatalf("prover error = %q, want %q", body.Prover.Error, "grpc http status 500")
+	}
+}
+
+func TestHandleFundsIncludesMPCPlaceholderWhenUnconfigured(t *testing.T) {
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x0",
+		}); err != nil {
+			t.Fatalf("encode eth rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	baseClient, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer baseClient.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient: baseClient,
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		MPCWallet struct {
+			Error string `json:"error"`
+		} `json:"mpcWallet"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.MPCWallet.Error != "MPC wallet address not configured on app host" {
+		t.Fatalf("mpc error = %q, want %q", body.MPCWallet.Error, "MPC wallet address not configured on app host")
+	}
+}

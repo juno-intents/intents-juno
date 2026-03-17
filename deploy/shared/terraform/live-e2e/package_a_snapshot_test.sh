@@ -18,10 +18,11 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf
+  local main_tf variables_tf monitoring_tf outputs_tf
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
+  outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
 
   assert_contains "$variables_tf" 'variable "shared_sp1_funder_secret_arn"' "live-e2e exposes distinct proof funder secret input"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "live-e2e exposes shared proof requestor address input"
@@ -91,6 +92,10 @@ main() {
   assert_contains "$main_tf" 'name      = "PROOF_FUNDER_KEY"' "live-e2e funder task keeps funder secret name"
   assert_contains "$main_tf" 'valueFrom = local.shared_sp1_funder_secret_arn' "live-e2e funder task uses funder secret ARN"
   assert_contains "$main_tf" 'task_role_arn            = aws_iam_role.proof_funder_task[0].arn' "live-e2e funder task definition uses the proof-funder task role"
+  assert_contains "$outputs_tf" 'output "shared_sp1_requestor_address"' "live-e2e exports the shared proof requestor address"
+  assert_contains "$outputs_tf" 'trimspace(var.shared_sp1_requestor_address)' "live-e2e output keeps the rendered proof requestor address"
+  assert_contains "$outputs_tf" 'output "shared_sp1_rpc_url"' "live-e2e exports the shared succinct rpc url"
+  assert_contains "$outputs_tf" 'trimspace(var.shared_sp1_rpc_url)' "live-e2e output keeps the rendered succinct rpc url"
 
   assert_contains "$main_tf" 'name  = "SP1_NETWORK_RPC_URL"' "live-e2e proof task env includes SP1 rpc url"
   assert_contains "$main_tf" 'name  = "JUNO_QUEUE_KAFKA_AUTH_MODE"' "live-e2e proof task env includes kafka auth mode"

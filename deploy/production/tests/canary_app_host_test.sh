@@ -28,24 +28,25 @@ write_inventory_fixture() {
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
       | .app_host.public_endpoint = $app_public_endpoint
+      | .app_host.operator_endpoints = ["0x9999999999999999999999999999999999999999=203.0.113.11:18443"]
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
-  cat >"$target" <<'EOF'
+cat >"$target" <<EOF
 #!/usr/bin/env bash
-printf 'cast %s\n' "$*" >>"$TEST_LOG_DIR/cast.log"
-if [[ "$1" == "wallet" && "$2" == "address" ]]; then
+printf 'cast %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "wallet" && "\$2" == "address" ]]; then
   printf '0x0000000000000000000000000000000000000abc\n'
   exit 0
 fi
-if [[ "$1" == "call" ]]; then
+if [[ "\$1" == "call" ]]; then
   printf '0x0000000000000000000000000000000000000abc\n'
   exit 0
 fi
-printf 'unexpected cast invocation: %s\n' "$*" >&2
+printf 'unexpected cast invocation: %s\n' "\$*" >&2
 exit 1
 EOF
   chmod +x "$target"
@@ -53,11 +54,12 @@ EOF
 
 write_fake_aws() {
   local target="$1"
+  local log_file="${target%/*}/../logs/aws.log"
   local desired_count="${2:-1}"
   local running_count="${3:-1}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"\$TEST_LOG_DIR/aws.log"
+printf 'aws %s\n' "\$*" >>"$log_file"
 if [[ "\$1" == "--profile" ]]; then
   shift 2
 fi
@@ -75,6 +77,237 @@ EOF
 }
 
 test_canary_app_host_checks_remote_services_and_http_endpoints() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = {
+      value: "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared"
+    }
+    | .shared_proof_requestor_service_name = {
+      value: "alpha-proof-requestor"
+    }
+    | .shared_proof_funder_service_name = {
+      value: "alpha-proof-funder"
+    }
+    | .shared_sp1_requestor_address = {
+      value: "0x4444444444444444444444444444444444444444"
+    }
+    | .shared_sp1_rpc_url = {
+      value: "https://rpc.mainnet.succinct.xyz"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  output_json="$workdir/canary.json"
+
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
+url="${@: -1}"
+case "$url" in
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz|https://ops.alpha.intents-testing.thejunowallet.com/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  write_fake_aws "$fake_bin/aws" 1 1
+  chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+
+  PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$workdir/output/app/known_hosts" "canary uses known_hosts file"
+  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active bridge-api" "bridge systemd checked"
+  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active backoffice" "backoffice systemd checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/config" "bridge config checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111" "bridge deposit memo checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime" "backoffice settings checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/api/funds" "backoffice funds checked"
+  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/" "backoffice ui checked"
+  assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "canary derives configured min deposit admin signer"
+  assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222 minDepositAdmin()(address)" "canary checks on-chain minDepositAdmin"
+  assert_contains "$(cat "$log_dir/aws.log")" "ecs describe-services --cluster arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared --services alpha-proof-requestor alpha-proof-funder" "canary checks shared proof services"
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready for test"
+  assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "passed" "bridge config passed"
+  assert_eq "$(jq -r '.checks.deposit_memo.status' "$output_json")" "passed" "deposit memo passed"
+  assert_eq "$(jq -r '.checks.backoffice_ui.status' "$output_json")" "passed" "backoffice ui passed"
+  assert_eq "$(jq -r '.checks.backoffice_settings.status' "$output_json")" "passed" "backoffice settings passed"
+  assert_eq "$(jq -r '.checks.shared_proof_runtime.status' "$output_json")" "passed" "shared proof runtime passed"
+  assert_eq "$(jq -r '.checks.backoffice_funds.status' "$output_json")" "passed" "backoffice funds passed"
+  assert_eq "$(jq -r '.checks.min_deposit_admin.status' "$output_json")" "passed" "min deposit admin passed"
+  assert_eq "$(jq -r '.checks.shared_proof_services.status' "$output_json")" "passed" "shared proof services passed"
+  rm -rf "$workdir"
+}
+
+test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = {
+      value: "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared"
+    }
+    | .shared_proof_requestor_service_name = {
+      value: "alpha-proof-requestor"
+    }
+    | .shared_proof_funder_service_name = {
+      value: "alpha-proof-funder"
+    }
+    | .shared_sp1_requestor_address = {
+      value: "0x4444444444444444444444444444444444444444"
+    }
+    | .shared_sp1_rpc_url = {
+      value: "https://rpc.mainnet.succinct.xyz"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  output_json="$workdir/canary.json"
+
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+url="${@: -1}"
+case "$url" in
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz|https://ops.alpha.intents-testing.thejunowallet.com/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}]}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/)
+    printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  write_fake_aws "$fake_bin/aws" 1 1
+  chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+
+  PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "false" "app canary blocks missing funds payload"
+  assert_eq "$(jq -r '.checks.backoffice_funds.status' "$output_json")" "failed" "backoffice funds failed"
+  assert_contains "$(jq -r '.checks.backoffice_funds.detail' "$output_json")" "missing prover or MPC" "backoffice funds detail explains failure"
+  rm -rf "$workdir"
+}
+
+test_canary_app_host_blocks_bridge_config_contract_mismatch() {
   local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
@@ -138,7 +371,7 @@ case "$url" in
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
-    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
     printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
@@ -150,6 +383,9 @@ case "$url" in
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -167,23 +403,9 @@ EOF
     bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
       --app-deploy "$app_manifest" >"$output_json"
 
-  assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$workdir/output/app/known_hosts" "canary uses known_hosts file"
-  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active bridge-api" "bridge systemd checked"
-  assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active backoffice" "backoffice systemd checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/config" "bridge config checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111" "bridge deposit memo checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime" "backoffice settings checked"
-  assert_contains "$(cat "$log_dir/curl.log")" "https://ops.alpha.intents-testing.thejunowallet.com/" "backoffice ui checked"
-  assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "canary derives configured min deposit admin signer"
-  assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222 minDepositAdmin()(address)" "canary checks on-chain minDepositAdmin"
-  assert_contains "$(cat "$log_dir/aws.log")" "ecs describe-services --cluster arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared --services alpha-proof-requestor alpha-proof-funder" "canary checks shared proof services"
-  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready for test"
-  assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "passed" "bridge config passed"
-  assert_eq "$(jq -r '.checks.deposit_memo.status' "$output_json")" "passed" "deposit memo passed"
-  assert_eq "$(jq -r '.checks.backoffice_ui.status' "$output_json")" "passed" "backoffice ui passed"
-  assert_eq "$(jq -r '.checks.backoffice_settings.status' "$output_json")" "passed" "backoffice settings passed"
-  assert_eq "$(jq -r '.checks.min_deposit_admin.status' "$output_json")" "passed" "min deposit admin passed"
-  assert_eq "$(jq -r '.checks.shared_proof_services.status' "$output_json")" "passed" "shared proof services passed"
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "false" "app canary blocks stale bridge config"
+  assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "failed" "bridge config mismatch failed"
+  assert_contains "$(jq -r '.checks.bridge_config.detail' "$output_json")" "mismatched" "bridge config mismatch detail"
   rm -rf "$workdir"
 }
 
@@ -251,7 +473,7 @@ case "$url" in
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
-    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
     printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
@@ -263,6 +485,9 @@ case "$url" in
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -350,7 +575,7 @@ case "$url" in
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
-    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
     printf 'curl: (22) The requested URL returned error: 500\n' >&2
@@ -361,6 +586,9 @@ case "$url" in
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -374,7 +602,10 @@ EOF
   write_fake_aws "$fake_bin/aws" 1 1
   chmod +x "$fake_bin/ssh" "$fake_bin/curl"
 
-  TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+  TEST_LOG_DIR="$log_dir" \
+  PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS=1 \
+  PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS=0 \
+  PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
       --app-deploy "$app_manifest" >"$output_json"
 
@@ -459,7 +690,7 @@ case "$url" in
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
-    printf '{"version":"v1","bridgeAddress":"0x2222222222222222222222222222222222222222","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
     printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
@@ -471,6 +702,9 @@ case "$url" in
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/api/settings/runtime)
     printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  https://ops.alpha.intents-testing.thejunowallet.com/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","balanceWei":"123","balanceEth":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","balance":"1.25","detail":"app-host rpc"}}\n'
     ;;
   https://ops.alpha.intents-testing.thejunowallet.com/)
     printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
@@ -551,6 +785,8 @@ EOF
 
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
+  test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc
+  test_canary_app_host_blocks_bridge_config_contract_mismatch
   test_canary_app_host_rejects_missing_shared_proof_capacity
   test_canary_app_host_blocks_deposit_memo_probe_failure
   test_canary_app_host_retries_transient_public_tls_failures

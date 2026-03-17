@@ -68,6 +68,16 @@ output "shared_proof_funder_service_name" {
   value       = try(aws_ecs_service.proof_funder[0].name, null)
 }
 
+output "shared_sp1_requestor_address" {
+  description = "EVM address used by the shared SP1 proof-requestor."
+  value       = trimspace(var.shared_sp1_requestor_address)
+}
+
+output "shared_sp1_rpc_url" {
+  description = "Succinct prover network RPC used by shared proof services."
+  value       = trimspace(var.shared_sp1_rpc_url)
+}
+
 output "shared_proof_services_ecr_repository_url" {
   description = "ECR repository URL that stores the shared proof-services image."
   value       = try(aws_ecr_repository.proof_services[0].repository_url, null)

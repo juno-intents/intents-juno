@@ -2211,25 +2211,25 @@ EOF
 
   if [[ "$signer_driver" == "aws-kms" ]]; then
     awk -F= '
-      $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
-      $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
+      NR == FNR {
+        if (index($0, "=") > 0) {
+          seen[$1] = 1
+        }
+        next
+      }
       $1 == "CHECKPOINT_SIGNER_PRIVATE_KEY" { next }
-      $1 == "OPERATOR_ADDRESS" { next }
-      $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
-      $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
-      $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
-      { print }
-    ' "$resolved_secret_env" >>"$output_file"
+      !($1 in seen) { print }
+    ' "$output_file" "$resolved_secret_env" >>"$output_file"
   else
     awk -F= '
-      $1 == "CHECKPOINT_SIGNER_DRIVER" { next }
-      $1 == "CHECKPOINT_SIGNER_KMS_KEY_ID" { next }
-      $1 == "OPERATOR_ADDRESS" { next }
-      $1 == "WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS" { next }
-      $1 == "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN" { next }
-      $1 == "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION" { next }
-      { print }
-    ' "$resolved_secret_env" >>"$output_file"
+      NR == FNR {
+        if (index($0, "=") > 0) {
+          seen[$1] = 1
+        }
+        next
+      }
+      !($1 in seen) { print }
+    ' "$output_file" "$resolved_secret_env" >>"$output_file"
   fi
 
   local required_env_key
@@ -2292,7 +2292,7 @@ production_render_backoffice_env() {
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
-  local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc
+  local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc effective_juno_rpc_url
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -2314,6 +2314,7 @@ production_render_backoffice_env() {
   sp1_requestor_address="$(production_json_optional "$shared_manifest" '.shared_services.proof.requestor_address')"
   sp1_rpc_url="$(production_json_optional "$shared_manifest" '.shared_services.proof.rpc_url')"
   render_juno_rpc="false"
+  effective_juno_rpc_url="$juno_rpc_url"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -2342,9 +2343,12 @@ EOF
   if [[ -n "$sp1_rpc_url" ]]; then
     printf 'BACKOFFICE_SP1_RPC_URL=%s\n' "$sp1_rpc_url" >>"$output_file"
   fi
-  if [[ -n "$juno_rpc_url" && ! "$juno_rpc_url" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:|/|$) ]]; then
+  if [[ -n "$effective_juno_rpc_url" && "$effective_juno_rpc_url" =~ ^https?://(127\.0\.0\.1|localhost|\[::1\])(:|/|$) ]]; then
+    effective_juno_rpc_url=""
+  fi
+  if [[ -n "$effective_juno_rpc_url" ]]; then
     render_juno_rpc="true"
-    printf 'BACKOFFICE_JUNO_RPC_URL=%s\n' "$juno_rpc_url" >>"$output_file"
+    printf 'BACKOFFICE_JUNO_RPC_URL=%s\n' "$effective_juno_rpc_url" >>"$output_file"
   fi
   local fee_distributor
   fee_distributor="$(production_json_optional "$shared_manifest" '.contracts.fee_distributor')"

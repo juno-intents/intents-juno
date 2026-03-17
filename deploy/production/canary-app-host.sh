@@ -75,7 +75,9 @@ public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select
 bridge_probe_url="$(production_json_required "$app_deploy" '.services.bridge_api.public_url | select(type == "string" and length > 0)')"
 backoffice_probe_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
 bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
+wjuno_address="$(production_json_optional "$shared_manifest_path" '.contracts.wjuno')"
 shared_ecs_cluster_arn="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.cluster_arn')"
 shared_proof_requestor_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_requestor_service_name')"
 shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_funder_service_name')"
@@ -105,12 +107,17 @@ backoffice_ui_status="passed"
 backoffice_ui_detail="backoffice HTML served"
 backoffice_settings_status="passed"
 backoffice_settings_detail="backoffice runtime settings API passed"
+shared_proof_runtime_status="skipped"
+shared_proof_runtime_detail="disabled"
+backoffice_funds_status="skipped"
+backoffice_funds_detail="disabled"
 min_deposit_admin_status="passed"
 min_deposit_admin_detail="configured signer matches on-chain minDepositAdmin"
 shared_proof_services_status="passed"
 shared_proof_services_detail="shared proof ECS services active"
 http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
 http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
+require_funds_check="${PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK:-false}"
 deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
@@ -181,6 +188,10 @@ if [[ "$dry_run" == "true" ]]; then
   backoffice_ui_detail="dry run"
   backoffice_settings_status="skipped"
   backoffice_settings_detail="dry run"
+  shared_proof_runtime_status="skipped"
+  shared_proof_runtime_detail="dry run"
+  backoffice_funds_status="skipped"
+  backoffice_funds_detail="dry run"
   min_deposit_admin_status="skipped"
   min_deposit_admin_detail="dry run"
   shared_proof_services_status="skipped"
@@ -204,12 +215,19 @@ else
 
   bridge_config_json="$(http_get_with_retry "${bridge_probe_url}/v1/config" "bridge config" || true)"
   if [[ -z "$bridge_config_json" ]] \
-    || ! jq -e '.bridgeAddress | select(type == "string" and length > 0)' >/dev/null <<<"$bridge_config_json" \
+    || ! jq -e --arg bridge_address "${bridge_address,,}" --argjson base_chain_id "$base_chain_id" --arg wjuno_address "${wjuno_address,,}" '
+      (.bridgeAddress | type == "string" and ascii_downcase == $bridge_address)
+      and (.baseChainId == $base_chain_id)
+      and (
+        ($wjuno_address == "")
+        or (.wjunoAddress | type == "string" and ascii_downcase == $wjuno_address)
+      )
+    ' >/dev/null <<<"$bridge_config_json" \
     || ! jq -e '.oWalletUA | select(type == "string" and length > 0)' >/dev/null <<<"$bridge_config_json" \
     || ! jq -e '.minDepositAmount | select(type == "string" and test("^[0-9]+$"))' >/dev/null <<<"$bridge_config_json" \
     || ! jq -e '.depositMinConfirmations | select(type == "number" and . > 0)' >/dev/null <<<"$bridge_config_json"; then
     bridge_config_status="failed"
-    bridge_config_detail="bridge-api /v1/config missing bridgeAddress, oWalletUA, minDepositAmount, or depositMinConfirmations"
+    bridge_config_detail="bridge-api /v1/config missing or mismatched baseChainId, bridgeAddress, wjunoAddress, oWalletUA, minDepositAmount, or depositMinConfirmations"
   fi
 
   deposit_memo_json="$(
@@ -242,6 +260,17 @@ else
   if [[ "$backoffice_html" != *"JUNO BACKOFFICE"* ]]; then
     backoffice_ui_status="failed"
     backoffice_ui_detail="backoffice UI did not return expected marker"
+  fi
+
+  shared_proof_requestor_address="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.requestor_address')"
+  shared_proof_rpc_url="$(production_json_optional "$shared_manifest_path" '.shared_services.proof.rpc_url')"
+  if [[ "$require_funds_check" == "true" ]]; then
+    shared_proof_runtime_status="passed"
+    shared_proof_runtime_detail="shared manifest carries proof requestor runtime metadata"
+    if [[ -z "$shared_proof_requestor_address" || -z "$shared_proof_rpc_url" ]]; then
+      shared_proof_runtime_status="failed"
+      shared_proof_runtime_detail="shared manifest is missing proof.requestor_address or proof.rpc_url"
+    fi
   fi
 
   auth_secret="$(production_env_first_value "$resolved_env" BACKOFFICE_AUTH_SECRET APP_BACKOFFICE_AUTH_SECRET || true)"
@@ -282,6 +311,39 @@ else
     backoffice_settings_detail="blocked by backoffice readiness failure"
   fi
 
+  if [[ "$require_funds_check" == "true" ]]; then
+    backoffice_funds_status="passed"
+    backoffice_funds_detail="backoffice funds API reports prover and MPC wallet details"
+    if [[ "$backoffice_ready_status" == "passed" && -n "${auth_secret:-}" ]]; then
+      backoffice_funds_json="$(
+        http_get_with_retry \
+          "${backoffice_probe_url}/api/funds" \
+          "backoffice funds api" \
+          -H "Authorization: Bearer ${auth_secret}" || true
+      )"
+      if [[ -z "$backoffice_funds_json" ]] \
+        || ! jq -e '.operators | select(type == "array" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
+        || ! jq -e '.mpcWallet.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
+        || ! jq -e '.prover.network | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json" \
+        || ! jq -e '.prover.address | select(type == "string" and length > 0)' >/dev/null <<<"$backoffice_funds_json"; then
+        backoffice_funds_status="failed"
+        backoffice_funds_detail="backoffice funds API missing prover or MPC wallet fields"
+      elif [[ -n "$shared_proof_requestor_address" ]] \
+        && ! jq -e --arg requestor "${shared_proof_requestor_address,,}" '
+          .prover.address | type == "string" and ascii_downcase == $requestor
+        ' >/dev/null <<<"$backoffice_funds_json"; then
+        backoffice_funds_status="failed"
+        backoffice_funds_detail="backoffice funds prover address does not match shared manifest proof.requestor_address"
+      fi
+    elif [[ -z "${auth_secret:-}" ]]; then
+      backoffice_funds_status="failed"
+      backoffice_funds_detail="secret contract is missing BACKOFFICE_AUTH_SECRET or APP_BACKOFFICE_AUTH_SECRET"
+    else
+      backoffice_funds_status="blocked"
+      backoffice_funds_detail="blocked by backoffice readiness failure"
+    fi
+  fi
+
   if [[ -z "$shared_ecs_cluster_arn" || -z "$shared_proof_requestor_service_name" || -z "$shared_proof_funder_service_name" ]]; then
     shared_proof_services_status="failed"
     shared_proof_services_detail="shared manifest is missing ECS proof service metadata"
@@ -315,6 +377,8 @@ for status in \
   "$backoffice_ready_status" \
   "$backoffice_ui_status" \
   "$backoffice_settings_status" \
+  "$shared_proof_runtime_status" \
+  "$backoffice_funds_status" \
   "$min_deposit_admin_status" \
   "$shared_proof_services_status"; do
   if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
@@ -350,6 +414,10 @@ jq -n \
   --arg backoffice_ui_detail "$backoffice_ui_detail" \
   --arg backoffice_settings_status "$backoffice_settings_status" \
   --arg backoffice_settings_detail "$backoffice_settings_detail" \
+  --arg shared_proof_runtime_status "$shared_proof_runtime_status" \
+  --arg shared_proof_runtime_detail "$shared_proof_runtime_detail" \
+  --arg backoffice_funds_status "$backoffice_funds_status" \
+  --arg backoffice_funds_detail "$backoffice_funds_detail" \
   --arg min_deposit_admin_status "$min_deposit_admin_status" \
   --arg min_deposit_admin_detail "$min_deposit_admin_detail" \
   --arg shared_proof_services_status "$shared_proof_services_status" \
@@ -399,6 +467,14 @@ jq -n \
       backoffice_settings: {
         status: $backoffice_settings_status,
         detail: $backoffice_settings_detail
+      },
+      shared_proof_runtime: {
+        status: $shared_proof_runtime_status,
+        detail: $shared_proof_runtime_detail
+      },
+      backoffice_funds: {
+        status: $backoffice_funds_status,
+        detail: $backoffice_funds_detail
       },
       min_deposit_admin: {
         status: $min_deposit_admin_status,
