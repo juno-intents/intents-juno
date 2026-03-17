@@ -1077,7 +1077,7 @@ func sweepEphemeralDeployerWithRetry(ctx context.Context, readBalance sweepBalan
 		if err == nil {
 			return txHash, true, nil
 		}
-		if isRetriableNonceError(err) {
+		if isRetriableNonceError(err) || errors.Is(err, context.DeadlineExceeded) {
 			if attempt+1 >= sweepRetryAttempts {
 				return common.Hash{}, false, err
 			}

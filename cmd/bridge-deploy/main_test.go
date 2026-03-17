@@ -304,6 +304,58 @@ func TestSweepEphemeralDeployerWithRetry_RetriesRetriableNonceErrors(t *testing.
 	}
 }
 
+func TestSweepEphemeralDeployerWithRetry_RetriesWaitMinedTimeout(t *testing.T) {
+	t.Parallel()
+
+	balance := big.NewInt(1_000_000)
+	gasPrice := big.NewInt(7)
+	wantValue, ok := sweepValueWei(balance, sweepReservedFeeWei(gasPrice))
+	if !ok {
+		t.Fatal("expected sweep value")
+	}
+	wantHash := common.HexToHash("0x3")
+	attempts := 0
+
+	gotHash, swept, err := sweepEphemeralDeployerWithRetry(
+		context.Background(),
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(balance), nil
+		},
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(gasPrice), nil
+		},
+		func(_ context.Context, value, gotGasPrice *big.Int) (common.Hash, error) {
+			attempts++
+			if gotGasPrice.Cmp(gasPrice) != 0 {
+				t.Fatalf("gas price = %s, want %s", gotGasPrice.String(), gasPrice.String())
+			}
+			if value.Cmp(wantValue) != 0 {
+				t.Fatalf("value = %s, want %s", value.String(), wantValue.String())
+			}
+			if attempts == 1 {
+				return common.Hash{}, context.DeadlineExceeded
+			}
+			if attempts == 2 {
+				return wantHash, nil
+			}
+			t.Fatalf("unexpected sweep attempt %d", attempts)
+			return common.Hash{}, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("sweepEphemeralDeployerWithRetry: %v", err)
+	}
+	if !swept {
+		t.Fatalf("swept = false, want true")
+	}
+	if gotHash != wantHash {
+		t.Fatalf("hash = %s, want %s", gotHash.Hex(), wantHash.Hex())
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
 func TestInsufficientFundsShortageWei_ParsesOvershotFormat(t *testing.T) {
 	t.Parallel()
 
