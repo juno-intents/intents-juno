@@ -2056,6 +2056,7 @@ production_render_operator_stack_env() {
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
   local juno_txsign_signer_keys owallet_ua withdraw_change_address
+  local juno_rpc_bind juno_rpc_allow_ips
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   juno_txsign_signer_keys=""
@@ -2067,6 +2068,8 @@ production_render_operator_stack_env() {
   runtime_withdraw_batch_confirmations="$(production_default_withdraw_batch_confirmations)"
   withdraw_expiry_safety_margin="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN || true)"
   withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
+  juno_rpc_bind="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_BIND || true)"
+  juno_rpc_allow_ips="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_ALLOW_IPS || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
@@ -2164,6 +2167,12 @@ EOF
   fi
   if [[ -n "$juno_txsign_signer_keys" ]]; then
     printf 'JUNO_TXSIGN_SIGNER_KEYS=%s\n' "$juno_txsign_signer_keys" >>"$output_file"
+  fi
+  if [[ -n "$juno_rpc_bind" ]]; then
+    printf 'JUNO_RPC_BIND=%s\n' "$juno_rpc_bind" >>"$output_file"
+  fi
+  if [[ -n "$juno_rpc_allow_ips" ]]; then
+    printf 'JUNO_RPC_ALLOW_IPS=%s\n' "$juno_rpc_allow_ips" >>"$output_file"
   fi
   if [[ -n "$aws_region" ]]; then
     printf 'AWS_REGION=%s\n' "$aws_region" >>"$output_file"
@@ -2375,7 +2384,7 @@ EOF
 production_render_junocashd_conf() {
   local operator_stack_env="$1"
   local output_file="$2"
-  local rpc_user rpc_pass
+  local rpc_user rpc_pass rpc_bind rpc_allow_ips allow_ip
 
   [[ -f "$operator_stack_env" ]] || die "operator stack env not found: $operator_stack_env"
   rpc_user="$(
@@ -2394,8 +2403,27 @@ production_render_junocashd_conf() {
       }
     ' "$operator_stack_env"
   )"
+  rpc_bind="$(
+    awk -F= '
+      $1 == "JUNO_RPC_BIND" {
+        print substr($0, index($0, "=") + 1)
+        exit
+      }
+    ' "$operator_stack_env"
+  )"
+  rpc_allow_ips="$(
+    awk -F= '
+      $1 == "JUNO_RPC_ALLOW_IPS" {
+        print substr($0, index($0, "=") + 1)
+        exit
+      }
+    ' "$operator_stack_env"
+  )"
   [[ -n "$rpc_user" ]] || die "operator stack env is missing JUNO_RPC_USER"
   [[ -n "$rpc_pass" ]] || die "operator stack env is missing JUNO_RPC_PASS"
+  if [[ -z "$rpc_bind" ]]; then
+    rpc_bind="127.0.0.1"
+  fi
 
   {
     printf 'testnet=1\n'
@@ -2404,8 +2432,15 @@ production_render_junocashd_conf() {
     printf 'txunpaidactionlimit=10000\n'
     printf 'daemon=0\n'
     printf 'listen=1\n'
-    printf 'rpcbind=127.0.0.1\n'
+    printf 'rpcbind=%s\n' "$rpc_bind"
     printf 'rpcallowip=127.0.0.1\n'
+    IFS=',' read -r -a rpc_allow_ip_list <<<"$rpc_allow_ips"
+    for allow_ip in "${rpc_allow_ip_list[@]}"; do
+      allow_ip="${allow_ip//[[:space:]]/}"
+      [[ -n "$allow_ip" ]] || continue
+      [[ "$allow_ip" == "127.0.0.1" ]] && continue
+      printf 'rpcallowip=%s\n' "$allow_ip"
+    done
     printf 'rpcport=18232\n'
     printf 'rpcuser=%s\n' "$rpc_user"
     printf 'rpcpassword=%s\n' "$rpc_pass"

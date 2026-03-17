@@ -563,6 +563,14 @@ resource "aws_security_group" "operator" {
     security_groups = [aws_security_group.runner.id]
   }
 
+  ingress {
+    description     = "Juno RPC from runner"
+    from_port       = 18232
+    to_port         = 18232
+    protocol        = "tcp"
+    security_groups = [aws_security_group.runner.id]
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0

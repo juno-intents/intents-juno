@@ -177,6 +177,10 @@ JUNO_RPC_PASS=literal:rpcpass
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cat >>"$workdir/operator-secrets.env" <<'EOF'
+JUNO_RPC_BIND=literal:0.0.0.0
+JUNO_RPC_ALLOW_IPS=literal:127.0.0.1,10.0.0.5
+EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -279,6 +283,10 @@ JUNO_RPC_PASS=literal:rpcpass
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cat >>"$workdir/operator-secrets.env" <<'EOF'
+JUNO_RPC_BIND=literal:0.0.0.0
+JUNO_RPC_ALLOW_IPS=literal:127.0.0.1,10.0.0.5
+EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -1154,6 +1162,10 @@ JUNO_RPC_PASS=literal:rpcpass
 JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 EOF
   append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cat >>"$workdir/operator-secrets.env" <<'EOF'
+JUNO_RPC_BIND=literal:0.0.0.0
+JUNO_RPC_ALLOW_IPS=literal:127.0.0.1,10.0.0.5
+EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   cat >"$workdir/app-secrets.env" <<'EOF'
@@ -1196,6 +1208,8 @@ EOF
   assert_contains "$(cat "$output_env")" "AWS_DEFAULT_REGION=us-east-1" "rendered env aws default region"
   assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
   assert_contains "$(cat "$output_env")" "JUNO_RPC_PASS=rpcpass" "rendered env juno rpc pass"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_BIND=0.0.0.0" "rendered env juno rpc bind override"
+  assert_contains "$(cat "$output_env")" "JUNO_RPC_ALLOW_IPS=127.0.0.1,10.0.0.5" "rendered env juno rpc allowlist override"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw coordinator juno rpc url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw coordinator scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443" "rendered env withdraw coordinator tss url"
@@ -1864,11 +1878,15 @@ test_render_junocashd_conf_uses_juno_rpc_credentials() {
   cat >"$env_file" <<'EOF'
 JUNO_RPC_USER=juno
 JUNO_RPC_PASS=rpcpass
+JUNO_RPC_BIND=0.0.0.0
+JUNO_RPC_ALLOW_IPS=127.0.0.1,10.0.0.5
 EOF
 
   production_render_junocashd_conf "$env_file" "$output_conf"
 
-  assert_contains "$(cat "$output_conf")" "rpcbind=127.0.0.1" "junocashd conf rpc bind"
+  assert_contains "$(cat "$output_conf")" "rpcbind=0.0.0.0" "junocashd conf rpc bind"
+  assert_contains "$(cat "$output_conf")" "rpcallowip=127.0.0.1" "junocashd conf first rpc allow ip"
+  assert_contains "$(cat "$output_conf")" "rpcallowip=10.0.0.5" "junocashd conf second rpc allow ip"
   assert_contains "$(cat "$output_conf")" "rpcport=18232" "junocashd conf rpc port"
   assert_contains "$(cat "$output_conf")" "rpcuser=juno" "junocashd conf rpc user"
   assert_contains "$(cat "$output_conf")" "rpcpassword=rpcpass" "junocashd conf rpc password"
