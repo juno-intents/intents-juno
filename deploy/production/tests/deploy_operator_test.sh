@@ -334,6 +334,73 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_respects_scan_backfill_from_height_override() {
+  local workdir output_dir manifest log_dir fake_bin
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":118298,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":100000,"to_height":118298,"scanned_from":100000,"scanned_to":109999,"next_height":118299,"inserted_notes":1,"inserted_events":2}'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PRODUCTION_DEPLOY_SCAN_BACKFILL_FROM_HEIGHT=100000 PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" >/dev/null
+
+  assert_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill eyJmcm9tX2hlaWdodCI6MTAwMDAw" "deploy uses the configured scan backfill start height"
+  rm -rf "$workdir"
+}
+
 test_deploy_operator_stages_distributed_dkg_server_tls() {
   local workdir output_dir manifest shared_manifest log_dir fake_bin state_file cert_b64 key_b64 san_text
   workdir="$(mktemp -d)"
@@ -857,6 +924,7 @@ EOF
 
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
+  test_deploy_operator_respects_scan_backfill_from_height_override
   test_deploy_operator_stages_distributed_dkg_server_tls
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
   test_deploy_operator_rejects_underfunded_base_relayer_before_rollout

@@ -496,14 +496,15 @@ sync_remote_scan_wallet() {
   local wallet_id="$2"
   local signer_ufvk="$3"
   local bearer_token="$4"
-  local wallet_payload backfill_payload backfill_response next_height to_height
+  local wallet_payload backfill_payload backfill_response next_height to_height backfill_from_height
 
   wallet_payload="$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$signer_ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')"
   remote_juno_scan_post "$scan_url" "/v1/wallets" "$wallet_payload" "$bearer_token" >/dev/null
 
   wait_for_remote_juno_scan_tip "$scan_url" "$bearer_token"
 
-  next_height=0
+  backfill_from_height="${PRODUCTION_DEPLOY_SCAN_BACKFILL_FROM_HEIGHT:-0}"
+  next_height="$backfill_from_height"
   while :; do
     backfill_payload="$(jq -cn --argjson from_height "$next_height" --argjson batch_size 10000 '{from_height: $from_height, batch_size: $batch_size}')"
     backfill_response="$(remote_juno_scan_post "$scan_url" "/v1/wallets/${wallet_id}/backfill" "$backfill_payload" "$bearer_token")"
