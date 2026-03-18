@@ -419,6 +419,65 @@ func TestMemoryStore_ClaimConfirmed_LeaseBehavior(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_ClaimConfirmed_ReclaimsProofRequestedAfterLeaseExpiry(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x31
+	var cm [32]byte
+	cm[0] = 0xaa
+	var recip [20]byte
+	recip[0] = 0x22
+
+	if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	if claimed, err := s.ClaimConfirmed(ctx, "worker-a", 80*time.Millisecond, 10); err != nil {
+		t.Fatalf("ClaimConfirmed worker-a: %v", err)
+	} else if len(claimed) != 1 {
+		t.Fatalf("expected worker-a claim, got %d", len(claimed))
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if err := s.MarkProofRequested(ctx, id, cp); err != nil {
+		t.Fatalf("MarkProofRequested: %v", err)
+	}
+	if sameOwner, err := s.ClaimConfirmed(ctx, "worker-a", 80*time.Millisecond, 10); err != nil {
+		t.Fatalf("ClaimConfirmed same owner: %v", err)
+	} else if len(sameOwner) != 1 {
+		t.Fatalf("expected same owner to reclaim proof-requested job, got %d", len(sameOwner))
+	}
+	if other, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10); err != nil {
+		t.Fatalf("ClaimConfirmed worker-b: %v", err)
+	} else if len(other) != 0 {
+		t.Fatalf("expected other worker to be excluded while proof-request lease active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	if afterExpiry, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10); err != nil {
+		t.Fatalf("ClaimConfirmed worker-b after expiry: %v", err)
+	} else if len(afterExpiry) != 1 || afterExpiry[0].State != StateProofRequested {
+		t.Fatalf("expected worker-b to reclaim proof-requested job after expiry, got %+v", afterExpiry)
+	}
+}
+
 func TestMemoryStore_MarkBatchSubmitted(t *testing.T) {
 	t.Parallel()
 

@@ -415,6 +415,34 @@ func TestRelayer_NewRejectsMissingOWalletIVK(t *testing.T) {
 	}
 }
 
+func TestRelayer_NewDefaultsClaimTTLToProofTimeoutPlusBuffer(t *testing.T) {
+	t.Parallel()
+
+	operatorKey := mustOperatorKey(t)
+
+	r, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{crypto.PubkeyToAddress(operatorKey.PublicKey)},
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Now:               time.Now,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if got, want := r.cfg.ProofRequestTimeout, 15*time.Minute; got != want {
+		t.Fatalf("proof request timeout: got %s want %s", got, want)
+	}
+	if got, want := r.cfg.ClaimTTL, 17*time.Minute; got != want {
+		t.Fatalf("claim ttl: got %s want %s", got, want)
+	}
+}
+
 func TestRelayer_RefillFromStore_PromotesSeenAndRejectsBelowMin(t *testing.T) {
 	t.Parallel()
 
@@ -1526,6 +1554,14 @@ func TestRelayer_ClaimConfirmedPreventsDuplicateWorkerSends(t *testing.T) {
 	}()
 
 	prover1.waitEntered(t, time.Second)
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get during proof request: %v", err)
+	}
+	if got, want := job.State, deposit.StateProofRequested; got != want {
+		t.Fatalf("state during proof request: got %v want %v", got, want)
+	}
 
 	if err := r2.Flush(ctx); err != nil {
 		t.Fatalf("r2 Flush: %v", err)

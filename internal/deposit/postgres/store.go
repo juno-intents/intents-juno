@@ -403,22 +403,22 @@ func (s *Store) ClaimConfirmed(ctx context.Context, owner string, ttl time.Durat
 			SELECT deposit_id
 			FROM deposit_jobs
 			WHERE
-				state = $1
+				state IN ($1, $2)
 				AND (
 					claim_expires_at IS NULL
 					OR claim_expires_at <= now()
-					OR claimed_by = $2
+					OR claimed_by = $3
 				)
 			ORDER BY created_at ASC, deposit_id ASC
 			FOR UPDATE SKIP LOCKED
-			LIMIT $3
+			LIMIT $4
 		)
 		UPDATE deposit_jobs dj
-		SET claimed_by = $2, claim_expires_at = $4, updated_at = now()
+		SET claimed_by = $3, claim_expires_at = $5, updated_at = now()
 		FROM picked
 		WHERE dj.deposit_id = picked.deposit_id
 		RETURNING dj.deposit_id
-	`, int16(deposit.StateConfirmed), owner, limit, expiresAt)
+	`, int16(deposit.StateConfirmed), int16(deposit.StateProofRequested), owner, limit, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("deposit/postgres: claim confirmed: %w", err)
 	}
@@ -533,8 +533,6 @@ func (s *Store) MarkProofRequested(ctx context.Context, depositID [32]byte, cp c
 			checkpoint_final_orchard_root = $5,
 			checkpoint_base_chain_id = $6,
 			checkpoint_bridge_contract = $7,
-			claimed_by = NULL,
-			claim_expires_at = NULL,
 			updated_at = now()
 		WHERE deposit_id = $1 AND state < $8
 	`, depositID[:],

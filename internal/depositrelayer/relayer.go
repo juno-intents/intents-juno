@@ -184,11 +184,11 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	if cfg.Owner == "" {
 		cfg.Owner = fmt.Sprintf("deposit-relayer-%d", time.Now().UnixNano())
 	}
-	if cfg.ClaimTTL <= 0 {
-		cfg.ClaimTTL = 30 * time.Second
-	}
 	if cfg.ProofRequestTimeout <= 0 {
 		cfg.ProofRequestTimeout = 15 * time.Minute
+	}
+	if cfg.ClaimTTL <= 0 {
+		cfg.ClaimTTL = cfg.ProofRequestTimeout + 2*time.Minute
 	}
 	if cfg.ProofPriority < 0 {
 		return nil, fmt.Errorf("%w: ProofPriority must be >= 0", ErrInvalidConfig)
@@ -640,6 +640,12 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 
 	pctx, cancel := context.WithTimeout(ctx, r.cfg.ProofRequestTimeout)
 	defer cancel()
+
+	for _, it := range batch.Items {
+		if err := r.store.MarkProofRequested(ctx, it.ID, cp); err != nil {
+			return fmt.Errorf("depositrelayer: mark proof requested %x: %w", it.ID[:8], err)
+		}
+	}
 
 	proofRes, err := r.prover.RequestProof(pctx, proofclient.Request{
 		JobID:        jobID,
