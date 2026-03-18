@@ -172,4 +172,7 @@ CREATE INDEX IF NOT EXISTS withdrawal_requests_requester_idx ON withdrawal_reque
 CREATE INDEX IF NOT EXISTS withdrawal_batches_juno_txid_idx ON withdrawal_batches (juno_txid) WHERE juno_txid IS NOT NULL AND juno_txid <> '';
 CREATE INDEX IF NOT EXISTS withdrawal_batches_base_tx_hash_idx ON withdrawal_batches (base_tx_hash) WHERE base_tx_hash IS NOT NULL AND base_tx_hash <> '';
 CREATE INDEX IF NOT EXISTS withdrawal_batches_unconfirmed_idx ON withdrawal_batches (juno_confirmed_at) WHERE juno_confirmed_at IS NOT NULL AND dlq_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS withdrawal_requests_base_event_key_idx
+  ON withdrawal_requests (base_tx_hash, base_log_index)
+  WHERE base_tx_hash IS NOT NULL AND base_log_index IS NOT NULL;
 `

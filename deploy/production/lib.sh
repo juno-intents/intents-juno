@@ -1837,7 +1837,7 @@ production_render_app_handoff() {
   edge_state_path="$edge_state_dir/${env_slug}.tfstate"
   edge_origin_record_name="origin.${public_subdomain}"
   edge_origin_endpoint="$public_endpoint"
-  edge_origin_http_port=80
+  edge_origin_http_port=443
   edge_rate_limit=2000
   edge_enable_shield_advanced="false"
 

@@ -125,6 +125,38 @@ func TestMemoryStore_UpsertRequested_RejectsBaseEventMetadataMismatch(t *testing
 	}
 }
 
+func TestMemoryStore_UpsertRequested_RejectsDuplicateBaseEventKeyAcrossWithdrawalIDs(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	s := NewMemoryStore(func() time.Time { return now })
+
+	w0 := Withdrawal{
+		ID:                 seq32(0x31),
+		Amount:             1000,
+		FeeBps:             50,
+		RecipientUA:        []byte{0x01},
+		ProofWitnessItem:   []byte{0x09, 0x08},
+		Expiry:             now.Add(24 * time.Hour),
+		BaseBlockNumber:    100,
+		BaseBlockHash:      seq32(0x40),
+		BaseTxHash:         seq32(0x80),
+		BaseLogIndex:       7,
+		BaseFinalitySource: "safe",
+	}
+	if _, created, err := s.UpsertRequested(context.Background(), w0); err != nil {
+		t.Fatalf("UpsertRequested w0: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	w1 := w0
+	w1.ID = seq32(0x32)
+	if _, _, err := s.UpsertRequested(context.Background(), w1); !errors.Is(err, ErrWithdrawalMismatch) {
+		t.Fatalf("expected ErrWithdrawalMismatch for duplicate base event key, got %v", err)
+	}
+}
+
 func TestMemoryStore_GetWithdrawal_DefensiveCopy(t *testing.T) {
 	t.Parallel()
 

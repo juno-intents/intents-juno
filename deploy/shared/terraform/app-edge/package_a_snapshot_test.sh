@@ -41,6 +41,8 @@ main() {
   assert_contains "$bridge_aaaa" 'allow_overwrite = true' "bridge AAAA record allows overwrite for replay-safe preview deploys"
   assert_contains "$backoffice_a" 'allow_overwrite = true' "backoffice A record allows overwrite for replay-safe preview deploys"
   assert_contains "$backoffice_aaaa" 'allow_overwrite = true' "backoffice AAAA record allows overwrite for replay-safe preview deploys"
+  assert_contains "$main_tf" 'origin_protocol_policy = "https-only"' "CloudFront uses TLS on the origin leg"
+  assert_contains "$main_tf" 'description       = "CloudFront origin HTTPS"' "origin ingress rule is scoped to HTTPS"
 
   printf 'app_edge package_a_snapshot_test: PASS\n'
 }

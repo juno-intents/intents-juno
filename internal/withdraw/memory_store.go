@@ -48,6 +48,14 @@ func (s *MemoryStore) UpsertRequested(_ context.Context, w Withdrawal) (Withdraw
 
 	rec, ok := s.withdrawals[w.ID]
 	if !ok {
+		for existingID, existing := range s.withdrawals {
+			if existingID == w.ID {
+				continue
+			}
+			if sameBaseEventKey(existing.w, w) {
+				return Withdrawal{}, false, ErrWithdrawalMismatch
+			}
+		}
 		w.RecipientUA = append([]byte(nil), w.RecipientUA...)
 		s.withdrawals[w.ID] = withdrawalRec{w: w, status: WithdrawalStatusRequested}
 		return w, true, nil
@@ -663,6 +671,13 @@ func withdrawalEqual(a, b Withdrawal) bool {
 	}
 	return bytes.Equal(a.RecipientUA, b.RecipientUA) &&
 		bytes.Equal(a.ProofWitnessItem, b.ProofWitnessItem)
+}
+
+func sameBaseEventKey(a, b Withdrawal) bool {
+	return a.BaseTxHash != ([32]byte{}) &&
+		b.BaseTxHash != ([32]byte{}) &&
+		a.BaseTxHash == b.BaseTxHash &&
+		a.BaseLogIndex == b.BaseLogIndex
 }
 
 func sortedUnique32(in [][32]byte) ([][32]byte, error) {

@@ -83,7 +83,7 @@ locals {
   shared_sp1_withdraw_program_url              = can(regex("^0x[0-9a-f]{64}$", local.shared_withdraw_image_id)) ? format("https://github.com/juno-intents/intents-juno/releases/download/%s/withdraw-guest-%s.elf", local.shared_proof_guest_release_tag, local.shared_withdraw_image_id_hex) : ""
   shared_proof_requestor_command = [
     "/usr/local/bin/proof-requestor",
-    "--postgres-dsn", local.shared_postgres_dsn,
+    "--postgres-dsn-env", "POSTGRES_DSN",
     "--store-driver", "postgres",
     "--owner", "${local.resource_name}-proof-requestor",
     "--sp1-requestor-address", local.shared_sp1_requestor_address,
@@ -103,7 +103,7 @@ locals {
   ]
   shared_proof_funder_command = [
     "/usr/local/bin/proof-funder",
-    "--postgres-dsn", local.shared_postgres_dsn,
+    "--postgres-dsn-env", "POSTGRES_DSN",
     "--lease-driver", "postgres",
     "--owner-id", "${local.resource_name}-proof-funder",
     "--sp1-requestor-address", local.shared_sp1_requestor_address,
@@ -486,6 +486,16 @@ resource "aws_iam_role" "proof_funder_task" {
   tags               = local.common_tags
 }
 
+resource "aws_secretsmanager_secret" "shared_postgres_dsn" {
+  name = "${local.resource_name}-shared-postgres-dsn"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_postgres_dsn" {
+  secret_id     = aws_secretsmanager_secret.shared_postgres_dsn.id
+  secret_string = local.shared_postgres_dsn
+}
+
 data "aws_iam_policy_document" "proof_requestor_execution_access" {
   dynamic "statement" {
     for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []
@@ -531,6 +541,15 @@ data "aws_iam_policy_document" "proof_requestor_execution_access" {
       "secretsmanager:GetSecretValue",
     ]
     resources = [var.shared_sp1_requestor_secret_arn]
+  }
+
+  statement {
+    sid = "AllowSharedPostgresDSNRead"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [aws_secretsmanager_secret.shared_postgres_dsn.arn]
   }
 }
 
@@ -579,6 +598,15 @@ data "aws_iam_policy_document" "proof_funder_execution_access" {
       "secretsmanager:GetSecretValue",
     ]
     resources = [var.shared_sp1_funder_secret_arn]
+  }
+
+  statement {
+    sid = "AllowSharedPostgresDSNRead"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [aws_secretsmanager_secret.shared_postgres_dsn.arn]
   }
 }
 
@@ -723,6 +751,10 @@ resource "aws_ecs_task_definition" "proof_requestor" {
       environment = local.shared_proof_requestor_environment
       secrets = [
         {
+          name      = "POSTGRES_DSN"
+          valueFrom = aws_secretsmanager_secret.shared_postgres_dsn.arn
+        },
+        {
           name      = "PROOF_REQUESTOR_KEY"
           valueFrom = var.shared_sp1_requestor_secret_arn
         }
@@ -781,6 +813,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
       command     = local.shared_proof_funder_command
       environment = local.shared_proof_funder_environment
       secrets = [
+        {
+          name      = "POSTGRES_DSN"
+          valueFrom = aws_secretsmanager_secret.shared_postgres_dsn.arn
+        },
         {
           name      = "PROOF_FUNDER_KEY"
           valueFrom = var.shared_sp1_funder_secret_arn

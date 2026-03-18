@@ -1974,7 +1974,7 @@ EOF
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
   assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"
   assert_eq "$(jq -r '.edge.origin_endpoint' "$app_manifest")" "203.0.113.21" "edge origin endpoint"
-  assert_eq "$(jq -r '.edge.origin_http_port' "$app_manifest")" "80" "edge origin port"
+  assert_eq "$(jq -r '.edge.origin_http_port' "$app_manifest")" "443" "edge origin port"
   assert_eq "$(jq -r '.edge.rate_limit' "$app_manifest")" "2000" "edge rate limit"
   assert_eq "$(jq -r '.edge.state_path' "$app_manifest")" "$workdir/edge-state/alpha.tfstate" "edge state path is stable per environment"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"

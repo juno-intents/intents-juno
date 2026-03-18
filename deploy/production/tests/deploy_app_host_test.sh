@@ -600,12 +600,15 @@ EOF
 
   assert_contains "$(cat "$log_dir/terraform.log")" "init" "edge terraform init"
   assert_contains "$(cat "$log_dir/terraform.log")" "apply" "edge terraform apply"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'auto_https off' "edge caddy disables direct tls"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'origin.alpha.intents-testing.thejunowallet.com' "edge caddy serves the dedicated origin hostname"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'email $acme_account_email' "edge caddy uses acme for origin tls"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /bridge*' "edge caddy bridge origin route"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /ops*' "edge caddy backoffice origin route"
+  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'auto_https off' "edge caddy no longer disables direct tls"
   assert_not_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "edge path does not publish direct dns records"
-  assert_not_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "edge path does not open direct public ingress"
-  assert_contains "$(cat "$log_dir/aws.log")" "revoke-security-group-ingress" "edge path revokes legacy direct ingress"
+  assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "edge path opens public 443 for origin tls"
+  assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":443' "edge path authorizes https ingress"
+  assert_contains "$(cat "$log_dir/aws.log")" "revoke-security-group-ingress" "edge path revokes legacy direct http ingress"
   rm -rf "$workdir"
 }
 

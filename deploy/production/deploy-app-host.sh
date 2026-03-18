@@ -94,6 +94,7 @@ edge_enabled="$(production_json_optional "$app_deploy" '.edge.enabled')"
 if [[ "$edge_enabled" != "true" ]]; then
   edge_enabled="false"
 fi
+edge_origin_record_name="$(production_json_optional "$app_deploy" '.edge.origin_record_name')"
 
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
@@ -237,8 +238,8 @@ if [[ "$public_scheme" == "https" && "$edge_enabled" == "false" ]]; then
   ensure_security_group_ingress 443
 else
   if [[ "$edge_enabled" == "true" ]]; then
+    ensure_security_group_ingress 443
     revoke_security_group_ingress 80
-    revoke_security_group_ingress 443
   else
     ensure_security_group_ingress "$bridge_port"
     ensure_security_group_ingress "$backoffice_port"
@@ -276,6 +277,7 @@ public_scheme="$public_scheme"
 acme_account_email="$acme_account_email"
 bridge_record_name="$bridge_record_name"
 backoffice_record_name="$backoffice_record_name"
+edge_origin_record_name="$edge_origin_record_name"
 shared_postgres_dsn="$shared_postgres_dsn"
 shared_kafka_brokers="$shared_kafka_brokers"
 shared_kafka_auth_mode="$shared_kafka_auth_mode"
@@ -478,10 +480,10 @@ if [[ "\$public_scheme" == "https" ]]; then
   if [[ "$edge_enabled" == "true" ]]; then
     cat >"\$caddyfile_tmp" <<CADDY
 {
-  auto_https off
+  email \$acme_account_email
 }
 
-:80 {
+\$edge_origin_record_name {
   encode zstd gzip
   handle_path /bridge* {
     reverse_proxy 127.0.0.1:$bridge_port

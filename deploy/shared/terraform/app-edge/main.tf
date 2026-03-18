@@ -205,7 +205,7 @@ resource "aws_cloudfront_distribution" "bridge" {
     custom_origin_config {
       http_port              = var.origin_http_port
       https_port             = 443
-      origin_protocol_policy = "http-only"
+      origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
@@ -253,7 +253,7 @@ resource "aws_cloudfront_distribution" "backoffice" {
     custom_origin_config {
       http_port              = var.origin_http_port
       https_port             = 443
-      origin_protocol_policy = "http-only"
+      origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
@@ -340,7 +340,7 @@ resource "aws_route53_record" "backoffice_alias_aaaa" {
 resource "aws_security_group_rule" "origin_http_from_cloudfront" {
   count             = var.security_group_id != "" ? 1 : 0
   type              = "ingress"
-  description       = "CloudFront origin HTTP"
+  description       = "CloudFront origin HTTPS"
   from_port         = var.origin_http_port
   to_port           = var.origin_http_port
   protocol          = "tcp"

@@ -112,6 +112,10 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 		ON CONFLICT (withdrawal_id) DO NOTHING
 	`, w.ID[:], w.Requester[:], int64(w.Amount), int32(w.FeeBps), w.RecipientUA, w.ProofWitnessItem, w.Expiry, baseBlockNumber, baseBlockHash, baseTxHash, baseLogIndex, baseFinalitySource, int16(withdraw.WithdrawalStatusRequested))
 	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "withdrawal_requests_base_event_key_idx" {
+			return withdraw.Withdrawal{}, false, withdraw.ErrWithdrawalMismatch
+		}
 		return withdraw.Withdrawal{}, false, fmt.Errorf("withdraw/postgres: insert requested: %w", err)
 	}
 	if tag.RowsAffected() == 1 {

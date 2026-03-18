@@ -80,6 +80,12 @@ output "shared_proof_funder_secret_arn" {
   sensitive   = true
 }
 
+output "shared_postgres_dsn_secret_arn" {
+  description = "Secrets Manager ARN containing the shared services Postgres DSN."
+  value       = aws_secretsmanager_secret.shared_postgres_dsn.arn
+  sensitive   = true
+}
+
 output "shared_ipfs_nlb_dns" {
   description = "Internal NLB DNS name fronting the IPFS ASG."
   value       = aws_lb.ipfs.dns_name
