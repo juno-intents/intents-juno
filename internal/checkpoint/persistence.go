@@ -25,6 +25,7 @@ type PackageStore interface {
 	Get(ctx context.Context, digest common.Hash) (PackageRecord, error)
 	ListByState(ctx context.Context, state PackageState) ([]PackageRecord, error)
 	ListReadyToPin(ctx context.Context, now time.Time, limit int) ([]PackageRecord, error)
+	ClaimReadyToPin(ctx context.Context, owner string, claimTTL time.Duration, now time.Time, limit int) ([]PackageRecord, error)
 }
 
 // IPFSPinner pins a package payload and returns the resulting CID.
@@ -53,6 +54,8 @@ type PackageRecord struct {
 	PinLastError     string
 	PinLastAttemptAt time.Time
 	PinNextAttemptAt time.Time
+	PinClaimOwner    string
+	PinClaimUntil    time.Time
 	State            PackageState
 	PersistedAt      time.Time
 	EmittedAt        time.Time
@@ -223,7 +226,7 @@ func (p *PackagePersistence) Get(ctx context.Context, digest common.Hash) (Packa
 	return p.store.Get(ctx, digest)
 }
 
-func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int, error) {
+func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, owner string, claimTTL time.Duration, limit int) (int, error) {
 	if p == nil || p.ipfs == nil {
 		return 0, nil
 	}
@@ -233,8 +236,15 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int
 	if limit <= 0 {
 		return 0, nil
 	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return 0, fmt.Errorf("%w: pin claim owner is required", ErrInvalidPersistenceConfig)
+	}
+	if claimTTL <= 0 {
+		claimTTL = time.Minute
+	}
 
-	recs, err := p.store.ListReadyToPin(ctx, p.now().UTC(), limit)
+	recs, err := p.store.ClaimReadyToPin(ctx, owner, claimTTL, p.now().UTC(), limit)
 	if err != nil {
 		return 0, err
 	}
@@ -249,6 +259,8 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int
 			rec.PinState = PackagePinStateFailed
 			rec.PinLastError = pinErrorString(err)
 			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
+			rec.PinClaimOwner = ""
+			rec.PinClaimUntil = time.Time{}
 			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
 				return processed, upsertErr
 			}
@@ -261,6 +273,8 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int
 			rec.PinState = PackagePinStateFailed
 			rec.PinLastError = "checkpoint/ipfs: empty cid in response"
 			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
+			rec.PinClaimOwner = ""
+			rec.PinClaimUntil = time.Time{}
 			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
 				return processed, upsertErr
 			}
@@ -272,6 +286,8 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int
 		rec.PinState = PackagePinStatePinned
 		rec.PinLastError = ""
 		rec.PinNextAttemptAt = time.Time{}
+		rec.PinClaimOwner = ""
+		rec.PinClaimUntil = time.Time{}
 		if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
 			return processed, upsertErr
 		}
@@ -392,6 +408,60 @@ func (s *MemoryPackageStore) ListReadyToPin(_ context.Context, now time.Time, li
 		}
 	})
 	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
+	return out, nil
+}
+
+func (s *MemoryPackageStore) ClaimReadyToPin(_ context.Context, owner string, claimTTL time.Duration, now time.Time, limit int) ([]PackageRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if limit <= 0 {
+		return nil, nil
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, fmt.Errorf("%w: pin claim owner is required", ErrInvalidPersistenceConfig)
+	}
+	if claimTTL <= 0 {
+		claimTTL = time.Minute
+	}
+
+	out := make([]PackageRecord, 0, len(s.records))
+	for digest, rec := range s.records {
+		if rec.PinState != PackagePinStatePending && rec.PinState != PackagePinStateFailed {
+			continue
+		}
+		if !rec.PinNextAttemptAt.IsZero() && rec.PinNextAttemptAt.After(now) {
+			continue
+		}
+		if rec.PinClaimOwner != "" && !rec.PinClaimUntil.IsZero() && rec.PinClaimUntil.After(now) {
+			continue
+		}
+		rec.PinClaimOwner = owner
+		rec.PinClaimUntil = now.Add(claimTTL)
+		s.records[digest] = clonePackageRecord(rec)
+		out = append(out, clonePackageRecord(rec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := out[i].PinNextAttemptAt
+		right := out[j].PinNextAttemptAt
+		switch {
+		case left.Equal(right):
+			if out[i].PersistedAt.Equal(out[j].PersistedAt) {
+				return out[i].Digest.Hex() < out[j].Digest.Hex()
+			}
+			return out[i].PersistedAt.Before(out[j].PersistedAt)
+		case left.IsZero():
+			return true
+		case right.IsZero():
+			return false
+		default:
+			return left.Before(right)
+		}
+	})
+	if len(out) > limit {
 		out = out[:limit]
 	}
 	return out, nil

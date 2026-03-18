@@ -72,13 +72,15 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			pin_last_error,
 			pin_last_attempt_at,
 			pin_next_attempt_at,
+			pin_claim_owner,
+			pin_claim_until,
 			s3_key,
 			package_json,
 			state,
 			persisted_at,
 			emitted_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,now())
 		ON CONFLICT (digest) DO UPDATE
 		SET
 			checkpoint_height = EXCLUDED.checkpoint_height,
@@ -93,6 +95,8 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			pin_last_error = EXCLUDED.pin_last_error,
 			pin_last_attempt_at = EXCLUDED.pin_last_attempt_at,
 			pin_next_attempt_at = EXCLUDED.pin_next_attempt_at,
+			pin_claim_owner = EXCLUDED.pin_claim_owner,
+			pin_claim_until = EXCLUDED.pin_claim_until,
 			s3_key = EXCLUDED.s3_key,
 			package_json = EXCLUDED.package_json,
 			state = EXCLUDED.state,
@@ -113,6 +117,8 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 		strings.TrimSpace(rec.PinLastError),
 		nullableTime(rec.PinLastAttemptAt),
 		nullableTime(rec.PinNextAttemptAt),
+		strings.TrimSpace(rec.PinClaimOwner),
+		nullableTime(rec.PinClaimUntil),
 		nullableString(rec.BlobKey),
 		rec.Payload,
 		int16(rec.State),
@@ -147,6 +153,8 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		pinLastError     string
 		pinLastAttemptAt *time.Time
 		pinNextAttemptAt *time.Time
+		pinClaimOwner    string
+		pinClaimUntil    *time.Time
 		blobKey          *string
 		payload          []byte
 		state            int16
@@ -169,6 +177,8 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 			pin_last_error,
 			pin_last_attempt_at,
 			pin_next_attempt_at,
+			pin_claim_owner,
+			pin_claim_until,
 			s3_key,
 			package_json,
 			state,
@@ -190,6 +200,8 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		&pinLastError,
 		&pinLastAttemptAt,
 		&pinNextAttemptAt,
+		&pinClaimOwner,
+		&pinClaimUntil,
 		&blobKey,
 		&payload,
 		&state,
@@ -241,6 +253,7 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		PinState:        checkpoint.PackagePinState(pinState),
 		PinAttempts:     int(pinAttempts),
 		PinLastError:    strings.TrimSpace(pinLastError),
+		PinClaimOwner:   strings.TrimSpace(pinClaimOwner),
 		State:           checkpoint.PackageState(state),
 		PersistedAt:     persistedAt.UTC(),
 	}
@@ -258,6 +271,9 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 	}
 	if pinNextAttemptAt != nil {
 		rec.PinNextAttemptAt = (*pinNextAttemptAt).UTC()
+	}
+	if pinClaimUntil != nil {
+		rec.PinClaimUntil = (*pinClaimUntil).UTC()
 	}
 	return rec, nil
 }
@@ -337,6 +353,73 @@ func (s *Store) ListReadyToPin(ctx context.Context, now time.Time, limit int) ([
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("checkpoint/postgres: list ready to pin rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) ClaimReadyToPin(ctx context.Context, owner string, claimTTL time.Duration, now time.Time, limit int) ([]checkpoint.PackageRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return nil, fmt.Errorf("%w: pin claim owner is required", checkpoint.ErrInvalidPersistenceConfig)
+	}
+	if claimTTL <= 0 {
+		claimTTL = time.Minute
+	}
+	claimUntil := now.UTC().Add(claimTTL)
+
+	rows, err := s.pool.Query(ctx, `
+		WITH candidates AS (
+			SELECT digest
+			FROM checkpoint_packages
+			WHERE pin_state IN ($1, $2)
+			  AND (pin_next_attempt_at IS NULL OR pin_next_attempt_at <= $3)
+			  AND (
+			  	btrim(pin_claim_owner) = ''
+			  	OR pin_claim_until IS NULL
+			  	OR pin_claim_until <= $3
+			  )
+			ORDER BY COALESCE(pin_next_attempt_at, persisted_at) ASC, persisted_at ASC, digest ASC
+			LIMIT $4
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE checkpoint_packages AS p
+		SET
+			pin_claim_owner = $5,
+			pin_claim_until = $6,
+			updated_at = now()
+		FROM candidates
+		WHERE p.digest = candidates.digest
+		RETURNING p.digest
+	`, int16(checkpoint.PackagePinStatePending), int16(checkpoint.PackagePinStateFailed), now.UTC(), limit, owner, claimUntil)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: claim ready to pin: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]checkpoint.PackageRecord, 0, limit)
+	for rows.Next() {
+		var digestRaw []byte
+		if err := rows.Scan(&digestRaw); err != nil {
+			return nil, fmt.Errorf("checkpoint/postgres: scan pin-claimed digest: %w", err)
+		}
+		digest, err := toHash(digestRaw)
+		if err != nil {
+			return nil, err
+		}
+		rec, err := s.Get(ctx, digest)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: claim ready to pin rows: %w", err)
 	}
 	return out, nil
 }

@@ -15,6 +15,8 @@ CREATE TABLE IF NOT EXISTS checkpoint_packages (
 	pin_last_error TEXT NOT NULL DEFAULT '',
 	pin_last_attempt_at TIMESTAMPTZ,
 	pin_next_attempt_at TIMESTAMPTZ,
+	pin_claim_owner TEXT NOT NULL DEFAULT '',
+	pin_claim_until TIMESTAMPTZ,
 	s3_key TEXT,
 	package_json BYTEA NOT NULL,
 	state SMALLINT NOT NULL DEFAULT 1,
@@ -43,6 +45,8 @@ ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_attempts INTEGER NO
 ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_last_error TEXT NOT NULL DEFAULT '';
 ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_last_attempt_at TIMESTAMPTZ;
 ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_next_attempt_at TIMESTAMPTZ;
+ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_claim_owner TEXT NOT NULL DEFAULT '';
+ALTER TABLE checkpoint_packages ADD COLUMN IF NOT EXISTS pin_claim_until TIMESTAMPTZ;
 UPDATE checkpoint_packages
 SET pin_state = CASE
 	WHEN pin_state IS NOT NULL THEN pin_state
@@ -64,6 +68,7 @@ ALTER TABLE checkpoint_packages ADD CONSTRAINT checkpoint_emitted_requires_emitt
 CREATE INDEX IF NOT EXISTS checkpoint_packages_height_idx ON checkpoint_packages (checkpoint_height DESC);
 CREATE INDEX IF NOT EXISTS checkpoint_packages_state_idx ON checkpoint_packages (state, persisted_at ASC);
 CREATE INDEX IF NOT EXISTS checkpoint_packages_pin_idx ON checkpoint_packages (pin_state, pin_next_attempt_at ASC, persisted_at ASC);
+CREATE INDEX IF NOT EXISTS checkpoint_packages_pin_claim_idx ON checkpoint_packages (pin_claim_until ASC, pin_state, pin_next_attempt_at ASC);
 
 CREATE TABLE IF NOT EXISTS checkpoint_signer_commitments (
 	base_chain_id BIGINT NOT NULL,

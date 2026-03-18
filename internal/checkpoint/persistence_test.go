@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,6 +26,36 @@ func (p *fakePinner) PinJSON(_ context.Context, payload []byte) (string, error) 
 		return "", p.err
 	}
 	return p.cid, nil
+}
+
+type blockingPinner struct {
+	cid     string
+	started chan struct{}
+	release chan struct{}
+
+	mu    sync.Mutex
+	calls int
+	once  sync.Once
+}
+
+func (p *blockingPinner) PinJSON(_ context.Context, payload []byte) (string, error) {
+	_ = payload
+
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+
+	p.once.Do(func() {
+		close(p.started)
+	})
+	<-p.release
+	return p.cid, nil
+}
+
+func (p *blockingPinner) CallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
 }
 
 func TestPackagePersistence_PersistsToAllSinks(t *testing.T) {
@@ -290,7 +321,7 @@ func TestPackagePersistence_ProcessPinJobsBacksOffAndRecovers(t *testing.T) {
 		t.Fatalf("Persist: %v", err)
 	}
 
-	processed, err := persist.ProcessPinJobs(context.Background(), 1)
+	processed, err := persist.ProcessPinJobs(context.Background(), "worker-a", time.Minute, 1)
 	if err != nil {
 		t.Fatalf("ProcessPinJobs #1: %v", err)
 	}
@@ -308,15 +339,26 @@ func TestPackagePersistence_ProcessPinJobsBacksOffAndRecovers(t *testing.T) {
 	if rec.PinAttempts != 1 {
 		t.Fatalf("pin attempts after failure: got %d want 1", rec.PinAttempts)
 	}
+	if rec.PinClaimOwner != "" || !rec.PinClaimUntil.IsZero() {
+		t.Fatalf("expected claim to be cleared after failure, got owner=%q until=%s", rec.PinClaimOwner, rec.PinClaimUntil)
+	}
 	if rec.PinNextAttemptAt.IsZero() || !rec.PinNextAttemptAt.After(now) {
 		t.Fatalf("expected next attempt after %s, got %s", now, rec.PinNextAttemptAt)
+	}
+
+	processed, err = persist.ProcessPinJobs(context.Background(), "worker-b", time.Minute, 1)
+	if err != nil {
+		t.Fatalf("ProcessPinJobs backoff window: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("expected no jobs during backoff window, got %d", processed)
 	}
 
 	now = rec.PinNextAttemptAt
 	pinner.err = nil
 	pinner.cid = "bafybeigdyrzt"
 
-	processed, err = persist.ProcessPinJobs(context.Background(), 1)
+	processed, err = persist.ProcessPinJobs(context.Background(), "worker-a", time.Minute, 1)
 	if err != nil {
 		t.Fatalf("ProcessPinJobs #2: %v", err)
 	}
@@ -336,5 +378,90 @@ func TestPackagePersistence_ProcessPinJobsBacksOffAndRecovers(t *testing.T) {
 	}
 	if rec.PinAttempts != 2 {
 		t.Fatalf("pin attempts after success: got %d want 2", rec.PinAttempts)
+	}
+	if rec.PinClaimOwner != "" || !rec.PinClaimUntil.IsZero() {
+		t.Fatalf("expected claim to be cleared after success, got owner=%q until=%s", rec.PinClaimOwner, rec.PinClaimUntil)
+	}
+}
+
+func TestPackagePersistence_ProcessPinJobs_ClaimsPerWorkerWindow(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryPackageStore()
+	pinner := &blockingPinner{
+		cid:     "bafybeigdyrzt",
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	persistA, err := NewPackagePersistence(PackagePersistenceConfig{
+		PackageStore: store,
+		IPFSPinner:   pinner,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence worker-a: %v", err)
+	}
+	persistB, err := NewPackagePersistence(PackagePersistenceConfig{
+		PackageStore: store,
+		IPFSPinner:   pinner,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence worker-b: %v", err)
+	}
+
+	cp := Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := Digest(cp)
+
+	if _, err := persistA.Persist(context.Background(), PackageEnvelope{
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Payload:         []byte(`{"version":"checkpoints.package.v1"}`),
+	}); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	done := make(chan struct {
+		processed int
+		err       error
+	}, 1)
+	go func() {
+		processed, err := persistA.ProcessPinJobs(context.Background(), "worker-a", time.Minute, 1)
+		done <- struct {
+			processed int
+			err       error
+		}{processed: processed, err: err}
+	}()
+
+	<-pinner.started
+
+	processed, err := persistB.ProcessPinJobs(context.Background(), "worker-b", time.Minute, 1)
+	if err != nil {
+		t.Fatalf("ProcessPinJobs worker-b: %v", err)
+	}
+	if processed != 0 {
+		t.Fatalf("expected worker-b to see no claimable jobs, got %d", processed)
+	}
+	if pinner.CallCount() != 1 {
+		t.Fatalf("expected exactly one ipfs call while claim active, got %d", pinner.CallCount())
+	}
+
+	close(pinner.release)
+
+	result := <-done
+	if result.err != nil {
+		t.Fatalf("ProcessPinJobs worker-a: %v", result.err)
+	}
+	if result.processed != 1 {
+		t.Fatalf("expected worker-a to process 1 job, got %d", result.processed)
 	}
 }

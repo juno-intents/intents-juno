@@ -257,7 +257,7 @@ func main() {
 	}
 
 	if *ipfsEnabled {
-		go runIPFSPinWorker(ctx, persist, *ipfsPinInterval, *ipfsPinBatchSize, *ipfsPinTimeout, log)
+		go runIPFSPinWorker(ctx, persist, ipfsPinWorkerOwner(), *ipfsPinInterval, *ipfsPinBatchSize, *ipfsPinTimeout, log)
 	}
 
 	go func() {
@@ -450,15 +450,20 @@ func restoreCheckpointState(
 func runIPFSPinWorker(
 	ctx context.Context,
 	persist *checkpoint.PackagePersistence,
+	owner string,
 	interval time.Duration,
 	batchSize int,
 	timeout time.Duration,
 	log *slog.Logger,
 ) {
+	claimTTL := timeout
+	if claimTTL < interval {
+		claimTTL = interval
+	}
 	process := func() {
 		pinCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
-		processed, err := persist.ProcessPinJobs(pinCtx, batchSize)
+		processed, err := persist.ProcessPinJobs(pinCtx, owner, claimTTL, batchSize)
 		if err != nil {
 			if log != nil {
 				log.Error("process checkpoint ipfs pin jobs", "err", err)
@@ -482,6 +487,14 @@ func runIPFSPinWorker(
 			process()
 		}
 	}
+}
+
+func ipfsPinWorkerOwner() string {
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "checkpoint-aggregator"
+	}
+	return fmt.Sprintf("%s:%d", host, os.Getpid())
 }
 
 func blobStoreReadinessCheck(store blobstore.Store, timeout time.Duration) func(context.Context) error {
