@@ -1955,14 +1955,13 @@ resource "aws_instance" "runner" {
     volume_size = var.root_volume_size_gb
   }
 
-  user_data = base64encode(<<-EOF
+  user_data = <<-EOF
     #!/usr/bin/env bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y ca-certificates curl git jq unzip rsync age
   EOF
-  )
 
   tags = merge(local.common_tags, {
     Name = "${local.resource_name}-runner"
@@ -1998,13 +1997,14 @@ resource "aws_launch_template" "operator" {
     }
   }
 
-  user_data = <<-EOF
+  user_data = base64encode(<<-EOF
     #!/usr/bin/env bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
     apt-get install -y ca-certificates curl git jq unzip rsync age
   EOF
+  )
 
   tag_specifications {
     resource_type = "instance"
