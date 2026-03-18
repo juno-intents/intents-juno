@@ -364,6 +364,7 @@ backoffice_wrapper_tmp="\$(mktemp)"
 cat >"\$backoffice_wrapper_tmp" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
+backoffice_bin="__RUNTIME_DIR__/bin/backoffice"
 args=(
   --listen "\$BACKOFFICE_LISTEN_ADDR"
   --postgres-dsn "\$BACKOFFICE_POSTGRES_DSN"
@@ -387,7 +388,14 @@ if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
   args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
 fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
-  args+=(--juno-rpc-urls "\$BACKOFFICE_JUNO_RPC_URLS")
+  if "\$backoffice_bin" -h 2>&1 | grep -q -- '--juno-rpc-urls'; then
+    args+=(--juno-rpc-urls "\$BACKOFFICE_JUNO_RPC_URLS")
+  else
+    IFS=, read -r backoffice_juno_rpc_url _ <<< "\$BACKOFFICE_JUNO_RPC_URLS"
+    if [[ -n "\${backoffice_juno_rpc_url:-}" ]]; then
+      args+=(--juno-rpc-url "\$backoffice_juno_rpc_url")
+    fi
+  fi
 elif [[ -n "\${BACKOFFICE_JUNO_RPC_URL:-}" ]]; then
   args+=(--juno-rpc-url "\$BACKOFFICE_JUNO_RPC_URL")
 fi
@@ -412,7 +420,7 @@ fi
 if [[ -n "\${BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI:-}" ]]; then
   args+=(--base-relayer-gas-min-wei "\$BACKOFFICE_BASE_RELAYER_GAS_MIN_WEI")
 fi
-exec __RUNTIME_DIR__/bin/backoffice "\${args[@]}"
+exec "\$backoffice_bin" "\${args[@]}"
 WRAP
 sed -i.bak "s|__RUNTIME_DIR__|$runtime_dir|g" "\$backoffice_wrapper_tmp"
 rm -f "\$backoffice_wrapper_tmp.bak"

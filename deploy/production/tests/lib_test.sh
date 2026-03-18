@@ -2080,6 +2080,65 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_backoffice_env_requires_sp1_requestor_address() {
+  local workdir shared_manifest app_manifest resolved_env backoffice_env
+  local fake_bin old_path output status
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  jq 'del(.shared_services.proof.requestor_address)' "$shared_manifest" >"$workdir/shared-manifest.next"
+  mv "$workdir/shared-manifest.next" "$shared_manifest"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  resolved_env="$workdir/resolved-app.env"
+  production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
+  backoffice_env="$workdir/backoffice.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_cast "$fake_bin/cast" "$workdir/cast.log"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  set +e
+  output="$(production_render_backoffice_env "$shared_manifest" "$app_manifest" "$resolved_env" "$backoffice_env" 2>&1)"
+  status=$?
+  set -e
+  PATH="$old_path"
+
+  if [[ $status -eq 0 ]]; then
+    printf 'expected production_render_backoffice_env to require shared_services.proof.requestor_address\n' >&2
+    exit 1
+  fi
+  assert_contains "$output" "shared manifest is missing shared_services.proof.requestor_address" "backoffice env rejects missing prover requestor address"
+  rm -rf "$workdir"
+}
+
 test_render_backoffice_env_preserves_non_loopback_juno_rpc_url() {
   local workdir shared_manifest app_manifest resolved_env backoffice_env
   local fake_bin old_path
