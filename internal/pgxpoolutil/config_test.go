@@ -1,6 +1,8 @@
 package pgxpoolutil
 
 import (
+	"errors"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -111,4 +113,43 @@ func TestParseConfigRejectsNilSettings(t *testing.T) {
 	if cfg != nil {
 		t.Fatal("expected nil config on error")
 	}
+}
+
+func TestResolveDSN(t *testing.T) {
+	t.Run("explicit flag wins", func(t *testing.T) {
+		t.Setenv("TEST_POSTGRES_DSN", "postgres://env-user:env-pass@env-host:5432/envdb")
+
+		got, err := ResolveDSN(" postgres://flag-user:flag-pass@flag-host:5432/flagdb ", "TEST_POSTGRES_DSN")
+		if err != nil {
+			t.Fatalf("ResolveDSN: %v", err)
+		}
+		if want := "postgres://flag-user:flag-pass@flag-host:5432/flagdb"; got != want {
+			t.Fatalf("dsn: got %q want %q", got, want)
+		}
+	})
+
+	t.Run("env fallback", func(t *testing.T) {
+		t.Setenv("TEST_POSTGRES_DSN", " postgres://env-user:env-pass@env-host:5432/envdb ")
+
+		got, err := ResolveDSN("", "TEST_POSTGRES_DSN")
+		if err != nil {
+			t.Fatalf("ResolveDSN: %v", err)
+		}
+		if want := "postgres://env-user:env-pass@env-host:5432/envdb"; got != want {
+			t.Fatalf("dsn: got %q want %q", got, want)
+		}
+	})
+
+	t.Run("missing env fails", func(t *testing.T) {
+		const missingEnv = "TEST_POSTGRES_DSN_MISSING"
+		_ = os.Unsetenv(missingEnv)
+
+		_, err := ResolveDSN("", missingEnv)
+		if !errors.Is(err, ErrMissingDSN) {
+			t.Fatalf("error: got %v want %v", err, ErrMissingDSN)
+		}
+		if !strings.Contains(err.Error(), missingEnv) {
+			t.Fatalf("error = %q, want missing env %q", err.Error(), missingEnv)
+		}
+	})
 }

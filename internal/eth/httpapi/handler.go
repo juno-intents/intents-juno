@@ -26,6 +26,10 @@ type Config struct {
 	// AuthToken enables bearer-token auth on every request when set.
 	AuthToken string
 
+	// AuthPrincipal is the rate-limit principal used for authenticated requests.
+	// Empty defaults to "authenticated" whenever bearer auth succeeds.
+	AuthPrincipal string
+
 	// ReadinessCheck is evaluated for /readyz. Nil means always ready.
 	ReadinessCheck func(context.Context) error
 
@@ -147,7 +151,11 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 			return
 		}
 
-		if !limiter.Allow(clientKey(r, bearerToken), cfg.Now().UTC()) {
+		authPrincipal := strings.TrimSpace(cfg.AuthPrincipal)
+		if bearerToken != "" && authPrincipal == "" {
+			authPrincipal = "authenticated"
+		}
+		if !limiter.Allow(clientKey(r, authPrincipal), cfg.Now().UTC()) {
 			w.Header().Set("Retry-After", "1")
 			writeJSON(w, http.StatusTooManyRequests, map[string]any{"error": "rate_limited"})
 			return

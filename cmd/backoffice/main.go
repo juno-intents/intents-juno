@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -30,6 +31,7 @@ func main() {
 	var (
 		listenAddr                = flag.String("listen", ":8090", "HTTP listen address")
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing the Postgres DSN")
 		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
 		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
 		postgresHealthCheckPeriod = flag.Duration(
@@ -83,8 +85,9 @@ func main() {
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 
 	// Validate required flags.
-	if *postgresDSN == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required")
+	resolvedPostgresDSN, err := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
 	if *baseRPCURL == "" {
@@ -229,7 +232,7 @@ func main() {
 	defer stop()
 
 	// Connect to Postgres.
-	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+	poolCfg, err := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
 		MinConns:          int32(*postgresMinConns),
 		MaxConns:          int32(*postgresMaxConns),
 		HealthCheckPeriod: *postgresHealthCheckPeriod,
@@ -389,12 +392,13 @@ func main() {
 		RateLimitPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:     *rateLimitBurst,
 
-		OperatorGasMinWei:      operatorGasMinWei,
-		BaseRelayerFundsMinWei: baseRelayerGasMinWei,
-		ProverFundsMinWei:      proverFundsMinWei,
-		ReadinessCheck: healthz.CombineReadinessChecks(
+	OperatorGasMinWei:      operatorGasMinWei,
+	BaseRelayerFundsMinWei: baseRelayerGasMinWei,
+	ProverFundsMinWei:      proverFundsMinWei,
+	ReadinessCheck: healthz.CombineReadinessChecks(
 			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 			bridgeSettingsCache.Ready,
+			chainReadinessCheck(baseClient),
 		),
 
 		Log: log,
@@ -464,4 +468,20 @@ func uniqueStrings(values []string) []string {
 		result = append(result, value)
 	}
 	return result
+}
+
+type chainIDReader interface {
+	ChainID(context.Context) (*big.Int, error)
+}
+
+func chainReadinessCheck(reader chainIDReader) func(context.Context) error {
+	if reader == nil {
+		return func(context.Context) error {
+			return errors.New("backoffice: nil chain reader")
+		}
+	}
+	return func(ctx context.Context) error {
+		_, err := reader.ChainID(ctx)
+		return err
+	}
 }

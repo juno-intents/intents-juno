@@ -52,15 +52,15 @@ type encryptedFile struct {
 }
 
 // GeneratePrivateKeyFile loads or creates a secp256k1 private key at path.
-// Plaintext keys are stored as lowercase hex without 0x prefix. Encrypted keys
-// use an scrypt-derived AES-GCM envelope.
+// Encrypted keys are the default; plaintext keys are stored as lowercase hex
+// without 0x prefix when explicitly requested.
 func GeneratePrivateKeyFile(path string, opts GenerateOptions) (*ecdsa.PrivateKey, bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, false, fmt.Errorf("operatorkey: key path required")
 	}
 	if opts.Format == "" {
-		opts.Format = FormatPlaintext
+		opts.Format = FormatEncrypted
 	}
 
 	raw, err := os.ReadFile(path)

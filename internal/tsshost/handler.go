@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -37,6 +38,10 @@ type Config struct {
 	// SessionTTL evicts completed sessions after the configured age.
 	// Defaults to 15 minutes.
 	SessionTTL time.Duration
+
+	// ReadinessCheck is evaluated for /readyz before the built-in session-capacity
+	// check. Nil means only session capacity gates readiness.
+	ReadinessCheck func(context.Context) error
 
 	// Log emits audit records for sign requests. Defaults to a discard logger.
 	Log *slog.Logger
@@ -99,9 +104,16 @@ func NewHandler(signer Signer, cfg Config) http.Handler {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("ok\n"))
 	}
+	handleReady := func(w http.ResponseWriter, r *http.Request) {
+		if err := h.readinessCheck(r.Context()); err != nil {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "not_ready", "detail": err.Error()})
+			return
+		}
+		handleHealth(w, r)
+	}
 	mux.HandleFunc("GET /livez", handleHealth)
 	mux.HandleFunc("GET /healthz", handleHealth)
-	mux.HandleFunc("GET /readyz", handleHealth)
+	mux.HandleFunc("GET /readyz", handleReady)
 
 	mux.HandleFunc("POST /v1/sign", h.handleSign)
 	return mux
@@ -298,6 +310,24 @@ func (h *handler) evictExpiredSessions(now time.Time) {
 		}
 		delete(h.sessions, sid)
 	}
+}
+
+func (h *handler) readinessCheck(ctx context.Context) error {
+	if h.cfg.ReadinessCheck != nil {
+		if err := h.cfg.ReadinessCheck(ctx); err != nil {
+			return err
+		}
+	}
+
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := h.cfg.Now().UTC()
+	h.evictExpiredSessions(now)
+	if len(h.sessions) >= h.cfg.MaxSessions {
+		return fmt.Errorf("tsshost: session capacity exhausted")
+	}
+	return nil
 }
 
 func (h *handler) audit(sessionID string, result string, startedAt time.Time) {

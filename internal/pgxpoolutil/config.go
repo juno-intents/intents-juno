@@ -2,7 +2,10 @@ package pgxpoolutil
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -16,6 +19,8 @@ const (
 	DefaultHealthCheckPeriod = time.Minute
 	DefaultReadyTimeout      = 2 * time.Second
 )
+
+var ErrMissingDSN = errors.New("pgxpoolutil: postgres dsn required")
 
 type Settings struct {
 	MinConns          int32
@@ -35,6 +40,23 @@ func ParseConfig(dsn string, settings Settings) (*pgxpool.Config, error) {
 		return nil, err
 	}
 	return cfg, nil
+}
+
+func ResolveDSN(dsn string, envName string) (string, error) {
+	if trimmed := strings.TrimSpace(dsn); trimmed != "" {
+		return trimmed, nil
+	}
+
+	envName = strings.TrimSpace(envName)
+	if envName == "" {
+		return "", ErrMissingDSN
+	}
+
+	value := strings.TrimSpace(os.Getenv(envName))
+	if value == "" {
+		return "", fmt.Errorf("%w: env %s is unset or empty", ErrMissingDSN, envName)
+	}
+	return value, nil
 }
 
 func Apply(cfg *pgxpool.Config, settings Settings) error {

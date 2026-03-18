@@ -27,6 +27,7 @@ import (
 func main() {
 	var (
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing the Postgres DSN when --store-driver=postgres")
 		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
 		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
 		postgresHealthCheckPeriod = flag.Duration(
@@ -137,11 +138,12 @@ func main() {
 	)
 	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
 	case "postgres":
-		if *postgresDSN == "" {
-			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --store-driver=postgres")
+		resolvedPostgresDSN, resolveErr := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
+		if resolveErr != nil {
+			log.Error("resolve postgres dsn", "err", resolveErr)
 			os.Exit(2)
 		}
-		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
 			MinConns:          int32(*postgresMinConns),
 			MaxConns:          int32(*postgresMaxConns),
 			HealthCheckPeriod: *postgresHealthCheckPeriod,

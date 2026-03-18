@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -48,6 +49,34 @@ func TestHandler_ProbePaths(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s status: got %d want %d", path, rec.Code, http.StatusOK)
 		}
+	}
+}
+
+func TestHandler_ReadyzReflectsReadinessCheck(t *testing.T) {
+	t.Parallel()
+
+	h := NewHandler(&stubSigner{ret: []byte("signed")}, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    16,
+		Now:            time.Now,
+		ReadinessCheck: func(context.Context) error {
+			return errors.New("signer unavailable")
+		},
+	})
+
+	readyReq := httptest.NewRequest(http.MethodGet, "/readyz", nil)
+	readyRec := httptest.NewRecorder()
+	h.ServeHTTP(readyRec, readyReq)
+	if readyRec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("/readyz status: got %d want %d", readyRec.Code, http.StatusServiceUnavailable)
+	}
+
+	liveReq := httptest.NewRequest(http.MethodGet, "/livez", nil)
+	liveRec := httptest.NewRecorder()
+	h.ServeHTTP(liveRec, liveReq)
+	if liveRec.Code != http.StatusOK {
+		t.Fatalf("/livez status: got %d want %d", liveRec.Code, http.StatusOK)
 	}
 }
 

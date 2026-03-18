@@ -411,3 +411,14 @@ func TestHandler_RateLimitsByTokenAndFallsBackToRemoteAddr(t *testing.T) {
 		t.Fatalf("ip fallback throttled status: got %d want %d body=%s", rr4.Code, http.StatusTooManyRequests, rr4.Body.String())
 	}
 }
+
+func TestClientKey_UsesAuthPrincipalInsteadOfTokenMaterial(t *testing.T) {
+	t.Parallel()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewReader([]byte("{}")))
+	req.RemoteAddr = "203.0.113.9:1234"
+
+	if got, want := clientKey(req, "backoffice-admin"), "principal:backoffice-admin"; got != want {
+		t.Fatalf("clientKey: got %q want %q", got, want)
+	}
+}

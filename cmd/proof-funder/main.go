@@ -15,6 +15,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
@@ -26,6 +27,7 @@ import (
 func main() {
 	var (
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required)")
+		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing the Postgres DSN when --lease-driver=postgres")
 		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
 		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
 		postgresHealthCheckPeriod = flag.Duration(
@@ -51,6 +53,7 @@ func main() {
 
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter")
+		healthPort      = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -82,14 +85,18 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	var leaseStore leases.Store
+	var (
+		leaseStore leases.Store
+		pool       *pgxpool.Pool
+	)
 	switch strings.ToLower(strings.TrimSpace(*leaseDriver)) {
 	case "postgres":
-		if *postgresDSN == "" {
-			fmt.Fprintln(os.Stderr, "error: --postgres-dsn is required when --lease-driver=postgres")
+		resolvedPostgresDSN, resolveErr := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
+		if resolveErr != nil {
+			log.Error("resolve postgres dsn", "err", resolveErr)
 			os.Exit(2)
 		}
-		poolCfg, cfgErr := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
 			MinConns:          int32(*postgresMinConns),
 			MaxConns:          int32(*postgresMaxConns),
 			HealthCheckPeriod: *postgresHealthCheckPeriod,
@@ -98,7 +105,7 @@ func main() {
 			log.Error("parse pgx pool config", "err", cfgErr)
 			os.Exit(2)
 		}
-		pool, err := pgxpool.NewWithConfig(ctx, poolCfg)
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
 		if err != nil {
 			log.Error("init pgx pool", "err", err)
 			os.Exit(2)
@@ -158,6 +165,16 @@ func main() {
 		os.Exit(2)
 	}
 	service.WithLogger(log)
+
+	go func() {
+		opts := []healthz.Option{}
+		if pool != nil {
+			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-funder", opts...); err != nil {
+			log.Error("healthz server", "err", err)
+		}
+	}()
 
 	log.Info("proof-funder started",
 		"owner_id", *ownerID,

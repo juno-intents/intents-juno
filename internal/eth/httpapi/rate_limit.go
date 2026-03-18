@@ -96,9 +96,9 @@ func (l *clientRateLimiter) evictOneLocked() {
 	}
 }
 
-func clientKey(r *http.Request, bearerToken string) string {
-	if bearerToken != "" {
-		return "token:" + bearerToken
+func clientKey(r *http.Request, authPrincipal string) string {
+	if authPrincipal != "" {
+		return "principal:" + authPrincipal
 	}
 	return "ip:" + extractClientIP(r)
 }

@@ -94,6 +94,33 @@ func TestGeneratePrivateKeyFile_EncryptedAndLoad(t *testing.T) {
 	}
 }
 
+func TestGeneratePrivateKeyFile_DefaultsToEncrypted(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "operator.key")
+	passphrase := "default encrypted secret"
+
+	key, created, err := GeneratePrivateKeyFile(path, GenerateOptions{Passphrase: passphrase})
+	if err != nil {
+		t.Fatalf("GeneratePrivateKeyFile default: %v", err)
+	}
+	if !created {
+		t.Fatalf("expected encrypted file to be created")
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if bytesContains(raw, []byte(OperatorIDFromPrivateKey(key))) {
+		t.Fatalf("expected default key file not to contain plaintext operator id")
+	}
+
+	if _, err := LoadPrivateKeyFile(path, LoadOptions{}); err == nil {
+		t.Fatalf("expected encrypted default file to require a passphrase")
+	}
+}
+
 func TestLoadPrivateKeyFile_EncryptedRequiresPassphrase(t *testing.T) {
 	t.Parallel()
 
