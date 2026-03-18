@@ -66,7 +66,7 @@ func (s *ExecSigner) Ready(context.Context) error {
 	return nil
 }
 
-func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte) ([]byte, error) {
+func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, batchID [32]byte, txPlan []byte) ([]byte, error) {
 	if s == nil || s.execFn == nil {
 		return nil, fmt.Errorf("%w: nil signer", ErrInvalidExecSignerConfig)
 	}
@@ -77,6 +77,7 @@ func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte
 	req, err := json.Marshal(tss.SignRequest{
 		Version:   tss.SignRequestVersion,
 		SessionID: tss.FormatSessionID(sessionID),
+		BatchID:   tss.FormatBatchID(batchID),
 		TxPlan:    txPlan,
 	})
 	if err != nil {

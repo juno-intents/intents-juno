@@ -19,7 +19,11 @@ type Signer interface {
 	// Sign returns a signed transaction for the provided txPlan, binding it to sessionID.
 	//
 	// Implementations MUST be safe to call multiple times (at-least-once request semantics).
-	Sign(ctx context.Context, sessionID [32]byte, txPlan []byte) ([]byte, error)
+	Sign(ctx context.Context, sessionID [32]byte, batchID [32]byte, txPlan []byte) ([]byte, error)
+}
+
+type Verifier interface {
+	VerifySignRequest(ctx context.Context, sessionID [32]byte, batchID [32]byte, txPlan []byte) error
 }
 
 type Config struct {
@@ -42,6 +46,10 @@ type Config struct {
 	// ReadinessCheck is evaluated for /readyz before the built-in session-capacity
 	// check. Nil means only session capacity gates readiness.
 	ReadinessCheck func(context.Context) error
+
+	// Verifier, if non-nil, validates that the sign request is bound to a known
+	// persisted batch before the signer is invoked.
+	Verifier Verifier
 
 	// Log emits audit records for sign requests. Defaults to a discard logger.
 	Log *slog.Logger
@@ -68,6 +76,7 @@ type httpHandler struct {
 }
 
 type session struct {
+	batchID    [32]byte
 	txPlanHash [32]byte
 
 	signing bool
@@ -175,6 +184,12 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_session_id"})
 		return
 	}
+	batchID, err := tss.ParseBatchID(req.BatchID)
+	if err != nil {
+		h.audit(sessionIDForLog, "invalid_batch_id", startedAt)
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_batch_id"})
+		return
+	}
 	sessionIDForLog = tss.FormatSessionID(sid)
 	if len(req.TxPlan) == 0 {
 		h.audit(sessionIDForLog, "missing_tx_plan", startedAt)
@@ -187,9 +202,22 @@ func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if h.cfg.Verifier != nil {
+		if err := h.cfg.Verifier.VerifySignRequest(r.Context(), sid, batchID, req.TxPlan); err != nil {
+			if errors.Is(err, ErrRejected) {
+				h.audit(sessionIDForLog, "request_rejected", startedAt)
+				writeJSON(w, http.StatusBadRequest, map[string]any{"error": "request_rejected"})
+				return
+			}
+			h.audit(sessionIDForLog, "verification_failed", startedAt)
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "verification_failed"})
+			return
+		}
+	}
+
 	txPlanHash := sha256.Sum256(req.TxPlan)
 
-	signedTx, outcome, err := h.signOnce(r.Context(), sid, txPlanHash, req.TxPlan)
+	signedTx, outcome, err := h.signOnce(r.Context(), sid, batchID, txPlanHash, req.TxPlan)
 	if err != nil {
 		switch {
 		case errors.Is(err, errConflict):
@@ -237,7 +265,7 @@ var (
 	errTooManySessions = errors.New("tsshost: too many sessions")
 )
 
-func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byte, txPlan []byte) ([]byte, string, error) {
+func (h *handler) signOnce(ctx context.Context, sid [32]byte, batchID [32]byte, txPlanHash [32]byte, txPlan []byte) ([]byte, string, error) {
 	for {
 		h.mu.Lock()
 		now := h.cfg.Now().UTC()
@@ -245,7 +273,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 		sess, ok := h.sessions[sid]
 		if ok {
 			sess.lastSeen = now
-			if sess.txPlanHash != txPlanHash {
+			if sess.batchID != batchID || sess.txPlanHash != txPlanHash {
 				h.mu.Unlock()
 				return nil, "", errConflict
 			}
@@ -270,7 +298,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 			sess.done = make(chan struct{})
 			h.mu.Unlock()
 
-			signedTx, err := h.signer.Sign(ctx, sid, txPlan)
+			signedTx, err := h.signer.Sign(ctx, sid, batchID, txPlan)
 
 			h.mu.Lock()
 			sess.signing = false
@@ -294,6 +322,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 		}
 
 		sess = &session{
+			batchID:    batchID,
 			txPlanHash: txPlanHash,
 			signing:    true,
 			done:       make(chan struct{}),
@@ -302,7 +331,7 @@ func (h *handler) signOnce(ctx context.Context, sid [32]byte, txPlanHash [32]byt
 		h.sessions[sid] = sess
 		h.mu.Unlock()
 
-		signedTx, err := h.signer.Sign(ctx, sid, txPlan)
+		signedTx, err := h.signer.Sign(ctx, sid, batchID, txPlan)
 
 		h.mu.Lock()
 		sess.signing = false

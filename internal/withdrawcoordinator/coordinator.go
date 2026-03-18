@@ -3,7 +3,6 @@ package withdrawcoordinator
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -17,6 +16,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	"github.com/juno-intents/intents-juno/internal/policy"
+	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -31,8 +31,8 @@ const (
 	TxStatusMempool   = "mempool"
 	TxStatusMissing   = "missing"
 
-	batchFailureDLQThreshold      = 3
-	markPaidFailureOpenThreshold  = 3
+	batchFailureDLQThreshold     = 3
+	markPaidFailureOpenThreshold = 3
 )
 
 type Planner interface {
@@ -463,7 +463,7 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
-	rawTx, err := c.signer.Sign(ctx, signingSessionIDV1(batchID, b.TxPlan), b.TxPlan)
+	rawTx, err := c.signer.Sign(ctx, batchID, b.TxPlan)
 	if err != nil {
 		if allowReplan {
 			replanned, replanErr := c.maybeReplanBatchAfterSigningFailure(ctx, b, err)
@@ -815,13 +815,7 @@ func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][3
 // signingSessionIDV1 binds signing idempotency to both logical batch id and txPlan bytes.
 // This allows safe re-planning/re-signing when a broadcasted tx disappears.
 func signingSessionIDV1(batchID [32]byte, txPlan []byte) [32]byte {
-	h := sha256.New()
-	_, _ = h.Write([]byte("withdraw-sign-session-v1"))
-	_, _ = h.Write(batchID[:])
-	_, _ = h.Write(txPlan)
-	var out [32]byte
-	copy(out[:], h.Sum(nil))
-	return out
+	return tss.DeriveSigningSessionID(batchID, txPlan)
 }
 
 func isStaleSigningTxPlanError(err error) bool {

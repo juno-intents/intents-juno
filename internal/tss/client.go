@@ -109,9 +109,11 @@ func NewClient(baseURL string, opts ...Option) (*Client, error) {
 }
 
 func (c *Client) Sign(ctx context.Context, batchID [32]byte, txPlan []byte) ([]byte, error) {
+	sessionID := DeriveSigningSessionID(batchID, txPlan)
 	reqBody, err := json.Marshal(SignRequest{
 		Version:   SignRequestVersion,
-		SessionID: FormatSessionID(batchID),
+		SessionID: FormatSessionID(sessionID),
+		BatchID:   FormatBatchID(batchID),
 		TxPlan:    txPlan,
 	})
 	if err != nil {
@@ -158,7 +160,7 @@ func (c *Client) Sign(ctx context.Context, batchID [32]byte, txPlan []byte) ([]b
 	if out.Version != SignResponseVersion {
 		return nil, fmt.Errorf("tss: unexpected response version: %q", out.Version)
 	}
-	if out.SessionID != FormatSessionID(batchID) {
+	if out.SessionID != FormatSessionID(sessionID) {
 		return nil, fmt.Errorf("tss: mismatched session id")
 	}
 	if len(out.SignedTx) == 0 {

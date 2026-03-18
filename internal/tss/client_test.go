@@ -20,6 +20,7 @@ func TestClient_Sign_SendsExpectedRequestAndParsesResponse(t *testing.T) {
 	batchID := seq32(0x10)
 	txPlan := []byte("plan-v1")
 	wantSigned := []byte("signed")
+	wantSessionID := DeriveSigningSessionID(batchID, txPlan)
 
 	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
 		if r.Method != http.MethodPost {
@@ -42,8 +43,11 @@ func TestClient_Sign_SendsExpectedRequestAndParsesResponse(t *testing.T) {
 		if req.Version != SignRequestVersion {
 			t.Fatalf("req version = %q", req.Version)
 		}
-		if req.SessionID != FormatSessionID(batchID) {
+		if req.SessionID != FormatSessionID(wantSessionID) {
 			t.Fatalf("req session id = %q", req.SessionID)
+		}
+		if req.BatchID != FormatBatchID(batchID) {
+			t.Fatalf("req batch id = %q", req.BatchID)
 		}
 		if !bytes.Equal(req.TxPlan, txPlan) {
 			t.Fatalf("req txPlan mismatch")
@@ -51,7 +55,7 @@ func TestClient_Sign_SendsExpectedRequestAndParsesResponse(t *testing.T) {
 
 		respBody, _ := json.Marshal(SignResponse{
 			Version:   SignResponseVersion,
-			SessionID: FormatSessionID(batchID),
+			SessionID: FormatSessionID(wantSessionID),
 			SignedTx:  wantSigned,
 		})
 

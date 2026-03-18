@@ -28,16 +28,14 @@ func main() {
 
 func run(args []string, stdout io.Writer) error {
 	command := "generate"
-	legacyMode := true
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		command = strings.TrimSpace(args[0])
 		args = args[1:]
-		legacyMode = false
 	}
 
 	switch command {
 	case "generate":
-		return runGenerate(args, stdout, legacyMode)
+		return runGenerate(args, stdout)
 	case "inspect":
 		return runInspect(args, stdout)
 	default:
@@ -45,17 +43,13 @@ func run(args []string, stdout io.Writer) error {
 	}
 }
 
-func runGenerate(args []string, stdout io.Writer, legacyMode bool) error {
+func runGenerate(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("operator-keygen", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 
-	defaultFormat := string(operatorkey.FormatEncrypted)
-	if legacyMode {
-		defaultFormat = string(operatorkey.FormatPlaintext)
-	}
 	privateKeyPath := fs.String("private-key-path", "", "path for operator secp256k1 private key")
 	feeRecipient := fs.String("fee-recipient", "", "optional fee recipient address; defaults to operator address")
-	storageFormat := fs.String("storage-format", defaultFormat, "key storage format: plaintext|encrypted")
+	storageFormat := fs.String("storage-format", string(operatorkey.FormatEncrypted), "key storage format: encrypted")
 	passphrase := fs.String("passphrase", "", "encryption passphrase for encrypted key generation")
 	passphraseEnv := fs.String("passphrase-env", "", "env var containing encryption passphrase")
 
@@ -70,9 +64,12 @@ func runGenerate(args []string, stdout io.Writer, legacyMode bool) error {
 	if err != nil {
 		return err
 	}
+	if format := operatorkey.StorageFormat(strings.TrimSpace(*storageFormat)); format != operatorkey.FormatEncrypted {
+		return fmt.Errorf("unsupported storage format %q", strings.TrimSpace(*storageFormat))
+	}
 
 	key, created, err := operatorkey.GeneratePrivateKeyFile(*privateKeyPath, operatorkey.GenerateOptions{
-		Format:     operatorkey.StorageFormat(strings.TrimSpace(*storageFormat)),
+		Format:     operatorkey.FormatEncrypted,
 		Passphrase: keyPassphrase,
 	})
 	if err != nil {

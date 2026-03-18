@@ -22,6 +22,7 @@ func TestExecSigner_Sign_Success(t *testing.T) {
 		t.Fatalf("NewExecSigner: %v", err)
 	}
 	sessionID := [32]byte{0x01, 0x02}
+	batchID := [32]byte{0x03, 0x04}
 	txPlan := []byte{0xaa, 0xbb}
 
 	s.execFn = func(_ context.Context, bin string, args []string, stdin []byte) ([]byte, []byte, error) {
@@ -46,6 +47,9 @@ func TestExecSigner_Sign_Success(t *testing.T) {
 		if req.SessionID != tss.FormatSessionID(sessionID) {
 			t.Fatalf("request session id mismatch")
 		}
+		if req.BatchID != tss.FormatBatchID(batchID) {
+			t.Fatalf("request batch id mismatch")
+		}
 		if len(req.TxPlan) != 2 {
 			t.Fatalf("request txplan length mismatch")
 		}
@@ -57,7 +61,7 @@ func TestExecSigner_Sign_Success(t *testing.T) {
 		return resp, nil, nil
 	}
 
-	got, err := s.Sign(context.Background(), sessionID, txPlan)
+	got, err := s.Sign(context.Background(), sessionID, batchID, txPlan)
 	if err != nil {
 		t.Fatalf("Sign: %v", err)
 	}
@@ -77,7 +81,7 @@ func TestExecSigner_Sign_PropagatesCommandError(t *testing.T) {
 		return nil, []byte("bad"), errors.New("exit 1")
 	}
 
-	_, err = s.Sign(context.Background(), [32]byte{0x01}, []byte{0xaa})
+	_, err = s.Sign(context.Background(), [32]byte{0x01}, [32]byte{0x02}, []byte{0xaa})
 	if err == nil || !strings.Contains(err.Error(), "bad") {
 		t.Fatalf("expected stderr in error, got %v", err)
 	}

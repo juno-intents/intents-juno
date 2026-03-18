@@ -12,6 +12,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/juno-intents/intents-juno/internal/tss"
+	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
 type stubSigner struct {
@@ -20,9 +23,25 @@ type stubSigner struct {
 	ret []byte
 }
 
-func (s *stubSigner) Sign(_ context.Context, _ [32]byte, _ []byte) ([]byte, error) {
+func (s *stubSigner) Sign(_ context.Context, _ [32]byte, _ [32]byte, _ []byte) ([]byte, error) {
 	s.calls++
 	return append([]byte(nil), s.ret...), nil
+}
+
+type stubVerifier struct {
+	calls     int
+	sessionID [32]byte
+	batchID   [32]byte
+	txPlan    []byte
+	err       error
+}
+
+func (v *stubVerifier) VerifySignRequest(_ context.Context, sessionID [32]byte, batchID [32]byte, txPlan []byte) error {
+	v.calls++
+	v.sessionID = sessionID
+	v.batchID = batchID
+	v.txPlan = append([]byte(nil), txPlan...)
+	return v.err
 }
 
 func seq32(start byte) (out [32]byte) {
@@ -92,11 +111,13 @@ func TestHandler_Sign_IdempotentPerSession(t *testing.T) {
 	})
 
 	sessionID := seq32(0x10)
+	batchID := seq32(0x11)
 	txPlan := []byte("plan-v1")
 
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    txPlan,
 	})
 	if err != nil {
@@ -147,10 +168,12 @@ func TestHandler_Sign_ConflictOnSameSessionDifferentTxPlan(t *testing.T) {
 	h := NewHandler(signer, Config{MaxBodyBytes: 1 << 20, MaxTxPlanBytes: 1 << 20, MaxSessions: 16, Now: time.Now})
 
 	sessionID := seq32(0x20)
+	batchID := seq32(0x21)
 
 	bodyA, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan-a"),
 	})
 	if err != nil {
@@ -159,6 +182,7 @@ func TestHandler_Sign_ConflictOnSameSessionDifferentTxPlan(t *testing.T) {
 	bodyB, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan-b"),
 	})
 	if err != nil {
@@ -203,9 +227,11 @@ func TestHandler_MetricsSnapshotReflectsTrackedSessions(t *testing.T) {
 	}
 
 	sessionID := seq32(0x44)
+	batchID := seq32(0x45)
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan-v1"),
 	})
 	if err != nil {
@@ -229,10 +255,12 @@ func TestHandler_Sign_BadRequestOnInvalidSessionID(t *testing.T) {
 
 	signer := &stubSigner{ret: []byte("signed")}
 	h := NewHandler(signer, Config{MaxBodyBytes: 1 << 20, MaxTxPlanBytes: 1 << 20, MaxSessions: 16, Now: time.Now})
+	batchID := seq32(0x31)
 
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x1234",
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan"),
 	})
 	if err != nil {
@@ -256,9 +284,11 @@ func TestHandler_Sign_PayloadTooLargeOnTxPlanLimit(t *testing.T) {
 	h := NewHandler(signer, Config{MaxBodyBytes: 1 << 20, MaxTxPlanBytes: 3, MaxSessions: 16, Now: time.Now})
 
 	sessionID := seq32(0x30)
+	batchID := seq32(0x31)
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("toolong"),
 	})
 	if err != nil {
@@ -272,6 +302,81 @@ func TestHandler_Sign_PayloadTooLargeOnTxPlanLimit(t *testing.T) {
 	}
 	if signer.calls != 0 {
 		t.Fatalf("expected 0 signer calls, got %d", signer.calls)
+	}
+}
+
+func TestHandler_Sign_BadRequestOnInvalidBatchID(t *testing.T) {
+	t.Parallel()
+
+	signer := &stubSigner{ret: []byte("signed")}
+	h := NewHandler(signer, Config{MaxBodyBytes: 1 << 20, MaxTxPlanBytes: 1 << 20, MaxSessions: 16, Now: time.Now})
+	sessionID := seq32(0x61)
+
+	body, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x1234",
+		"txPlan":    []byte("plan"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body)))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signer.calls != 0 {
+		t.Fatalf("expected 0 signer calls, got %d", signer.calls)
+	}
+}
+
+func TestHandler_Sign_VerifiesBatchBindingBeforeSigning(t *testing.T) {
+	t.Parallel()
+
+	signer := &stubSigner{ret: []byte("signed")}
+	verifier := &stubVerifier{}
+	batchID := seq32(0x72)
+	txPlan := []byte(`{"version":"v0"}`)
+	sessionID := tss.DeriveSigningSessionID(batchID, txPlan)
+	h := NewHandler(signer, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    16,
+		Now:            time.Now,
+		Verifier:       verifier,
+	})
+
+	body, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": tss.FormatSessionID(sessionID),
+		"batchId":   tss.FormatBatchID(batchID),
+		"txPlan":    txPlan,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signer.calls != 1 {
+		t.Fatalf("expected 1 signer call, got %d", signer.calls)
+	}
+	if verifier.calls != 1 {
+		t.Fatalf("expected 1 verifier call, got %d", verifier.calls)
+	}
+	if verifier.sessionID != sessionID {
+		t.Fatalf("sessionID mismatch")
+	}
+	if verifier.batchID != batchID {
+		t.Fatalf("batchID mismatch")
+	}
+	if !bytes.Equal(verifier.txPlan, txPlan) {
+		t.Fatalf("txPlan mismatch")
 	}
 }
 
@@ -295,9 +400,11 @@ func TestHandler_Sign_BadRequestOnTrailingJSON(t *testing.T) {
 	h := NewHandler(signer, Config{MaxBodyBytes: 1 << 20, MaxTxPlanBytes: 1 << 20, MaxSessions: 16, Now: time.Now})
 
 	sessionID := seq32(0x40)
+	batchID := seq32(0x41)
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan"),
 	})
 	if err != nil {
@@ -331,9 +438,11 @@ func TestHandler_Sign_EvictsExpiredCompletedSessions(t *testing.T) {
 
 	now = time.Unix(100, 0).UTC()
 	sessionIDA := seq32(0x50)
+	batchIDA := seq32(0x51)
 	bodyA, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionIDA[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchIDA[:]),
 		"txPlan":    []byte("plan-a"),
 	})
 	if err != nil {
@@ -347,9 +456,11 @@ func TestHandler_Sign_EvictsExpiredCompletedSessions(t *testing.T) {
 
 	now = now.Add(2 * time.Second)
 	sessionIDB := seq32(0x60)
+	batchIDB := seq32(0x61)
 	bodyB, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionIDB[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchIDB[:]),
 		"txPlan":    []byte("plan-b"),
 	})
 	if err != nil {
@@ -380,9 +491,11 @@ func TestHandler_Sign_AuditLogsRequests(t *testing.T) {
 	})
 
 	sessionID := seq32(0x70)
+	batchID := seq32(0x71)
 	body, err := json.Marshal(map[string]any{
 		"version":   "tss.sign.v1",
 		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"batchId":   "0x" + hex.EncodeToString(batchID[:]),
 		"txPlan":    []byte("plan-a"),
 	})
 	if err != nil {
@@ -408,6 +521,46 @@ func TestHandler_Sign_AuditLogsRequests(t *testing.T) {
 	}
 	if got.attrs["session_id"] == "" {
 		t.Fatalf("expected session_id in audit log")
+	}
+}
+
+func TestWithdrawBatchVerifier_RejectsMismatchedSessionBinding(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	store := withdraw.NewMemoryStore(func() time.Time { return now })
+	ctx := context.Background()
+	w := withdraw.Withdrawal{
+		ID:          seq32(0x80),
+		Requester:   [20]byte{0x01},
+		Amount:      5,
+		RecipientUA: bytes.Repeat([]byte{0x11}, 43),
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if _, _, err := store.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+	if _, err := store.ClaimUnbatched(ctx, withdraw.Fence{Owner: "a", LeaseVersion: 1}, time.Minute, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+	batchID := seq32(0x81)
+	txPlan := []byte(`{"kind":"send-many"}`)
+	if err := store.CreatePlannedBatch(ctx, withdraw.Fence{Owner: "a", LeaseVersion: 1}, withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        txPlan,
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+
+	verifier := NewWithdrawBatchVerifier(store)
+	err := verifier.VerifySignRequest(ctx, seq32(0x82), batchID, txPlan)
+	if err == nil {
+		t.Fatalf("expected verifier rejection")
+	}
+	if !errors.Is(err, ErrRejected) {
+		t.Fatalf("expected ErrRejected, got %v", err)
 	}
 }
 

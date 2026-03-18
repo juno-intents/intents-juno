@@ -76,3 +76,20 @@ func TestRun_InspectFailsForMissingKey(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+
+func TestRun_GenerateRejectsPlaintextStorage(t *testing.T) {
+	t.Parallel()
+
+	keyPath := filepath.Join(t.TempDir(), "operator.key")
+	var out bytes.Buffer
+
+	err := run([]string{
+		"generate",
+		"-private-key-path", keyPath,
+		"-storage-format", "plaintext",
+		"-passphrase", "secret",
+	}, &out)
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+}

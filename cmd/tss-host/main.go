@@ -16,8 +16,11 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/emf"
+	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/tsshost"
+	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 )
 
 func main() {
@@ -37,6 +40,12 @@ func main() {
 		maxBodyBytes   = flag.Int64("max-body-bytes", 1<<20, "max HTTP request body size (bytes)")
 		maxTxPlanBytes = flag.Int("max-txplan-bytes", 1<<20, "max decoded txPlan size (bytes)")
 		maxSessions    = flag.Int("max-sessions", 1024, "max in-memory sessions for idempotency")
+
+		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
+		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
+		postgresMinConns          = flag.Int("postgres-min-conns", int(pgxpoolutil.DefaultMinConns), "minimum pgxpool connections")
+		postgresMaxConns          = flag.Int("postgres-max-conns", int(pgxpoolutil.DefaultMaxConns), "maximum pgxpool connections")
+		postgresHealthCheckPeriod = flag.Duration("postgres-health-check-period", pgxpoolutil.DefaultHealthCheckPeriod, "pgxpool health check period")
 
 		readHeaderTimeout = flag.Duration("read-header-timeout", 5*time.Second, "http.Server ReadHeaderTimeout")
 		readTimeout       = flag.Duration("read-timeout", 120*time.Second, "http.Server ReadTimeout")
@@ -76,6 +85,8 @@ func main() {
 		log.Error("missing --signer-bin")
 		os.Exit(2)
 	}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 	devMode := devModeEnabled()
 	if *insecureHTTP && !devMode {
 		log.Error("--insecure-http requires JUNO_DEV_MODE=true")
@@ -98,11 +109,53 @@ func main() {
 		os.Exit(2)
 	}
 
+	var (
+		pool     *pgxpool.Pool
+		verifier tsshost.Verifier
+		dbReady  func(context.Context) error
+	)
+	resolvedPostgresDSN, err := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
+	if err != nil {
+		if !devMode {
+			log.Error("resolve postgres dsn", "err", err)
+			os.Exit(2)
+		}
+	} else {
+		poolCfg, cfgErr := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
+			MinConns:          int32(*postgresMinConns),
+			MaxConns:          int32(*postgresMaxConns),
+			HealthCheckPeriod: *postgresHealthCheckPeriod,
+		})
+		if cfgErr != nil {
+			log.Error("parse pgx pool config", "err", cfgErr)
+			os.Exit(2)
+		}
+		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
+		if err != nil {
+			log.Error("connect postgres", "err", err)
+			os.Exit(2)
+		}
+		defer pool.Close()
+
+		withdrawStore, storeErr := withdrawpg.New(pool)
+		if storeErr != nil {
+			log.Error("init withdraw store", "err", storeErr)
+			os.Exit(2)
+		}
+		verifier = tsshost.NewWithdrawBatchVerifier(withdrawStore)
+		dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+	}
+	if verifier == nil && !devMode {
+		log.Error("missing withdrawal verifier configuration")
+		os.Exit(2)
+	}
+
 	h := tsshost.NewHandler(signer, tsshost.Config{
 		MaxBodyBytes:   *maxBodyBytes,
 		MaxTxPlanBytes: *maxTxPlanBytes,
 		MaxSessions:    *maxSessions,
-		ReadinessCheck: signerReadinessCheck(signer),
+		ReadinessCheck: combineReadinessChecks(signerReadinessCheck(signer), dbReady),
+		Verifier:       verifier,
 		Now:            time.Now,
 	})
 
@@ -116,8 +169,6 @@ func main() {
 		MaxHeaderBytes:    1 << 20,
 	}
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 	if reporter, ok := h.(interface {
 		MetricsSnapshot() tsshost.MetricsSnapshot
 	}); ok {
@@ -126,7 +177,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("tss-host starting", "addr", *listenAddr, "tls", !*insecureHTTP, "mtls", *clientCAFile != "")
+		log.Info("tss-host starting", "addr", *listenAddr, "tls", !*insecureHTTP, "mtls", *clientCAFile != "", "batch_verifier", verifier != nil)
 		if *insecureHTTP {
 			errCh <- srv.ListenAndServe()
 			return
@@ -227,6 +278,26 @@ func signerReadinessCheck(signer any) func(context.Context) error {
 		return nil
 	}
 	return ready.Ready
+}
+
+func combineReadinessChecks(checks ...func(context.Context) error) func(context.Context) error {
+	filtered := make([]func(context.Context) error, 0, len(checks))
+	for _, check := range checks {
+		if check != nil {
+			filtered = append(filtered, check)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		for _, check := range filtered {
+			if err := check(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 }
 
 func emitTSSMetricsLoop(

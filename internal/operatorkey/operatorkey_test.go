@@ -4,48 +4,27 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"testing"
 )
 
-func TestGeneratePrivateKeyFile_PlaintextCreatesAndReuses(t *testing.T) {
+func TestGeneratePrivateKeyFile_PlaintextRejected(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "operator.key")
 
-	key1, created1, err := GeneratePrivateKeyFile(path, GenerateOptions{Format: FormatPlaintext})
-	if err != nil {
-		t.Fatalf("GeneratePrivateKeyFile create: %v", err)
+	key, created, err := GeneratePrivateKeyFile(path, GenerateOptions{Format: StorageFormat("plaintext")})
+	if !errors.Is(err, ErrUnsupportedFormat) {
+		t.Fatalf("GeneratePrivateKeyFile plaintext: got %v want %v", err, ErrUnsupportedFormat)
 	}
-	if !created1 {
-		t.Fatalf("created1: got false want true")
+	if key != nil {
+		t.Fatalf("expected nil key")
 	}
-	addr1 := OperatorIDFromPrivateKey(key1)
-	if len(addr1) != 42 || addr1[:2] != "0x" {
-		t.Fatalf("operator id format invalid: %q", addr1)
+	if created {
+		t.Fatalf("expected created=false")
 	}
-
-	key2, created2, err := LoadOrGeneratePlaintextPrivateKeyFile(path)
-	if err != nil {
-		t.Fatalf("LoadOrGeneratePlaintextPrivateKeyFile reuse: %v", err)
-	}
-	if created2 {
-		t.Fatalf("created2: got true want false")
-	}
-	addr2 := OperatorIDFromPrivateKey(key2)
-	if addr2 != addr1 {
-		t.Fatalf("address mismatch: got %q want %q", addr2, addr1)
-	}
-
-	if runtime.GOOS != "windows" {
-		info, err := os.Stat(path)
-		if err != nil {
-			t.Fatalf("stat key: %v", err)
-		}
-		if got := info.Mode().Perm(); got != 0o600 {
-			t.Fatalf("permissions: got %o want 600", got)
-		}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected key file to remain absent, got %v", statErr)
 	}
 }
 

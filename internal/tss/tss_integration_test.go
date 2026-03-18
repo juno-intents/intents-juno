@@ -27,7 +27,7 @@ type countingSigner struct {
 	ret   []byte
 }
 
-func (s *countingSigner) Sign(_ context.Context, _ [32]byte, _ []byte) ([]byte, error) {
+func (s *countingSigner) Sign(_ context.Context, _ [32]byte, _ [32]byte, _ []byte) ([]byte, error) {
 	s.calls.Add(1)
 	return append([]byte(nil), s.ret...), nil
 }
@@ -150,12 +150,12 @@ func mustNewLeafCert(t *testing.T, ca *x509.Certificate, caKey *rsa.PrivateKey, 
 		Subject: pkix.Name{
 			CommonName: cn,
 		},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(24 * time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
-		IPAddresses:  ips,
-		DNSNames:     []string{cn},
+		NotBefore:   time.Now().Add(-time.Hour),
+		NotAfter:    time.Now().Add(24 * time.Hour),
+		KeyUsage:    x509.KeyUsageDigitalSignature,
+		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		IPAddresses: ips,
+		DNSNames:    []string{cn},
 	}
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, ca, &key.PublicKey, caKey)

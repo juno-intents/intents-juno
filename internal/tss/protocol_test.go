@@ -50,3 +50,28 @@ func TestParseSessionID_RejectsWrongLength(t *testing.T) {
 	}
 }
 
+func TestFormatAndParseBatchID_RoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := seq32(0x30)
+	s := FormatBatchID(want)
+
+	got, err := ParseBatchID(s)
+	if err != nil {
+		t.Fatalf("ParseBatchID: %v", err)
+	}
+	if got != want {
+		t.Fatalf("mismatch: got %x want %x", got, want)
+	}
+}
+
+func TestDeriveSigningSessionID_DiffersAcrossPlans(t *testing.T) {
+	t.Parallel()
+
+	batchID := seq32(0x40)
+	id0 := DeriveSigningSessionID(batchID, []byte(`{"v":1}`))
+	id1 := DeriveSigningSessionID(batchID, []byte(`{"v":2}`))
+	if id0 == id1 {
+		t.Fatalf("expected different signing session ids for different plans")
+	}
+}

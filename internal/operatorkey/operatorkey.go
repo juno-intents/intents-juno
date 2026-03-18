@@ -29,7 +29,6 @@ var (
 type StorageFormat string
 
 const (
-	FormatPlaintext StorageFormat = "plaintext"
 	FormatEncrypted StorageFormat = "encrypted"
 )
 
@@ -51,9 +50,7 @@ type encryptedFile struct {
 	CipherHex string `json:"cipher_hex"`
 }
 
-// GeneratePrivateKeyFile loads or creates a secp256k1 private key at path.
-// Encrypted keys are the default; plaintext keys are stored as lowercase hex
-// without 0x prefix when explicitly requested.
+// GeneratePrivateKeyFile loads or creates an encrypted secp256k1 private key at path.
 func GeneratePrivateKeyFile(path string, opts GenerateOptions) (*ecdsa.PrivateKey, bool, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
@@ -111,12 +108,6 @@ func LoadPrivateKeyFile(path string, opts LoadOptions) (*ecdsa.PrivateKey, error
 	return loadPrivateKeyBytes(path, raw, opts)
 }
 
-// LoadOrGeneratePlaintextPrivateKeyFile preserves the legacy plaintext behavior for
-// existing tooling that still expects load-or-generate semantics.
-func LoadOrGeneratePlaintextPrivateKeyFile(path string) (*ecdsa.PrivateKey, bool, error) {
-	return GeneratePrivateKeyFile(path, GenerateOptions{Format: FormatPlaintext})
-}
-
 func OperatorIDFromPrivateKey(key *ecdsa.PrivateKey) string {
 	addr := crypto.PubkeyToAddress(key.PublicKey)
 	return strings.ToLower(addr.Hex())
@@ -132,8 +123,6 @@ func NormalizeAddress(input string) (string, error) {
 
 func marshalPrivateKeyFile(keyHex string, opts GenerateOptions) ([]byte, error) {
 	switch opts.Format {
-	case FormatPlaintext:
-		return []byte(keyHex + "\n"), nil
 	case FormatEncrypted:
 		if strings.TrimSpace(opts.Passphrase) == "" {
 			return nil, ErrMissingPassphrase
@@ -172,7 +161,7 @@ func decodePrivateKeyHex(raw []byte, opts LoadOptions) (string, error) {
 		}
 		return decryptKeyHex([]byte(trimmed), opts.Passphrase)
 	}
-	return strings.TrimSpace(strings.TrimPrefix(trimmed, "0x")), nil
+	return "", fmt.Errorf("%w: plaintext", ErrUnsupportedFormat)
 }
 
 func encryptKeyHex(keyHex string, passphrase string) (*encryptedFile, error) {
