@@ -724,6 +724,13 @@ runtime_dir="$2"
 base_chain_id="$3"
 bridge_address="$4"
 
+cleanup_sensitive_stage_files() {
+  local staged_backup_zip="$remote_stage_dir/dkg-backup.zip"
+  sudo rm -f "$staged_backup_zip" 2>/dev/null || true
+}
+
+trap cleanup_sensitive_stage_files EXIT
+
 if ! getent group intents-juno >/dev/null 2>&1; then
   sudo groupadd --system intents-juno
 fi
@@ -750,10 +757,7 @@ sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/operator-stack.e
 sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/junocashd.conf" /etc/intents-juno/junocashd.conf
 sudo install -m 0640 "$remote_stage_dir/shared-manifest.json" /etc/intents-juno/shared-manifest.json
 sudo install -m 0640 "$remote_stage_dir/operator-deploy.json" /etc/intents-juno/operator-deploy.json
-sudo install -m 0600 "$remote_stage_dir/$(basename "$remote_stage_dir").zip" /tmp/intents-juno-dkg-backup.zip 2>/dev/null || true
-sudo cp "$remote_stage_dir/dkg-backup.zip" /tmp/intents-juno-dkg-backup.zip
-sudo bash "$remote_stage_dir/backup-package.sh" restore --package /tmp/intents-juno-dkg-backup.zip --workdir "$runtime_dir" --force
-sudo rm -f /tmp/intents-juno-dkg-backup.zip
+sudo bash "$remote_stage_dir/backup-package.sh" restore --package "$remote_stage_dir/dkg-backup.zip" --workdir "$runtime_dir" --force
 if [[ -f "$remote_stage_dir/dkg-server.pem" ]]; then
   sudo install -m 0640 -o root -g intents-juno "$remote_stage_dir/dkg-server.pem" "$runtime_dir/bundle/tls/server.pem"
 fi
@@ -956,6 +960,7 @@ case "$CHECKPOINT_SIGNER_DRIVER_REMOTE" in
       exit 1
     }
     sudo ln -sfn "$latest_kms_receipt" "$runtime_dir/exports/kms-export-receipt.json"
+    sudo rm -f "$remote_stage_dir/dkg-backup.zip"
     ;;
   *)
     echo "operator runtime must set CHECKPOINT_SIGNER_DRIVER=aws-kms in /etc/intents-juno/operator-stack.env" >&2
@@ -1785,6 +1790,8 @@ sudo install -m 0755 "$remote_stage_dir/intents-juno-config-hydrator.sh" "$confi
 sudo systemctl daemon-reload
 sudo systemctl restart intents-juno-config-hydrator.service
 sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"
+sudo rm -rf "$remote_stage_dir"
+trap - EXIT
 sudo pkill -f '/usr/local/bin/intents-juno-dkg-admin-serve.sh' || true
 sudo pkill -f 'dkg-admin .* serve' || true
 for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
