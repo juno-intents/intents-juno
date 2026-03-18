@@ -452,6 +452,14 @@ resource "aws_security_group" "runner" {
   }
 
   ingress {
+    description = "HTTPS for bridge origin and direct app access"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
     description = "IPFS API from VPC (runner hosts IPFS container as NLB target)"
     from_port   = 5001
     to_port     = 5001

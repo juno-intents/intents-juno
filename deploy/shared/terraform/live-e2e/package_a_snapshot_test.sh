@@ -44,6 +44,8 @@ main() {
   assert_contains "$variables_tf" $'variable "shared_kafka_port" {\n  description = "MSK SASL/IAM bootstrap port exposed to clients."\n  type        = number\n  default     = 9098' "live-e2e defaults kafka port to the MSK IAM listener"
   assert_contains "$variables_tf" 'shared_kafka_port must be 9098 for MSK IAM bootstrap brokers.' "live-e2e validates the IAM kafka listener port"
   assert_contains "$variables_tf" $'variable "shared_msk_broker_instance_type" {\n  description = "MSK broker instance type."\n  type        = string\n  default     = "kafka.m5.large"' "live-e2e defaults MSK to an IAM-ready broker class"
+  assert_contains "$main_tf" 'description = "HTTPS for bridge origin and direct app access"' "live-e2e keeps runner https ingress durable for the bridge edge origin"
+  assert_contains "$main_tf" $'from_port   = 443\n    to_port     = 443\n    protocol    = "tcp"\n    cidr_blocks = ["0.0.0.0/0"]' "live-e2e runner sg exposes https publicly for edge/origin reachability"
   assert_contains "$main_tf" $'allowed_checkpoint_signer_kms_key_arns = sort(distinct(concat(\n    [aws_kms_key.dkg.arn],' "live-e2e auto-includes the managed dkg kms key in checkpoint signer allowlists"
   assert_contains "$main_tf" 'Sid    = "AllowCheckpointSignerKMS"' "live-e2e always renders checkpoint signer kms permissions"
   assert_contains "$main_tf" '"kms:DescribeKey"' "live-e2e checkpoint signer kms policy allows restore preflight DescribeKey"
