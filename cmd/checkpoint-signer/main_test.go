@@ -156,3 +156,41 @@ func TestJunoRPCReadinessCheck_ProbesTipHeight(t *testing.T) {
 		t.Fatalf("expected readiness error")
 	}
 }
+
+func TestSignerReadinessCheck_RequiresDBAndRPC(t *testing.T) {
+	t.Parallel()
+
+	dbCalls := 0
+	rpcCalls := 0
+	check := signerReadinessCheck(
+		func(context.Context) error {
+			dbCalls++
+			return nil
+		},
+		func(context.Context) error {
+			rpcCalls++
+			return nil
+		},
+	)
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("signerReadinessCheck: %v", err)
+	}
+	if dbCalls != 1 || rpcCalls != 1 {
+		t.Fatalf("expected both checks to run, got db=%d rpc=%d", dbCalls, rpcCalls)
+	}
+
+	rpcCalls = 0
+	check = signerReadinessCheck(
+		func(context.Context) error { return errors.New("db down") },
+		func(context.Context) error {
+			rpcCalls++
+			return nil
+		},
+	)
+	if err := check(context.Background()); err == nil {
+		t.Fatalf("expected db readiness error")
+	}
+	if rpcCalls != 0 {
+		t.Fatalf("expected rpc check to be skipped after db failure, got %d calls", rpcCalls)
+	}
+}

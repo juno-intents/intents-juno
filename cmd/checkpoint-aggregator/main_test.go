@@ -313,3 +313,41 @@ func TestBlobStoreReadinessCheck_UsesExists(t *testing.T) {
 		t.Fatalf("expected readiness error")
 	}
 }
+
+func TestAggregatorReadinessCheck_RequiresDBAndBlob(t *testing.T) {
+	t.Parallel()
+
+	dbCalls := 0
+	blobCalls := 0
+	check := aggregatorReadinessCheck(
+		func(context.Context) error {
+			dbCalls++
+			return nil
+		},
+		func(context.Context) error {
+			blobCalls++
+			return nil
+		},
+	)
+	if err := check(context.Background()); err != nil {
+		t.Fatalf("aggregatorReadinessCheck: %v", err)
+	}
+	if dbCalls != 1 || blobCalls != 1 {
+		t.Fatalf("expected both checks to run, got db=%d blob=%d", dbCalls, blobCalls)
+	}
+
+	blobCalls = 0
+	check = aggregatorReadinessCheck(
+		func(context.Context) error { return errors.New("db down") },
+		func(context.Context) error {
+			blobCalls++
+			return nil
+		},
+	)
+	if err := check(context.Background()); err == nil {
+		t.Fatalf("expected db readiness error")
+	}
+	if blobCalls != 0 {
+		t.Fatalf("expected blob check to be skipped after db failure, got %d calls", blobCalls)
+	}
+}

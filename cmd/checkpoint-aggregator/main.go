@@ -260,12 +260,11 @@ func main() {
 	}
 
 	go func() {
-		opts := []healthz.Option{}
-		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
-		}
-		if mirrorStore != nil {
-			opts = append(opts, healthz.WithReadinessCheck(blobStoreReadinessCheck(mirrorStore, *persistTimeout)))
+		opts := []healthz.Option{
+			healthz.WithReadinessCheck(aggregatorReadinessCheck(
+				pgxpoolReadinessCheck(pool),
+				blobStoreReadinessCheck(mirrorStore, *persistTimeout),
+			)),
 		}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator", opts...); err != nil {
 			log.Error("healthz server", "err", err)
@@ -476,12 +475,29 @@ func runIPFSPinWorker(
 }
 
 func blobStoreReadinessCheck(store blobstore.Store, timeout time.Duration) func(context.Context) error {
+	if store == nil {
+		return nil
+	}
 	return func(ctx context.Context) error {
 		readyCtx, cancel := context.WithTimeout(ctx, timeout)
 		defer cancel()
 		_, err := store.Exists(readyCtx, "healthz/checkpoint-aggregator-readiness")
 		return err
 	}
+}
+
+func aggregatorReadinessCheck(
+	dbCheck func(context.Context) error,
+	blobCheck func(context.Context) error,
+) func(context.Context) error {
+	return healthz.CombineReadinessChecks(dbCheck, blobCheck)
+}
+
+func pgxpoolReadinessCheck(pool *pgxpool.Pool) func(context.Context) error {
+	if pool == nil {
+		return nil
+	}
+	return pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
 }
 
 func marshalCheckpointPackage(pkg checkpoint.CheckpointPackageV1) ([]byte, error) {

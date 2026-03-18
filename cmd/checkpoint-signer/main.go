@@ -230,11 +230,12 @@ func main() {
 	}
 
 	go func() {
-		opts := []healthz.Option{}
-		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		opts := []healthz.Option{
+			healthz.WithReadinessCheck(signerReadinessCheck(
+				pgxpoolReadinessCheck(pool),
+				junoRPCReadinessCheck(src, *rpcTimeout),
+			)),
 		}
-		opts = append(opts, healthz.WithReadinessCheck(junoRPCReadinessCheck(src, *rpcTimeout)))
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-signer", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
@@ -388,4 +389,18 @@ func junoRPCReadinessCheck(src interface {
 		_, err := src.TipHeight(readyCtx)
 		return err
 	}
+}
+
+func signerReadinessCheck(
+	dbCheck func(context.Context) error,
+	rpcCheck func(context.Context) error,
+) func(context.Context) error {
+	return healthz.CombineReadinessChecks(dbCheck, rpcCheck)
+}
+
+func pgxpoolReadinessCheck(pool *pgxpool.Pool) func(context.Context) error {
+	if pool == nil {
+		return nil
+	}
+	return pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
 }
