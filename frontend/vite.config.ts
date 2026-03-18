@@ -8,6 +8,10 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react()],
+    test: {
+      environment: 'jsdom',
+      setupFiles: './src/test/setup.ts',
+    },
     build: {
       outDir: '../internal/bridgeapi/frontend_dist',
       emptyOutDir: true,

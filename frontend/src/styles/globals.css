@@ -377,6 +377,35 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--text-dim);
 }
 
+.field-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.field-action-btn {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 11px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.field-action-btn:hover {
+  border-color: var(--accent);
+  color: var(--text);
+}
+
+.recipient-input.is-readonly {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+  cursor: text;
+}
+
 .optional-pill {
   display: inline-flex;
   align-items: center;
@@ -410,21 +439,23 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   color: var(--text-dim);
   font-size: 10px;
   line-height: 1;
-  cursor: help;
+  cursor: pointer;
   flex-shrink: 0;
   font: inherit;
 }
 
+.info-hint.is-open {
+  border-color: var(--accent);
+  color: var(--text);
+  background: rgba(255, 77, 0, 0.12);
+}
+
 .info-hint-bubble {
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
   z-index: 30;
   position: absolute;
   left: 50%;
   bottom: calc(100% + 8px);
-  transform: translate(-50%, 4px);
+  transform: translate(-50%, 0);
   width: max-content;
   max-width: min(240px, calc(100vw - 32px));
   padding: 8px 10px;
@@ -449,13 +480,6 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   border-width: 6px 6px 0 6px;
   border-style: solid;
   border-color: var(--border) transparent transparent transparent;
-}
-
-.info-hint-wrap:hover .info-hint-bubble,
-.info-hint-wrap:focus-within .info-hint-bubble {
-  opacity: 1;
-  visibility: visible;
-  transform: translate(-50%, 0);
 }
 
 .warning-box {
@@ -892,6 +916,76 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .guide-modal {
   width: 560px;
+}
+
+.deposit-instructions-modal {
+  width: 560px;
+}
+
+.deposit-modal-body {
+  display: grid;
+  gap: 16px;
+}
+
+.deposit-modal-copy {
+  font-size: 13px;
+  color: var(--text-dim);
+  line-height: 1.6;
+  margin: 0;
+}
+
+.deposit-warning-list {
+  margin: 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.deposit-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.deposit-modal-primary {
+  width: auto;
+  min-width: 128px;
+}
+
+.transport-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.transport-option {
+  text-align: left;
+  border: 1px solid var(--border);
+  background: var(--bg-input);
+  color: var(--text);
+  border-radius: 12px;
+  padding: 14px 16px;
+  display: grid;
+  gap: 4px;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.transport-option:hover {
+  border-color: var(--accent);
+}
+
+.transport-option-title {
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.transport-option-copy {
+  font-size: 12px;
+  color: var(--text-dim);
+  line-height: 1.5;
 }
 
 .guide-body {
