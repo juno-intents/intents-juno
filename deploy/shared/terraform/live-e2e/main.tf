@@ -1537,6 +1537,7 @@ resource "aws_lb" "ipfs" {
   name               = local.ipfs_lb_name
   internal           = true
   load_balancer_type = "network"
+  enable_cross_zone_load_balancing = true
   subnets            = local.shared_subnets
 
   lifecycle {

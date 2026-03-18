@@ -145,6 +145,7 @@ main() {
   assert_contains "$main_tf" 'volume_size           = var.shared_ipfs_data_volume_size_gb' "production-shared provisions a dedicated IPFS data volume"
   assert_contains "$main_tf" 'delete_on_termination = false' "production-shared preserves the dedicated IPFS data volume across instance replacement"
   assert_contains "$main_tf" '/var/lib/intents-juno/ipfs' "production-shared mounts a dedicated IPFS data path"
+  assert_contains "$main_tf" 'enable_cross_zone_load_balancing = true' "production-shared enables cross-zone load balancing on the IPFS NLB"
   assert_not_contains "$main_tf" 'apt-get install -y awscli' "production-shared no longer depends on the missing Ubuntu awscli package for IPFS bootstrap"
   assert_contains "$main_tf" 'arch="$(uname -m)"' "production-shared detects the IPFS instance architecture before installing AWS CLI"
   assert_contains "$main_tf" 'awscli-exe-linux-$${awscli_arch}.zip' "production-shared installs AWS CLI from the official architecture-specific bundle"
