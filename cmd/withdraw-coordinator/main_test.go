@@ -1,9 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -94,6 +97,65 @@ func TestShouldAckWithdrawIngestError(t *testing.T) {
 				t.Fatalf("shouldAckWithdrawIngestError(%v) = %v want %v", tc.err, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStartTxBuildScanProxy_DisabledWhenScanURLBlank(t *testing.T) {
+	t.Parallel()
+
+	proxy, scanURL, err := startTxBuildScanProxy(context.Background(), " \t ")
+	if err != nil {
+		t.Fatalf("startTxBuildScanProxy: %v", err)
+	}
+	if proxy != nil {
+		t.Fatalf("proxy: got %v want nil", proxy)
+	}
+	if scanURL != "" {
+		t.Fatalf("scan URL: got %q want empty", scanURL)
+	}
+}
+
+func TestStartTxBuildScanProxy_StartsForwardingProxy(t *testing.T) {
+	t.Parallel()
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ok"}`)
+	}))
+	defer upstream.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	proxy, scanURL, err := startTxBuildScanProxy(ctx, upstream.URL)
+	if err != nil {
+		t.Fatalf("startTxBuildScanProxy: %v", err)
+	}
+	if proxy == nil {
+		t.Fatalf("proxy: got nil want non-nil")
+	}
+	if scanURL == "" || scanURL == upstream.URL {
+		t.Fatalf("scan URL: got %q want proxy URL distinct from upstream %q", scanURL, upstream.URL)
+	}
+	defer func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := proxy.Close(shutdownCtx); err != nil {
+			t.Fatalf("proxy close: %v", err)
+		}
+	}()
+
+	resp, err := http.Get(scanURL + "/v1/health")
+	if err != nil {
+		t.Fatalf("proxy get: %v", err)
+	}
+	defer resp.Body.Close()
+
+	raw, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(raw) != `{"status":"ok"}` {
+		t.Fatalf("body: got %q want %q", string(raw), `{"status":"ok"}`)
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
 	"github.com/juno-intents/intents-juno/internal/leases"
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
@@ -377,6 +378,22 @@ func main() {
 		extender    withdrawcoordinator.ExpiryExtender
 		paidMarker  withdrawcoordinator.PaidMarker
 	)
+	plannerScanURL := strings.TrimSpace(*junoScanURL)
+	txBuildScanProxy, plannerScanURL, err := startTxBuildScanProxy(ctx, plannerScanURL)
+	if err != nil {
+		log.Error("start txbuild juno-scan proxy", "err", err)
+		os.Exit(2)
+	}
+	if txBuildScanProxy != nil {
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := txBuildScanProxy.Close(shutdownCtx); err != nil {
+				log.Warn("shutdown txbuild juno-scan proxy", "err", err)
+			}
+		}()
+		log.Info("txbuild juno-scan proxy enabled", "listen", plannerScanURL, "upstream", *junoScanURL)
+	}
 	txBuildPlanner, err := withdrawcoordinator.NewTxBuildPlanner(withdrawcoordinator.TxBuildPlannerConfig{
 		Binary:           *txbuildBin,
 		WalletID:         *junoWalletID,
@@ -394,7 +411,7 @@ func main() {
 		RPCURL:           *junoRPCURL,
 		RPCUser:          junoRPCUser,
 		RPCPass:          junoRPCPass,
-		ScanURL:          *junoScanURL,
+		ScanURL:          plannerScanURL,
 		ScanBearerToken:  scanBearerToken,
 	})
 	if err != nil {
@@ -783,6 +800,17 @@ func withTimeout(ctx context.Context, d time.Duration) (context.Context, context
 		return ctx, func() {}
 	}
 	return context.WithTimeout(ctx, d)
+}
+
+func startTxBuildScanProxy(ctx context.Context, upstreamURL string) (*junoscanhttp.NotesFilterProxy, string, error) {
+	if strings.TrimSpace(upstreamURL) == "" {
+		return nil, "", nil
+	}
+	proxy, err := junoscanhttp.StartNotesFilterProxy(ctx, upstreamURL)
+	if err != nil {
+		return nil, "", err
+	}
+	return proxy, proxy.BaseURL(), nil
 }
 
 func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {
