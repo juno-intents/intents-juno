@@ -142,6 +142,7 @@ main() {
   assert_contains "$main_tf" 'selected_subnet_id = var.subnet_id != "" ? var.subnet_id : local.public_one_per_az[0]' "live-e2e defaults runner/operator hosts onto a deterministic public subnet"
   assert_not_contains "$main_tf" 'selected_subnet_id = var.subnet_id != "" ? var.subnet_id : data.aws_subnets.selected_vpc.ids[0]' "live-e2e no longer chooses runner/operator subnets from an unordered vpc subnet list"
   assert_contains "$main_tf" 'resource "aws_launch_template" "operator"' "live-e2e provisions operator launch templates"
+  assert_contains "$main_tf" 'user_data = base64encode(<<-EOF' "live-e2e base64-encodes operator launch template user data for EC2"
   assert_contains "$main_tf" 'device_name = "/dev/sda1"' "live-e2e operator launch templates map the root volume through block_device_mappings"
   assert_contains "$main_tf" 'resource "aws_autoscaling_group" "operator"' "live-e2e provisions one autoscaling group per operator"
   assert_not_contains "$main_tf" 'resource "aws_instance" "operator"' "live-e2e no longer provisions bare operator instances"
