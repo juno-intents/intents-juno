@@ -115,4 +115,24 @@ contract FeeDistributorTest is Test {
         assertEq(token.balanceOf(newRecipient), 0);
         assertEq(distributor.pendingReward(op2), 0);
     }
+
+    function test_depositFees_carriesDustForwardAcrossDeposits() public {
+        registry.setOperator(op2, op2Fee, 2, true);
+
+        vm.startPrank(bridge);
+        token.mint(address(distributor), 3);
+        distributor.depositFees(1);
+        distributor.depositFees(2);
+        vm.stopPrank();
+
+        assertEq(distributor.pendingReward(op1), 1);
+        assertEq(distributor.pendingReward(op2), 2);
+
+        distributor.claim(op1);
+        distributor.claim(op2);
+
+        assertEq(token.balanceOf(op1Fee), 1);
+        assertEq(token.balanceOf(op2Fee), 2);
+        assertEq(token.balanceOf(address(distributor)), 0);
+    }
 }

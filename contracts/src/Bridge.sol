@@ -170,7 +170,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId);
     event WithdrawRefunded(bytes32 indexed withdrawalId);
     event WithdrawExpiryExtended(bytes32 indexed withdrawalId, uint64 oldExpiry, uint64 newExpiry);
-    event WithdrawPaidMarked(bytes32 indexed withdrawalId);
+    event WithdrawalPaidRecorded(bytes32 indexed withdrawalId);
+    event CheckpointAccepted(uint64 indexed height, bytes32 indexed blockHash, bytes32 indexed finalOrchardRoot);
 
     constructor(
         address initialOwner,
@@ -479,7 +480,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             if (w.refunded) revert WithdrawalRefunded();
 
             withdrawalPaid[withdrawalId] = true;
-            emit WithdrawPaidMarked(withdrawalId);
+            emit WithdrawalPaidRecorded(withdrawalId);
         }
     }
 
@@ -518,7 +519,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 emit WithdrawFinalizedSkipped(it.withdrawalId);
                 continue;
             }
-            if (!withdrawalPaid[it.withdrawalId] && block.timestamp >= w.expiry) revert WithdrawalExpired();
+            if (block.timestamp >= w.expiry) revert WithdrawalExpired();
 
             if (it.recipientUAHash != keccak256(w.recipientUA)) revert WithdrawalRecipientMismatch();
 
@@ -548,7 +549,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         Withdrawal storage w = _withdrawals[withdrawalId];
         if (w.requester == address(0)) revert WithdrawalNotFound();
         if (w.finalized) revert WithdrawalFinalized();
-        if (withdrawalPaid[withdrawalId]) revert WithdrawalPaid();
         if (w.refunded) revert WithdrawalRefunded();
         if (block.timestamp < w.expiry) revert WithdrawNotExpired();
 
@@ -608,6 +608,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             lastAcceptedCheckpointHeight = checkpoint.height;
             lastAcceptedCheckpointBlockHash = checkpoint.blockHash;
             lastAcceptedCheckpointFinalOrchardRoot = checkpoint.finalOrchardRoot;
+            emit CheckpointAccepted(checkpoint.height, checkpoint.blockHash, checkpoint.finalOrchardRoot);
         }
     }
 

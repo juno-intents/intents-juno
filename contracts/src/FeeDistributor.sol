@@ -27,6 +27,7 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     uint256 public totalWeight;
     uint256 public accFeePerWeight; // scaled by 1e18
     uint256 public pendingUndistributedFees;
+    uint256 public pendingScaledRemainder;
 
     struct OperatorData {
         address feeRecipient;
@@ -139,7 +140,10 @@ contract FeeDistributor is Ownable2Step, ReentrancyGuard {
     function _distributeFees(uint256 amount, uint256 tw) internal {
         uint256 totalAmount = amount + pendingUndistributedFees;
         pendingUndistributedFees = 0;
-        accFeePerWeight += (totalAmount * ACC_SCALE) / tw;
+
+        uint256 scaledTotal = (totalAmount * ACC_SCALE) + pendingScaledRemainder;
+        accFeePerWeight += scaledTotal / tw;
+        pendingScaledRemainder = scaledTotal % tw;
         emit FeesDeposited(totalAmount, accFeePerWeight);
     }
 }
