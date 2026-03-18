@@ -1261,7 +1261,18 @@ resource "aws_launch_template" "ipfs" {
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y awscli ca-certificates curl docker.io nginx
+    apt-get install -y ca-certificates curl docker.io nginx unzip
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) awscli_arch="x86_64" ;;
+      aarch64|arm64) awscli_arch="aarch64" ;;
+      *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    rm -rf /tmp/aws
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+    rm -rf /tmp/aws /tmp/awscliv2.zip
     systemctl enable --now docker nginx
 
     ipfs_api_secret_arn="${aws_secretsmanager_secret.shared_ipfs_api_bearer_token.arn}"
@@ -1475,7 +1486,18 @@ resource "aws_instance" "wireguard_gateway" {
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y awscli ca-certificates curl dnsmasq iptables wireguard
+    apt-get install -y ca-certificates curl dnsmasq iptables unzip wireguard
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) awscli_arch="x86_64" ;;
+      aarch64|arm64) awscli_arch="aarch64" ;;
+      *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    rm -rf /tmp/aws
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+    rm -rf /tmp/aws /tmp/awscliv2.zip
 
     imds_token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
     for _ in $(seq 1 30); do
