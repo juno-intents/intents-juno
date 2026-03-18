@@ -322,6 +322,32 @@ func (s *MemoryStore) MarkFinalized(_ context.Context, depositID [32]byte, txHas
 	return nil
 }
 
+func (s *MemoryStore) RepairFinalized(_ context.Context, depositID [32]byte, txHash [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, ok := s.jobs[depositID]
+	if !ok {
+		return ErrNotFound
+	}
+	if j.State < StateConfirmed {
+		return ErrInvalidTransition
+	}
+	if j.State == StateFinalized {
+		if j.TxHash != txHash {
+			return ErrDepositMismatch
+		}
+		return nil
+	}
+
+	j.State = StateFinalized
+	j.TxHash = txHash
+	j.RejectionReason = ""
+	s.jobs[depositID] = j
+	delete(s.claim, depositID)
+	return nil
+}
+
 func (s *MemoryStore) MarkRejected(_ context.Context, depositID [32]byte, reason string, txHash [32]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

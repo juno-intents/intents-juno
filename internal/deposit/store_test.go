@@ -303,6 +303,72 @@ func TestMemoryStore_ListByState(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_RepairFinalizedOverridesRejectedState(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+
+	var id [32]byte
+	id[0] = 0x81
+
+	var cm [32]byte
+	cm[0] = 0xb1
+
+	var recip [20]byte
+	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000456").Bytes())
+
+	_, _, err := s.UpsertConfirmed(context.Background(), Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	})
+	if err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if err := s.MarkProofRequested(context.Background(), id, cp); err != nil {
+		t.Fatalf("MarkProofRequested: %v", err)
+	}
+	if err := s.SetProofReady(context.Background(), id, []byte{0x02}); err != nil {
+		t.Fatalf("SetProofReady: %v", err)
+	}
+
+	var rejectedTxHash [32]byte
+	rejectedTxHash[0] = 0x91
+	if err := s.MarkRejected(context.Background(), id, "deposit skipped by bridge", rejectedTxHash); err != nil {
+		t.Fatalf("MarkRejected: %v", err)
+	}
+
+	var mintedTxHash [32]byte
+	mintedTxHash[0] = 0x92
+	if err := s.RepairFinalized(context.Background(), id, mintedTxHash); err != nil {
+		t.Fatalf("RepairFinalized: %v", err)
+	}
+
+	job, err := s.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != StateFinalized {
+		t.Fatalf("state: got %v want %v", job.State, StateFinalized)
+	}
+	if job.TxHash != mintedTxHash {
+		t.Fatalf("tx hash: got %x want %x", job.TxHash, mintedTxHash)
+	}
+	if job.RejectionReason != "" {
+		t.Fatalf("rejection reason: got %q want empty", job.RejectionReason)
+	}
+}
+
 func TestMemoryStore_ClaimConfirmed_LeaseBehavior(t *testing.T) {
 	t.Parallel()
 

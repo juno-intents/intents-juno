@@ -623,6 +623,43 @@ func (s *Store) MarkFinalized(ctx context.Context, depositID [32]byte, txHash [3
 	return nil
 }
 
+func (s *Store) RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error {
+	job, err := s.Get(ctx, depositID)
+	if err != nil {
+		return err
+	}
+	if job.State < deposit.StateConfirmed {
+		return deposit.ErrInvalidTransition
+	}
+	if job.State == deposit.StateFinalized {
+		if job.TxHash != txHash {
+			return deposit.ErrDepositMismatch
+		}
+		return nil
+	}
+
+	_, err = s.pool.Exec(ctx, `
+		UPDATE deposit_jobs
+		SET
+			state = $2,
+			tx_hash = $3,
+			rejection_reason = NULL,
+			submit_batch_id = NULL,
+			claimed_by = NULL,
+			claim_expires_at = NULL,
+			updated_at = now()
+		WHERE deposit_id = $1
+		  AND state <> $2
+	`, depositID[:], int16(deposit.StateFinalized), txHash[:])
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: repair finalized: %w", err)
+	}
+	if err := s.ensureTerminalState(ctx, depositID, deposit.StateFinalized, txHash, ""); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (s *Store) MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error {
 	job, err := s.Get(ctx, depositID)
 	if err != nil {

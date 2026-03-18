@@ -897,8 +897,8 @@ func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depos
 		return fmt.Errorf("depositrelayer: apply batch receipt outcome: %w", err)
 	}
 	for depositID, mintedTxHash := range recoveredFinalized {
-		if err := r.store.MarkFinalized(ctx, depositID, mintedTxHash); err != nil {
-			return fmt.Errorf("depositrelayer: finalize duplicate skipped deposit %x: %w", depositID[:], err)
+		if err := r.store.RepairFinalized(ctx, depositID, mintedTxHash); err != nil {
+			return fmt.Errorf("depositrelayer: repair duplicate skipped deposit %x: %w", depositID[:], err)
 		}
 	}
 

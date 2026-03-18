@@ -26,6 +26,7 @@ type Store interface {
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error
 	MarkFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
+	RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
 	MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error
 	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
 	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error
