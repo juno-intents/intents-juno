@@ -390,44 +390,37 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   text-transform: uppercase;
 }
 
+.info-hint-wrap {
+  display: inline-flex;
+  align-items: center;
+  position: relative;
+  vertical-align: middle;
+}
+
 .info-hint {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  position: relative;
   width: 16px;
   height: 16px;
+  padding: 0;
   border-radius: 50%;
   border: 1px solid var(--border);
+  background: transparent;
   color: var(--text-dim);
   font-size: 10px;
   line-height: 1;
   cursor: help;
   flex-shrink: 0;
+  font: inherit;
 }
 
-.info-hint::before,
-.info-hint::after {
+.info-hint-bubble {
   opacity: 0;
   visibility: hidden;
   pointer-events: none;
   transition: opacity 0.15s ease, transform 0.15s ease, visibility 0.15s ease;
   z-index: 30;
-}
-
-.info-hint::before {
-  content: '';
-  position: absolute;
-  left: 50%;
-  bottom: calc(100% + 2px);
-  transform: translate(-50%, 4px);
-  border-width: 6px 6px 0 6px;
-  border-style: solid;
-  border-color: var(--border) transparent transparent transparent;
-}
-
-.info-hint::after {
-  content: attr(aria-label);
   position: absolute;
   left: 50%;
   bottom: calc(100% + 8px);
@@ -447,10 +440,19 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
 }
 
-.info-hint:hover::before,
-.info-hint:hover::after,
-.info-hint:focus-visible::before,
-.info-hint:focus-visible::after {
+.info-hint-bubble::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  transform: translateX(-50%);
+  border-width: 6px 6px 0 6px;
+  border-style: solid;
+  border-color: var(--border) transparent transparent transparent;
+}
+
+.info-hint-wrap:hover .info-hint-bubble,
+.info-hint-wrap:focus-within .info-hint-bubble {
   opacity: 1;
   visibility: visible;
   transform: translate(-50%, 0);
