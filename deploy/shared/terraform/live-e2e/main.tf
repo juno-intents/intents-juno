@@ -2,6 +2,11 @@ provider "aws" {
   region = var.aws_region
 }
 
+provider "aws" {
+  alias  = "dr"
+  region = var.shared_postgres_dr_region
+}
+
 locals {
   resource_name = "${var.name_prefix}-${var.deployment_id}"
 
@@ -715,6 +720,96 @@ resource "aws_rds_cluster_instance" "shared" {
   tags = merge(local.common_tags, {
     Name = "${local.resource_name}-aurora-${replace(each.value.availability_zone, "-", "")}"
   })
+}
+
+data "aws_iam_policy_document" "shared_backup_assume_role" {
+  count = var.provision_shared_services ? 1 : 0
+
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["backup.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "shared_backup" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name               = "${local.resource_name}-backup-role"
+  assume_role_policy = data.aws_iam_policy_document.shared_backup_assume_role[0].json
+  tags               = local.common_tags
+}
+
+resource "aws_iam_role_policy_attachment" "shared_backup_backup" {
+  count = var.provision_shared_services ? 1 : 0
+
+  role       = aws_iam_role.shared_backup[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForBackup"
+}
+
+resource "aws_iam_role_policy_attachment" "shared_backup_restore" {
+  count = var.provision_shared_services ? 1 : 0
+
+  role       = aws_iam_role.shared_backup[0].name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSBackupServiceRolePolicyForRestores"
+}
+
+resource "aws_backup_vault" "shared_postgres" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name = "${local.resource_name}-shared-postgres"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-shared-postgres-backup"
+  })
+}
+
+resource "aws_backup_vault" "shared_postgres_dr" {
+  count    = var.provision_shared_services ? 1 : 0
+  provider = aws.dr
+  name     = "${local.resource_name}-shared-postgres-dr"
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-shared-postgres-backup-dr"
+  })
+}
+
+resource "aws_backup_plan" "shared_postgres" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name = "${local.resource_name}-shared-postgres"
+
+  rule {
+    rule_name         = "daily"
+    target_vault_name = aws_backup_vault.shared_postgres[0].name
+    schedule          = var.shared_postgres_backup_schedule_expression
+
+    lifecycle {
+      delete_after = var.shared_postgres_backup_delete_after_days
+    }
+
+    copy_action {
+      destination_vault_arn = aws_backup_vault.shared_postgres_dr[0].arn
+
+      lifecycle {
+        delete_after = var.shared_postgres_backup_delete_after_days
+      }
+    }
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_backup_selection" "shared_postgres" {
+  count = var.provision_shared_services ? 1 : 0
+
+  iam_role_arn = aws_iam_role.shared_backup[0].arn
+  name         = "${local.resource_name}-shared-postgres"
+  plan_id      = aws_backup_plan.shared_postgres[0].id
+  resources    = [aws_rds_cluster.shared[0].arn]
 }
 
 resource "aws_msk_configuration" "shared" {

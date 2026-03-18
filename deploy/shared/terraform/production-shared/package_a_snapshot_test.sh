@@ -18,9 +18,10 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf outputs_tf password_block key_rotation failover min_healthy_count max_healthy_count rollback_count
+  local main_tf variables_tf monitoring_tf outputs_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
+  monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
   password_block="$(awk '
     /variable "shared_postgres_password" \{/ { in_block = 1 }
@@ -34,6 +35,7 @@ main() {
   ' "$SCRIPT_DIR/variables.tf")"
   key_rotation="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-key-rotation.md")"
   failover="$(cat "$REPO_ROOT/deploy/shared/runbooks/proof-requestor-failover.md")"
+  restore_runbook="$(cat "$REPO_ROOT/deploy/shared/runbooks/aurora-dr-restore.md")"
 
   assert_contains "$main_tf" 'check "distinct_proof_secret_arns"' "distinct proof secret ARN guard"
   assert_contains "$main_tf" 'check "proof_service_image_ecr_scope"' "explicit ECR image repository scope guard"
@@ -148,6 +150,31 @@ main() {
   assert_contains "$main_tf" 'route_table_ids   = local.shared_route_table_ids' "production-shared attaches the S3 gateway endpoint to the shared route tables"
   assert_contains "$main_tf" 'security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]' "production-shared constrains interface endpoints behind the dedicated SG"
   assert_contains "$main_tf" 'private_dns_enabled = true' "production-shared enables private DNS on interface endpoints"
+  assert_contains "$main_tf" 'alias  = "dr"' "production-shared configures an aws dr provider alias"
+  assert_contains "$variables_tf" 'variable "shared_postgres_dr_region"' "production-shared exposes the Aurora DR backup region"
+  assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres"' "production-shared provisions a primary backup vault"
+  assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres_dr"' "production-shared provisions a DR backup vault"
+  assert_contains "$main_tf" 'provider = aws.dr' "production-shared binds DR backup resources to the dr provider"
+  assert_contains "$main_tf" 'resource "aws_backup_plan" "shared_postgres"' "production-shared provisions an Aurora backup plan"
+  assert_contains "$main_tf" 'copy_action {' "production-shared copies backups into the DR vault"
+  assert_contains "$main_tf" 'destination_vault_arn = aws_backup_vault.shared_postgres_dr.arn' "production-shared targets the DR backup vault"
+  assert_contains "$main_tf" 'resource "aws_backup_selection" "shared_postgres"' "production-shared selects the Aurora cluster for AWS Backup"
+  assert_contains "$main_tf" 'resources    = [aws_rds_cluster.shared.arn]' "production-shared backs up the Aurora cluster ARN"
+  assert_contains "$main_tf" 'resource "aws_iam_role" "shared_backup"' "production-shared provisions a dedicated AWS Backup role"
+  assert_contains "$main_tf" 'AWSBackupServiceRolePolicyForBackup' "production-shared attaches the AWS Backup backup policy"
+  assert_contains "$main_tf" 'AWSBackupServiceRolePolicyForRestores' "production-shared attaches the AWS Backup restore policy"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "withdrawal_dlq_depth"' "production-shared alarms on withdrawal dlq depth"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "confirmed_unmarked_count"' "production-shared alarms on confirmed-unmarked withdrawals"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "min_withdrawal_time_to_expiry_seconds"' "production-shared alarms on withdrawal expiry runway"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "checkpoint_pin_backlog"' "production-shared alarms on checkpoint pin backlog"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "tss_session_saturation"' "production-shared alarms on tss session saturation"
+  assert_contains "$monitoring_tf" 'metric_name         = "WithdrawalDLQDepth"' "production-shared wires the withdrawal dlq metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "ConfirmedUnmarkedCount"' "production-shared wires the confirmed-unmarked metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "MinWithdrawalTimeToExpirySeconds"' "production-shared wires the withdrawal expiry metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "CheckpointPinBacklog"' "production-shared wires the checkpoint pin backlog metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "TSSSessionSaturation"' "production-shared wires the tss session saturation metric name"
+  assert_contains "$monitoring_tf" 'operations_metric_namespace = "IntentsJuno/Operations"' "production-shared defines the custom operations metric namespace"
+  assert_contains "$monitoring_tf" 'namespace           = local.operations_metric_namespace' "production-shared uses the custom operations metric namespace"
 
   assert_not_contains "$password_block" 'default' "shared postgres password has no default"
   assert_contains "$variables_tf" 'variable "shared_proof_service_image_ecr_repository_arn"' "explicit proof-service ECR repository ARN input"
@@ -157,6 +184,8 @@ main() {
   assert_contains "$key_rotation" 'deployment_maximum_percent = 200' "rotation runbook documents overlapping rollout"
   assert_contains "$failover" 'at least two healthy targets' "failover runbook documents IPFS redundancy"
   assert_contains "$failover" 'ELB health checks' "failover runbook documents ELB-backed readiness"
+  assert_contains "$restore_runbook" 'backup list-recovery-points-by-backup-vault' "aurora dr runbook enumerates recovery points"
+  assert_contains "$restore_runbook" 'backup start-restore-job' "aurora dr runbook documents restore execution"
 
   printf 'package_a_snapshot_test: PASS\n'
 }

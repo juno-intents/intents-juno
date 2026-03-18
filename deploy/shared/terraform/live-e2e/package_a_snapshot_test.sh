@@ -18,11 +18,12 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf
+  local main_tf variables_tf monitoring_tf outputs_tf restore_runbook
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
+  restore_runbook="$(cat "$REPO_ROOT/deploy/shared/runbooks/aurora-dr-restore.md")"
 
   assert_contains "$variables_tf" 'variable "shared_sp1_funder_secret_arn"' "live-e2e exposes distinct proof funder secret input"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "live-e2e exposes shared proof requestor address input"
@@ -155,9 +156,36 @@ main() {
   assert_contains "$main_tf" 'proxy_pass http://127.0.0.1:5001;' "live-e2e proxies authenticated IPFS API traffic to loopback Kubo"
   assert_contains "$main_tf" 'daemon --migrate=true --api /ip4/127.0.0.1/tcp/5001 --routing=dhtclient' "live-e2e binds raw Kubo API to loopback only"
   assert_not_contains "$main_tf" '--api /ip4/0.0.0.0/tcp/5001' "live-e2e no longer exposes raw Kubo on all interfaces"
+  assert_contains "$main_tf" 'alias  = "dr"' "live-e2e configures an aws dr provider alias"
+  assert_contains "$variables_tf" 'variable "shared_postgres_dr_region"' "live-e2e exposes the Aurora DR backup region"
+  assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres"' "live-e2e provisions a primary backup vault"
+  assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres_dr"' "live-e2e provisions a DR backup vault"
+  assert_contains "$main_tf" 'provider = aws.dr' "live-e2e binds DR backup resources to the dr provider"
+  assert_contains "$main_tf" 'resource "aws_backup_plan" "shared_postgres"' "live-e2e provisions an Aurora backup plan"
+  assert_contains "$main_tf" 'copy_action {' "live-e2e copies backups into the DR vault"
+  assert_contains "$main_tf" 'destination_vault_arn = aws_backup_vault.shared_postgres_dr[0].arn' "live-e2e targets the DR backup vault"
+  assert_contains "$main_tf" 'resource "aws_backup_selection" "shared_postgres"' "live-e2e selects the Aurora cluster for AWS Backup"
+  assert_contains "$main_tf" 'resources    = [aws_rds_cluster.shared[0].arn]' "live-e2e backs up the Aurora cluster ARN"
+  assert_contains "$main_tf" 'resource "aws_iam_role" "shared_backup"' "live-e2e provisions a dedicated AWS Backup role"
+  assert_contains "$main_tf" 'AWSBackupServiceRolePolicyForBackup' "live-e2e attaches the AWS Backup backup policy"
+  assert_contains "$main_tf" 'AWSBackupServiceRolePolicyForRestores' "live-e2e attaches the AWS Backup restore policy"
   assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "shared_postgres_instance_cpu"' "live-e2e monitors Aurora CPU per instance"
   assert_contains "$monitoring_tf" 'var.provision_shared_services ? aws_rds_cluster_instance.shared : {}' "live-e2e derives Aurora CPU alarms from the keyed cluster instances"
   assert_not_contains "$monitoring_tf" 'aws_rds_cluster_instance.shared[0].identifier' "live-e2e no longer indexes keyed Aurora instances numerically"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "withdrawal_dlq_depth"' "live-e2e alarms on withdrawal dlq depth"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "confirmed_unmarked_count"' "live-e2e alarms on confirmed-unmarked withdrawals"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "min_withdrawal_time_to_expiry_seconds"' "live-e2e alarms on withdrawal expiry runway"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "checkpoint_pin_backlog"' "live-e2e alarms on checkpoint pin backlog"
+  assert_contains "$monitoring_tf" 'resource "aws_cloudwatch_metric_alarm" "tss_session_saturation"' "live-e2e alarms on tss session saturation"
+  assert_contains "$monitoring_tf" 'metric_name         = "WithdrawalDLQDepth"' "live-e2e wires the withdrawal dlq metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "ConfirmedUnmarkedCount"' "live-e2e wires the confirmed-unmarked metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "MinWithdrawalTimeToExpirySeconds"' "live-e2e wires the withdrawal expiry metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "CheckpointPinBacklog"' "live-e2e wires the checkpoint pin backlog metric name"
+  assert_contains "$monitoring_tf" 'metric_name         = "TSSSessionSaturation"' "live-e2e wires the tss session saturation metric name"
+  assert_contains "$monitoring_tf" 'operations_metric_namespace = "IntentsJuno/Operations"' "live-e2e defines the custom operations metric namespace"
+  assert_contains "$monitoring_tf" 'namespace           = local.operations_metric_namespace' "live-e2e uses the custom operations metric namespace"
+  assert_contains "$restore_runbook" 'backup list-recovery-points-by-backup-vault' "aurora dr runbook enumerates recovery points"
+  assert_contains "$restore_runbook" 'backup start-restore-job' "aurora dr runbook documents restore execution"
 
   printf 'live_e2e package_a_snapshot_test: PASS\n'
 }

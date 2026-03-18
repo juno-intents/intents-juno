@@ -87,6 +87,34 @@ variable "shared_postgres_preferred_backup_window" {
   default     = "07:00-09:00"
 }
 
+variable "shared_postgres_dr_region" {
+  description = "AWS region that receives copied Aurora backups for disaster recovery."
+  type        = string
+  default     = "us-west-2"
+
+  validation {
+    condition     = trimspace(var.shared_postgres_dr_region) != "" && trimspace(var.shared_postgres_dr_region) != trimspace(var.aws_region)
+    error_message = "shared_postgres_dr_region must be non-empty and differ from aws_region."
+  }
+}
+
+variable "shared_postgres_backup_schedule_expression" {
+  description = "AWS Backup schedule expression for Aurora cross-region backups."
+  type        = string
+  default     = "cron(0 6 * * ? *)"
+}
+
+variable "shared_postgres_backup_delete_after_days" {
+  description = "Retention in days for copied Aurora backups in AWS Backup vaults."
+  type        = number
+  default     = 35
+
+  validation {
+    condition     = var.shared_postgres_backup_delete_after_days >= 7
+    error_message = "shared_postgres_backup_delete_after_days must be at least 7 days."
+  }
+}
+
 variable "shared_postgres_final_snapshot_identifier" {
   description = "Optional final snapshot identifier to override the default production snapshot name."
   type        = string

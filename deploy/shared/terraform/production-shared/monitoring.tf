@@ -1,6 +1,7 @@
 locals {
-  cloudtrail_bucket_base = trim(replace(lower("${local.resource_name}-trail"), "_", "-"), "-")
-  cloudtrail_bucket_name = trim(substr(local.cloudtrail_bucket_base, 0, 63), "-")
+  cloudtrail_bucket_base      = trim(replace(lower("${local.resource_name}-trail"), "_", "-"), "-")
+  cloudtrail_bucket_name      = trim(substr(local.cloudtrail_bucket_base, 0, 63), "-")
+  operations_metric_namespace = "IntentsJuno/Operations"
 }
 
 resource "aws_s3_bucket" "cloudtrail" {
@@ -182,4 +183,74 @@ resource "aws_cloudwatch_metric_alarm" "ipfs_unhealthy_hosts" {
     LoadBalancer = aws_lb.ipfs.arn_suffix
     TargetGroup  = aws_lb_target_group.ipfs_api.arn_suffix
   }
+}
+
+resource "aws_cloudwatch_metric_alarm" "withdrawal_dlq_depth" {
+  alarm_name          = "${local.resource_name}-withdrawal-dlq-depth"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "WithdrawalDLQDepth"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Withdrawal DLQ depth is non-zero."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "confirmed_unmarked_count" {
+  alarm_name          = "${local.resource_name}-confirmed-unmarked-count"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ConfirmedUnmarkedCount"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Confirmed withdrawals remain unmarked on Base."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "min_withdrawal_time_to_expiry_seconds" {
+  alarm_name          = "${local.resource_name}-min-withdrawal-time-to-expiry"
+  comparison_operator = "LessThanOrEqualToThreshold"
+  evaluation_periods  = 1
+  metric_name         = "MinWithdrawalTimeToExpirySeconds"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Minimum"
+  threshold           = 1800
+  alarm_description   = "The minimum withdrawal time-to-expiry runway is below 30 minutes."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "checkpoint_pin_backlog" {
+  alarm_name          = "${local.resource_name}-checkpoint-pin-backlog"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "CheckpointPinBacklog"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Checkpoint packages are accumulating faster than IPFS pinning drains them."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "tss_session_saturation" {
+  alarm_name          = "${local.resource_name}-tss-session-saturation"
+  comparison_operator = "GreaterThanOrEqualToThreshold"
+  evaluation_periods  = 2
+  metric_name         = "TSSSessionSaturation"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0.8
+  alarm_description   = "TSS session saturation is above 80%."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
 }
