@@ -14,10 +14,6 @@ variable "bridge_record_name" {
   type = string
 }
 
-variable "backoffice_record_name" {
-  type = string
-}
-
 variable "origin_record_name" {
   type = string
 }

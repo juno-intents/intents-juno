@@ -100,10 +100,11 @@ bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_a
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
 backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
-if ! jq -e '(.services.backoffice.allowed_cidrs // []) | type == "array" and all(.[]; type == "string" and length > 0)' "$app_deploy" >/dev/null 2>&1; then
-  die "services.backoffice.allowed_cidrs must be an array of non-empty strings"
+if ! jq -e '.services.backoffice.access.mode == "wireguard"
+  and ((.services.backoffice.access.wireguard_client_cidrs // []) | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' "$app_deploy" >/dev/null 2>&1; then
+  die "services.backoffice.access must be wireguard with a non-empty wireguard_client_cidrs array"
 fi
-mapfile -t backoffice_allowed_cidrs < <(jq -r '.services.backoffice.allowed_cidrs[]? | select(type == "string" and length > 0)' "$app_deploy")
+mapfile -t backoffice_wireguard_client_cidrs < <(jq -r '.services.backoffice.access.wireguard_client_cidrs[]? | select(type == "string" and length > 0)' "$app_deploy")
 shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
 shared_kafka_auth_mode="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
 shared_kafka_auth_aws_region="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.aws_region | select(type == "string" and length > 0)')"
@@ -237,48 +238,19 @@ download_release_asset "bridge-api_linux_amd64"
 download_release_asset "backoffice_linux_amd64"
 download_release_asset "shared-infra-e2e_linux_amd64"
 
-edge_backoffice_caddy_block="$(cat <<EOF
-  handle_path /ops* {
-    reverse_proxy 127.0.0.1:$backoffice_port
-  }
-EOF
-)"
 direct_backoffice_caddy_block="$(cat <<EOF
 \$backoffice_record_name {
   encode zstd gzip
-  reverse_proxy 127.0.0.1:$backoffice_port
-}
-EOF
-)"
-if (( ${#backoffice_allowed_cidrs[@]} > 0 )); then
-  local_backoffice_cidrs="${backoffice_allowed_cidrs[*]}"
-  edge_backoffice_caddy_block="$(cat <<EOF
-  @backoffice_vpn {
-    path /ops*
-    remote_ip $local_backoffice_cidrs
+  @backoffice_wireguard {
+    remote_ip ${backoffice_wireguard_client_cidrs[*]}
   }
-  handle_path @backoffice_vpn {
-    reverse_proxy 127.0.0.1:$backoffice_port
-  }
-  handle_path /ops* {
-    respond "forbidden" 403
-  }
-EOF
-)"
-  direct_backoffice_caddy_block="$(cat <<EOF
-\$backoffice_record_name {
-  encode zstd gzip
-  @backoffice_vpn {
-    remote_ip $local_backoffice_cidrs
-  }
-  handle @backoffice_vpn {
+  handle @backoffice_wireguard {
     reverse_proxy 127.0.0.1:$backoffice_port
   }
   respond "forbidden" 403
 }
 EOF
 )"
-fi
 
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy bridge-api and backoffice to $ssh_target from release $release_tag"
@@ -298,8 +270,10 @@ else
   fi
 fi
 
-if [[ "$edge_enabled" == "false" && "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
-  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
+if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; then
+  if [[ "$edge_enabled" == "false" ]]; then
+    production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
+  fi
   production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
 fi
 
@@ -545,9 +519,10 @@ if [[ "\$public_scheme" == "https" ]]; then
   handle_path /bridge* {
     reverse_proxy 127.0.0.1:$bridge_port
   }
-$edge_backoffice_caddy_block
   respond "not found" 404
 }
+
+$direct_backoffice_caddy_block
 CADDY
   else
     cat >"\$caddyfile_tmp" <<CADDY

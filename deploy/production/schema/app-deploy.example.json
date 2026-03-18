@@ -38,9 +38,12 @@
       "probe_url": "https://ops.alpha.intents-testing.thejunowallet.com",
       "internal_url": "http://127.0.0.1:8090",
       "record_name": "ops.alpha.intents-testing.thejunowallet.com",
-      "allowed_cidrs": [
-        "172.27.48.0/20"
-      ]
+      "access": {
+        "mode": "wireguard",
+        "wireguard_client_cidrs": [
+          "10.66.0.0/24"
+        ]
+      }
     }
   },
   "dns": {

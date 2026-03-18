@@ -46,7 +46,6 @@ resource "aws_route53_record" "origin_cname" {
 resource "aws_acm_certificate" "viewer" {
   provider                  = aws.us_east_1
   domain_name               = var.bridge_record_name
-  subject_alternative_names = [var.backoffice_record_name]
   validation_method         = "DNS"
 
   lifecycle {
@@ -237,54 +236,6 @@ resource "aws_cloudfront_distribution" "bridge" {
   })
 }
 
-resource "aws_cloudfront_distribution" "backoffice" {
-  provider            = aws.us_east_1
-  enabled             = true
-  is_ipv6_enabled     = true
-  wait_for_deployment = true
-  aliases             = [var.backoffice_record_name]
-  web_acl_id          = aws_wafv2_web_acl.app.arn
-
-  origin {
-    domain_name = var.origin_record_name
-    origin_id   = "app-origin"
-    origin_path = "/ops"
-
-    custom_origin_config {
-      http_port              = var.origin_http_port
-      https_port             = 443
-      origin_protocol_policy = "https-only"
-      origin_ssl_protocols   = ["TLSv1.2"]
-    }
-  }
-
-  default_cache_behavior {
-    target_origin_id       = "app-origin"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods         = ["GET", "HEAD", "OPTIONS"]
-    compress               = true
-    cache_policy_id        = local.cloudfront_cache_policy_id
-    origin_request_policy_id = local.cloudfront_origin_request_policy_id
-  }
-
-  restrictions {
-    geo_restriction {
-      restriction_type = "none"
-    }
-  }
-
-  viewer_certificate {
-    acm_certificate_arn      = aws_acm_certificate_validation.viewer.certificate_arn
-    minimum_protocol_version = "TLSv1.2_2021"
-    ssl_support_method       = "sni-only"
-  }
-
-  tags = merge(local.common_tags, {
-    Name = "${local.resource_slug}-backoffice"
-  })
-}
-
 resource "aws_route53_record" "bridge_alias_a" {
   zone_id         = var.zone_id
   name            = var.bridge_record_name
@@ -307,32 +258,6 @@ resource "aws_route53_record" "bridge_alias_aaaa" {
   alias {
     name                   = aws_cloudfront_distribution.bridge.domain_name
     zone_id                = aws_cloudfront_distribution.bridge.hosted_zone_id
-    evaluate_target_health = false
-  }
-}
-
-resource "aws_route53_record" "backoffice_alias_a" {
-  zone_id         = var.zone_id
-  name            = var.backoffice_record_name
-  type            = "A"
-  allow_overwrite = true
-
-  alias {
-    name                   = aws_cloudfront_distribution.backoffice.domain_name
-    zone_id                = aws_cloudfront_distribution.backoffice.hosted_zone_id
-    evaluate_target_health = false
-  }
-}
-
-resource "aws_route53_record" "backoffice_alias_aaaa" {
-  zone_id         = var.zone_id
-  name            = var.backoffice_record_name
-  type            = "AAAA"
-  allow_overwrite = true
-
-  alias {
-    name                   = aws_cloudfront_distribution.backoffice.domain_name
-    zone_id                = aws_cloudfront_distribution.backoffice.hosted_zone_id
     evaluate_target_health = false
   }
 }
@@ -368,26 +293,6 @@ resource "aws_cloudwatch_metric_alarm" "bridge_5xx" {
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "backoffice_5xx" {
-  provider            = aws.us_east_1
-  alarm_name          = "${local.resource_slug}-backoffice-5xx"
-  comparison_operator = "GreaterThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "5xxErrorRate"
-  namespace           = "AWS/CloudFront"
-  period              = 300
-  statistic           = "Average"
-  threshold           = 1
-  alarm_description   = "Backoffice CloudFront 5xx error rate is elevated."
-  alarm_actions       = var.alarm_actions
-  ok_actions          = var.alarm_actions
-
-  dimensions = {
-    DistributionId = aws_cloudfront_distribution.backoffice.id
-    Region         = "Global"
-  }
-}
-
 resource "aws_cloudwatch_metric_alarm" "waf_blocked_requests" {
   provider            = aws.us_east_1
   alarm_name          = "${local.resource_slug}-waf-blocked"
@@ -414,11 +319,4 @@ resource "aws_shield_protection" "bridge" {
   count        = var.enable_shield_advanced ? 1 : 0
   name         = "${local.resource_slug}-bridge-shield"
   resource_arn = aws_cloudfront_distribution.bridge.arn
-}
-
-resource "aws_shield_protection" "backoffice" {
-  provider     = aws.us_east_1
-  count        = var.enable_shield_advanced ? 1 : 0
-  name         = "${local.resource_slug}-backoffice-shield"
-  resource_arn = aws_cloudfront_distribution.backoffice.arn
 }

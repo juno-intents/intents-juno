@@ -1858,12 +1858,12 @@ production_render_app_handoff() {
   local app_json app_dir manifest_path known_hosts_src secret_contract_src
   local known_hosts_dst secret_contract_dst app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
-  local bridge_dns_label ops_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
-  local bridge_record_name ops_record_name bridge_public_url ops_public_url
-  local bridge_probe_url ops_probe_url bridge_internal_url ops_internal_url
+  local bridge_dns_label backoffice_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
+  local bridge_record_name backoffice_record_name bridge_public_url backoffice_public_url
+  local bridge_probe_url backoffice_probe_url bridge_internal_url backoffice_internal_url
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
-  local service_urls_json operator_endpoints_json backoffice_allowed_cidrs_json
+  local service_urls_json operator_endpoints_json backoffice_wireguard_client_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced
 
@@ -1885,9 +1885,9 @@ production_render_app_handoff() {
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
-  ops_dns_label="$(jq -r '.ops_public_dns_label // empty' <<<"$app_json")"
+  backoffice_dns_label="$(jq -r '.backoffice_dns_label // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_host.bridge_public_dns_label is required when inventory.app_host is present"
-  [[ -n "$ops_dns_label" ]] || die "app_host.ops_public_dns_label is required when inventory.app_host is present"
+  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label is required when inventory.app_host is present"
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
   [[ "$public_scheme" == "https" ]] || die "app_host.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"
@@ -1902,9 +1902,9 @@ production_render_app_handoff() {
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
-  backoffice_allowed_cidrs_json="$(jq -c '.backoffice_allowed_cidrs // []' <<<"$app_json")"
-  jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' <<<"$backoffice_allowed_cidrs_json" >/dev/null \
-    || die "app_host.backoffice_allowed_cidrs must be an array of non-empty strings"
+  backoffice_wireguard_client_cidrs_json="$(jq -c '.backoffice_wireguard_client_cidrs // []' <<<"$app_json")"
+  jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' <<<"$backoffice_wireguard_client_cidrs_json" >/dev/null \
+    || die "app_host.backoffice_wireguard_client_cidrs must be a non-empty array of non-empty strings"
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi
@@ -1920,13 +1920,13 @@ production_render_app_handoff() {
   [[ -f "$secret_contract_src" ]] || die "app secret contract file not found: $secret_contract_src"
 
   bridge_record_name="${bridge_dns_label}.${public_subdomain}"
-  ops_record_name="${ops_dns_label}.${public_subdomain}"
+  backoffice_record_name="${backoffice_dns_label}.${public_subdomain}"
   bridge_public_url="$(production_origin_url "$public_scheme" "$bridge_record_name")"
-  ops_public_url="$(production_origin_url "$public_scheme" "$ops_record_name")"
+  backoffice_public_url="$(production_origin_url "$public_scheme" "$backoffice_record_name")"
   bridge_probe_url="$bridge_public_url"
-  ops_probe_url="$ops_public_url"
+  backoffice_probe_url="$backoffice_public_url"
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
-  ops_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
+  backoffice_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
   edge_enabled="true"
   edge_output_root="$(dirname "$output_dir")"
   edge_state_dir="$edge_output_root/edge-state"
@@ -1972,11 +1972,11 @@ production_render_app_handoff() {
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
-    --arg backoffice_public_url "$ops_public_url" \
-    --arg backoffice_probe_url "$ops_probe_url" \
-    --arg backoffice_internal_url "$ops_internal_url" \
-    --arg backoffice_record_name "$ops_record_name" \
-    --argjson backoffice_allowed_cidrs "$backoffice_allowed_cidrs_json" \
+    --arg backoffice_public_url "$backoffice_public_url" \
+    --arg backoffice_probe_url "$backoffice_probe_url" \
+    --arg backoffice_internal_url "$backoffice_internal_url" \
+    --arg backoffice_record_name "$backoffice_record_name" \
+    --argjson backoffice_wireguard_client_cidrs "$backoffice_wireguard_client_cidrs_json" \
     --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
     --arg zone_id "$zone_id" \
@@ -2028,7 +2028,10 @@ production_render_app_handoff() {
           probe_url: $backoffice_probe_url,
           internal_url: $backoffice_internal_url,
           record_name: $backoffice_record_name,
-          allowed_cidrs: $backoffice_allowed_cidrs
+          access: {
+            mode: "wireguard",
+            wireguard_client_cidrs: $backoffice_wireguard_client_cidrs
+          }
         }
       },
       dns: {

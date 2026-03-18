@@ -33,12 +33,12 @@
     "known_hosts_file": "app/known_hosts",
     "secret_contract_file": "app/app-secrets.env",
     "bridge_public_dns_label": "bridge",
-    "ops_public_dns_label": "ops",
+    "backoffice_dns_label": "ops",
     "public_scheme": "https",
     "bridge_api_listen": "127.0.0.1:8082",
     "backoffice_listen": "127.0.0.1:8090",
-    "backoffice_allowed_cidrs": [
-      "172.27.48.0/20"
+    "backoffice_wireguard_client_cidrs": [
+      "10.66.0.0/24"
     ],
     "juno_rpc_url": "http://127.0.0.1:18232",
     "service_urls": [

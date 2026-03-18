@@ -54,7 +54,6 @@ aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_required "$app_deploy" '.aws_region | select(type == "string" and length > 0)')"
 zone_id="$(production_json_required "$app_deploy" '.dns.zone_id | select(type == "string" and length > 0)')"
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
-backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 origin_record_name="$(production_json_required "$app_deploy" '.edge.origin_record_name | select(type == "string" and length > 0)')"
 origin_endpoint="$(production_json_required "$app_deploy" '.edge.origin_endpoint | select(type == "string" and length > 0)')"
 origin_http_port="$(production_json_required "$app_deploy" '.edge.origin_http_port')"
@@ -86,7 +85,6 @@ cat >"$work_dir/terraform.tfvars.json" <<EOF
   "deployment_id": $(jq -Rn --arg v "$environment" '$v'),
   "zone_id": $(jq -Rn --arg v "$zone_id" '$v'),
   "bridge_record_name": $(jq -Rn --arg v "$bridge_record_name" '$v'),
-  "backoffice_record_name": $(jq -Rn --arg v "$backoffice_record_name" '$v'),
   "origin_record_name": $(jq -Rn --arg v "$origin_record_name" '$v'),
   "origin_endpoint": $(jq -Rn --arg v "$origin_endpoint" '$v'),
   "origin_http_port": $origin_http_port,
@@ -97,7 +95,7 @@ cat >"$work_dir/terraform.tfvars.json" <<EOF
 EOF
 
 if [[ "$dry_run" == "true" ]]; then
-  log "[DRY RUN] would provision app edge for $bridge_record_name and $backoffice_record_name"
+  log "[DRY RUN] would provision app edge for $bridge_record_name"
   exit 0
 fi
 
@@ -108,4 +106,4 @@ TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" apply -input=false -auto-approve -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" >/dev/null
 
-log "app edge provisioned: $bridge_record_name, $backoffice_record_name"
+log "app edge provisioned: $bridge_record_name"
