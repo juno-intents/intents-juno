@@ -923,6 +923,69 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_rejects_plaintext_checkpoint_signer_key_contract() {
+  local workdir output_dir manifest log_dir fake_bin output
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+CHECKPOINT_SIGNER_PRIVATE_KEY=literal:0xdeadbeef
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+exit 0
+EOF
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh"
+
+  if output="$(PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" 2>&1)"; then
+    printf 'expected deploy-operator.sh to reject plaintext checkpoint signer key config\n' >&2
+    exit 1
+  fi
+
+  if [[ -z "$output" ]]; then
+    printf 'expected deploy-operator.sh to emit a rejection error\n' >&2
+    exit 1
+  fi
+  if [[ -e "$log_dir/scp.log" || -e "$log_dir/ssh.log" ]]; then
+    printf 'expected deploy-operator.sh to fail before remote actions\n' >&2
+    exit 1
+  fi
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_respects_scan_backfill_from_height_override
@@ -932,6 +995,7 @@ main() {
   test_deploy_operator_force_reruns_done_operator
   test_deploy_operator_retries_transient_service_checks
   test_deploy_operator_preserves_secure_preview_signer_configuration
+  test_deploy_operator_rejects_plaintext_checkpoint_signer_key_contract
 }
 
 main "$@"

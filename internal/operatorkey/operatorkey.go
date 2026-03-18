@@ -75,6 +75,10 @@ func GeneratePrivateKeyFile(path string, opts GenerateOptions) (*ecdsa.PrivateKe
 		return nil, false, fmt.Errorf("operatorkey: read key %s: %w", path, err)
 	}
 
+	if opts.Format == FormatEncrypted && strings.TrimSpace(opts.Passphrase) == "" {
+		return nil, false, ErrMissingPassphrase
+	}
+
 	key, err := crypto.GenerateKey()
 	if err != nil {
 		return nil, false, fmt.Errorf("operatorkey: generate key: %w", err)

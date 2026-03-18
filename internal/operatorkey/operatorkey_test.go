@@ -1,6 +1,7 @@
 package operatorkey
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -118,6 +119,31 @@ func TestGeneratePrivateKeyFile_DefaultsToEncrypted(t *testing.T) {
 
 	if _, err := LoadPrivateKeyFile(path, LoadOptions{}); err == nil {
 		t.Fatalf("expected encrypted default file to require a passphrase")
+	}
+}
+
+func TestGeneratePrivateKeyFile_DefaultWithoutPassphraseFailsBeforeWriting(t *testing.T) {
+	t.Parallel()
+
+	baseDir := t.TempDir()
+	keyDir := filepath.Join(baseDir, "operator")
+	path := filepath.Join(keyDir, "operator.key")
+
+	key, created, err := GeneratePrivateKeyFile(path, GenerateOptions{})
+	if !errors.Is(err, ErrMissingPassphrase) {
+		t.Fatalf("GeneratePrivateKeyFile default missing passphrase: got %v want %v", err, ErrMissingPassphrase)
+	}
+	if key != nil {
+		t.Fatalf("expected nil key on missing passphrase")
+	}
+	if created {
+		t.Fatalf("expected created to be false on missing passphrase")
+	}
+	if _, statErr := os.Stat(path); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected key file to remain absent, got %v", statErr)
+	}
+	if _, statErr := os.Stat(keyDir); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("expected key dir to remain absent, got %v", statErr)
 	}
 }
 

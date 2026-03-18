@@ -630,7 +630,13 @@ cleanup() {
 trap cleanup EXIT
 
 production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
+if env_has_key "$resolved_secret_env" "CHECKPOINT_SIGNER_PRIVATE_KEY"; then
+  die "deploy-operator rejects CHECKPOINT_SIGNER_PRIVATE_KEY; plaintext operator key configuration is dev/test-only"
+fi
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
+if env_has_key "$merged_env" "CHECKPOINT_SIGNER_PRIVATE_KEY"; then
+  die "deploy-operator rendered CHECKPOINT_SIGNER_PRIVATE_KEY; plaintext operator key configuration is dev/test-only"
+fi
 production_render_junocashd_conf "$merged_env" "$junocashd_conf"
 extract_build_runbook_block \
   "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
