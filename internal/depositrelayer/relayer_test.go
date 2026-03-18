@@ -80,12 +80,14 @@ func (s *scriptedSender) Send(_ context.Context, req httpapi.SendRequest) (httpa
 }
 
 type stubProofRequester struct {
+	calls  int
 	gotReq proofclient.Request
 	res    proofclient.Result
 	err    error
 }
 
 func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Request) (proofclient.Result, error) {
+	p.calls++
 	p.gotReq = req
 	p.gotReq.Journal = append([]byte(nil), req.Journal...)
 	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
@@ -238,6 +240,216 @@ func (s *stubDepositRuntimeSettingsProvider) Current() (runtimeconfig.Settings, 
 
 func (s *stubDepositRuntimeSettingsProvider) Ready(context.Context) error {
 	return s.err
+}
+
+type stubPauseChecker struct {
+	calls  int
+	paused bool
+	err    error
+}
+
+func (s *stubPauseChecker) IsPaused(context.Context) (bool, error) {
+	s.calls++
+	return s.paused, s.err
+}
+
+func TestRelayer_DefaultClaimTTLTracksProofRequestTimeout(t *testing.T) {
+	t.Parallel()
+
+	cp := checkpoint.Checkpoint{
+		Height:         1,
+		BaseChainID:    31337,
+		BridgeContract: common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	operatorAddrs, _ := mustSignedCheckpoint(t, cp)
+
+	r, err := New(Config{
+		BaseChainID:         uint32(cp.BaseChainID),
+		BridgeAddress:       cp.BridgeContract,
+		DepositImageID:      common.HexToHash("0x01"),
+		OWalletIVKBytes:     testOWalletIVKBytes(),
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   1,
+		MaxItems:            1,
+		MaxAge:              time.Minute,
+		DedupeMax:           16,
+		ProofRequestTimeout: 4 * time.Minute,
+	}, deposit.NewMemoryStore(), &stubSender{}, &stubProofRequester{res: proofclient.Result{Seal: []byte{0x01}}}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if got, want := r.cfg.ClaimTTL, 6*time.Minute; got != want {
+		t.Fatalf("ClaimTTL: got %s want %s", got, want)
+	}
+}
+
+func TestRelayer_MarksProofRequestedBeforeProofRequestAndAllowsRetryAfterLeaseExpiry(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	store := deposit.NewMemoryStore()
+	prover := newBlockingProofRequester(proofclient.Result{Seal: []byte{0x99}})
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-1",
+		ClaimTTL:          80 * time.Millisecond,
+		Now:               time.Now,
+	}, store, &stubSender{}, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
+	if _, _, err := store.UpsertConfirmed(ctx, deposit.Deposit{
+		DepositID:        depositID,
+		Commitment:       [32]byte(cm),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    [20]byte(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- r.FlushDue(ctx)
+	}()
+
+	prover.waitEntered(t, time.Second)
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateProofRequested; got != want {
+		t.Fatalf("state while proof in flight: got %v want %v", got, want)
+	}
+
+	other, err := store.ClaimConfirmed(ctx, "worker-2", 80*time.Millisecond, 1)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed before expiry: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("expected active proof lease to block second worker")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	reclaimed, err := store.ClaimConfirmed(ctx, "worker-2", 80*time.Millisecond, 1)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed after expiry: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].Deposit.DepositID != depositID {
+		t.Fatalf("expected second worker to reclaim proof-requested deposit after lease expiry")
+	}
+
+	cancel()
+	if err := <-errCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("FlushDue err = %v, want context.Canceled", err)
+	}
+}
+
+func TestRelayer_PauseCheckErrorFailsClosedBeforeProofRequest(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	store := deposit.NewMemoryStore()
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-1",
+		ClaimTTL:          time.Minute,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.WithPauseChecker(&stubPauseChecker{err: errors.New("pause rpc failed")})
+
+	ctx := context.Background()
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	depositID := idempotency.MustDepositIDV1([32]byte(cm), 7)
+	if _, _, err := store.UpsertConfirmed(ctx, deposit.Deposit{
+		DepositID:        depositID,
+		Commitment:       [32]byte(cm),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    [20]byte(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	if err := r.FlushDue(ctx); err == nil {
+		t.Fatalf("expected pause check to fail closed")
+	}
+	if prover.calls != 0 {
+		t.Fatalf("proof requester calls: got %d want 0", prover.calls)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender calls: got %d want 0", sender.calls)
+	}
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateConfirmed; got != want {
+		t.Fatalf("state after paused flush: got %v want %v", got, want)
+	}
 }
 
 type stubDepositBridgeSettingsProvider struct {

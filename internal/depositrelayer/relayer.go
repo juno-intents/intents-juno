@@ -105,11 +105,12 @@ type Config struct {
 }
 
 type DepositEvent struct {
-	Commitment common.Hash
-	LeafIndex  uint64
-	Amount     uint64
-	JunoHeight int64
-	Memo       []byte
+	Commitment  common.Hash
+	LeafIndex   uint64
+	Amount      uint64
+	JunoHeight  int64
+	Memo        []byte
+	SourceEvent *deposit.SourceEvent
 	// Optional per-deposit witness payload. Layout must match
 	// proverinput.DepositWitnessItemLen.
 	ProofWitnessItem []byte
@@ -309,6 +310,7 @@ func (r *Relayer) IngestDeposit(ctx context.Context, ev DepositEvent) error {
 		LeafIndex:        ev.LeafIndex,
 		Amount:           ev.Amount,
 		BaseRecipient:    [20]byte(recipient),
+		SourceEvent:      cloneSourceEvent(ev.SourceEvent),
 		ProofWitnessItem: append([]byte(nil), ev.ProofWitnessItem...),
 		JunoHeight:       ev.JunoHeight,
 	}
@@ -735,12 +737,21 @@ func (r *Relayer) checkBridgePause(ctx context.Context) error {
 	paused, err := r.pauseChecker.IsPaused(ctx)
 	if err != nil {
 		r.log.Warn("bridge pause check error (fail-safe: skipping submit)", "err", err)
+		return fmt.Errorf("depositrelayer: pause check failed: %w", err)
 	}
 	if paused {
 		r.log.Warn("bridge is paused, skipping batch submission")
 		return fmt.Errorf("depositrelayer: bridge is paused, skipping submit")
 	}
 	return nil
+}
+
+func cloneSourceEvent(src *deposit.SourceEvent) *deposit.SourceEvent {
+	if src == nil {
+		return nil
+	}
+	out := *src
+	return &out
 }
 
 // maybeDLQDepositBatch inserts a deposit batch into the dead-letter queue.

@@ -47,6 +47,10 @@ type Deposit struct {
 	Amount        uint64
 	BaseRecipient [20]byte
 
+	// SourceEvent identifies the originating scanner event when available.
+	// It is optional for backward compatibility with legacy producers.
+	SourceEvent *SourceEvent
+
 	// ProofWitnessItem is the optional per-deposit witness payload expected by
 	// the deposit guest, excluding checkpoint fields, IVK, and item count.
 	// Layout must match proverinput.DepositWitnessItemLen.
@@ -55,6 +59,12 @@ type Deposit struct {
 	// JunoHeight is the Juno chain height at which this deposit was observed.
 	// Zero means unknown (legacy rows).
 	JunoHeight int64
+}
+
+type SourceEvent struct {
+	ChainID  uint64
+	TxHash   [32]byte
+	LogIndex uint64
 }
 
 type Job struct {

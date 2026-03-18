@@ -282,6 +282,75 @@ func TestStore_UpsertSeen_AllowsWitnessRefresh(t *testing.T) {
 	}
 }
 
+func TestStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	src := &deposit.SourceEvent{
+		ChainID:  84532,
+		LogIndex: 11,
+	}
+	src.TxHash[0] = 0xaa
+
+	var id [32]byte
+	id[0] = 0x71
+	var cm [32]byte
+	cm[0] = 0xe1
+	var recip [20]byte
+	copy(recip[:], common.HexToAddress("0x0000000000000000000000000000000000000456").Bytes())
+
+	dep := deposit.Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+		SourceEvent:   src,
+	}
+
+	if _, created, err := s.UpsertConfirmed(ctx, dep); err != nil {
+		t.Fatalf("UpsertConfirmed #1: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	if _, created, err := s.UpsertConfirmed(ctx, dep); err != nil {
+		t.Fatalf("UpsertConfirmed replay: %v", err)
+	} else if created {
+		t.Fatalf("expected replay created=false")
+	}
+
+	conflict := dep
+	conflict.DepositID[0] = 0x72
+	conflict.Commitment[0] = 0xe2
+	conflict.LeafIndex = 8
+	if _, _, err := s.UpsertConfirmed(ctx, conflict); !errors.Is(err, deposit.ErrDepositMismatch) {
+		t.Fatalf("expected ErrDepositMismatch on conflicting source replay, got %v", err)
+	}
+}
+
 func TestStore_MarkRejectedDoesNotOverrideFinalizedState(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

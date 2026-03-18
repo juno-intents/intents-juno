@@ -53,13 +53,16 @@ type checkpointPackageV1 struct {
 }
 
 type depositEventV2 struct {
-	Version          string `json:"version"`
-	CM               string `json:"cm"`
-	LeafIndex        uint64 `json:"leafIndex"`
-	Amount           uint64 `json:"amount"`
-	JunoHeight       int64  `json:"junoHeight"`
-	Memo             string `json:"memo"`
-	ProofWitnessItem string `json:"proofWitnessItem,omitempty"`
+	Version          string  `json:"version"`
+	CM               string  `json:"cm"`
+	LeafIndex        uint64  `json:"leafIndex"`
+	Amount           uint64  `json:"amount"`
+	JunoHeight       int64   `json:"junoHeight"`
+	Memo             string  `json:"memo"`
+	ProofWitnessItem string  `json:"proofWitnessItem,omitempty"`
+	ChainID          *uint64 `json:"chainId,omitempty"`
+	TxHash           string  `json:"txHash,omitempty"`
+	LogIndex         *uint64 `json:"logIndex,omitempty"`
 }
 
 func main() {
@@ -558,34 +561,8 @@ func main() {
 					ackMessage(qmsg, *ackTimeout, log)
 					continue
 				}
-				cm, err := parseHash32Strict(depMsg.CM)
-				if err != nil {
-					log.Error("parse cm", "err", err)
-					ackMessage(qmsg, *ackTimeout, log)
-					continue
-				}
-				memoBytes, err := decodeHexBytes(depMsg.Memo)
-				if err != nil {
-					log.Error("parse memo", "err", err)
-					ackMessage(qmsg, *ackTimeout, log)
-					continue
-				}
-				proofWitnessItem, err := decodeHexBytesOptional(depMsg.ProofWitnessItem)
-				if err != nil {
-					log.Error("parse proofWitnessItem", "err", err)
-					ackMessage(qmsg, *ackTimeout, log)
-					continue
-				}
-
 				cctx, cancel := withTimeout(ctx, *submitTimeout)
-				err = relayer.IngestDeposit(cctx, depositrelayer.DepositEvent{
-					Commitment:       cm,
-					LeafIndex:        depMsg.LeafIndex,
-					Amount:           depMsg.Amount,
-					JunoHeight:       depMsg.JunoHeight,
-					Memo:             memoBytes,
-					ProofWitnessItem: proofWitnessItem,
-				})
+				err = ingestDepositEvent(cctx, relayer, depMsg)
 				cancel()
 				if err != nil {
 					log.Error("ingest deposit", "err", err)
@@ -715,6 +692,63 @@ func parseHash32Strict(s string) (common.Hash, error) {
 	var out common.Hash
 	copy(out[:], b)
 	return out, nil
+}
+
+type depositIngester interface {
+	IngestDeposit(ctx context.Context, ev depositrelayer.DepositEvent) error
+}
+
+func ingestDepositEvent(ctx context.Context, ingester depositIngester, depMsg depositEventV2) error {
+	cm, err := parseHash32Strict(depMsg.CM)
+	if err != nil {
+		return err
+	}
+	memoBytes, err := decodeHexBytes(depMsg.Memo)
+	if err != nil {
+		return err
+	}
+	proofWitnessItem, err := decodeHexBytesOptional(depMsg.ProofWitnessItem)
+	if err != nil {
+		return err
+	}
+	sourceEvent, err := parseDepositSourceEvent(depMsg)
+	if err != nil {
+		return fmt.Errorf("%w: %v", depositrelayer.ErrInvalidEvent, err)
+	}
+
+	return ingester.IngestDeposit(ctx, depositrelayer.DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        depMsg.LeafIndex,
+		Amount:           depMsg.Amount,
+		JunoHeight:       depMsg.JunoHeight,
+		Memo:             memoBytes,
+		ProofWitnessItem: proofWitnessItem,
+		SourceEvent:      sourceEvent,
+	})
+}
+
+func parseDepositSourceEvent(depMsg depositEventV2) (*deposit.SourceEvent, error) {
+	hasChainID := depMsg.ChainID != nil
+	hasLogIndex := depMsg.LogIndex != nil
+	hasTxHash := strings.TrimSpace(depMsg.TxHash) != ""
+	if !hasChainID && !hasLogIndex && !hasTxHash {
+		return nil, nil
+	}
+	if !hasChainID || !hasLogIndex || !hasTxHash {
+		return nil, fmt.Errorf("source event requires chainId, txHash, and logIndex")
+	}
+	txHash, err := parseHash32Strict(depMsg.TxHash)
+	if err != nil {
+		return nil, fmt.Errorf("parse txHash: %w", err)
+	}
+	if *depMsg.ChainID == 0 {
+		return nil, fmt.Errorf("chainId must be > 0")
+	}
+	return &deposit.SourceEvent{
+		ChainID:  *depMsg.ChainID,
+		TxHash:   [32]byte(txHash),
+		LogIndex: *depMsg.LogIndex,
+	}, nil
 }
 
 func decodeHexBytes(s string) ([]byte, error) {

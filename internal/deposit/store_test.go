@@ -3,6 +3,7 @@ package deposit
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -475,6 +476,55 @@ func TestMemoryStore_ClaimConfirmed_ReclaimsProofRequestedAfterLeaseExpiry(t *te
 		t.Fatalf("ClaimConfirmed worker-b after expiry: %v", err)
 	} else if len(afterExpiry) != 1 || afterExpiry[0].State != StateProofRequested {
 		t.Fatalf("expected worker-b to reclaim proof-requested job after expiry, got %+v", afterExpiry)
+	}
+}
+
+func TestMemoryStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	src := &SourceEvent{
+		ChainID:  84532,
+		LogIndex: 7,
+	}
+	src.TxHash[0] = 0xaa
+
+	var id [32]byte
+	id[0] = 0x41
+	var cm [32]byte
+	cm[0] = 0xca
+	var recip [20]byte
+	recip[19] = 0x04
+
+	dep := Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+		SourceEvent:   src,
+	}
+
+	if _, created, err := s.UpsertConfirmed(ctx, dep); err != nil {
+		t.Fatalf("UpsertConfirmed #1: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	if _, created, err := s.UpsertConfirmed(ctx, dep); err != nil {
+		t.Fatalf("UpsertConfirmed replay: %v", err)
+	} else if created {
+		t.Fatalf("expected replay created=false")
+	}
+
+	conflict := dep
+	conflict.DepositID[0] = 0x42
+	conflict.Commitment[0] = 0xcb
+	conflict.LeafIndex = 8
+	if _, _, err := s.UpsertConfirmed(ctx, conflict); !errors.Is(err, ErrDepositMismatch) {
+		t.Fatalf("expected ErrDepositMismatch on conflicting source replay, got %v", err)
 	}
 }
 

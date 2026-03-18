@@ -75,6 +75,20 @@ CREATE TABLE IF NOT EXISTS deposit_batch_attempts (
 	CONSTRAINT deposit_batch_attempts_claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '')
 );
 
+CREATE TABLE IF NOT EXISTS deposit_source_events (
+	chain_id BIGINT NOT NULL,
+	tx_hash BYTEA NOT NULL,
+	log_index BIGINT NOT NULL,
+	deposit_id BYTEA NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+	PRIMARY KEY (chain_id, tx_hash, log_index),
+	CONSTRAINT deposit_source_events_chain_id_positive CHECK (chain_id > 0),
+	CONSTRAINT deposit_source_events_tx_hash_len CHECK (octet_length(tx_hash) = 32),
+	CONSTRAINT deposit_source_events_log_index_nonneg CHECK (log_index >= 0),
+	CONSTRAINT deposit_source_events_deposit_id_len CHECK (octet_length(deposit_id) = 32)
+);
+
 CREATE INDEX IF NOT EXISTS deposit_jobs_state_idx ON deposit_jobs (state);
 CREATE INDEX IF NOT EXISTS deposit_jobs_claim_idx ON deposit_jobs (claim_expires_at);
 CREATE INDEX IF NOT EXISTS deposit_jobs_submit_batch_idx ON deposit_jobs (submit_batch_id) WHERE submit_batch_id IS NOT NULL;
@@ -83,6 +97,7 @@ CREATE INDEX IF NOT EXISTS deposit_jobs_base_recipient_idx ON deposit_jobs (base
 CREATE INDEX IF NOT EXISTS deposit_jobs_tx_hash_idx ON deposit_jobs (tx_hash) WHERE tx_hash IS NOT NULL;
 CREATE INDEX IF NOT EXISTS deposit_batch_attempts_claim_idx ON deposit_batch_attempts (claim_expires_at);
 CREATE INDEX IF NOT EXISTS deposit_batch_attempts_tx_hash_idx ON deposit_batch_attempts (tx_hash) WHERE tx_hash IS NOT NULL;
+CREATE INDEX IF NOT EXISTS deposit_source_events_deposit_id_idx ON deposit_source_events (deposit_id);
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claimed_by TEXT;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS claim_expires_at TIMESTAMPTZ;
 ALTER TABLE deposit_jobs ADD COLUMN IF NOT EXISTS proof_witness_item BYTEA;
@@ -104,4 +119,12 @@ ALTER TABLE deposit_batch_attempts DROP CONSTRAINT IF EXISTS deposit_batch_attem
 ALTER TABLE deposit_batch_attempts ADD CONSTRAINT deposit_batch_attempts_claim_owner_nonempty CHECK (claimed_by IS NULL OR claimed_by <> '');
 ALTER TABLE deposit_batch_attempts DROP CONSTRAINT IF EXISTS deposit_batch_attempts_tx_hash_len;
 ALTER TABLE deposit_batch_attempts ADD CONSTRAINT deposit_batch_attempts_tx_hash_len CHECK (tx_hash IS NULL OR octet_length(tx_hash) = 32);
+ALTER TABLE deposit_source_events DROP CONSTRAINT IF EXISTS deposit_source_events_chain_id_positive;
+ALTER TABLE deposit_source_events ADD CONSTRAINT deposit_source_events_chain_id_positive CHECK (chain_id > 0);
+ALTER TABLE deposit_source_events DROP CONSTRAINT IF EXISTS deposit_source_events_tx_hash_len;
+ALTER TABLE deposit_source_events ADD CONSTRAINT deposit_source_events_tx_hash_len CHECK (octet_length(tx_hash) = 32);
+ALTER TABLE deposit_source_events DROP CONSTRAINT IF EXISTS deposit_source_events_log_index_nonneg;
+ALTER TABLE deposit_source_events ADD CONSTRAINT deposit_source_events_log_index_nonneg CHECK (log_index >= 0);
+ALTER TABLE deposit_source_events DROP CONSTRAINT IF EXISTS deposit_source_events_deposit_id_len;
+ALTER TABLE deposit_source_events ADD CONSTRAINT deposit_source_events_deposit_id_len CHECK (octet_length(deposit_id) = 32);
 `

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
@@ -20,6 +21,11 @@ var ErrInvalidConfig = errors.New("deposit/postgres: invalid config")
 
 type Store struct {
 	pool *pgxpool.Pool
+}
+
+type execQueryer interface {
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	QueryRow(ctx context.Context, sql string, args ...any) pgx.Row
 }
 
 func New(pool *pgxpool.Pool) (*Store, error) {
@@ -51,13 +57,38 @@ func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job,
 		return deposit.Job{}, false, fmt.Errorf("%w: leaf index too large", deposit.ErrDepositMismatch)
 	}
 
+	if d.SourceEvent == nil {
+		return s.upsertSeenWithQuerier(ctx, s.pool, d)
+	}
+
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: begin upsert seen: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	job, created, err := s.upsertSeenWithQuerier(ctx, tx, d)
+	if err != nil {
+		return deposit.Job{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return deposit.Job{}, false, fmt.Errorf("deposit/postgres: commit upsert seen: %w", err)
+	}
+	return job, created, nil
+}
+
+func (s *Store) upsertSeenWithQuerier(ctx context.Context, q execQueryer, d deposit.Deposit) (deposit.Job, bool, error) {
+	if err := recordSourceEvent(ctx, q, d); err != nil {
+		return deposit.Job{}, false, err
+	}
+
 	var junoHeight *int64
 	if d.JunoHeight > 0 {
 		h := d.JunoHeight
 		junoHeight = &h
 	}
 
-	tag, err := s.pool.Exec(ctx, `
+	tag, err := q.Exec(ctx, `
 		INSERT INTO deposit_jobs (
 			deposit_id,
 			commitment,
@@ -79,7 +110,7 @@ func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job,
 		return deposit.Job{Deposit: cloneDeposit(d), State: deposit.StateSeen}, true, nil
 	}
 
-	job, err := s.Get(ctx, d.DepositID)
+	job, err := getWithQuerier(ctx, q, d.DepositID)
 	if err != nil {
 		return deposit.Job{}, false, err
 	}
@@ -87,7 +118,7 @@ func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job,
 		return deposit.Job{}, false, deposit.ErrDepositMismatch
 	}
 	if job.State < deposit.StateProofRequested && len(d.ProofWitnessItem) > 0 && !bytes.Equal(job.Deposit.ProofWitnessItem, d.ProofWitnessItem) {
-		_, err = s.pool.Exec(ctx, `
+		_, err = q.Exec(ctx, `
 			UPDATE deposit_jobs
 			SET proof_witness_item = $2, updated_at = now()
 			WHERE deposit_id = $1
@@ -98,7 +129,7 @@ func (s *Store) UpsertSeen(ctx context.Context, d deposit.Deposit) (deposit.Job,
 		job.Deposit.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
 	}
 	if d.JunoHeight > 0 && job.Deposit.JunoHeight != d.JunoHeight {
-		_, err = s.pool.Exec(ctx, `
+		_, err = q.Exec(ctx, `
 			UPDATE deposit_jobs
 			SET juno_height = $2, updated_at = now()
 			WHERE deposit_id = $1
@@ -194,157 +225,7 @@ func (s *Store) Get(ctx context.Context, depositID [32]byte) (deposit.Job, error
 	if s == nil || s.pool == nil {
 		return deposit.Job{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
-
-	var (
-		depositIDRaw     []byte
-		commitmentRaw    []byte
-		leafIndex        int64
-		amount           int64
-		baseRecipientRaw []byte
-		proofWitnessRaw  []byte
-		state            int16
-
-		cpHeight        *int64
-		cpBlockHashRaw  []byte
-		cpRootRaw       []byte
-		cpBaseChainID   *int64
-		cpBridgeRaw     []byte
-		proofSeal       []byte
-		txHashRaw       []byte
-		junoHeight      *int64
-		rejectionReason *string
-	)
-
-	err := s.pool.QueryRow(ctx, `
-		SELECT
-			deposit_id,
-			commitment,
-			leaf_index,
-			amount,
-			base_recipient,
-			proof_witness_item,
-			state,
-			checkpoint_height,
-			checkpoint_block_hash,
-			checkpoint_final_orchard_root,
-			checkpoint_base_chain_id,
-			checkpoint_bridge_contract,
-			proof_seal,
-			tx_hash,
-			juno_height,
-			rejection_reason
-		FROM deposit_jobs
-		WHERE deposit_id = $1
-	`, depositID[:]).Scan(
-		&depositIDRaw,
-		&commitmentRaw,
-		&leafIndex,
-		&amount,
-		&baseRecipientRaw,
-		&proofWitnessRaw,
-		&state,
-		&cpHeight,
-		&cpBlockHashRaw,
-		&cpRootRaw,
-		&cpBaseChainID,
-		&cpBridgeRaw,
-		&proofSeal,
-		&txHashRaw,
-		&junoHeight,
-		&rejectionReason,
-	)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return deposit.Job{}, deposit.ErrNotFound
-		}
-		return deposit.Job{}, fmt.Errorf("deposit/postgres: get: %w", err)
-	}
-
-	id, err := to32(depositIDRaw)
-	if err != nil {
-		return deposit.Job{}, err
-	}
-	cm, err := to32(commitmentRaw)
-	if err != nil {
-		return deposit.Job{}, err
-	}
-	recip, err := to20(baseRecipientRaw)
-	if err != nil {
-		return deposit.Job{}, err
-	}
-	if leafIndex < 0 || amount < 0 {
-		return deposit.Job{}, fmt.Errorf("deposit/postgres: negative values in db")
-	}
-
-	var jh int64
-	if junoHeight != nil {
-		jh = *junoHeight
-	}
-	job := deposit.Job{
-		Deposit: deposit.Deposit{
-			DepositID:        id,
-			Commitment:       cm,
-			LeafIndex:        uint64(leafIndex),
-			Amount:           uint64(amount),
-			BaseRecipient:    recip,
-			ProofWitnessItem: append([]byte(nil), proofWitnessRaw...),
-			JunoHeight:       jh,
-		},
-		State: deposit.State(state),
-	}
-
-	if cpHeight != nil {
-		var (
-			bh [32]byte
-			rt [32]byte
-		)
-		if cpBlockHashRaw != nil {
-			bh, err = to32(cpBlockHashRaw)
-			if err != nil {
-				return deposit.Job{}, err
-			}
-		}
-		if cpRootRaw != nil {
-			rt, err = to32(cpRootRaw)
-			if err != nil {
-				return deposit.Job{}, err
-			}
-		}
-		var bridge [20]byte
-		if cpBridgeRaw != nil {
-			bridge, err = to20(cpBridgeRaw)
-			if err != nil {
-				return deposit.Job{}, err
-			}
-		}
-		var baseChain uint64
-		if cpBaseChainID != nil && *cpBaseChainID >= 0 {
-			baseChain = uint64(*cpBaseChainID)
-		}
-		job.Checkpoint = checkpoint.Checkpoint{
-			Height:           uint64(*cpHeight),
-			BlockHash:        bh,
-			FinalOrchardRoot: rt,
-			BaseChainID:      baseChain,
-			BridgeContract:   bridge,
-		}
-	}
-
-	if proofSeal != nil {
-		job.ProofSeal = append([]byte(nil), proofSeal...)
-	}
-	if txHashRaw != nil {
-		tx, err := to32(txHashRaw)
-		if err != nil {
-			return deposit.Job{}, err
-		}
-		job.TxHash = tx
-	}
-	if rejectionReason != nil {
-		job.RejectionReason = *rejectionReason
-	}
-
-	return job, nil
+	return getWithQuerier(ctx, s.pool, depositID)
 }
 
 func (s *Store) ListByState(ctx context.Context, state deposit.State, limit int) ([]deposit.Job, error) {
@@ -1250,6 +1131,10 @@ func to20(b []byte) ([20]byte, error) {
 
 func cloneDeposit(d deposit.Deposit) deposit.Deposit {
 	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	if d.SourceEvent != nil {
+		src := *d.SourceEvent
+		d.SourceEvent = &src
+	}
 	return d
 }
 
@@ -1516,6 +1401,187 @@ func depositIdentityEqual(a, b deposit.Deposit) bool {
 		a.LeafIndex == b.LeafIndex &&
 		a.Amount == b.Amount &&
 		a.BaseRecipient == b.BaseRecipient
+}
+
+func getWithQuerier(ctx context.Context, q execQueryer, depositID [32]byte) (deposit.Job, error) {
+	var (
+		depositIDRaw     []byte
+		commitmentRaw    []byte
+		leafIndex        int64
+		amount           int64
+		baseRecipientRaw []byte
+		proofWitnessRaw  []byte
+		state            int16
+
+		cpHeight        *int64
+		cpBlockHashRaw  []byte
+		cpRootRaw       []byte
+		cpBaseChainID   *int64
+		cpBridgeRaw     []byte
+		proofSeal       []byte
+		txHashRaw       []byte
+		junoHeight      *int64
+		rejectionReason *string
+	)
+
+	err := q.QueryRow(ctx, `
+		SELECT
+			deposit_id,
+			commitment,
+			leaf_index,
+			amount,
+			base_recipient,
+			proof_witness_item,
+			state,
+			checkpoint_height,
+			checkpoint_block_hash,
+			checkpoint_final_orchard_root,
+			checkpoint_base_chain_id,
+			checkpoint_bridge_contract,
+			proof_seal,
+			tx_hash,
+			juno_height,
+			rejection_reason
+		FROM deposit_jobs
+		WHERE deposit_id = $1
+	`, depositID[:]).Scan(
+		&depositIDRaw,
+		&commitmentRaw,
+		&leafIndex,
+		&amount,
+		&baseRecipientRaw,
+		&proofWitnessRaw,
+		&state,
+		&cpHeight,
+		&cpBlockHashRaw,
+		&cpRootRaw,
+		&cpBaseChainID,
+		&cpBridgeRaw,
+		&proofSeal,
+		&txHashRaw,
+		&junoHeight,
+		&rejectionReason,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return deposit.Job{}, deposit.ErrNotFound
+		}
+		return deposit.Job{}, fmt.Errorf("deposit/postgres: get: %w", err)
+	}
+
+	id, err := to32(depositIDRaw)
+	if err != nil {
+		return deposit.Job{}, err
+	}
+	cm, err := to32(commitmentRaw)
+	if err != nil {
+		return deposit.Job{}, err
+	}
+	recip, err := to20(baseRecipientRaw)
+	if err != nil {
+		return deposit.Job{}, err
+	}
+	if leafIndex < 0 || amount < 0 {
+		return deposit.Job{}, fmt.Errorf("deposit/postgres: negative values in db")
+	}
+
+	var jh int64
+	if junoHeight != nil {
+		jh = *junoHeight
+	}
+	job := deposit.Job{
+		Deposit: deposit.Deposit{
+			DepositID:        id,
+			Commitment:       cm,
+			LeafIndex:        uint64(leafIndex),
+			Amount:           uint64(amount),
+			BaseRecipient:    recip,
+			ProofWitnessItem: append([]byte(nil), proofWitnessRaw...),
+			JunoHeight:       jh,
+		},
+		State: deposit.State(state),
+	}
+
+	if cpHeight != nil {
+		var (
+			bh [32]byte
+			rt [32]byte
+		)
+		if cpBlockHashRaw != nil {
+			bh, err = to32(cpBlockHashRaw)
+			if err != nil {
+				return deposit.Job{}, err
+			}
+		}
+		if cpRootRaw != nil {
+			rt, err = to32(cpRootRaw)
+			if err != nil {
+				return deposit.Job{}, err
+			}
+		}
+		var bridge [20]byte
+		if cpBridgeRaw != nil {
+			bridge, err = to20(cpBridgeRaw)
+			if err != nil {
+				return deposit.Job{}, err
+			}
+		}
+		var baseChain uint64
+		if cpBaseChainID != nil && *cpBaseChainID >= 0 {
+			baseChain = uint64(*cpBaseChainID)
+		}
+		job.Checkpoint = checkpoint.Checkpoint{
+			Height:           uint64(*cpHeight),
+			BlockHash:        bh,
+			FinalOrchardRoot: rt,
+			BaseChainID:      baseChain,
+			BridgeContract:   bridge,
+		}
+	}
+
+	if proofSeal != nil {
+		job.ProofSeal = append([]byte(nil), proofSeal...)
+	}
+	if txHashRaw != nil {
+		tx, err := to32(txHashRaw)
+		if err != nil {
+			return deposit.Job{}, err
+		}
+		job.TxHash = tx
+	}
+	if rejectionReason != nil {
+		job.RejectionReason = *rejectionReason
+	}
+
+	return job, nil
+}
+
+func recordSourceEvent(ctx context.Context, q execQueryer, d deposit.Deposit) error {
+	if d.SourceEvent == nil {
+		return nil
+	}
+	if d.SourceEvent.ChainID == 0 || d.SourceEvent.ChainID > math.MaxInt64 || d.SourceEvent.LogIndex > math.MaxInt64 {
+		return deposit.ErrDepositMismatch
+	}
+
+	var existingIDRaw []byte
+	if err := q.QueryRow(ctx, `
+		INSERT INTO deposit_source_events (chain_id, tx_hash, log_index, deposit_id, created_at)
+		VALUES ($1, $2, $3, $4, now())
+		ON CONFLICT (chain_id, tx_hash, log_index)
+		DO UPDATE SET deposit_id = deposit_source_events.deposit_id
+		RETURNING deposit_id
+	`, int64(d.SourceEvent.ChainID), d.SourceEvent.TxHash[:], int64(d.SourceEvent.LogIndex), d.DepositID[:]).Scan(&existingIDRaw); err != nil {
+		return fmt.Errorf("deposit/postgres: record source event: %w", err)
+	}
+	existingID, err := to32(existingIDRaw)
+	if err != nil {
+		return err
+	}
+	if existingID != d.DepositID {
+		return deposit.ErrDepositMismatch
+	}
+	return nil
 }
 
 var _ deposit.Store = (*Store)(nil)

@@ -20,6 +20,7 @@ type MemoryStore struct {
 	attemptOrder     [][32]byte
 	attemptClaim     map[[32]byte]claimLease
 	attemptByDeposit map[[32]byte][32]byte
+	sourceEvents     map[sourceEventKey][32]byte
 }
 
 type claimLease struct {
@@ -34,12 +35,23 @@ func NewMemoryStore() *MemoryStore {
 		attempts:         make(map[[32]byte]SubmittedBatchAttempt),
 		attemptClaim:     make(map[[32]byte]claimLease),
 		attemptByDeposit: make(map[[32]byte][32]byte),
+		sourceEvents:     make(map[sourceEventKey][32]byte),
 	}
+}
+
+type sourceEventKey struct {
+	chainID  uint64
+	txHash   [32]byte
+	logIndex uint64
 }
 
 func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.recordSourceEvent(d); err != nil {
+		return Job{}, false, err
+	}
 
 	j, ok := s.jobs[d.DepositID]
 	if !ok {
@@ -68,6 +80,10 @@ func (s *MemoryStore) UpsertSeen(_ context.Context, d Deposit) (Job, bool, error
 func (s *MemoryStore) UpsertConfirmed(_ context.Context, d Deposit) (Job, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if err := s.recordSourceEvent(d); err != nil {
+		return Job{}, false, err
+	}
 
 	j, ok := s.jobs[d.DepositID]
 	if !ok {
@@ -602,6 +618,10 @@ func uniqueDepositIDs(ids [][32]byte) [][32]byte {
 
 func cloneDeposit(d Deposit) Deposit {
 	d.ProofWitnessItem = append([]byte(nil), d.ProofWitnessItem...)
+	if d.SourceEvent != nil {
+		src := *d.SourceEvent
+		d.SourceEvent = &src
+	}
 	return d
 }
 
@@ -671,6 +691,25 @@ func depositIdentityEqual(a, b Deposit) bool {
 
 func depositEqual(a, b Deposit) bool {
 	return depositIdentityEqual(a, b) && a.JunoHeight == b.JunoHeight
+}
+
+func (s *MemoryStore) recordSourceEvent(d Deposit) error {
+	if d.SourceEvent == nil {
+		return nil
+	}
+	if d.SourceEvent.ChainID == 0 {
+		return ErrDepositMismatch
+	}
+	key := sourceEventKey{
+		chainID:  d.SourceEvent.ChainID,
+		txHash:   d.SourceEvent.TxHash,
+		logIndex: d.SourceEvent.LogIndex,
+	}
+	if existing, ok := s.sourceEvents[key]; ok && existing != d.DepositID {
+		return ErrDepositMismatch
+	}
+	s.sourceEvents[key] = d.DepositID
+	return nil
 }
 
 func hasID(ids map[[32]byte]struct{}, id [32]byte) bool {

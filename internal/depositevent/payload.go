@@ -20,14 +20,17 @@ const (
 )
 
 type Payload struct {
-	Version          string `json:"version"`
-	CM               string `json:"cm"`
-	LeafIndex        uint64 `json:"leafIndex"`
-	Amount           uint64 `json:"amount"`
-	JunoHeight       int64  `json:"junoHeight"`
-	Memo             string `json:"memo"`
-	ProofWitnessItem string `json:"proofWitnessItem"`
-	DepositID        string `json:"depositId"`
+	Version          string  `json:"version"`
+	CM               string  `json:"cm"`
+	LeafIndex        uint64  `json:"leafIndex"`
+	Amount           uint64  `json:"amount"`
+	JunoHeight       int64   `json:"junoHeight"`
+	Memo             string  `json:"memo"`
+	ProofWitnessItem string  `json:"proofWitnessItem"`
+	DepositID        string  `json:"depositId"`
+	ChainID          *uint64 `json:"chainId,omitempty"`
+	TxHash           string  `json:"txHash,omitempty"`
+	LogIndex         *uint64 `json:"logIndex,omitempty"`
 }
 
 func BuildPayload(baseChainID uint32, bridge, recipient common.Address, amount, nonce uint64, junoHeight int64, witnessItem []byte) (Payload, error) {
