@@ -73,7 +73,15 @@ aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$app_deploy" '.aws_region')"
 public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select(type == "string" and length > 0)')"
 bridge_probe_url="$(production_json_required "$app_deploy" '.services.bridge_api.public_url | select(type == "string" and length > 0)')"
-backoffice_probe_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
+backoffice_public_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
+backoffice_internal_url="$(production_json_required "$app_deploy" '.services.backoffice.internal_url | select(type == "string" and length > 0)')"
+backoffice_access_mode="$(production_json_required "$app_deploy" '.services.backoffice.access.mode | select(type == "string" and length > 0)')"
+backoffice_probe_url="$backoffice_public_url"
+backoffice_probe_transport="direct"
+if [[ "$backoffice_access_mode" == "wireguard" ]]; then
+  backoffice_probe_url="$backoffice_internal_url"
+  backoffice_probe_transport="ssh-local"
+fi
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
 bridge_address="$(production_json_required "$shared_manifest_path" '.contracts.bridge | select(type == "string" and length > 0)')"
@@ -87,7 +95,17 @@ shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_p
 [[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"
 [[ "$public_scheme" == "https" ]] || die "app deploy manifest must use public_scheme=https"
 [[ "$bridge_probe_url" == https://* ]] || die "bridge probe url must use https: $bridge_probe_url"
-[[ "$backoffice_probe_url" == https://* ]] || die "backoffice probe url must use https: $backoffice_probe_url"
+case "$backoffice_probe_transport" in
+  direct)
+    [[ "$backoffice_probe_url" == https://* ]] || die "backoffice probe url must use https when directly accessible: $backoffice_probe_url"
+    ;;
+  ssh-local)
+    [[ "$backoffice_probe_url" == http://127.0.0.1:* ]] || die "wireguard backoffice probes must use host-local http via ssh: $backoffice_probe_url"
+    ;;
+  *)
+    die "unsupported backoffice probe transport: $backoffice_probe_transport"
+    ;;
+esac
 
 input_status="passed"
 input_detail="handoff inputs present"
@@ -167,6 +185,62 @@ http_get_with_retry() {
   rm -f "$response_file"
   rm -f "$error_file"
   return 1
+}
+
+ssh_http_get_with_retry() {
+  local url="$1"
+  local label="$2"
+  shift 2
+  local response_file error_file
+  local ssh_status attempt remote_cmd
+  local -a remote_argv=(curl -fsS)
+
+  response_file="$(mktemp)"
+  error_file="$(mktemp)"
+  for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
+    : >"$response_file"
+    : >"$error_file"
+    remote_argv=(curl -fsS)
+    if (($# > 0)); then
+      remote_argv+=("$@")
+    fi
+    remote_argv+=("$url")
+    printf -v remote_cmd '%q ' "${remote_argv[@]}"
+    set +e
+    ssh "${SSH_OPTS[@]}" "$ssh_target" "$remote_cmd" >"$response_file" 2>"$error_file"
+    ssh_status=$?
+    set -e
+
+    if (( ssh_status == 0 )); then
+      cat "$response_file"
+      rm -f "$response_file"
+      rm -f "$error_file"
+      return 0
+    fi
+
+    if (( attempt < http_retry_max_attempts )); then
+      sleep "$http_retry_sleep_seconds"
+    fi
+  done
+
+  if [[ -s "$response_file" ]]; then
+    cat "$response_file" >&2
+  fi
+  if [[ -s "$error_file" ]]; then
+    cat "$error_file" >&2
+  fi
+  printf 'remote http probe failed label=%s url=%s\n' "$label" "$url" >&2
+  rm -f "$response_file"
+  rm -f "$error_file"
+  return 1
+}
+
+backoffice_http_get_with_retry() {
+  if [[ "$backoffice_probe_transport" == "ssh-local" ]]; then
+    ssh_http_get_with_retry "$@"
+  else
+    http_get_with_retry "$@"
+  fi
 }
 
 if [[ "$dry_run" == "true" ]]; then
@@ -251,12 +325,12 @@ else
     bridge_frontend_detail="bridge frontend did not return HTML"
   fi
 
-  if ! http_get_with_retry "${backoffice_probe_url}/readyz" "backoffice readyz" >/dev/null; then
+  if ! backoffice_http_get_with_retry "${backoffice_probe_url}/readyz" "backoffice readyz" >/dev/null; then
     backoffice_ready_status="failed"
     backoffice_ready_detail="backoffice /readyz failed"
   fi
 
-  backoffice_html="$(http_get_with_retry "${backoffice_probe_url}/" "backoffice html" || true)"
+  backoffice_html="$(backoffice_http_get_with_retry "${backoffice_probe_url}/" "backoffice html" || true)"
   if [[ "$backoffice_html" != *"JUNO BACKOFFICE"* ]]; then
     backoffice_ui_status="failed"
     backoffice_ui_detail="backoffice UI did not return expected marker"
@@ -289,7 +363,7 @@ else
 
   if [[ "$backoffice_ready_status" == "passed" && -n "${auth_secret:-}" ]]; then
     backoffice_settings_json="$(
-      http_get_with_retry \
+      backoffice_http_get_with_retry \
         "${backoffice_probe_url}/api/settings/runtime" \
         "backoffice settings api" \
         -H "Authorization: Bearer ${auth_secret}" || true
@@ -316,7 +390,7 @@ else
     backoffice_funds_detail="backoffice funds API reports prover and MPC wallet runtime balances"
     if [[ "$backoffice_ready_status" == "passed" && -n "${auth_secret:-}" ]]; then
       backoffice_funds_json="$(
-        http_get_with_retry \
+        backoffice_http_get_with_retry \
           "${backoffice_probe_url}/api/funds" \
           "backoffice funds api" \
           -H "Authorization: Bearer ${auth_secret}" || true
