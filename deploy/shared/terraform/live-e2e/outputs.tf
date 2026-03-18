@@ -93,6 +93,12 @@ output "shared_ipfs_api_url" {
   value       = try("http://${aws_lb.ipfs[0].dns_name}:${var.shared_ipfs_api_port}", null)
 }
 
+output "shared_ipfs_api_auth_secret_arn" {
+  description = "Secrets Manager ARN containing the shared IPFS API bearer token."
+  value       = try(aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn, null)
+  sensitive   = true
+}
+
 output "operator_instance_ids" {
   description = "Operator EC2 instance IDs."
   value       = aws_instance.operator[*].id

@@ -20,6 +20,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
+	"github.com/juno-intents/intents-juno/internal/envutil"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
@@ -71,6 +72,8 @@ func main() {
 		blobMaxGet       = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
 		ipfsEnabled      = flag.Bool("ipfs-enabled", true, "enable IPFS pinning for checkpoint packages")
 		ipfsAPIURL       = flag.String("ipfs-api-url", "http://127.0.0.1:5001", "IPFS API URL used for package pinning")
+		ipfsAPIBearer    = flag.String("ipfs-api-bearer-token", "", "optional IPFS API bearer token used for package pinning")
+		ipfsAPIBearerEnv = flag.String("ipfs-api-bearer-token-env", "CHECKPOINT_IPFS_API_BEARER_TOKEN", "env var containing an optional IPFS API bearer token")
 		ipfsPinInterval  = flag.Duration("ipfs-pin-interval", 15*time.Second, "interval between background IPFS pin attempts")
 		ipfsPinTimeout   = flag.Duration("ipfs-pin-timeout", 30*time.Second, "timeout for a single background IPFS pin attempt")
 		ipfsPinBatchSize = flag.Int("ipfs-pin-batch-size", 8, "maximum checkpoint packages pinned per background IPFS pass")
@@ -188,7 +191,8 @@ func main() {
 	var pinner checkpoint.IPFSPinner
 	if *ipfsEnabled {
 		pinner, err = checkpoint.NewHTTPIPFSPinner(checkpoint.HTTPIPFSConfig{
-			APIURL: *ipfsAPIURL,
+			APIURL:      *ipfsAPIURL,
+			BearerToken: envutil.ResolveOptional(*ipfsAPIBearer, *ipfsAPIBearerEnv),
 		})
 		if err != nil {
 			log.Error("init ipfs pinner", "err", err)

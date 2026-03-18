@@ -717,6 +717,18 @@ production_resolve_secret_value() {
   esac
 }
 
+production_resolve_optional_aws_sm_secret() {
+  local secret_arn="$1"
+  local aws_profile="$2"
+  local aws_region="$3"
+
+  secret_arn="$(trim "$secret_arn")"
+  if [[ -z "$secret_arn" ]]; then
+    return 0
+  fi
+  production_resolve_secret_value "aws-sm://$secret_arn" "$aws_profile" "$aws_region"
+}
+
 production_resolve_secret_contract() {
   local input_file="$1"
   local allow_local="$2"
@@ -1491,7 +1503,7 @@ production_render_shared_manifest() {
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
-  local postgres_endpoint postgres_port kafka_brokers ipfs_api_url dkg_bucket dkg_prefix
+  local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn dkg_bucket dkg_prefix
   local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_refund_window_seconds
@@ -1538,6 +1550,7 @@ production_render_shared_manifest() {
   shared_sp1_requestor_address="$(production_tf_output_value "$tf_json" "shared_sp1_requestor_address" false)"
   shared_sp1_rpc_url="$(production_tf_output_value "$tf_json" "shared_sp1_rpc_url" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
+  ipfs_api_auth_secret_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_api_auth_secret_arn" false)"
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
   dkg_prefix="$(production_tf_output_value "$tf_json" "dkg_s3_key_prefix" false)"
@@ -1637,6 +1650,7 @@ production_render_shared_manifest() {
     --arg shared_sp1_requestor_address "$shared_sp1_requestor_address" \
     --arg shared_sp1_rpc_url "$shared_sp1_rpc_url" \
     --arg ipfs_api_url "$ipfs_api_url" \
+    --arg ipfs_api_auth_secret_arn "$ipfs_api_auth_secret_arn" \
     --arg ipfs_target_group_arn "$ipfs_target_group_arn" \
     --arg dkg_bucket "$dkg_bucket" \
     --arg dkg_prefix "$dkg_prefix" \
@@ -1698,6 +1712,7 @@ production_render_shared_manifest() {
         },
         ipfs: {
           api_url: $ipfs_api_url,
+          api_auth_secret_arn: (if $ipfs_api_auth_secret_arn == "" then null else $ipfs_api_auth_secret_arn end),
           target_group_arn: (if $ipfs_target_group_arn == "" then null else $ipfs_target_group_arn end)
         },
         artifacts: {
@@ -2148,8 +2163,10 @@ production_render_operator_stack_env() {
   local juno_rpc_bind juno_rpc_allow_ips
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
+  local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
+  ipfs_api_bearer_token=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
   withdraw_juno_fee_add_zat="$(production_default_withdraw_coordinator_juno_fee_add_zat)"
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
@@ -2162,6 +2179,12 @@ production_render_operator_stack_env() {
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
+  shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
+  shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
+  ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn')"
+  if [[ -n "$ipfs_api_auth_secret_arn" ]]; then
+    ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
+  fi
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
@@ -2251,6 +2274,9 @@ TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
 TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 EOF
 
+  if [[ -n "$ipfs_api_bearer_token" ]]; then
+    printf 'CHECKPOINT_IPFS_API_BEARER_TOKEN=%s\n' "$ipfs_api_bearer_token" >>"$output_file"
+  fi
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
   fi
@@ -2391,6 +2417,7 @@ production_render_backoffice_env() {
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local min_deposit_admin_private_key sp1_requestor_address sp1_rpc_url render_juno_rpc
+  local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
@@ -2411,6 +2438,13 @@ production_render_backoffice_env() {
   min_deposit_admin_private_key="$(production_env_first_value "$resolved_secret_env" MIN_DEPOSIT_ADMIN_PRIVATE_KEY APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY || true)"
   sp1_requestor_address="$(production_json_optional "$shared_manifest" '.shared_services.proof.requestor_address')"
   sp1_rpc_url="$(production_json_optional "$shared_manifest" '.shared_services.proof.rpc_url')"
+  shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
+  shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
+  ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn')"
+  ipfs_api_bearer_token=""
+  if [[ -n "$ipfs_api_auth_secret_arn" ]]; then
+    ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
+  fi
   [[ -n "$sp1_requestor_address" ]] || die "shared manifest is missing shared_services.proof.requestor_address"
   render_juno_rpc="false"
   juno_rpc_urls="$(production_backoffice_juno_rpc_urls_csv "$app_deploy" || true)"
@@ -2436,6 +2470,9 @@ BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$sh
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 EOF
 
+  if [[ -n "$ipfs_api_bearer_token" ]]; then
+    printf 'BACKOFFICE_IPFS_API_BEARER_TOKEN=%s\n' "$ipfs_api_bearer_token" >>"$output_file"
+  fi
   if [[ -n "$sp1_requestor_address" ]]; then
     printf 'BACKOFFICE_SP1_REQUESTOR_ADDRESS=%s\n' "$sp1_requestor_address" >>"$output_file"
   fi

@@ -367,6 +367,17 @@ variable "shared_ipfs_min_size" {
   default     = 1
 }
 
+variable "shared_ipfs_data_volume_size_gb" {
+  description = "Dedicated EBS data volume size for persisted shared IPFS content."
+  type        = number
+  default     = 80
+
+  validation {
+    condition     = var.shared_ipfs_data_volume_size_gb >= 20
+    error_message = "shared_ipfs_data_volume_size_gb must be at least 20 GiB."
+  }
+}
+
 variable "shared_ipfs_max_size" {
   description = "Maximum size for the shared IPFS pinning autoscaling group."
   type        = number

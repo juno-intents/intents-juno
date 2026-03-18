@@ -96,6 +96,12 @@ output "shared_ipfs_api_url" {
   value       = "http://${aws_lb.ipfs.dns_name}:${var.shared_ipfs_api_port}"
 }
 
+output "shared_ipfs_api_auth_secret_arn" {
+  description = "Secrets Manager ARN containing the shared IPFS API bearer token."
+  value       = aws_secretsmanager_secret.shared_ipfs_api_bearer_token.arn
+  sensitive   = true
+}
+
 output "shared_ipfs_target_group_arn" {
   description = "IPFS API target group ARN."
   value       = aws_lb_target_group.ipfs_api.arn

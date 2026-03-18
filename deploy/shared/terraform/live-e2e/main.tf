@@ -201,6 +201,27 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "dkg_keypackages" 
   }
 }
 
+resource "random_password" "shared_ipfs_api_bearer_token" {
+  count = var.provision_shared_services ? 1 : 0
+
+  length  = 48
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "shared_ipfs_api_bearer_token" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name = "${local.resource_name}-shared-ipfs-api-bearer-token"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
+  count = var.provision_shared_services ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].id
+  secret_string = random_password.shared_ipfs_api_bearer_token[0].result
+}
+
 data "aws_iam_policy_document" "live_e2e_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -347,6 +368,15 @@ locals {
               "logs:GetLogEvents"
             ]
             Resource = "*"
+          }),
+          jsonencode({
+            Sid    = "AllowSharedIPFSSecretRead"
+            Effect = "Allow"
+            Action = [
+              "secretsmanager:DescribeSecret",
+              "secretsmanager:GetSecretValue"
+            ]
+            Resource = [aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn]
           })
         ] : []
       ) : jsondecode(statement_json)
@@ -1461,21 +1491,72 @@ resource "aws_launch_template" "ipfs" {
     }
   }
 
+  block_device_mappings {
+    device_name = "/dev/sdf"
+
+    ebs {
+      volume_size           = var.shared_ipfs_data_volume_size_gb
+      volume_type           = "gp3"
+      delete_on_termination = false
+      encrypted             = true
+    }
+  }
+
   user_data = base64encode(<<-EOF
     #!/usr/bin/env bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -y
-    apt-get install -y ca-certificates curl docker.io
-    systemctl enable --now docker
+    apt-get install -y awscli ca-certificates curl docker.io nginx
+    systemctl enable --now docker nginx
+
+    ipfs_api_secret_arn="${aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn}"
+    ipfs_api_bearer_token="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$ipfs_api_secret_arn" --query SecretString --output text)"
+    imds_token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
+    private_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/local-ipv4)"
+    root_source="$(findmnt -n -o SOURCE /)"
+    root_disk="/dev/$(lsblk -no PKNAME "$root_source")"
+    data_disk="$(lsblk -dpno NAME,TYPE | awk '$2 == "disk" {print $1}' | grep -vx "$root_disk" | head -n1)"
+    [[ -n "$data_disk" ]] || { echo "shared ipfs data disk not found" >&2; exit 1; }
+    if ! blkid "$data_disk" >/dev/null 2>&1; then
+      mkfs.ext4 -F "$data_disk"
+    fi
+    install -d -m 0755 /var/lib/intents-juno/ipfs
+    data_uuid="$(blkid -s UUID -o value "$data_disk")"
+    grep -q "$data_uuid /var/lib/intents-juno/ipfs " /etc/fstab || echo "UUID=$data_uuid /var/lib/intents-juno/ipfs ext4 defaults,nofail 0 2" >> /etc/fstab
+    mountpoint -q /var/lib/intents-juno/ipfs || mount /var/lib/intents-juno/ipfs
+
+    {
+      printf 'server {\n'
+      printf '  listen %s:%s;\n' "$private_ip" "${var.shared_ipfs_api_port}"
+      printf '  location /api/v0/ {\n'
+      printf '    if ($http_authorization != "Bearer %s") {\n' "$ipfs_api_bearer_token"
+      printf '      return 401;\n'
+      printf '    }\n'
+      printf '    proxy_http_version 1.1;\n'
+      printf '    proxy_buffering off;\n'
+      printf '    proxy_request_buffering off;\n'
+      printf '    proxy_set_header Host $host;\n'
+      printf '    proxy_pass http://127.0.0.1:5001;\n'
+      printf '  }\n'
+      printf '  location / {\n'
+      printf '    return 404;\n'
+      printf '  }\n'
+      printf '}\n'
+    } >/etc/nginx/conf.d/intents-shared-ipfs.conf
+    rm -f /etc/nginx/sites-enabled/default /etc/nginx/conf.d/default.conf
+    nginx -t
+    systemctl restart nginx
 
     docker rm -f intents-shared-ipfs >/dev/null 2>&1 || true
     docker pull ipfs/kubo:v0.32.1
     docker run -d \
       --name intents-shared-ipfs \
       --restart unless-stopped \
-      -p ${var.shared_ipfs_api_port}:5001 \
-      ipfs/kubo:v0.32.1 daemon --migrate=true --api /ip4/0.0.0.0/tcp/5001 --routing=dhtclient
+      --network host \
+      -e IPFS_PATH=/data/ipfs \
+      -v /var/lib/intents-juno/ipfs:/data/ipfs \
+      ipfs/kubo:v0.32.1 daemon --migrate=true --api /ip4/127.0.0.1/tcp/5001 --routing=dhtclient
   EOF
   )
 

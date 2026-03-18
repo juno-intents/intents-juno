@@ -21,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/envutil"
 	ethutil "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
@@ -65,6 +66,8 @@ func main() {
 		operatorEndpointsRaw            = flag.String("operator-endpoints", "", "Comma-separated addr=host:port pairs for gRPC health check")
 		kafkaBrokersRaw                 = flag.String("kafka-brokers", "", "Comma-separated Kafka broker addresses for health probe")
 		ipfsApiURL                      = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
+		ipfsApiBearerToken              = flag.String("ipfs-api-bearer-token", "", "optional IPFS API bearer token for the health probe")
+		ipfsApiBearerTokenEnv           = flag.String("ipfs-api-bearer-token-env", "BACKOFFICE_IPFS_API_BEARER_TOKEN", "env var containing an optional IPFS API bearer token")
 		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
 		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
 		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
@@ -382,20 +385,21 @@ func main() {
 		OperatorAddresses:          operatorAddresses,
 		BaseRelayerSignerAddresses: baseRelayerSignerAddresses,
 
-		ServiceEntries:    serviceEntries,
-		OperatorEndpoints: operatorEndpoints,
-		KafkaBrokers:      kafkaBrokers,
-		IPFSApiURL:        strings.TrimSpace(*ipfsApiURL),
+		ServiceEntries:     serviceEntries,
+		OperatorEndpoints:  operatorEndpoints,
+		KafkaBrokers:       kafkaBrokers,
+		IPFSApiURL:         strings.TrimSpace(*ipfsApiURL),
+		IPFSApiBearerToken: envutil.ResolveOptional(*ipfsApiBearerToken, *ipfsApiBearerTokenEnv),
 
 		AuthSecret: *authSecret,
 
 		RateLimitPerSecond: *rateLimitPerSecond,
 		RateLimitBurst:     *rateLimitBurst,
 
-	OperatorGasMinWei:      operatorGasMinWei,
-	BaseRelayerFundsMinWei: baseRelayerGasMinWei,
-	ProverFundsMinWei:      proverFundsMinWei,
-	ReadinessCheck: healthz.CombineReadinessChecks(
+		OperatorGasMinWei:      operatorGasMinWei,
+		BaseRelayerFundsMinWei: baseRelayerGasMinWei,
+		ProverFundsMinWei:      proverFundsMinWei,
+		ReadinessCheck: healthz.CombineReadinessChecks(
 			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 			bridgeSettingsCache.Ready,
 			chainReadinessCheck(baseClient),

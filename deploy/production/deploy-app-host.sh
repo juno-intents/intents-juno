@@ -104,6 +104,7 @@ shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.share
 shared_kafka_auth_mode="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
 shared_kafka_auth_aws_region="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.aws_region | select(type == "string" and length > 0)')"
 shared_ipfs_api_url="$(production_json_required "$shared_manifest_path" '.shared_services.ipfs.api_url | select(type == "string" and length > 0)')"
+shared_ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest_path" '.shared_services.ipfs.api_auth_secret_arn | select(type == "string" and length > 0)')"
 checkpoint_signature_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.signature_topic | select(type == "string" and length > 0)')"
 checkpoint_package_topic="$(production_json_required "$shared_manifest_path" '.checkpoint.package_topic | select(type == "string" and length > 0)')"
 checkpoint_threshold="$(production_json_required "$shared_manifest_path" '.checkpoint.threshold')"
@@ -212,6 +213,10 @@ required_kafka_topics_csv="$(
 shared_infra_check_max_attempts="${PRODUCTION_SHARED_INFRA_CHECK_MAX_ATTEMPTS:-5}"
 shared_infra_check_sleep_seconds="${PRODUCTION_SHARED_INFRA_CHECK_SLEEP_SECONDS:-10}"
 shared_infra_check_timeout="${PRODUCTION_SHARED_INFRA_CHECK_TIMEOUT:-420s}"
+shared_ipfs_api_bearer_token=""
+if [[ -n "$shared_ipfs_api_auth_secret_arn" ]]; then
+  shared_ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$shared_ipfs_api_auth_secret_arn" "$aws_profile" "$aws_region")"
+fi
 kafka_tls_enabled="$(production_json_optional "$shared_manifest_path" '.shared_services.kafka.tls')"
 if [[ "$kafka_tls_enabled" != "true" ]]; then
   kafka_tls_enabled="false"
@@ -287,6 +292,7 @@ shared_infra_check_max_attempts="$shared_infra_check_max_attempts"
 shared_infra_check_sleep_seconds="$shared_infra_check_sleep_seconds"
 shared_infra_check_timeout="$shared_infra_check_timeout"
 shared_ipfs_api_url="$shared_ipfs_api_url"
+shared_ipfs_api_bearer_token="$shared_ipfs_api_bearer_token"
 shared_checkpoint_operators="$checkpoint_operators_csv"
 shared_checkpoint_threshold="$checkpoint_threshold"
 kafka_tls_enabled="$kafka_tls_enabled"
@@ -309,6 +315,7 @@ run_shared_infra_e2e() {
     JUNO_QUEUE_KAFKA_TLS="\$kafka_tls_enabled" \
     JUNO_QUEUE_KAFKA_AUTH_MODE="\$shared_kafka_auth_mode" \
     JUNO_QUEUE_KAFKA_AWS_REGION="\$shared_kafka_auth_aws_region" \
+    CHECKPOINT_IPFS_API_BEARER_TOKEN="\$shared_ipfs_api_bearer_token" \
     "\$shared_infra_e2e_bin" \
       --postgres-dsn "\$shared_postgres_dsn" \
       --kafka-brokers "\$shared_kafka_brokers" \
@@ -388,6 +395,9 @@ if [[ -n "\${BACKOFFICE_SP1_REQUESTOR_ADDRESS:-}" ]]; then
 fi
 if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
   args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
+fi
+if [[ -n "\${BACKOFFICE_IPFS_API_BEARER_TOKEN:-}" ]]; then
+  args+=(--ipfs-api-bearer-token "\$BACKOFFICE_IPFS_API_BEARER_TOKEN")
 fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
   if "\$backoffice_bin" -h 2>&1 | grep -q -- '--juno-rpc-urls'; then

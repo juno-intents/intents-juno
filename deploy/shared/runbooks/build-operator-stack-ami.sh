@@ -1229,6 +1229,7 @@ exec /usr/local/bin/checkpoint-aggregator \
   --blob-prefix "${CHECKPOINT_BLOB_PREFIX:-checkpoint-packages}" \
   --ipfs-enabled=true \
   --ipfs-api-url "$CHECKPOINT_IPFS_API_URL" \
+  ${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"} \
   --queue-driver kafka \
   --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
   --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \

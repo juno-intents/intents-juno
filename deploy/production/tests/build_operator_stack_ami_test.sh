@@ -268,6 +268,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$aggregator_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint aggregator requires bridge address in operator env"
   assert_contains "$aggregator_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint aggregator reads base chain id from operator env"
   assert_contains "$aggregator_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint aggregator reads bridge address from operator env"
+  assert_contains "$aggregator_wrapper" '${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"}' "checkpoint aggregator forwards the optional IPFS bearer token"
   assert_not_contains "$aggregator_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint aggregator does not bake bootstrap bridge address into wrapper"
 
   base_event_scanner_wrapper="$(extract_block "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER")"

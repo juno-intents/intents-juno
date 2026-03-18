@@ -23,25 +23,27 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	"github.com/juno-intents/intents-juno/internal/envutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/segmentio/kafka-go"
 )
 
 type config struct {
-	PostgresDSN              string
-	KafkaBrokers             []string
-	RequiredKafkaTopics      []string
-	CheckpointIPFSAPIURL     string
-	CheckpointIPFSGatewayURL string
-	CheckpointOperators      []common.Address
-	CheckpointThreshold      int
-	CheckpointMinPersistedAt time.Time
-	TopicPrefix              string
-	Timeout                  time.Duration
-	OutputPath               string
-	MaxLineBytes             int
-	KafkaMaxBytes            int
-	AckTimeout               time.Duration
+	PostgresDSN                  string
+	KafkaBrokers                 []string
+	RequiredKafkaTopics          []string
+	CheckpointIPFSAPIURL         string
+	CheckpointIPFSAPIBearerToken string
+	CheckpointIPFSGatewayURL     string
+	CheckpointOperators          []common.Address
+	CheckpointThreshold          int
+	CheckpointMinPersistedAt     time.Time
+	TopicPrefix                  string
+	Timeout                      time.Duration
+	OutputPath                   string
+	MaxLineBytes                 int
+	KafkaMaxBytes                int
+	AckTimeout                   time.Duration
 }
 
 type report struct {
@@ -213,6 +215,8 @@ func parseArgs(args []string) (config, error) {
 	var requiredTopicsRaw string
 	var checkpointOperatorsRaw string
 	var checkpointMinPersistedAtRaw string
+	var checkpointIPFSAPIBearerTokenRaw string
+	var checkpointIPFSAPIBearerTokenEnv string
 
 	fs := flag.NewFlagSet("shared-infra-e2e", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -221,6 +225,8 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&brokersRaw, "kafka-brokers", "", "comma-separated Kafka brokers (required)")
 	fs.StringVar(&requiredTopicsRaw, "required-kafka-topics", "", "comma-separated Kafka topics to create before validation")
 	fs.StringVar(&cfg.CheckpointIPFSAPIURL, "checkpoint-ipfs-api-url", "", "IPFS API URL for persisted checkpoint package pin/fetch validation (required)")
+	fs.StringVar(&checkpointIPFSAPIBearerTokenRaw, "checkpoint-ipfs-api-bearer-token", "", "optional IPFS API bearer token for checkpoint validation")
+	fs.StringVar(&checkpointIPFSAPIBearerTokenEnv, "checkpoint-ipfs-api-bearer-token-env", "CHECKPOINT_IPFS_API_BEARER_TOKEN", "env var containing an optional IPFS API bearer token")
 	fs.StringVar(&checkpointOperatorsRaw, "checkpoint-operators", "", "comma-separated expected checkpoint signer operator addresses")
 	fs.IntVar(&cfg.CheckpointThreshold, "checkpoint-threshold", 0, "expected minimum checkpoint signer threshold (requires --checkpoint-operators)")
 	fs.StringVar(&checkpointMinPersistedAtRaw, "checkpoint-min-persisted-at", "", "RFC3339 lower bound for checkpoint package persisted_at (run-bound filtering)")
@@ -250,6 +256,7 @@ func parseArgs(args []string) (config, error) {
 	if cfg.CheckpointIPFSAPIURL == "" {
 		return cfg, errors.New("--checkpoint-ipfs-api-url is required")
 	}
+	cfg.CheckpointIPFSAPIBearerToken = envutil.ResolveOptional(checkpointIPFSAPIBearerTokenRaw, checkpointIPFSAPIBearerTokenEnv)
 	checkpointOperatorsRaw = strings.TrimSpace(checkpointOperatorsRaw)
 	if checkpointOperatorsRaw != "" {
 		operators, err := checkpoint.ParseOperatorAddressesCSV(checkpointOperatorsRaw)
@@ -721,12 +728,12 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 		return checkpointReport{}, err
 	}
 
-	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, rec.IPFSCID); err != nil {
+	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, cfg.CheckpointIPFSAPIBearerToken, rec.IPFSCID); err != nil {
 		return checkpointReport{}, err
 	}
 
 	fetchStarted := time.Now()
-	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, rec.IPFSCID)
+	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, cfg.CheckpointIPFSAPIBearerToken, rec.IPFSCID)
 	fetchMS := time.Since(fetchStarted).Milliseconds()
 	if err != nil {
 		return checkpointReport{}, err
@@ -752,16 +759,16 @@ func checkCheckpointIPFSWithSource(ctx context.Context, cfg config, source check
 func probeCheckpointIPFS(ctx context.Context, cfg config) (checkpointReport, error) {
 	payload := []byte(fmt.Sprintf(`{"version":"shared.infra.e2e.ipfs.v1","generated_at":"%s"}`, time.Now().UTC().Format(time.RFC3339Nano)))
 	publishStarted := time.Now()
-	cid, err := addIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, payload)
+	cid, err := addIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, cfg.CheckpointIPFSAPIBearerToken, payload)
 	publishMS := time.Since(publishStarted).Milliseconds()
 	if err != nil {
 		return checkpointReport{}, err
 	}
-	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, cid); err != nil {
+	if err := ensureIPFSPin(ctx, cfg.CheckpointIPFSAPIURL, cfg.CheckpointIPFSAPIBearerToken, cid); err != nil {
 		return checkpointReport{}, err
 	}
 	fetchStarted := time.Now()
-	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, cid)
+	gotPayload, err := fetchIPFSPayload(ctx, cfg.CheckpointIPFSAPIURL, cfg.CheckpointIPFSAPIBearerToken, cid)
 	fetchMS := time.Since(fetchStarted).Milliseconds()
 	if err != nil {
 		return checkpointReport{}, err
@@ -978,13 +985,13 @@ func bytesToHash(raw []byte) (common.Hash, error) {
 	return h, nil
 }
 
-func ensureIPFSPin(ctx context.Context, apiURL string, cid string) error {
+func ensureIPFSPin(ctx context.Context, apiURL string, bearerToken string, cid string) error {
 	cid = strings.TrimSpace(cid)
 	if cid == "" {
 		return errors.New("ipfs pin probe cid is required")
 	}
 	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/pin/ls?arg=" + url.QueryEscape(cid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	req, err := newIPFSRequest(ctx, endpoint, bearerToken, nil)
 	if err != nil {
 		return fmt.Errorf("build ipfs pin/ls request: %w", err)
 	}
@@ -1016,13 +1023,13 @@ func ensureIPFSPin(ctx context.Context, apiURL string, cid string) error {
 	return fmt.Errorf("ipfs pin/ls missing cid %s", cid)
 }
 
-func fetchIPFSPayload(ctx context.Context, apiURL string, cid string) ([]byte, error) {
+func fetchIPFSPayload(ctx context.Context, apiURL string, bearerToken string, cid string) ([]byte, error) {
 	cid = strings.TrimSpace(cid)
 	if cid == "" {
 		return nil, errors.New("ipfs fetch cid is required")
 	}
 	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/cat?arg=" + url.QueryEscape(cid)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, nil)
+	req, err := newIPFSRequest(ctx, endpoint, bearerToken, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build ipfs cat request: %w", err)
 	}
@@ -1042,7 +1049,7 @@ func fetchIPFSPayload(ctx context.Context, apiURL string, cid string) ([]byte, e
 	return raw, nil
 }
 
-func addIPFSPayload(ctx context.Context, apiURL string, payload []byte) (string, error) {
+func addIPFSPayload(ctx context.Context, apiURL string, bearerToken string, payload []byte) (string, error) {
 	if len(payload) == 0 {
 		return "", errors.New("ipfs add payload is required")
 	}
@@ -1060,7 +1067,7 @@ func addIPFSPayload(ctx context.Context, apiURL string, payload []byte) (string,
 	}
 
 	endpoint := strings.TrimRight(strings.TrimSpace(apiURL), "/") + "/api/v0/add?pin=true&quieter=true"
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, &body)
+	req, err := newIPFSRequest(ctx, endpoint, bearerToken, &body)
 	if err != nil {
 		return "", fmt.Errorf("build ipfs add request: %w", err)
 	}
@@ -1094,6 +1101,17 @@ func addIPFSPayload(ctx context.Context, apiURL string, payload []byte) (string,
 		return "", errors.New("ipfs add response hash is empty")
 	}
 	return out.Hash, nil
+}
+
+func newIPFSRequest(ctx context.Context, endpoint string, bearerToken string, body io.Reader) (*http.Request, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, body)
+	if err != nil {
+		return nil, err
+	}
+	if token := strings.TrimSpace(bearerToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	return req, nil
 }
 
 func attachCheckpointGatewayProbe(ctx context.Context, gatewayURL string, cid string, rep *checkpointReport) {

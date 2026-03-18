@@ -68,6 +68,7 @@ kafka_brokers="$(production_json_required "$shared_manifest" '.shared_services.k
 kafka_cluster_arn="$(production_json_optional "$shared_manifest" '.shared_services.kafka.cluster_arn | select(type == "string" and length > 0)')"
 kafka_auth_mode="$(production_json_required "$shared_manifest" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
 ipfs_api_url="$(production_json_required "$shared_manifest" '.shared_services.ipfs.api_url | select(type == "string" and length > 0)')"
+ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn | select(type == "string" and length > 0)')"
 ipfs_target_group_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.target_group_arn | select(type == "string" and length > 0)')"
 checkpoint_blob_bucket="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 artifacts_object_lock_required="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.object_lock_required')"
@@ -95,6 +96,7 @@ postgres_detail="reachable"
 kafka_detail="all brokers reachable"
 ipfs_detail="api reachable"
 artifacts_detail="no artifact bucket configured"
+ipfs_auth_header=()
 
 if [[ "$dry_run" == "true" ]]; then
   aws_auth_status="skipped"
@@ -133,11 +135,6 @@ else
     fi
   done
 
-  if ! curl -fsS -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
-    ipfs_status="failed"
-    ipfs_detail="ipfs api unreachable"
-  fi
-
   if [[ "$kafka_auth_mode" == "aws-msk-iam" || -n "$postgres_cluster_arn" || -n "$kafka_cluster_arn" || -n "$ipfs_target_group_arn" || -n "$checkpoint_blob_bucket" ]]; then
     have_cmd aws || die "required command not found: aws"
     if [[ -z "$aws_profile" || -z "$aws_region" ]]; then
@@ -150,6 +147,18 @@ else
   else
     aws_auth_status="skipped"
     aws_auth_detail="no aws-backed checks configured"
+  fi
+
+  if [[ "$aws_auth_status" == "passed" && -n "$ipfs_api_auth_secret_arn" ]]; then
+    ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$aws_profile" "$aws_region")"
+    if [[ -n "$ipfs_api_bearer_token" ]]; then
+      ipfs_auth_header=(-H "Authorization: Bearer ${ipfs_api_bearer_token}")
+    fi
+  fi
+
+  if ! curl -fsS "${ipfs_auth_header[@]}" -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
+    ipfs_status="failed"
+    ipfs_detail="ipfs api unreachable"
   fi
 
   if [[ "$aws_auth_status" == "passed" && -n "$postgres_cluster_arn" ]]; then

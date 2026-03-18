@@ -117,6 +117,23 @@ func TestParseArgs_Valid(t *testing.T) {
 	}
 }
 
+func TestParseArgs_ResolvesCheckpointIPFSBearerTokenFromEnv(t *testing.T) {
+	t.Setenv("TEST_CHECKPOINT_IPFS_TOKEN", "  secret-token  ")
+
+	cfg, err := parseArgs([]string{
+		"--postgres-dsn", "postgres://postgres:postgres@127.0.0.1:5432/postgres?sslmode=disable",
+		"--kafka-brokers", "127.0.0.1:9092",
+		"--checkpoint-ipfs-api-url", "http://127.0.0.1:5001",
+		"--checkpoint-ipfs-api-bearer-token-env", "TEST_CHECKPOINT_IPFS_TOKEN",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if cfg.CheckpointIPFSAPIBearerToken != "secret-token" {
+		t.Fatalf("checkpoint ipfs bearer token = %q, want %q", cfg.CheckpointIPFSAPIBearerToken, "secret-token")
+	}
+}
+
 func TestParseArgs_RequiresPostgresDSN(t *testing.T) {
 	t.Parallel()
 
@@ -1135,5 +1152,53 @@ func TestCheckCheckpointIPFSWithSource_ProbesIPFSWhenNoFreshCheckpointPackageExi
 	}
 	if addCalls != 1 {
 		t.Fatalf("add calls: got %d want 1", addCalls)
+	}
+}
+
+func TestCheckpointIPFSHelpers_UseBearerToken(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = append(gotAuth, r.Header.Get("Authorization"))
+		switch r.URL.Path {
+		case "/api/v0/add":
+			_, _ = io.WriteString(w, `{"Name":"shared-infra-e2e.json","Hash":"bafyauth","Size":"42"}`)
+		case "/api/v0/pin/ls":
+			_, _ = io.WriteString(w, `{"Keys":{"bafyauth":{"Type":"recursive"}}}`)
+		case "/api/v0/cat":
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	ctx := context.Background()
+	token := "secret-token"
+	cid, err := addIPFSPayload(ctx, srv.URL, token, []byte(`{"ok":true}`))
+	if err != nil {
+		t.Fatalf("addIPFSPayload: %v", err)
+	}
+	if cid != "bafyauth" {
+		t.Fatalf("cid = %q, want %q", cid, "bafyauth")
+	}
+	if err := ensureIPFSPin(ctx, srv.URL, token, cid); err != nil {
+		t.Fatalf("ensureIPFSPin: %v", err)
+	}
+	payload, err := fetchIPFSPayload(ctx, srv.URL, token, cid)
+	if err != nil {
+		t.Fatalf("fetchIPFSPayload: %v", err)
+	}
+	if string(payload) != `{"ok":true}` {
+		t.Fatalf("payload = %q, want %q", string(payload), `{"ok":true}`)
+	}
+	if len(gotAuth) != 3 {
+		t.Fatalf("Authorization header count = %d, want 3", len(gotAuth))
+	}
+	for i, header := range gotAuth {
+		if header != "Bearer secret-token" {
+			t.Fatalf("Authorization header[%d] = %q, want %q", i, header, "Bearer secret-token")
+		}
 	}
 }

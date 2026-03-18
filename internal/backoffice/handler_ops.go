@@ -315,7 +315,7 @@ func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 
 	// Built-in: IPFS (API v0 requires POST)
 	if s.cfg.IPFSApiURL != "" {
-		results = append(results, probeIPFS(r.Context(), client, s.cfg.IPFSApiURL))
+		results = append(results, probeIPFS(r.Context(), client, s.cfg.IPFSApiURL, s.cfg.IPFSApiBearerToken))
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -325,7 +325,7 @@ func (s *Server) handleServicesHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 // probeIPFS checks IPFS API connectivity using POST /api/v0/version.
-func probeIPFS(ctx context.Context, client *http.Client, baseURL string) map[string]any {
+func probeIPFS(ctx context.Context, client *http.Client, baseURL string, bearerToken string) map[string]any {
 	start := time.Now()
 	url := strings.TrimRight(baseURL, "/") + "/api/v0/version"
 	result := map[string]any{
@@ -339,6 +339,9 @@ func probeIPFS(ctx context.Context, client *http.Client, baseURL string) map[str
 		result["error"] = err.Error()
 		result["latencyMs"] = time.Since(start).Milliseconds()
 		return result
+	}
+	if token := strings.TrimSpace(bearerToken); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	resp, err := client.Do(req)
