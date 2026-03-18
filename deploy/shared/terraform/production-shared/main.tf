@@ -23,6 +23,11 @@ data "aws_subnet" "shared" {
   id       = each.value
 }
 
+data "aws_route_table" "shared" {
+  for_each  = toset(var.shared_subnet_ids)
+  subnet_id = each.value
+}
+
 check "shared_ecs_private_subnets_when_no_public_ip" {
   assert {
     condition = var.shared_ecs_assign_public_ip || alltrue([
@@ -50,6 +55,7 @@ data "aws_ami" "ubuntu" {
 locals {
   shared_subnets            = sort(var.shared_subnet_ids)
   shared_subnet_cidrs       = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
+  shared_route_table_ids    = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
   shared_ipfs_ingress_cidrs = distinct(concat(local.shared_subnet_cidrs, var.shared_ipfs_client_cidr_blocks))
   ipfs_ami_id               = var.shared_ipfs_ami_id != "" ? var.shared_ipfs_ami_id : data.aws_ami.ubuntu.id
 
@@ -67,7 +73,7 @@ locals {
   shared_deposit_image_id_hex                  = replace(local.shared_deposit_image_id, "0x", "")
   shared_withdraw_image_id_hex                 = replace(local.shared_withdraw_image_id, "0x", "")
   shared_postgres_dsn                          = format("postgres://%s:%s@%s:%d/%s?sslmode=require", urlencode(var.shared_postgres_user), urlencode(var.shared_postgres_password), aws_rds_cluster.shared.endpoint, var.shared_postgres_port, urlencode(var.shared_postgres_db))
-  shared_kafka_cluster_arn                    = coalesce(aws_msk_cluster.shared.arn, "")
+  shared_kafka_cluster_arn                     = coalesce(aws_msk_cluster.shared.arn, "")
   shared_kafka_bootstrap_brokers               = coalesce(aws_msk_cluster.shared.bootstrap_brokers_sasl_iam, "")
   shared_kafka_topic_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":topic/")
   shared_kafka_group_arn_prefix                = replace(local.shared_kafka_cluster_arn, ":cluster/", ":group/")
@@ -221,6 +227,30 @@ resource "aws_security_group" "ecs" {
   name        = "${local.resource_name}-shared-ecs-sg"
   description = "Security group for intents-juno production shared ECS services"
   vpc_id      = data.aws_vpc.selected.id
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_security_group" "shared_vpc_endpoints" {
+  name        = "${local.resource_name}-shared-vpce-sg"
+  description = "Security group for intents-juno production shared VPC interface endpoints"
+  vpc_id      = data.aws_vpc.selected.id
+
+  ingress {
+    description = "HTTPS from shared subnets"
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = local.shared_subnet_cidrs
+  }
 
   egress {
     description = "All outbound"
@@ -731,6 +761,95 @@ resource "aws_cloudwatch_log_group" "proof_funder" {
 resource "aws_ecs_cluster" "shared" {
   name = "${local.resource_name}-shared-ecs"
   tags = local.common_tags
+}
+
+resource "aws_vpc_endpoint" "secretsmanager" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-secretsmanager-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "ecr_api" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-ecr-api-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "ecr_dkr" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-ecr-dkr-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "sts" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.sts"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-sts-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "kms" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.kms"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-kms-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "logs" {
+  vpc_id              = data.aws_vpc.selected.id
+  service_name        = "com.amazonaws.${var.aws_region}.logs"
+  vpc_endpoint_type   = "Interface"
+  subnet_ids          = local.shared_subnets
+  security_group_ids  = [aws_security_group.shared_vpc_endpoints.id]
+  private_dns_enabled = true
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-logs-vpce"
+  })
+}
+
+resource "aws_vpc_endpoint" "s3" {
+  vpc_id            = data.aws_vpc.selected.id
+  service_name      = "com.amazonaws.${var.aws_region}.s3"
+  vpc_endpoint_type = "Gateway"
+  route_table_ids   = local.shared_route_table_ids
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-s3-vpce"
+  })
 }
 
 resource "aws_ecs_task_definition" "proof_requestor" {
