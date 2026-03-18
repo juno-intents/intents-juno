@@ -1,73 +1,43 @@
 package junoscanhttp
 
 import (
-	"context"
 	"encoding/json"
 	"io"
-	"net"
 	"net/http"
-	"sync"
+	"net/http/httptest"
+	"strings"
 	"testing"
-	"time"
 )
 
-func TestStartNotesFilterProxy_FiltersOutgoingWalletNotes(t *testing.T) {
+func TestNotesFilterProxyServeHTTP_FiltersOutgoingWalletNotes(t *testing.T) {
 	t.Parallel()
 
-	var (
-		mu              sync.Mutex
-		gotAuthHeader   string
-		gotRequestPath  string
-		gotRequestQuery string
-	)
-	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		gotAuthHeader = r.Header.Get("Authorization")
-		gotRequestPath = r.URL.Path
-		gotRequestQuery = r.URL.RawQuery
-		mu.Unlock()
-
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
-			"notes": [
-				{"direction":"outgoing","txid":"bad","action_index":0,"value_zat":1},
-				{"direction":"incoming","txid":"good","action_index":1,"value_zat":2},
-				{"txid":"legacy","action_index":2,"value_zat":3}
-			],
-			"next_cursor": "cursor-1"
-		}`)
-	}))
-	defer upstream.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	proxy, err := StartNotesFilterProxy(ctx, upstream.URL)
-	if err != nil {
-		t.Fatalf("StartNotesFilterProxy: %v", err)
-	}
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := proxy.Close(shutdownCtx); err != nil {
-			t.Fatalf("proxy close: %v", err)
-		}
-	}()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, proxy.BaseURL()+"/v1/wallets/wallet-a/notes?limit=1000", nil)
-	if err != nil {
-		t.Fatalf("new request: %v", err)
-	}
+	var gotAuthHeader, gotRequestPath, gotRequestQuery string
+	handler := newNotesFilterProxyHandler("http://scan.internal/base", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotAuthHeader = r.Header.Get("Authorization")
+			gotRequestPath = r.URL.Path
+			gotRequestQuery = r.URL.RawQuery
+			return jsonResponse(http.StatusOK, `{
+				"notes": [
+					{"direction":"outgoing","txid":"bad","action_index":0,"value_zat":1},
+					{"direction":"incoming","txid":"good","action_index":1,"value_zat":2},
+					{"txid":"legacy","action_index":2,"value_zat":3}
+				],
+				"next_cursor": "cursor-1"
+			}`), nil
+		}),
+	})
+	req := httptest.NewRequest(http.MethodGet, "http://proxy/v1/wallets/wallet-a/notes?limit=1000", nil)
 	req.Header.Set("Authorization", "Bearer test-token")
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("proxy request: %v", err)
-	}
-	defer resp.Body.Close()
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("status code: got %d want %d", resp.StatusCode, http.StatusOK)
+	resp := rr.Result()
+	defer resp.Body.Close()
+	if got, want := resp.StatusCode, http.StatusOK; got != want {
+		t.Fatalf("status code: got %d want %d", got, want)
 	}
 
 	var body struct {
@@ -93,48 +63,37 @@ func TestStartNotesFilterProxy_FiltersOutgoingWalletNotes(t *testing.T) {
 		t.Fatalf("next_cursor: got %q want %q", body.NextCursor, "cursor-1")
 	}
 
-	mu.Lock()
-	defer mu.Unlock()
 	if gotAuthHeader != "Bearer test-token" {
 		t.Fatalf("upstream auth header: got %q want %q", gotAuthHeader, "Bearer test-token")
 	}
-	if gotRequestPath != "/v1/wallets/wallet-a/notes" {
-		t.Fatalf("upstream path: got %q want %q", gotRequestPath, "/v1/wallets/wallet-a/notes")
+	if gotRequestPath != "/base/v1/wallets/wallet-a/notes" {
+		t.Fatalf("upstream path: got %q want %q", gotRequestPath, "/base/v1/wallets/wallet-a/notes")
 	}
 	if gotRequestQuery != "limit=1000" {
 		t.Fatalf("upstream query: got %q want %q", gotRequestQuery, "limit=1000")
 	}
 }
 
-func TestStartNotesFilterProxy_PassesThroughNonNoteResponses(t *testing.T) {
+func TestNotesFilterProxyServeHTTP_PassesThroughNonNoteResponses(t *testing.T) {
 	t.Parallel()
 
-	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"status":"ok","scanned_height":123}`)
-	}))
-	defer upstream.Close()
+	var gotMethod string
+	handler := newNotesFilterProxyHandler("http://scan.internal", &http.Client{
+		Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			gotMethod = r.Method
+			return jsonResponse(http.StatusAccepted, `{"status":"ok","scanned_height":123}`), nil
+		}),
+	})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "http://proxy/v1/health", io.NopCloser(strings.NewReader(`{"status":"ping"}`)))
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
 
-	proxy, err := StartNotesFilterProxy(ctx, upstream.URL)
-	if err != nil {
-		t.Fatalf("StartNotesFilterProxy: %v", err)
-	}
-	defer func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer shutdownCancel()
-		if err := proxy.Close(shutdownCtx); err != nil {
-			t.Fatalf("proxy close: %v", err)
-		}
-	}()
-
-	resp, err := http.Get(proxy.BaseURL() + "/v1/health")
-	if err != nil {
-		t.Fatalf("proxy request: %v", err)
-	}
+	resp := rr.Result()
 	defer resp.Body.Close()
+	if got, want := resp.StatusCode, http.StatusAccepted; got != want {
+		t.Fatalf("status: got %d want %d", got, want)
+	}
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -143,38 +102,23 @@ func TestStartNotesFilterProxy_PassesThroughNonNoteResponses(t *testing.T) {
 	if string(raw) != `{"status":"ok","scanned_height":123}` {
 		t.Fatalf("body: got %q want %q", string(raw), `{"status":"ok","scanned_height":123}`)
 	}
+	if got, want := gotMethod, http.MethodPost; got != want {
+		t.Fatalf("method: got %q want %q", got, want)
+	}
 }
 
-type ipv4Server struct {
-	URL    string
-	server *http.Server
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) {
+	return f(r)
 }
 
-func (s *ipv4Server) Close() {
-	if s == nil || s.server == nil {
-		return
-	}
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer shutdownCancel()
-	_ = s.server.Shutdown(shutdownCtx)
-}
-
-func newIPv4Server(t *testing.T, handler http.Handler) *ipv4Server {
-	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen 127.0.0.1: %v", err)
-	}
-	server := &http.Server{
-		Handler:           handler,
-		ReadHeaderTimeout: 5 * time.Second,
-	}
-	go func() {
-		_ = server.Serve(listener)
-	}()
-	return &ipv4Server{
-		URL:    "http://" + listener.Addr().String(),
-		server: server,
+func jsonResponse(status int, body string) *http.Response {
+	return &http.Response{
+		StatusCode: status,
+		Header: http.Header{
+			"Content-Type": []string{"application/json"},
+		},
+		Body: io.NopCloser(strings.NewReader(body)),
 	}
 }

@@ -44,7 +44,7 @@ func StartNotesFilterProxy(parent context.Context, upstreamBaseURL string) (*Not
 		baseURL: "http://" + listener.Addr().String(),
 	}
 	proxy.server = &http.Server{
-		Handler:           notesFilterProxyHandler(baseURL),
+		Handler:           newNotesFilterProxyHandler(baseURL, &http.Client{Timeout: 30 * time.Second}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -83,8 +83,14 @@ func (p *NotesFilterProxy) Close(ctx context.Context) error {
 }
 
 func notesFilterProxyHandler(upstreamBaseURL string) http.Handler {
-	client := &http.Client{Timeout: 30 * time.Second}
+	return newNotesFilterProxyHandler(upstreamBaseURL, &http.Client{Timeout: 30 * time.Second})
+}
+
+func newNotesFilterProxyHandler(upstreamBaseURL string, client *http.Client) http.Handler {
 	baseURL := strings.TrimRight(strings.TrimSpace(upstreamBaseURL), "/")
+	if client == nil {
+		client = &http.Client{Timeout: 30 * time.Second}
+	}
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		upstreamURL := baseURL + r.URL.Path
