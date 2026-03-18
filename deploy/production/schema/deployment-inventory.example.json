@@ -37,6 +37,9 @@
     "public_scheme": "https",
     "bridge_api_listen": "127.0.0.1:8082",
     "backoffice_listen": "127.0.0.1:8090",
+    "backoffice_allowed_cidrs": [
+      "172.27.48.0/20"
+    ],
     "juno_rpc_url": "http://127.0.0.1:18232",
     "service_urls": [
       "bridge-api=http://127.0.0.1:8082/readyz"

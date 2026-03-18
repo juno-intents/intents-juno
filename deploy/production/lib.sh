@@ -1863,7 +1863,7 @@ production_render_app_handoff() {
   local bridge_probe_url ops_probe_url bridge_internal_url ops_internal_url
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
-  local service_urls_json operator_endpoints_json
+  local service_urls_json operator_endpoints_json backoffice_allowed_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced
 
@@ -1902,6 +1902,9 @@ production_render_app_handoff() {
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
+  backoffice_allowed_cidrs_json="$(jq -c '.backoffice_allowed_cidrs // []' <<<"$app_json")"
+  jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' <<<"$backoffice_allowed_cidrs_json" >/dev/null \
+    || die "app_host.backoffice_allowed_cidrs must be an array of non-empty strings"
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi
@@ -1973,6 +1976,7 @@ production_render_app_handoff() {
     --arg backoffice_probe_url "$ops_probe_url" \
     --arg backoffice_internal_url "$ops_internal_url" \
     --arg backoffice_record_name "$ops_record_name" \
+    --argjson backoffice_allowed_cidrs "$backoffice_allowed_cidrs_json" \
     --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
     --arg zone_id "$zone_id" \
@@ -2023,7 +2027,8 @@ production_render_app_handoff() {
           public_url: $backoffice_public_url,
           probe_url: $backoffice_probe_url,
           internal_url: $backoffice_internal_url,
-          record_name: $backoffice_record_name
+          record_name: $backoffice_record_name,
+          allowed_cidrs: $backoffice_allowed_cidrs
         }
       },
       dns: {

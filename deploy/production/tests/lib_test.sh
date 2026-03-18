@@ -1970,6 +1970,7 @@ EOF
   assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge probe url"
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
   assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "https://ops.alpha.intents-testing.thejunowallet.com" "backoffice public url"
+  assert_eq "$(jq -r '.services.backoffice.allowed_cidrs[0]' "$app_manifest")" "172.27.48.0/20" "backoffice vpn allowlist"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
   assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"
