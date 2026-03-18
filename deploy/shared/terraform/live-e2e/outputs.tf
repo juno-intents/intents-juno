@@ -101,22 +101,22 @@ output "shared_ipfs_api_auth_secret_arn" {
 
 output "operator_instance_ids" {
   description = "Operator EC2 instance IDs."
-  value       = aws_instance.operator[*].id
+  value       = data.aws_instance.operator[*].id
 }
 
 output "operator_ami_ids" {
   description = "Operator AMI IDs."
-  value       = aws_instance.operator[*].ami
+  value       = data.aws_instance.operator[*].ami
 }
 
 output "operator_public_ips" {
   description = "Operator public IPv4 addresses."
-  value       = aws_instance.operator[*].public_ip
+  value       = data.aws_instance.operator[*].public_ip
 }
 
 output "operator_private_ips" {
   description = "Operator private IPv4 addresses."
-  value       = aws_instance.operator[*].private_ip
+  value       = data.aws_instance.operator[*].private_ip
 }
 
 output "effective_instance_profile" {

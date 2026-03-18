@@ -109,22 +109,22 @@ resource "aws_cloudwatch_metric_alarm" "runner_status" {
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "operator_status" {
+resource "aws_cloudwatch_metric_alarm" "operator_in_service" {
   count               = var.operator_instance_count
-  alarm_name          = "${local.resource_name}-operator-${count.index + 1}-status"
-  comparison_operator = "GreaterThanThreshold"
+  alarm_name          = "${local.resource_name}-operator-${count.index + 1}-in-service"
+  comparison_operator = "LessThanThreshold"
   evaluation_periods  = 2
-  metric_name         = "StatusCheckFailed"
-  namespace           = "AWS/EC2"
+  metric_name         = "GroupInServiceInstances"
+  namespace           = "AWS/AutoScaling"
   period              = 60
-  statistic           = "Maximum"
-  threshold           = 0
-  alarm_description   = "Operator instance failed EC2 status checks."
+  statistic           = "Minimum"
+  threshold           = 1
+  alarm_description   = "Operator autoscaling group has no in-service instances."
   alarm_actions       = var.alarm_actions
   ok_actions          = var.alarm_actions
 
   dimensions = {
-    InstanceId = aws_instance.operator[count.index].id
+    AutoScalingGroupName = aws_autoscaling_group.operator[count.index].name
   }
 }
 

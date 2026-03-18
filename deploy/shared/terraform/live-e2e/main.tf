@@ -1739,17 +1739,23 @@ resource "aws_instance" "runner" {
   })
 }
 
-resource "aws_instance" "operator" {
+resource "aws_launch_template" "operator" {
   count = var.operator_instance_count
 
-  ami                    = local.operator_ami_id
-  instance_type          = var.operator_instance_type
-  key_name               = aws_key_pair.runner.key_name
-  subnet_id              = local.selected_subnet_id
-  vpc_security_group_ids = [aws_security_group.operator.id]
-  iam_instance_profile   = local.instance_profile_name
+  name_prefix   = "${local.resource_name}-operator-${count.index + 1}-"
+  image_id      = local.operator_ami_id
+  instance_type = var.operator_instance_type
+  key_name      = aws_key_pair.runner.key_name
 
-  associate_public_ip_address = var.operator_associate_public_ip_address
+  iam_instance_profile {
+    name = local.instance_profile_name
+  }
+
+  network_interfaces {
+    associate_public_ip_address = var.operator_associate_public_ip_address
+    delete_on_termination       = true
+    security_groups             = [aws_security_group.operator.id]
+  }
 
   root_block_device {
     volume_type = "gp3"
@@ -1764,7 +1770,71 @@ resource "aws_instance" "operator" {
     apt-get install -y ca-certificates curl git jq unzip rsync age
   EOF
 
-  tags = merge(local.common_tags, {
-    Name = "${local.resource_name}-operator-${count.index + 1}"
-  })
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-operator-${count.index + 1}"
+    })
+  }
+
+  tag_specifications {
+    resource_type = "volume"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-operator-${count.index + 1}"
+    })
+  }
+}
+
+resource "aws_autoscaling_group" "operator" {
+  count = var.operator_instance_count
+
+  name                = "${local.resource_name}-operator-${count.index + 1}"
+  min_size            = 1
+  max_size            = 1
+  desired_capacity    = 1
+  vpc_zone_identifier = var.subnet_id != "" ? [var.subnet_id] : local.public_one_per_az
+
+  health_check_type         = "EC2"
+  health_check_grace_period = 120
+
+  launch_template {
+    id      = aws_launch_template.operator[count.index].id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${local.resource_name}-operator-${count.index + 1}"
+    propagate_at_launch = true
+  }
+
+  dynamic "tag" {
+    for_each = local.common_tags
+    content {
+      key                 = tag.key
+      value               = tag.value
+      propagate_at_launch = true
+    }
+  }
+}
+
+data "aws_instances" "operator" {
+  count = var.operator_instance_count
+
+  instance_state_names = ["pending", "running", "stopped", "stopping"]
+
+  filter {
+    name   = "tag:aws:autoscaling:groupName"
+    values = [aws_autoscaling_group.operator[count.index].name]
+  }
+
+  depends_on = [aws_autoscaling_group.operator]
+}
+
+data "aws_instance" "operator" {
+  count = var.operator_instance_count
+
+  instance_id = one(data.aws_instances.operator[count.index].ids)
+
+  depends_on = [data.aws_instances.operator]
 }
