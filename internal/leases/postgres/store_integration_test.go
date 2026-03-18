@@ -152,6 +152,78 @@ func TestStore_ReacquireAfterExpiryBySameOwnerIncrementsVersion(t *testing.T) {
 	}
 }
 
+func TestStore_RenewExpiredLeaseUsesDBClock(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if _, ok, err := s.TryAcquire(ctx, "leader", "a", 50*time.Millisecond); err != nil || !ok {
+		t.Fatalf("TryAcquire: ok=%v err=%v", ok, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if _, ok, err := s.Renew(ctx, "leader", "a", time.Second); !errors.Is(err, leases.ErrExpired) || ok {
+		t.Fatalf("expected ErrExpired on renew after DB expiry, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestStore_ReleaseExpiredLeaseUsesDBClock(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	if _, ok, err := s.TryAcquire(ctx, "leader", "a", 50*time.Millisecond); err != nil || !ok {
+		t.Fatalf("TryAcquire: ok=%v err=%v", ok, err)
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	if err := s.Release(ctx, "leader", "a"); err != nil {
+		t.Fatalf("expected release of expired lease to be idempotent, got %v", err)
+	}
+}
+
 func mustFreePort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

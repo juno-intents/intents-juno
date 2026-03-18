@@ -121,7 +121,7 @@ func (s *Store) Renew(ctx context.Context, name, owner string, ttl time.Duration
 	`, name, owner, ttlMS).Scan(&gotOwner, &version, &expires)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			l, gerr := s.Get(ctx, name)
+			l, dbNow, gerr := s.getWithDBNow(ctx, name)
 			if errors.Is(gerr, leases.ErrNotFound) {
 				return leases.Lease{}, false, leases.ErrNotFound
 			}
@@ -131,7 +131,7 @@ func (s *Store) Renew(ctx context.Context, name, owner string, ttl time.Duration
 			if l.Owner != owner {
 				return leases.Lease{}, false, leases.ErrNotOwner
 			}
-			if !l.ExpiresAt.After(time.Now()) {
+			if !l.ExpiresAt.After(dbNow) {
 				return leases.Lease{}, false, leases.ErrExpired
 			}
 			return leases.Lease{}, false, fmt.Errorf("leases/postgres: renew: unexpected no rows")
@@ -169,7 +169,7 @@ func (s *Store) Release(ctx context.Context, name, owner string) error {
 	}
 
 	// Idempotent if already absent; otherwise reject non-owner.
-	l, gerr := s.Get(ctx, name)
+	l, dbNow, gerr := s.getWithDBNow(ctx, name)
 	if errors.Is(gerr, leases.ErrNotFound) {
 		return nil
 	}
@@ -179,7 +179,7 @@ func (s *Store) Release(ctx context.Context, name, owner string) error {
 	if l.Owner != owner {
 		return leases.ErrNotOwner
 	}
-	if !l.ExpiresAt.After(time.Now()) {
+	if !l.ExpiresAt.After(dbNow) {
 		return nil
 	}
 	return nil
@@ -212,6 +212,40 @@ func (s *Store) Get(ctx context.Context, name string) (leases.Lease, error) {
 		Version:   version,
 		ExpiresAt: expiresAt,
 	}, nil
+}
+
+func (s *Store) getWithDBNow(ctx context.Context, name string) (leases.Lease, time.Time, error) {
+	if s == nil || s.pool == nil {
+		return leases.Lease{}, time.Time{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if name == "" {
+		return leases.Lease{}, time.Time{}, leases.ErrInvalidInput
+	}
+
+	var (
+		owner     string
+		version   int64
+		expiresAt time.Time
+		dbNow     time.Time
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT owner, version, expires_at, now()
+		FROM leases
+		WHERE name = $1
+	`, name).Scan(&owner, &version, &expiresAt, &dbNow)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return leases.Lease{}, time.Time{}, leases.ErrNotFound
+		}
+		return leases.Lease{}, time.Time{}, fmt.Errorf("leases/postgres: get with db now: %w", err)
+	}
+
+	return leases.Lease{
+		Name:      name,
+		Owner:     owner,
+		Version:   version,
+		ExpiresAt: expiresAt,
+	}, dbNow, nil
 }
 
 func ttlMilliseconds(ttl time.Duration) int64 {
