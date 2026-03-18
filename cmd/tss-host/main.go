@@ -89,6 +89,7 @@ func main() {
 		MaxBodyBytes:   *maxBodyBytes,
 		MaxTxPlanBytes: *maxTxPlanBytes,
 		MaxSessions:    *maxSessions,
+		ReadinessCheck: signerReadinessCheck(signer),
 		Now:            time.Now,
 	})
 
@@ -196,6 +197,18 @@ func devModeEnabled() bool {
 	default:
 		return false
 	}
+}
+
+type readyChecker interface {
+	Ready(context.Context) error
+}
+
+func signerReadinessCheck(signer any) func(context.Context) error {
+	ready, ok := signer.(readyChecker)
+	if !ok {
+		return nil
+	}
+	return ready.Ready
 }
 
 type multiValueFlag struct {

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -92,5 +94,35 @@ func TestNewExecSigner_RejectsInvalidConfig(t *testing.T) {
 	_, err = NewExecSigner("fake-signer", []string{" ", "--ok"}, 1<<20)
 	if !errors.Is(err, ErrInvalidExecSignerConfig) {
 		t.Fatalf("expected ErrInvalidExecSignerConfig for blank arg, got %v", err)
+	}
+}
+
+func TestExecSigner_Ready_RejectsMissingBinary(t *testing.T) {
+	t.Parallel()
+
+	s, err := NewExecSigner("/nonexistent/tss-signer", nil, 1<<20)
+	if err != nil {
+		t.Fatalf("NewExecSigner: %v", err)
+	}
+	if err := s.Ready(context.Background()); err == nil {
+		t.Fatalf("expected missing signer binary to fail readiness")
+	}
+}
+
+func TestExecSigner_Ready_AcceptsExecutableBinary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "fake-signer")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	s, err := NewExecSigner(path, nil, 1<<20)
+	if err != nil {
+		t.Fatalf("NewExecSigner: %v", err)
+	}
+	if err := s.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v", err)
 	}
 }

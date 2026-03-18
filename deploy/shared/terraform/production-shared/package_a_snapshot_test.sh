@@ -58,6 +58,7 @@ main() {
   assert_contains "$main_tf" 'resource "aws_secretsmanager_secret" "shared_postgres_dsn"' "production-shared provisions a dedicated postgres dsn secret"
   assert_contains "$main_tf" 'resources = [aws_secretsmanager_secret.shared_postgres_dsn.arn]' "execution roles can read only the shared postgres dsn secret"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "production-shared exposes shared proof requestor address input"
+  assert_contains "$variables_tf" 'alarm_actions must include at least one CloudWatch action ARN.' "production-shared requires alarm actions"
   assert_contains "$outputs_tf" 'output "shared_sp1_requestor_address"' "production-shared exports shared proof requestor address"
   assert_contains "$outputs_tf" 'output "shared_sp1_rpc_url"' "production-shared exports shared sp1 rpc url"
   assert_contains "$variables_tf" 'At least two private subnet IDs in distinct AZs for Aurora, MSK, ECS, and the IPFS NLB.' "production-shared documents private shared subnet requirement"

@@ -49,4 +49,9 @@ variable "enable_shield_advanced" {
 variable "alarm_actions" {
   type    = list(string)
   default = []
+
+  validation {
+    condition     = length(var.alarm_actions) > 0
+    error_message = "alarm_actions must include at least one CloudWatch action ARN."
+  }
 }

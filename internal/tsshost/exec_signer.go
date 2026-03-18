@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -42,6 +43,27 @@ func NewExecSigner(bin string, args []string, maxResponseBytes int) (*ExecSigner
 		maxResponseBytes: maxResponseBytes,
 		execFn:           runExecSigner,
 	}, nil
+}
+
+func (s *ExecSigner) Ready(context.Context) error {
+	if s == nil {
+		return fmt.Errorf("%w: nil signer", ErrInvalidExecSignerConfig)
+	}
+	path, err := resolveExecSignerPath(s.bin)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("tsshost: stat signer binary: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("tsshost: signer binary path %q is a directory", path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("tsshost: signer binary path %q is not executable", path)
+	}
+	return nil
 }
 
 func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte) ([]byte, error) {
@@ -90,6 +112,20 @@ func (s *ExecSigner) Sign(ctx context.Context, sessionID [32]byte, txPlan []byte
 		return nil, fmt.Errorf("tsshost: empty signed tx")
 	}
 	return resp.SignedTx, nil
+}
+
+func resolveExecSignerPath(bin string) (string, error) {
+	if strings.TrimSpace(bin) == "" {
+		return "", fmt.Errorf("%w: missing signer binary", ErrInvalidExecSignerConfig)
+	}
+	if strings.ContainsRune(bin, os.PathSeparator) {
+		return bin, nil
+	}
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return "", fmt.Errorf("tsshost: resolve signer binary: %w", err)
+	}
+	return path, nil
 }
 
 func runExecSigner(ctx context.Context, bin string, args []string, stdin []byte) ([]byte, []byte, error) {

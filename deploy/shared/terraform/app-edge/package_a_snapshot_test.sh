@@ -8,9 +8,10 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$REPO_ROOT/deploy/production/tests/common_test.sh"
 
 main() {
-  local main_tf bridge_a bridge_aaaa backoffice_a backoffice_aaaa
+  local main_tf variables_tf bridge_a bridge_aaaa backoffice_a backoffice_aaaa
 
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
+  variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   bridge_a="$(awk '
     /resource "aws_route53_record" "bridge_alias_a" \{/ { in_block = 1 }
     in_block { print }
@@ -43,6 +44,7 @@ main() {
   assert_contains "$backoffice_aaaa" 'allow_overwrite = true' "backoffice AAAA record allows overwrite for replay-safe preview deploys"
   assert_contains "$main_tf" 'origin_protocol_policy = "https-only"' "CloudFront uses TLS on the origin leg"
   assert_contains "$main_tf" 'description       = "CloudFront origin HTTPS"' "origin ingress rule is scoped to HTTPS"
+  assert_contains "$variables_tf" 'alarm_actions must include at least one CloudWatch action ARN.' "app-edge requires alarm actions"
 
   printf 'app_edge package_a_snapshot_test: PASS\n'
 }
