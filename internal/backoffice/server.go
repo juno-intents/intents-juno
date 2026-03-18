@@ -16,6 +16,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/dlq"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 )
 
@@ -62,8 +63,13 @@ type ServerConfig struct {
 	BaseRelayerFundsMinWei *big.Int
 	ProverFundsMinWei      *big.Int
 	ReadinessCheck         func(context.Context) error
+	MetricsEmitter         metricEmitter
 
 	Log *slog.Logger
+}
+
+type metricEmitter interface {
+	Emit(...emf.Metric) error
 }
 
 // Server is the backoffice HTTP API server.

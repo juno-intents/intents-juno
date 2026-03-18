@@ -49,12 +49,22 @@ type Config struct {
 	Now func() time.Time
 }
 
+type MetricsSnapshot struct {
+	SessionCount    int
+	SessionCapacity int
+}
+
 type handler struct {
 	cfg    Config
 	signer Signer
 
 	mu       sync.Mutex
 	sessions map[[32]byte]*session
+}
+
+type httpHandler struct {
+	inner *handler
+	mux   *http.ServeMux
 }
 
 type session struct {
@@ -116,7 +126,21 @@ func NewHandler(signer Signer, cfg Config) http.Handler {
 	mux.HandleFunc("GET /readyz", handleReady)
 
 	mux.HandleFunc("POST /v1/sign", h.handleSign)
-	return mux
+	return &httpHandler{
+		inner: h,
+		mux:   mux,
+	}
+}
+
+func (h *httpHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	h.mux.ServeHTTP(w, r)
+}
+
+func (h *httpHandler) MetricsSnapshot() MetricsSnapshot {
+	if h == nil || h.inner == nil {
+		return MetricsSnapshot{}
+	}
+	return h.inner.MetricsSnapshot()
 }
 
 func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
@@ -328,6 +352,21 @@ func (h *handler) readinessCheck(ctx context.Context) error {
 		return fmt.Errorf("tsshost: session capacity exhausted")
 	}
 	return nil
+}
+
+func (h *handler) MetricsSnapshot() MetricsSnapshot {
+	if h == nil {
+		return MetricsSnapshot{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	now := h.cfg.Now().UTC()
+	h.evictExpiredSessions(now)
+	return MetricsSnapshot{
+		SessionCount:    len(h.sessions),
+		SessionCapacity: h.cfg.MaxSessions,
+	}
 }
 
 func (h *handler) audit(sessionID string, result string, startedAt time.Time) {

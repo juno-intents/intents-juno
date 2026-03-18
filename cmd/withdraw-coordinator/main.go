@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -78,7 +79,8 @@ type withdrawRequestedMessage struct {
 }
 
 const (
-	runtimeModeFull = "full"
+	runtimeModeFull                 = "full"
+	withdrawMetricIdleExpirySeconds = 24 * 60 * 60
 )
 
 func main() {
@@ -180,6 +182,18 @@ func main() {
 	}
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, metricsErr := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "withdraw-coordinator",
+		},
+	})
+	if metricsErr != nil {
+		log.Error("init metrics emitter", "err", metricsErr)
+		os.Exit(2)
+	}
 
 	postgresDSNValue, err := resolveRequiredFlagOrEnv("--postgres-dsn", *postgresDSN, *postgresDSNEnv)
 	if err != nil {
@@ -622,6 +636,7 @@ func main() {
 					log.Error("tick", "err", err)
 				}
 			}
+			emitWithdrawMetrics(ctx, coord, metricsEmitter, log)
 		case qmsg, ok := <-msgCh:
 			if !ok {
 				return
@@ -734,6 +749,40 @@ func main() {
 				continue
 			}
 		}
+	}
+}
+
+func emitWithdrawMetrics(
+	ctx context.Context,
+	coord *withdrawcoordinator.Coordinator,
+	emitter *emf.Emitter,
+	log *slog.Logger,
+) {
+	if coord == nil || emitter == nil {
+		return
+	}
+	summary, err := coord.MetricsSummary(ctx)
+	if err != nil {
+		if log != nil {
+			log.Warn("withdraw metrics summary", "err", err)
+		}
+		return
+	}
+	minExpirySeconds := float64(withdrawMetricIdleExpirySeconds)
+	if summary.HasConfirmedUnmarked {
+		minExpirySeconds = summary.MinTimeToExpiry.Seconds()
+	}
+	circuitOpen := 0.0
+	if summary.MarkPaidCircuitOpen {
+		circuitOpen = 1
+	}
+	if err := emitter.Emit(
+		emf.Metric{Name: "WithdrawalDLQDepth", Unit: emf.UnitCount, Value: float64(summary.DLQDepth)},
+		emf.Metric{Name: "ConfirmedUnmarkedCount", Unit: emf.UnitCount, Value: float64(summary.ConfirmedUnmarkedCount)},
+		emf.Metric{Name: "MinWithdrawalTimeToExpirySeconds", Unit: emf.UnitSeconds, Value: minExpirySeconds},
+		emf.Metric{Name: "MarkPaidCircuitOpen", Unit: emf.UnitCount, Value: circuitOpen},
+	); err != nil && log != nil {
+		log.Warn("emit withdraw metrics", "err", err)
 	}
 }
 

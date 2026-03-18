@@ -1,0 +1,67 @@
+package withdrawcoordinator
+
+import (
+	"context"
+	"time"
+
+	"github.com/juno-intents/intents-juno/internal/withdraw"
+)
+
+type MetricsSummary struct {
+	DLQDepth               int
+	ConfirmedUnmarkedCount int
+	MinTimeToExpiry        time.Duration
+	HasConfirmedUnmarked   bool
+	MarkPaidCircuitOpen    bool
+}
+
+func (c *Coordinator) MetricsSummary(ctx context.Context) (MetricsSummary, error) {
+	summary := MetricsSummary{}
+	if c == nil {
+		return summary, ErrInvalidConfig
+	}
+	summary.MarkPaidCircuitOpen = c.markPaidCircuitOpen
+
+	dlqDepth, err := c.store.CountDLQBatches(ctx)
+	if err != nil {
+		return summary, err
+	}
+	summary.DLQDepth = dlqDepth
+
+	batches, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateBroadcasted)
+	if err != nil {
+		return summary, err
+	}
+
+	now := c.cfg.Now().UTC()
+	var minExpiry time.Time
+	for _, b := range batches {
+		if b.JunoConfirmedAt.IsZero() {
+			continue
+		}
+		summary.ConfirmedUnmarkedCount += len(b.WithdrawalIDs)
+		for _, withdrawalID := range b.WithdrawalIDs {
+			w, err := c.store.GetWithdrawal(ctx, withdrawalID)
+			if err != nil {
+				return summary, err
+			}
+			if !summary.HasConfirmedUnmarked || w.Expiry.Before(minExpiry) {
+				minExpiry = w.Expiry
+				summary.HasConfirmedUnmarked = true
+			}
+		}
+	}
+	if summary.HasConfirmedUnmarked {
+		if minExpiry.After(now) {
+			summary.MinTimeToExpiry = minExpiry.Sub(now)
+		}
+	}
+	return summary, nil
+}
+
+func (c *Coordinator) MarkPaidCircuitOpen() bool {
+	if c == nil {
+		return false
+	}
+	return c.markPaidCircuitOpen
+}

@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/tsshost"
 )
 
@@ -46,6 +47,18 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, err := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "tss-host",
+		},
+	})
+	if err != nil {
+		log.Error("init metrics emitter", "err", err)
+		os.Exit(2)
+	}
 
 	if *listenAddr == "" {
 		log.Error("missing --listen-addr")
@@ -105,6 +118,11 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if reporter, ok := h.(interface {
+		MetricsSnapshot() tsshost.MetricsSnapshot
+	}); ok {
+		go emitTSSMetricsLoop(ctx, reporter, metricsEmitter, 15*time.Second, log)
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -209,6 +227,53 @@ func signerReadinessCheck(signer any) func(context.Context) error {
 		return nil
 	}
 	return ready.Ready
+}
+
+func emitTSSMetricsLoop(
+	ctx context.Context,
+	reporter interface {
+		MetricsSnapshot() tsshost.MetricsSnapshot
+	},
+	emitter *emf.Emitter,
+	interval time.Duration,
+	log *slog.Logger,
+) {
+	emit := func() {
+		if err := emitTSSMetrics(reporter, emitter); err != nil && log != nil {
+			log.Warn("emit tss metrics", "err", err)
+		}
+	}
+	emit()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			emit()
+		}
+	}
+}
+
+func emitTSSMetrics(
+	reporter interface {
+		MetricsSnapshot() tsshost.MetricsSnapshot
+	},
+	emitter *emf.Emitter,
+) error {
+	if reporter == nil || emitter == nil {
+		return nil
+	}
+	snapshot := reporter.MetricsSnapshot()
+	saturation := 0.0
+	if snapshot.SessionCapacity > 0 {
+		saturation = float64(snapshot.SessionCount) / float64(snapshot.SessionCapacity)
+	}
+	return emitter.Emit(
+		emf.Metric{Name: "TSSSessionCount", Unit: emf.UnitCount, Value: float64(snapshot.SessionCount)},
+		emf.Metric{Name: "TSSSessionSaturation", Unit: emf.UnitNone, Value: saturation},
+	)
 }
 
 type multiValueFlag struct {

@@ -281,6 +281,82 @@ func TestRestoreCheckpointState_SkipsReplayForAlreadyEmittedPackages(t *testing.
 	}
 }
 
+func TestPinBacklogMetricsCountsDueAndRetryPackages(t *testing.T) {
+	t.Parallel()
+
+	store := checkpoint.NewMemoryPackageStore()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	bridge := common.HexToAddress("0x000000000000000000000000000000000000bEEF")
+
+	for _, rec := range []checkpoint.PackageRecord{
+		{
+			Digest: common.HexToHash("0x0101010101010101010101010101010101010101010101010101010101010101"),
+			Checkpoint: checkpoint.Checkpoint{
+				Height:           100,
+				BlockHash:        common.HexToHash("0x1111111111111111111111111111111111111111111111111111111111111111"),
+				FinalOrchardRoot: common.HexToHash("0x1212121212121212121212121212121212121212121212121212121212121212"),
+				BaseChainID:      8453,
+				BridgeContract:   bridge,
+			},
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(`{"digest":"pending-due"}`),
+			PinState:         checkpoint.PackagePinStatePending,
+			PinNextAttemptAt: now.Add(-time.Second),
+			State:            checkpoint.PackageStateOpen,
+			PersistedAt:      now.Add(-2 * time.Second),
+		},
+		{
+			Digest: common.HexToHash("0x0202020202020202020202020202020202020202020202020202020202020202"),
+			Checkpoint: checkpoint.Checkpoint{
+				Height:           101,
+				BlockHash:        common.HexToHash("0x2121212121212121212121212121212121212121212121212121212121212121"),
+				FinalOrchardRoot: common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222"),
+				BaseChainID:      8453,
+				BridgeContract:   bridge,
+			},
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(`{"digest":"failed-due"}`),
+			PinState:         checkpoint.PackagePinStateFailed,
+			PinAttempts:      1,
+			PinNextAttemptAt: now.Add(-time.Second),
+			State:            checkpoint.PackageStateOpen,
+			PersistedAt:      now.Add(-time.Second),
+		},
+		{
+			Digest: common.HexToHash("0x0303030303030303030303030303030303030303030303030303030303030303"),
+			Checkpoint: checkpoint.Checkpoint{
+				Height:           102,
+				BlockHash:        common.HexToHash("0x3131313131313131313131313131313131313131313131313131313131313131"),
+				FinalOrchardRoot: common.HexToHash("0x3232323232323232323232323232323232323232323232323232323232323232"),
+				BaseChainID:      8453,
+				BridgeContract:   bridge,
+			},
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(`{"digest":"failed-later"}`),
+			PinState:         checkpoint.PackagePinStateFailed,
+			PinAttempts:      2,
+			PinNextAttemptAt: now.Add(time.Minute),
+			State:            checkpoint.PackageStateOpen,
+			PersistedAt:      now,
+		},
+	} {
+		if err := store.UpsertPackage(context.Background(), rec); err != nil {
+			t.Fatalf("UpsertPackage(%s): %v", rec.Digest, err)
+		}
+	}
+
+	backlog, retryBacklog, err := pinBacklogMetrics(context.Background(), store, now)
+	if err != nil {
+		t.Fatalf("pinBacklogMetrics: %v", err)
+	}
+	if backlog != 2 {
+		t.Fatalf("backlog = %d, want 2", backlog)
+	}
+	if retryBacklog != 1 {
+		t.Fatalf("retry backlog = %d, want 1", retryBacklog)
+	}
+}
+
 func TestPublishCheckpointPackage_SkipsDurablyEmittedDigestAfterCacheEviction(t *testing.T) {
 	t.Parallel()
 

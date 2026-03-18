@@ -20,11 +20,14 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/envutil"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
+
+const checkpointPinMetricsLimit = 4096
 
 type signatureMessageV1 struct {
 	Version    string                `json:"version"`
@@ -92,6 +95,18 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, metricsErr := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "checkpoint-aggregator",
+		},
+	})
+	if metricsErr != nil {
+		log.Error("init metrics emitter", "err", metricsErr)
+		os.Exit(2)
+	}
 
 	if *baseChainID == 0 || *bridgeAddr == "" || *operatorsFlag == "" || *thresholdFlag <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, and --threshold are required")
@@ -261,7 +276,17 @@ func main() {
 	}
 
 	if *ipfsEnabled {
-		go runIPFSPinWorker(ctx, persist, ipfsPinWorkerOwner(), *ipfsPinInterval, *ipfsPinBatchSize, *ipfsPinTimeout, log)
+		go runIPFSPinWorker(
+			ctx,
+			persist,
+			packageStore,
+			metricsEmitter,
+			ipfsPinWorkerOwner(),
+			*ipfsPinInterval,
+			*ipfsPinBatchSize,
+			*ipfsPinTimeout,
+			log,
+		)
 	}
 
 	go func() {
@@ -454,6 +479,8 @@ func restoreCheckpointState(
 func runIPFSPinWorker(
 	ctx context.Context,
 	persist *checkpoint.PackagePersistence,
+	packageStore checkpoint.PackageStore,
+	emitter *emf.Emitter,
 	owner string,
 	interval time.Duration,
 	batchSize int,
@@ -472,10 +499,13 @@ func runIPFSPinWorker(
 			if log != nil {
 				log.Error("process checkpoint ipfs pin jobs", "err", err)
 			}
-			return
-		}
-		if processed > 0 && log != nil {
+		} else if processed > 0 && log != nil {
 			log.Info("processed checkpoint ipfs pin jobs", "count", processed)
+		}
+		metricsCtx, metricsCancel := context.WithTimeout(ctx, timeout)
+		defer metricsCancel()
+		if emitErr := emitCheckpointPinMetrics(metricsCtx, packageStore, emitter, time.Now().UTC()); emitErr != nil && log != nil {
+			log.Warn("emit checkpoint pin metrics", "err", emitErr)
 		}
 	}
 
@@ -491,6 +521,42 @@ func runIPFSPinWorker(
 			process()
 		}
 	}
+}
+
+func pinBacklogMetrics(ctx context.Context, store checkpoint.PackageStore, now time.Time) (int, int, error) {
+	if store == nil {
+		return 0, 0, nil
+	}
+	recs, err := store.ListReadyToPin(ctx, now.UTC(), checkpointPinMetricsLimit)
+	if err != nil {
+		return 0, 0, err
+	}
+	retryBacklog := 0
+	for _, rec := range recs {
+		if rec.PinState == checkpoint.PackagePinStateFailed {
+			retryBacklog++
+		}
+	}
+	return len(recs), retryBacklog, nil
+}
+
+func emitCheckpointPinMetrics(
+	ctx context.Context,
+	store checkpoint.PackageStore,
+	emitter *emf.Emitter,
+	now time.Time,
+) error {
+	if emitter == nil {
+		return nil
+	}
+	backlog, retryBacklog, err := pinBacklogMetrics(ctx, store, now)
+	if err != nil {
+		return err
+	}
+	return emitter.Emit(
+		emf.Metric{Name: "CheckpointPinBacklog", Unit: emf.UnitCount, Value: float64(backlog)},
+		emf.Metric{Name: "CheckpointPinRetryBacklog", Unit: emf.UnitCount, Value: float64(retryBacklog)},
+	)
 }
 
 func ipfsPinWorkerOwner() string {

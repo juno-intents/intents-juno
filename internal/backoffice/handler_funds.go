@@ -14,12 +14,14 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/juno-intents/intents-juno/internal/emf"
 )
 
 // handleFunds returns all fund data in one response: base relayer signer
 // balances, prover funds, bridge wJUNO balance, and MPC wallet balance.
 func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	walletBalanceBelowThreshold := false
 
 	resp := map[string]any{
 		"version": "v1",
@@ -47,6 +49,7 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp["operators"] = operators
+	walletBalanceBelowThreshold = walletBalanceBelowThreshold || anyBalanceBelowThreshold(operators)
 
 	// Prover (SP1 requestor) balance. Queries the Succinct prover network via
 	// gRPC if SP1RPCURL is configured, otherwise falls back to BaseClient.
@@ -84,6 +87,7 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 			} else {
 				prover["network"] = "base"
 				resp["prover"] = prover
+				walletBalanceBelowThreshold = walletBalanceBelowThreshold || balanceEntryBelowThreshold(prover)
 			}
 		}
 	}
@@ -125,10 +129,44 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 				mpcBalance["address"] = strings.TrimSpace(s.cfg.OWalletUA)
 			}
 			resp["mpcWallet"] = mpcBalance
+			walletBalanceBelowThreshold = walletBalanceBelowThreshold || balanceEntryBelowThreshold(mpcBalance)
 		}
 	}
 
+	s.emitWalletBalanceMetric(walletBalanceBelowThreshold)
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func anyBalanceBelowThreshold(entries []map[string]any) bool {
+	for _, entry := range entries {
+		if balanceEntryBelowThreshold(entry) {
+			return true
+		}
+	}
+	return false
+}
+
+func balanceEntryBelowThreshold(entry map[string]any) bool {
+	if entry == nil {
+		return false
+	}
+	value, ok := entry["belowThreshold"].(bool)
+	return ok && value
+}
+
+func (s *Server) emitWalletBalanceMetric(belowThreshold bool) {
+	if s == nil || s.cfg.MetricsEmitter == nil {
+		return
+	}
+	value := 0.0
+	if belowThreshold {
+		value = 1
+	}
+	if err := s.cfg.MetricsEmitter.Emit(
+		emf.Metric{Name: "WalletBalanceBelowThreshold", Unit: emf.UnitCount, Value: value},
+	); err != nil && s.log != nil {
+		s.log.Warn("backoffice emit wallet balance metric", "err", err)
+	}
 }
 
 // fundsBalanceAddresses returns the addresses shown in the funds monitor.

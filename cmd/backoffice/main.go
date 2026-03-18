@@ -21,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/backoffice/alerts"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/envutil"
 	ethutil "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/healthz"
@@ -86,6 +87,18 @@ func main() {
 	_ = alertCheckInterval
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, err := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "backoffice",
+		},
+	})
+	if err != nil {
+		log.Error("init metrics emitter", "err", err)
+		os.Exit(2)
+	}
 
 	// Validate required flags.
 	resolvedPostgresDSN, err := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
@@ -399,6 +412,7 @@ func main() {
 		OperatorGasMinWei:      operatorGasMinWei,
 		BaseRelayerFundsMinWei: baseRelayerGasMinWei,
 		ProverFundsMinWei:      proverFundsMinWei,
+		MetricsEmitter:         metricsEmitter,
 		ReadinessCheck: healthz.CombineReadinessChecks(
 			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 			bridgeSettingsCache.Ready,

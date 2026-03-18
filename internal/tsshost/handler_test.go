@@ -181,6 +181,49 @@ func TestHandler_Sign_ConflictOnSameSessionDifferentTxPlan(t *testing.T) {
 	}
 }
 
+func TestHandler_MetricsSnapshotReflectsTrackedSessions(t *testing.T) {
+	t.Parallel()
+
+	signer := &stubSigner{ret: []byte("signed")}
+	h := NewHandler(signer, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    2,
+		Now:            func() time.Time { return time.Unix(0, 0).UTC() },
+	})
+
+	reporter, ok := h.(interface{ MetricsSnapshot() MetricsSnapshot })
+	if !ok {
+		t.Fatalf("handler does not expose MetricsSnapshot")
+	}
+
+	snapshot := reporter.MetricsSnapshot()
+	if snapshot.SessionCount != 0 || snapshot.SessionCapacity != 2 {
+		t.Fatalf("initial snapshot = %#v, want zero active sessions with capacity 2", snapshot)
+	}
+
+	sessionID := seq32(0x44)
+	body, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": "0x" + hex.EncodeToString(sessionID[:]),
+		"txPlan":    []byte("plan-v1"),
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	snapshot = reporter.MetricsSnapshot()
+	if snapshot.SessionCount != 1 || snapshot.SessionCapacity != 2 {
+		t.Fatalf("snapshot after sign = %#v, want one active session with capacity 2", snapshot)
+	}
+}
+
 func TestHandler_Sign_BadRequestOnInvalidSessionID(t *testing.T) {
 	t.Parallel()
 

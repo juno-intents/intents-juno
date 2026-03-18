@@ -128,7 +128,7 @@ type Batch struct {
 	LastFailedAt     time.Time
 	DLQAt            time.Time
 
-	MarkPaidFailures int
+	MarkPaidFailures  int
 	LastMarkPaidError string
 }
 
@@ -141,6 +141,7 @@ type Store interface {
 	GetWithdrawalStatus(ctx context.Context, id [32]byte) (WithdrawalStatus, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
+	CountDLQBatches(ctx context.Context) (int, error)
 
 	AdoptBatch(ctx context.Context, batchID [32]byte, fence Fence) error
 	MarkBatchSigning(ctx context.Context, batchID [32]byte, fence Fence) error

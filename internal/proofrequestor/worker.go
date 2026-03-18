@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/dlq"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/queue"
 )
@@ -32,6 +33,12 @@ type WorkerConfig struct {
 	// MaxDLQAttempts is the max number of attempts before a retryable failure is sent to the DLQ.
 	// Defaults to DefaultMaxDLQAttempts if zero.
 	MaxDLQAttempts int
+
+	MetricsEmitter metricEmitter
+}
+
+type metricEmitter interface {
+	Emit(...emf.Metric) error
 }
 
 type Worker struct {
@@ -133,6 +140,8 @@ func (w *Worker) Run(ctx context.Context) error {
 }
 
 func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
+	startedAt := time.Now()
+
 	job, err := proof.DecodeJobRequest(msg.Value)
 	if err != nil {
 		w.maybeDLQMalformedRequest(ctx, msg, err)
@@ -146,7 +155,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			_ = w.producer.Publish(ctx, w.cfg.FailureTopic, failPayload)
 		}
 		w.failureCount.Add(1)
-		w.emitMetrics(msg.Timestamp, false, false)
+		w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
 		ackMessage(msg, w.cfg.AckTimeout, w.log)
 		return nil
 	}
@@ -175,7 +184,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			return perr
 		}
 		w.failureCount.Add(1)
-		w.emitMetrics(msg.Timestamp, false, false)
+		w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
 		ackMessage(msg, w.cfg.AckTimeout, w.log)
 		return nil
 	}
@@ -200,7 +209,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			w.fallbackCount.Add(1)
 		}
 		w.successCount.Add(1)
-		w.emitMetrics(msg.Timestamp, true, out.FallbackUsed)
+		w.emitMetrics(msg.Timestamp, true, out.FallbackUsed, time.Since(startedAt))
 	case StatusFailed:
 		w.log.Error(
 			"proof-requestor submission failed",
@@ -225,7 +234,7 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			return err
 		}
 		w.failureCount.Add(1)
-		w.emitMetrics(msg.Timestamp, false, false)
+		w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
 
 		// Insert into DLQ on terminal failure or when max attempts exceeded.
 		shouldDLQ := !out.Retryable || out.AttemptCount >= w.cfg.MaxDLQAttempts
@@ -301,7 +310,7 @@ func proofStateFromOutcome(out Outcome) int {
 	return 4 // failed_terminal
 }
 
-func (w *Worker) emitMetrics(ts time.Time, success bool, fallback bool) {
+func (w *Worker) emitMetrics(ts time.Time, success bool, fallback bool, latency time.Duration) {
 	lagSeconds := float64(0)
 	if !ts.IsZero() {
 		lag := time.Since(ts)
@@ -309,8 +318,13 @@ func (w *Worker) emitMetrics(ts time.Time, success bool, fallback bool) {
 			lagSeconds = lag.Seconds()
 		}
 	}
+	if latency < 0 {
+		latency = 0
+	}
+	latencyMs := float64(latency.Milliseconds())
 	w.log.Info("proof-requestor metrics",
 		"queue_lag_seconds", lagSeconds,
+		"request_latency_ms", latencyMs,
 		"in_flight_requests", w.inflight.Load(),
 		"submission_success_count", w.successCount.Load(),
 		"submission_failure_count", w.failureCount.Load(),
@@ -318,6 +332,22 @@ func (w *Worker) emitMetrics(ts time.Time, success bool, fallback bool) {
 		"success", success,
 		"fallback", fallback,
 	)
+	if w.cfg.MetricsEmitter == nil {
+		return
+	}
+	successValue := 0.0
+	failureValue := 1.0
+	if success {
+		successValue = 1
+		failureValue = 0
+	}
+	if err := w.cfg.MetricsEmitter.Emit(
+		emf.Metric{Name: "ProofRequestSuccessCount", Unit: emf.UnitCount, Value: successValue},
+		emf.Metric{Name: "ProofRequestFailureCount", Unit: emf.UnitCount, Value: failureValue},
+		emf.Metric{Name: "ProofRequestLatencyMs", Unit: emf.UnitMilliseconds, Value: latencyMs},
+	); err != nil {
+		w.log.Warn("proof-requestor emit metrics", "err", err)
+	}
 }
 
 func ackMessage(msg queue.Message, timeout time.Duration, log *slog.Logger) {

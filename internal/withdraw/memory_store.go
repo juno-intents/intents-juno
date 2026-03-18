@@ -20,9 +20,9 @@ type withdrawalRec struct {
 	w      Withdrawal
 	status WithdrawalStatus
 
-	claimedBy        string
+	claimedBy         string
 	claimLeaseVersion int64
-	claimExpiresAt   time.Time
+	claimExpiresAt    time.Time
 
 	batchID [32]byte
 }
@@ -218,6 +218,19 @@ func (s *MemoryStore) ListBatchesByState(_ context.Context, state BatchState) ([
 	}
 	slices.SortFunc(out, func(a, b Batch) int { return bytes.Compare(a.ID[:], b.ID[:]) })
 	return out, nil
+}
+
+func (s *MemoryStore) CountDLQBatches(_ context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for _, b := range s.batches {
+		if !b.DLQAt.IsZero() {
+			count++
+		}
+	}
+	return count, nil
 }
 
 func (s *MemoryStore) AdoptBatch(_ context.Context, batchID [32]byte, fence Fence) error {

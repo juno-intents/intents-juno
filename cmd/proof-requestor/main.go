@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proof"
@@ -69,6 +70,18 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, err := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "proof-requestor",
+		},
+	})
+	if err != nil {
+		log.Error("init metrics emitter", "err", err)
+		os.Exit(2)
+	}
 	if *owner == "" || *requestorAddress == "" || *requestorKeySecretARN == "" || *chainID == 0 || *sp1Bin == "" {
 		fmt.Fprintln(os.Stderr, "error: --owner, --sp1-requestor-address, --sp1-requestor-key-secret-arn, --chain-id, and --sp1-bin are required")
 		os.Exit(2)
@@ -209,12 +222,13 @@ func main() {
 	}
 
 	worker, err := proofrequestor.NewWorker(proofrequestor.WorkerConfig{
-		InputTopic:   *inputTopic,
-		ResultTopic:  *resultTopic,
-		FailureTopic: *failureTopic,
-		MaxInflight:  *maxInflight,
-		AckTimeout:   *ackTimeout,
-		DLQStore:     dlqStore,
+		InputTopic:     *inputTopic,
+		ResultTopic:    *resultTopic,
+		FailureTopic:   *failureTopic,
+		MaxInflight:    *maxInflight,
+		AckTimeout:     *ackTimeout,
+		DLQStore:       dlqStore,
+		MetricsEmitter: metricsEmitter,
 	}, svc, consumer, producer, log)
 	if err != nil {
 		log.Error("init proof requestor worker", "err", err)

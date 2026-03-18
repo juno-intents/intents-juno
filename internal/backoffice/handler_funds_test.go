@@ -12,7 +12,18 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/juno-intents/intents-juno/internal/emf"
 )
+
+type metricCapture struct {
+	calls [][]emf.Metric
+}
+
+func (m *metricCapture) Emit(metrics ...emf.Metric) error {
+	cloned := append([]emf.Metric(nil), metrics...)
+	m.calls = append(m.calls, cloned)
+	return nil
+}
 
 func TestExtractProtoString(t *testing.T) {
 	tests := []struct {
@@ -268,6 +279,70 @@ func TestHandleFundsUsesBaseRelayerSignerAddresses(t *testing.T) {
 	}
 	if body.Operators[0].BelowThreshold {
 		t.Fatalf("belowThreshold = true, want false")
+	}
+}
+
+func TestHandleFundsEmitsWalletThresholdMetric(t *testing.T) {
+	relayerAddr := common.HexToAddress("0xd68c28f414b210a6c519d05159014378a5b8bc0f")
+	metrics := &metricCapture{}
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any               `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"result":  "0x1",
+		}); err != nil {
+			t.Fatalf("encode rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	client, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer client.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:                 client,
+			BaseRelayerSignerAddresses: []common.Address{relayerAddr},
+			BaseRelayerFundsMinWei:     big.NewInt(2),
+			MetricsEmitter:             metrics,
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+	if len(metrics.calls) != 1 {
+		t.Fatalf("metric calls = %d, want 1", len(metrics.calls))
+	}
+	found := false
+	for _, metric := range metrics.calls[0] {
+		if metric.Name == "WalletBalanceBelowThreshold" {
+			found = true
+			if metric.Value != 1 {
+				t.Fatalf("WalletBalanceBelowThreshold = %v, want 1", metric.Value)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("WalletBalanceBelowThreshold metric not emitted")
 	}
 }
 

@@ -520,6 +520,18 @@ func (s *Store) ListBatchesByState(ctx context.Context, state withdraw.BatchStat
 	return out, nil
 }
 
+func (s *Store) CountDLQBatches(ctx context.Context) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	var count int
+	if err := s.pool.QueryRow(ctx, `SELECT COUNT(*) FROM withdrawal_batches WHERE dlq_at IS NOT NULL`).Scan(&count); err != nil {
+		return 0, fmt.Errorf("withdraw/postgres: count dlq batches: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) AdoptBatch(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
 	if err := fence.Validate(); err != nil {
 		return err
