@@ -34,6 +34,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
@@ -336,6 +337,7 @@ func main() {
 		os.Exit(2)
 	}
 	defer func() { _ = consumer.Close() }()
+	criticalQueueCodec := queueauth.NewDefaultCodec()
 
 	proofRequester, proofCleanup, err := initProofClient(ctx, initProofClientConfig{
 		driver:            *proofDriver,
@@ -487,7 +489,12 @@ func main() {
 				cancel()
 				return
 			}
-			line := qmsg.Value
+			line, err := queueauth.UnwrapPayload(criticalQueueCodec, qmsg.Topic, qmsg.Value)
+			if err != nil {
+				log.Error("verify input envelope", "err", err, "topic", qmsg.Topic)
+				ackMessage(qmsg, *ackTimeout, log)
+				continue
+			}
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
 				ackMessage(qmsg, *ackTimeout, log)

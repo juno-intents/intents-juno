@@ -27,6 +27,7 @@ import (
 	leasespg "github.com/juno-intents/intents-juno/internal/leases/postgres"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
 
 type junoChainSource struct {
@@ -207,6 +208,7 @@ func main() {
 		os.Exit(2)
 	}
 	defer func() { _ = producer.Close() }()
+	criticalQueueCodec := queueauth.NewDefaultCodec()
 
 	rpc, err := junorpc.New(*junoRPCURL, rpcUser, rpcPass,
 		junorpc.WithTimeout(*rpcTimeout),
@@ -309,7 +311,12 @@ func main() {
 			log.Error("marshal output", "err", err)
 			continue
 		}
-		if err := producer.Publish(ctx, *queueOutTopic, payload); err != nil {
+		wirePayload, err := queueauth.WrapPayload(criticalQueueCodec, *queueOutTopic, payload)
+		if err != nil {
+			log.Error("sign output", "err", err, "topic", *queueOutTopic)
+			continue
+		}
+		if err := producer.Publish(ctx, *queueOutTopic, wirePayload); err != nil {
 			log.Error("publish output", "err", err, "topic", *queueOutTopic)
 			continue
 		}

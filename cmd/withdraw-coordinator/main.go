@@ -33,6 +33,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
 	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
@@ -597,6 +598,7 @@ func main() {
 	defer t.Stop()
 	msgCh := consumer.Messages()
 	errCh := consumer.Errors()
+	criticalQueueCodec := queueauth.NewDefaultCodec()
 
 	for {
 		select {
@@ -642,7 +644,12 @@ func main() {
 				return
 			}
 			log.Info("queue message received", "topic", qmsg.Topic, "len", len(qmsg.Value))
-			line := qmsg.Value
+			line, err := queueauth.UnwrapPayload(criticalQueueCodec, qmsg.Topic, qmsg.Value)
+			if err != nil {
+				log.Error("verify input envelope", "err", err, "topic", qmsg.Topic)
+				ackMessage(qmsg, *ackTimeout, log)
+				continue
+			}
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
 				ackMessage(qmsg, *ackTimeout, log)

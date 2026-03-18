@@ -25,6 +25,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
 
 const checkpointPinMetricsLimit = 4096
@@ -270,7 +271,8 @@ func main() {
 		log.Error("init aggregator", "err", err)
 		os.Exit(2)
 	}
-	if err := restoreCheckpointState(ctx, persist, agg, producer, *queueOutTopic, log); err != nil {
+	criticalQueueCodec := queueauth.NewDefaultCodec()
+	if err := restoreCheckpointState(ctx, persist, agg, producer, criticalQueueCodec, *queueOutTopic, log); err != nil {
 		log.Error("restore checkpoint state", "err", err)
 		os.Exit(2)
 	}
@@ -332,7 +334,13 @@ func main() {
 			if !ok {
 				return
 			}
-			line := bytes.TrimSpace(msg.Value)
+			line, err := queueauth.UnwrapPayload(criticalQueueCodec, msg.Topic, msg.Value)
+			if err != nil {
+				log.Error("verify input envelope", "err", err, "topic", msg.Topic)
+				ackMessage(msg, *queueAckTimeout, log)
+				continue
+			}
+			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
 				ackMessage(msg, *queueAckTimeout, log)
 				continue
@@ -374,7 +382,7 @@ func main() {
 			}
 
 			pctx, pcancel := context.WithTimeout(ctx, *persistTimeout)
-			err = publishCheckpointPackage(pctx, persist, agg, producer, *queueOutTopic, *pkg)
+			err = publishCheckpointPackage(pctx, persist, agg, producer, criticalQueueCodec, *queueOutTopic, *pkg)
 			pcancel()
 			if err != nil {
 				log.Error("publish checkpoint package", "err", err, "digest", pkg.Digest, "topic", *queueOutTopic)
@@ -390,6 +398,7 @@ func publishCheckpointPackage(
 	persist *checkpoint.PackagePersistence,
 	agg *checkpoint.Aggregator,
 	producer queue.Producer,
+	criticalQueueCodec *queueauth.Codec,
 	topic string,
 	pkg checkpoint.CheckpointPackageV1,
 ) error {
@@ -415,7 +424,11 @@ func publishCheckpointPackage(
 	if err != nil {
 		return err
 	}
-	if err := producer.Publish(ctx, topic, payload); err != nil {
+	queuePayload, err := queueauth.WrapPayload(criticalQueueCodec, topic, payload)
+	if err != nil {
+		return err
+	}
+	if err := producer.Publish(ctx, topic, queuePayload); err != nil {
 		return err
 	}
 	if _, err := persist.MarkEmitted(ctx, rec.Digest); err != nil {
@@ -430,6 +443,7 @@ func replayOpenCheckpointPackages(
 	persist *checkpoint.PackagePersistence,
 	agg *checkpoint.Aggregator,
 	producer queue.Producer,
+	criticalQueueCodec *queueauth.Codec,
 	topic string,
 	log *slog.Logger,
 ) error {
@@ -445,7 +459,7 @@ func replayOpenCheckpointPackages(
 		if err := agg.RestorePendingPackage(pkg); err != nil {
 			return fmt.Errorf("restore open checkpoint package %s: %w", rec.Digest, err)
 		}
-		if err := publishCheckpointPackage(ctx, persist, agg, producer, topic, pkg); err != nil {
+		if err := publishCheckpointPackage(ctx, persist, agg, producer, criticalQueueCodec, topic, pkg); err != nil {
 			return err
 		}
 		if log != nil {
@@ -460,6 +474,7 @@ func restoreCheckpointState(
 	persist *checkpoint.PackagePersistence,
 	agg *checkpoint.Aggregator,
 	producer queue.Producer,
+	criticalQueueCodec *queueauth.Codec,
 	topic string,
 	log *slog.Logger,
 ) error {
@@ -473,7 +488,7 @@ func restoreCheckpointState(
 			log.Info("restored emitted checkpoint package", "digest", rec.Digest)
 		}
 	}
-	return replayOpenCheckpointPackages(ctx, persist, agg, producer, topic, log)
+	return replayOpenCheckpointPackages(ctx, persist, agg, producer, criticalQueueCodec, topic, log)
 }
 
 func runIPFSPinWorker(

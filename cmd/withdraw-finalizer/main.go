@@ -32,6 +32,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 	withdrawpg "github.com/juno-intents/intents-juno/internal/withdraw/postgres"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
@@ -227,6 +228,7 @@ func main() {
 		os.Exit(2)
 	}
 	defer func() { _ = consumer.Close() }()
+	criticalQueueCodec := queueauth.NewDefaultCodec()
 
 	poolCfg, err := pgxpoolutil.ParseConfig(strings.TrimSpace(*postgresDSN), pgxpoolutil.Settings{
 		MinConns:          int32(*postgresMinConns),
@@ -387,7 +389,12 @@ func main() {
 			if !ok {
 				return
 			}
-			line := qmsg.Value
+			line, err := queueauth.UnwrapPayload(criticalQueueCodec, qmsg.Topic, qmsg.Value)
+			if err != nil {
+				log.Error("verify input envelope", "err", err, "topic", qmsg.Topic)
+				ackMessage(qmsg, *ackTimeout, log)
+				continue
+			}
 			line = bytes.TrimSpace(line)
 			if len(line) == 0 {
 				ackMessage(qmsg, *ackTimeout, log)

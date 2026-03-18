@@ -21,6 +21,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 	"github.com/juno-intents/intents-juno/internal/queue"
+	"github.com/juno-intents/intents-juno/internal/queueauth"
 )
 
 func main() {
@@ -133,6 +134,7 @@ func runMain(args []string, stdout io.Writer) error {
 		return fmt.Errorf("create queue producer: %w", err)
 	}
 	defer func() { _ = producer.Close() }()
+	criticalQueueCodec := queueauth.NewDefaultCodec()
 
 	topic := strings.TrimSpace(*withdrawEventTopic)
 
@@ -205,7 +207,11 @@ func runMain(args []string, stdout io.Writer) error {
 			return fmt.Errorf("marshal event: %w", err)
 		}
 
-		if err := producer.Publish(ctx, topic, encoded); err != nil {
+		wirePayload, err := queueauth.WrapPayload(criticalQueueCodec, topic, encoded)
+		if err != nil {
+			return fmt.Errorf("sign event: %w", err)
+		}
+		if err := producer.Publish(ctx, topic, wirePayload); err != nil {
 			return fmt.Errorf("publish event: %w", err)
 		}
 
