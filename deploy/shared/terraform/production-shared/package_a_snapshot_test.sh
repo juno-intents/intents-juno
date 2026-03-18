@@ -170,6 +170,7 @@ main() {
   assert_contains "$main_tf" 'private_dns_enabled = true' "production-shared enables private DNS on interface endpoints"
   assert_contains "$main_tf" 'alias  = "dr"' "production-shared configures an aws dr provider alias"
   assert_contains "$variables_tf" 'variable "shared_postgres_dr_region"' "production-shared exposes the Aurora DR backup region"
+  assert_not_contains "$variables_tf" 'trimspace(var.shared_postgres_dr_region) != trimspace(var.aws_region)' "production-shared no longer uses cross-variable validation in shared_postgres_dr_region"
   assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres"' "production-shared provisions a primary backup vault"
   assert_contains "$main_tf" 'resource "aws_backup_vault" "shared_postgres_dr"' "production-shared provisions a DR backup vault"
   assert_contains "$main_tf" 'provider = aws.dr' "production-shared binds DR backup resources to the dr provider"

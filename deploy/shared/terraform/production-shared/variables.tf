@@ -93,8 +93,8 @@ variable "shared_postgres_dr_region" {
   default     = "us-west-2"
 
   validation {
-    condition     = trimspace(var.shared_postgres_dr_region) != "" && trimspace(var.shared_postgres_dr_region) != trimspace(var.aws_region)
-    error_message = "shared_postgres_dr_region must be non-empty and differ from aws_region."
+    condition     = trimspace(var.shared_postgres_dr_region) != ""
+    error_message = "shared_postgres_dr_region must be non-empty."
   }
 }
 

@@ -1986,9 +1986,15 @@ resource "aws_launch_template" "operator" {
     security_groups             = [aws_security_group.operator.id]
   }
 
-  root_block_device {
-    volume_type = "gp3"
-    volume_size = var.operator_root_volume_size_gb
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_type           = "gp3"
+      volume_size           = var.operator_root_volume_size_gb
+      delete_on_termination = true
+      encrypted             = true
+    }
   }
 
   user_data = <<-EOF
