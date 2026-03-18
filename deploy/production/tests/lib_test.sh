@@ -1990,6 +1990,7 @@ EOF
   assert_eq "$(jq -r '.edge.origin_endpoint' "$app_manifest")" "203.0.113.21" "edge origin endpoint"
   assert_eq "$(jq -r '.edge.origin_http_port' "$app_manifest")" "443" "edge origin port"
   assert_eq "$(jq -r '.edge.rate_limit' "$app_manifest")" "2000" "edge rate limit"
+  assert_eq "$(jq -r '.edge.alarm_actions[0]' "$app_manifest")" "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts" "edge alarm actions"
   assert_eq "$(jq -r '.edge.state_path' "$app_manifest")" "$workdir/edge-state/alpha.tfstate" "edge state path is stable per environment"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
 

@@ -62,6 +62,9 @@
     "origin_endpoint": "203.0.113.21",
     "origin_http_port": 80,
     "rate_limit": 2000,
+    "alarm_actions": [
+      "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts"
+    ],
     "enable_shield_advanced": false
   }
 }

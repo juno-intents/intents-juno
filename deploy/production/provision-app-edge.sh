@@ -58,6 +58,10 @@ origin_record_name="$(production_json_required "$app_deploy" '.edge.origin_recor
 origin_endpoint="$(production_json_required "$app_deploy" '.edge.origin_endpoint | select(type == "string" and length > 0)')"
 origin_http_port="$(production_json_required "$app_deploy" '.edge.origin_http_port')"
 rate_limit="$(production_json_required "$app_deploy" '.edge.rate_limit')"
+if ! jq -e '.edge.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$app_deploy" >/dev/null 2>&1; then
+  die "edge.alarm_actions must be a non-empty array"
+fi
+alarm_actions_json="$(jq -c '.edge.alarm_actions' "$app_deploy")"
 state_path="$(production_json_required "$app_deploy" '.edge.state_path | select(type == "string" and length > 0)')"
 security_group_id="$(production_json_optional "$app_deploy" '.security_group_id')"
 enable_shield_advanced="$(production_json_optional "$app_deploy" '.edge.enable_shield_advanced')"
@@ -90,6 +94,7 @@ cat >"$work_dir/terraform.tfvars.json" <<EOF
   "origin_http_port": $origin_http_port,
   "security_group_id": $(jq -Rn --arg v "$security_group_id" '$v'),
   "rate_limit": $rate_limit,
+  "alarm_actions": $alarm_actions_json,
   "enable_shield_advanced": $enable_shield_advanced
 }
 EOF

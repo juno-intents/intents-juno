@@ -8,6 +8,9 @@
     "route53_zone_id": "Z01169511CVMQJAD7T3TJ",
     "public_zone_name": "thejunowallet.com",
     "public_subdomain": "alpha.intents-testing.thejunowallet.com",
+    "alarm_actions": [
+      "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts"
+    ],
     "wireguard": {
       "public_subnet_id": "subnet-0123456789abcdef0"
     }

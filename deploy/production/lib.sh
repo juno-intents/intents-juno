@@ -1938,7 +1938,7 @@ production_render_app_handoff() {
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
-  local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced
+  local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
   local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
   local wireguard_client_address_cidr wireguard_client_config_secret_arn
 
@@ -1977,6 +1977,10 @@ production_render_app_handoff() {
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
+  if ! jq -e '.shared_services.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$inventory" >/dev/null 2>&1; then
+    die "shared_services.alarm_actions must be a non-empty array when inventory.app_host is present"
+  fi
+  edge_alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
   wireguard_gateway_private_ip="$(production_json_required "$shared_manifest" '.shared_services.wireguard.gateway_private_ip | select(type == "string" and length > 0)')"
   wireguard_endpoint_host="$(production_json_required "$shared_manifest" '.shared_services.wireguard.endpoint_host | select(type == "string" and length > 0)')"
   wireguard_listen_port="$(production_json_required "$shared_manifest" '.shared_services.wireguard.listen_port')"
@@ -2072,6 +2076,7 @@ production_render_app_handoff() {
     --arg edge_origin_endpoint "$edge_origin_endpoint" \
     --argjson edge_origin_http_port "$edge_origin_http_port" \
     --argjson edge_rate_limit "$edge_rate_limit" \
+    --argjson edge_alarm_actions "$edge_alarm_actions_json" \
     --arg edge_enable_shield_advanced "$edge_enable_shield_advanced" \
     '{
       version: $version,
@@ -2132,6 +2137,7 @@ production_render_app_handoff() {
         origin_endpoint: $edge_origin_endpoint,
         origin_http_port: $edge_origin_http_port,
         rate_limit: $edge_rate_limit,
+        alarm_actions: $edge_alarm_actions,
         enable_shield_advanced: ($edge_enable_shield_advanced == "true")
       }
     }' >"$manifest_path"
