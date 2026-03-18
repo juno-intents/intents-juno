@@ -40,9 +40,13 @@
       "record_name": "ops.alpha.intents-testing.thejunowallet.com",
       "access": {
         "mode": "wireguard",
-        "wireguard_client_cidrs": [
-          "10.66.0.0/24"
-        ]
+        "source_cidrs": [
+          "10.0.2.50/32"
+        ],
+        "endpoint_host": "198.51.100.25",
+        "listen_port": 51820,
+        "client_address_cidr": "10.66.0.2/32",
+        "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config"
       }
     }
   },

@@ -111,3 +111,34 @@ output "shared_ipfs_instance_profile" {
   description = "IAM instance profile attached to the shared IPFS nodes."
   value       = aws_iam_instance_profile.ipfs.name
 }
+
+output "shared_wireguard_gateway_private_ip" {
+  description = "Private IPv4 address of the dedicated WireGuard gateway."
+  value       = var.shared_wireguard_enabled ? aws_instance.wireguard_gateway[0].private_ip : null
+}
+
+output "shared_wireguard_endpoint_host" {
+  description = "Public endpoint host used by the generated WireGuard client config."
+  value       = var.shared_wireguard_enabled ? aws_eip.wireguard_gateway[0].public_ip : null
+}
+
+output "shared_wireguard_listen_port" {
+  description = "UDP port exposed by the dedicated WireGuard gateway."
+  value       = var.shared_wireguard_enabled ? var.shared_wireguard_listen_port : null
+}
+
+output "shared_wireguard_network_cidr" {
+  description = "Tunnel CIDR assigned to the dedicated WireGuard gateway."
+  value       = var.shared_wireguard_enabled ? var.shared_wireguard_network_cidr : null
+}
+
+output "shared_wireguard_client_address_cidr" {
+  description = "Client tunnel address generated for the dedicated backoffice WireGuard profile."
+  value       = var.shared_wireguard_enabled ? local.wireguard_client_address_cidr : null
+}
+
+output "shared_wireguard_client_config_secret_arn" {
+  description = "Secrets Manager ARN containing the generated backoffice WireGuard client config."
+  value       = var.shared_wireguard_enabled ? aws_secretsmanager_secret.shared_wireguard_client_config[0].arn : null
+  sensitive   = true
+}

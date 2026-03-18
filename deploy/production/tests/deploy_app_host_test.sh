@@ -609,7 +609,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /bridge*' "edge caddy bridge origin route"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '$backoffice_record_name {' "edge caddy serves backoffice on a direct hostname"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '@backoffice_wireguard {' "edge caddy defines a wireguard matcher for backoffice"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'remote_ip 10.66.0.0/24' "edge caddy restricts backoffice to the wireguard client cidr"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'remote_ip 10.0.2.50/32' "edge caddy restricts backoffice to the wireguard gateway source ip"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle @backoffice_wireguard {' "edge caddy only proxies allowed wireguard backoffice traffic"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'respond "forbidden" 403' "edge caddy returns forbidden for non-wireguard backoffice traffic"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /ops* {' "edge origin no longer publishes /ops"

@@ -101,10 +101,10 @@ bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_a
 backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
 if ! jq -e '.services.backoffice.access.mode == "wireguard"
-  and ((.services.backoffice.access.wireguard_client_cidrs // []) | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' "$app_deploy" >/dev/null 2>&1; then
-  die "services.backoffice.access must be wireguard with a non-empty wireguard_client_cidrs array"
+  and ((.services.backoffice.access.source_cidrs // []) | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' "$app_deploy" >/dev/null 2>&1; then
+  die "services.backoffice.access must be wireguard with a non-empty source_cidrs array"
 fi
-mapfile -t backoffice_wireguard_client_cidrs < <(jq -r '.services.backoffice.access.wireguard_client_cidrs[]? | select(type == "string" and length > 0)' "$app_deploy")
+mapfile -t backoffice_wireguard_source_cidrs < <(jq -r '.services.backoffice.access.source_cidrs[]? | select(type == "string" and length > 0)' "$app_deploy")
 shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
 shared_kafka_auth_mode="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.mode | select(type == "string" and length > 0)')"
 shared_kafka_auth_aws_region="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.auth.aws_region | select(type == "string" and length > 0)')"
@@ -242,7 +242,7 @@ direct_backoffice_caddy_block="$(cat <<EOF
 \$backoffice_record_name {
   encode zstd gzip
   @backoffice_wireguard {
-    remote_ip ${backoffice_wireguard_client_cidrs[*]}
+    remote_ip ${backoffice_wireguard_source_cidrs[*]}
   }
   handle @backoffice_wireguard {
     reverse_proxy 127.0.0.1:$backoffice_port

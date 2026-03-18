@@ -31,6 +31,8 @@ write_inventory_fixture() {
     --arg operator_address "0x9999999999999999999999999999999999999999" \
     --arg app_host "203.0.113.21" \
     --arg app_public_endpoint "203.0.113.21" \
+    --arg app_private_endpoint "10.0.10.21" \
+    --arg wireguard_public_subnet_id "subnet-0abc1234def567890" \
     '
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
@@ -40,6 +42,8 @@ write_inventory_fixture() {
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
       | .app_host.public_endpoint = $app_public_endpoint
+      | .app_host.private_endpoint = $app_private_endpoint
+      | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -345,6 +349,11 @@ EOF
   assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
   assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "proof requestor service name"
   assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "alpha-proof-funder" "proof funder service name"
+  assert_eq "$(jq -r '.shared_services.wireguard.gateway_private_ip' "$shared_manifest")" "10.0.2.50" "wireguard gateway private ip"
+  assert_eq "$(jq -r '.shared_services.wireguard.endpoint_host' "$shared_manifest")" "198.51.100.25" "wireguard endpoint host"
+  assert_eq "$(jq -r '.shared_services.wireguard.listen_port' "$shared_manifest")" "51820" "wireguard listen port"
+  assert_eq "$(jq -r '.shared_services.wireguard.client_address_cidr' "$shared_manifest")" "10.66.0.2/32" "wireguard client address cidr"
+  assert_eq "$(jq -r '.shared_services.wireguard.client_config_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "wireguard client config secret arn"
   assert_eq "$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id' "$shared_manifest")" "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "shared manifest checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
@@ -1971,7 +1980,10 @@ EOF
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
   assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "https://ops.alpha.intents-testing.thejunowallet.com" "backoffice public url"
   assert_eq "$(jq -r '.services.backoffice.access.mode' "$app_manifest")" "wireguard" "backoffice access mode"
-  assert_eq "$(jq -r '.services.backoffice.access.wireguard_client_cidrs[0]' "$app_manifest")" "10.66.0.0/24" "backoffice wireguard client cidr"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.2.50/32" "backoffice wireguard source cidr"
+  assert_eq "$(jq -r '.services.backoffice.access.client_config_secret_arn' "$app_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "backoffice wireguard client config secret"
+  assert_eq "$(jq -r '.services.backoffice.access.endpoint_host' "$app_manifest")" "198.51.100.25" "backoffice wireguard endpoint host"
+  assert_eq "$(jq -r '.services.backoffice.access.listen_port' "$app_manifest")" "51820" "backoffice wireguard listen port"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
   assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"

@@ -7,7 +7,10 @@
     "terraform_dir": "deploy/shared/terraform/production-shared",
     "route53_zone_id": "Z01169511CVMQJAD7T3TJ",
     "public_zone_name": "thejunowallet.com",
-    "public_subdomain": "alpha.intents-testing.thejunowallet.com"
+    "public_subdomain": "alpha.intents-testing.thejunowallet.com",
+    "wireguard": {
+      "public_subnet_id": "subnet-0123456789abcdef0"
+    }
   },
   "contracts": {
     "juno_network": "testnet",
@@ -26,6 +29,7 @@
     "user": "ubuntu",
     "runtime_dir": "/var/lib/intents-juno/app-runtime",
     "public_endpoint": "203.0.113.21",
+    "private_endpoint": "10.0.10.21",
     "aws_profile": "juno",
     "aws_region": "us-east-1",
     "account_id": "021490342184",
@@ -37,9 +41,6 @@
     "public_scheme": "https",
     "bridge_api_listen": "127.0.0.1:8082",
     "backoffice_listen": "127.0.0.1:8090",
-    "backoffice_wireguard_client_cidrs": [
-      "10.66.0.0/24"
-    ],
     "juno_rpc_url": "http://127.0.0.1:18232",
     "service_urls": [
       "bridge-api=http://127.0.0.1:8082/readyz"

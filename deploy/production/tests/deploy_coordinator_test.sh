@@ -62,6 +62,12 @@ set -euo pipefail
 printf 'terraform %s\n' "\$*" >>"$log_file"
 case "\${1:-}" in
   init|apply)
+    for arg in "\$@"; do
+      if [[ "\$arg" == -var-file=* ]]; then
+        printf 'terraform-var-file %s\n' "\${arg#-var-file=}" >>"$log_file"
+        printf 'terraform-var-file-contents %s\n' "\$(tr '\n' ' ' <"\${arg#-var-file=}")" >>"$log_file"
+      fi
+    done
     exit 0
     ;;
   output)
@@ -216,12 +222,16 @@ write_inventory_fixture() {
     --arg backup "$workdir/dkg-backup.zip" \
     --arg secrets "$workdir/operator-secrets.env" \
     --arg app_secrets "$workdir/app-secrets.env" \
+    --arg app_private_endpoint "10.0.10.21" \
+    --arg wireguard_public_subnet_id "subnet-0abc1234def567890" \
     '
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
+      | .app_host.private_endpoint = $app_private_endpoint
+      | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -271,6 +281,7 @@ EOF
   assert_eq "$(jq -r '.checkpoint_signer_driver' "$operator_dir/operator-deploy.json")" "aws-kms" "operator signer driver"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$operator_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "operator signer kms key id"
   assert_eq "$(jq -r '.services.bridge_api.public_url' "$output_dir/alpha/app/app-deploy.json")" "https://bridge.alpha.intents-testing.thejunowallet.com" "app manifest bridge url"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.2.50/32" "app manifest wireguard source cidr"
   rm -rf "$workdir"
 }
 
@@ -788,6 +799,11 @@ EOF
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator creates the terraform state bucket"
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"
+  assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated wireguard override file"
+  assert_contains "$combined_log" 'terraform-var-file-contents {   "shared_wireguard_enabled": true,' "deploy-coordinator writes a wireguard-enabled override file"
+  assert_contains "$combined_log" '"shared_wireguard_public_subnet_id": "subnet-0abc1234def567890"' "deploy-coordinator forwards the wireguard public subnet into terraform"
+  assert_contains "$combined_log" '"shared_wireguard_backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com"' "deploy-coordinator forwards the backoffice hostname into terraform"
+  assert_contains "$combined_log" '"shared_wireguard_backoffice_private_endpoint": "10.0.10.21"' "deploy-coordinator forwards the private app endpoint into terraform"
   assert_line_order "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator bootstraps backend storage before terraform init"
   rm -rf "$workdir"
 }

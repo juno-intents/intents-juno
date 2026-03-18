@@ -141,6 +141,7 @@ terraform_backend_bucket=""
 terraform_backend_table=""
 terraform_backend_key=""
 terraform_backend_args=()
+terraform_var_file=""
 if [[ -n "$run_label" ]]; then
   output_dir="$output_root/$env_slug/$(production_safe_slug "$run_label")"
 else
@@ -211,12 +212,18 @@ if [[ "$skip_terraform_apply" != "true" || -z "$terraform_output_json" ]]; then
 fi
 
 if [[ "$skip_terraform_apply" != "true" ]]; then
+  terraform_var_file="$output_dir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$coordinator_inventory" "$terraform_var_file"
   log "Applying shared-services terraform in $terraform_dir"
   if [[ "$dry_run" != "true" ]]; then
     (
       cd "$terraform_dir"
       terraform init -input=false "${terraform_backend_args[@]}"
-      terraform apply -auto-approve -input=false
+      if [[ -f "$terraform_var_file" ]]; then
+        terraform apply -auto-approve -input=false -var-file="$terraform_var_file"
+      else
+        terraform apply -auto-approve -input=false
+      fi
     )
   else
     log "[DRY RUN] skipped terraform apply"
