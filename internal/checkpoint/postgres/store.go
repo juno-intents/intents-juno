@@ -327,6 +327,11 @@ func (s *Store) ListReadyToPin(ctx context.Context, now time.Time, limit int) ([
 		FROM checkpoint_packages
 		WHERE pin_state IN ($1, $2)
 		  AND (pin_next_attempt_at IS NULL OR pin_next_attempt_at <= $3)
+		  AND (
+		  	btrim(pin_claim_owner) = ''
+		  	OR pin_claim_until IS NULL
+		  	OR pin_claim_until <= $3
+		  )
 		ORDER BY COALESCE(pin_next_attempt_at, persisted_at) ASC, persisted_at ASC, digest ASC
 		LIMIT $4
 	`, int16(checkpoint.PackagePinStatePending), int16(checkpoint.PackagePinStateFailed), now.UTC(), limit)
@@ -422,6 +427,90 @@ func (s *Store) ClaimReadyToPin(ctx context.Context, owner string, claimTTL time
 		return nil, fmt.Errorf("checkpoint/postgres: claim ready to pin rows: %w", err)
 	}
 	return out, nil
+}
+
+func (s *Store) UpdateClaimedPin(ctx context.Context, owner string, now time.Time, rec checkpoint.PackageRecord) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if rec.Digest == (common.Hash{}) || len(rec.Payload) == 0 {
+		return fmt.Errorf("%w: missing digest/payload", checkpoint.ErrInvalidPackageEnvelope)
+	}
+	if rec.State != checkpoint.PackageStateOpen && rec.State != checkpoint.PackageStateEmitted {
+		return fmt.Errorf("%w: invalid state %s", checkpoint.ErrInvalidPackageEnvelope, rec.State)
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return fmt.Errorf("%w: pin claim owner is required", checkpoint.ErrInvalidPersistenceConfig)
+	}
+
+	persistedAt := rec.PersistedAt
+	if persistedAt.IsZero() {
+		persistedAt = time.Now().UTC()
+	}
+	var emittedAt any
+	if !rec.EmittedAt.IsZero() {
+		emittedAt = rec.EmittedAt.UTC()
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE checkpoint_packages
+		SET
+			checkpoint_height = $2,
+			checkpoint_block_hash = $3,
+			checkpoint_final_orchard_root = $4,
+			checkpoint_base_chain_id = $5,
+			checkpoint_bridge_contract = $6,
+			operator_set_hash = $7,
+			ipfs_cid = $8,
+			pin_state = $9,
+			pin_attempts = $10,
+			pin_last_error = $11,
+			pin_last_attempt_at = $12,
+			pin_next_attempt_at = $13,
+			pin_claim_owner = '',
+			pin_claim_until = NULL,
+			s3_key = $14,
+			package_json = $15,
+			state = $16,
+			persisted_at = $17,
+			emitted_at = $18,
+			updated_at = now()
+		WHERE digest = $1
+		  AND pin_claim_owner = $19
+		  AND pin_claim_until > $20
+	`,
+		rec.Digest[:],
+		int64(rec.Checkpoint.Height),
+		rec.Checkpoint.BlockHash[:],
+		rec.Checkpoint.FinalOrchardRoot[:],
+		int64(rec.Checkpoint.BaseChainID),
+		rec.Checkpoint.BridgeContract[:],
+		rec.OperatorSetHash[:],
+		nullableString(rec.IPFSCID),
+		int16(rec.PinState),
+		rec.PinAttempts,
+		strings.TrimSpace(rec.PinLastError),
+		nullableTime(rec.PinLastAttemptAt),
+		nullableTime(rec.PinNextAttemptAt),
+		nullableString(rec.BlobKey),
+		rec.Payload,
+		int16(rec.State),
+		persistedAt,
+		emittedAt,
+		owner,
+		now.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("checkpoint/postgres: update claimed pin: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	if _, err := s.Get(ctx, rec.Digest); err != nil {
+		return err
+	}
+	return checkpoint.ErrPackagePinClaimLost
 }
 
 func (s *Store) RecordCommitment(ctx context.Context, commitment checkpoint.SignerCommitment) error {

@@ -68,3 +68,29 @@ func TestHTTPIPFSPinner_RejectsErrorResponse(t *testing.T) {
 		t.Fatalf("expected error")
 	}
 }
+
+func TestHTTPIPFSPinner_PinJSON_UsesBearerToken(t *testing.T) {
+	t.Parallel()
+
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		_ = json.NewEncoder(w).Encode(map[string]any{"Hash": "bafybeigdyrzt"})
+	}))
+	defer srv.Close()
+
+	pinner, err := NewHTTPIPFSPinner(HTTPIPFSConfig{
+		APIURL:      srv.URL,
+		BearerToken: "secret-token",
+	})
+	if err != nil {
+		t.Fatalf("NewHTTPIPFSPinner: %v", err)
+	}
+
+	if _, err := pinner.PinJSON(context.Background(), []byte(`{"hello":"world"}`)); err != nil {
+		t.Fatalf("PinJSON: %v", err)
+	}
+	if gotAuth != "Bearer secret-token" {
+		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer secret-token")
+	}
+}

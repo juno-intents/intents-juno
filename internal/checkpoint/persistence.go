@@ -17,6 +17,7 @@ var (
 	ErrInvalidPersistenceConfig = errors.New("checkpoint: invalid persistence config")
 	ErrInvalidPackageEnvelope   = errors.New("checkpoint: invalid package envelope")
 	ErrPackageNotFound          = errors.New("checkpoint: package not found")
+	ErrPackagePinClaimLost      = errors.New("checkpoint: package pin claim lost")
 )
 
 // PackageStore persists checkpoint package metadata and payload references.
@@ -26,6 +27,7 @@ type PackageStore interface {
 	ListByState(ctx context.Context, state PackageState) ([]PackageRecord, error)
 	ListReadyToPin(ctx context.Context, now time.Time, limit int) ([]PackageRecord, error)
 	ClaimReadyToPin(ctx context.Context, owner string, claimTTL time.Duration, now time.Time, limit int) ([]PackageRecord, error)
+	UpdateClaimedPin(ctx context.Context, owner string, now time.Time, rec PackageRecord) error
 }
 
 // IPFSPinner pins a package payload and returns the resulting CID.
@@ -259,9 +261,7 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, owner string, c
 			rec.PinState = PackagePinStateFailed
 			rec.PinLastError = pinErrorString(err)
 			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
-			rec.PinClaimOwner = ""
-			rec.PinClaimUntil = time.Time{}
-			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+			if upsertErr := p.store.UpdateClaimedPin(ctx, owner, attemptedAt, rec); upsertErr != nil {
 				return processed, upsertErr
 			}
 			processed++
@@ -273,9 +273,7 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, owner string, c
 			rec.PinState = PackagePinStateFailed
 			rec.PinLastError = "checkpoint/ipfs: empty cid in response"
 			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
-			rec.PinClaimOwner = ""
-			rec.PinClaimUntil = time.Time{}
-			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+			if upsertErr := p.store.UpdateClaimedPin(ctx, owner, attemptedAt, rec); upsertErr != nil {
 				return processed, upsertErr
 			}
 			processed++
@@ -286,9 +284,7 @@ func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, owner string, c
 		rec.PinState = PackagePinStatePinned
 		rec.PinLastError = ""
 		rec.PinNextAttemptAt = time.Time{}
-		rec.PinClaimOwner = ""
-		rec.PinClaimUntil = time.Time{}
-		if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+		if upsertErr := p.store.UpdateClaimedPin(ctx, owner, attemptedAt, rec); upsertErr != nil {
 			return processed, upsertErr
 		}
 		processed++
@@ -388,6 +384,9 @@ func (s *MemoryPackageStore) ListReadyToPin(_ context.Context, now time.Time, li
 		if !rec.PinNextAttemptAt.IsZero() && rec.PinNextAttemptAt.After(now) {
 			continue
 		}
+		if !rec.PinClaimUntil.IsZero() && rec.PinClaimUntil.After(now) {
+			continue
+		}
 		out = append(out, clonePackageRecord(rec))
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -429,7 +428,7 @@ func (s *MemoryPackageStore) ClaimReadyToPin(_ context.Context, owner string, cl
 	}
 
 	out := make([]PackageRecord, 0, len(s.records))
-	for digest, rec := range s.records {
+	for _, rec := range s.records {
 		if rec.PinState != PackagePinStatePending && rec.PinState != PackagePinStateFailed {
 			continue
 		}
@@ -439,9 +438,6 @@ func (s *MemoryPackageStore) ClaimReadyToPin(_ context.Context, owner string, cl
 		if rec.PinClaimOwner != "" && !rec.PinClaimUntil.IsZero() && rec.PinClaimUntil.After(now) {
 			continue
 		}
-		rec.PinClaimOwner = owner
-		rec.PinClaimUntil = now.Add(claimTTL)
-		s.records[digest] = clonePackageRecord(rec)
 		out = append(out, clonePackageRecord(rec))
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -464,7 +460,37 @@ func (s *MemoryPackageStore) ClaimReadyToPin(_ context.Context, owner string, cl
 	if len(out) > limit {
 		out = out[:limit]
 	}
+	claimUntil := now.UTC().Add(claimTTL)
+	for i := range out {
+		rec := out[i]
+		rec.PinClaimOwner = owner
+		rec.PinClaimUntil = claimUntil
+		s.records[rec.Digest] = clonePackageRecord(rec)
+		out[i] = clonePackageRecord(rec)
+	}
 	return out, nil
+}
+
+func (s *MemoryPackageStore) UpdateClaimedPin(_ context.Context, owner string, now time.Time, rec PackageRecord) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	current, ok := s.records[rec.Digest]
+	if !ok {
+		return ErrPackageNotFound
+	}
+	owner = strings.TrimSpace(owner)
+	if owner == "" {
+		return fmt.Errorf("%w: pin claim owner is required", ErrInvalidPersistenceConfig)
+	}
+	now = now.UTC()
+	if current.PinClaimOwner != owner || current.PinClaimUntil.IsZero() || !current.PinClaimUntil.After(now) {
+		return ErrPackagePinClaimLost
+	}
+	rec.PinClaimOwner = ""
+	rec.PinClaimUntil = time.Time{}
+	s.records[rec.Digest] = clonePackageRecord(rec)
+	return nil
 }
 
 func clonePackageRecord(rec PackageRecord) PackageRecord {

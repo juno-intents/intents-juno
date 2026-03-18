@@ -465,3 +465,57 @@ func TestPackagePersistence_ProcessPinJobs_ClaimsPerWorkerWindow(t *testing.T) {
 		t.Fatalf("expected worker-a to process 1 job, got %d", result.processed)
 	}
 }
+
+func TestMemoryPackageStore_ClaimReadyToPin_RespectsLimitBeforeClaiming(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryPackageStore()
+	now := time.Unix(1_700_000_000, 0).UTC()
+	baseCheckpoint := Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+
+	for i, payload := range []string{`{"digest":"first"}`, `{"digest":"second"}`} {
+		cp := baseCheckpoint
+		cp.Height += uint64(i)
+		if i == 1 {
+			cp.BlockHash = common.HexToHash("0x2102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+		}
+		rec := PackageRecord{
+			Digest:           Digest(cp),
+			Checkpoint:       cp,
+			OperatorSetHash:  common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+			Payload:          []byte(payload),
+			PinState:         PackagePinStatePending,
+			PinNextAttemptAt: now,
+			State:            PackageStateOpen,
+			PersistedAt:      now.Add(time.Duration(i) * time.Second),
+		}
+		if err := store.UpsertPackage(context.Background(), rec); err != nil {
+			t.Fatalf("UpsertPackage(%d): %v", i, err)
+		}
+	}
+
+	claimed, err := store.ClaimReadyToPin(context.Background(), "worker-a", time.Minute, now, 1)
+	if err != nil {
+		t.Fatalf("ClaimReadyToPin worker-a: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed count: got %d want 1", len(claimed))
+	}
+
+	secondClaim, err := store.ClaimReadyToPin(context.Background(), "worker-b", time.Minute, now, 1)
+	if err != nil {
+		t.Fatalf("ClaimReadyToPin worker-b: %v", err)
+	}
+	if len(secondClaim) != 1 {
+		t.Fatalf("second claim count: got %d want 1", len(secondClaim))
+	}
+	if secondClaim[0].Digest == claimed[0].Digest {
+		t.Fatalf("expected different package on second claim, got same digest %s", secondClaim[0].Digest)
+	}
+}

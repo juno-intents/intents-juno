@@ -16,13 +16,15 @@ import (
 const defaultIPFSTimeout = 15 * time.Second
 
 type HTTPIPFSConfig struct {
-	APIURL     string
-	HTTPClient *http.Client
+	APIURL      string
+	BearerToken string
+	HTTPClient  *http.Client
 }
 
 type HTTPIPFSPinner struct {
-	apiURL string
-	client *http.Client
+	apiURL      string
+	bearerToken string
+	client      *http.Client
 }
 
 func NewHTTPIPFSPinner(cfg HTTPIPFSConfig) (*HTTPIPFSPinner, error) {
@@ -38,7 +40,11 @@ func NewHTTPIPFSPinner(cfg HTTPIPFSConfig) (*HTTPIPFSPinner, error) {
 	if client == nil {
 		client = &http.Client{Timeout: defaultIPFSTimeout}
 	}
-	return &HTTPIPFSPinner{apiURL: strings.TrimRight(apiURL, "/"), client: client}, nil
+	return &HTTPIPFSPinner{
+		apiURL:      strings.TrimRight(apiURL, "/"),
+		bearerToken: strings.TrimSpace(cfg.BearerToken),
+		client:      client,
+	}, nil
 }
 
 func (p *HTTPIPFSPinner) PinJSON(ctx context.Context, payload []byte) (string, error) {
@@ -60,6 +66,9 @@ func (p *HTTPIPFSPinner) PinJSON(ctx context.Context, payload []byte) (string, e
 		return "", fmt.Errorf("checkpoint/ipfs: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", mw.FormDataContentType())
+	if p.bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+p.bearerToken)
+	}
 
 	resp, err := p.client.Do(req)
 	if err != nil {
