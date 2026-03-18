@@ -1499,6 +1499,7 @@ withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
 exec /usr/local/bin/withdraw-coordinator \
   --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
   --owner "${withdraw_coord_owner}" \
+  --leader-lease-ttl "${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-60s}" \
   --claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}" \
   --max-items "${withdraw_coord_max_items}" \
   --queue-driver kafka \

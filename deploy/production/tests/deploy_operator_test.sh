@@ -215,6 +215,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"' "remote deploy can patch the withdraw-coordinator wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_tmp="$(mktemp)"' "remote deploy rewrites the withdraw-coordinator wrapper from a temp file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "remote deploy writes the withdraw wrapper to pass the Postgres DSN by env indirection"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--leader-lease-ttl "${WITHDRAW_COORDINATOR_LEADER_LEASE_TTL:-60s}"' "remote deploy writes the withdraw wrapper with a longer leader lease default"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "remote deploy writes the withdraw wrapper with a durable claim ttl default"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "remote deploy writes the withdraw wrapper with a single-item default batch cap"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-items "${withdraw_coord_max_items}"' "remote deploy writes the withdraw wrapper with the withdraw batch cap"
