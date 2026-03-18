@@ -214,6 +214,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" 'export JUNO_TXSIGN_SIGNER_KEYS' "withdraw wrapper exports juno txsign signer keys"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
+  assert_contains "$withdraw_wrapper" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "withdraw wrapper defaults to single-item batches with env override"
+  assert_contains "$withdraw_wrapper" '--max-items "${withdraw_coord_max_items}"' "withdraw wrapper passes the withdraw batch size override"
   assert_contains "$withdraw_wrapper" '--juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}"' "withdraw wrapper pins juno txbuild to the scanner URL"
   assert_contains "$withdraw_wrapper" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper passes the scanner bearer env name"
   assert_contains "$withdraw_wrapper" '--juno-rpc-user-env JUNO_RPC_USER' "withdraw wrapper passes RPC username env name"

@@ -216,6 +216,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_tmp="$(mktemp)"' "remote deploy rewrites the withdraw-coordinator wrapper from a temp file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "remote deploy writes the withdraw wrapper to pass the Postgres DSN by env indirection"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "remote deploy writes the withdraw wrapper with a durable claim ttl default"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "remote deploy writes the withdraw wrapper with a single-item default batch cap"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" '--max-items "${withdraw_coord_max_items}"' "remote deploy writes the withdraw wrapper with the withdraw batch cap"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_base_rpc_url="${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}"' "remote deploy derives the deposit relayer base rpc url from staged env"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_juno_rpc_url="${DEPOSIT_SCAN_JUNO_RPC_URL:-${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}}"' "remote deploy derives the deposit relayer juno rpc url from staged env"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"' "remote deploy writes the deposit wrapper with a single-item default batch cap"
