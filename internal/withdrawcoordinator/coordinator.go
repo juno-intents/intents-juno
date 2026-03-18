@@ -30,6 +30,9 @@ const (
 	TxStatusConfirmed = "confirmed"
 	TxStatusMempool   = "mempool"
 	TxStatusMissing   = "missing"
+
+	batchFailureDLQThreshold      = 3
+	markPaidFailureOpenThreshold  = 3
 )
 
 type Planner interface {
@@ -113,6 +116,9 @@ type Coordinator struct {
 
 	leaderLeaseStore leases.Store
 	currentLeader    leases.Lease
+
+	markPaidFailureStreak int
+	markPaidCircuitOpen   bool
 }
 
 func New(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, txChecker TxChecker, log *slog.Logger) (*Coordinator, error) {
@@ -216,6 +222,17 @@ func (c *Coordinator) ClearLeaderLease() {
 	c.currentLeader = leases.Lease{}
 }
 
+func (c *Coordinator) storeFence() withdraw.Fence {
+	version := c.currentLeader.Version
+	if version <= 0 {
+		version = 1
+	}
+	return withdraw.Fence{
+		Owner:        c.cfg.Owner,
+		LeaseVersion: version,
+	}
+}
+
 func (c *Coordinator) assertLeadership(ctx context.Context) error {
 	if c.leaderLeaseStore == nil {
 		return nil
@@ -262,11 +279,11 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	if toClaim < 0 {
 		toClaim = 0
 	}
-	if toClaim > 0 {
+	if !c.markPaidCircuitOpen && toClaim > 0 {
 		if err := c.assertLeadership(ctx); err != nil {
 			return err
 		}
-		ws, err := c.store.ClaimUnbatched(ctx, c.cfg.Owner, c.cfg.ClaimTTL, toClaim)
+		ws, err := c.store.ClaimUnbatched(ctx, c.storeFence(), c.cfg.ClaimTTL, toClaim)
 		if err != nil {
 			return err
 		}
@@ -288,13 +305,15 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 		}
 	}
 
-	if batch, ok := c.batcher.FlushDue(); ok {
-		if err := c.assertLeadership(ctx); err != nil {
-			return errors.Join(tickErr, err)
-		}
-		c.releasePending(batch.Items)
-		if err := c.processNewBatch(ctx, batch); err != nil {
-			return errors.Join(tickErr, err)
+	if !c.markPaidCircuitOpen {
+		if batch, ok := c.batcher.FlushDue(); ok {
+			if err := c.assertLeadership(ctx); err != nil {
+				return errors.Join(tickErr, err)
+			}
+			c.releasePending(batch.Items)
+			if err := c.processNewBatch(ctx, batch); err != nil {
+				return errors.Join(tickErr, err)
+			}
 		}
 	}
 
@@ -314,37 +333,37 @@ func (c *Coordinator) releasePending(items []batching.Item[withdraw.Withdrawal])
 }
 
 func (c *Coordinator) resume(ctx context.Context) error {
-	// Planned or signing => sign.
-	for _, st := range []withdraw.BatchState{withdraw.BatchStatePlanned, withdraw.BatchStateSigning} {
-		batches, err := c.store.ListBatchesByState(ctx, st)
+	var resumeErr error
+	if !c.markPaidCircuitOpen {
+		for _, st := range []withdraw.BatchState{withdraw.BatchStatePlanned, withdraw.BatchStateSigning} {
+			batches, err := c.store.ListBatchesByState(ctx, st)
+			if err != nil {
+				return err
+			}
+			for _, b := range batches {
+				if err := c.assertLeadership(ctx); err != nil {
+					return err
+				}
+				if err := c.processBatchError(ctx, b.ID, "signing", c.signBatch(ctx, b.ID)); err != nil && resumeErr == nil {
+					resumeErr = err
+				}
+			}
+		}
+
+		signedBatches, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateSigned)
 		if err != nil {
 			return err
 		}
-		for _, b := range batches {
+		for _, b := range signedBatches {
 			if err := c.assertLeadership(ctx); err != nil {
 				return err
 			}
-			if err := c.signBatch(ctx, b.ID); err != nil {
-				return err
+			if err := c.processBatchError(ctx, b.ID, "broadcast", c.broadcastBatch(ctx, b.ID)); err != nil && resumeErr == nil {
+				resumeErr = err
 			}
 		}
 	}
 
-	// Signed => broadcast.
-	signedBatches, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateSigned)
-	if err != nil {
-		return err
-	}
-	for _, b := range signedBatches {
-		if err := c.assertLeadership(ctx); err != nil {
-			return err
-		}
-		if err := c.broadcastBatch(ctx, b.ID); err != nil {
-			return err
-		}
-	}
-
-	// Broadcasted => confirm.
 	bcast, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateBroadcasted)
 	if err != nil {
 		return err
@@ -353,11 +372,11 @@ func (c *Coordinator) resume(ctx context.Context) error {
 		if err := c.assertLeadership(ctx); err != nil {
 			return err
 		}
-		if err := c.confirmBatch(ctx, b.ID); err != nil {
-			return err
+		if err := c.processBatchError(ctx, b.ID, "confirm", c.confirmBatch(ctx, b.ID)); err != nil && resumeErr == nil {
+			resumeErr = err
 		}
 	}
-	return nil
+	return resumeErr
 }
 
 func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[withdraw.Withdrawal]) error {
@@ -381,7 +400,7 @@ func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[
 		return err
 	}
 
-	if err := c.store.CreatePlannedBatch(ctx, c.cfg.Owner, withdraw.Batch{
+	if err := c.store.CreatePlannedBatch(ctx, c.storeFence(), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: ids,
 		State:         withdraw.BatchStatePlanned,
@@ -409,6 +428,10 @@ func (c *Coordinator) signBatch(ctx context.Context, batchID [32]byte) error {
 }
 
 func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, allowReplan bool) error {
+	fence := c.storeFence()
+	if err := c.store.AdoptBatch(ctx, batchID, fence); err != nil {
+		return err
+	}
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -417,7 +440,7 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 		return nil
 	}
 
-	if err := c.store.MarkBatchSigning(ctx, batchID); err != nil {
+	if err := c.store.MarkBatchSigning(ctx, batchID, fence); err != nil {
 		return err
 	}
 
@@ -436,9 +459,6 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 				return c.signBatchWithRetry(ctx, batchID, false)
 			}
 		}
-		if dlqErr := c.maybeDLQWithdrawalBatch(ctx, b, "signing", "signing_failed", err.Error()); dlqErr != nil {
-			return dlqErr
-		}
 		return err
 	}
 	if err := c.assertLeadership(ctx); err != nil {
@@ -447,7 +467,7 @@ func (c *Coordinator) signBatchWithRetry(ctx context.Context, batchID [32]byte, 
 	if err := c.persistSignedTxArtifact(ctx, batchID, rawTx); err != nil {
 		return err
 	}
-	if err := c.store.SetBatchSigned(ctx, batchID, rawTx); err != nil {
+	if err := c.store.SetBatchSigned(ctx, batchID, fence, rawTx); err != nil {
 		return err
 	}
 	c.log.Info("batch signed", "batch_id", hex.EncodeToString(batchID[:]), "raw_tx_len", len(rawTx))
@@ -478,7 +498,7 @@ func (c *Coordinator) maybeReplanBatchAfterSigningFailure(ctx context.Context, b
 	if bytes.Equal(plan, b.TxPlan) {
 		return false, nil
 	}
-	if err := c.store.ResetBatchSigning(ctx, b.ID, plan); err != nil {
+	if err := c.store.ResetBatchSigning(ctx, b.ID, c.storeFence(), plan); err != nil {
 		if !errors.Is(err, withdraw.ErrInvalidTransition) {
 			return false, err
 		}
@@ -507,6 +527,10 @@ func (c *Coordinator) broadcastBatch(ctx context.Context, batchID [32]byte) erro
 }
 
 func (c *Coordinator) broadcastBatchWithRetry(ctx context.Context, batchID [32]byte, allowReplan bool) error {
+	fence := c.storeFence()
+	if err := c.store.AdoptBatch(ctx, batchID, fence); err != nil {
+		return err
+	}
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -521,6 +545,9 @@ func (c *Coordinator) broadcastBatchWithRetry(ctx context.Context, batchID [32]b
 	if err := c.ensureExpirySafety(ctx, b.WithdrawalIDs); err != nil {
 		return err
 	}
+	if err := c.store.MarkBatchBroadcastLocked(ctx, batchID, fence); err != nil {
+		return err
+	}
 
 	c.log.Info("batch broadcasting", "batch_id", hex.EncodeToString(batchID[:]))
 	if err := c.assertLeadership(ctx); err != nil {
@@ -528,79 +555,23 @@ func (c *Coordinator) broadcastBatchWithRetry(ctx context.Context, batchID [32]b
 	}
 	txid, err := c.broadcaster.Broadcast(ctx, b.SignedTx)
 	if err != nil {
-		if allowReplan {
-			replanned, replanErr := c.maybeReplanBatchAfterBroadcastFailure(ctx, b, err)
-			if replanErr != nil {
-				return replanErr
-			}
-			if replanned {
-				return c.broadcastBatchWithRetry(ctx, batchID, false)
-			}
-		}
 		return err
 	}
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
-	if err := c.store.SetBatchBroadcasted(ctx, batchID, txid); err != nil {
+	if err := c.store.SetBatchBroadcasted(ctx, batchID, fence, txid); err != nil {
 		return err
 	}
 	c.log.Info("batch broadcasted", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", txid)
 	return nil
 }
 
-func (c *Coordinator) maybeReplanBatchAfterBroadcastFailure(ctx context.Context, b withdraw.Batch, broadcastErr error) (bool, error) {
-	if !isStaleBroadcastTxError(broadcastErr) {
-		return false, nil
-	}
-
-	withdrawals := make([]withdraw.Withdrawal, 0, len(b.WithdrawalIDs))
-	for _, wid := range b.WithdrawalIDs {
-		w, err := c.store.GetWithdrawal(ctx, wid)
-		if err != nil {
-			return false, err
-		}
-		withdrawals = append(withdrawals, w)
-	}
-
-	plan, err := c.planner.Plan(ctx, b.ID, withdrawals)
-	if err != nil {
-		return false, err
-	}
-	if err := c.assertLeadership(ctx); err != nil {
-		return false, err
-	}
-	if bytes.Equal(plan, b.TxPlan) {
-		return false, nil
-	}
-	if err := c.store.ResetBatchPlanned(ctx, b.ID, plan); err != nil {
-		if !errors.Is(err, withdraw.ErrInvalidTransition) {
-			return false, err
-		}
-		b2, err2 := c.store.GetBatch(ctx, b.ID)
-		if err2 != nil {
-			return false, err2
-		}
-		if b2.State != withdraw.BatchStateSigned {
-			return false, nil
-		}
-		return false, err
-	}
-	c.log.Info(
-		"batch replanned after broadcast failure",
-		"batch_id", hex.EncodeToString(b.ID[:]),
-		"error", broadcastErr.Error(),
-	)
-	if err := c.persistTxPlanArtifact(ctx, b.ID, plan); err != nil {
-		return false, err
-	}
-	if err := c.signBatch(ctx, b.ID); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
 func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error {
+	fence := c.storeFence()
+	if err := c.store.AdoptBatch(ctx, batchID, fence); err != nil {
+		return err
+	}
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -611,8 +582,8 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 	if b.State < withdraw.BatchStateBroadcasted {
 		return withdraw.ErrInvalidTransition
 	}
-	if err := c.ensureExpirySafety(ctx, b.WithdrawalIDs); err != nil {
-		return err
+	if !b.JunoConfirmedAt.IsZero() {
+		return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
 	}
 	c.log.Info("batch confirming", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
 	if err := c.assertLeadership(ctx); err != nil {
@@ -623,8 +594,6 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			return nil
 		}
 		if errors.Is(err, ErrConfirmationMissing) {
-			// Double-spend prevention: verify the tx is truly missing from both
-			// mempool and chain before rebroadcasting.
 			if b.JunoTxID != "" {
 				status, txErr := c.txChecker.TxStatus(ctx, b.JunoTxID)
 				if txErr != nil {
@@ -633,34 +602,17 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 				}
 				switch status {
 				case TxStatusConfirmed:
-					// Tx is confirmed on-chain; advance directly.
+					if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
+						return err
+					}
 					return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
 				case TxStatusMempool:
-					// Tx is in mempool; wait — do not rebroadcast.
 					return nil
 				case TxStatusMissing:
-					// Tx appears missing. Wait for 1 more block and re-check
-					// to guard against propagation delay.
-					if recheck, recheckErr := c.waitOneBlockAndRecheck(ctx, b.JunoTxID); recheckErr != nil {
-						c.log.Error("wait-one-block recheck failed, skipping rebroadcast", "txid", b.JunoTxID, "err", recheckErr)
-						return nil
-					} else if recheck != TxStatusMissing {
-						if recheck == TxStatusConfirmed {
-							return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
-						}
-						// Back in mempool after the new block; keep waiting.
-						return nil
-					}
-					// Still missing after 1 block — proceed with rebroadcast below.
 				}
 			}
 
-			// Check max rebroadcast attempts.
 			if c.cfg.MaxRebroadcastAttempts > 0 && int(b.RebroadcastAttempts) >= c.cfg.MaxRebroadcastAttempts {
-				if err := c.maybeDLQWithdrawalBatch(ctx, b, "confirm", "rebroadcast_exhausted",
-					fmt.Sprintf("exceeded max rebroadcast attempts (%d)", c.cfg.MaxRebroadcastAttempts)); err != nil {
-					return err
-				}
 				return fmt.Errorf("%w: batch %x after %d attempts", ErrRebroadcastExhausted, b.ID[:8], b.RebroadcastAttempts)
 			}
 
@@ -668,14 +620,26 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 			if !b.NextRebroadcastAt.IsZero() && now.Before(b.NextRebroadcastAt) {
 				return nil
 			}
+			attempts := b.RebroadcastAttempts
+			if attempts == 0 {
+				attempts = 1
+			}
+			nextAt := now.Add(c.rebroadcastBackoff(attempts))
+			if err := c.store.SetBatchRebroadcastBackoff(ctx, b.ID, fence, b.RebroadcastAttempts, nextAt); err != nil {
+				return err
+			}
 			return c.rebroadcastSignedBatch(ctx, b.ID)
 		}
+		return err
+	}
+	if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
 		return err
 	}
 	return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
 }
 
 func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, withdrawalIDs [][32]byte, junoTxID string) error {
+	fence := c.storeFence()
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
@@ -683,54 +647,32 @@ func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, wi
 		return fmt.Errorf("%w: nil paid marker", ErrInvalidConfig)
 	}
 	if err := c.paidMarker.MarkPaid(ctx, withdrawalIDs); err != nil {
+		if _, ferr := c.store.RecordBatchMarkPaidFailure(ctx, batchID, fence, err.Error()); ferr != nil {
+			return ferr
+		}
+		c.markPaidFailureStreak++
+		if c.markPaidFailureStreak >= markPaidFailureOpenThreshold {
+			c.markPaidCircuitOpen = true
+		}
 		return err
 	}
-	if err := c.store.SetBatchConfirmed(ctx, batchID); err != nil {
+	c.markPaidFailureStreak = 0
+	c.markPaidCircuitOpen = false
+	if err := c.store.ResetBatchMarkPaidFailures(ctx, batchID, fence); err != nil {
+		return err
+	}
+	if err := c.store.SetBatchConfirmed(ctx, batchID, fence); err != nil {
 		return err
 	}
 	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", junoTxID)
 	return nil
 }
 
-// waitOneBlockAndRecheck waits for the Juno chain to advance by at least one
-// block, then re-checks the tx status. This prevents rebroadcasting a tx that
-// was recently submitted but hasn't propagated to the mempool yet.
-func (c *Coordinator) waitOneBlockAndRecheck(ctx context.Context, txid string) (string, error) {
-	startHeight, err := c.txChecker.TipHeight(ctx)
-	if err != nil {
-		return "", fmt.Errorf("get tip height: %w", err)
-	}
-
-	targetHeight := startHeight + 1
-	pollInterval := 2 * time.Second
-	timeout := 5 * time.Minute
-
-	deadline := c.cfg.Now().Add(timeout)
-	for {
-		if !c.cfg.Now().Before(deadline) {
-			return "", fmt.Errorf("timed out waiting for block %d (stuck at %d)", targetHeight, startHeight)
-		}
-		t := time.NewTimer(pollInterval)
-		select {
-		case <-ctx.Done():
-			t.Stop()
-			return "", ctx.Err()
-		case <-t.C:
-		}
-		h, err := c.txChecker.TipHeight(ctx)
-		if err != nil {
-			c.log.Warn("tip height poll failed, retrying", "err", err)
-			continue
-		}
-		if h >= targetHeight {
-			break
-		}
-	}
-
-	return c.txChecker.TxStatus(ctx, txid)
-}
-
 func (c *Coordinator) rebroadcastSignedBatch(ctx context.Context, batchID [32]byte) error {
+	fence := c.storeFence()
+	if err := c.store.AdoptBatch(ctx, batchID, fence); err != nil {
+		return err
+	}
 	b, err := c.store.GetBatch(ctx, batchID)
 	if err != nil {
 		return err
@@ -754,19 +696,43 @@ func (c *Coordinator) rebroadcastSignedBatch(ctx context.Context, batchID [32]by
 		return fmt.Errorf("withdrawcoordinator: rebroadcast returned empty txid")
 	}
 	if b.JunoTxID != "" && txid != b.JunoTxID {
-		return fmt.Errorf("withdrawcoordinator: rebroadcast txid mismatch: got %s want %s", txid, b.JunoTxID)
+		statuses := make(map[string]string, 2)
+		for _, candidate := range []string{b.JunoTxID, txid} {
+			if candidate == "" {
+				continue
+			}
+			status, statusErr := c.txChecker.TxStatus(ctx, candidate)
+			if statusErr != nil {
+				return statusErr
+			}
+			statuses[candidate] = status
+		}
+		switch {
+		case statuses[b.JunoTxID] == TxStatusConfirmed:
+			if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
+				return err
+			}
+			return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+		case statuses[txid] == TxStatusConfirmed:
+			if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
+				return err
+			}
+			return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, txid)
+		default:
+			return fmt.Errorf("withdrawcoordinator: rebroadcast txid mismatch: got %s want %s", txid, b.JunoTxID)
+		}
 	}
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
-	if err := c.store.SetBatchBroadcasted(ctx, b.ID, txid); err != nil {
+	if err := c.store.SetBatchBroadcasted(ctx, b.ID, fence, txid); err != nil {
 		return err
 	}
 
 	now := c.cfg.Now().UTC()
 	nextAttempts := b.RebroadcastAttempts + 1
 	nextAt := now.Add(c.rebroadcastBackoff(nextAttempts))
-	return c.store.SetBatchRebroadcastBackoff(ctx, b.ID, nextAttempts, nextAt)
+	return c.store.SetBatchRebroadcastBackoff(ctx, b.ID, fence, nextAttempts, nextAt)
 }
 
 func (c *Coordinator) ensureExpirySafety(ctx context.Context, withdrawalIDs [][32]byte) error {
@@ -865,6 +831,53 @@ func txPlanArtifactKey(batchID [32]byte) string {
 
 func signedTxArtifactKey(batchID [32]byte) string {
 	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/signed.tx"
+}
+
+func (c *Coordinator) processBatchError(ctx context.Context, batchID [32]byte, stage string, batchErr error) error {
+	if batchErr == nil {
+		return nil
+	}
+	if errors.Is(batchErr, ErrLeadershipLost) {
+		return batchErr
+	}
+
+	fence := c.storeFence()
+	errorCode := batchErrorCode(stage, batchErr)
+	updated, err := c.store.RecordBatchFailure(ctx, batchID, fence, stage, errorCode, batchErr.Error())
+	if err != nil {
+		return err
+	}
+
+	terminal := updated.FailureCount >= batchFailureDLQThreshold ||
+		errors.Is(batchErr, ErrRebroadcastExhausted) ||
+		errorCode == "rebroadcast_txid_mismatch"
+	if !terminal {
+		return batchErr
+	}
+	if err := c.maybeDLQWithdrawalBatch(ctx, updated, stage, errorCode, batchErr.Error()); err != nil {
+		return err
+	}
+	if err := c.store.MarkBatchDLQ(ctx, batchID, fence); err != nil {
+		return err
+	}
+	return batchErr
+}
+
+func batchErrorCode(stage string, err error) string {
+	switch {
+	case errors.Is(err, ErrRebroadcastExhausted):
+		return "rebroadcast_exhausted"
+	case strings.Contains(strings.ToLower(err.Error()), "txid mismatch"):
+		return "rebroadcast_txid_mismatch"
+	case stage == "signing":
+		return "signing_failed"
+	case stage == "broadcast":
+		return "broadcast_failed"
+	case stage == "confirm":
+		return "confirm_failed"
+	default:
+		return "batch_failed"
+	}
 }
 
 func (c *Coordinator) persistTxPlanArtifact(ctx context.Context, batchID [32]byte, txPlan []byte) error {

@@ -13,7 +13,6 @@ import (
 	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	"github.com/juno-intents/intents-juno/internal/leases"
-	"github.com/juno-intents/intents-juno/internal/policy"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -301,6 +300,10 @@ func seq32(start byte) (out [32]byte) {
 	return out
 }
 
+func testWithdrawFence(owner string) withdraw.Fence {
+	return withdraw.Fence{Owner: owner, LeaseVersion: 1}
+}
+
 func newCoordinatorForTest(cfg Config, store withdraw.Store, planner Planner, signer Signer, broadcaster Broadcaster, confirmer Confirmer, log *slog.Logger) (*Coordinator, error) {
 	c, err := New(cfg, store, planner, signer, broadcaster, confirmer, &stubTxChecker{}, log)
 	if err != nil {
@@ -374,10 +377,10 @@ func TestCoordinator_ResumeFromPlannedBatch(t *testing.T) {
 
 	w0 := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w0)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 10)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 10)
 
 	batchID := seq32(0x99)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w0.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -473,9 +476,9 @@ func TestCoordinator_BroadcastedPendingDoesNotFailTick(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x77)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -483,9 +486,10 @@ func TestCoordinator_BroadcastedPendingDoesNotFailTick(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePlannedBatch: %v", err)
 	}
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx1")
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending, ErrConfirmationPending}}
 	c, err := newCoordinatorForTest(Config{
@@ -523,9 +527,9 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x78)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -533,9 +537,10 @@ func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePlannedBatch: %v", err)
 	}
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-old")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-old")
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
@@ -588,9 +593,9 @@ func TestCoordinator_ReplansWhenSigningPlanTurnsStale(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x11), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x7a)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -654,7 +659,7 @@ func TestCoordinator_ReplansWhenSigningPlanTurnsStale(t *testing.T) {
 	}
 }
 
-func TestCoordinator_ReplansSignedBatchWhenBroadcastTxTurnsStale(t *testing.T) {
+func TestCoordinator_BroadcastLockedBatchDoesNotReplanWhenSignedTxTurnsStale(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
@@ -665,9 +670,9 @@ func TestCoordinator_ReplansSignedBatchWhenBroadcastTxTurnsStale(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x12), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x7b)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -675,15 +680,13 @@ func TestCoordinator_ReplansSignedBatchWhenBroadcastTxTurnsStale(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePlannedBatch: %v", err)
 	}
-	if err := store.MarkBatchSigning(ctx, batchID); err != nil {
+	if err := store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a")); err != nil {
 		t.Fatalf("MarkBatchSigning: %v", err)
 	}
-	if err := store.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+	if err := store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01}); err != nil {
 		t.Fatalf("SetBatchSigned: %v", err)
 	}
 
-	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":2}`)}}
-	signer := &txPlanAwareSigner{}
 	broadcaster := &txPlanAwareBroadcaster{}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationPending}}
 
@@ -693,39 +696,40 @@ func TestCoordinator_ReplansSignedBatchWhenBroadcastTxTurnsStale(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-	}, store, planner, signer, broadcaster, confirmer, nil)
+	}, store, &sequencePlanner{plans: [][]byte{[]byte(`{"v":2}`)}}, &txPlanAwareSigner{}, broadcaster, confirmer, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 
-	if err := c.broadcastBatch(ctx, batchID); err != nil {
-		t.Fatalf("broadcastBatch: %v", err)
+	err = c.broadcastBatch(ctx, batchID)
+	if err == nil {
+		t.Fatal("expected stale signed-tx broadcast error")
+	}
+	if !strings.Contains(strings.ToLower(err.Error()), "tx-expiring-soon") {
+		t.Fatalf("expected tx-expiring-soon error, got %v", err)
 	}
 
 	b, err := store.GetBatch(ctx, batchID)
 	if err != nil {
 		t.Fatalf("GetBatch: %v", err)
 	}
-	if b.State != withdraw.BatchStateBroadcasted {
-		t.Fatalf("expected batch to recover to broadcasted, got %s", b.State)
+	if b.State != withdraw.BatchStateSigned {
+		t.Fatalf("expected batch to remain signed, got %s", b.State)
 	}
-	if b.JunoTxID != "tx-fresh" {
-		t.Fatalf("juno txid: got %q want %q", b.JunoTxID, "tx-fresh")
+	if b.JunoTxID != "" {
+		t.Fatalf("juno txid: got %q want empty", b.JunoTxID)
 	}
-	if got, want := string(b.TxPlan), `{"v":2}`; got != want {
-		t.Fatalf("tx plan after recovery: got %q want %q", got, want)
+	if got, want := string(b.TxPlan), `{"v":1}`; got != want {
+		t.Fatalf("tx plan after broadcast failure: got %q want %q", got, want)
 	}
-	if planner.calls != 1 {
-		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
 	}
-	if signer.calls != 1 {
-		t.Fatalf("signer calls: got %d want 1", signer.calls)
-	}
-	if broadcaster.calls != 2 {
-		t.Fatalf("broadcaster calls: got %d want 2", broadcaster.calls)
-	}
-	if len(broadcaster.rawTx) != 2 || broadcaster.rawTx[0][0] != 0x01 || broadcaster.rawTx[1][0] != 0x02 {
+	if len(broadcaster.rawTx) != 1 || broadcaster.rawTx[0][0] != 0x01 {
 		t.Fatalf("unexpected raw tx sequence: %v", broadcaster.rawTx)
+	}
+	if b.BroadcastLockedAt.IsZero() {
+		t.Fatal("expected broadcast lock to be persisted")
 	}
 }
 
@@ -751,9 +755,9 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x79)
-	if err := store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -761,9 +765,10 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("CreatePlannedBatch: %v", err)
 	}
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-old")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-old")
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
@@ -800,7 +805,7 @@ func TestCoordinator_RebroadcastBackoffSkipsUntilDue(t *testing.T) {
 	}
 }
 
-func TestCoordinator_ReplansSignedBatchAfterTxExpiringSoonBroadcastError(t *testing.T) {
+func TestCoordinator_DoesNotReplanSignedBatchAfterTxExpiringSoonBroadcastError(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
@@ -820,11 +825,10 @@ func TestCoordinator_ReplansSignedBatchAfterTxExpiringSoonBroadcastError(t *test
 		t.Fatalf("UpsertRequested: %v", err)
 	}
 
-	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":1}`), []byte(`{"v":2}`)}}
+	planner := &sequencePlanner{plans: [][]byte{[]byte(`{"v":1}`)}}
 	signer := &sequenceSigner{}
 	broadcaster := &txAwareBroadcaster{}
 	confirmer := &stubConfirmer{}
-	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
 		Owner:    "a",
@@ -836,40 +840,42 @@ func TestCoordinator_ReplansSignedBatchAfterTxExpiringSoonBroadcastError(t *test
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithPaidMarker(paidMarker)
 
-	if err := c.Tick(ctx); err != nil {
-		t.Fatalf("Tick: %v", err)
+	err = c.Tick(ctx)
+	if err == nil {
+		t.Fatal("expected broadcast error")
 	}
-
-	if planner.calls != 2 {
-		t.Fatalf("planner calls: got %d want 2", planner.calls)
+	if !strings.Contains(strings.ToLower(err.Error()), "tx-expiring-soon") {
+		t.Fatalf("expected tx-expiring-soon error, got %v", err)
 	}
-	if signer.calls != 2 {
-		t.Fatalf("signer calls: got %d want 2", signer.calls)
+	if planner.calls != 1 {
+		t.Fatalf("planner calls: got %d want 1", planner.calls)
 	}
-	if got, want := signer.plans, []string{`{"v":1}`, `{"v":2}`}; !bytes.Equal([]byte(strings.Join(got, ",")), []byte(strings.Join(want, ","))) {
+	if signer.calls != 1 {
+		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	}
+	if got, want := signer.plans, []string{`{"v":1}`}; !bytes.Equal([]byte(strings.Join(got, ",")), []byte(strings.Join(want, ","))) {
 		t.Fatalf("signer plans: got %v want %v", got, want)
 	}
-	if broadcaster.calls != 2 {
-		t.Fatalf("broadcaster calls: got %d want 2", broadcaster.calls)
+	if broadcaster.calls != 1 {
+		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
 	}
 
 	b, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{w.ID}))
 	if err != nil {
 		t.Fatalf("GetBatch: %v", err)
 	}
-	if b.State != withdraw.BatchStateConfirmed {
-		t.Fatalf("batch state: got %s want %s", b.State, withdraw.BatchStateConfirmed)
+	if b.State != withdraw.BatchStateSigned {
+		t.Fatalf("batch state: got %s want %s", b.State, withdraw.BatchStateSigned)
 	}
-	if got, want := string(b.TxPlan), `{"v":2}`; got != want {
-		t.Fatalf("tx plan after recovery: got %q want %q", got, want)
+	if got, want := string(b.TxPlan), `{"v":1}`; got != want {
+		t.Fatalf("tx plan after failure: got %q want %q", got, want)
 	}
-	if got, want := b.JunoTxID, "tx-replanned"; got != want {
-		t.Fatalf("juno txid: got %q want %q", got, want)
+	if b.JunoTxID != "" {
+		t.Fatalf("juno txid: got %q want empty", b.JunoTxID)
 	}
-	if paidMarker.calls != 1 {
-		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
+	if b.BroadcastLockedAt.IsZero() {
+		t.Fatal("expected broadcast lock to be persisted")
 	}
 }
 
@@ -1121,17 +1127,18 @@ func TestCoordinator_DoubleSpendPrevention_TxConfirmed(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x80)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-existing")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-existing")
 
 	planner := &stubPlanner{}
 	signer := &stubSigner{}
@@ -1191,17 +1198,18 @@ func TestCoordinator_DoubleSpendPrevention_TxInMempool(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x81)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-in-mempool")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-in-mempool")
 
 	// Tick calls resume() twice (beginning + end), so the confirmer is called twice.
 	// Both calls should return ErrConfirmationMissing so the batch stays broadcasted.
@@ -1249,19 +1257,20 @@ func TestCoordinator_MaxRebroadcastAttempts(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x82)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-gone")
 	// Set RebroadcastAttempts to the max.
-	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 5, now.Add(-1*time.Hour))
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, testWithdrawFence("a"), 5, now.Add(-1*time.Hour))
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 
@@ -1297,27 +1306,28 @@ func TestCoordinator_WaitOneBlock_TxAppearsInMempool(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x10), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x83)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-slow-propagate")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-slow-propagate")
 
-	// Tick calls resume() twice (beginning + end), so provide statuses for both passes.
-	// Pass 1: TxStatusMissing → wait-one-block → TxStatusMempool → abort rebroadcast.
-	// Pass 2: TxStatusMissing → wait-one-block → TxStatusMempool → abort rebroadcast.
+	// Tick calls resume() twice (beginning + end).
+	// Pass 1: TxStatusMissing triggers an immediate same-bytes rebroadcast.
+	// Pass 2: TxStatusMempool leaves the batch in broadcasted state.
 	txChecker := &stubTxChecker{statuses: []string{
 		TxStatusMissing, TxStatusMempool, // pass 1
 		TxStatusMissing, TxStatusMempool, // pass 2
 	}}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationMissing}}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-slow-propagate"}
 	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
@@ -1336,9 +1346,9 @@ func TestCoordinator_WaitOneBlock_TxAppearsInMempool(t *testing.T) {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	// Tx appeared in mempool after 1 block; no rebroadcast.
-	if broadcaster.calls != 0 {
-		t.Fatalf("expected no rebroadcast after tx appeared in mempool, got broadcaster=%d", broadcaster.calls)
+	// A missing tx now schedules an immediate same-bytes rebroadcast and leaves the batch broadcasted.
+	if broadcaster.calls != 1 {
+		t.Fatalf("expected exactly one rebroadcast after tx went missing, got broadcaster=%d", broadcaster.calls)
 	}
 
 	b, err := store.GetBatch(ctx, batchID)
@@ -1364,23 +1374,24 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x11), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x84)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-confirmed-late")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-confirmed-late")
 
-	// First TxStatus: Missing → triggers wait-one-block.
-	// Second TxStatus (after block): Confirmed → advance to confirmed.
-	txChecker := &stubTxChecker{statuses: []string{TxStatusMissing, TxStatusConfirmed}}
+	// First pass sees the tx as missing and rebroadcasts the same signed bytes.
+	// Second pass confirms the tx and finalizes the batch.
+	txChecker := &stubTxChecker{statuses: []string{TxStatusMissing}}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
-	broadcaster := &stubBroadcaster{}
+	broadcaster := &stubBroadcaster{txid: "tx-confirmed-late"}
 	paidMarker := &stubPaidMarker{}
 
 	c, err := New(Config{
@@ -1399,9 +1410,8 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 		t.Fatalf("Tick: %v", err)
 	}
 
-	// Tx was confirmed after 1 block; no rebroadcast, batch advanced.
-	if broadcaster.calls != 0 {
-		t.Fatalf("expected no rebroadcast, got broadcaster=%d", broadcaster.calls)
+	if broadcaster.calls != 1 {
+		t.Fatalf("expected one rebroadcast before confirmation, got broadcaster=%d", broadcaster.calls)
 	}
 
 	b, err := store.GetBatch(ctx, batchID)
@@ -1427,17 +1437,18 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 
 	w := withdraw.Withdrawal{ID: seq32(0x12), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x85)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-paid-marker-fail")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-paid-marker-fail")
 
 	txChecker := &stubTxChecker{statuses: []string{TxStatusConfirmed}}
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
@@ -1486,17 +1497,18 @@ func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
 
 	stuck := withdraw.Withdrawal{ID: seq32(0x20), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(30 * time.Second)}
 	_, _, _ = store.UpsertRequested(ctx, stuck)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	stuckBatchID := seq32(0x86)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            stuckBatchID,
 		WithdrawalIDs: [][32]byte{stuck.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, stuckBatchID)
-	_ = store.SetBatchSigned(ctx, stuckBatchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, stuckBatchID, "tx-stuck")
+	_ = store.MarkBatchSigning(ctx, stuckBatchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, stuckBatchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, stuckBatchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, stuckBatchID, testWithdrawFence("a"), "tx-stuck")
 
 	fresh := withdraw.Withdrawal{ID: seq32(0x21), Amount: 2, FeeBps: 0, RecipientUA: []byte{0x02}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, fresh)
@@ -1505,12 +1517,11 @@ func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
 	signer := &stubSigner{}
 	broadcaster := &stubBroadcaster{txid: "tx-fresh"}
 	confirmer := &stubConfirmer{errs: []error{
-		ErrConfirmationPending,
-		ErrConfirmationPending,
+		nil,
 		ErrConfirmationPending,
 		ErrConfirmationPending,
 	}}
-	extender := &failingExpiryExtender{err: errors.New("extend signer unavailable")}
+	paidMarker := &stubPaidMarker{err: errors.New("base relay unavailable")}
 
 	c, err := New(Config{
 		Owner:    "a",
@@ -1518,26 +1529,21 @@ func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
 		Now:      nowFn,
-		ExpiryPolicy: policy.WithdrawExpiryConfig{
-			SafetyMargin: 2 * time.Minute,
-			MaxExtension: time.Hour,
-			MaxBatch:     10,
-		},
 	}, store, planner, signer, broadcaster, confirmer, &stubTxChecker{}, nil)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	c.WithExpiryExtender(extender)
+	c.WithPaidMarker(paidMarker)
 
 	err = c.Tick(ctx)
 	if err == nil {
 		t.Fatal("expected Tick error")
 	}
-	if !strings.Contains(err.Error(), "extend signer unavailable") {
-		t.Fatalf("expected extend signer error, got %v", err)
+	if !strings.Contains(err.Error(), "base relay unavailable") {
+		t.Fatalf("expected paid marker error, got %v", err)
 	}
-	if extender.calls == 0 {
-		t.Fatal("expected expiry extender to be called")
+	if paidMarker.calls != 1 {
+		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
 	}
 	if planner.calls != 1 {
 		t.Fatalf("planner calls: got %d want 1", planner.calls)
@@ -1577,19 +1583,20 @@ func TestCoordinator_DLQ_RebroadcastExhausted(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x90)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-gone")
 	// Set RebroadcastAttempts to the max.
-	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 2, now.Add(-1*time.Hour))
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, testWithdrawFence("a"), 2, now.Add(-1*time.Hour))
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 	dlqStore := dlq.NewMemoryStore(nil)
@@ -1655,18 +1662,19 @@ func TestCoordinator_DLQInsertFailureKeepsRebroadcastRetryable(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x92)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
-	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 2, now.Add(-1*time.Hour))
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-gone")
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, testWithdrawFence("a"), 2, now.Add(-1*time.Hour))
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing, ErrConfirmationMissing}}
 	dlqStore := newFlakyDLQStore()
@@ -1752,9 +1760,9 @@ func TestCoordinator_DLQ_SigningFailed(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x91)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -1775,12 +1783,18 @@ func TestCoordinator_DLQ_SigningFailed(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	err = c.Tick(ctx)
-	if err == nil {
-		t.Fatal("expected signing error")
+	for i := 0; i < 2; i++ {
+		err = c.Tick(ctx)
+		if err == nil {
+			t.Fatal("expected signing error")
+		}
+		if !strings.Contains(err.Error(), "hsm unavailable") {
+			t.Fatalf("expected signing error, got %v", err)
+		}
 	}
-	if !strings.Contains(err.Error(), "hsm unavailable") {
-		t.Fatalf("expected signing error, got %v", err)
+
+	if err = c.Tick(ctx); err != nil {
+		t.Fatalf("expected no further error after batch DLQ, got %v", err)
 	}
 
 	counts, cerr := dlqStore.CountUnacknowledged(ctx)
@@ -1788,7 +1802,7 @@ func TestCoordinator_DLQ_SigningFailed(t *testing.T) {
 		t.Fatalf("CountUnacknowledged: %v", cerr)
 	}
 	if counts.WithdrawalBatches != 1 {
-		t.Fatalf("expected 1 withdrawal batch DLQ entry, got %d", counts.WithdrawalBatches)
+		t.Fatalf("expected 1 withdrawal batch DLQ entry after repeated failures, got %d", counts.WithdrawalBatches)
 	}
 
 	recs, lerr := dlqStore.ListWithdrawalBatchDLQ(ctx, dlq.DLQFilter{})
@@ -1817,18 +1831,19 @@ func TestCoordinator_DLQ_NilStoreSkipsDLQ(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x92)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx-gone")
-	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, 5, now.Add(-1*time.Hour))
+	_ = store.MarkBatchSigning(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testWithdrawFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testWithdrawFence("a"), "tx-gone")
+	_ = store.SetBatchRebroadcastBackoff(ctx, batchID, testWithdrawFence("a"), 5, now.Add(-1*time.Hour))
 
 	confirmer := &stubConfirmer{errs: []error{ErrConfirmationMissing}}
 

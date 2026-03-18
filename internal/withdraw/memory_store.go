@@ -3,7 +3,6 @@ package withdraw
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"slices"
 	"sync"
 	"time"
@@ -21,8 +20,9 @@ type withdrawalRec struct {
 	w      Withdrawal
 	status WithdrawalStatus
 
-	claimedBy      string
-	claimExpiresAt time.Time
+	claimedBy        string
+	claimLeaseVersion int64
+	claimExpiresAt   time.Time
 
 	batchID [32]byte
 }
@@ -59,29 +59,30 @@ func (s *MemoryStore) UpsertRequested(_ context.Context, w Withdrawal) (Withdraw
 	return cloneWithdrawal(rec.w), false, nil
 }
 
-func (s *MemoryStore) ClaimUnbatched(_ context.Context, owner string, ttl time.Duration, max int) ([]Withdrawal, error) {
-	if owner == "" || ttl <= 0 || max <= 0 {
+func (s *MemoryStore) ClaimUnbatched(_ context.Context, fence Fence, ttl time.Duration, max int) ([]Withdrawal, error) {
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	if ttl <= 0 || max <= 0 {
 		return nil, ErrInvalidConfig
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	now := s.now()
+	now := s.now().UTC()
 
 	ids := make([][32]byte, 0, len(s.withdrawals))
 	for id, rec := range s.withdrawals {
-		if rec.batchID != ([32]byte{}) {
+		if rec.batchID != ([32]byte{}) || rec.status != WithdrawalStatusRequested {
 			continue
 		}
-		// Skip actively claimed withdrawals.
 		if rec.claimedBy != "" && rec.claimExpiresAt.After(now) {
 			continue
 		}
 		ids = append(ids, id)
 	}
 	slices.SortFunc(ids, func(a, b [32]byte) int { return bytes.Compare(a[:], b[:]) })
-
 	if len(ids) > max {
 		ids = ids[:max]
 	}
@@ -89,7 +90,8 @@ func (s *MemoryStore) ClaimUnbatched(_ context.Context, owner string, ttl time.D
 	out := make([]Withdrawal, 0, len(ids))
 	for _, id := range ids {
 		rec := s.withdrawals[id]
-		rec.claimedBy = owner
+		rec.claimedBy = fence.Owner
+		rec.claimLeaseVersion = fence.LeaseVersion
 		rec.claimExpiresAt = now.Add(ttl)
 		s.withdrawals[id] = rec
 		out = append(out, cloneWithdrawal(rec.w))
@@ -97,21 +99,12 @@ func (s *MemoryStore) ClaimUnbatched(_ context.Context, owner string, ttl time.D
 	return out, nil
 }
 
-func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batch) error {
-	if owner == "" {
+func (s *MemoryStore) CreatePlannedBatch(_ context.Context, fence Fence, b Batch) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if b.ID == ([32]byte{}) || b.State != BatchStatePlanned || len(b.WithdrawalIDs) == 0 || len(b.TxPlan) == 0 {
 		return ErrInvalidConfig
-	}
-	if b.ID == ([32]byte{}) {
-		return fmt.Errorf("%w: missing batch id", ErrInvalidConfig)
-	}
-	if b.State != BatchStatePlanned {
-		return fmt.Errorf("%w: batch state must be planned", ErrInvalidConfig)
-	}
-	if len(b.WithdrawalIDs) == 0 {
-		return fmt.Errorf("%w: empty withdrawal ids", ErrInvalidConfig)
-	}
-	if len(b.TxPlan) == 0 {
-		return fmt.Errorf("%w: empty tx plan", ErrInvalidConfig)
 	}
 
 	s.mu.Lock()
@@ -122,18 +115,21 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 		return err
 	}
 
-	// Idempotency: if batch exists, require exact match.
 	if existing, ok := s.batches[b.ID]; ok {
-		if existing.State < BatchStatePlanned {
-			return ErrInvalidTransition
+		want := Batch{
+			ID:            b.ID,
+			WithdrawalIDs: ids,
+			State:         BatchStatePlanned,
+			LeaseOwner:    fence.Owner,
+			LeaseVersion:  fence.LeaseVersion,
+			TxPlan:        b.TxPlan,
 		}
-		if !batchEqual(existing, Batch{ID: b.ID, WithdrawalIDs: ids, State: BatchStatePlanned, TxPlan: b.TxPlan}) {
+		if !batchEqual(existing, want) {
 			return ErrBatchMismatch
 		}
 		return nil
 	}
 
-	// Ensure all withdrawals exist, are unbatched, and are claimed by owner.
 	for _, id := range ids {
 		rec, ok := s.withdrawals[id]
 		if !ok {
@@ -142,16 +138,17 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 		if rec.batchID != ([32]byte{}) {
 			return ErrInvalidTransition
 		}
-		if rec.claimedBy != owner {
+		if rec.claimedBy != fence.Owner || rec.claimLeaseVersion != fence.LeaseVersion {
 			return ErrInvalidTransition
 		}
 	}
 
-	// Create the batch and assign withdrawals to it.
 	nb := Batch{
 		ID:            b.ID,
 		WithdrawalIDs: ids,
 		State:         BatchStatePlanned,
+		LeaseOwner:    fence.Owner,
+		LeaseVersion:  fence.LeaseVersion,
 		TxPlan:        append([]byte(nil), b.TxPlan...),
 	}
 	s.batches[b.ID] = nb
@@ -161,6 +158,7 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, owner string, b Batc
 		rec.batchID = b.ID
 		rec.status = WithdrawalStatusBatched
 		rec.claimedBy = ""
+		rec.claimLeaseVersion = 0
 		rec.claimExpiresAt = time.Time{}
 		s.withdrawals[id] = rec
 	}
@@ -206,7 +204,7 @@ func (s *MemoryStore) ListBatchesByState(_ context.Context, state BatchState) ([
 
 	var out []Batch
 	for _, b := range s.batches {
-		if b.State == state {
+		if b.State == state && b.DLQAt.IsZero() {
 			out = append(out, cloneBatch(b))
 		}
 	}
@@ -214,7 +212,11 @@ func (s *MemoryStore) ListBatchesByState(_ context.Context, state BatchState) ([
 	return out, nil
 }
 
-func (s *MemoryStore) MarkBatchSigning(_ context.Context, batchID [32]byte) error {
+func (s *MemoryStore) AdoptBatch(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -222,14 +224,41 @@ func (s *MemoryStore) MarkBatchSigning(_ context.Context, batchID [32]byte) erro
 	if !ok {
 		return ErrNotFound
 	}
+	if b.LeaseVersion > fence.LeaseVersion {
+		return ErrInvalidTransition
+	}
+	if b.LeaseVersion == fence.LeaseVersion {
+		if b.LeaseOwner == "" || b.LeaseOwner == fence.Owner {
+			b.LeaseOwner = fence.Owner
+			s.batches[batchID] = b
+			return nil
+		}
+		return ErrInvalidTransition
+	}
+	b.LeaseOwner = fence.Owner
+	b.LeaseVersion = fence.LeaseVersion
+	s.batches[batchID] = b
+	return nil
+}
 
+func (s *MemoryStore) MarkBatchSigning(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
 	switch b.State {
 	case BatchStatePlanned, BatchStateSigning:
 		b.State = BatchStateSigning
 		s.batches[batchID] = b
 		return nil
 	default:
-		// Already progressed beyond signing.
 		if b.State > BatchStateSigning {
 			return nil
 		}
@@ -237,7 +266,40 @@ func (s *MemoryStore) MarkBatchSigning(_ context.Context, batchID [32]byte) erro
 	}
 }
 
-func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, signedTx []byte) error {
+func (s *MemoryStore) ResetBatchSigning(_ context.Context, batchID [32]byte, fence Fence, txPlan []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if len(txPlan) == 0 {
+		return ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
+	if b.State != BatchStateSigning {
+		return ErrInvalidTransition
+	}
+
+	b.State = BatchStatePlanned
+	b.TxPlan = append([]byte(nil), txPlan...)
+	b.SignedTx = nil
+	b.BroadcastLockedAt = time.Time{}
+	b.JunoTxID = ""
+	b.BaseTxHash = ""
+	b.NextRebroadcastAt = time.Time{}
+	s.batches[batchID] = b
+	return nil
+}
+
+func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, fence Fence, signedTx []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if len(signedTx) == 0 {
 		return ErrInvalidConfig
 	}
@@ -245,15 +307,13 @@ func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, signed
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
-
 	if b.State < BatchStateSigning {
 		return ErrInvalidTransition
 	}
-
 	if b.State >= BatchStateSigned {
 		if !bytes.Equal(b.SignedTx, signedTx) {
 			return ErrBatchMismatch
@@ -267,32 +327,35 @@ func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, signed
 	return nil
 }
 
-func (s *MemoryStore) ResetBatchSigning(_ context.Context, batchID [32]byte, txPlan []byte) error {
-	if len(txPlan) == 0 {
-		return ErrInvalidConfig
+func (s *MemoryStore) MarkBatchBroadcastLocked(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
-	if b.State != BatchStateSigning {
+	if b.State < BatchStateSigned {
 		return ErrInvalidTransition
 	}
-
-	b.State = BatchStatePlanned
-	b.TxPlan = append([]byte(nil), txPlan...)
-	b.SignedTx = nil
-	b.JunoTxID = ""
-	b.NextRebroadcastAt = time.Time{}
-	s.batches[batchID] = b
+	if b.State >= BatchStateBroadcasted {
+		return nil
+	}
+	if b.BroadcastLockedAt.IsZero() {
+		b.BroadcastLockedAt = s.now().UTC()
+		s.batches[batchID] = b
+	}
 	return nil
 }
 
-func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, txid string) error {
+func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, fence Fence, txid string) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if txid == "" {
 		return ErrInvalidConfig
 	}
@@ -300,20 +363,21 @@ func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, t
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
-
 	if b.State < BatchStateSigned {
 		return ErrInvalidTransition
 	}
-
 	if b.State >= BatchStateBroadcasted {
 		if b.JunoTxID != txid {
 			return ErrBatchMismatch
 		}
 		return nil
+	}
+	if b.BroadcastLockedAt.IsZero() {
+		return ErrInvalidTransition
 	}
 
 	b.State = BatchStateBroadcasted
@@ -323,7 +387,10 @@ func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, t
 	return nil
 }
 
-func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, txPlan []byte) error {
+func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, fence Fence, txPlan []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if len(txPlan) == 0 {
 		return ErrInvalidConfig
 	}
@@ -331,11 +398,14 @@ func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, txP
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
 	if b.State != BatchStateSigned && b.State != BatchStateBroadcasted {
+		return ErrInvalidTransition
+	}
+	if !b.BroadcastLockedAt.IsZero() {
 		return ErrInvalidTransition
 	}
 
@@ -348,24 +418,155 @@ func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, txP
 	return nil
 }
 
-func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) error {
+func (s *MemoryStore) SetBatchRebroadcastBackoff(_ context.Context, batchID [32]byte, fence Fence, attempts uint32, next time.Time) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if next.IsZero() {
+		return ErrInvalidConfig
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
-
-	if b.State < BatchStateBroadcasted {
+	if b.State != BatchStateBroadcasted {
 		return ErrInvalidTransition
 	}
 
+	b.RebroadcastAttempts = attempts
+	b.NextRebroadcastAt = next.UTC()
+	s.batches[batchID] = b
+	return nil
+}
+
+func (s *MemoryStore) MarkBatchJunoConfirmed(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
+	if b.State != BatchStateBroadcasted {
+		return ErrInvalidTransition
+	}
+	if b.JunoConfirmedAt.IsZero() {
+		b.JunoConfirmedAt = s.now().UTC()
+		s.batches[batchID] = b
+	}
+	return nil
+}
+
+func (s *MemoryStore) RecordBatchFailure(_ context.Context, batchID [32]byte, fence Fence, stage string, errorCode string, errorMessage string) (Batch, error) {
+	if err := fence.Validate(); err != nil {
+		return Batch{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return Batch{}, err
+	}
+	b.FailureCount++
+	b.LastFailureStage = stage
+	b.LastErrorCode = errorCode
+	b.LastErrorMessage = errorMessage
+	b.LastFailedAt = s.now().UTC()
+	s.batches[batchID] = b
+	return cloneBatch(b), nil
+}
+
+func (s *MemoryStore) RecordBatchMarkPaidFailure(_ context.Context, batchID [32]byte, fence Fence, errorMessage string) (Batch, error) {
+	if err := fence.Validate(); err != nil {
+		return Batch{}, err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return Batch{}, err
+	}
+	b.MarkPaidFailures++
+	b.LastMarkPaidError = errorMessage
+	s.batches[batchID] = b
+	return cloneBatch(b), nil
+}
+
+func (s *MemoryStore) ResetBatchMarkPaidFailures(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
+	b.MarkPaidFailures = 0
+	b.LastMarkPaidError = ""
+	s.batches[batchID] = b
+	return nil
+}
+
+func (s *MemoryStore) MarkBatchDLQ(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
+	if b.DLQAt.IsZero() {
+		b.DLQAt = s.now().UTC()
+		s.batches[batchID] = b
+	}
+	return nil
+}
+
+func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
+	}
+	if b.State < BatchStateBroadcasted {
+		return ErrInvalidTransition
+	}
 	if b.State >= BatchStateConfirmed {
 		return nil
 	}
+	if b.JunoConfirmedAt.IsZero() {
+		return ErrInvalidTransition
+	}
 
 	b.State = BatchStateConfirmed
+	b.NextRebroadcastAt = time.Time{}
+	b.MarkPaidFailures = 0
+	b.LastMarkPaidError = ""
 	s.batches[batchID] = b
 	for _, id := range b.WithdrawalIDs {
 		rec := s.withdrawals[id]
@@ -375,13 +576,17 @@ func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte) err
 	return nil
 }
 
-func (s *MemoryStore) MarkBatchFinalizing(_ context.Context, batchID [32]byte) error {
+func (s *MemoryStore) MarkBatchFinalizing(_ context.Context, batchID [32]byte, fence Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
 	if b.State < BatchStateConfirmed {
 		return ErrInvalidTransition
@@ -395,29 +600,10 @@ func (s *MemoryStore) MarkBatchFinalizing(_ context.Context, batchID [32]byte) e
 	return nil
 }
 
-func (s *MemoryStore) SetBatchRebroadcastBackoff(_ context.Context, batchID [32]byte, attempts uint32, next time.Time) error {
-	if next.IsZero() {
-		return ErrInvalidConfig
+func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, fence Fence, baseTxHash string) error {
+	if err := fence.Validate(); err != nil {
+		return err
 	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
-	}
-	if b.State != BatchStateBroadcasted {
-		return ErrInvalidTransition
-	}
-
-	b.RebroadcastAttempts = attempts
-	b.NextRebroadcastAt = next
-	s.batches[batchID] = b
-	return nil
-}
-
-func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, baseTxHash string) error {
 	if baseTxHash == "" {
 		return ErrInvalidConfig
 	}
@@ -425,15 +611,13 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, bas
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	b, ok := s.batches[batchID]
-	if !ok {
-		return ErrNotFound
+	b, err := s.batchForMutation(batchID, fence)
+	if err != nil {
+		return err
 	}
-
 	if b.State < BatchStateConfirmed {
 		return ErrInvalidTransition
 	}
-
 	if b.State >= BatchStateFinalized {
 		if b.BaseTxHash != baseTxHash {
 			return ErrBatchMismatch
@@ -445,6 +629,17 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, bas
 	b.BaseTxHash = baseTxHash
 	s.batches[batchID] = b
 	return nil
+}
+
+func (s *MemoryStore) batchForMutation(batchID [32]byte, fence Fence) (Batch, error) {
+	b, ok := s.batches[batchID]
+	if !ok {
+		return Batch{}, ErrNotFound
+	}
+	if b.LeaseOwner != fence.Owner || b.LeaseVersion != fence.LeaseVersion {
+		return Batch{}, ErrInvalidTransition
+	}
+	return b, nil
 }
 
 func cloneWithdrawal(w Withdrawal) Withdrawal {
@@ -490,13 +685,28 @@ func cloneBatch(b Batch) Batch {
 }
 
 func batchEqual(a, b Batch) bool {
-	if a.ID != b.ID || a.State != b.State || a.JunoTxID != b.JunoTxID || a.BaseTxHash != b.BaseTxHash {
+	if a.ID != b.ID ||
+		a.State != b.State ||
+		a.LeaseOwner != b.LeaseOwner ||
+		a.LeaseVersion != b.LeaseVersion ||
+		a.JunoTxID != b.JunoTxID ||
+		a.BaseTxHash != b.BaseTxHash ||
+		a.FailureCount != b.FailureCount ||
+		a.LastFailureStage != b.LastFailureStage ||
+		a.LastErrorCode != b.LastErrorCode ||
+		a.LastErrorMessage != b.LastErrorMessage ||
+		a.MarkPaidFailures != b.MarkPaidFailures ||
+		a.LastMarkPaidError != b.LastMarkPaidError {
+		return false
+	}
+	if !a.BroadcastLockedAt.Equal(b.BroadcastLockedAt) ||
+		!a.JunoConfirmedAt.Equal(b.JunoConfirmedAt) ||
+		!a.NextRebroadcastAt.Equal(b.NextRebroadcastAt) ||
+		!a.LastFailedAt.Equal(b.LastFailedAt) ||
+		!a.DLQAt.Equal(b.DLQAt) {
 		return false
 	}
 	if a.RebroadcastAttempts != b.RebroadcastAttempts {
-		return false
-	}
-	if !a.NextRebroadcastAt.Equal(b.NextRebroadcastAt) {
 		return false
 	}
 	if len(a.WithdrawalIDs) != len(b.WithdrawalIDs) {

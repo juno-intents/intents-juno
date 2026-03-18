@@ -128,11 +128,14 @@ func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (wit
 	return existing, false, nil
 }
 
-func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Duration, max int) ([]withdraw.Withdrawal, error) {
+func (s *Store) ClaimUnbatched(ctx context.Context, fence withdraw.Fence, ttl time.Duration, max int) ([]withdraw.Withdrawal, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
-	if owner == "" || ttl <= 0 || max <= 0 {
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	if ttl <= 0 || max <= 0 {
 		return nil, withdraw.ErrInvalidConfig
 	}
 
@@ -145,7 +148,7 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 			WHERE NOT EXISTS (
 				SELECT 1 FROM withdrawal_batch_items wbi WHERE wbi.withdrawal_id = wr.withdrawal_id
 			)
-			AND wr.status = $4
+			AND wr.status = $5
 			AND (wr.claimed_by IS NULL OR wr.claim_expires_at <= now())
 			ORDER BY wr.withdrawal_id ASC
 			LIMIT $1
@@ -153,12 +156,13 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 		)
 		UPDATE withdrawal_requests wr
 		SET claimed_by = $2,
-			claim_expires_at = now() + ($3::bigint * interval '1 millisecond'),
+			claim_lease_version = $3,
+			claim_expires_at = now() + ($4::bigint * interval '1 millisecond'),
 			updated_at = now()
 		FROM cte
 		WHERE wr.withdrawal_id = cte.withdrawal_id
 		RETURNING wr.withdrawal_id, wr.requester, wr.amount, wr.fee_bps, wr.recipient_ua, wr.proof_witness_item, wr.expiry, wr.base_block_number, wr.base_block_hash, wr.base_tx_hash, wr.base_log_index, wr.base_finality_source
-	`, max, owner, ttlMS, int16(withdraw.WithdrawalStatusRequested))
+	`, max, fence.Owner, fence.LeaseVersion, ttlMS, int16(withdraw.WithdrawalStatusRequested))
 	if err != nil {
 		return nil, fmt.Errorf("withdraw/postgres: claim unbatched: %w", err)
 	}
@@ -238,12 +242,12 @@ func (s *Store) ClaimUnbatched(ctx context.Context, owner string, ttl time.Durat
 	return out, nil
 }
 
-func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw.Batch) error {
+func (s *Store) CreatePlannedBatch(ctx context.Context, fence withdraw.Fence, b withdraw.Batch) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
-	if owner == "" {
-		return withdraw.ErrInvalidConfig
+	if err := fence.Validate(); err != nil {
+		return err
 	}
 	if b.ID == ([32]byte{}) || b.State != withdraw.BatchStatePlanned || len(b.WithdrawalIDs) == 0 || len(b.TxPlan) == 0 {
 		return withdraw.ErrInvalidConfig
@@ -261,13 +265,27 @@ func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	// Insert batch row (idempotent).
-	_, err = tx.Exec(ctx, `
-		INSERT INTO withdrawal_batches (batch_id, state, tx_plan, created_at, updated_at)
-		VALUES ($1,$2,$3,now(),now())
+	tag, err := tx.Exec(ctx, `
+		INSERT INTO withdrawal_batches (batch_id, state, lease_owner, lease_version, tx_plan, created_at, updated_at)
+		VALUES ($1,$2,$3,$4,$5,now(),now())
 		ON CONFLICT (batch_id) DO NOTHING
-	`, b.ID[:], int16(withdraw.BatchStatePlanned), b.TxPlan)
+	`, b.ID[:], int16(withdraw.BatchStatePlanned), fence.Owner, fence.LeaseVersion, b.TxPlan)
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: insert batch: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		existing, getErr := s.GetBatch(ctx, b.ID)
+		if getErr != nil {
+			return getErr
+		}
+		if existing.State == withdraw.BatchStatePlanned &&
+			existing.LeaseOwner == fence.Owner &&
+			existing.LeaseVersion == fence.LeaseVersion &&
+			bytes.Equal(existing.TxPlan, b.TxPlan) &&
+			slices.Equal(existing.WithdrawalIDs, ids) {
+			return nil
+		}
+		return withdraw.ErrBatchMismatch
 	}
 
 	// Ensure each withdrawal is claimed by owner and not expired; clear claims.
@@ -275,12 +293,14 @@ func (s *Store) CreatePlannedBatch(ctx context.Context, owner string, b withdraw
 		tag, err := tx.Exec(ctx, `
 			UPDATE withdrawal_requests
 			SET claimed_by = NULL,
-				status = $3,
+				claim_lease_version = NULL,
+				status = $4,
 				claim_expires_at = NULL,
 				updated_at = now()
 			WHERE withdrawal_id = $1
 				AND claimed_by = $2
-		`, id[:], owner, int16(withdraw.WithdrawalStatusBatched))
+				AND claim_lease_version = $3
+		`, id[:], fence.Owner, fence.LeaseVersion, int16(withdraw.WithdrawalStatusBatched))
 		if err != nil {
 			return fmt.Errorf("withdraw/postgres: clear claim: %w", err)
 		}
@@ -345,18 +365,30 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 	var (
 		idRaw           []byte
 		state           int16
+		leaseOwner      *string
+		leaseVersion    *int64
 		txPlan          []byte
 		signedTx        []byte
+		broadcastLocked *time.Time
 		junoTxID        *string
+		junoConfirmed   *time.Time
 		baseTxHash      *string
 		rebAttempts     int32
 		nextRebroadcast *time.Time
+		failureCount    int32
+		lastFailure     *string
+		lastErrorCode   *string
+		lastErrorMsg    *string
+		lastFailedAt    *time.Time
+		dlqAt           *time.Time
+		markPaidFails   int32
+		lastMarkPaidErr *string
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT batch_id, state, tx_plan, signed_tx, juno_txid, base_tx_hash, rebroadcast_attempts, next_rebroadcast_at
+		SELECT batch_id, state, lease_owner, lease_version, tx_plan, signed_tx, broadcast_locked_at, juno_txid, juno_confirmed_at, base_tx_hash, rebroadcast_attempts, next_rebroadcast_at, failure_count, last_failure_stage, last_error_code, last_error_message, last_failed_at, dlq_at, mark_paid_failures, last_mark_paid_error
 		FROM withdrawal_batches
 		WHERE batch_id = $1
-	`, batchID[:]).Scan(&idRaw, &state, &txPlan, &signedTx, &junoTxID, &baseTxHash, &rebAttempts, &nextRebroadcast)
+	`, batchID[:]).Scan(&idRaw, &state, &leaseOwner, &leaseVersion, &txPlan, &signedTx, &broadcastLocked, &junoTxID, &junoConfirmed, &baseTxHash, &rebAttempts, &nextRebroadcast, &failureCount, &lastFailure, &lastErrorCode, &lastErrorMsg, &lastFailedAt, &dlqAt, &markPaidFails, &lastMarkPaidErr)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Batch{}, withdraw.ErrNotFound
@@ -406,15 +438,47 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 		TxPlan:              append([]byte(nil), txPlan...),
 		SignedTx:            append([]byte(nil), signedTx...),
 		RebroadcastAttempts: uint32(rebAttempts),
+		FailureCount:        int(failureCount),
+		MarkPaidFailures:    int(markPaidFails),
+	}
+	if leaseOwner != nil {
+		out.LeaseOwner = *leaseOwner
+	}
+	if leaseVersion != nil {
+		out.LeaseVersion = *leaseVersion
+	}
+	if broadcastLocked != nil {
+		out.BroadcastLockedAt = (*broadcastLocked).UTC()
 	}
 	if junoTxID != nil {
 		out.JunoTxID = *junoTxID
+	}
+	if junoConfirmed != nil {
+		out.JunoConfirmedAt = (*junoConfirmed).UTC()
 	}
 	if baseTxHash != nil {
 		out.BaseTxHash = *baseTxHash
 	}
 	if nextRebroadcast != nil {
 		out.NextRebroadcastAt = (*nextRebroadcast).UTC()
+	}
+	if lastFailure != nil {
+		out.LastFailureStage = *lastFailure
+	}
+	if lastErrorCode != nil {
+		out.LastErrorCode = *lastErrorCode
+	}
+	if lastErrorMsg != nil {
+		out.LastErrorMessage = *lastErrorMsg
+	}
+	if lastFailedAt != nil {
+		out.LastFailedAt = (*lastFailedAt).UTC()
+	}
+	if dlqAt != nil {
+		out.DLQAt = (*dlqAt).UTC()
+	}
+	if lastMarkPaidErr != nil {
+		out.LastMarkPaidError = *lastMarkPaidErr
 	}
 	return out, nil
 }
@@ -424,7 +488,7 @@ func (s *Store) ListBatchesByState(ctx context.Context, state withdraw.BatchStat
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
 	}
 
-	rows, err := s.pool.Query(ctx, `SELECT batch_id FROM withdrawal_batches WHERE state = $1 ORDER BY batch_id ASC`, int16(state))
+	rows, err := s.pool.Query(ctx, `SELECT batch_id FROM withdrawal_batches WHERE state = $1 AND dlq_at IS NULL ORDER BY batch_id ASC`, int16(state))
 	if err != nil {
 		return nil, fmt.Errorf("withdraw/postgres: list batches: %w", err)
 	}
@@ -452,157 +516,455 @@ func (s *Store) ListBatchesByState(ctx context.Context, state withdraw.BatchStat
 	return out, nil
 }
 
-func (s *Store) MarkBatchSigning(ctx context.Context, batchID [32]byte) error {
-	return s.updateState(ctx, batchID, withdraw.BatchStatePlanned, withdraw.BatchStateSigning)
+func (s *Store) AdoptBatch(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET lease_owner = $2,
+			lease_version = $3,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND dlq_at IS NULL
+		  AND (
+			lease_version IS NULL
+			OR lease_version < $3
+			OR (lease_version = $3 AND (lease_owner IS NULL OR lease_owner = $2))
+		  )
+	`, batchID[:], fence.Owner, fence.LeaseVersion)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: adopt batch: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	_, err = s.batchForMutation(ctx, batchID, fence)
+	return err
 }
 
-func (s *Store) ResetBatchSigning(ctx context.Context, batchID [32]byte, txPlan []byte) error {
+func (s *Store) MarkBatchSigning(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = CASE WHEN state = $4 THEN $5 ELSE state END,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND dlq_at IS NULL
+		  AND state IN ($4, $5, $6, $7, $8, $9, $10)
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStatePlanned),
+		int16(withdraw.BatchStateSigning),
+		int16(withdraw.BatchStateSigned),
+		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+		int16(withdraw.BatchStateFinalized),
+	)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: mark signing: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State > withdraw.BatchStateSigning {
+		return nil
+	}
+	return withdraw.ErrInvalidTransition
+}
+
+func (s *Store) ResetBatchSigning(ctx context.Context, batchID [32]byte, fence withdraw.Fence, txPlan []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if len(txPlan) == 0 {
 		return withdraw.ErrInvalidConfig
 	}
-
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state != withdraw.BatchStateSigning {
-		return withdraw.ErrInvalidTransition
-	}
-
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, base_tx_hash = NULL, next_rebroadcast_at = NULL, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
-	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateSigning))
+		SET state = $4,
+			tx_plan = $5,
+			signed_tx = NULL,
+			broadcast_locked_at = NULL,
+			juno_txid = NULL,
+			juno_confirmed_at = NULL,
+			base_tx_hash = NULL,
+			rebroadcast_attempts = 0,
+			next_rebroadcast_at = NULL,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state = $6
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateSigning))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: reset signing: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State != withdraw.BatchStateSigning {
 		return withdraw.ErrInvalidTransition
 	}
-	return nil
+	return withdraw.ErrInvalidTransition
 }
 
-func (s *Store) SetBatchSigned(ctx context.Context, batchID [32]byte, signedTx []byte) error {
+func (s *Store) SetBatchSigned(ctx context.Context, batchID [32]byte, fence withdraw.Fence, signedTx []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if len(signedTx) == 0 {
 		return withdraw.ErrInvalidConfig
 	}
-
-	state, existingSigned, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state < withdraw.BatchStateSigning {
-		return withdraw.ErrInvalidTransition
-	}
-	if state >= withdraw.BatchStateSigned {
-		if !bytes.Equal(existingSigned, signedTx) {
-			return withdraw.ErrBatchMismatch
-		}
-		return nil
-	}
-
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, signed_tx = $3, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
-	`, batchID[:], int16(withdraw.BatchStateSigned), signedTx, int16(withdraw.BatchStateSigning))
+		SET state = $4,
+			signed_tx = $5,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state = $6
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, int16(withdraw.BatchStateSigned), signedTx, int16(withdraw.BatchStateSigning))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: set signed: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		// Re-check state for idempotency vs races.
-		state2, existingSigned2, _, err2 := s.getBatchStateFields(ctx, batchID)
-		if err2 != nil {
-			return err2
-		}
-		if state2 >= withdraw.BatchStateSigned && bytes.Equal(existingSigned2, signedTx) {
-			return nil
-		}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State < withdraw.BatchStateSigning {
 		return withdraw.ErrInvalidTransition
 	}
-	return nil
-}
-
-func (s *Store) SetBatchBroadcasted(ctx context.Context, batchID [32]byte, txid string) error {
-	if txid == "" {
-		return withdraw.ErrInvalidConfig
-	}
-
-	state, _, existingTxID, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state < withdraw.BatchStateSigned {
-		return withdraw.ErrInvalidTransition
-	}
-	if state >= withdraw.BatchStateBroadcasted {
-		if existingTxID != txid {
+	if b.State >= withdraw.BatchStateSigned {
+		if !bytes.Equal(b.SignedTx, signedTx) {
 			return withdraw.ErrBatchMismatch
 		}
 		return nil
 	}
+	return withdraw.ErrInvalidTransition
+}
 
+func (s *Store) MarkBatchBroadcastLocked(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, juno_txid = $3, next_rebroadcast_at = NULL, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
-	`, batchID[:], int16(withdraw.BatchStateBroadcasted), txid, int16(withdraw.BatchStateSigned))
+		SET broadcast_locked_at = COALESCE(broadcast_locked_at, now()),
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state IN ($4, $5, $6, $7, $8)
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStateSigned),
+		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+		int16(withdraw.BatchStateFinalized),
+	)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: mark broadcast locked: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State < withdraw.BatchStateSigned {
+		return withdraw.ErrInvalidTransition
+	}
+	return nil
+}
+
+func (s *Store) SetBatchBroadcasted(ctx context.Context, batchID [32]byte, fence withdraw.Fence, txid string) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if txid == "" {
+		return withdraw.ErrInvalidConfig
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET state = CASE WHEN state = $5 THEN $6 ELSE state END,
+			juno_txid = COALESCE(juno_txid, $4),
+			next_rebroadcast_at = NULL,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND broadcast_locked_at IS NOT NULL
+		  AND state IN ($5, $6, $7, $8, $9)
+		  AND (juno_txid IS NULL OR juno_txid = $4)
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, txid,
+		int16(withdraw.BatchStateSigned),
+		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+		int16(withdraw.BatchStateFinalized),
+	)
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: set broadcasted: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		state2, _, existingTxID2, err2 := s.getBatchStateFields(ctx, batchID)
-		if err2 != nil {
-			return err2
-		}
-		if state2 >= withdraw.BatchStateBroadcasted && existingTxID2 == txid {
-			return nil
-		}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State < withdraw.BatchStateSigned || b.BroadcastLockedAt.IsZero() {
 		return withdraw.ErrInvalidTransition
 	}
-	return nil
+	if b.State >= withdraw.BatchStateBroadcasted {
+		if b.JunoTxID != txid {
+			return withdraw.ErrBatchMismatch
+		}
+		return nil
+	}
+	return withdraw.ErrInvalidTransition
 }
 
-func (s *Store) ResetBatchPlanned(ctx context.Context, batchID [32]byte, txPlan []byte) error {
+func (s *Store) ResetBatchPlanned(ctx context.Context, batchID [32]byte, fence withdraw.Fence, txPlan []byte) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	if len(txPlan) == 0 {
 		return withdraw.ErrInvalidConfig
 	}
-
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state != withdraw.BatchStateSigned && state != withdraw.BatchStateBroadcasted {
-		return withdraw.ErrInvalidTransition
-	}
-
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, tx_plan = $3, signed_tx = NULL, juno_txid = NULL, next_rebroadcast_at = NULL, updated_at = now()
-		WHERE batch_id = $1 AND state IN ($4, $5)
-	`, batchID[:], int16(withdraw.BatchStatePlanned), txPlan, int16(withdraw.BatchStateSigned), int16(withdraw.BatchStateBroadcasted))
+		SET state = $4,
+			tx_plan = $5,
+			signed_tx = NULL,
+			broadcast_locked_at = NULL,
+			juno_txid = NULL,
+			juno_confirmed_at = NULL,
+			base_tx_hash = NULL,
+			rebroadcast_attempts = 0,
+			next_rebroadcast_at = NULL,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state IN ($6, $7)
+		  AND broadcast_locked_at IS NULL
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, int16(withdraw.BatchStatePlanned), txPlan,
+		int16(withdraw.BatchStateSigned), int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: reset planned: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		return withdraw.ErrInvalidTransition
-	}
-	return nil
-}
-
-func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state < withdraw.BatchStateBroadcasted {
-		return withdraw.ErrInvalidTransition
-	}
-	if state >= withdraw.BatchStateConfirmed {
+	if tag.RowsAffected() == 1 {
 		return nil
 	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State != withdraw.BatchStateSigned && b.State != withdraw.BatchStateBroadcasted {
+		return withdraw.ErrInvalidTransition
+	}
+	if !b.BroadcastLockedAt.IsZero() {
+		return withdraw.ErrInvalidTransition
+	}
+	return withdraw.ErrInvalidTransition
+}
 
+func (s *Store) SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, fence withdraw.Fence, attempts uint32, next time.Time) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if next.IsZero() || attempts > math.MaxInt32 {
+		return withdraw.ErrInvalidConfig
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET rebroadcast_attempts = $4,
+			next_rebroadcast_at = $5,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state = $6
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, int32(attempts), next.UTC(), int16(withdraw.BatchStateBroadcasted))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: set rebroadcast backoff: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		return withdraw.ErrInvalidTransition
+	}
+	return withdraw.ErrInvalidTransition
+}
+
+func (s *Store) MarkBatchJunoConfirmed(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET juno_confirmed_at = COALESCE(juno_confirmed_at, now()),
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state = $4
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, int16(withdraw.BatchStateBroadcasted))
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: mark juno confirmed: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		return withdraw.ErrInvalidTransition
+	}
+	if !b.JunoConfirmedAt.IsZero() {
+		return nil
+	}
+	return withdraw.ErrInvalidTransition
+}
+
+func (s *Store) RecordBatchFailure(ctx context.Context, batchID [32]byte, fence withdraw.Fence, stage string, errorCode string, errorMessage string) (withdraw.Batch, error) {
+	if err := fence.Validate(); err != nil {
+		return withdraw.Batch{}, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET failure_count = failure_count + 1,
+			last_failure_stage = $4,
+			last_error_code = $5,
+			last_error_message = $6,
+			last_failed_at = now(),
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, stage, errorCode, errorMessage)
+	if err != nil {
+		return withdraw.Batch{}, fmt.Errorf("withdraw/postgres: record batch failure: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		if _, ferr := s.batchForMutation(ctx, batchID, fence); ferr != nil {
+			return withdraw.Batch{}, ferr
+		}
+		return withdraw.Batch{}, withdraw.ErrInvalidTransition
+	}
+	return s.GetBatch(ctx, batchID)
+}
+
+func (s *Store) RecordBatchMarkPaidFailure(ctx context.Context, batchID [32]byte, fence withdraw.Fence, errorMessage string) (withdraw.Batch, error) {
+	if err := fence.Validate(); err != nil {
+		return withdraw.Batch{}, err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET mark_paid_failures = mark_paid_failures + 1,
+			last_mark_paid_error = $4,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, errorMessage)
+	if err != nil {
+		return withdraw.Batch{}, fmt.Errorf("withdraw/postgres: record mark-paid failure: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		if _, ferr := s.batchForMutation(ctx, batchID, fence); ferr != nil {
+			return withdraw.Batch{}, ferr
+		}
+		return withdraw.Batch{}, withdraw.ErrInvalidTransition
+	}
+	return s.GetBatch(ctx, batchID)
+}
+
+func (s *Store) ResetBatchMarkPaidFailures(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET mark_paid_failures = 0,
+			last_mark_paid_error = '',
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: reset mark-paid failures: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	_, ferr := s.batchForMutation(ctx, batchID, fence)
+	return ferr
+}
+
+func (s *Store) MarkBatchDLQ(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_batches
+		SET dlq_at = COALESCE(dlq_at, now()),
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+	`, batchID[:], fence.Owner, fence.LeaseVersion)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: mark batch dlq: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	_, ferr := s.batchForMutation(ctx, batchID, fence)
+	return ferr
+}
+
+func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
 	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: begin confirm tx: %w", err)
@@ -611,19 +973,38 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, next_rebroadcast_at = NULL, updated_at = now()
-		WHERE batch_id = $1 AND state = $3
-	`, batchID[:], int16(withdraw.BatchStateConfirmed), int16(withdraw.BatchStateBroadcasted))
+		SET state = CASE WHEN state = $4 THEN $5 ELSE state END,
+			next_rebroadcast_at = NULL,
+			mark_paid_failures = 0,
+			last_mark_paid_error = '',
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND juno_confirmed_at IS NOT NULL
+		  AND state IN ($4, $5, $6, $7)
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+		int16(withdraw.BatchStateFinalized),
+	)
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: set confirmed: %w", err)
 	}
 	if tag.RowsAffected() != 1 {
-		// Idempotent if already confirmed.
-		state2, _, _, err2 := s.getBatchStateFields(ctx, batchID)
-		if err2 != nil {
-			return err2
+		if _, ferr := s.batchForMutation(ctx, batchID, fence); ferr != nil {
+			return ferr
 		}
-		if state2 == withdraw.BatchStateConfirmed {
+		b, berr := s.GetBatch(ctx, batchID)
+		if berr != nil {
+			return berr
+		}
+		if b.State < withdraw.BatchStateBroadcasted || b.JunoConfirmedAt.IsZero() {
+			return withdraw.ErrInvalidTransition
+		}
+		if b.State >= withdraw.BatchStateConfirmed {
 			return nil
 		}
 		return withdraw.ErrInvalidTransition
@@ -639,195 +1020,100 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte) error {
 	`, batchID[:], int16(withdraw.WithdrawalStatusPaid)); err != nil {
 		return fmt.Errorf("withdraw/postgres: set withdrawal paid status: %w", err)
 	}
-
 	if err := tx.Commit(ctx); err != nil {
 		return fmt.Errorf("withdraw/postgres: commit confirm tx: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) MarkBatchFinalizing(ctx context.Context, batchID [32]byte) error {
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
+func (s *Store) MarkBatchFinalizing(ctx context.Context, batchID [32]byte, fence withdraw.Fence) error {
+	if err := fence.Validate(); err != nil {
 		return err
 	}
-	if state < withdraw.BatchStateConfirmed {
-		return withdraw.ErrInvalidTransition
-	}
-	if state >= withdraw.BatchStateFinalizing {
-		return nil
-	}
-
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, updated_at = now()
-		WHERE batch_id = $1 AND state = $3
-	`, batchID[:], int16(withdraw.BatchStateFinalizing), int16(withdraw.BatchStateConfirmed))
+		SET state = CASE WHEN state = $4 THEN $5 ELSE state END,
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state IN ($4, $5, $6)
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+		int16(withdraw.BatchStateFinalized),
+	)
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: mark finalizing: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		state2, _, _, err2 := s.getBatchStateFields(ctx, batchID)
-		if err2 != nil {
-			return err2
-		}
-		if state2 >= withdraw.BatchStateFinalizing {
-			return nil
-		}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State < withdraw.BatchStateConfirmed {
 		return withdraw.ErrInvalidTransition
 	}
 	return nil
 }
 
-func (s *Store) SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, attempts uint32, next time.Time) error {
-	if next.IsZero() {
-		return withdraw.ErrInvalidConfig
-	}
-	if attempts > math.MaxInt32 {
-		return withdraw.ErrInvalidConfig
-	}
-
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
+func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, fence withdraw.Fence, baseTxHash string) error {
+	if err := fence.Validate(); err != nil {
 		return err
 	}
-	if state != withdraw.BatchStateBroadcasted {
-		return withdraw.ErrInvalidTransition
-	}
-
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE withdrawal_batches
-		SET rebroadcast_attempts = $2, next_rebroadcast_at = $3, updated_at = now()
-		WHERE batch_id = $1 AND state = $4
-	`, batchID[:], int32(attempts), next.UTC(), int16(withdraw.BatchStateBroadcasted))
-	if err != nil {
-		return fmt.Errorf("withdraw/postgres: set rebroadcast backoff: %w", err)
-	}
-	if tag.RowsAffected() != 1 {
-		return withdraw.ErrInvalidTransition
-	}
-	return nil
-}
-
-func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, baseTxHash string) error {
 	if baseTxHash == "" {
 		return withdraw.ErrInvalidConfig
 	}
-
-	state, existingHash, err := s.getBatchFinalizationFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state < withdraw.BatchStateConfirmed {
-		return withdraw.ErrInvalidTransition
-	}
-	if state >= withdraw.BatchStateFinalized {
-		if existingHash != baseTxHash {
-			return withdraw.ErrBatchMismatch
-		}
-		return nil
-	}
-
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = $2, base_tx_hash = $3, updated_at = now()
-		WHERE batch_id = $1 AND state >= $4 AND state < $2
-	`, batchID[:], int16(withdraw.BatchStateFinalized), baseTxHash, int16(withdraw.BatchStateConfirmed))
+		SET state = $5,
+			base_tx_hash = COALESCE(base_tx_hash, $4),
+			updated_at = now()
+		WHERE batch_id = $1
+		  AND lease_owner = $2
+		  AND lease_version = $3
+		  AND state IN ($6, $7, $5)
+		  AND (base_tx_hash IS NULL OR base_tx_hash = $4)
+		  AND dlq_at IS NULL
+	`, batchID[:], fence.Owner, fence.LeaseVersion, baseTxHash,
+		int16(withdraw.BatchStateFinalized),
+		int16(withdraw.BatchStateConfirmed),
+		int16(withdraw.BatchStateFinalizing),
+	)
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: set finalized: %w", err)
 	}
-	if tag.RowsAffected() != 1 {
-		// Re-check state for idempotency vs races.
-		state2, existingHash2, err2 := s.getBatchFinalizationFields(ctx, batchID)
-		if err2 != nil {
-			return err2
-		}
-		if state2 >= withdraw.BatchStateFinalized && existingHash2 == baseTxHash {
-			return nil
-		}
-		return withdraw.ErrInvalidTransition
-	}
-	return nil
-}
-
-func (s *Store) updateState(ctx context.Context, batchID [32]byte, from, to withdraw.BatchState) error {
-	state, _, _, err := s.getBatchStateFields(ctx, batchID)
-	if err != nil {
-		return err
-	}
-	if state >= to {
+	if tag.RowsAffected() == 1 {
 		return nil
 	}
-	if state != from {
+	b, ferr := s.batchForMutation(ctx, batchID, fence)
+	if ferr != nil {
+		return ferr
+	}
+	if b.State < withdraw.BatchStateConfirmed {
 		return withdraw.ErrInvalidTransition
 	}
-	tag, err := s.pool.Exec(ctx, `
-		UPDATE withdrawal_batches
-		SET state = $2, updated_at = now()
-		WHERE batch_id = $1 AND state = $3
-	`, batchID[:], int16(to), int16(from))
-	if err != nil {
-		return fmt.Errorf("withdraw/postgres: update state: %w", err)
+	if b.BaseTxHash != "" && b.BaseTxHash != baseTxHash {
+		return withdraw.ErrBatchMismatch
 	}
-	if tag.RowsAffected() != 1 {
-		return withdraw.ErrInvalidTransition
+	if b.State >= withdraw.BatchStateFinalized {
+		return nil
 	}
-	return nil
+	return withdraw.ErrInvalidTransition
 }
 
-func (s *Store) getBatchStateFields(ctx context.Context, batchID [32]byte) (withdraw.BatchState, []byte, string, error) {
-	if s == nil || s.pool == nil {
-		return 0, nil, "", fmt.Errorf("%w: nil store", ErrInvalidConfig)
-	}
-
-	var (
-		state    int16
-		signedTx []byte
-		junoTxID *string
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT state, signed_tx, juno_txid
-		FROM withdrawal_batches
-		WHERE batch_id = $1
-	`, batchID[:]).Scan(&state, &signedTx, &junoTxID)
+func (s *Store) batchForMutation(ctx context.Context, batchID [32]byte, fence withdraw.Fence) (withdraw.Batch, error) {
+	b, err := s.GetBatch(ctx, batchID)
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, nil, "", withdraw.ErrNotFound
-		}
-		return 0, nil, "", fmt.Errorf("withdraw/postgres: get batch state: %w", err)
+		return withdraw.Batch{}, err
 	}
-	txid := ""
-	if junoTxID != nil {
-		txid = *junoTxID
+	if b.LeaseOwner != fence.Owner || b.LeaseVersion != fence.LeaseVersion {
+		return withdraw.Batch{}, withdraw.ErrInvalidTransition
 	}
-	return withdraw.BatchState(state), signedTx, txid, nil
-}
-
-func (s *Store) getBatchFinalizationFields(ctx context.Context, batchID [32]byte) (withdraw.BatchState, string, error) {
-	if s == nil || s.pool == nil {
-		return 0, "", fmt.Errorf("%w: nil store", ErrInvalidConfig)
-	}
-
-	var (
-		state      int16
-		baseTxHash *string
-	)
-	err := s.pool.QueryRow(ctx, `
-		SELECT state, base_tx_hash
-		FROM withdrawal_batches
-		WHERE batch_id = $1
-	`, batchID[:]).Scan(&state, &baseTxHash)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return 0, "", withdraw.ErrNotFound
-		}
-		return 0, "", fmt.Errorf("withdraw/postgres: get batch finalize fields: %w", err)
-	}
-	h := ""
-	if baseTxHash != nil {
-		h = *baseTxHash
-	}
-	return withdraw.BatchState(state), h, nil
+	return b, nil
 }
 
 func (s *Store) getWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdrawal, error) {

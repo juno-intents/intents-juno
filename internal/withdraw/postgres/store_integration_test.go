@@ -74,7 +74,10 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	}
 
 	// Claim deterministically by id.
-	claimed, err := s.ClaimUnbatched(ctx, "a", 10*time.Second, 2)
+	fenceA := testFence("a")
+	fenceC := testFence("c")
+
+	claimed, err := s.ClaimUnbatched(ctx, fenceA, 10*time.Second, 2)
 	if err != nil {
 		t.Fatalf("ClaimUnbatched: %v", err)
 	}
@@ -83,7 +86,7 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	}
 
 	batchID := seq32(0x99)
-	if err := s.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	if err := s.CreatePlannedBatch(ctx, fenceA, withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w0.ID, w1.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -98,7 +101,7 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	}
 
 	// Remaining withdrawal should still be claimable.
-	claimed2, err := s.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	claimed2, err := s.ClaimUnbatched(ctx, fenceA, 10*time.Second, 1)
 	if err != nil {
 		t.Fatalf("ClaimUnbatched #2: %v", err)
 	}
@@ -106,7 +109,7 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 		t.Fatalf("expected only w2 to remain")
 	}
 
-	claimed3, err := s.ClaimUnbatched(ctx, "c", 20*time.Millisecond, 1)
+	claimed3, err := s.ClaimUnbatched(ctx, fenceC, 20*time.Millisecond, 1)
 	if err != nil {
 		t.Fatalf("ClaimUnbatched w3 by c: %v", err)
 	}
@@ -114,7 +117,7 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 		t.Fatalf("expected c to claim w3")
 	}
 	time.Sleep(60 * time.Millisecond)
-	if err := s.CreatePlannedBatch(ctx, "c", withdraw.Batch{
+	if err := s.CreatePlannedBatch(ctx, fenceC, withdraw.Batch{
 		ID:            seq32(0x98),
 		WithdrawalIDs: [][32]byte{w3.ID},
 		State:         withdraw.BatchStatePlanned,
@@ -124,13 +127,13 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	}
 
 	// Batch state machine.
-	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err == nil {
+	if err := s.SetBatchSigned(ctx, batchID, fenceA, []byte{0x01}); err == nil {
 		t.Fatalf("expected error signing before marking signing")
 	}
-	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+	if err := s.MarkBatchSigning(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("MarkBatchSigning: %v", err)
 	}
-	if err := s.ResetBatchSigning(ctx, batchID, []byte(`{"v":"replanned"}`)); err != nil {
+	if err := s.ResetBatchSigning(ctx, batchID, fenceA, []byte(`{"v":"replanned"}`)); err != nil {
 		t.Fatalf("ResetBatchSigning: %v", err)
 	}
 	bReset, err := s.GetBatch(ctx, batchID)
@@ -143,13 +146,13 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if got, want := string(bReset.TxPlan), `{"v":"replanned"}`; got != want {
 		t.Fatalf("tx plan after ResetBatchSigning: got %q want %q", got, want)
 	}
-	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+	if err := s.MarkBatchSigning(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("MarkBatchSigning after ResetBatchSigning: %v", err)
 	}
-	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+	if err := s.SetBatchSigned(ctx, batchID, fenceA, []byte{0x01}); err != nil {
 		t.Fatalf("SetBatchSigned: %v", err)
 	}
-	if err := s.ResetBatchPlanned(ctx, batchID, []byte(`{"v":"broadcast-replanned"}`)); err != nil {
+	if err := s.ResetBatchPlanned(ctx, batchID, fenceA, []byte(`{"v":"broadcast-replanned"}`)); err != nil {
 		t.Fatalf("ResetBatchPlanned from signed: %v", err)
 	}
 	bSignedReset, err := s.GetBatch(ctx, batchID)
@@ -162,24 +165,36 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if got, want := string(bSignedReset.TxPlan), `{"v":"broadcast-replanned"}`; got != want {
 		t.Fatalf("tx plan after ResetBatchPlanned from signed: got %q want %q", got, want)
 	}
-	if err := s.MarkBatchSigning(ctx, batchID); err != nil {
+	if err := s.MarkBatchSigning(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("MarkBatchSigning after ResetBatchPlanned from signed: %v", err)
 	}
-	if err := s.SetBatchSigned(ctx, batchID, []byte{0x01}); err != nil {
+	if err := s.SetBatchSigned(ctx, batchID, fenceA, []byte{0x01}); err != nil {
 		t.Fatalf("SetBatchSigned after ResetBatchPlanned from signed: %v", err)
 	}
-	if err := s.SetBatchSigned(ctx, batchID, []byte{0x02}); !errors.Is(err, withdraw.ErrBatchMismatch) {
+	if err := s.SetBatchSigned(ctx, batchID, fenceA, []byte{0x02}); !errors.Is(err, withdraw.ErrBatchMismatch) {
 		t.Fatalf("expected ErrBatchMismatch, got %v", err)
 	}
+	if err := s.MarkBatchBroadcastLocked(ctx, batchID, fenceA); err != nil {
+		t.Fatalf("MarkBatchBroadcastLocked: %v", err)
+	}
+	if err := s.ResetBatchPlanned(ctx, batchID, fenceA, []byte(`{"v":"should-not-work"}`)); !errors.Is(err, withdraw.ErrInvalidTransition) {
+		t.Fatalf("expected ResetBatchPlanned to fail after broadcast lock, got %v", err)
+	}
 
-	if err := s.SetBatchBroadcasted(ctx, batchID, "tx1"); err != nil {
+	if err := s.SetBatchBroadcasted(ctx, batchID, fenceA, "tx1"); err != nil {
 		t.Fatalf("SetBatchBroadcasted: %v", err)
 	}
-	if err := s.SetBatchBroadcasted(ctx, batchID, "tx2"); !errors.Is(err, withdraw.ErrBatchMismatch) {
+	if err := s.SetBatchBroadcasted(ctx, batchID, fenceA, "tx2"); !errors.Is(err, withdraw.ErrBatchMismatch) {
 		t.Fatalf("expected ErrBatchMismatch, got %v", err)
 	}
+	if err := s.SetBatchConfirmed(ctx, batchID, fenceA); !errors.Is(err, withdraw.ErrInvalidTransition) {
+		t.Fatalf("expected SetBatchConfirmed to require juno confirmation, got %v", err)
+	}
+	if err := s.MarkBatchJunoConfirmed(ctx, batchID, fenceA); err != nil {
+		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
 
-	if err := s.SetBatchConfirmed(ctx, batchID); err != nil {
+	if err := s.SetBatchConfirmed(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("SetBatchConfirmed: %v", err)
 	}
 	if status, err := s.GetWithdrawalStatus(ctx, w0.ID); err != nil {
@@ -187,8 +202,91 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	} else if status != withdraw.WithdrawalStatusPaid {
 		t.Fatalf("paid status: got %s want %s", status, withdraw.WithdrawalStatusPaid)
 	}
-	if err := s.MarkBatchFinalizing(ctx, batchID); err != nil {
+	if err := s.MarkBatchFinalizing(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("MarkBatchFinalizing: %v", err)
+	}
+}
+
+func TestStore_FencedBatchMutationAndFailureBookkeeping(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	fenceA := testFence("a")
+	fenceB := withdraw.Fence{Owner: "b", LeaseVersion: 2}
+
+	w := withdraw.Withdrawal{ID: seq32(0x70), Amount: 5, FeeBps: 0, RecipientUA: []byte{0x05}, Expiry: now.Add(24 * time.Hour)}
+	if _, created, err := s.UpsertRequested(ctx, w); err != nil || !created {
+		t.Fatalf("UpsertRequested: created=%v err=%v", created, err)
+	}
+	if _, err := s.ClaimUnbatched(ctx, fenceA, 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+
+	batchID := seq32(0xa1)
+	if err := s.CreatePlannedBatch(ctx, fenceA, withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := s.AdoptBatch(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("AdoptBatch: %v", err)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID, fenceA); !errors.Is(err, withdraw.ErrInvalidTransition) {
+		t.Fatalf("expected stale fence rejection, got %v", err)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("MarkBatchSigning with adopted fence: %v", err)
+	}
+	if err := s.SetBatchSigned(ctx, batchID, fenceB, []byte{0x09}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	if got, err := s.RecordBatchFailure(ctx, batchID, fenceB, "broadcast", "broadcast_failed", "rpc unavailable"); err != nil {
+		t.Fatalf("RecordBatchFailure: %v", err)
+	} else if got.FailureCount != 1 || got.LastErrorCode != "broadcast_failed" {
+		t.Fatalf("unexpected failure bookkeeping: %+v", got)
+	}
+	if got, err := s.RecordBatchMarkPaidFailure(ctx, batchID, fenceB, "base relay down"); err != nil {
+		t.Fatalf("RecordBatchMarkPaidFailure: %v", err)
+	} else if got.MarkPaidFailures != 1 || got.LastMarkPaidError != "base relay down" {
+		t.Fatalf("unexpected mark-paid bookkeeping: %+v", got)
+	}
+	if err := s.ResetBatchMarkPaidFailures(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("ResetBatchMarkPaidFailures: %v", err)
+	}
+	if err := s.MarkBatchDLQ(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("MarkBatchDLQ: %v", err)
+	}
+	if listed, err := s.ListBatchesByState(ctx, withdraw.BatchStateSigned); err != nil {
+		t.Fatalf("ListBatchesByState: %v", err)
+	} else if len(listed) != 0 {
+		t.Fatalf("expected DLQed batch to be filtered from state listing, got %d", len(listed))
 	}
 }
 
@@ -253,6 +351,10 @@ func seq32(start byte) (out [32]byte) {
 		out[i] = start + byte(i)
 	}
 	return out
+}
+
+func testFence(owner string) withdraw.Fence {
+	return withdraw.Fence{Owner: owner, LeaseVersion: 1}
 }
 
 func mustFreePort(t *testing.T) string {
