@@ -58,51 +58,51 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type config struct {
-	RPCURL                          string
-	ChainID                         uint64
-	DeployOnly                      bool
-	ReuseDeployedContracts          bool
-	DeployerKeyHex                  string
-	OperatorKeyFiles                []string
-	OperatorAddresses               []common.Address
-	OperatorSignerBin               string
-	OperatorSignerEndpoints         []string
-	OperatorSignerMaxRespBytes      int
-	Threshold                       int
-	ContractsOut                    string
-	DepositAmount                   uint64
-	WithdrawAmount                  uint64
-	BridgeFeeBps                    uint64
-	BridgeRelayerTipBps             uint64
-	BridgeRefundWindowSeconds       uint64
-	BridgeMaxExpiryExtensionSeconds uint64
-	BridgeMinDepositAmount          uint64
-	BridgeMinWithdrawAmount         uint64
-	MinDepositAdmin                 common.Address
-	MinDepositAdminSet              bool
-	DepositCheckpointHeight         uint64
-	DepositCheckpointBlockHash      common.Hash
-	WithdrawCheckpointHeight        uint64
-	WithdrawCheckpointBlockHash     common.Hash
-	DepositFinalOrchardRoot         common.Hash
-	WithdrawFinalOrchardRoot        common.Hash
-	Recipient                       common.Address
-	RecipientSet                    bool
-	VerifierAddress                 common.Address
-	VerifierSet                     bool
-	ExistingWJunoAddress            common.Address
-	ExistingOperatorRegAddress      common.Address
-	ExistingFeeDistributor          common.Address
-	ExistingBridgeAddress           common.Address
-	DepositImageID                  common.Hash
-	WithdrawImageID                 common.Hash
-	DepositSeal                     []byte
-	WithdrawSeal                    []byte
-	ProofInputsOut                  string
-	JunoExecutionTxHash             string
-	OutputPath                      string
-	RunTimeout                      time.Duration
-	SP1                             sp1Config
+	RPCURL                              string
+	ChainID                             uint64
+	DeployOnly                          bool
+	ReuseDeployedContracts              bool
+	DeployerKeyHex                      string
+	OperatorKeyFiles                    []string
+	OperatorAddresses                   []common.Address
+	OperatorSignerBin                   string
+	OperatorSignerEndpoints             []string
+	OperatorSignerMaxRespBytes          int
+	Threshold                           int
+	ContractsOut                        string
+	DepositAmount                       uint64
+	WithdrawAmount                      uint64
+	BridgeFeeBps                        uint64
+	BridgeRelayerTipBps                 uint64
+	BridgeWithdrawalExpiryWindowSeconds uint64
+	BridgeMaxExpiryExtensionSeconds     uint64
+	BridgeMinDepositAmount              uint64
+	BridgeMinWithdrawAmount             uint64
+	MinDepositAdmin                     common.Address
+	MinDepositAdminSet                  bool
+	DepositCheckpointHeight             uint64
+	DepositCheckpointBlockHash          common.Hash
+	WithdrawCheckpointHeight            uint64
+	WithdrawCheckpointBlockHash         common.Hash
+	DepositFinalOrchardRoot             common.Hash
+	WithdrawFinalOrchardRoot            common.Hash
+	Recipient                           common.Address
+	RecipientSet                        bool
+	VerifierAddress                     common.Address
+	VerifierSet                         bool
+	ExistingWJunoAddress                common.Address
+	ExistingOperatorRegAddress          common.Address
+	ExistingFeeDistributor              common.Address
+	ExistingBridgeAddress               common.Address
+	DepositImageID                      common.Hash
+	WithdrawImageID                     common.Hash
+	DepositSeal                         []byte
+	WithdrawSeal                        []byte
+	ProofInputsOut                      string
+	JunoExecutionTxHash                 string
+	OutputPath                          string
+	RunTimeout                          time.Duration
+	SP1                                 sp1Config
 }
 
 type sp1Config struct {
@@ -151,14 +151,14 @@ type sp1WaitResult struct {
 }
 
 const (
-	defaultDepositImageIDHex                = "0x000000000000000000000000000000000000000000000000000000000000aa01"
-	defaultWithdrawImageIDHex               = "0x000000000000000000000000000000000000000000000000000000000000aa02"
-	bridgeBPSDenominator                    = uint64(10_000)
-	defaultBridgeFeeBps                     = uint64(50)
-	defaultBridgeRelayerTipBps              = uint64(1000)
-	defaultBridgeRefundWindowSeconds        = uint64(24 * 60 * 60)
-	defaultBridgeMaxExpiryExtensionSeconds  = uint64(12 * 60 * 60)
-	defaultWithdrawCoordinatorJunoFeeAddZat = uint64(1_000_000)
+	defaultDepositImageIDHex                   = "0x000000000000000000000000000000000000000000000000000000000000aa01"
+	defaultWithdrawImageIDHex                  = "0x000000000000000000000000000000000000000000000000000000000000aa02"
+	bridgeBPSDenominator                       = uint64(10_000)
+	defaultBridgeFeeBps                        = uint64(50)
+	defaultBridgeRelayerTipBps                 = uint64(1000)
+	defaultBridgeWithdrawalExpiryWindowSeconds = uint64(24 * 60 * 60)
+	defaultBridgeMaxExpiryExtensionSeconds     = uint64(12 * 60 * 60)
+	defaultWithdrawCoordinatorJunoFeeAddZat    = uint64(1_000_000)
 
 	defaultSP1MaxPricePerPGU    = uint64(1000000000000)
 	defaultSP1MinAuctionPeriod  = uint64(85)
@@ -239,12 +239,12 @@ type report struct {
 	} `json:"governance,omitempty"`
 
 	BridgeParams struct {
-		FeeBps                    uint64 `json:"fee_bps"`
-		RelayerTipBps             uint64 `json:"relayer_tip_bps"`
-		RefundWindowSeconds       uint64 `json:"refund_window_seconds"`
-		MaxExpiryExtensionSeconds uint64 `json:"max_expiry_extension_seconds"`
-		MinDepositAmount          uint64 `json:"min_deposit_amount"`
-		MinWithdrawAmount         uint64 `json:"min_withdraw_amount"`
+		FeeBps                        uint64 `json:"fee_bps"`
+		RelayerTipBps                 uint64 `json:"relayer_tip_bps"`
+		WithdrawalExpiryWindowSeconds uint64 `json:"withdrawal_expiry_window_seconds"`
+		MaxExpiryExtensionSeconds     uint64 `json:"max_expiry_extension_seconds"`
+		MinDepositAmount              uint64 `json:"min_deposit_amount"`
+		MinWithdrawAmount             uint64 `json:"min_withdraw_amount"`
 	} `json:"bridge_params"`
 
 	Operators []string `json:"operators"`
@@ -324,7 +324,6 @@ type report struct {
 		Withdrawal  struct {
 			Exists         bool   `json:"exists"`
 			Finalized      bool   `json:"finalized"`
-			Refunded       bool   `json:"refunded"`
 			Extended       bool   `json:"extended"`
 			FeeBps         uint64 `json:"fee_bps"`
 			Amount         string `json:"amount"`
@@ -481,7 +480,6 @@ type withdrawalView struct {
 	Expiry    uint64
 	FeeBps    uint64
 	Finalized bool
-	Refunded  bool
 	Recipient []byte
 }
 
@@ -577,7 +575,12 @@ func parseArgs(args []string) (config, error) {
 	fs.Uint64Var(&cfg.WithdrawAmount, "withdraw-amount", 10_000, "request/finalize amount (wJUNO base units)")
 	fs.Uint64Var(&cfg.BridgeFeeBps, "fee-bps", defaultBridgeFeeBps, "bridge fee in basis points")
 	fs.Uint64Var(&cfg.BridgeRelayerTipBps, "relayer-tip-bps", defaultBridgeRelayerTipBps, "bridge relayer tip share in basis points of fee")
-	fs.Uint64Var(&cfg.BridgeRefundWindowSeconds, "refund-window-seconds", defaultBridgeRefundWindowSeconds, "bridge refund window in seconds")
+	fs.Uint64Var(
+		&cfg.BridgeWithdrawalExpiryWindowSeconds,
+		"withdrawal-expiry-window-seconds",
+		defaultBridgeWithdrawalExpiryWindowSeconds,
+		"bridge withdrawal expiry window in seconds",
+	)
 	fs.Uint64Var(&cfg.BridgeMaxExpiryExtensionSeconds, "max-expiry-extension-seconds", defaultBridgeMaxExpiryExtensionSeconds, "bridge max expiry extension in seconds")
 	fs.Uint64Var(&cfg.BridgeMinDepositAmount, "min-deposit-amount", defaultBridgeMinDepositAmountZat, "bridge minimum deposit amount in Juno base units")
 	fs.Uint64Var(&cfg.BridgeMinWithdrawAmount, "min-withdraw-amount", defaultBridgeMinWithdrawAmountZat, "bridge minimum withdrawal amount in wJUNO base units")
@@ -666,8 +669,8 @@ func parseArgs(args []string) (config, error) {
 	if cfg.BridgeRelayerTipBps > bridgeBPSDenominator {
 		return cfg, errors.New("--relayer-tip-bps must be <= 10000")
 	}
-	if cfg.BridgeRefundWindowSeconds == 0 {
-		return cfg, errors.New("--refund-window-seconds must be > 0")
+	if cfg.BridgeWithdrawalExpiryWindowSeconds == 0 {
+		return cfg, errors.New("--withdrawal-expiry-window-seconds must be > 0")
 	}
 	if cfg.BridgeMaxExpiryExtensionSeconds == 0 {
 		return cfg, errors.New("--max-expiry-extension-seconds must be > 0")
@@ -1342,7 +1345,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			withdrawImageID,
 			new(big.Int).SetUint64(cfg.BridgeFeeBps),
 			new(big.Int).SetUint64(cfg.BridgeRelayerTipBps),
-			cfg.BridgeRefundWindowSeconds,
+			cfg.BridgeWithdrawalExpiryWindowSeconds,
 			cfg.BridgeMaxExpiryExtensionSeconds,
 			new(big.Int).SetUint64(cfg.BridgeMinDepositAmount),
 			new(big.Int).SetUint64(cfg.BridgeMinWithdrawAmount),
@@ -1367,7 +1370,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 			withdrawImageID,
 			cfg.BridgeFeeBps,
 			cfg.BridgeRelayerTipBps,
-			cfg.BridgeRefundWindowSeconds,
+			cfg.BridgeWithdrawalExpiryWindowSeconds,
 			cfg.BridgeMaxExpiryExtensionSeconds,
 			cfg.BridgeMinDepositAmount,
 			cfg.BridgeMinWithdrawAmount,
@@ -1614,12 +1617,12 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	if relayerTipBpsOnChain != cfg.BridgeRelayerTipBps {
 		return nil, fmt.Errorf("bridge relayerTipBps mismatch: got=%d want=%d", relayerTipBpsOnChain, cfg.BridgeRelayerTipBps)
 	}
-	refundWindowSecondsOnChain, err := callUint64(ctx, bridge, "refundWindowSeconds")
+	withdrawalExpiryWindowSecondsOnChain, err := callUint64(ctx, bridge, "withdrawalExpiryWindowSeconds")
 	if err != nil {
-		return nil, fmt.Errorf("bridge refundWindowSeconds: %w", err)
+		return nil, fmt.Errorf("bridge withdrawalExpiryWindowSeconds: %w", err)
 	}
-	if refundWindowSecondsOnChain != cfg.BridgeRefundWindowSeconds {
-		return nil, fmt.Errorf("bridge refundWindowSeconds mismatch: got=%d want=%d", refundWindowSecondsOnChain, cfg.BridgeRefundWindowSeconds)
+	if withdrawalExpiryWindowSecondsOnChain != cfg.BridgeWithdrawalExpiryWindowSeconds {
+		return nil, fmt.Errorf("bridge withdrawalExpiryWindowSeconds mismatch: got=%d want=%d", withdrawalExpiryWindowSecondsOnChain, cfg.BridgeWithdrawalExpiryWindowSeconds)
 	}
 	maxExpiryExtensionSecondsOnChain, err := callUint64(ctx, bridge, "maxExpiryExtensionSeconds")
 	if err != nil {
@@ -1659,7 +1662,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		rep.Contracts.Bridge = bridgeAddr.Hex()
 		rep.BridgeParams.FeeBps = cfg.BridgeFeeBps
 		rep.BridgeParams.RelayerTipBps = cfg.BridgeRelayerTipBps
-		rep.BridgeParams.RefundWindowSeconds = cfg.BridgeRefundWindowSeconds
+		rep.BridgeParams.WithdrawalExpiryWindowSeconds = cfg.BridgeWithdrawalExpiryWindowSeconds
 		rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
 		rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
 		rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
@@ -2099,9 +2102,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 		if !withdrawInvariant.Finalized {
 			return errors.New("withdraw invariant failed: expected finalized=true")
 		}
-		if withdrawInvariant.Refunded {
-			return errors.New("withdraw invariant failed: expected refunded=false")
-		}
 		if !bytes.Equal(withdrawInvariant.Recipient, recipientUA) {
 			return errors.New("withdraw invariant failed: recipient UA mismatch")
 		}
@@ -2155,7 +2155,7 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Contracts.Bridge = bridgeAddr.Hex()
 	rep.BridgeParams.FeeBps = cfg.BridgeFeeBps
 	rep.BridgeParams.RelayerTipBps = cfg.BridgeRelayerTipBps
-	rep.BridgeParams.RefundWindowSeconds = cfg.BridgeRefundWindowSeconds
+	rep.BridgeParams.WithdrawalExpiryWindowSeconds = cfg.BridgeWithdrawalExpiryWindowSeconds
 	rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
 	rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
 	rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
@@ -2247,7 +2247,6 @@ func run(ctx context.Context, cfg config) (*report, error) {
 	rep.Invariants.DepositUsed = depositUsedInvariant
 	rep.Invariants.Withdrawal.Exists = true
 	rep.Invariants.Withdrawal.Finalized = withdrawInvariant.Finalized
-	rep.Invariants.Withdrawal.Refunded = withdrawInvariant.Refunded
 	rep.Invariants.Withdrawal.Extended = withdrawalExpiryWant > 0
 	rep.Invariants.Withdrawal.FeeBps = withdrawInvariant.FeeBps
 	rep.Invariants.Withdrawal.Amount = withdrawInvariant.Amount.String()
@@ -3365,7 +3364,7 @@ func validateReusedBridgeConfig(
 	expectedWithdrawImageID common.Hash,
 	expectedFeeBps uint64,
 	expectedRelayerTipBps uint64,
-	expectedRefundWindowSeconds uint64,
+	expectedWithdrawalExpiryWindowSeconds uint64,
 	expectedMaxExpiryExtensionSeconds uint64,
 	expectedMinDepositAmount uint64,
 	expectedMinWithdrawAmount uint64,
@@ -3419,12 +3418,12 @@ func validateReusedBridgeConfig(
 	if onChainRelayerTipBps != expectedRelayerTipBps {
 		return fmt.Errorf("reused bridge relayerTipBps mismatch: got=%d want=%d", onChainRelayerTipBps, expectedRelayerTipBps)
 	}
-	onChainRefundWindowSeconds, err := callUint64FromCaller(ctx, bridge, "refundWindowSeconds")
+	onChainWithdrawalExpiryWindowSeconds, err := callUint64FromCaller(ctx, bridge, "withdrawalExpiryWindowSeconds")
 	if err != nil {
-		return fmt.Errorf("read bridge refundWindowSeconds: %w", err)
+		return fmt.Errorf("read bridge withdrawalExpiryWindowSeconds: %w", err)
 	}
-	if onChainRefundWindowSeconds != expectedRefundWindowSeconds {
-		return fmt.Errorf("reused bridge refundWindowSeconds mismatch: got=%d want=%d", onChainRefundWindowSeconds, expectedRefundWindowSeconds)
+	if onChainWithdrawalExpiryWindowSeconds != expectedWithdrawalExpiryWindowSeconds {
+		return fmt.Errorf("reused bridge withdrawalExpiryWindowSeconds mismatch: got=%d want=%d", onChainWithdrawalExpiryWindowSeconds, expectedWithdrawalExpiryWindowSeconds)
 	}
 	onChainMaxExpiryExtensionSeconds, err := callUint64FromCaller(ctx, bridge, "maxExpiryExtensionSeconds")
 	if err != nil {
@@ -3756,13 +3755,9 @@ func callWithdrawal(ctx context.Context, bridge *bind.BoundContract, withdrawalI
 	if !ok {
 		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal finalized type: %T", res[4])
 	}
-	refunded, ok := res[5].(bool)
+	recipient, ok := res[5].([]byte)
 	if !ok {
-		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal refunded type: %T", res[5])
-	}
-	recipient, ok := res[6].([]byte)
-	if !ok {
-		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal recipient type: %T", res[6])
+		return withdrawalView{}, fmt.Errorf("unexpected getWithdrawal recipient type: %T", res[5])
 	}
 
 	return withdrawalView{
@@ -3771,7 +3766,6 @@ func callWithdrawal(ctx context.Context, bridge *bind.BoundContract, withdrawalI
 		Expiry:    expiry,
 		FeeBps:    feeBps,
 		Finalized: finalized,
-		Refunded:  refunded,
 		Recipient: append([]byte(nil), recipient...),
 	}, nil
 }
@@ -3800,7 +3794,7 @@ func waitForWithdrawalFinalized(ctx context.Context, pollInterval time.Duration,
 					return withdrawalView{}, fmt.Errorf("%s: %w", timeoutMsg, lastErr)
 				}
 				if haveLast {
-					return last, fmt.Errorf("%s: finalized=%t refunded=%t", timeoutMsg, last.Finalized, last.Refunded)
+					return last, fmt.Errorf("%s: finalized=%t", timeoutMsg, last.Finalized)
 				}
 				return withdrawalView{}, errors.New(timeoutMsg)
 			}

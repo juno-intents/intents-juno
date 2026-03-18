@@ -43,7 +43,11 @@ func main() {
 		wjunoAddr   = flag.String("wjuno-address", "", "WJuno token contract address (optional, returned by /v1/config)")
 		oWalletUA   = flag.String("owallet-ua", "", "oWallet unified address (required)")
 
-		refundWindowSeconds             = flag.Uint64("refund-window-seconds", 24*60*60, "on-chain refund window in seconds")
+		withdrawalExpiryWindowSeconds = flag.Uint64(
+			"withdrawal-expiry-window-seconds",
+			24*60*60,
+			"on-chain withdrawal expiry window in seconds",
+		)
 		minDepositAmount                = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
 		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
 		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
@@ -209,24 +213,24 @@ func main() {
 	}
 
 	handler, err := bridgeapi.NewHandler(bridgeapi.Config{
-		BaseChainID:             uint32(*baseChainID),
-		BridgeAddress:           common.HexToAddress(*bridgeAddr),
-		WJunoAddress:            wjunoAddress,
-		OWalletUA:               *oWalletUA,
-		RefundWindowSeconds:     *refundWindowSeconds,
-		MinDepositAmount:        *minDepositAmount,
-		DepositMinConfirmations: *depositMinConfirmations,
-		MinWithdrawAmount:       *minWithdrawAmount,
-		FeeBps:                  uint32(*feeBps),
-		RuntimeSettings:         runtimeSettingsCache,
-		BridgeSettings:          bridgeSettingsCache,
-		RateLimitPerIPPerSecond: *rateLimitPerSecond,
-		RateLimitBurst:          *rateLimitBurst,
-		RateLimitMaxTrackedIPs:  *rateLimitMaxIPs,
-		MemoCacheTTL:            *memoCacheTTL,
-		MemoCacheMaxEntries:     *memoCacheMaxEntries,
-		DepositLister:           depositLister,
-		WithdrawalLister:        withdrawalLister,
+		BaseChainID:                   uint32(*baseChainID),
+		BridgeAddress:                 common.HexToAddress(*bridgeAddr),
+		WJunoAddress:                  wjunoAddress,
+		OWalletUA:                     *oWalletUA,
+		WithdrawalExpiryWindowSeconds: *withdrawalExpiryWindowSeconds,
+		MinDepositAmount:              *minDepositAmount,
+		DepositMinConfirmations:       *depositMinConfirmations,
+		MinWithdrawAmount:             *minWithdrawAmount,
+		FeeBps:                        uint32(*feeBps),
+		RuntimeSettings:               runtimeSettingsCache,
+		BridgeSettings:                bridgeSettingsCache,
+		RateLimitPerIPPerSecond:       *rateLimitPerSecond,
+		RateLimitBurst:                *rateLimitBurst,
+		RateLimitMaxTrackedIPs:        *rateLimitMaxIPs,
+		MemoCacheTTL:                  *memoCacheTTL,
+		MemoCacheMaxEntries:           *memoCacheMaxEntries,
+		DepositLister:                 depositLister,
+		WithdrawalLister:              withdrawalLister,
 		ReadinessCheck: healthz.CombineReadinessChecks(
 			pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout),
 			runtimeSettingsCache.Ready,

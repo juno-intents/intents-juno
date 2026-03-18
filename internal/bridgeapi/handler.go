@@ -27,16 +27,16 @@ import (
 var ErrInvalidConfig = errors.New("bridgeapi: invalid config")
 
 type Config struct {
-	BaseChainID             uint32
-	BridgeAddress           common.Address
-	WJunoAddress            common.Address
-	OWalletUA               string
-	RefundWindowSeconds     uint64
-	MinDepositAmount        uint64
-	DepositMinConfirmations int64
-	MinWithdrawAmount       uint64
-	FeeBps                  uint32
-	NonceFn                 func() (uint64, error)
+	BaseChainID                   uint32
+	BridgeAddress                 common.Address
+	WJunoAddress                  common.Address
+	OWalletUA                     string
+	WithdrawalExpiryWindowSeconds uint64
+	MinDepositAmount              uint64
+	DepositMinConfirmations       int64
+	MinWithdrawAmount             uint64
+	FeeBps                        uint32
+	NonceFn                       func() (uint64, error)
 
 	RuntimeSettings RuntimeSettingsProvider
 	BridgeSettings  BridgeSettingsProvider
@@ -235,15 +235,15 @@ func (h *handler) handleConfig(w http.ResponseWriter, _ *http.Request) {
 
 	w.Header().Set("Cache-Control", "no-store")
 	resp := map[string]any{
-		"version":                 "v1",
-		"baseChainId":             h.cfg.BaseChainID,
-		"bridgeAddress":           h.cfg.BridgeAddress.Hex(),
-		"oWalletUA":               h.cfg.OWalletUA,
-		"refundWindowSeconds":     h.cfg.RefundWindowSeconds,
-		"minDepositAmount":        strconv.FormatUint(minDepositAmount, 10),
-		"depositMinConfirmations": depositMinConfirmations,
-		"minWithdrawAmount":       strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
-		"feeBps":                  h.cfg.FeeBps,
+		"version":                       "v1",
+		"baseChainId":                   h.cfg.BaseChainID,
+		"bridgeAddress":                 h.cfg.BridgeAddress.Hex(),
+		"oWalletUA":                     h.cfg.OWalletUA,
+		"withdrawalExpiryWindowSeconds": h.cfg.WithdrawalExpiryWindowSeconds,
+		"minDepositAmount":              strconv.FormatUint(minDepositAmount, 10),
+		"depositMinConfirmations":       depositMinConfirmations,
+		"minWithdrawAmount":             strconv.FormatUint(h.cfg.MinWithdrawAmount, 10),
+		"feeBps":                        h.cfg.FeeBps,
 	}
 	if h.cfg.WJunoAddress != (common.Address{}) {
 		resp["wjunoAddress"] = h.cfg.WJunoAddress.Hex()

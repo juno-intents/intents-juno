@@ -24,12 +24,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error InvalidBps();
     error InvalidWithdrawalRecipient();
     error WithdrawalNotFound();
-    error WithdrawalFinalized();
-    error WithdrawalPaid();
-    error WithdrawalRefunded();
-    error WithdrawalExpired();
-    error WithdrawNotExpired();
-    error RefundDisabled();
     error NetAmountMismatch();
     error WithdrawalRecipientMismatch();
     error ZeroImageId();
@@ -94,7 +88,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint64 expiry;
         uint96 feeBps; // snapshot at request time
         bool finalized;
-        bool refunded;
         bytes recipientUA;
     }
 
@@ -115,10 +108,8 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     uint8 private constant WITHDRAW_PAID_SKIP_FINALIZED = 1;
     uint8 private constant WITHDRAW_PAID_SKIP_ALREADY_PAID = 2;
-    uint8 private constant WITHDRAW_PAID_SKIP_REFUNDED = 3;
     uint8 private constant WITHDRAW_FINALIZE_SKIP_FINALIZED = 1;
-    uint8 private constant WITHDRAW_FINALIZE_SKIP_REFUNDED = 2;
-    uint8 private constant WITHDRAW_FINALIZE_SKIP_EXPIRED_UNPAID = 4;
+    uint8 private constant WITHDRAW_FINALIZE_SKIP_EXPIRED_UNPAID = 2;
 
     // -------- State --------
     WJuno public immutable wjuno;
@@ -131,7 +122,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
     uint96 public feeBps;
     uint96 public relayerTipBps; // portion of fee (in bps) paid to msg.sender
-    uint64 public refundWindowSeconds;
+    uint64 public withdrawalExpiryWindowSeconds;
     uint64 public maxExpiryExtensionSeconds;
     address public pauseGuardian;
     address public minDepositAdmin;
@@ -152,7 +143,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     event ParamsUpdated(
         uint96 feeBps,
         uint96 relayerTipBps,
-        uint64 refundWindowSeconds,
+        uint64 withdrawalExpiryWindowSeconds,
         uint64 maxExpiryExtensionSeconds,
         uint256 minDepositAmount,
         uint256 minWithdrawAmount
@@ -176,7 +167,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     );
     event WithdrawFinalized(bytes32 indexed withdrawalId, uint256 netAmount, uint256 fee, uint256 relayerTip);
     event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId, uint8 reason);
-    event WithdrawRefunded(bytes32 indexed withdrawalId);
     event WithdrawExpiryExtended(bytes32 indexed withdrawalId, uint64 oldExpiry, uint64 newExpiry);
     event WithdrawalPaidRecorded(bytes32 indexed withdrawalId);
     event WithdrawalPaidSkipped(bytes32 indexed withdrawalId, uint8 reason);
@@ -192,7 +182,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         bytes32 withdrawImageId_,
         uint96 feeBps_,
         uint96 relayerTipBps_,
-        uint64 refundWindowSeconds_,
+        uint64 withdrawalExpiryWindowSeconds_,
         uint64 maxExpiryExtensionSeconds_,
         uint256 minDepositAmount_,
         uint256 minWithdrawAmount_
@@ -204,7 +194,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         if (depositImageId_ == bytes32(0) || withdrawImageId_ == bytes32(0)) revert ZeroImageId();
 
         if (feeBps_ > BPS_DENOMINATOR || relayerTipBps_ > BPS_DENOMINATOR) revert InvalidBps();
-        if (refundWindowSeconds_ == 0 || maxExpiryExtensionSeconds_ == 0) revert InvalidExtendBatch();
+        if (withdrawalExpiryWindowSeconds_ == 0 || maxExpiryExtensionSeconds_ == 0) revert InvalidExtendBatch();
 
         wjuno = wjuno_;
         feeDistributor = feeDistributor_;
@@ -216,7 +206,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
         feeBps = feeBps_;
         relayerTipBps = relayerTipBps_;
-        refundWindowSeconds = refundWindowSeconds_;
+        withdrawalExpiryWindowSeconds = withdrawalExpiryWindowSeconds_;
         maxExpiryExtensionSeconds = maxExpiryExtensionSeconds_;
         minDepositAmount = minDepositAmount_;
         minWithdrawAmount = minWithdrawAmount_;
@@ -224,7 +214,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit ParamsUpdated(
             feeBps_,
             relayerTipBps_,
-            refundWindowSeconds_,
+            withdrawalExpiryWindowSeconds_,
             maxExpiryExtensionSeconds_,
             minDepositAmount_,
             minWithdrawAmount_
@@ -251,7 +241,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     function setParams(
         uint96 newFeeBps,
         uint96 newRelayerTipBps,
-        uint64 newRefundWindowSeconds,
+        uint64 newWithdrawalExpiryWindowSeconds,
         uint64 newMaxExpiryExtensionSeconds,
         uint256 newMinDepositAmount,
         uint256 newMinWithdrawAmount
@@ -259,11 +249,11 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         if (newFeeBps > BPS_DENOMINATOR || newRelayerTipBps > BPS_DENOMINATOR) {
             revert InvalidBps();
         }
-        if (newRefundWindowSeconds == 0 || newMaxExpiryExtensionSeconds == 0) revert InvalidExtendBatch();
+        if (newWithdrawalExpiryWindowSeconds == 0 || newMaxExpiryExtensionSeconds == 0) revert InvalidExtendBatch();
 
         feeBps = newFeeBps;
         relayerTipBps = newRelayerTipBps;
-        refundWindowSeconds = newRefundWindowSeconds;
+        withdrawalExpiryWindowSeconds = newWithdrawalExpiryWindowSeconds;
         maxExpiryExtensionSeconds = newMaxExpiryExtensionSeconds;
         minDepositAmount = newMinDepositAmount;
         minWithdrawAmount = newMinWithdrawAmount;
@@ -271,7 +261,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         emit ParamsUpdated(
             newFeeBps,
             newRelayerTipBps,
-            newRefundWindowSeconds,
+            newWithdrawalExpiryWindowSeconds,
             newMaxExpiryExtensionSeconds,
             newMinDepositAmount,
             newMinWithdrawAmount
@@ -413,7 +403,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
         IERC20(address(wjuno)).safeTransferFrom(msg.sender, address(this), amount);
 
-        uint64 expiry = uint64(block.timestamp + refundWindowSeconds);
+        uint64 expiry = uint64(block.timestamp + withdrawalExpiryWindowSeconds);
         uint96 fbps = feeBps;
 
         withdrawNonce += 1;
@@ -458,7 +448,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
 
         for (uint256 i = 0; i < n; i++) {
             Withdrawal storage w = _withdrawals[withdrawalIds[i]];
-            if (w.requester == address(0) || w.finalized || w.refunded) continue;
+            if (w.requester == address(0) || w.finalized) continue;
             if (block.timestamp >= w.expiry) continue;
 
             uint64 oldExpiry = w.expiry;
@@ -493,11 +483,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 emit WithdrawalPaidSkipped(withdrawalId, WITHDRAW_PAID_SKIP_ALREADY_PAID);
                 continue;
             }
-            if (w.refunded) {
-                emit WithdrawalPaidSkipped(withdrawalId, WITHDRAW_PAID_SKIP_REFUNDED);
-                continue;
-            }
-
             withdrawalPaid[withdrawalId] = true;
             emit WithdrawalPaidRecorded(withdrawalId);
         }
@@ -534,10 +519,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
                 emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_FINALIZED);
                 continue;
             }
-            if (w.refunded) {
-                emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_REFUNDED);
-                continue;
-            }
             if (block.timestamp >= w.expiry && !withdrawalPaid[it.withdrawalId]) {
                 emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_EXPIRED_UNPAID);
                 continue;
@@ -565,11 +546,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         _recordCheckpoint(checkpoint);
     }
 
-    function refund(bytes32 withdrawalId) external nonReentrant {
-        withdrawalId;
-        revert RefundDisabled();
-    }
-
     // -------- Views --------
     function getWithdrawal(bytes32 withdrawalId)
         external
@@ -580,7 +556,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             uint64 expiry,
             uint96 feeBpsAtRequest,
             bool finalized,
-            bool refunded,
             bytes memory recipientUA
         )
     {
@@ -590,7 +565,6 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         expiry = w.expiry;
         feeBpsAtRequest = w.feeBps;
         finalized = w.finalized;
-        refunded = w.refunded;
         recipientUA = w.recipientUA;
     }
 

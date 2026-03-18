@@ -157,7 +157,7 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
 	const feeBps = uint64(50)
 	const tipBps = uint64(1000)
-	const refundWindowSeconds = uint64(60)
+	const withdrawalExpiryWindowSeconds = uint64(60)
 	const maxExtendSeconds = uint64(12 * 60 * 60)
 
 	bridgeAddr := deployContract(
@@ -171,7 +171,7 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 		withdrawImageID,
 		new(big.Int).SetUint64(feeBps),
 		new(big.Int).SetUint64(tipBps),
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExtendSeconds,
 		big.NewInt(0),
 		big.NewInt(0),
@@ -228,12 +228,12 @@ func TestFinalizer_Integration_PostgresAndAnvil(t *testing.T) {
 	copy(req20[:], signerAddr[:])
 
 	w := withdraw.Withdrawal{
-		ID:          ([32]byte)(withdrawalID),
-		Requester:   req20,
-		Amount:      withdrawAmount.Uint64(),
-		FeeBps:      uint32(feeBpsAtReq),
-		RecipientUA: append([]byte(nil), recipientUA...),
-		Expiry:      time.Unix(int64(expiry), 0).UTC(),
+		ID:               ([32]byte)(withdrawalID),
+		Requester:        req20,
+		Amount:           withdrawAmount.Uint64(),
+		FeeBps:           uint32(feeBpsAtReq),
+		RecipientUA:      append([]byte(nil), recipientUA...),
+		Expiry:           time.Unix(int64(expiry), 0).UTC(),
 		ProofWitnessItem: testWithdrawWitnessItem(),
 	}
 	if _, _, err := store.UpsertRequested(ctx, w); err != nil {

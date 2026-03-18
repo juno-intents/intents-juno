@@ -93,11 +93,11 @@ func TestHandler_Config(t *testing.T) {
 
 	t.Run("without wjuno", func(t *testing.T) {
 		h, err := NewHandler(Config{
-			BaseChainID:             8453,
-			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-			OWalletUA:               "u1example",
-			RefundWindowSeconds:     86400,
-			DepositMinConfirmations: 1,
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			DepositMinConfirmations:       1,
 			NonceFn: func() (uint64, error) {
 				return 1, nil
 			},
@@ -134,12 +134,12 @@ func TestHandler_Config(t *testing.T) {
 	t.Run("with wjuno", func(t *testing.T) {
 		wjuno := common.HexToAddress("0xabcdefabcdefabcdefabcdefabcdefabcdefabcd")
 		h, err := NewHandler(Config{
-			BaseChainID:             8453,
-			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-			WJunoAddress:            wjuno,
-			OWalletUA:               "u1example",
-			RefundWindowSeconds:     86400,
-			DepositMinConfirmations: 2,
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			WJunoAddress:                  wjuno,
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			DepositMinConfirmations:       2,
 			NonceFn: func() (uint64, error) {
 				return 1, nil
 			},
@@ -176,12 +176,12 @@ func TestHandler_Config(t *testing.T) {
 
 	t.Run("prefers runtime and chain-backed settings", func(t *testing.T) {
 		h, err := NewHandler(Config{
-			BaseChainID:             8453,
-			BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-			OWalletUA:               "u1example",
-			RefundWindowSeconds:     86400,
-			DepositMinConfirmations: 1,
-			MinDepositAmount:        7,
+			BaseChainID:                   8453,
+			BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+			OWalletUA:                     "u1example",
+			WithdrawalExpiryWindowSeconds: 86400,
+			DepositMinConfirmations:       1,
+			MinDepositAmount:              7,
 			RuntimeSettings: &stubRuntimeSettingsProvider{settings: runtimeconfig.Settings{
 				DepositMinConfirmations:         9,
 				WithdrawPlannerMinConfirmations: 4,
@@ -222,10 +222,10 @@ func TestHandler_ProbeAliases(t *testing.T) {
 	t.Parallel()
 
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
 		NonceFn: func() (uint64, error) {
 			return 1, nil
 		},
@@ -248,12 +248,12 @@ func TestHandler_ProbePathsBypassFrontendAndRateLimiting(t *testing.T) {
 	t.Parallel()
 
 	h, err := NewHandler(Config{
-		BaseChainID:             8453,
-		BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:               "u1example",
-		RefundWindowSeconds:     86400,
-		RateLimitPerIPPerSecond: 0.0001,
-		RateLimitBurst:          1,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
+		RateLimitPerIPPerSecond:       0.0001,
+		RateLimitBurst:                1,
 		NonceFn: func() (uint64, error) {
 			return 1, nil
 		},
@@ -276,10 +276,10 @@ func TestHandler_DepositMemo(t *testing.T) {
 	t.Parallel()
 
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
 		NonceFn: func() (uint64, error) {
 			return 0x0102030405060708, nil
 		},
@@ -323,10 +323,10 @@ func TestHandler_DepositStatus_NotFound(t *testing.T) {
 	t.Parallel()
 
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
 		NonceFn: func() (uint64, error) {
 			return 1, nil
 		},
@@ -362,10 +362,10 @@ func TestHandler_WithdrawalStatus(t *testing.T) {
 	batchID[0] = 0x22
 
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
 		NonceFn: func() (uint64, error) {
 			return 1, nil
 		},
@@ -412,11 +412,11 @@ func TestHandler_DepositMemo_CacheHitUsesSingleNonce(t *testing.T) {
 
 	var nonceCalls atomic.Uint64
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
-		MemoCacheTTL:        30 * time.Second,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
+		MemoCacheTTL:                  30 * time.Second,
 		NonceFn: func() (uint64, error) {
 			return nonceCalls.Add(1), nil
 		},
@@ -470,11 +470,11 @@ func TestHandler_DepositMemo_CacheExpires(t *testing.T) {
 	now := time.Date(2026, 2, 11, 10, 0, 0, 0, time.UTC)
 	var nonceCalls atomic.Uint64
 	h, err := NewHandler(Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
-		MemoCacheTTL:        2 * time.Second,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
+		MemoCacheTTL:                  2 * time.Second,
 		Now: func() time.Time {
 			return now
 		},
@@ -532,12 +532,12 @@ func TestHandler_RateLimitPerIP(t *testing.T) {
 
 	now := time.Date(2026, 2, 11, 10, 0, 0, 0, time.UTC)
 	h, err := NewHandler(Config{
-		BaseChainID:             8453,
-		BridgeAddress:           common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:               "u1example",
-		RefundWindowSeconds:     86400,
-		RateLimitPerIPPerSecond: 1,
-		RateLimitBurst:          1,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
+		RateLimitPerIPPerSecond:       1,
+		RateLimitBurst:                1,
 		Now: func() time.Time {
 			return now
 		},
@@ -599,10 +599,10 @@ func TestHandler_RateLimitPerIP(t *testing.T) {
 
 func testConfig() Config {
 	return Config{
-		BaseChainID:         8453,
-		BridgeAddress:       common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
-		OWalletUA:           "u1example",
-		RefundWindowSeconds: 86400,
+		BaseChainID:                   8453,
+		BridgeAddress:                 common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678"),
+		OWalletUA:                     "u1example",
+		WithdrawalExpiryWindowSeconds: 86400,
 		NonceFn: func() (uint64, error) {
 			return 1, nil
 		},

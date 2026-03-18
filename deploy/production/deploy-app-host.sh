@@ -352,7 +352,7 @@ args=(
   --base-chain-id "\$BRIDGE_API_BASE_CHAIN_ID"
   --bridge-address "\$BRIDGE_API_BRIDGE_ADDRESS"
   --owallet-ua "\$BRIDGE_API_OWALLET_UA"
-  --refund-window-seconds "\$BRIDGE_API_REFUND_WINDOW_SECONDS"
+  --withdrawal-expiry-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS"
   --deposit-min-confirmations "\${BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS:-1}"
   --withdraw-planner-min-confirmations "\${BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
   --withdraw-batch-confirmations "\${BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS:-1}"

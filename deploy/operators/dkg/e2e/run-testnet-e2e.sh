@@ -115,8 +115,6 @@ Options:
   --relayer-runtime-operator-ssh-user <user> SSH user for distributed relayer runtime operator hosts
   --relayer-runtime-operator-ssh-key-file <path> SSH key file for distributed relayer runtime operator hosts
   --aws-dr-region <region>          optional AWS DR region passthrough (recorded in summary metadata only)
-  --refund-after-expiry-window-seconds <n> refund window seconds used only for refund-after-expiry chaos scenario
-                                   (default: 120)
   --output <path>                  summary json output (default: <workdir>/reports/testnet-e2e-summary.json)
   --force                          remove existing workdir before starting
   --stop-after-stage <stage>      optional stage checkpoint to stop after successful completion
@@ -2040,48 +2038,49 @@ cast_contract_call_one() {
   jq -r '.[0] | if type == "number" then tostring else . end' <<<"$decoded_json"
 }
 
-read_bridge_refund_window_seconds() {
+read_bridge_withdrawal_expiry_window_seconds() {
   local rpc_url="$1"
   local bridge_address="$2"
   cast_contract_call_one \
     "$rpc_url" \
     "$bridge_address" \
-    "refundWindowSeconds()" \
-    "refundWindowSeconds()(uint64)"
+    "withdrawalExpiryWindowSeconds()" \
+    "withdrawalExpiryWindowSeconds()(uint64)"
 }
 
-wait_for_bridge_refund_window_seconds() {
+wait_for_bridge_withdrawal_expiry_window_seconds() {
   local rpc_url="$1"
   local bridge_address="$2"
-  local expected_refund_window_seconds="$3"
+  local expected_withdrawal_expiry_window_seconds="$3"
   local timeout_seconds="${4:-20}"
   local interval_seconds="${5:-2}"
 
-  local deadline_epoch now_epoch current_refund_window=""
+  local deadline_epoch now_epoch current_withdrawal_expiry_window=""
   deadline_epoch=$(( $(date +%s) + timeout_seconds ))
   while true; do
-    current_refund_window="$(read_bridge_refund_window_seconds "$rpc_url" "$bridge_address" 2>/dev/null || true)"
-    if [[ "$current_refund_window" =~ ^[0-9]+$ ]] && (( current_refund_window == expected_refund_window_seconds )); then
-      printf '%s' "$current_refund_window"
+    current_withdrawal_expiry_window="$(read_bridge_withdrawal_expiry_window_seconds "$rpc_url" "$bridge_address" 2>/dev/null || true)"
+    if [[ "$current_withdrawal_expiry_window" =~ ^[0-9]+$ ]] &&
+      (( current_withdrawal_expiry_window == expected_withdrawal_expiry_window_seconds )); then
+      printf '%s' "$current_withdrawal_expiry_window"
       return 0
     fi
 
     now_epoch="$(date +%s)"
     if (( now_epoch >= deadline_epoch )); then
-      printf '%s' "$current_refund_window"
+      printf '%s' "$current_withdrawal_expiry_window"
       return 1
     fi
     sleep "$interval_seconds"
   done
 }
 
-set_bridge_params_with_refund_window_retry() {
+set_bridge_params_with_withdrawal_expiry_window_retry() {
   local rpc_url="$1"
   local bridge_deployer_key_hex="$2"
   local bridge_address="$3"
   local fee_bps="$4"
   local relayer_tip_bps="$5"
-  local target_refund_window_seconds="$6"
+  local target_withdrawal_expiry_window_seconds="$6"
   local max_expiry_extension_seconds="$7"
   local min_deposit_amount="$8"
   local min_withdraw_amount="$9"
@@ -2100,7 +2099,7 @@ set_bridge_params_with_refund_window_retry() {
         "setParams(uint96,uint96,uint64,uint64,uint256,uint256)" \
         "$fee_bps" \
         "$relayer_tip_bps" \
-        "$target_refund_window_seconds" \
+        "$target_withdrawal_expiry_window_seconds" \
         "$max_expiry_extension_seconds" \
         "$min_deposit_amount" \
         "$min_withdraw_amount")"
@@ -2121,10 +2120,10 @@ set_bridge_params_with_refund_window_retry() {
 
     set +e
     readback_output="$(
-      wait_for_bridge_refund_window_seconds \
+      wait_for_bridge_withdrawal_expiry_window_seconds \
         "$rpc_url" \
         "$bridge_address" \
-        "$target_refund_window_seconds" \
+        "$target_withdrawal_expiry_window_seconds" \
         20 \
         2
     )"
@@ -2136,16 +2135,16 @@ set_bridge_params_with_refund_window_retry() {
     fi
 
     if (( attempt < max_attempts )); then
-      log "$action_label readback mismatch after setParams attempt=${attempt}/${max_attempts} got_refund_window=${readback_output:-<empty>} expected_refund_window=$target_refund_window_seconds; retrying"
+      log "$action_label readback mismatch after setParams attempt=${attempt}/${max_attempts} got_withdrawal_expiry_window=${readback_output:-<empty>} expected_withdrawal_expiry_window=$target_withdrawal_expiry_window_seconds; retrying"
       sleep 2
       continue
     fi
   done
 
-  printf '%s configure mismatch: got_refund_window=%s expected=%s\n' \
+  printf '%s configure mismatch: got_withdrawal_expiry_window=%s expected=%s\n' \
     "$action_label" \
     "${readback_output:-<empty>}" \
-    "$target_refund_window_seconds"
+    "$target_withdrawal_expiry_window_seconds"
   return 1
 }
 
@@ -3219,23 +3218,6 @@ endpoint_host_port() {
   return 1
 }
 
-is_withdraw_not_expired_error() {
-  local msg lowered
-  msg="${1:-}"
-  lowered="$(lower "$msg")"
-  [[ "$lowered" == *"withdrawnotexpired"* ]] ||
-    [[ "$lowered" == *"withdraw not expired"* ]]
-}
-
-# Returns true if the error indicates the withdrawal was already refunded.
-is_withdrawal_already_refunded_error() {
-  local msg lowered
-  msg="${1:-}"
-  lowered="$(lower "$msg")"
-  [[ "$lowered" == *"withdrawalrefunded"* ]] ||
-    [[ "$lowered" == *"withdrawal refunded"* ]]
-}
-
 inject_operator_endpoint_failure() {
   local endpoint="$1"
   local ssh_key_path="$2"
@@ -3451,7 +3433,6 @@ command_run() {
   local relayer_runtime_operator_ssh_user=""
   local relayer_runtime_operator_ssh_key_file=""
   local aws_dr_region=""
-  local refund_after_expiry_window_seconds="120"
   local backoffice_url=""
   local backoffice_auth_token=""
   local output_path=""
@@ -3873,11 +3854,6 @@ command_run() {
         aws_dr_region="$2"
         shift 2
         ;;
-      --refund-after-expiry-window-seconds)
-        [[ $# -ge 2 ]] || die "missing value for --refund-after-expiry-window-seconds"
-        refund_after_expiry_window_seconds="$2"
-        shift 2
-        ;;
       --backoffice-url)
         [[ $# -ge 2 ]] || die "missing value for --backoffice-url"
         backoffice_url="$2"
@@ -3978,8 +3954,6 @@ command_run() {
   (( sp1_deposit_pgu_estimate > 0 )) || die "--sp1-deposit-pgu-estimate must be > 0"
   (( sp1_withdraw_pgu_estimate > 0 )) || die "--sp1-withdraw-pgu-estimate must be > 0"
   (( sp1_groth16_base_fee_wei > 0 )) || die "--sp1-groth16-base-fee-wei must be > 0"
-  [[ "$refund_after_expiry_window_seconds" =~ ^[0-9]+$ ]] || die "--refund-after-expiry-window-seconds must be numeric"
-  (( refund_after_expiry_window_seconds > 0 )) || die "--refund-after-expiry-window-seconds must be > 0"
   case "$relayer_runtime_mode" in
     distributed) ;;
     runner)
@@ -6283,8 +6257,8 @@ command_run() {
   [[ -n "$bridge_deployer_key_hex" ]] || die "bridge deployer key file is empty: $bridge_deployer_key_file"
 
   local bridge_fee_bps bridge_relayer_tip_bps bridge_fee_distributor
-  local bridge_refund_window_seconds bridge_max_expiry_extension_seconds
-  local bridge_min_refund_window_seconds="${BRIDGE_MIN_REFUND_WINDOW_SECONDS:-86400}"
+  local bridge_withdrawal_expiry_window_seconds bridge_max_expiry_extension_seconds
+  local bridge_min_withdrawal_expiry_window_seconds="${BRIDGE_MIN_WITHDRAWAL_EXPIRY_WINDOW_SECONDS:-86400}"
   local owner_wjuno_balance_before recipient_wjuno_balance_before
   local fee_distributor_wjuno_balance_before bridge_wjuno_balance_before
   bridge_fee_bps="$(
@@ -6308,7 +6282,7 @@ command_run() {
       "feeDistributor()" \
       "feeDistributor()(address)"
   )"
-  bridge_refund_window_seconds="$(read_bridge_refund_window_seconds "$base_rpc_url" "$deployed_bridge_address")"
+  bridge_withdrawal_expiry_window_seconds="$(read_bridge_withdrawal_expiry_window_seconds "$base_rpc_url" "$deployed_bridge_address")"
   bridge_max_expiry_extension_seconds="$(
     cast_contract_call_one \
       "$base_rpc_url" \
@@ -6319,31 +6293,31 @@ command_run() {
   [[ "$bridge_fee_bps" =~ ^[0-9]+$ ]] || die "bridge feeBps is invalid: $bridge_fee_bps"
   [[ "$bridge_relayer_tip_bps" =~ ^[0-9]+$ ]] || die "bridge relayerTipBps is invalid: $bridge_relayer_tip_bps"
   [[ "$bridge_fee_distributor" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "bridge feeDistributor is invalid: $bridge_fee_distributor"
-  [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
-    die "bridge refundWindowSeconds is invalid: $bridge_refund_window_seconds"
+  [[ "$bridge_withdrawal_expiry_window_seconds" =~ ^[0-9]+$ ]] || \
+    die "bridge withdrawalExpiryWindowSeconds is invalid: $bridge_withdrawal_expiry_window_seconds"
   [[ "$bridge_max_expiry_extension_seconds" =~ ^[0-9]+$ ]] || \
     die "bridge maxExpiryExtensionSeconds is invalid: $bridge_max_expiry_extension_seconds"
-  [[ "$bridge_min_refund_window_seconds" =~ ^[0-9]+$ ]] || \
-    die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be numeric: $bridge_min_refund_window_seconds"
-  (( bridge_min_refund_window_seconds > 0 )) || \
-    die "BRIDGE_MIN_REFUND_WINDOW_SECONDS must be > 0"
-  local bridge_effective_refund_window_floor_seconds="$bridge_min_refund_window_seconds"
-  if (( bridge_effective_refund_window_floor_seconds > bridge_max_expiry_extension_seconds )); then
-    log "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target floor=$bridge_effective_refund_window_floor_seconds max=$bridge_max_expiry_extension_seconds"
-    bridge_effective_refund_window_floor_seconds="$bridge_max_expiry_extension_seconds"
+  [[ "$bridge_min_withdrawal_expiry_window_seconds" =~ ^[0-9]+$ ]] || \
+    die "BRIDGE_MIN_WITHDRAWAL_EXPIRY_WINDOW_SECONDS must be numeric: $bridge_min_withdrawal_expiry_window_seconds"
+  (( bridge_min_withdrawal_expiry_window_seconds > 0 )) || \
+    die "BRIDGE_MIN_WITHDRAWAL_EXPIRY_WINDOW_SECONDS must be > 0"
+  local bridge_effective_withdrawal_expiry_window_floor_seconds="$bridge_min_withdrawal_expiry_window_seconds"
+  if (( bridge_effective_withdrawal_expiry_window_floor_seconds > bridge_max_expiry_extension_seconds )); then
+    log "bridge effective withdrawal expiry window floor exceeds maxExpiryExtensionSeconds; clamping target floor=$bridge_effective_withdrawal_expiry_window_floor_seconds max=$bridge_max_expiry_extension_seconds"
+    bridge_effective_withdrawal_expiry_window_floor_seconds="$bridge_max_expiry_extension_seconds"
   fi
-  if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
+  if (( bridge_withdrawal_expiry_window_seconds < bridge_effective_withdrawal_expiry_window_floor_seconds )); then
     local bridge_params_restore_output bridge_params_restore_status
-    log "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) current=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
+    log "bridge withdrawalExpiryWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) current=$bridge_withdrawal_expiry_window_seconds target=$bridge_effective_withdrawal_expiry_window_floor_seconds"
     set +e
     bridge_params_restore_output="$(
-      set_bridge_params_with_refund_window_retry \
+      set_bridge_params_with_withdrawal_expiry_window_retry \
         "$base_rpc_url" \
         "$bridge_deployer_key_hex" \
         "$deployed_bridge_address" \
         "$bridge_fee_bps" \
         "$bridge_relayer_tip_bps" \
-        "$bridge_effective_refund_window_floor_seconds" \
+        "$bridge_effective_withdrawal_expiry_window_floor_seconds" \
         "$bridge_max_expiry_extension_seconds" \
         "$bridge_min_deposit_amount" \
         "$bridge_min_withdraw_amount" \
@@ -6354,11 +6328,11 @@ command_run() {
     if (( bridge_params_restore_status != 0 )); then
       die "failed to restore baseline bridge params before relayer launch: status=$bridge_params_restore_status output=$bridge_params_restore_output"
     fi
-    bridge_refund_window_seconds="$bridge_params_restore_output"
-    [[ "$bridge_refund_window_seconds" =~ ^[0-9]+$ ]] || \
-      die "bridge refundWindowSeconds is invalid after baseline restore: $bridge_refund_window_seconds"
-    if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then
-      die "bridge refundWindowSeconds baseline restore mismatch: got=$bridge_refund_window_seconds target=$bridge_effective_refund_window_floor_seconds"
+    bridge_withdrawal_expiry_window_seconds="$bridge_params_restore_output"
+    [[ "$bridge_withdrawal_expiry_window_seconds" =~ ^[0-9]+$ ]] || \
+      die "bridge withdrawalExpiryWindowSeconds is invalid after baseline restore: $bridge_withdrawal_expiry_window_seconds"
+    if (( bridge_withdrawal_expiry_window_seconds < bridge_effective_withdrawal_expiry_window_floor_seconds )); then
+      die "bridge withdrawalExpiryWindowSeconds baseline restore mismatch: got=$bridge_withdrawal_expiry_window_seconds target=$bridge_effective_withdrawal_expiry_window_floor_seconds"
     fi
   fi
   owner_wjuno_balance_before="$(
@@ -6418,7 +6392,6 @@ command_run() {
   local invariant_withdraw_expiry=""
   local invariant_withdraw_expiry_extended_vs_request="false"
   local invariant_withdraw_finalized="false"
-  local invariant_withdraw_refunded="true"
   local invariant_withdraw_recipient_ua=""
   local invariant_owner_delta_expected=""
   local invariant_owner_delta_actual=""
@@ -6438,11 +6411,6 @@ command_run() {
   local operator_down_2_endpoint=""
   local operator_down_1_signature_count=""
   local operator_down_2_signature_count=""
-  local refund_after_expiry_status="not-run"
-  local refund_after_expiry_withdrawal_id=""
-  local refund_after_expiry_request_expiry=""
-  local refund_after_expiry_refund_tx_hash=""
-  local refund_after_expiry_on_chain_refunded="false"
   local operator_down_ssh_key_path="$REPO_ROOT/.ci/secrets/operator-fleet-ssh.key"
   local operator_down_ssh_user=""
   local -a operator_signer_endpoints=()
@@ -7049,7 +7017,7 @@ command_run() {
       --base-chain-id "$base_chain_id"
       --bridge-address "$deployed_bridge_address"
       --owallet-ua "$withdraw_coordinator_juno_change_address"
-      --refund-window-seconds "$bridge_refund_window_seconds"
+      --withdrawal-expiry-window-seconds "$bridge_withdrawal_expiry_window_seconds"
       --fee-bps "$bridge_fee_bps"
       --min-deposit-amount "$bridge_min_deposit_amount"
       --min-withdraw-amount "$bridge_min_withdraw_amount"
@@ -7656,13 +7624,13 @@ command_run() {
 
       local withdrawal_view_json requester_on_chain amount_on_chain fee_bps_on_chain
       local expiry_on_chain
-      local finalized_on_chain refunded_on_chain recipient_ua_on_chain
+      local finalized_on_chain recipient_ua_on_chain
       withdrawal_view_json="$(
         cast_contract_call_json \
           "$base_rpc_url" \
           "$deployed_bridge_address" \
           "getWithdrawal(bytes32)" \
-          "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
+          "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bytes)" \
           "$run_withdrawal_id"
       )"
       requester_on_chain="$(jq -r '.[0]' <<<"$withdrawal_view_json")"
@@ -7670,8 +7638,7 @@ command_run() {
       expiry_on_chain="$(jq -r '.[2] | tostring' <<<"$withdrawal_view_json")"
       fee_bps_on_chain="$(jq -r '.[3] | tostring' <<<"$withdrawal_view_json")"
       finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$withdrawal_view_json")"
-      refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$withdrawal_view_json")"
-      recipient_ua_on_chain="$(jq -r '.[6]' <<<"$withdrawal_view_json")"
+      recipient_ua_on_chain="$(jq -r '.[5]' <<<"$withdrawal_view_json")"
       recipient_ua_on_chain="$(normalize_hex_prefixed "$recipient_ua_on_chain" || true)"
       requester_on_chain="$(lower "$requester_on_chain")"
       recipient_ua_on_chain="$(lower "$recipient_ua_on_chain")"
@@ -7714,12 +7681,6 @@ command_run() {
         printf 'getWithdrawal finalized mismatch for withdrawalId=%s (got=%s want=true)\n' \
           "$run_withdrawal_id" \
           "$finalized_on_chain"
-        return 1
-      fi
-      if [[ "$refunded_on_chain" != "false" ]]; then
-        printf 'getWithdrawal refunded mismatch for withdrawalId=%s (got=%s want=false)\n' \
-          "$run_withdrawal_id" \
-          "$refunded_on_chain"
         return 1
       fi
       if [[ "$recipient_ua_on_chain" != "$(lower "$run_withdraw_recipient_ua")" ]]; then
@@ -7842,7 +7803,6 @@ command_run() {
         invariant_withdraw_expiry_extended_vs_request="false"
       fi
       invariant_withdraw_finalized="$finalized_on_chain"
-      invariant_withdraw_refunded="$refunded_on_chain"
       invariant_withdraw_recipient_ua="$recipient_ua_on_chain"
       invariant_owner_delta_expected="$owner_delta_expected"
       invariant_owner_delta_actual="$owner_delta_actual"
@@ -8431,323 +8391,6 @@ command_run() {
     return 0
   }
 
-  run_refund_after_expiry_scenario() {
-    local scenario_refund_window_seconds="$1"
-    local witness_metadata_json scenario_recipient_raw_hex
-    local scenario_withdraw_request_payload scenario_request_status
-    local scenario_request_output scenario_request_attempt
-    local scenario_withdrawal_view_json scenario_refunded_on_chain scenario_finalized_on_chain
-    local scenario_refund_output scenario_refund_status scenario_refund_attempt
-    local scenario_wait_deadline scenario_now
-    local scenario_restore_output scenario_restore_status
-    local scenario_current_refund_window
-    local scenario_owner_wjuno_balance scenario_withdraw_amount
-    local scenario_requester_address_from_key scenario_withdraw_requester_address
-    local scenario_bridge_paused scenario_diag_owner_allowance
-    local scenario_params_mutated="false"
-
-    restore_refund_after_expiry_params() {
-      if [[ "$scenario_params_mutated" != "true" ]]; then
-        return 0
-      fi
-      log "refund-after-expiry scenario restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) refund_window_seconds=$bridge_refund_window_seconds"
-      set +e
-      scenario_restore_output="$(
-        set_bridge_params_with_refund_window_retry \
-          "$base_rpc_url" \
-          "$bridge_deployer_key_hex" \
-          "$deployed_bridge_address" \
-          "$bridge_fee_bps" \
-          "$bridge_relayer_tip_bps" \
-          "$bridge_refund_window_seconds" \
-          "$bridge_max_expiry_extension_seconds" \
-          "$bridge_min_deposit_amount" \
-          "$bridge_min_withdraw_amount" \
-          "refund-after-expiry scenario restore"
-      )"
-      scenario_restore_status=$?
-      set -e
-      if (( scenario_restore_status != 0 )); then
-        printf 'refund-after-expiry scenario failed to restore bridge params: status=%s output=%s\n' \
-          "$scenario_restore_status" \
-          "$scenario_restore_output"
-        return 1
-      fi
-      scenario_current_refund_window="$scenario_restore_output"
-      if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
-        (( scenario_current_refund_window != bridge_refund_window_seconds )); then
-        printf 'refund-after-expiry scenario restore mismatch: got_refund_window=%s expected=%s\n' \
-          "$scenario_current_refund_window" \
-          "$bridge_refund_window_seconds"
-        return 1
-      fi
-      scenario_params_mutated="false"
-      return 0
-    }
-
-    witness_metadata_json="$workdir/reports/witness/generated-witness-metadata.json"
-    scenario_recipient_raw_hex="$(jq -r '.recipient_raw_address_hex // empty' "$witness_metadata_json" 2>/dev/null || true)"
-    [[ "$scenario_recipient_raw_hex" =~ ^[0-9a-fA-F]{86}$ ]] || return 1
-
-    log "refund-after-expiry scenario configuring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256) refund_window_seconds=$scenario_refund_window_seconds"
-    set +e
-    scenario_refund_output="$(
-      set_bridge_params_with_refund_window_retry \
-        "$base_rpc_url" \
-        "$bridge_deployer_key_hex" \
-        "$deployed_bridge_address" \
-        "$bridge_fee_bps" \
-        "$bridge_relayer_tip_bps" \
-        "$scenario_refund_window_seconds" \
-        "$bridge_max_expiry_extension_seconds" \
-        "$bridge_min_deposit_amount" \
-        "$bridge_min_withdraw_amount" \
-        "refund-after-expiry scenario configure"
-    )"
-    scenario_refund_status=$?
-    set -e
-    if (( scenario_refund_status != 0 )); then
-      printf 'refund-after-expiry scenario failed to configure refund window: status=%s output=%s\n' \
-        "$scenario_refund_status" \
-        "$scenario_refund_output"
-      return 1
-    fi
-    scenario_current_refund_window="$scenario_refund_output"
-    if [[ ! "$scenario_current_refund_window" =~ ^[0-9]+$ ]] ||
-      (( scenario_current_refund_window != scenario_refund_window_seconds )); then
-      printf 'refund-after-expiry scenario configure mismatch: got_refund_window=%s expected=%s\n' \
-        "$scenario_current_refund_window" \
-        "$scenario_refund_window_seconds"
-      return 1
-    fi
-    scenario_params_mutated="true"
-
-    scenario_requester_address_from_key="$(cast wallet address --private-key "$bridge_deployer_key_hex" 2>/dev/null || true)"
-    scenario_requester_address_from_key="$(normalize_hex_prefixed "$scenario_requester_address_from_key" || true)"
-    if [[ ! "$scenario_requester_address_from_key" =~ ^0x[0-9a-f]{40}$ ]]; then
-      printf 'refund-after-expiry scenario failed to derive requester address from owner key\n'
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-    scenario_withdraw_requester_address="$scenario_requester_address_from_key"
-    if [[ "$(lower "$bridge_deployer_address")" != "$(lower "$scenario_withdraw_requester_address")" ]]; then
-      log "refund-after-expiry scenario bridge deployer address mismatch detected summary_address=$bridge_deployer_address key_address=$scenario_withdraw_requester_address; using key-derived requester address"
-    fi
-    scenario_bridge_paused="$(
-      cast_contract_call_one \
-        "$base_rpc_url" \
-        "$deployed_bridge_address" \
-        "paused()" \
-        "paused()(bool)"
-    )"
-    if [[ "$scenario_bridge_paused" == "true" ]]; then
-      printf 'refund-after-expiry scenario bridge paused before withdrawal request bridge=%s\n' \
-        "$deployed_bridge_address"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-
-    scenario_owner_wjuno_balance="$(
-      cast_contract_call_one \
-        "$base_rpc_url" \
-        "$deployed_wjuno_address" \
-        "balanceOf(address)" \
-        "balanceOf(address)(uint256)" \
-        "$scenario_withdraw_requester_address"
-    )"
-    if [[ ! "$scenario_owner_wjuno_balance" =~ ^[0-9]+$ ]]; then
-      printf 'refund-after-expiry scenario owner wjuno balance read failed: value=%s\n' \
-        "$scenario_owner_wjuno_balance"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-    if (( scenario_owner_wjuno_balance == 0 )); then
-      printf 'refund-after-expiry scenario owner has zero wjuno balance; cannot request withdrawal requester=%s\n' \
-        "$scenario_withdraw_requester_address"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-    scenario_withdraw_amount="$scenario_owner_wjuno_balance"
-    if [[ "${#scenario_withdraw_amount}" -gt 4 || "$scenario_withdraw_amount" -gt 1000 ]]; then
-      scenario_withdraw_amount="1000"
-    fi
-    [[ "$scenario_withdraw_amount" =~ ^[0-9]+$ ]] || {
-      printf 'refund-after-expiry scenario computed withdraw amount is invalid: value=%s\n' \
-        "$scenario_withdraw_amount"
-      restore_refund_after_expiry_params || true
-      return 1
-    }
-    (( scenario_withdraw_amount > 0 )) || {
-      printf 'refund-after-expiry scenario computed withdraw amount must be > 0: value=%s\n' \
-        "$scenario_withdraw_amount"
-      restore_refund_after_expiry_params || true
-      return 1
-    }
-    log "refund-after-expiry scenario requesting withdraw amount=$scenario_withdraw_amount owner_balance=$scenario_owner_wjuno_balance"
-
-    scenario_withdraw_request_payload="$workdir/reports/refund-after-expiry-withdraw-request.json"
-    scenario_request_status=1
-    scenario_request_output=""
-    for scenario_request_attempt in $(seq 1 3); do
-      set +e
-      scenario_request_output="$(
-        cd "$REPO_ROOT" && \
-          go run ./cmd/withdraw-request \
-            --rpc-url "$base_rpc_url" \
-            --chain-id "$base_chain_id" \
-            --owner-key-file "$bridge_deployer_key_file" \
-            --wjuno-address "$deployed_wjuno_address" \
-            --bridge-address "$deployed_bridge_address" \
-            --amount "$scenario_withdraw_amount" \
-            --recipient-raw-address-hex "$scenario_recipient_raw_hex" \
-            --output "$scenario_withdraw_request_payload" 2>&1
-      )"
-      scenario_request_status=$?
-      set -e
-      if (( scenario_request_status == 0 )); then
-        break
-      fi
-      if (( scenario_request_attempt < 3 )); then
-        if is_nonce_race_error "$scenario_request_output"; then
-          log "refund-after-expiry scenario retrying withdraw request after nonce race attempt=${scenario_request_attempt}/3"
-          sleep 2
-          continue
-        fi
-        local lowered_req_output
-        lowered_req_output="$(lower "$scenario_request_output")"
-        if [[ "$lowered_req_output" == *"execution reverted"* ]]; then
-          log "refund-after-expiry scenario retrying withdraw request after execution revert attempt=${scenario_request_attempt}/3"
-          sleep 3
-          continue
-        fi
-      fi
-      break
-    done
-    if (( scenario_request_status != 0 )); then
-      scenario_bridge_paused="$(
-        cast_contract_call_one \
-          "$base_rpc_url" \
-          "$deployed_bridge_address" \
-          "paused()" \
-          "paused()(bool)" 2>/dev/null || true
-      )"
-      scenario_diag_owner_allowance="$(
-        cast_contract_call_one \
-          "$base_rpc_url" \
-          "$deployed_wjuno_address" \
-          "allowance(address,address)" \
-          "allowance(address,address)(uint256)" \
-          "$scenario_withdraw_requester_address" \
-          "$deployed_bridge_address" 2>/dev/null || true
-      )"
-      printf 'refund-after-expiry scenario failed to request withdrawal: status=%s output=%s\n' \
-        "$scenario_request_status" \
-        "$scenario_request_output"
-      printf 'refund-after-expiry scenario request diagnostics requester=%s owner_balance=%s allowance=%s bridge_paused=%s\n' \
-        "$scenario_withdraw_requester_address" \
-        "$scenario_owner_wjuno_balance" \
-        "${scenario_diag_owner_allowance:-<unknown>}" \
-        "${scenario_bridge_paused:-<unknown>}"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-
-    refund_after_expiry_withdrawal_id="$(jq -r '.withdrawalId // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
-    refund_after_expiry_request_expiry="$(jq -r '.expiry // empty' "$scenario_withdraw_request_payload" 2>/dev/null || true)"
-    if [[ ! "$refund_after_expiry_withdrawal_id" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-    if [[ ! "$refund_after_expiry_request_expiry" =~ ^[0-9]+$ ]]; then
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-
-    scenario_wait_deadline=$(( $(date +%s) + scenario_refund_window_seconds + 240 ))
-    scenario_refunded_on_chain="false"
-    scenario_finalized_on_chain="false"
-    for scenario_refund_attempt in $(seq 1 180); do
-      set +e
-      scenario_refund_output="$(
-        cast send \
-          --rpc-url "$base_rpc_url" \
-          --private-key "$bridge_deployer_key_hex" \
-          "$deployed_bridge_address" \
-          "refund(bytes32)" \
-          "$refund_after_expiry_withdrawal_id" 2>&1
-      )"
-      scenario_refund_status=$?
-      set -e
-      if (( scenario_refund_status == 0 )); then
-        if [[ "$scenario_refund_output" =~ (0x[0-9a-fA-F]{64}) ]]; then
-          refund_after_expiry_refund_tx_hash="$(normalize_hex_prefixed "${BASH_REMATCH[1]}" || true)"
-        fi
-      elif is_withdrawal_already_refunded_error "$scenario_refund_output"; then
-        log "refund-after-expiry scenario refund reverted with WithdrawalRefunded — already refunded, checking on-chain state"
-      elif ! is_withdraw_not_expired_error "$scenario_refund_output"; then
-        printf 'refund-after-expiry scenario refund tx failed: status=%s output=%s\n' \
-          "$scenario_refund_status" \
-          "$scenario_refund_output"
-        restore_refund_after_expiry_params || true
-        return 1
-      fi
-
-      scenario_withdrawal_view_json="$(
-        cast_contract_call_json \
-          "$base_rpc_url" \
-          "$deployed_bridge_address" \
-          "getWithdrawal(bytes32)" \
-          "getWithdrawal(bytes32)(address,uint256,uint64,uint96,bool,bool,bytes)" \
-          "$refund_after_expiry_withdrawal_id"
-      )"
-      scenario_finalized_on_chain="$(jq -r '.[4] | tostring' <<<"$scenario_withdrawal_view_json")"
-      scenario_refunded_on_chain="$(jq -r '.[5] | tostring' <<<"$scenario_withdrawal_view_json")"
-      if [[ "$scenario_refunded_on_chain" == "true" ]]; then
-        break
-      fi
-      if [[ "$scenario_finalized_on_chain" == "true" ]]; then
-        printf 'refund-after-expiry scenario expected finalized=false for withdrawalId=%s (got=%s)\n' \
-          "$refund_after_expiry_withdrawal_id" \
-          "$scenario_finalized_on_chain"
-        restore_refund_after_expiry_params || true
-        return 1
-      fi
-
-      scenario_now="$(date +%s)"
-      if (( scenario_now >= scenario_wait_deadline )); then
-        printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
-          "$refund_after_expiry_withdrawal_id" \
-          "$scenario_refunded_on_chain"
-        restore_refund_after_expiry_params || true
-        return 1
-      fi
-      if (( scenario_refund_status == 0 )); then
-        log "refund-after-expiry scenario refund tx submitted but refunded flag not visible yet; retrying state check"
-      fi
-      sleep 2
-    done
-    if [[ "$scenario_refunded_on_chain" != "true" ]]; then
-      printf 'withdrawal refund did not transition to refunded=true for withdrawalId=%s (got=%s)\n' \
-        "$refund_after_expiry_withdrawal_id" \
-        "$scenario_refunded_on_chain"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-    if [[ "$scenario_finalized_on_chain" != "false" ]]; then
-      printf 'refund-after-expiry scenario expected finalized=false for withdrawalId=%s (got=%s)\n' \
-        "$refund_after_expiry_withdrawal_id" \
-        "$scenario_finalized_on_chain"
-      restore_refund_after_expiry_params || true
-      return 1
-    fi
-
-    refund_after_expiry_on_chain_refunded="true"
-    if ! restore_refund_after_expiry_params; then
-      return 1
-    fi
-    return 0
-  }
-
   if (( relayer_status == 0 )); then
     ensure_bridge_operator_signer_ready
     operator_signer_supports_endpoints="$bridge_operator_signer_supports_operator_endpoint"
@@ -8788,16 +8431,6 @@ command_run() {
     bridge_status=1
   else
     bridge_status=0
-  fi
-
-  if (( bridge_status == 0 )); then
-    refund_after_expiry_status="running"
-    if run_refund_after_expiry_scenario "$refund_after_expiry_window_seconds"; then
-      refund_after_expiry_status="passed"
-    else
-      refund_after_expiry_status="failed"
-      bridge_status=1
-    fi
   fi
 
   stop_centralized_proof_services
@@ -8874,7 +8507,6 @@ command_run() {
       --arg invariant_withdraw_expiry "$invariant_withdraw_expiry" \
       --arg invariant_withdraw_expiry_extended_vs_request "$invariant_withdraw_expiry_extended_vs_request" \
       --arg invariant_withdraw_finalized "$invariant_withdraw_finalized" \
-      --arg invariant_withdraw_refunded "$invariant_withdraw_refunded" \
       --arg invariant_withdraw_recipient_ua "$invariant_withdraw_recipient_ua" \
       --arg invariant_owner_delta_expected "$invariant_owner_delta_expected" \
       --arg invariant_owner_delta_actual "$invariant_owner_delta_actual" \
@@ -8916,7 +8548,6 @@ command_run() {
             expiry: (if $invariant_withdraw_expiry == "" then null else ($invariant_withdraw_expiry | tonumber) end),
             extended_vs_request: ($invariant_withdraw_expiry_extended_vs_request == "true"),
             finalized: ($invariant_withdraw_finalized == "true"),
-            refunded: ($invariant_withdraw_refunded == "true"),
             recipient_ua: (if $invariant_withdraw_recipient_ua == "" then null else $invariant_withdraw_recipient_ua end)
           },
           balance_deltas: {
@@ -8966,12 +8597,6 @@ command_run() {
       --arg run_withdraw_request_expiry "$run_withdraw_request_expiry" \
       --arg invariant_withdraw_expiry "$invariant_withdraw_expiry" \
       --arg invariant_withdraw_expiry_extended_vs_request "$invariant_withdraw_expiry_extended_vs_request" \
-      --arg refund_after_expiry_status "$refund_after_expiry_status" \
-      --arg refund_after_expiry_withdrawal_id "$refund_after_expiry_withdrawal_id" \
-      --arg refund_after_expiry_request_expiry "$refund_after_expiry_request_expiry" \
-      --arg refund_after_expiry_refund_tx_hash "$refund_after_expiry_refund_tx_hash" \
-      --arg refund_after_expiry_on_chain_refunded "$refund_after_expiry_on_chain_refunded" \
-      --arg refund_after_expiry_window_seconds "$refund_after_expiry_window_seconds" \
       --arg operator_down_1_status "$operator_down_1_status" \
       --arg operator_down_1_endpoint "$operator_down_1_endpoint" \
       --arg operator_down_1_signature_count "$operator_down_1_signature_count" \
@@ -8992,14 +8617,6 @@ command_run() {
           request_expiry: (if $run_withdraw_request_expiry == "" then null else ($run_withdraw_request_expiry | tonumber) end),
           on_chain_expiry: (if $invariant_withdraw_expiry == "" then null else ($invariant_withdraw_expiry | tonumber) end),
           extended_vs_request: ($invariant_withdraw_expiry_extended_vs_request == "true")
-        },
-        refund_after_expiry: {
-          status: (if $refund_after_expiry_status == "" then null else $refund_after_expiry_status end),
-          withdrawal_id: (if $refund_after_expiry_withdrawal_id == "" then null else $refund_after_expiry_withdrawal_id end),
-          request_expiry: (if $refund_after_expiry_request_expiry == "" then null else ($refund_after_expiry_request_expiry | tonumber) end),
-          refund_tx_hash: (if $refund_after_expiry_refund_tx_hash == "" then null else $refund_after_expiry_refund_tx_hash end),
-          on_chain_refunded: ($refund_after_expiry_on_chain_refunded == "true"),
-          refund_window_seconds: (if $refund_after_expiry_window_seconds == "" then null else ($refund_after_expiry_window_seconds | tonumber) end)
         },
         operator_down_1: {
           status: (if $operator_down_1_status == "" then null else $operator_down_1_status end),

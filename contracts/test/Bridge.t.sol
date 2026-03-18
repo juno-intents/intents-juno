@@ -70,7 +70,7 @@ contract BridgeTest is Test {
 
     uint96 private constant FEE_BPS = 50; // 0.50%
     uint96 private constant TIP_BPS = 1000; // 10% of fee
-    uint64 private constant REFUND_WINDOW = 1 days;
+    uint64 private constant WITHDRAWAL_EXPIRY_WINDOW = 1 days;
     uint64 private constant MAX_EXTEND = 12 hours;
 
     function setUp() public {
@@ -99,7 +99,7 @@ contract BridgeTest is Test {
             WITHDRAW_IMAGE_ID,
             FEE_BPS,
             TIP_BPS,
-            REFUND_WINDOW,
+            WITHDRAWAL_EXPIRY_WINDOW,
             MAX_EXTEND,
             0,
             0
@@ -121,7 +121,7 @@ contract BridgeTest is Test {
             WITHDRAW_IMAGE_ID,
             FEE_BPS,
             TIP_BPS,
-            REFUND_WINDOW,
+            WITHDRAWAL_EXPIRY_WINDOW,
             MAX_EXTEND,
             0,
             0
@@ -138,7 +138,7 @@ contract BridgeTest is Test {
             bytes32(0),
             FEE_BPS,
             TIP_BPS,
-            REFUND_WINDOW,
+            WITHDRAWAL_EXPIRY_WINDOW,
             MAX_EXTEND,
             0,
             0
@@ -167,7 +167,7 @@ contract BridgeTest is Test {
 
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, minDepositAdmin));
         vm.prank(minDepositAdmin);
-        bridge.setParams(FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND, 999, 111);
+        bridge.setParams(FEE_BPS, TIP_BPS, WITHDRAWAL_EXPIRY_WINDOW, MAX_EXTEND, 999, 111);
     }
 
     function test_owner_retainsFullParamControlAlongsideMinDepositAdmin() public {
@@ -180,7 +180,7 @@ contract BridgeTest is Test {
 
         assertEq(bridge.feeBps(), 75);
         assertEq(bridge.relayerTipBps(), 1200);
-        assertEq(bridge.refundWindowSeconds(), 2 days);
+        assertEq(bridge.withdrawalExpiryWindowSeconds(), 2 days);
         assertEq(bridge.maxExpiryExtensionSeconds(), 18 hours);
         assertEq(bridge.minDepositAmount(), 888);
         assertEq(bridge.minWithdrawAmount(), 999);
@@ -298,13 +298,15 @@ contract BridgeTest is Test {
         assertTrue(bridge.depositUsed(depositId));
     }
 
-    function test_requestWithdraw_refundDisabled_beforeAndAfterExpiry() public {
+    function test_requestWithdraw_setsExpiryFromWithdrawalExpiryWindow() public {
         address alice = makeAddr("alice");
         uint256 amount = 50_000;
 
         // Fund alice.
         vm.prank(address(bridge));
         token.mint(alice, amount);
+
+        uint256 requestedAt = block.timestamp;
 
         vm.startPrank(alice);
         token.approve(address(bridge), amount);
@@ -315,35 +317,11 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(alice), 0);
         assertEq(token.balanceOf(address(bridge)), amount);
 
-        vm.expectRevert(Bridge.RefundDisabled.selector);
-        bridge.refund(wid);
-
-        vm.warp(block.timestamp + REFUND_WINDOW + 1);
-        vm.expectRevert(Bridge.RefundDisabled.selector);
-        bridge.refund(wid);
-
-        assertEq(token.balanceOf(alice), 0);
-        assertEq(token.balanceOf(address(bridge)), amount);
-    }
-
-    function test_refund_disabled_whilePaused_afterExpiry() public {
-        address alice = makeAddr("alice");
-        uint256 amount = 50_000;
-
-        vm.prank(address(bridge));
-        token.mint(alice, amount);
-
-        vm.startPrank(alice);
-        token.approve(address(bridge), amount);
-        bytes32 wid = bridge.requestWithdraw(amount, bytes("uaddr1..."));
-        vm.stopPrank();
-
-        bridge.pause();
-        vm.warp(block.timestamp + REFUND_WINDOW + 1);
-        vm.expectRevert(Bridge.RefundDisabled.selector);
-        bridge.refund(wid);
-
-        assertEq(token.balanceOf(alice), 0);
+        (, uint256 storedAmount, uint64 expiry,, bool finalized, bytes memory recipientUA) = bridge.getWithdrawal(wid);
+        assertEq(storedAmount, amount);
+        assertEq(expiry, requestedAt + WITHDRAWAL_EXPIRY_WINDOW);
+        assertFalse(finalized);
+        assertEq(recipientUA, ua);
     }
 
     function test_markWithdrawPaidBatch_recordsMetadata_and_allowsFinalizeAfterExpiry() public {
@@ -369,7 +347,7 @@ contract BridgeTest is Test {
         bridge.markWithdrawPaidBatch(ids, paidSigs);
         assertTrue(bridge.withdrawalPaid(wid));
 
-        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        vm.warp(block.timestamp + WITHDRAWAL_EXPIRY_WINDOW + 1);
 
         uint256 fee = (amount * FEE_BPS) / 10_000;
         uint256 tip = (fee * TIP_BPS) / 10_000;
@@ -393,9 +371,6 @@ contract BridgeTest is Test {
 
         vm.prank(relayer);
         bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"05", journal);
-
-        vm.expectRevert(Bridge.RefundDisabled.selector);
-        bridge.refund(wid);
 
         assertEq(token.balanceOf(alice), 0);
         assertEq(token.balanceOf(relayer), tip);
@@ -570,7 +545,7 @@ contract BridgeTest is Test {
         bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
         bridge.markWithdrawPaidBatch(ids, paidSigs);
 
-        vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        vm.warp(block.timestamp + WITHDRAWAL_EXPIRY_WINDOW + 1);
 
         uint256 fee = (amount * FEE_BPS) / 10_000;
         uint256 tip = (fee * TIP_BPS) / 10_000;
@@ -594,7 +569,7 @@ contract BridgeTest is Test {
         bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
         vm.expectEmit(true, false, false, true);
-        emit WithdrawFinalizedSkipped(widBob, 4);
+        emit WithdrawFinalizedSkipped(widBob, 2);
         vm.prank(relayer);
         bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"06", journal);
 
@@ -602,11 +577,12 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(distributor)), feeToDist);
         assertEq(token.balanceOf(address(bridge)), amount);
 
-        (,,,, bool finalizedAlice,,) = bridge.getWithdrawal(widAlice);
-        (,,,, bool finalizedBob, bool refundedBob,) = bridge.getWithdrawal(widBob);
+        (,,,, bool finalizedAlice, bytes memory recipientAliceUA) = bridge.getWithdrawal(widAlice);
+        (,,,, bool finalizedBob, bytes memory recipientBobUA) = bridge.getWithdrawal(widBob);
         assertTrue(finalizedAlice);
         assertFalse(finalizedBob);
-        assertFalse(refundedBob);
+        assertEq(recipientAliceUA, uaAlice);
+        assertEq(recipientBobUA, uaBob);
     }
 
     function test_mintBatch_emitsCheckpointAccepted() public {
@@ -791,7 +767,7 @@ contract BridgeTest is Test {
         bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
-        (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
+        (,, uint64 oldExpiry,,,) = bridge.getWithdrawal(wid);
         uint64 newExpiry = oldExpiry + 6 hours;
 
         bytes32[] memory ids = new bytes32[](1);
@@ -802,7 +778,7 @@ contract BridgeTest is Test {
 
         bridge.extendWithdrawExpiryBatch(ids, newExpiry, sigs);
 
-        (,, uint64 updatedExpiry,,,,) = bridge.getWithdrawal(wid);
+        (,, uint64 updatedExpiry,,,) = bridge.getWithdrawal(wid);
         assertEq(updatedExpiry, newExpiry);
     }
 
@@ -855,7 +831,7 @@ contract BridgeTest is Test {
         bytes32 wid = bridge.requestWithdraw(amount, ua);
         vm.stopPrank();
 
-        (,, uint64 oldExpiry,,,,) = bridge.getWithdrawal(wid);
+        (,, uint64 oldExpiry,,,) = bridge.getWithdrawal(wid);
         uint64 newExpiry = oldExpiry + MAX_EXTEND + uint64(1);
 
         bytes32[] memory ids = new bytes32[](1);
@@ -1008,7 +984,19 @@ contract BridgeTest is Test {
         }
 
         Bridge b = new Bridge(
-            owner, t, d, r, v, DEPOSIT_IMAGE_ID, WITHDRAW_IMAGE_ID, FEE_BPS, TIP_BPS, REFUND_WINDOW, MAX_EXTEND, 0, 0
+            owner,
+            t,
+            d,
+            r,
+            v,
+            DEPOSIT_IMAGE_ID,
+            WITHDRAW_IMAGE_ID,
+            FEE_BPS,
+            TIP_BPS,
+            WITHDRAWAL_EXPIRY_WINDOW,
+            MAX_EXTEND,
+            0,
+            0
         );
         t.setBridge(address(b));
         d.setBridge(address(b));

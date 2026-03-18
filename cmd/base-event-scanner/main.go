@@ -179,7 +179,8 @@ func runMain(args []string, stdout io.Writer) error {
 		}
 		// Warn about non-standard recipientUA. The ZK circuit requires exactly
 		// 43 bytes (raw Orchard receiver). Other lengths will be rejected by the
-		// coordinator and the user's funds will be locked until refund expiry.
+		// coordinator and the user's funds will remain escrowed until operators
+		// resolve the invalid withdrawal request.
 		if len(event.RecipientUA) != 43 {
 			slog.Warn("withdrawal has non-standard recipientUA length (will be rejected by coordinator)",
 				"withdrawal_id", fmt.Sprintf("0x%x", event.WithdrawalID),

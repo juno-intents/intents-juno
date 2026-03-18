@@ -70,7 +70,6 @@ const (
 	WithdrawalStatusRequested
 	WithdrawalStatusBatched
 	WithdrawalStatusPaid
-	WithdrawalStatusRefunded
 )
 
 func (s WithdrawalStatus) String() string {
@@ -81,8 +80,6 @@ func (s WithdrawalStatus) String() string {
 		return "batched"
 	case WithdrawalStatusPaid:
 		return "paid"
-	case WithdrawalStatusRefunded:
-		return "refunded"
 	default:
 		return fmt.Sprintf("unknown(%d)", uint8(s))
 	}

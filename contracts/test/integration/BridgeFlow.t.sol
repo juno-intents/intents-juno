@@ -27,7 +27,7 @@ contract BridgeFlowIntegrationTest is Test {
 
     uint96 private constant FEE_BPS = 50;
     uint96 private constant TIP_BPS = 1000;
-    uint64 private constant REFUND_WINDOW = 1 days;
+    uint64 private constant WITHDRAWAL_EXPIRY_WINDOW = 1 days;
     uint64 private constant MAX_EXTEND = 12 hours;
 
     function setUp() public {
@@ -54,7 +54,7 @@ contract BridgeFlowIntegrationTest is Test {
             WITHDRAW_IMAGE_ID,
             FEE_BPS,
             TIP_BPS,
-            REFUND_WINDOW,
+            WITHDRAWAL_EXPIRY_WINDOW,
             MAX_EXTEND,
             0,
             0
@@ -139,7 +139,7 @@ contract BridgeFlowIntegrationTest is Test {
         assertEq(token.balanceOf(op1), pending1);
     }
 
-    function test_markPaid_allowsFinalizeAfterExpiry_and_blocksRefund() public {
+    function test_markPaid_allowsFinalizeAfterExpiry() public {
         address alice = makeAddr("alice");
         address relayer = makeAddr("relayer");
         uint256 amount = 50_000;
@@ -159,10 +159,7 @@ contract BridgeFlowIntegrationTest is Test {
         bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
         bridge.markWithdrawPaidBatch(ids, paidSigs);
 
-        vm.warp(block.timestamp + REFUND_WINDOW + 1);
-
-        vm.expectRevert(Bridge.RefundDisabled.selector);
-        bridge.refund(wid);
+        vm.warp(block.timestamp + WITHDRAWAL_EXPIRY_WINDOW + 1);
 
         Bridge.Checkpoint memory cp = _checkpoint();
         bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));

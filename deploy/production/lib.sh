@@ -1202,7 +1202,7 @@ production_default_bridge_relayer_tip_bps() {
   printf '1000\n'
 }
 
-production_default_bridge_refund_window_seconds() {
+production_default_bridge_withdrawal_expiry_window_seconds() {
   printf '86400\n'
 }
 
@@ -1506,7 +1506,7 @@ production_render_shared_manifest() {
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn dkg_bucket dkg_prefix
   local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
-  local bridge_fee_bps bridge_relayer_tip_bps bridge_refund_window_seconds
+  local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
   local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
@@ -1557,7 +1557,7 @@ production_render_shared_manifest() {
   dkg_kms_key_arn="$(production_tf_output_value "$tf_json" "dkg_kms_key_arn" false)"
   bridge_fee_bps="$(production_json_required "$bridge_summary" '.bridge_params.fee_bps // .bridge_fee_params.fee_bps')"
   bridge_relayer_tip_bps="$(production_json_required "$bridge_summary" '.bridge_params.relayer_tip_bps // .bridge_fee_params.relayer_tip_bps')"
-  bridge_refund_window_seconds="$(production_json_required "$bridge_summary" '.bridge_params.refund_window_seconds')"
+  bridge_withdrawal_expiry_window_seconds="$(production_json_required "$bridge_summary" '.bridge_params.withdrawal_expiry_window_seconds')"
   bridge_max_expiry_extension_seconds="$(production_json_required "$bridge_summary" '.bridge_params.max_expiry_extension_seconds')"
   bridge_min_deposit_amount="$(production_json_required "$bridge_summary" '.bridge_params.min_deposit_amount')"
   bridge_min_withdraw_amount="$(production_json_required "$bridge_summary" '.bridge_params.min_withdraw_amount')"
@@ -1660,7 +1660,7 @@ production_render_shared_manifest() {
     --argjson base_event_scanner_start_block "$base_event_scanner_start_block" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
     --argjson bridge_relayer_tip_bps "$bridge_relayer_tip_bps" \
-    --argjson bridge_refund_window_seconds "$bridge_refund_window_seconds" \
+    --argjson bridge_withdrawal_expiry_window_seconds "$bridge_withdrawal_expiry_window_seconds" \
     --argjson bridge_max_expiry_extension_seconds "$bridge_max_expiry_extension_seconds" \
     --argjson bridge_min_deposit_amount "$bridge_min_deposit_amount" \
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
@@ -1733,7 +1733,7 @@ production_render_shared_manifest() {
         bridge_params: {
           fee_bps: $bridge_fee_bps,
           relayer_tip_bps: $bridge_relayer_tip_bps,
-          refund_window_seconds: $bridge_refund_window_seconds,
+          withdrawal_expiry_window_seconds: $bridge_withdrawal_expiry_window_seconds,
           max_expiry_extension_seconds: $bridge_max_expiry_extension_seconds,
           min_deposit_amount: $bridge_min_deposit_amount,
           min_withdraw_amount: $bridge_min_withdraw_amount
@@ -1782,7 +1782,7 @@ production_render_app_handoff() {
   local bridge_dns_label ops_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name ops_record_name bridge_public_url ops_public_url
   local bridge_probe_url ops_probe_url bridge_internal_url ops_internal_url
-  local bridge_refund_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
+  local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
@@ -1815,7 +1815,7 @@ production_render_app_handoff() {
   backoffice_listen_addr="$(jq -r '.backoffice_listen // "0.0.0.0:8090"' <<<"$app_json")"
   production_require_loopback_listen_addr "$bridge_listen_addr" "app_host.bridge_api_listen"
   production_require_loopback_listen_addr "$backoffice_listen_addr" "app_host.backoffice_listen"
-  bridge_refund_window_seconds="$(production_json_required "$shared_manifest" '.contracts.bridge_params.refund_window_seconds')"
+  bridge_withdrawal_expiry_window_seconds="$(production_json_required "$shared_manifest" '.contracts.bridge_params.withdrawal_expiry_window_seconds')"
   bridge_min_deposit_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_deposit_amount')"
   bridge_min_withdraw_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_withdraw_amount')"
   bridge_fee_bps="$(production_json_required "$shared_manifest" '.contracts.bridge_params.fee_bps')"
@@ -1885,7 +1885,7 @@ production_render_app_handoff() {
     --arg bridge_probe_url "$bridge_probe_url" \
     --arg bridge_internal_url "$bridge_internal_url" \
     --arg bridge_record_name "$bridge_record_name" \
-    --argjson bridge_refund_window_seconds "$bridge_refund_window_seconds" \
+    --argjson bridge_withdrawal_expiry_window_seconds "$bridge_withdrawal_expiry_window_seconds" \
     --argjson bridge_min_deposit_amount "$bridge_min_deposit_amount" \
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
@@ -1934,7 +1934,7 @@ production_render_app_handoff() {
           probe_url: $bridge_probe_url,
           internal_url: $bridge_internal_url,
           record_name: $bridge_record_name,
-          refund_window_seconds: $bridge_refund_window_seconds,
+          withdrawal_expiry_window_seconds: $bridge_withdrawal_expiry_window_seconds,
           min_deposit_amount: $bridge_min_deposit_amount,
           min_withdraw_amount: $bridge_min_withdraw_amount,
           fee_bps: $bridge_fee_bps
@@ -2368,14 +2368,14 @@ production_render_bridge_api_env() {
   local resolved_secret_env="$3"
   local output_file="$4"
 
-  local postgres_dsn owallet_ua listen_addr refund_window_seconds min_deposit_amount min_withdraw_amount fee_bps
+  local postgres_dsn owallet_ua listen_addr withdrawal_expiry_window_seconds min_deposit_amount min_withdraw_amount fee_bps
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
 
   postgres_dsn="$(production_env_first_value "$resolved_secret_env" APP_POSTGRES_DSN CHECKPOINT_POSTGRES_DSN || true)"
   [[ -n "$postgres_dsn" ]] || die "resolved secret env is missing APP_POSTGRES_DSN or CHECKPOINT_POSTGRES_DSN"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
-  refund_window_seconds="$(production_json_optional "$app_deploy" '.services.bridge_api.refund_window_seconds')"
+  withdrawal_expiry_window_seconds="$(production_json_optional "$app_deploy" '.services.bridge_api.withdrawal_expiry_window_seconds')"
   min_deposit_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_deposit_amount')"
   min_withdraw_amount="$(production_json_optional "$app_deploy" '.services.bridge_api.min_withdraw_amount')"
   fee_bps="$(production_json_optional "$app_deploy" '.services.bridge_api.fee_bps')"
@@ -2390,7 +2390,7 @@ BRIDGE_API_BASE_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
 BRIDGE_API_BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_API_BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BRIDGE_API_OWALLET_UA=$owallet_ua
-BRIDGE_API_REFUND_WINDOW_SECONDS=${refund_window_seconds:-86400}
+BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS=${withdrawal_expiry_window_seconds:-86400}
 BRIDGE_API_MIN_DEPOSIT_AMOUNT=${min_deposit_amount:-0}
 BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations
 BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=$runtime_withdraw_planner_min_confirmations

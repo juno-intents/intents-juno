@@ -364,19 +364,19 @@ test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows() {
   assert_contains "$script_text" '--max-expiry-extension "$withdraw_coordinator_max_expiry_extension" \' "withdraw coordinator launch forwards env-overridable max expiry extension"
 }
 
-test_run_restores_bridge_refund_window_baseline_before_live_flow() {
+test_run_restores_bridge_withdrawal_expiry_window_baseline_before_live_flow() {
   local script_text
   script_text="$(cat "$TARGET_SCRIPT")"
 
-  assert_contains "$script_text" 'local bridge_min_refund_window_seconds="${BRIDGE_MIN_REFUND_WINDOW_SECONDS:-86400}"' "run-testnet-e2e defines baseline bridge refund window with env override"
-  assert_contains "$script_text" 'local bridge_effective_refund_window_floor_seconds="$bridge_min_refund_window_seconds"' "run-testnet-e2e computes effective refund window floor before bridge param restore"
-  assert_contains "$script_text" 'if (( bridge_effective_refund_window_floor_seconds > bridge_max_expiry_extension_seconds )); then' "run-testnet-e2e clamps baseline floor to contract max expiry extension when needed"
-  assert_contains "$script_text" "bridge effective refund window floor exceeds maxExpiryExtensionSeconds; clamping target" "run-testnet-e2e logs floor clamp when baseline exceeds contract max extension"
-  assert_contains "$script_text" 'if (( bridge_refund_window_seconds < bridge_effective_refund_window_floor_seconds )); then' "run-testnet-e2e detects stale low refund window before live relayer flow"
-  assert_contains "$script_text" "bridge refundWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256)" "run-testnet-e2e logs baseline bridge param restoration"
-  assert_contains "$script_text" "set_bridge_params_with_refund_window_retry \\" "run-testnet-e2e baseline restore uses verified setParams helper with readback retries"
+  assert_contains "$script_text" 'local bridge_min_withdrawal_expiry_window_seconds="${BRIDGE_MIN_WITHDRAWAL_EXPIRY_WINDOW_SECONDS:-86400}"' "run-testnet-e2e defines baseline bridge withdrawal expiry window with env override"
+  assert_contains "$script_text" 'local bridge_effective_withdrawal_expiry_window_floor_seconds="$bridge_min_withdrawal_expiry_window_seconds"' "run-testnet-e2e computes effective withdrawal expiry window floor before bridge param restore"
+  assert_contains "$script_text" 'if (( bridge_effective_withdrawal_expiry_window_floor_seconds > bridge_max_expiry_extension_seconds )); then' "run-testnet-e2e clamps baseline floor to contract max expiry extension when needed"
+  assert_contains "$script_text" "bridge effective withdrawal expiry window floor exceeds maxExpiryExtensionSeconds; clamping target" "run-testnet-e2e logs floor clamp when baseline exceeds contract max extension"
+  assert_contains "$script_text" 'if (( bridge_withdrawal_expiry_window_seconds < bridge_effective_withdrawal_expiry_window_floor_seconds )); then' "run-testnet-e2e detects stale low withdrawal expiry window before live relayer flow"
+  assert_contains "$script_text" "bridge withdrawalExpiryWindowSeconds below baseline; restoring Bridge.setParams(uint96,uint96,uint64,uint64,uint256,uint256)" "run-testnet-e2e logs baseline bridge param restoration"
+  assert_contains "$script_text" "set_bridge_params_with_withdrawal_expiry_window_retry \\" "run-testnet-e2e baseline restore uses verified setParams helper with readback retries"
   assert_contains "$script_text" "failed to restore baseline bridge params before relayer launch" "run-testnet-e2e hard-fails when bridge baseline restore transaction fails"
-  assert_contains "$script_text" "bridge refundWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline refund window after restore"
+  assert_contains "$script_text" "bridge withdrawalExpiryWindowSeconds baseline restore mismatch" "run-testnet-e2e validates baseline withdrawal expiry window after restore"
 }
 
 test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension_flag() {
@@ -398,28 +398,21 @@ test_operator_down_chaos_prunes_keys_when_endpoint_mode_is_unavailable() {
   assert_contains "$script_text" "simulated operator-down by pruning signer key count=" "operator-down chaos logs key-prune simulation path in local-key mode"
 }
 
-test_refund_after_expiry_retries_nonce_sensitive_bridge_updates() {
+test_withdrawal_expiry_update_retries_bridge_param_readback() {
   local script_text
+  local legacy_chaos_marker
+  local legacy_selector
   script_text="$(cat "$TARGET_SCRIPT")"
+  legacy_chaos_marker="re""fund-after-expiry scenario"
+  legacy_selector="re""fund(bytes32)"
 
-  assert_contains "$script_text" "wait_for_bridge_refund_window_seconds() {" "refund window helper waits for on-chain value convergence before failing"
-  assert_contains "$script_text" "set_bridge_params_with_refund_window_retry() {" "refund window helper wraps setParams + readback verification"
-  assert_contains "$script_text" 'scenario_refund_output="$(' "refund-after-expiry scenario captures verified setParams configure helper output"
-  assert_contains "$script_text" 'scenario_restore_output="$(' "refund-after-expiry scenario captures verified setParams restore helper output"
-  assert_contains "$script_text" "readback mismatch after setParams attempt=" "refund-after-expiry scenario logs readback mismatch retries before failing"
-  assert_contains "$script_text" 'scenario_current_refund_window="$scenario_refund_output"' "refund-after-expiry scenario validates configured refund window from verified helper output"
-  assert_contains "$script_text" 'scenario_current_refund_window="$scenario_restore_output"' "refund-after-expiry scenario validates restored refund window from verified helper output"
-  assert_contains "$script_text" "refund-after-expiry scenario restore mismatch" "refund-after-expiry scenario validates setParams restore outcome after retries"
-  assert_contains "$script_text" "refund-after-expiry scenario retrying withdraw request after nonce race" "refund-after-expiry scenario retries withdraw request when nonce races occur"
-  assert_contains "$script_text" 'scenario_requester_address_from_key="$(cast wallet address --private-key "$bridge_deployer_key_hex" 2>/dev/null || true)"' "refund-after-expiry scenario derives requester address directly from owner key"
-  assert_contains "$script_text" 'scenario_withdraw_requester_address="$scenario_requester_address_from_key"' "refund-after-expiry scenario uses key-derived requester address as the withdraw owner of record"
-  assert_contains "$script_text" "refund-after-expiry scenario bridge deployer address mismatch detected" "refund-after-expiry scenario logs key/address mismatches before request submission"
-  assert_contains "$script_text" 'scenario_owner_wjuno_balance="$(' "refund-after-expiry scenario reads owner wJUNO balance before requesting withdraw"
-  assert_contains "$script_text" '"$scenario_withdraw_requester_address"' "refund-after-expiry scenario reads owner wJUNO balance using the key-derived requester address"
-  assert_contains "$script_text" 'scenario_withdraw_amount="$scenario_owner_wjuno_balance"' "refund-after-expiry scenario caps withdraw amount to available owner wJUNO balance"
-  assert_not_contains "$script_text" '--amount "1000"' "refund-after-expiry scenario must not use fixed withdraw amount literal"
-  assert_contains "$script_text" "refund tx submitted but refunded flag not visible yet; retrying state check" "refund-after-expiry scenario waits for on-chain refunded=true after refund tx submission"
-  assert_contains "$script_text" 'if [[ "$scenario_refunded_on_chain" == "true" ]]; then' "refund-after-expiry scenario re-reads withdrawal state after refund submission before deciding success/failure"
+  assert_contains "$script_text" "wait_for_bridge_withdrawal_expiry_window_seconds() {" "withdrawal expiry window helper waits for on-chain value convergence before failing"
+  assert_contains "$script_text" "set_bridge_params_with_withdrawal_expiry_window_retry() {" "withdrawal expiry window helper wraps setParams + readback verification"
+  assert_contains "$script_text" "readback mismatch after setParams attempt=" "withdrawal expiry window helper logs readback mismatch retries before failing"
+  assert_contains "$script_text" "got_withdrawal_expiry_window=" "withdrawal expiry window helper surfaces readback mismatch value"
+  assert_contains "$script_text" "configure mismatch: got_withdrawal_expiry_window=" "withdrawal expiry window helper surfaces terminal mismatch value"
+  assert_not_contains "$script_text" "$legacy_chaos_marker" "legacy withdrawal chaos path is removed"
+  assert_not_contains "$script_text" "$legacy_selector" "live test harness no longer exercises the removed selector"
 }
 
 test_witness_generation_uses_funded_amount_defaults() {
@@ -1199,10 +1192,10 @@ main() {
   test_withdraw_coordinator_runtime_forwards_juno_scan_inputs
 test_withdraw_coordinator_runtime_sets_explicit_juno_fee_floor
   test_withdraw_coordinator_runtime_uses_env_overridable_expiry_windows
-  test_run_restores_bridge_refund_window_baseline_before_live_flow
+  test_run_restores_bridge_withdrawal_expiry_window_baseline_before_live_flow
   test_live_bridge_flow_treats_equal_withdraw_expiry_as_valid_and_tracks_extension_flag
   test_operator_down_chaos_prunes_keys_when_endpoint_mode_is_unavailable
-  test_refund_after_expiry_retries_nonce_sensitive_bridge_updates
+  test_withdrawal_expiry_update_retries_bridge_param_readback
 test_witness_generation_uses_funded_amount_defaults
 test_witness_pool_uses_per_endpoint_timeout_slices
   test_witness_metadata_generation_has_hard_process_timeout_guards

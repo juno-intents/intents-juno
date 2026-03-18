@@ -138,7 +138,7 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
 	const feeBps = uint64(50)
 	const tipBps = uint64(1000)
-	const refundWindowSeconds = uint64(24 * 60 * 60)
+	const withdrawalExpiryWindowSeconds = uint64(24 * 60 * 60)
 	const maxExtendSeconds = uint64(12 * 60 * 60)
 
 	bridgeAddr := deployContract(
@@ -152,7 +152,7 @@ func TestBridgeMintBatchHarness_MintsNetAndFees(t *testing.T) {
 		withdrawImageID,
 		new(big.Int).SetUint64(feeBps),
 		new(big.Int).SetUint64(tipBps),
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExtendSeconds,
 		big.NewInt(0),
 		big.NewInt(0),

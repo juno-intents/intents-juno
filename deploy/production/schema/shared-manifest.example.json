@@ -42,7 +42,7 @@
     "bridge_params": {
       "fee_bps": 50,
       "relayer_tip_bps": 1000,
-      "refund_window_seconds": 86400,
+      "withdrawal_expiry_window_seconds": 86400,
       "max_expiry_extension_seconds": 43200,
       "min_deposit_amount": 201005025,
       "min_withdraw_amount": 200000000

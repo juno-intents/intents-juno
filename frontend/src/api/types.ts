@@ -4,7 +4,7 @@ export interface BridgeConfig {
   bridgeAddress: string
   wjunoAddress?: string
   oWalletUA: string
-  refundWindowSeconds: number
+  withdrawalExpiryWindowSeconds: number
   minDepositAmount: string
   depositMinConfirmations: number
   minWithdrawAmount: string

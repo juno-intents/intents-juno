@@ -106,7 +106,7 @@ func TestBridgeWithdrawHarness_RequestExtendFinalizeAndRefund(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
 	const feeBps = uint64(50)
 	const tipBps = uint64(1000)
-	const refundWindowSeconds = uint64(60)
+	const withdrawalExpiryWindowSeconds = uint64(60)
 	const maxExtendSeconds = uint64(12 * 60 * 60)
 
 	bridgeAddr := deployContract(
@@ -120,7 +120,7 @@ func TestBridgeWithdrawHarness_RequestExtendFinalizeAndRefund(t *testing.T) {
 		withdrawImageID,
 		new(big.Int).SetUint64(feeBps),
 		new(big.Int).SetUint64(tipBps),
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExtendSeconds,
 		big.NewInt(0),
 		big.NewInt(0),
@@ -246,7 +246,7 @@ func TestBridgeWithdrawHarness_RequestExtendFinalizeAndRefund(t *testing.T) {
 		t.Fatalf("bridge balance before finalize: got %s want %s", balBridgeBefore.String(), withdrawAmount.String())
 	}
 
-	// refund
+	// Expired withdrawals remain escrowed until a paid/finalized operator path completes.
 	withdrawAmount2 := new(big.Int).SetUint64(1_000)
 	recipientUA2 := []byte{0xaa}
 	mustTransact(t, ctx, evm, auth, wjuno, "approve", bridgeAddr, withdrawAmount2)
@@ -259,17 +259,12 @@ func TestBridgeWithdrawHarness_RequestExtendFinalizeAndRefund(t *testing.T) {
 	if rcpt2.Status != 1 {
 		t.Fatalf("requestWithdraw #2 reverted")
 	}
-	withdrawalID2, _, _ := mustParseWithdrawRequested(t, bridgeABI, rcpt2)
 
-	// Warp past expiry2 and mine a block.
-	anvilIncreaseTimeAndMine(t, ctx, evm, int64(refundWindowSeconds)+2)
+	anvilIncreaseTimeAndMine(t, ctx, evm, int64(withdrawalExpiryWindowSeconds)+2)
 
-	balBeforeRefund := callBalanceOf(t, ctx, wjuno, owner)
-	mustTransact(t, ctx, evm, auth, bridge, "refund", withdrawalID2)
-	balAfterRefund := callBalanceOf(t, ctx, wjuno, owner)
-
-	if gotDelta := new(big.Int).Sub(balAfterRefund, balBeforeRefund); gotDelta.Cmp(withdrawAmount2) != 0 {
-		t.Fatalf("refund delta: got %s want %s", gotDelta.String(), withdrawAmount2.String())
+	balBridgeExpired := callBalanceOf(t, ctx, wjuno, bridgeAddr)
+	if balBridgeExpired.Cmp(withdrawAmount2) < 0 {
+		t.Fatalf("bridge balance after expired withdrawal: got %s want at least %s", balBridgeExpired.String(), withdrawAmount2.String())
 	}
 }
 
@@ -473,7 +468,7 @@ func callBytes32(t *testing.T, ctx context.Context, c *bind.BoundContract, metho
 func callWithdrawalExpiry(t *testing.T, ctx context.Context, bridge *bind.BoundContract, withdrawalID common.Hash) uint64 {
 	t.Helper()
 
-	// getWithdrawal returns: requester,address; amount,uint256; expiry,uint64; feeBps,uint96; finalized,bool; refunded,bool; recipientUA,bytes.
+	// getWithdrawal returns: requester,address; amount,uint256; expiry,uint64; feeBps,uint96; finalized,bool; recipientUA,bytes.
 	var res []interface{}
 	if err := bridge.Call(&bind.CallOpts{Context: ctx}, &res, "getWithdrawal", withdrawalID); err != nil {
 		t.Fatalf("getWithdrawal call: %v", err)
@@ -489,10 +484,10 @@ func callWithdrawalExpiry(t *testing.T, ctx context.Context, bridge *bind.BoundC
 }
 
 type withdrawRequestedEvent struct {
-	Amount       *big.Int
-	RecipientUA  []byte
-	Expiry       uint64
-	FeeBps       *big.Int
+	Amount      *big.Int
+	RecipientUA []byte
+	Expiry      uint64
+	FeeBps      *big.Int
 }
 
 func mustParseWithdrawRequested(t *testing.T, bridgeABI abi.ABI, rcpt *types.Receipt) (common.Hash, uint64, uint64) {

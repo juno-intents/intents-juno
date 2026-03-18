@@ -60,7 +60,7 @@ describe('DepositFlow', () => {
       bridgeAddress: '0xbridge',
       wjunoAddress: '0xwjuno',
       oWalletUA: 'jtest1bridgewallet',
-      refundWindowSeconds: 600,
+      withdrawalExpiryWindowSeconds: 600,
       minDepositAmount: '201005025',
       depositMinConfirmations: 1,
       minWithdrawAmount: '100000000',

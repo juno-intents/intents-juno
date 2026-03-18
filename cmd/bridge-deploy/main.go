@@ -28,28 +28,28 @@ import (
 )
 
 const (
-	defaultBridgeFeeBps                    = uint64(50)
-	defaultBridgeRelayerTipBps             = uint64(1000)
-	defaultBridgeRefundWindowSeconds       = uint64(24 * 60 * 60)
-	defaultBridgeMaxExpiryExtensionSeconds = uint64(12 * 60 * 60)
-	defaultBridgeMinDepositAmountZat       = uint64(201_005_025)
-	defaultBridgeMinWithdrawAmountZat      = uint64(200_000_000)
-	defaultTimelockMinDelaySeconds         = uint64(48 * 60 * 60)
-	defaultBootstrapTimelockDelaySeconds   = uint64(0)
-	bridgeBPSDenominator                   = uint64(10_000)
-	txMinedWaitTimeout                     = 180 * time.Second
-	txMinedGraceTimeout                    = 240 * time.Second
-	deployCodeRecoveryTimeout              = 8 * time.Minute
-	deployCodeRecoveryPollInterval         = 5 * time.Second
-	defaultRetryGasPriceWei                = int64(2_000_000_000)
-	defaultRetryGasTipCapWei               = int64(500_000_000)
-	defaultRunTimeout                      = 20 * time.Minute
-	legacyValueTransferGasLimit            = uint64(21_000)
-	ephemeralFundingReadRetries            = 8
-	ephemeralFundingReadBackoff            = 500 * time.Millisecond
-	sweepRetryAttempts                     = 5
-	sweepRetryBackoff                      = 500 * time.Millisecond
-	sweepValueSafetyBufferWei              = int64(100_000)
+	defaultBridgeFeeBps                        = uint64(50)
+	defaultBridgeRelayerTipBps                 = uint64(1000)
+	defaultBridgeWithdrawalExpiryWindowSeconds = uint64(24 * 60 * 60)
+	defaultBridgeMaxExpiryExtensionSeconds     = uint64(12 * 60 * 60)
+	defaultBridgeMinDepositAmountZat           = uint64(201_005_025)
+	defaultBridgeMinWithdrawAmountZat          = uint64(200_000_000)
+	defaultTimelockMinDelaySeconds             = uint64(48 * 60 * 60)
+	defaultBootstrapTimelockDelaySeconds       = uint64(0)
+	bridgeBPSDenominator                       = uint64(10_000)
+	txMinedWaitTimeout                         = 180 * time.Second
+	txMinedGraceTimeout                        = 240 * time.Second
+	deployCodeRecoveryTimeout                  = 8 * time.Minute
+	deployCodeRecoveryPollInterval             = 5 * time.Second
+	defaultRetryGasPriceWei                    = int64(2_000_000_000)
+	defaultRetryGasTipCapWei                   = int64(500_000_000)
+	defaultRunTimeout                          = 20 * time.Minute
+	legacyValueTransferGasLimit                = uint64(21_000)
+	ephemeralFundingReadRetries                = 8
+	ephemeralFundingReadBackoff                = 500 * time.Millisecond
+	sweepRetryAttempts                         = 5
+	sweepRetryBackoff                          = 500 * time.Millisecond
+	sweepValueSafetyBufferWei                  = int64(100_000)
 )
 
 type stringListFlag []string
@@ -68,32 +68,32 @@ func (f *stringListFlag) Set(value string) error {
 }
 
 type config struct {
-	RPCURL                          string
-	ChainID                         uint64
-	ContractsOut                    string
-	Threshold                       int
-	OperatorAddresses               []common.Address
-	VerifierAddress                 common.Address
-	BridgeFeeBps                    uint64
-	BridgeRelayerTipBps             uint64
-	BridgeRefundWindowSeconds       uint64
-	BridgeMaxExpiryExtensionSeconds uint64
-	BridgeMinDepositAmount          uint64
-	BridgeMinWithdrawAmount         uint64
-	DepositImageID                  common.Hash
-	WithdrawImageID                 common.Hash
-	GovernanceSafe                  common.Address
-	PauseGuardian                   common.Address
-	MinDepositAdmin                 common.Address
-	TimelockMinDelaySeconds         uint64
-	DeployerKeyHex                  string
-	FunderKeyHex                    string
-	UseEphemeralDeployer            bool
-	EphemeralFundingAmountWei       *big.Int
-	SweepRecipient                  common.Address
-	SweepRecipientSet               bool
-	OutputPath                      string
-	RunTimeout                      time.Duration
+	RPCURL                              string
+	ChainID                             uint64
+	ContractsOut                        string
+	Threshold                           int
+	OperatorAddresses                   []common.Address
+	VerifierAddress                     common.Address
+	BridgeFeeBps                        uint64
+	BridgeRelayerTipBps                 uint64
+	BridgeWithdrawalExpiryWindowSeconds uint64
+	BridgeMaxExpiryExtensionSeconds     uint64
+	BridgeMinDepositAmount              uint64
+	BridgeMinWithdrawAmount             uint64
+	DepositImageID                      common.Hash
+	WithdrawImageID                     common.Hash
+	GovernanceSafe                      common.Address
+	PauseGuardian                       common.Address
+	MinDepositAdmin                     common.Address
+	TimelockMinDelaySeconds             uint64
+	DeployerKeyHex                      string
+	FunderKeyHex                        string
+	UseEphemeralDeployer                bool
+	EphemeralFundingAmountWei           *big.Int
+	SweepRecipient                      common.Address
+	SweepRecipientSet                   bool
+	OutputPath                          string
+	RunTimeout                          time.Duration
 }
 
 type report struct {
@@ -130,12 +130,12 @@ type report struct {
 	} `json:"governance"`
 
 	BridgeParams struct {
-		FeeBps                    uint64 `json:"fee_bps"`
-		RelayerTipBps             uint64 `json:"relayer_tip_bps"`
-		RefundWindowSeconds       uint64 `json:"refund_window_seconds"`
-		MaxExpiryExtensionSeconds uint64 `json:"max_expiry_extension_seconds"`
-		MinDepositAmount          uint64 `json:"min_deposit_amount"`
-		MinWithdrawAmount         uint64 `json:"min_withdraw_amount"`
+		FeeBps                        uint64 `json:"fee_bps"`
+		RelayerTipBps                 uint64 `json:"relayer_tip_bps"`
+		WithdrawalExpiryWindowSeconds uint64 `json:"withdrawal_expiry_window_seconds"`
+		MaxExpiryExtensionSeconds     uint64 `json:"max_expiry_extension_seconds"`
+		MinDepositAmount              uint64 `json:"min_deposit_amount"`
+		MinWithdrawAmount             uint64 `json:"min_withdraw_amount"`
 	} `json:"bridge_params"`
 
 	Operators []string `json:"operators"`
@@ -265,7 +265,12 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&verifierAddressHex, "verifier-address", "", "verifier router address")
 	fs.Uint64Var(&cfg.BridgeFeeBps, "fee-bps", defaultBridgeFeeBps, "bridge fee in basis points")
 	fs.Uint64Var(&cfg.BridgeRelayerTipBps, "relayer-tip-bps", defaultBridgeRelayerTipBps, "bridge relayer tip share in basis points of fee")
-	fs.Uint64Var(&cfg.BridgeRefundWindowSeconds, "refund-window-seconds", defaultBridgeRefundWindowSeconds, "bridge refund window in seconds")
+	fs.Uint64Var(
+		&cfg.BridgeWithdrawalExpiryWindowSeconds,
+		"withdrawal-expiry-window-seconds",
+		defaultBridgeWithdrawalExpiryWindowSeconds,
+		"bridge withdrawal expiry window in seconds",
+	)
 	fs.Uint64Var(&cfg.BridgeMaxExpiryExtensionSeconds, "max-expiry-extension-seconds", defaultBridgeMaxExpiryExtensionSeconds, "bridge max expiry extension in seconds")
 	fs.Uint64Var(&cfg.BridgeMinDepositAmount, "min-deposit-amount", defaultBridgeMinDepositAmountZat, "bridge minimum deposit amount in Juno base units")
 	fs.Uint64Var(&cfg.BridgeMinWithdrawAmount, "min-withdraw-amount", defaultBridgeMinWithdrawAmountZat, "bridge minimum withdrawal amount in wJUNO base units")
@@ -298,8 +303,8 @@ func parseArgs(args []string) (config, error) {
 	if cfg.BridgeRelayerTipBps > bridgeBPSDenominator {
 		return cfg, errors.New("--relayer-tip-bps must be <= 10000")
 	}
-	if cfg.BridgeRefundWindowSeconds == 0 {
-		return cfg, errors.New("--refund-window-seconds must be > 0")
+	if cfg.BridgeWithdrawalExpiryWindowSeconds == 0 {
+		return cfg, errors.New("--withdrawal-expiry-window-seconds must be > 0")
 	}
 	if cfg.BridgeMaxExpiryExtensionSeconds == 0 {
 		return cfg, errors.New("--max-expiry-extension-seconds must be > 0")
@@ -445,7 +450,7 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 	}
 	rep.BridgeParams.FeeBps = cfg.BridgeFeeBps
 	rep.BridgeParams.RelayerTipBps = cfg.BridgeRelayerTipBps
-	rep.BridgeParams.RefundWindowSeconds = cfg.BridgeRefundWindowSeconds
+	rep.BridgeParams.WithdrawalExpiryWindowSeconds = cfg.BridgeWithdrawalExpiryWindowSeconds
 	rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
 	rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
 	rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
@@ -569,7 +574,7 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 		cfg.WithdrawImageID,
 		new(big.Int).SetUint64(cfg.BridgeFeeBps),
 		new(big.Int).SetUint64(cfg.BridgeRelayerTipBps),
-		cfg.BridgeRefundWindowSeconds,
+		cfg.BridgeWithdrawalExpiryWindowSeconds,
 		cfg.BridgeMaxExpiryExtensionSeconds,
 		new(big.Int).SetUint64(cfg.BridgeMinDepositAmount),
 		new(big.Int).SetUint64(cfg.BridgeMinWithdrawAmount),

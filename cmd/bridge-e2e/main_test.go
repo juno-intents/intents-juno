@@ -104,8 +104,8 @@ func TestParseArgs_Valid(t *testing.T) {
 	if cfg.BridgeRelayerTipBps != 1000 {
 		t.Fatalf("bridge relayer tip bps: got %d want 1000", cfg.BridgeRelayerTipBps)
 	}
-	if cfg.BridgeRefundWindowSeconds != 24*60*60 {
-		t.Fatalf("bridge refund window: got %d want %d", cfg.BridgeRefundWindowSeconds, 24*60*60)
+	if cfg.BridgeWithdrawalExpiryWindowSeconds != 24*60*60 {
+		t.Fatalf("bridge withdrawal expiry window: got %d want %d", cfg.BridgeWithdrawalExpiryWindowSeconds, 24*60*60)
 	}
 	if cfg.BridgeMaxExpiryExtensionSeconds != 12*60*60 {
 		t.Fatalf("bridge max expiry extension: got %d want %d", cfg.BridgeMaxExpiryExtensionSeconds, 12*60*60)
@@ -1827,21 +1827,21 @@ func TestValidateReusedBridgeConfig_RejectsVerifierMismatch(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
 	const feeBps uint64 = 50
 	const relayerTipBps uint64 = 1000
-	const refundWindowSeconds uint64 = 86400
+	const withdrawalExpiryWindowSeconds uint64 = 86400
 	const maxExpiryExtensionSeconds uint64 = 43200
 	const minDepositAmount uint64 = 201005025
 	const minWithdrawAmount uint64 = 200000000
 	caller := &mockBridgeConfigCaller{
 		responses: map[string]mockCallResponse{
-			"verifier":                  {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
-			"depositImageId":            {result: depositImageID},
-			"withdrawImageId":           {result: withdrawImageID},
-			"feeBps":                    {result: feeBps},
-			"relayerTipBps":             {result: relayerTipBps},
-			"refundWindowSeconds":       {result: refundWindowSeconds},
-			"maxExpiryExtensionSeconds": {result: maxExpiryExtensionSeconds},
-			"minDepositAmount":          {result: minDepositAmount},
-			"minWithdrawAmount":         {result: minWithdrawAmount},
+			"verifier":                      {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
+			"depositImageId":                {result: depositImageID},
+			"withdrawImageId":               {result: withdrawImageID},
+			"feeBps":                        {result: feeBps},
+			"relayerTipBps":                 {result: relayerTipBps},
+			"withdrawalExpiryWindowSeconds": {result: withdrawalExpiryWindowSeconds},
+			"maxExpiryExtensionSeconds":     {result: maxExpiryExtensionSeconds},
+			"minDepositAmount":              {result: minDepositAmount},
+			"minWithdrawAmount":             {result: minWithdrawAmount},
 		},
 	}
 
@@ -1853,7 +1853,7 @@ func TestValidateReusedBridgeConfig_RejectsVerifierMismatch(t *testing.T) {
 		withdrawImageID,
 		feeBps,
 		relayerTipBps,
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExpiryExtensionSeconds,
 		minDepositAmount,
 		minWithdrawAmount,
@@ -1873,21 +1873,21 @@ func TestValidateReusedBridgeConfig_RejectsImageIDMismatch(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
 	const feeBps uint64 = 50
 	const relayerTipBps uint64 = 1000
-	const refundWindowSeconds uint64 = 86400
+	const withdrawalExpiryWindowSeconds uint64 = 86400
 	const maxExpiryExtensionSeconds uint64 = 43200
 	const minDepositAmount uint64 = 201005025
 	const minWithdrawAmount uint64 = 200000000
 	caller := &mockBridgeConfigCaller{
 		responses: map[string]mockCallResponse{
-			"verifier":                  {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
-			"depositImageId":            {result: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
-			"withdrawImageId":           {result: withdrawImageID},
-			"feeBps":                    {result: feeBps},
-			"relayerTipBps":             {result: relayerTipBps},
-			"refundWindowSeconds":       {result: refundWindowSeconds},
-			"maxExpiryExtensionSeconds": {result: maxExpiryExtensionSeconds},
-			"minDepositAmount":          {result: minDepositAmount},
-			"minWithdrawAmount":         {result: minWithdrawAmount},
+			"verifier":                      {result: common.HexToAddress("0x00000000000000000000000000000000000000aa")},
+			"depositImageId":                {result: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
+			"withdrawImageId":               {result: withdrawImageID},
+			"feeBps":                        {result: feeBps},
+			"relayerTipBps":                 {result: relayerTipBps},
+			"withdrawalExpiryWindowSeconds": {result: withdrawalExpiryWindowSeconds},
+			"maxExpiryExtensionSeconds":     {result: maxExpiryExtensionSeconds},
+			"minDepositAmount":              {result: minDepositAmount},
+			"minWithdrawAmount":             {result: minWithdrawAmount},
 		},
 	}
 
@@ -1899,7 +1899,7 @@ func TestValidateReusedBridgeConfig_RejectsImageIDMismatch(t *testing.T) {
 		withdrawImageID,
 		feeBps,
 		relayerTipBps,
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExpiryExtensionSeconds,
 		minDepositAmount,
 		minWithdrawAmount,
@@ -1920,21 +1920,21 @@ func TestValidateReusedBridgeConfig_AcceptsMatchingConfig(t *testing.T) {
 	withdrawImageID := common.HexToHash("0x2222222222222222222222222222222222222222222222222222222222222222")
 	const feeBps uint64 = 50
 	const relayerTipBps uint64 = 1000
-	const refundWindowSeconds uint64 = 86400
+	const withdrawalExpiryWindowSeconds uint64 = 86400
 	const maxExpiryExtensionSeconds uint64 = 43200
 	const minDepositAmount uint64 = 201005025
 	const minWithdrawAmount uint64 = 200000000
 	caller := &mockBridgeConfigCaller{
 		responses: map[string]mockCallResponse{
-			"verifier":                  {result: verifier},
-			"depositImageId":            {result: depositImageID},
-			"withdrawImageId":           {result: withdrawImageID},
-			"feeBps":                    {result: feeBps},
-			"relayerTipBps":             {result: relayerTipBps},
-			"refundWindowSeconds":       {result: refundWindowSeconds},
-			"maxExpiryExtensionSeconds": {result: maxExpiryExtensionSeconds},
-			"minDepositAmount":          {result: minDepositAmount},
-			"minWithdrawAmount":         {result: minWithdrawAmount},
+			"verifier":                      {result: verifier},
+			"depositImageId":                {result: depositImageID},
+			"withdrawImageId":               {result: withdrawImageID},
+			"feeBps":                        {result: feeBps},
+			"relayerTipBps":                 {result: relayerTipBps},
+			"withdrawalExpiryWindowSeconds": {result: withdrawalExpiryWindowSeconds},
+			"maxExpiryExtensionSeconds":     {result: maxExpiryExtensionSeconds},
+			"minDepositAmount":              {result: minDepositAmount},
+			"minWithdrawAmount":             {result: minWithdrawAmount},
 		},
 	}
 
@@ -1946,7 +1946,7 @@ func TestValidateReusedBridgeConfig_AcceptsMatchingConfig(t *testing.T) {
 		withdrawImageID,
 		feeBps,
 		relayerTipBps,
-		refundWindowSeconds,
+		withdrawalExpiryWindowSeconds,
 		maxExpiryExtensionSeconds,
 		minDepositAmount,
 		minWithdrawAmount,
