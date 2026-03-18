@@ -216,6 +216,13 @@ func (p *PackagePersistence) ListByState(ctx context.Context, state PackageState
 	return p.store.ListByState(ctx, state)
 }
 
+func (p *PackagePersistence) Get(ctx context.Context, digest common.Hash) (PackageRecord, error) {
+	if p == nil || p.store == nil {
+		return PackageRecord{}, fmt.Errorf("%w: package store required to get package", ErrInvalidPersistenceConfig)
+	}
+	return p.store.Get(ctx, digest)
+}
+
 func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int, error) {
 	if p == nil || p.ipfs == nil {
 		return 0, nil

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -363,6 +364,15 @@ func publishCheckpointPackage(
 	topic string,
 	pkg checkpoint.CheckpointPackageV1,
 ) error {
+	if rec, err := persist.Get(ctx, pkg.Digest); err == nil {
+		if rec.State == checkpoint.PackageStateEmitted {
+			agg.RestoreEmittedDigest(pkg.Digest)
+			return nil
+		}
+	} else if !errors.Is(err, checkpoint.ErrPackageNotFound) {
+		return err
+	}
+
 	payload, err := marshalCheckpointPackage(pkg)
 	if err != nil {
 		return err

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -277,6 +278,110 @@ func TestRestoreCheckpointState_SkipsReplayForAlreadyEmittedPackages(t *testing.
 	}
 	if len(producer.payloads) != 0 {
 		t.Fatalf("expected no replay for emitted package, got %d publishes", len(producer.payloads))
+	}
+}
+
+func TestPublishCheckpointPackage_SkipsDurablyEmittedDigestAfterCacheEviction(t *testing.T) {
+	t.Parallel()
+
+	makePackage := func(height uint64, suffix string, createdAt time.Time) (checkpoint.Checkpoint, checkpoint.CheckpointPackageV1, []byte) {
+		cp := checkpoint.Checkpoint{
+			Height:           height,
+			BlockHash:        common.HexToHash("0x" + strings.Repeat(suffix, 64)),
+			FinalOrchardRoot: common.HexToHash("0x" + strings.Repeat(string(suffix[0]+1), 64)),
+			BaseChainID:      8453,
+			BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		}
+		digest := checkpoint.Digest(cp)
+		operatorSetHash := common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+		payload, err := json.Marshal(checkpointPackageV1{
+			Version:         "checkpoints.package.v1",
+			Digest:          digest,
+			Checkpoint:      cp,
+			OperatorSetHash: operatorSetHash,
+			CreatedAt:       createdAt,
+		})
+		if err != nil {
+			t.Fatalf("json.Marshal: %v", err)
+		}
+		return cp, checkpoint.CheckpointPackageV1{
+			Digest:          digest,
+			Checkpoint:      cp,
+			OperatorSetHash: operatorSetHash,
+			CreatedAt:       createdAt,
+		}, payload
+	}
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	store := checkpoint.NewMemoryPackageStore()
+	persist, err := checkpoint.NewPackagePersistence(checkpoint.PackagePersistenceConfig{
+		PackageStore: store,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence: %v", err)
+	}
+
+	cpOld, pkgOld, payloadOld := makePackage(123, "1", now)
+	if _, err := persist.Persist(context.Background(), checkpoint.PackageEnvelope{
+		Digest:          pkgOld.Digest,
+		Checkpoint:      cpOld,
+		OperatorSetHash: pkgOld.OperatorSetHash,
+		Payload:         payloadOld,
+	}); err != nil {
+		t.Fatalf("Persist old: %v", err)
+	}
+	if _, err := persist.MarkEmitted(context.Background(), pkgOld.Digest); err != nil {
+		t.Fatalf("MarkEmitted old: %v", err)
+	}
+
+	now = now.Add(time.Minute)
+	cpNew, pkgNew, payloadNew := makePackage(124, "2", now)
+	if _, err := persist.Persist(context.Background(), checkpoint.PackageEnvelope{
+		Digest:          pkgNew.Digest,
+		Checkpoint:      cpNew,
+		OperatorSetHash: pkgNew.OperatorSetHash,
+		Payload:         payloadNew,
+	}); err != nil {
+		t.Fatalf("Persist new: %v", err)
+	}
+	if _, err := persist.MarkEmitted(context.Background(), pkgNew.Digest); err != nil {
+		t.Fatalf("MarkEmitted new: %v", err)
+	}
+
+	agg, err := checkpoint.NewAggregator(checkpoint.AggregatorConfig{
+		BaseChainID:    cpOld.BaseChainID,
+		BridgeContract: cpOld.BridgeContract,
+		Operators:      []common.Address{common.HexToAddress("0x1111111111111111111111111111111111111111")},
+		Threshold:      1,
+		MaxEmitted:     1,
+		Now:            func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewAggregator: %v", err)
+	}
+	producer := &stubCheckpointProducer{}
+
+	if err := restoreCheckpointState(context.Background(), persist, agg, producer, "checkpoints.packages.v1", slog.Default()); err != nil {
+		t.Fatalf("restoreCheckpointState: %v", err)
+	}
+	if len(producer.payloads) != 0 {
+		t.Fatalf("expected no replay during restore, got %d publishes", len(producer.payloads))
+	}
+
+	if err := publishCheckpointPackage(context.Background(), persist, agg, producer, "checkpoints.packages.v1", pkgOld); err != nil {
+		t.Fatalf("publishCheckpointPackage old emitted: %v", err)
+	}
+	if len(producer.payloads) != 0 {
+		t.Fatalf("expected durably emitted package to be skipped, got %d publishes", len(producer.payloads))
+	}
+
+	stored, err := store.Get(context.Background(), pkgOld.Digest)
+	if err != nil {
+		t.Fatalf("store.Get old: %v", err)
+	}
+	if stored.State != checkpoint.PackageStateEmitted {
+		t.Fatalf("stored state: got %s want %s", stored.State, checkpoint.PackageStateEmitted)
 	}
 }
 
