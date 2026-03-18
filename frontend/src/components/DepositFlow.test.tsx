@@ -136,4 +136,34 @@ describe('DepositFlow', () => {
     expect(screen.queryByText('junocash-cli')).not.toBeInTheDocument()
     expect(screen.queryByTestId('deposit-qr')).not.toBeInTheDocument()
   })
+
+  it('does not carry a memo fetch error into the next warning modal open', async () => {
+    const user = userEvent.setup()
+
+    vi.mocked(getDepositMemo)
+      .mockRejectedValueOnce(new Error('API 500: /v1/deposit-memo'))
+      .mockResolvedValueOnce({
+        version: 'test',
+        baseRecipient: CONNECTED_ADDRESS,
+        oWalletUA: 'jtest1destinationwallet',
+        nonce: '7',
+        memoHex: `${'ab'.repeat(68)}${'00'.repeat(444)}`,
+        memoBase64: 'memo-base-64',
+      })
+
+    renderDepositFlow()
+
+    await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
+    await user.click(screen.getByRole('button', { name: 'I agree' }))
+
+    expect(await screen.findByText('API 500: /v1/deposit-memo')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Cancel' }))
+    await user.click(screen.getByRole('button', { name: 'Generate Deposit Instructions' }))
+
+    expect(screen.queryByText('API 500: /v1/deposit-memo')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'I agree' }))
+    expect(await screen.findByRole('button', { name: 'QR Code' })).toBeInTheDocument()
+  })
 })

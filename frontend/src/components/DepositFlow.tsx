@@ -58,6 +58,7 @@ export default function DepositFlow() {
   const [amount, setAmount] = useState('')
   const [instructionStep, setInstructionStep] = useState<InstructionStep>('closed')
   const [transport, setTransport] = useState<InstructionTransport>(null)
+  const [memoRequestError, setMemoRequestError] = useState<string | null>(null)
 
   useEffect(() => {
     if (!address) {
@@ -79,7 +80,6 @@ export default function DepositFlow() {
 
   const {
     data: memo,
-    error: memoError,
     isFetching: isMemoFetching,
     refetch,
   } = useQuery({
@@ -114,6 +114,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   const closeInstructions = () => {
     setInstructionStep('closed')
     setTransport(null)
+    setMemoRequestError(null)
   }
 
   const handleGenerate = () => {
@@ -121,6 +122,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
       return
     }
 
+    setMemoRequestError(null)
     setTransport(null)
     setInstructionStep('warnings')
   }
@@ -130,11 +132,15 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
       return
     }
 
+    setMemoRequestError(null)
     const result = await refetch()
     if (result.data) {
       setTransport(null)
       setInstructionStep('transport')
+      return
     }
+
+    setMemoRequestError(formatQueryError(result.error))
   }
 
   const handleSelectTransport = (nextTransport: Exclude<InstructionTransport, null>) => {
@@ -355,7 +361,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
                     <li>I must include the memo exactly or my funds will be permenantly lost</li>
                     <li>Juno Intents is not responsible for losses from incorrect sending params</li>
                   </ol>
-                  {memoError ? <div className="error-box">{formatQueryError(memoError)}</div> : null}
+                  {memoRequestError ? <div className="error-box">{memoRequestError}</div> : null}
                   <div className="deposit-modal-actions">
                     <button type="button" className="ghost-btn" onClick={closeInstructions}>
                       Cancel
