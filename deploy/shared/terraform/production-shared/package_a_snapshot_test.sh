@@ -158,6 +158,8 @@ main() {
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "kms"' "production-shared provisions a KMS VPC endpoint"
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "logs"' "production-shared provisions a CloudWatch Logs VPC endpoint"
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "s3"' "production-shared provisions an S3 gateway endpoint"
+  assert_contains "$main_tf" 'description = "HTTPS from the VPC"' "production-shared opens interface endpoints to the whole VPC"
+  assert_contains "$main_tf" 'cidr_blocks = [data.aws_vpc.selected.cidr_block]' "production-shared interface endpoints allow non-shared subnets"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"' "production-shared points the Secrets Manager endpoint at the deployment region"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.ecr.api"' "production-shared points the ECR API endpoint at the deployment region"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"' "production-shared points the ECR DKR endpoint at the deployment region"

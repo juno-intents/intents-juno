@@ -267,11 +267,11 @@ resource "aws_security_group" "shared_vpc_endpoints" {
   vpc_id      = data.aws_vpc.selected.id
 
   ingress {
-    description = "HTTPS from shared subnets"
+    description = "HTTPS from the VPC"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = local.shared_subnet_cidrs
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
   }
 
   egress {

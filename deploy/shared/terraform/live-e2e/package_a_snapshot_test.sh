@@ -177,6 +177,8 @@ main() {
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "kms"' "live-e2e provisions a KMS VPC endpoint"
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "logs"' "live-e2e provisions a CloudWatch Logs VPC endpoint"
   assert_contains "$main_tf" 'resource "aws_vpc_endpoint" "s3"' "live-e2e provisions an S3 gateway endpoint"
+  assert_contains "$main_tf" 'description = "HTTPS from the VPC"' "live-e2e opens interface endpoints to the whole preview VPC"
+  assert_contains "$main_tf" 'cidr_blocks = [data.aws_vpc.selected.cidr_block]' "live-e2e interface endpoints allow operator and runner subnets"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"' "live-e2e points the Secrets Manager endpoint at the deployment region"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.ecr.api"' "live-e2e points the ECR API endpoint at the deployment region"
   assert_contains "$main_tf" 'service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"' "live-e2e points the ECR DKR endpoint at the deployment region"
