@@ -99,6 +99,37 @@ output "shared_ipfs_api_auth_secret_arn" {
   sensitive   = true
 }
 
+output "shared_wireguard_gateway_private_ip" {
+  description = "Private IPv4 address of the dedicated WireGuard gateway."
+  value       = try(aws_instance.wireguard_gateway[0].private_ip, null)
+}
+
+output "shared_wireguard_endpoint_host" {
+  description = "Public endpoint host used by the generated WireGuard client config."
+  value       = try(aws_eip.wireguard_gateway[0].public_ip, null)
+}
+
+output "shared_wireguard_listen_port" {
+  description = "UDP port exposed by the dedicated WireGuard gateway."
+  value       = local.wireguard_enabled ? var.shared_wireguard_listen_port : null
+}
+
+output "shared_wireguard_network_cidr" {
+  description = "Tunnel CIDR assigned to the dedicated WireGuard gateway."
+  value       = local.wireguard_enabled ? var.shared_wireguard_network_cidr : null
+}
+
+output "shared_wireguard_client_address_cidr" {
+  description = "Client tunnel address generated for the dedicated backoffice WireGuard profile."
+  value       = local.wireguard_enabled ? local.wireguard_client_address_cidr : null
+}
+
+output "shared_wireguard_client_config_secret_arn" {
+  description = "Secrets Manager ARN containing the generated backoffice WireGuard client config."
+  value       = try(aws_secretsmanager_secret.shared_wireguard_client_config[0].arn, null)
+  sensitive   = true
+}
+
 output "operator_instance_ids" {
   description = "Operator EC2 instance IDs."
   value       = data.aws_instance.operator[*].id

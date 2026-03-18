@@ -2434,6 +2434,29 @@ EOF
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .app_host.backoffice_dns_label = ""
+    | .app_host.ops_public_dns_label = "ops"
+    | del(.shared_services.wireguard.public_subnet_id)
+    | .app_host.private_endpoint = ""
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_wireguard_enabled' "$override_file")" "true" "preview override enables wireguard"
+  assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$override_file")" "ops.alpha.intents-testing.thejunowallet.com" "preview override falls back to legacy ops dns label"
+  assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_id")' "$override_file")" "false" "preview override omits public subnet when inventory relies on live-e2e defaults"
+  assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
+  rm -rf "$workdir"
+}
+
 test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root() {
   local workdir fakebin log_file output_file expected_repo_root
   workdir="$(mktemp -d)"
@@ -2500,6 +2523,7 @@ main() {
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
+  test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
 }
 

@@ -330,6 +330,50 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_supports_preview_legacy_wireguard_inventory() {
+  local workdir output_dir fake_bin log_dir
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .app_host.backoffice_dns_label = ""
+    | .app_host.ops_public_dns_label = "ops"
+    | del(.shared_services.wireguard.public_subnet_id)
+    | .app_host.private_endpoint = ""
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_eq "$(jq -r '.services.backoffice.record_name' "$output_dir/alpha/app/app-deploy.json")" "ops.alpha.intents-testing.thejunowallet.com" "preview legacy inventory still renders backoffice record name"
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it() {
   local workdir output_dir fake_bin log_dir operator_dir dkg_tls_dir cert_purpose san_text
   workdir="$(mktemp -d)"
@@ -811,6 +855,7 @@ EOF
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
+  test_deploy_coordinator_supports_preview_legacy_wireguard_inventory
   test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it
   test_deploy_coordinator_normalizes_relative_output_paths
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk

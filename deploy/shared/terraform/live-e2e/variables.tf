@@ -429,6 +429,53 @@ variable "shared_ipfs_api_port" {
   }
 }
 
+variable "shared_wireguard_enabled" {
+  description = "Whether the live-e2e shared stack should provision a dedicated WireGuard gateway for backoffice access."
+  type        = bool
+  default     = false
+}
+
+variable "shared_wireguard_public_subnet_id" {
+  description = "Optional public subnet ID used by the dedicated WireGuard gateway when shared_wireguard_enabled=true. If empty, the first discovered public subnet is used."
+  type        = string
+  default     = ""
+}
+
+variable "shared_wireguard_instance_type" {
+  description = "EC2 instance type for the dedicated WireGuard gateway."
+  type        = string
+  default     = "t3.small"
+}
+
+variable "shared_wireguard_listen_port" {
+  description = "UDP port exposed by the dedicated WireGuard gateway."
+  type        = number
+  default     = 51820
+
+  validation {
+    condition     = var.shared_wireguard_listen_port >= 1 && var.shared_wireguard_listen_port <= 65535
+    error_message = "shared_wireguard_listen_port must be in the range [1, 65535]."
+  }
+}
+
+variable "shared_wireguard_network_cidr" {
+  description = "Tunnel network CIDR assigned to the dedicated WireGuard gateway and its generated client."
+  type        = string
+  default     = "10.66.0.0/24"
+}
+
+variable "shared_wireguard_backoffice_hostname" {
+  description = "Backoffice hostname resolved over the dedicated WireGuard gateway when shared_wireguard_enabled=true."
+  type        = string
+  default     = ""
+}
+
+variable "shared_wireguard_backoffice_private_endpoint" {
+  description = "Optional private IPv4 address of the app host reached through the dedicated WireGuard gateway when shared_wireguard_enabled=true. If empty, the runner private IP is used."
+  type        = string
+  default     = ""
+}
+
 variable "dkg_s3_key_prefix" {
   description = "S3 key prefix used for operator DKG key-package exports."
   type        = string

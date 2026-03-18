@@ -233,6 +233,19 @@ production_inventory_tfvars_value() {
   printf '%s\n' "$value"
 }
 
+production_inventory_backoffice_dns_label() {
+  local inventory="$1"
+  local label
+
+  label="$(production_json_optional "$inventory" '.app_host.backoffice_dns_label | select(type == "string" and length > 0)')"
+  if [[ -n "$label" ]]; then
+    printf '%s\n' "$label"
+    return 0
+  fi
+
+  production_json_optional "$inventory" '.app_host.ops_public_dns_label | select(type == "string" and length > 0)'
+}
+
 production_write_shared_terraform_override_tfvars() {
   local inventory="$1"
   local output_file="$2"
@@ -245,11 +258,14 @@ production_write_shared_terraform_override_tfvars() {
   local backoffice_private_endpoint wireguard_public_subnet_id
 
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
-  backoffice_dns_label="$(production_json_required "$inventory" '.app_host.backoffice_dns_label | select(type == "string" and length > 0)')"
-  backoffice_private_endpoint="$(production_json_required "$inventory" '.app_host.private_endpoint | select(type == "string" and length > 0)')"
-  wireguard_public_subnet_id="$(production_json_required "$inventory" '.shared_services.wireguard.public_subnet_id | select(type == "string" and length > 0)')"
-  [[ "$backoffice_private_endpoint" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-    || die "app_host.private_endpoint must be an IPv4 address for wireguard backoffice routing"
+  backoffice_dns_label="$(production_inventory_backoffice_dns_label "$inventory")"
+  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
+  backoffice_private_endpoint="$(production_json_optional "$inventory" '.app_host.private_endpoint | select(type == "string" and length > 0)')"
+  wireguard_public_subnet_id="$(production_json_optional "$inventory" '.shared_services.wireguard.public_subnet_id | select(type == "string" and length > 0)')"
+  if [[ -n "$backoffice_private_endpoint" ]]; then
+    [[ "$backoffice_private_endpoint" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
+      || die "app_host.private_endpoint must be an IPv4 address for wireguard backoffice routing"
+  fi
   backoffice_hostname="${backoffice_dns_label}.${public_subdomain}"
 
   jq -n \
@@ -258,10 +274,14 @@ production_write_shared_terraform_override_tfvars() {
     --arg backoffice_private_endpoint "$backoffice_private_endpoint" \
     '{
       shared_wireguard_enabled: true,
-      shared_wireguard_public_subnet_id: $wireguard_public_subnet_id,
-      shared_wireguard_backoffice_hostname: $backoffice_hostname,
+      shared_wireguard_backoffice_hostname: $backoffice_hostname
+    }
+    + (if $wireguard_public_subnet_id == "" then {} else {
+      shared_wireguard_public_subnet_id: $wireguard_public_subnet_id
+    } end)
+    + (if $backoffice_private_endpoint == "" then {} else {
       shared_wireguard_backoffice_private_endpoint: $backoffice_private_endpoint
-    }' >"$output_file"
+    } end)' >"$output_file"
 }
 
 production_parse_postgres_dsn_field() {
@@ -1940,9 +1960,9 @@ production_render_app_handoff() {
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
-  backoffice_dns_label="$(jq -r '.backoffice_dns_label // empty' <<<"$app_json")"
+  backoffice_dns_label="$(jq -r '(.backoffice_dns_label | select(type == "string" and length > 0)) // (.ops_public_dns_label | select(type == "string" and length > 0)) // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_host.bridge_public_dns_label is required when inventory.app_host is present"
-  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label is required when inventory.app_host is present"
+  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
   [[ "$public_scheme" == "https" ]] || die "app_host.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"

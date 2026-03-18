@@ -109,6 +109,20 @@ check "shared_ecs_private_subnets_when_no_public_ip" {
   }
 }
 
+check "shared_wireguard_inputs_when_enabled" {
+  assert {
+    condition = !local.wireguard_enabled || (
+      (trimspace(var.shared_wireguard_public_subnet_id) != "" || length(local.public_one_per_az) > 0) &&
+      trimspace(var.shared_wireguard_backoffice_hostname) != "" &&
+      (
+        trimspace(var.shared_wireguard_backoffice_private_endpoint) == "" ||
+        can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", trimspace(var.shared_wireguard_backoffice_private_endpoint)))
+      )
+    )
+    error_message = "shared wireguard requires a public subnet, shared_wireguard_backoffice_hostname, and an IPv4 shared_wireguard_backoffice_private_endpoint when an explicit endpoint override is set."
+  }
+}
+
 locals {
   shared_subnet_cidrs    = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
   shared_route_table_ids = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
@@ -147,10 +161,20 @@ locals {
     ]
   )))
 
-  resource_slug           = trim(replace(lower(local.resource_name), "_", "-"), "-")
-  ipfs_lb_name            = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
-  ipfs_target_group_name  = trim(substr("${local.resource_slug}-ipfstg", 0, 32), "-")
-  ipfs_launch_name_prefix = trim(substr("${local.resource_slug}-ipfs-", 0, 32), "-")
+  resource_slug                  = trim(replace(lower(local.resource_name), "_", "-"), "-")
+  ipfs_lb_name                   = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
+  ipfs_target_group_name         = trim(substr("${local.resource_slug}-ipfstg", 0, 32), "-")
+  ipfs_launch_name_prefix        = trim(substr("${local.resource_slug}-ipfs-", 0, 32), "-")
+  wireguard_enabled              = var.provision_shared_services && var.shared_wireguard_enabled
+  wireguard_public_subnet_id     = local.wireguard_enabled ? (trimspace(var.shared_wireguard_public_subnet_id) != "" ? trimspace(var.shared_wireguard_public_subnet_id) : (length(local.public_one_per_az) > 0 ? local.public_one_per_az[0] : "")) : ""
+  wireguard_network_prefix       = tonumber(split("/", var.shared_wireguard_network_cidr)[1])
+  wireguard_gateway_tunnel_ip    = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 1) : ""
+  wireguard_gateway_address_cidr = local.wireguard_enabled ? "${local.wireguard_gateway_tunnel_ip}/${local.wireguard_network_prefix}" : ""
+  wireguard_client_tunnel_ip     = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 2) : ""
+  wireguard_client_address_cidr  = local.wireguard_enabled ? "${local.wireguard_client_tunnel_ip}/32" : ""
+  wireguard_backoffice_private_endpoint = local.wireguard_enabled ? (
+    trimspace(var.shared_wireguard_backoffice_private_endpoint) != "" ? trimspace(var.shared_wireguard_backoffice_private_endpoint) : aws_instance.runner.private_ip
+  ) : ""
 }
 
 resource "aws_kms_key" "dkg" {
@@ -1709,6 +1733,211 @@ resource "aws_autoscaling_group" "ipfs" {
       error_message = "shared_ipfs_desired_capacity must be between shared_ipfs_min_size and shared_ipfs_max_size."
     }
   }
+}
+
+resource "aws_security_group" "wireguard" {
+  count = local.wireguard_enabled ? 1 : 0
+
+  name        = "${local.resource_name}-wireguard-sg"
+  description = "Security group for intents-juno live e2e backoffice WireGuard gateway"
+  vpc_id      = local.selected_vpc_id
+
+  ingress {
+    description = "WireGuard ingress"
+    from_port   = var.shared_wireguard_listen_port
+    to_port     = var.shared_wireguard_listen_port
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard"
+  })
+}
+
+data "aws_iam_policy_document" "wireguard_gateway_assume_role" {
+  count = local.wireguard_enabled ? 1 : 0
+
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "wireguard_gateway" {
+  count              = local.wireguard_enabled ? 1 : 0
+  name               = "${local.resource_name}-wireguard-role"
+  assume_role_policy = data.aws_iam_policy_document.wireguard_gateway_assume_role[0].json
+  tags               = local.common_tags
+}
+
+resource "aws_secretsmanager_secret" "shared_wireguard_client_config" {
+  count = local.wireguard_enabled ? 1 : 0
+  name  = "${local.resource_name}-wireguard-client-config"
+  tags  = local.common_tags
+}
+
+data "aws_iam_policy_document" "wireguard_gateway_access" {
+  count = local.wireguard_enabled ? 1 : 0
+
+  statement {
+    sid = "AllowWireGuardClientConfigSecretWrite"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:PutSecretValue",
+    ]
+    resources = [aws_secretsmanager_secret.shared_wireguard_client_config[0].arn]
+  }
+}
+
+resource "aws_iam_role_policy" "wireguard_gateway_access" {
+  count  = local.wireguard_enabled ? 1 : 0
+  name   = "${local.resource_name}-wireguard-access"
+  role   = aws_iam_role.wireguard_gateway[0].id
+  policy = data.aws_iam_policy_document.wireguard_gateway_access[0].json
+}
+
+resource "aws_iam_instance_profile" "wireguard_gateway" {
+  count = local.wireguard_enabled ? 1 : 0
+  name  = "${local.resource_name}-wireguard-profile"
+  role  = aws_iam_role.wireguard_gateway[0].name
+}
+
+resource "aws_instance" "wireguard_gateway" {
+  count                       = local.wireguard_enabled ? 1 : 0
+  ami                         = data.aws_ami.ubuntu.id
+  instance_type               = var.shared_wireguard_instance_type
+  subnet_id                   = local.wireguard_public_subnet_id
+  vpc_security_group_ids      = [aws_security_group.wireguard[0].id]
+  iam_instance_profile        = aws_iam_instance_profile.wireguard_gateway[0].name
+  source_dest_check           = false
+  associate_public_ip_address = false
+
+  root_block_device {
+    volume_size           = 20
+    volume_type           = "gp3"
+    delete_on_termination = true
+    encrypted             = true
+  }
+
+  user_data = <<-EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y awscli ca-certificates curl dnsmasq iptables wireguard
+
+    imds_token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
+    for _ in $(seq 1 30); do
+      public_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)"
+      [[ -n "$public_ip" ]] && break
+      sleep 2
+    done
+    [[ -n "$public_ip" ]] || { echo "wireguard public IP is unavailable" >&2; exit 1; }
+
+    wireguard_client_config_secret_arn="${aws_secretsmanager_secret.shared_wireguard_client_config[0].arn}"
+    wireguard_gateway_address_cidr="${local.wireguard_gateway_address_cidr}"
+    wireguard_gateway_tunnel_ip="${local.wireguard_gateway_tunnel_ip}"
+    wireguard_client_address_cidr="${local.wireguard_client_address_cidr}"
+    wireguard_network_cidr="${var.shared_wireguard_network_cidr}"
+    wireguard_listen_port="${var.shared_wireguard_listen_port}"
+    wireguard_backoffice_private_endpoint="${local.wireguard_backoffice_private_endpoint}"
+    wireguard_upstream_dns="169.254.169.253"
+    default_iface="$(ip route show default | awk '/default/ {print $5; exit}')"
+
+    install -d -m 0700 /etc/wireguard
+    if [[ ! -f /etc/wireguard/server.key ]]; then
+      umask 077
+      wg genkey | tee /etc/wireguard/server.key | wg pubkey >/etc/wireguard/server.pub
+      wg genkey | tee /etc/wireguard/client.key | wg pubkey >/etc/wireguard/client.pub
+    fi
+
+    server_private_key="$(cat /etc/wireguard/server.key)"
+    server_public_key="$(cat /etc/wireguard/server.pub)"
+    client_private_key="$(cat /etc/wireguard/client.key)"
+    client_public_key="$(cat /etc/wireguard/client.pub)"
+
+    cat >/etc/wireguard/wg0.conf <<WGEOF
+    [Interface]
+    Address = $${wireguard_gateway_address_cidr}
+    ListenPort = $${wireguard_listen_port}
+    PrivateKey = $${server_private_key}
+    PostUp = iptables -t nat -A POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+    PostDown = iptables -t nat -D POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+
+    [Peer]
+    PublicKey = $${client_public_key}
+    AllowedIPs = $${wireguard_client_address_cidr}
+    PersistentKeepalive = 25
+    WGEOF
+
+    cat >/etc/dnsmasq.d/intents-juno-wireguard.conf <<DNSEOF
+    interface=wg0
+    bind-interfaces
+    listen-address=$${wireguard_gateway_tunnel_ip}
+    address=/${var.shared_wireguard_backoffice_hostname}/$${wireguard_backoffice_private_endpoint}
+    server=$${wireguard_upstream_dns}
+    DNSEOF
+
+    install -m 0644 /dev/null /etc/sysctl.d/99-intents-juno-wireguard.conf
+    cat >/etc/sysctl.d/99-intents-juno-wireguard.conf <<SYSEOF
+    net.ipv4.ip_forward=1
+    SYSEOF
+    sysctl --system >/dev/null
+
+    systemctl enable dnsmasq
+    systemctl restart dnsmasq
+    systemctl enable wg-quick@wg0
+    systemctl restart wg-quick@wg0
+
+    client_config="$(cat <<CFGEOF
+    [Interface]
+    PrivateKey = $${client_private_key}
+    Address = $${wireguard_client_address_cidr}
+    DNS = $${wireguard_gateway_tunnel_ip}
+
+    [Peer]
+    PublicKey = $${server_public_key}
+    Endpoint = $${public_ip}:$${wireguard_listen_port}
+    AllowedIPs = $${wireguard_network_cidr}, $${wireguard_backoffice_private_endpoint}/32
+    PersistentKeepalive = 25
+    CFGEOF
+    )"
+
+    for _ in $(seq 1 10); do
+      if AWS_PAGER="" aws --region ${var.aws_region} secretsmanager put-secret-value --secret-id "$wireguard_client_config_secret_arn" --secret-string "$client_config" >/dev/null; then
+        break
+      fi
+      sleep 5
+    done
+  EOF
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard"
+  })
+}
+
+resource "aws_eip" "wireguard_gateway" {
+  count    = local.wireguard_enabled ? 1 : 0
+  domain   = "vpc"
+  instance = aws_instance.wireguard_gateway[0].id
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard"
+  })
 }
 
 resource "aws_instance" "runner" {
