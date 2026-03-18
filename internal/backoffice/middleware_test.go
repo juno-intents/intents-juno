@@ -137,3 +137,38 @@ func TestAuthMiddleware_UIPathsExempt(t *testing.T) {
 		})
 	}
 }
+
+func TestRateLimitMiddleware_UsesAuthenticatedPrincipalAcrossIPs(t *testing.T) {
+	t.Parallel()
+
+	s := &Server{
+		cfg: ServerConfig{
+			AuthSecret:         "test-secret",
+			RateLimitPerSecond: 1,
+			RateLimitBurst:     1,
+		},
+	}
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	handler := s.rateLimitMiddleware(inner)
+
+	req1 := httptest.NewRequest("GET", "/api/funds", nil)
+	req1.RemoteAddr = "198.51.100.1:1234"
+	req1.Header.Set("Authorization", "Bearer test-secret")
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, req1)
+	if rec1.Code != http.StatusOK {
+		t.Fatalf("first request status: got %d want %d", rec1.Code, http.StatusOK)
+	}
+
+	req2 := httptest.NewRequest("GET", "/api/funds", nil)
+	req2.RemoteAddr = "198.51.100.2:5678"
+	req2.Header.Set("Authorization", "Bearer test-secret")
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, req2)
+	if rec2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request status: got %d want %d", rec2.Code, http.StatusTooManyRequests)
+	}
+}

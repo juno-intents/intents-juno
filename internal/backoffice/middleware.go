@@ -1,7 +1,9 @@
 package backoffice
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"net/netip"
 	"strings"
@@ -35,7 +37,8 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// rateLimitMiddleware applies per-IP token bucket rate limiting.
+// rateLimitMiddleware applies token bucket rate limiting keyed by
+// authenticated principal when available, otherwise by source IP.
 // Probe endpoints are exempt.
 func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	limiter := newBackofficeRateLimiter(
@@ -51,8 +54,8 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
-		ip := extractClientIP(r)
-		if !limiter.Allow(ip, time.Now().UTC()) {
+		key := rateLimitKey(r, s.cfg.AuthSecret)
+		if !limiter.Allow(key, time.Now().UTC()) {
 			w.Header().Set("Retry-After", "1")
 			writeError(w, http.StatusTooManyRequests, "rate_limited")
 			return
@@ -62,7 +65,30 @@ func (s *Server) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// backofficeRateLimiter is a per-IP token bucket rate limiter with LRU eviction.
+func rateLimitKey(r *http.Request, authSecret string) string {
+	if principal := authenticatedPrincipal(r, authSecret); principal != "" {
+		return "auth:" + principal
+	}
+	return "ip:" + extractClientIP(r)
+}
+
+func authenticatedPrincipal(r *http.Request, authSecret string) string {
+	if strings.TrimSpace(authSecret) == "" {
+		return ""
+	}
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return ""
+	}
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if subtle.ConstantTimeCompare([]byte(token), []byte(authSecret)) != 1 {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// backofficeRateLimiter is a token bucket rate limiter with LRU eviction.
 type backofficeRateLimiter struct {
 	mu sync.Mutex
 
