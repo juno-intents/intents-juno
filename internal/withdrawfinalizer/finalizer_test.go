@@ -144,8 +144,12 @@ type failSetFinalizedStore struct {
 	err error
 }
 
-func (s *failSetFinalizedStore) SetBatchFinalized(context.Context, [32]byte, string) error {
+func (s *failSetFinalizedStore) SetBatchFinalized(context.Context, [32]byte, withdraw.Fence, string) error {
 	return s.err
+}
+
+func testFence(owner string) withdraw.Fence {
+	return withdraw.Fence{Owner: owner, LeaseVersion: 1}
 }
 
 type trackingLeaseStore struct {
@@ -236,18 +240,20 @@ func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	sender := &recordingSender{}
 	operatorKey := mustOperatorKey(t)
@@ -295,18 +301,20 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
@@ -432,18 +440,20 @@ func TestFinalizer_TickReturnsDecodedRevertReason(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -507,18 +517,20 @@ func TestFinalizer_FailsWhenProofArtifactPersistenceFails(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
@@ -591,18 +603,20 @@ func TestFinalizer_SetBatchFinalizedFailureLeavesBatchFinalizing(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = baseStore.UpsertRequested(ctx, w)
-	_, _ = baseStore.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = baseStore.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = baseStore.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = baseStore.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = baseStore.MarkBatchSigning(ctx, batchID)
-	_ = baseStore.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = baseStore.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = baseStore.SetBatchConfirmed(ctx, batchID)
+	_ = baseStore.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = baseStore.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = baseStore.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = baseStore.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = baseStore.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = baseStore.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -673,19 +687,21 @@ func TestFinalizer_TickResumesFinalizingBatch(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
-	_ = store.MarkBatchFinalizing(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
+	_ = store.MarkBatchFinalizing(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -758,18 +774,20 @@ func TestFinalizer_LeaseSkipsBatch(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	// Hold the lease under another owner.
 	_, ok, err := leaseStore.TryAcquire(ctx, batchLeaseName(batchID), "other", 10*time.Second)
@@ -824,18 +842,20 @@ func TestFinalizer_SkipsBatchesWhenBaseRelayerNotReady(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x00), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{BaseChainID: 31337, BridgeContract: bridgeAddr}
@@ -900,18 +920,20 @@ func TestFinalizer_UsesBinaryGuestInputWhenConfigured(t *testing.T) {
 		ProofWitnessItem: witness,
 	}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -987,18 +1009,20 @@ func TestFinalizer_ErrorsWhenOVKMissing(t *testing.T) {
 		ProofWitnessItem: witness,
 	}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1068,18 +1092,20 @@ func TestFinalizer_UsesExtractorWitnessFromBatchTxHashWhenConfigured(t *testing.
 		ProofWitnessItem: payloadWitness,
 	}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "juno-batch-txid-42")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "juno-batch-txid-42")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1185,18 +1211,20 @@ func TestFinalizer_DoesNotFallbackToPayloadWitnessWhenExtractorConfigured(t *tes
 		ProofWitnessItem: payloadWitness,
 	}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "juno-batch-txid-42")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "juno-batch-txid-42")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1265,18 +1293,20 @@ func TestFinalizer_ErrorsWhenGuestInputConfiguredButWitnessMissing(t *testing.T)
 		Expiry:      now.Add(24 * time.Hour),
 	}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1341,18 +1371,20 @@ func TestFinalizer_TickContinuesAfterBatchError(t *testing.T) {
 		ProofWitnessItem: bytes.Repeat([]byte{0x66}, proverinput.WithdrawWitnessItemLen),
 	}
 	_, _, _ = store.UpsertRequested(ctx, w1)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID1 := seq32(0x10)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID1,
 		WithdrawalIDs: [][32]byte{w1.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID1)
-	_ = store.SetBatchSigned(ctx, batchID1, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID1, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID1)
+	_ = store.MarkBatchSigning(ctx, batchID1, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID1, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID1, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID1, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID1, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID1, testFence("a"))
 
 	// Batch 2: will SUCCEED (no witness extractor needed — no OVK configured on batch).
 	w2 := withdraw.Withdrawal{
@@ -1363,18 +1395,20 @@ func TestFinalizer_TickContinuesAfterBatchError(t *testing.T) {
 		Expiry:      now.Add(24 * time.Hour),
 	}
 	_, _, _ = store.UpsertRequested(ctx, w2)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID2 := seq32(0x20)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID2,
 		WithdrawalIDs: [][32]byte{w2.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID2)
-	_ = store.SetBatchSigned(ctx, batchID2, []byte{0x02})
-	_ = store.SetBatchBroadcasted(ctx, batchID2, "tx2")
-	_ = store.SetBatchConfirmed(ctx, batchID2)
+	_ = store.MarkBatchSigning(ctx, batchID2, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID2, testFence("a"), []byte{0x02})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID2, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID2, testFence("a"), "tx2")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID2, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID2, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1456,18 +1490,20 @@ func TestFinalizer_RenewsBatchLeaseWhileProofInFlight(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x40), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x50)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{
@@ -1546,18 +1582,20 @@ func TestFinalizer_AbortsWhenLeaseRenewalFails(t *testing.T) {
 
 	w := withdraw.Withdrawal{ID: seq32(0x60), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: time.Now().Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
 	_, _, _ = store.UpsertRequested(ctx, w)
-	_, _ = store.ClaimUnbatched(ctx, "a", 10*time.Second, 1)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
 	batchID := seq32(0x70)
-	_ = store.CreatePlannedBatch(ctx, "a", withdraw.Batch{
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
 		ID:            batchID,
 		WithdrawalIDs: [][32]byte{w.ID},
 		State:         withdraw.BatchStatePlanned,
 		TxPlan:        []byte(`{"v":1}`),
 	})
-	_ = store.MarkBatchSigning(ctx, batchID)
-	_ = store.SetBatchSigned(ctx, batchID, []byte{0x01})
-	_ = store.SetBatchBroadcasted(ctx, batchID, "tx1")
-	_ = store.SetBatchConfirmed(ctx, batchID)
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
 
 	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
 	cp := checkpoint.Checkpoint{

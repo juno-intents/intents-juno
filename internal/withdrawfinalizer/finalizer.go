@@ -277,6 +277,10 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		heartbeat.Stop()
 		_ = f.releaseLease(context.Background(), leaseName)
 	}()
+	fence := finalizerFence(f.cfg.Owner)
+	if err := f.store.AdoptBatch(workCtx, batchID, fence); err != nil {
+		return heartbeat.Wrap(err)
+	}
 
 	// Bridge pause check: if paused, skip finalization.
 	if f.pauseChecker != nil {
@@ -299,7 +303,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		return nil
 	}
 	if b.State == withdraw.BatchStateConfirmed {
-		if err := f.store.MarkBatchFinalizing(workCtx, batchID); err != nil {
+		if err := f.store.MarkBatchFinalizing(workCtx, batchID, fence); err != nil {
 			return heartbeat.Wrap(err)
 		}
 	}
@@ -437,7 +441,7 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 	if err := heartbeat.Err(); err != nil {
 		return err
 	}
-	if err := f.store.SetBatchFinalized(workCtx, batchID, res.TxHash); err != nil {
+	if err := f.store.SetBatchFinalized(workCtx, batchID, fence, res.TxHash); err != nil {
 		// If another worker won the race, treat it as success.
 		b2, err2 := f.store.GetBatch(workCtx, batchID)
 		if err2 == nil && b2.State == withdraw.BatchStateFinalized {
@@ -452,6 +456,17 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+func finalizerFence(owner string) withdraw.Fence {
+	version := time.Now().UTC().UnixNano()
+	if version <= 0 {
+		version = 1
+	}
+	return withdraw.Fence{
+		Owner:        owner,
+		LeaseVersion: version,
+	}
 }
 
 type leaseHeartbeat struct {
