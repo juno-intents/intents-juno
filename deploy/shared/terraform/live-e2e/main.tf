@@ -1633,7 +1633,7 @@ resource "aws_launch_template" "ipfs" {
       aarch64|arm64) awscli_arch="aarch64" ;;
       *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
     esac
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
     rm -rf /tmp/aws
     unzip -q /tmp/awscliv2.zip -d /tmp
     /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
@@ -1856,7 +1856,7 @@ resource "aws_instance" "wireguard_gateway" {
       aarch64|arm64) awscli_arch="aarch64" ;;
       *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
     esac
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
     rm -rf /tmp/aws
     unzip -q /tmp/awscliv2.zip -d /tmp
     /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
