@@ -137,6 +137,10 @@ inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.
 terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
 terraform_dir="$(production_abs_path "$REPO_ROOT" "$terraform_dir_rel")"
 [[ -d "$terraform_dir" ]] || die "terraform dir not found: $terraform_dir"
+terraform_backend_bucket=""
+terraform_backend_table=""
+terraform_backend_key=""
+terraform_backend_args=()
 if [[ -n "$run_label" ]]; then
   output_dir="$output_root/$env_slug/$(production_safe_slug "$run_label")"
 else
@@ -185,15 +189,33 @@ if jq -e '.governance != null' "$inventory" >/dev/null 2>&1; then
   pause_guardian_address="$(production_json_optional "$inventory" '.governance.pause_guardian')"
 fi
 
-if [[ "$skip_terraform_apply" != "true" ]]; then
-  for cmd in terraform; do
+if [[ "$skip_terraform_apply" != "true" || -z "$terraform_output_json" ]]; then
+  for cmd in terraform aws; do
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
+  terraform_backend_output="$(
+    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$terraform_dir"
+  )" || die "failed to bootstrap terraform backend"
+  mapfile -t terraform_backend_config <<<"$terraform_backend_output"
+  (( ${#terraform_backend_config[@]} == 3 )) || die "terraform backend bootstrap returned incomplete configuration"
+  terraform_backend_bucket="${terraform_backend_config[0]}"
+  terraform_backend_table="${terraform_backend_config[1]}"
+  terraform_backend_key="${terraform_backend_config[2]}"
+  terraform_backend_args=(
+    -reconfigure
+    "-backend-config=bucket=$terraform_backend_bucket"
+    "-backend-config=dynamodb_table=$terraform_backend_table"
+    "-backend-config=key=$terraform_backend_key"
+    "-backend-config=region=$inventory_aws_region"
+  )
+fi
+
+if [[ "$skip_terraform_apply" != "true" ]]; then
   log "Applying shared-services terraform in $terraform_dir"
   if [[ "$dry_run" != "true" ]]; then
     (
       cd "$terraform_dir"
-      terraform init -input=false
+      terraform init -input=false "${terraform_backend_args[@]}"
       terraform apply -auto-approve -input=false
     )
   else
@@ -206,12 +228,12 @@ if [[ -n "$terraform_output_json" ]]; then
   tf_output_json="$output_dir/terraform-output.json"
   cp "$terraform_output_json" "$tf_output_json"
 else
-  for cmd in terraform; do
-    have_cmd "$cmd" || die "required command not found: $cmd"
-  done
   tf_output_json="$output_dir/terraform-output.json"
   (
     cd "$terraform_dir"
+    if [[ "$skip_terraform_apply" == "true" ]]; then
+      terraform init -input=false "${terraform_backend_args[@]}"
+    fi
     terraform output -json >"$tf_output_json"
   )
 fi

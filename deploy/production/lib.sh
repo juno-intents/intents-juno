@@ -117,6 +117,85 @@ production_inventory_terraform_dir() {
   production_abs_path "$inventory_dir" "$terraform_dir"
 }
 
+production_terraform_backend_bucket_name() {
+  local account_id="$1"
+  local aws_region="$2"
+  [[ "$account_id" =~ ^[0-9]{12}$ ]] || die "invalid aws account id for terraform backend bucket: $account_id"
+  [[ -n "$aws_region" ]] || die "aws region is required for terraform backend bucket"
+  printf 'intents-juno-tfstate-%s-%s\n' "$account_id" "$aws_region"
+}
+
+production_terraform_backend_table_name() {
+  local account_id="$1"
+  local aws_region="$2"
+  [[ "$account_id" =~ ^[0-9]{12}$ ]] || die "invalid aws account id for terraform backend table: $account_id"
+  [[ -n "$aws_region" ]] || die "aws region is required for terraform backend table"
+  printf 'intents-juno-tfstate-locks-%s-%s\n' "$account_id" "$aws_region"
+}
+
+production_terraform_backend_state_key() {
+  local environment="$1"
+  local terraform_dir="$2"
+  local resource_slug
+  [[ -n "$environment" ]] || die "environment is required for terraform backend state key"
+  [[ -n "$terraform_dir" ]] || die "terraform_dir is required for terraform backend state key"
+  resource_slug="$(basename "$terraform_dir")"
+  printf '%s/%s.tfstate\n' "$resource_slug" "$(production_safe_slug "$environment")"
+}
+
+production_bootstrap_terraform_backend() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local environment="$3"
+  local terraform_dir="$4"
+  local account_id bucket_name table_name state_key
+
+  have_cmd aws || die "required command not found: aws"
+  [[ -n "$aws_profile" ]] || die "aws profile is required for terraform backend bootstrap"
+  [[ -n "$aws_region" ]] || die "aws region is required for terraform backend bootstrap"
+
+  account_id="$(
+    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" sts get-caller-identity \
+      --query 'Account' --output text
+  )"
+  [[ "$account_id" =~ ^[0-9]{12}$ ]] || die "failed to resolve a valid aws account id for terraform backend bootstrap"
+
+  bucket_name="$(production_terraform_backend_bucket_name "$account_id" "$aws_region")"
+  table_name="$(production_terraform_backend_table_name "$account_id" "$aws_region")"
+  state_key="$(production_terraform_backend_state_key "$environment" "$terraform_dir")"
+
+  if ! AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api head-bucket --bucket "$bucket_name" >/dev/null 2>&1; then
+    if [[ "$aws_region" == "us-east-1" ]]; then
+      AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api create-bucket \
+        --bucket "$bucket_name" >/dev/null
+    else
+      AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api create-bucket \
+        --bucket "$bucket_name" \
+        --create-bucket-configuration "LocationConstraint=$aws_region" >/dev/null
+    fi
+  fi
+
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api put-bucket-versioning \
+    --bucket "$bucket_name" \
+    --versioning-configuration Status=Enabled >/dev/null
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api put-bucket-encryption \
+    --bucket "$bucket_name" \
+    --server-side-encryption-configuration '{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"AES256"}}]}' >/dev/null
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api put-public-access-block \
+    --bucket "$bucket_name" \
+    --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true >/dev/null
+
+  if ! AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" dynamodb describe-table --table-name "$table_name" >/dev/null 2>&1; then
+    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" dynamodb create-table \
+      --table-name "$table_name" \
+      --attribute-definitions AttributeName=LockID,AttributeType=S \
+      --key-schema AttributeName=LockID,KeyType=HASH \
+      --billing-mode PAY_PER_REQUEST >/dev/null
+  fi
+
+  printf '%s\n%s\n%s\n' "$bucket_name" "$table_name" "$state_key"
+}
+
 production_inventory_tfvars_value() {
   local inventory="$1"
   local inventory_dir="$2"

@@ -18,11 +18,12 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
+  versions_tf="$(cat "$SCRIPT_DIR/versions.tf")"
   password_block="$(awk '
     /variable "shared_postgres_password" \{/ { in_block = 1 }
     in_block { print }
@@ -38,6 +39,7 @@ main() {
   restore_runbook="$(cat "$REPO_ROOT/deploy/shared/runbooks/aurora-dr-restore.md")"
 
   assert_contains "$main_tf" 'check "distinct_proof_secret_arns"' "distinct proof secret ARN guard"
+  assert_contains "$versions_tf" 'backend "s3" {}' "production-shared declares an s3 backend block for coordinator bootstrap"
   assert_contains "$main_tf" 'check "proof_service_image_ecr_scope"' "explicit ECR image repository scope guard"
   assert_contains "$main_tf" 'check "shared_ecs_private_subnets_when_no_public_ip"' "shared ecs subnet/public-ip compatibility guard"
   assert_contains "$main_tf" 'shared_proof_service_image_ecr_repository_arn must be set when shared_proof_service_image points at an explicit ECR repository.' "explicit ECR image scope message"

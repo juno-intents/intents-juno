@@ -17,6 +17,20 @@ assert_not_contains() {
   fi
 }
 
+assert_line_order() {
+  local haystack="$1"
+  local first="$2"
+  local second="$3"
+  local msg="$4"
+  local first_line second_line
+  first_line="$(awk -v needle="$first" 'index($0, needle) { print NR; exit }' <<<"$haystack")"
+  second_line="$(awk -v needle="$second" 'index($0, needle) { print NR; exit }' <<<"$haystack")"
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    printf 'assert_line_order failed: %s: first=%q second=%q first_line=%q second_line=%q\n' "$msg" "$first" "$second" "$first_line" "$second_line" >&2
+    exit 1
+  fi
+}
+
 write_fake_cast() {
   local target="$1"
   local log_file="$2"
@@ -34,6 +48,79 @@ if [[ "\$1" == "balance" ]]; then
 fi
 printf 'unexpected cast invocation: %s\n' "\$*" >&2
 exit 1
+EOF
+  chmod +x "$target"
+}
+
+write_fake_terraform_binary() {
+  local target="$1"
+  local log_file="$2"
+  local output_fixture="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'terraform %s\n' "\$*" >>"$log_file"
+case "\${1:-}" in
+  init|apply)
+    exit 0
+    ;;
+  output)
+    [[ "\${2:-}" == "-json" ]] || {
+      printf 'unexpected terraform output invocation: %s\n' "\$*" >&2
+      exit 1
+    }
+    cat "$output_fixture"
+    exit 0
+    ;;
+esac
+printf 'unexpected terraform invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
+write_fake_aws_backend_bootstrap() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "\$*" >>"$log_file"
+args=( "\$@" )
+while [[ \${#args[@]} -gt 0 ]]; do
+  case "\${args[0]}" in
+    --profile|--region)
+      args=( "\${args[@]:2}" )
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "sts get-caller-identity")
+    if [[ " \$* " == *" --query Account "* && " \$* " == *" --output text "* ]]; then
+      printf '021490342184\n'
+    else
+      printf '{"Account":"021490342184"}\n'
+    fi
+    ;;
+  "s3api head-bucket")
+    exit 255
+    ;;
+  "s3api create-bucket"|"s3api put-bucket-versioning"|"s3api put-bucket-encryption"|"s3api put-public-access-block")
+    ;;
+  "dynamodb describe-table")
+    exit 255
+    ;;
+  "dynamodb create-table")
+    printf '{"TableDescription":{"TableStatus":"ACTIVE"}}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
 EOF
   chmod +x "$target"
 }
@@ -663,6 +750,48 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_bootstraps_terraform_backend_before_init() {
+  local workdir output_dir fake_bin log_dir aws_log terraform_log combined_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  aws_log="$log_dir/aws.log"
+  terraform_log="$log_dir/terraform.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  write_fake_aws_backend_bootstrap "$fake_bin/aws" "$aws_log"
+  write_fake_terraform_binary "$fake_bin/terraform" "$terraform_log" "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    --output-dir "$output_dir" >/dev/null
+
+  combined_log="$(printf '%s\n%s\n' "$(cat "$aws_log")" "$(cat "$terraform_log")")"
+  assert_contains "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator creates the terraform state bucket"
+  assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
+  assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"
+  assert_line_order "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator bootstraps backend storage before terraform init"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_supports_run_label
@@ -674,6 +803,7 @@ main() {
   test_deploy_coordinator_forwards_ephemeral_funder_mode
   test_deploy_coordinator_rejects_direct_deployer_outside_alpha
   test_deploy_coordinator_invokes_production_bridge_deploy_binary
+  test_deploy_coordinator_bootstraps_terraform_backend_before_init
 }
 
 main "$@"
