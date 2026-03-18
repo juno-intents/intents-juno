@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/big"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -42,6 +43,27 @@ func NewExecClient(cfg ExecClientConfig) (*ExecClient, error) {
 		maxResponseBytes: cfg.MaxResponseBytes,
 		execCommand:      runExecCommand,
 	}, nil
+}
+
+func (c *ExecClient) Ready(context.Context) error {
+	if c == nil {
+		return fmt.Errorf("%w: nil exec client", ErrInvalidConfig)
+	}
+	path, err := resolveExecBinaryPath(c.bin)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("sp1network: stat sp1 binary: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("sp1network: sp1 binary path %q is a directory", path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("sp1network: sp1 binary path %q is not executable", path)
+	}
+	return nil
 }
 
 func (c *ExecClient) RequestorBalanceWei(ctx context.Context, requestor common.Address) (*big.Int, error) {
@@ -104,4 +126,18 @@ func runExecCommand(ctx context.Context, bin string, stdin []byte) ([]byte, []by
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func resolveExecBinaryPath(bin string) (string, error) {
+	if strings.TrimSpace(bin) == "" {
+		return "", fmt.Errorf("%w: missing sp1 binary", ErrInvalidConfig)
+	}
+	if strings.ContainsRune(bin, os.PathSeparator) {
+		return bin, nil
+	}
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return "", fmt.Errorf("sp1network: resolve sp1 binary: %w", err)
+	}
+	return path, nil
 }

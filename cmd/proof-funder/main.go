@@ -53,7 +53,7 @@ func main() {
 
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter")
-		healthPort      = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
+		healthPort      = flag.Int("health-port", 8080, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -167,9 +167,15 @@ func main() {
 	service.WithLogger(log)
 
 	go func() {
-		opts := []healthz.Option{}
+		var dbReady func(context.Context) error
 		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+			dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+		}
+		opts := []healthz.Option{
+			healthz.WithReadinessCheck(proofFunderReadinessCheck(
+				dbReady,
+				sp1BalanceReadinessCheck(sp1Client, common.HexToAddress(*requestorAddress)),
+			)),
 		}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-funder", opts...); err != nil {
 			log.Error("healthz server", "err", err)
@@ -243,4 +249,35 @@ func parseBigInt(v string) (*big.Int, error) {
 		return nil, fmt.Errorf("must be > 0")
 	}
 	return out, nil
+}
+
+type sp1BalanceChecker interface {
+	RequestorBalanceWei(context.Context, common.Address) (*big.Int, error)
+}
+
+func proofFunderReadinessCheck(dbCheck, sp1Check func(context.Context) error) func(context.Context) error {
+	return healthz.CombineReadinessChecks(dbCheck, sp1Check)
+}
+
+func sp1BalanceReadinessCheck(client sp1BalanceChecker, requestor common.Address) func(context.Context) error {
+	if client == nil {
+		return func(context.Context) error {
+			return fmt.Errorf("proof-funder: sp1 readiness client is nil")
+		}
+	}
+	if requestor == (common.Address{}) {
+		return func(context.Context) error {
+			return fmt.Errorf("proof-funder: requestor address is required for readiness")
+		}
+	}
+	return func(ctx context.Context) error {
+		balance, err := client.RequestorBalanceWei(ctx, requestor)
+		if err != nil {
+			return fmt.Errorf("proof-funder: sp1 balance readiness: %w", err)
+		}
+		if balance == nil {
+			return fmt.Errorf("proof-funder: sp1 balance readiness: empty balance")
+		}
+		return nil
+	}
 }

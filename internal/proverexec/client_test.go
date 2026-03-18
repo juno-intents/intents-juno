@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -84,5 +86,37 @@ func TestNew_RejectsInvalidConfig(t *testing.T) {
 	_, err := New("", 1)
 	if !errors.Is(err, ErrInvalidConfig) {
 		t.Fatalf("expected ErrInvalidConfig, got %v", err)
+	}
+}
+
+func TestClient_Ready_RejectsMissingBinary(t *testing.T) {
+	t.Parallel()
+
+	client, err := New("missing-prover-binary", 1<<20)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := client.Ready(context.Background()); err == nil {
+		t.Fatalf("expected readiness error")
+	}
+}
+
+func TestClient_Ready_AcceptsExecutableBinary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "fake-prover")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	client, err := New(bin, 1<<20)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := client.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v", err)
 	}
 }

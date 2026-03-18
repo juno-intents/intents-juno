@@ -3,6 +3,8 @@ package sp1network
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -53,6 +55,44 @@ func TestExecClient_RequestorBalanceWeiRejectsWrongVersion(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatalf("expected version error")
+	}
+}
+
+func TestExecClient_Ready_RejectsMissingBinary(t *testing.T) {
+	t.Parallel()
+
+	client, err := NewExecClient(ExecClientConfig{
+		Binary:           "missing-sp1-binary",
+		MaxResponseBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewExecClient: %v", err)
+	}
+
+	if err := client.Ready(context.Background()); err == nil {
+		t.Fatalf("expected readiness error")
+	}
+}
+
+func TestExecClient_Ready_AcceptsExecutableBinary(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	bin := filepath.Join(dir, "sp1-prover-adapter")
+	if err := os.WriteFile(bin, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	client, err := NewExecClient(ExecClientConfig{
+		Binary:           bin,
+		MaxResponseBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("NewExecClient: %v", err)
+	}
+
+	if err := client.Ready(context.Background()); err != nil {
+		t.Fatalf("Ready: %v", err)
 	}
 }
 

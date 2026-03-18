@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"strings"
 
@@ -36,6 +37,27 @@ func New(bin string, maxResponseBytes int) (*Client, error) {
 		maxResponseBytes: maxResponseBytes,
 		execCommand:      runExecCommand,
 	}, nil
+}
+
+func (c *Client) Ready(context.Context) error {
+	if c == nil {
+		return fmt.Errorf("%w: nil client", ErrInvalidConfig)
+	}
+	path, err := resolveBinaryPath(c.bin)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return fmt.Errorf("proverexec: stat prover binary: %w", err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("proverexec: prover binary path %q is a directory", path)
+	}
+	if info.Mode()&0o111 == 0 {
+		return fmt.Errorf("proverexec: prover binary path %q is not executable", path)
+	}
+	return nil
 }
 
 func (c *Client) Prove(ctx context.Context, imageID common.Hash, journal []byte, privateInput []byte) ([]byte, error) {
@@ -104,6 +126,20 @@ func runExecCommand(ctx context.Context, bin string, stdin []byte) ([]byte, []by
 	cmd.Stderr = &stderr
 	err := cmd.Run()
 	return stdout.Bytes(), stderr.Bytes(), err
+}
+
+func resolveBinaryPath(bin string) (string, error) {
+	if strings.TrimSpace(bin) == "" {
+		return "", fmt.Errorf("%w: missing prover binary", ErrInvalidConfig)
+	}
+	if strings.ContainsRune(bin, os.PathSeparator) {
+		return bin, nil
+	}
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return "", fmt.Errorf("proverexec: resolve prover binary: %w", err)
+	}
+	return path, nil
 }
 
 func decodeHexBytes(s string) ([]byte, error) {

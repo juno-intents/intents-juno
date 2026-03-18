@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -63,7 +64,7 @@ func main() {
 		sp1Bin          = flag.String("sp1-bin", "", "SP1 prover adapter binary path (required)")
 		sp1MaxRespBytes = flag.Int("sp1-max-response-bytes", 1<<20, "max response bytes from SP1 adapter binary")
 
-		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
+		healthPort = flag.Int("health-port", 8080, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 	)
 	flag.Parse()
 
@@ -221,9 +222,16 @@ func main() {
 	}
 
 	go func() {
-		opts := []healthz.Option{}
+		var dbReady func(context.Context) error
 		if pool != nil {
-			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+			dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+		}
+		var queueReady func(context.Context) error
+		if strings.EqualFold(strings.TrimSpace(*queueDriver), queue.DriverKafka) {
+			queueReady = kafkaBrokerReadinessCheck(queue.SplitCommaList(*queueBrokers), 5*time.Second)
+		}
+		opts := []healthz.Option{
+			healthz.WithReadinessCheck(proofRequestorReadinessCheck(dbReady, queueReady, readyCheckFromDependency(prover))),
 		}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "proof-requestor", opts...); err != nil {
 			log.Error("healthz server", "err", err)
@@ -257,5 +265,69 @@ func newSecretProvider(ctx context.Context, driver string) (secrets.Provider, er
 		return secrets.NewEnv(), nil
 	default:
 		return nil, fmt.Errorf("unsupported secrets driver %q", driver)
+	}
+}
+
+type readyChecker interface {
+	Ready(context.Context) error
+}
+
+type dialContextFunc func(context.Context, string, string) (io.Closer, error)
+
+func readyCheckFromDependency(dep any) func(context.Context) error {
+	checker, ok := dep.(readyChecker)
+	if !ok {
+		return nil
+	}
+	return checker.Ready
+}
+
+func proofRequestorReadinessCheck(dbCheck, queueCheck, proverCheck func(context.Context) error) func(context.Context) error {
+	return healthz.CombineReadinessChecks(dbCheck, queueCheck, proverCheck)
+}
+
+func kafkaBrokerReadinessCheck(brokers []string, timeout time.Duration) func(context.Context) error {
+	if len(queue.SplitCommaList(strings.Join(brokers, ","))) == 0 {
+		return nil
+	}
+	dialer, err := queue.NewKafkaDialerFromEnv(timeout)
+	if err != nil {
+		return func(context.Context) error {
+			return fmt.Errorf("proof-requestor: init kafka readiness dialer: %w", err)
+		}
+	}
+	return kafkaBrokerReadinessCheckWithDialer(
+		brokers,
+		func(ctx context.Context, network, address string) (io.Closer, error) {
+			return dialer.DialContext(ctx, network, address)
+		},
+	)
+}
+
+func kafkaBrokerReadinessCheckWithDialer(brokers []string, dialContext dialContextFunc) func(context.Context) error {
+	filtered := queue.SplitCommaList(strings.Join(brokers, ","))
+	if len(filtered) == 0 {
+		return nil
+	}
+	return func(ctx context.Context) error {
+		if dialContext == nil {
+			return fmt.Errorf("proof-requestor: kafka readiness dialer is nil")
+		}
+		var lastErr error
+		for _, broker := range filtered {
+			conn, err := dialContext(ctx, "tcp", broker)
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if conn != nil {
+				_ = conn.Close()
+			}
+			return nil
+		}
+		if lastErr == nil {
+			lastErr = fmt.Errorf("no kafka brokers configured")
+		}
+		return fmt.Errorf("proof-requestor: kafka broker readiness: %w", lastErr)
 	}
 }
