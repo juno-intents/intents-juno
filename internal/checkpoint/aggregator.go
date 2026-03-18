@@ -268,6 +268,15 @@ func (a *Aggregator) MarkEmitted(d common.Hash) {
 	a.markEmitted(d)
 }
 
+func (a *Aggregator) RestoreEmittedDigest(d common.Hash) {
+	if d == (common.Hash{}) {
+		return
+	}
+	delete(a.open, d)
+	delete(a.pending, d)
+	a.markEmitted(d)
+}
+
 func (a *Aggregator) evictOldestOpen() {
 	var (
 		oldestDigest common.Hash

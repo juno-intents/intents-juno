@@ -25,8 +25,9 @@ type ChainSource interface {
 }
 
 type SignerConfig struct {
-	BaseChainID    uint64
-	BridgeContract common.Address
+	BaseChainID     uint64
+	BridgeContract  common.Address
+	CommitmentStore SignerCommitmentStore
 
 	Now func() time.Time
 }
@@ -46,6 +47,7 @@ type Signer struct {
 	operator    common.Address
 	baseChainID uint64
 	bridge      common.Address
+	commitments SignerCommitmentStore
 	now         func() time.Time
 }
 
@@ -62,6 +64,9 @@ func NewSigner(src ChainSource, signer DigestSigner, cfg SignerConfig) (*Signer,
 	if cfg.BridgeContract == (common.Address{}) {
 		return nil, errors.New("checkpoint: bridge contract must be non-zero")
 	}
+	if cfg.CommitmentStore == nil {
+		return nil, errors.New("checkpoint: commitment store must be non-nil")
+	}
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
@@ -73,6 +78,7 @@ func NewSigner(src ChainSource, signer DigestSigner, cfg SignerConfig) (*Signer,
 		operator:    signer.Address(),
 		baseChainID: cfg.BaseChainID,
 		bridge:      cfg.BridgeContract,
+		commitments: cfg.CommitmentStore,
 		now:         nowFn,
 	}, nil
 }
@@ -106,6 +112,16 @@ func (s *Signer) SignHeight(ctx context.Context, height uint64) (SignatureMessag
 	}
 
 	digest := Digest(cp)
+	if err := s.commitments.RecordCommitment(ctx, SignerCommitment{
+		BaseChainID:    s.baseChainID,
+		BridgeContract: s.bridge,
+		Operator:       s.operator,
+		Height:         height,
+		Digest:         digest,
+		SignedAt:       s.now().UTC(),
+	}); err != nil {
+		return SignatureMessageV1{}, err
+	}
 	sig, err := s.signer.SignDigest(ctx, digest)
 	if err != nil {
 		return SignatureMessageV1{}, err

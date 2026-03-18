@@ -19,6 +19,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
 	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -72,12 +73,12 @@ func main() {
 		rpcUserEnv = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var containing junocashd RPC username")
 		rpcPassEnv = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var containing junocashd RPC password")
 
-		signerDriver  = flag.String("signer-driver", "local-env", "checkpoint signer backend: local-env|aws-kms")
-		kmsKeyID      = flag.String("kms-key-id", "", "AWS KMS asymmetric key id/arn (required when --signer-driver=aws-kms)")
+		signerDriver   = flag.String("signer-driver", "local-env", "checkpoint signer backend: local-env|aws-kms")
+		kmsKeyID       = flag.String("kms-key-id", "", "AWS KMS asymmetric key id/arn (required when --signer-driver=aws-kms)")
 		operatorKeyEnv = flag.String("operator-key-env", "CHECKPOINT_SIGNER_PRIVATE_KEY", "env var containing operator ECDSA private key (32-byte hex)")
-		baseChainID   = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
-		bridgeAddr    = flag.String("bridge-address", "", "Bridge contract address (required)")
-		confirmations = flag.Uint64("confirmations", 100, "confirmations (k) for checkpoint height h = tip - k")
+		baseChainID    = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
+		bridgeAddr     = flag.String("bridge-address", "", "Bridge contract address (required)")
+		confirmations  = flag.Uint64("confirmations", 100, "confirmations (k) for checkpoint height h = tip - k")
 
 		pollInterval = flag.Duration("poll-interval", 2*time.Second, "poll interval for tip height")
 		rpcTimeout   = flag.Duration("rpc-timeout", 10*time.Second, "HTTP client timeout for junocashd RPC calls")
@@ -140,8 +141,9 @@ func main() {
 	}
 
 	var (
-		leaseStore leases.Store
-		pool       *pgxpool.Pool
+		leaseStore      leases.Store
+		commitmentStore checkpoint.SignerCommitmentStore
+		pool            *pgxpool.Pool
 	)
 	switch strings.ToLower(strings.TrimSpace(*leaseDriver)) {
 	case "postgres":
@@ -175,8 +177,19 @@ func main() {
 			os.Exit(2)
 		}
 		leaseStore = pgLeaseStore
+		pgCheckpointStore, err := checkpointpg.New(pool)
+		if err != nil {
+			log.Error("init checkpoint commitment store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgCheckpointStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure checkpoint schema", "err", err)
+			os.Exit(2)
+		}
+		commitmentStore = pgCheckpointStore
 	case "memory":
 		leaseStore = leases.NewMemoryStore(time.Now)
+		commitmentStore = checkpoint.NewMemorySignerCommitmentStore()
 	default:
 		fmt.Fprintf(os.Stderr, "error: unsupported --lease-driver %q\n", *leaseDriver)
 		os.Exit(2)
@@ -206,9 +219,10 @@ func main() {
 
 	src := &junoChainSource{c: rpc}
 	signer, err := checkpoint.NewSigner(src, digestSigner, checkpoint.SignerConfig{
-		BaseChainID:    *baseChainID,
-		BridgeContract: bridge,
-		Now:            time.Now,
+		BaseChainID:     *baseChainID,
+		BridgeContract:  bridge,
+		CommitmentStore: commitmentStore,
+		Now:             time.Now,
 	})
 	if err != nil {
 		log.Error("init checkpoint signer", "err", err)
@@ -220,6 +234,7 @@ func main() {
 		if pool != nil {
 			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
 		}
+		opts = append(opts, healthz.WithReadinessCheck(junoRPCReadinessCheck(src, *rpcTimeout)))
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-signer", opts...); err != nil {
 			log.Error("healthz server", "err", err)
 		}
@@ -362,4 +377,15 @@ func holdLease(ctx context.Context, store leases.Store, name, owner string, ttl 
 		return false, err
 	}
 	return ok, nil
+}
+
+func junoRPCReadinessCheck(src interface {
+	TipHeight(context.Context) (uint64, error)
+}, timeout time.Duration) func(context.Context) error {
+	return func(ctx context.Context) error {
+		readyCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		_, err := src.TipHeight(readyCtx)
+		return err
+	}
 }

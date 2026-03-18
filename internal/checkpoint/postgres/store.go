@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -66,13 +67,18 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			checkpoint_bridge_contract,
 			operator_set_hash,
 			ipfs_cid,
+			pin_state,
+			pin_attempts,
+			pin_last_error,
+			pin_last_attempt_at,
+			pin_next_attempt_at,
 			s3_key,
 			package_json,
 			state,
 			persisted_at,
 			emitted_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
 		ON CONFLICT (digest) DO UPDATE
 		SET
 			checkpoint_height = EXCLUDED.checkpoint_height,
@@ -82,6 +88,11 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 			checkpoint_bridge_contract = EXCLUDED.checkpoint_bridge_contract,
 			operator_set_hash = EXCLUDED.operator_set_hash,
 			ipfs_cid = EXCLUDED.ipfs_cid,
+			pin_state = EXCLUDED.pin_state,
+			pin_attempts = EXCLUDED.pin_attempts,
+			pin_last_error = EXCLUDED.pin_last_error,
+			pin_last_attempt_at = EXCLUDED.pin_last_attempt_at,
+			pin_next_attempt_at = EXCLUDED.pin_next_attempt_at,
 			s3_key = EXCLUDED.s3_key,
 			package_json = EXCLUDED.package_json,
 			state = EXCLUDED.state,
@@ -97,6 +108,11 @@ func (s *Store) UpsertPackage(ctx context.Context, rec checkpoint.PackageRecord)
 		rec.Checkpoint.BridgeContract[:],
 		rec.OperatorSetHash[:],
 		nullableString(rec.IPFSCID),
+		int16(rec.PinState),
+		rec.PinAttempts,
+		strings.TrimSpace(rec.PinLastError),
+		nullableTime(rec.PinLastAttemptAt),
+		nullableTime(rec.PinNextAttemptAt),
 		nullableString(rec.BlobKey),
 		rec.Payload,
 		int16(rec.State),
@@ -118,19 +134,24 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 	}
 
 	var (
-		digestRaw    []byte
-		height       int64
-		blockHashRaw []byte
-		rootRaw      []byte
-		baseChainID  int64
-		bridgeRaw    []byte
-		opSetHashRaw []byte
-		ipfsCID      *string
-		blobKey      *string
-		payload      []byte
-		state        int16
-		persistedAt  time.Time
-		emittedAt    *time.Time
+		digestRaw        []byte
+		height           int64
+		blockHashRaw     []byte
+		rootRaw          []byte
+		baseChainID      int64
+		bridgeRaw        []byte
+		opSetHashRaw     []byte
+		ipfsCID          *string
+		pinState         int16
+		pinAttempts      int32
+		pinLastError     string
+		pinLastAttemptAt *time.Time
+		pinNextAttemptAt *time.Time
+		blobKey          *string
+		payload          []byte
+		state            int16
+		persistedAt      time.Time
+		emittedAt        *time.Time
 	)
 
 	err := s.pool.QueryRow(ctx, `
@@ -143,6 +164,11 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 			checkpoint_bridge_contract,
 			operator_set_hash,
 			ipfs_cid,
+			pin_state,
+			pin_attempts,
+			pin_last_error,
+			pin_last_attempt_at,
+			pin_next_attempt_at,
 			s3_key,
 			package_json,
 			state,
@@ -159,6 +185,11 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		&bridgeRaw,
 		&opSetHashRaw,
 		&ipfsCID,
+		&pinState,
+		&pinAttempts,
+		&pinLastError,
+		&pinLastAttemptAt,
+		&pinNextAttemptAt,
 		&blobKey,
 		&payload,
 		&state,
@@ -207,6 +238,9 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 		},
 		OperatorSetHash: opSetHash,
 		Payload:         append([]byte(nil), payload...),
+		PinState:        checkpoint.PackagePinState(pinState),
+		PinAttempts:     int(pinAttempts),
+		PinLastError:    strings.TrimSpace(pinLastError),
 		State:           checkpoint.PackageState(state),
 		PersistedAt:     persistedAt.UTC(),
 	}
@@ -218,6 +252,12 @@ func (s *Store) Get(ctx context.Context, digest common.Hash) (checkpoint.Package
 	}
 	if emittedAt != nil {
 		rec.EmittedAt = (*emittedAt).UTC()
+	}
+	if pinLastAttemptAt != nil {
+		rec.PinLastAttemptAt = (*pinLastAttemptAt).UTC()
+	}
+	if pinNextAttemptAt != nil {
+		rec.PinNextAttemptAt = (*pinNextAttemptAt).UTC()
 	}
 	return rec, nil
 }
@@ -259,12 +299,130 @@ func (s *Store) ListByState(ctx context.Context, state checkpoint.PackageState) 
 	return out, nil
 }
 
+func (s *Store) ListReadyToPin(ctx context.Context, now time.Time, limit int) ([]checkpoint.PackageRecord, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if limit <= 0 {
+		return nil, nil
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT digest
+		FROM checkpoint_packages
+		WHERE pin_state IN ($1, $2)
+		  AND (pin_next_attempt_at IS NULL OR pin_next_attempt_at <= $3)
+		ORDER BY COALESCE(pin_next_attempt_at, persisted_at) ASC, persisted_at ASC, digest ASC
+		LIMIT $4
+	`, int16(checkpoint.PackagePinStatePending), int16(checkpoint.PackagePinStateFailed), now.UTC(), limit)
+	if err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: list ready to pin: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]checkpoint.PackageRecord, 0, limit)
+	for rows.Next() {
+		var digestRaw []byte
+		if err := rows.Scan(&digestRaw); err != nil {
+			return nil, fmt.Errorf("checkpoint/postgres: scan pin-ready digest: %w", err)
+		}
+		digest, err := toHash(digestRaw)
+		if err != nil {
+			return nil, err
+		}
+		rec, err := s.Get(ctx, digest)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rec)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("checkpoint/postgres: list ready to pin rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) RecordCommitment(ctx context.Context, commitment checkpoint.SignerCommitment) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if commitment.BaseChainID == 0 {
+		return fmt.Errorf("%w: base chain id must be non-zero", checkpoint.ErrInvalidCheckpointCommitment)
+	}
+	if commitment.BridgeContract == (common.Address{}) {
+		return fmt.Errorf("%w: bridge contract must be non-zero", checkpoint.ErrInvalidCheckpointCommitment)
+	}
+	if commitment.Operator == (common.Address{}) {
+		return fmt.Errorf("%w: operator must be non-zero", checkpoint.ErrInvalidCheckpointCommitment)
+	}
+	if commitment.Digest == (common.Hash{}) {
+		return fmt.Errorf("%w: digest must be non-zero", checkpoint.ErrInvalidCheckpointCommitment)
+	}
+
+	signedAt := commitment.SignedAt
+	if signedAt.IsZero() {
+		signedAt = time.Now().UTC()
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		INSERT INTO checkpoint_signer_commitments (
+			base_chain_id,
+			bridge_contract,
+			operator,
+			checkpoint_height,
+			digest,
+			signed_at
+		) VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT DO NOTHING
+	`,
+		int64(commitment.BaseChainID),
+		commitment.BridgeContract[:],
+		commitment.Operator[:],
+		int64(commitment.Height),
+		commitment.Digest[:],
+		signedAt.UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("checkpoint/postgres: record commitment: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+
+	var digestRaw []byte
+	if err := s.pool.QueryRow(ctx, `
+		SELECT digest
+		FROM checkpoint_signer_commitments
+		WHERE base_chain_id = $1
+		  AND bridge_contract = $2
+		  AND operator = $3
+		  AND checkpoint_height = $4
+	`,
+		int64(commitment.BaseChainID),
+		commitment.BridgeContract[:],
+		commitment.Operator[:],
+		int64(commitment.Height),
+	).Scan(&digestRaw); err != nil {
+		return fmt.Errorf("checkpoint/postgres: load commitment: %w", err)
+	}
+	if bytes.Equal(digestRaw, commitment.Digest[:]) {
+		return nil
+	}
+	return checkpoint.ErrCheckpointEquivocation
+}
+
 func nullableString(v string) any {
 	v = strings.TrimSpace(v)
 	if v == "" {
 		return nil
 	}
 	return v
+}
+
+func nullableTime(v time.Time) any {
+	if v.IsZero() {
+		return nil
+	}
+	return v.UTC()
 }
 
 func toHash(raw []byte) (common.Hash, error) {
@@ -286,3 +444,4 @@ func toAddress(raw []byte) (common.Address, error) {
 }
 
 var _ checkpoint.PackageStore = (*Store)(nil)
+var _ checkpoint.SignerCommitmentStore = (*Store)(nil)

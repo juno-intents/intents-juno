@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/leases"
 )
 
@@ -82,8 +83,8 @@ func TestHoldLease_ReacquiresExpiredLease(t *testing.T) {
 	t.Parallel()
 
 	store := &stubLeaseStore{
-		renewErr:   leases.ErrExpired,
-		acquireOK:  true,
+		renewErr:  leases.ErrExpired,
+		acquireOK: true,
 		acquireLease: leases.Lease{
 			Name:      "checkpoint-signer",
 			Owner:     "node-a",
@@ -123,5 +124,35 @@ func TestHoldLease_PropagatesUnexpectedRenewError(t *testing.T) {
 	}
 	if store.acquireCalls != 0 {
 		t.Fatalf("acquire calls: got %d want 0", store.acquireCalls)
+	}
+}
+
+type readinessChainSource struct {
+	tip uint64
+	err error
+}
+
+func (s *readinessChainSource) TipHeight(context.Context) (uint64, error) {
+	if s.err != nil {
+		return 0, s.err
+	}
+	return s.tip, nil
+}
+
+func (s *readinessChainSource) CheckpointAtHeight(context.Context, uint64) (checkpoint.ChainCheckpoint, error) {
+	return checkpoint.ChainCheckpoint{}, nil
+}
+
+func TestJunoRPCReadinessCheck_ProbesTipHeight(t *testing.T) {
+	t.Parallel()
+
+	src := &readinessChainSource{tip: 123}
+	if err := junoRPCReadinessCheck(src, time.Second)(context.Background()); err != nil {
+		t.Fatalf("junoRPCReadinessCheck: %v", err)
+	}
+
+	src.err = errors.New("rpc down")
+	if err := junoRPCReadinessCheck(src, time.Second)(context.Background()); err == nil {
+		t.Fatalf("expected readiness error")
 	}
 }

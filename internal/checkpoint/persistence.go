@@ -24,6 +24,7 @@ type PackageStore interface {
 	UpsertPackage(ctx context.Context, rec PackageRecord) error
 	Get(ctx context.Context, digest common.Hash) (PackageRecord, error)
 	ListByState(ctx context.Context, state PackageState) ([]PackageRecord, error)
+	ListReadyToPin(ctx context.Context, now time.Time, limit int) ([]PackageRecord, error)
 }
 
 // IPFSPinner pins a package payload and returns the resulting CID.
@@ -41,15 +42,20 @@ type PackageEnvelope struct {
 
 // PackageRecord is the persisted representation of a checkpoint package.
 type PackageRecord struct {
-	Digest          common.Hash
-	Checkpoint      Checkpoint
-	OperatorSetHash common.Hash
-	Payload         []byte
-	IPFSCID         string
-	BlobKey         string
-	State           PackageState
-	PersistedAt     time.Time
-	EmittedAt       time.Time
+	Digest           common.Hash
+	Checkpoint       Checkpoint
+	OperatorSetHash  common.Hash
+	Payload          []byte
+	IPFSCID          string
+	BlobKey          string
+	PinState         PackagePinState
+	PinAttempts      int
+	PinLastError     string
+	PinLastAttemptAt time.Time
+	PinNextAttemptAt time.Time
+	State            PackageState
+	PersistedAt      time.Time
+	EmittedAt        time.Time
 }
 
 type PackageState uint8
@@ -71,36 +77,71 @@ func (s PackageState) String() string {
 	}
 }
 
+type PackagePinState uint8
+
+const (
+	PackagePinStateUnknown PackagePinState = iota
+	PackagePinStateDisabled
+	PackagePinStatePending
+	PackagePinStatePinned
+	PackagePinStateFailed
+)
+
+func (s PackagePinState) String() string {
+	switch s {
+	case PackagePinStateDisabled:
+		return "disabled"
+	case PackagePinStatePending:
+		return "pending"
+	case PackagePinStatePinned:
+		return "pinned"
+	case PackagePinStateFailed:
+		return "failed"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(s))
+	}
+}
+
 type PackagePersistenceConfig struct {
-	PackageStore PackageStore
-	BlobStore    blobstore.Store
-	BlobPrefix   string
-	IPFSPinner   IPFSPinner
-	Now          func() time.Time
+	PackageStore      PackageStore
+	BlobStore         blobstore.Store
+	BlobPrefix        string
+	IPFSPinner        IPFSPinner
+	PinRetryBaseDelay time.Duration
+	Now               func() time.Time
 }
 
 type PackagePersistence struct {
-	store      PackageStore
-	blobStore  blobstore.Store
-	blobPrefix string
-	ipfs       IPFSPinner
-	now        func() time.Time
+	store             PackageStore
+	blobStore         blobstore.Store
+	blobPrefix        string
+	ipfs              IPFSPinner
+	pinRetryBaseDelay time.Duration
+	now               func() time.Time
 }
 
 func NewPackagePersistence(cfg PackagePersistenceConfig) (*PackagePersistence, error) {
 	if cfg.PackageStore == nil && cfg.BlobStore == nil && cfg.IPFSPinner == nil {
 		return nil, fmt.Errorf("%w: at least one sink must be configured", ErrInvalidPersistenceConfig)
 	}
+	if cfg.IPFSPinner != nil && cfg.PackageStore == nil {
+		return nil, fmt.Errorf("%w: package store required when ipfs pinning is enabled", ErrInvalidPersistenceConfig)
+	}
 	nowFn := cfg.Now
 	if nowFn == nil {
 		nowFn = time.Now
 	}
+	pinRetryBaseDelay := cfg.PinRetryBaseDelay
+	if pinRetryBaseDelay <= 0 {
+		pinRetryBaseDelay = 30 * time.Second
+	}
 	return &PackagePersistence{
-		store:      cfg.PackageStore,
-		blobStore:  cfg.BlobStore,
-		blobPrefix: normalizePrefix(cfg.BlobPrefix),
-		ipfs:       cfg.IPFSPinner,
-		now:        nowFn,
+		store:             cfg.PackageStore,
+		blobStore:         cfg.BlobStore,
+		blobPrefix:        normalizePrefix(cfg.BlobPrefix),
+		ipfs:              cfg.IPFSPinner,
+		pinRetryBaseDelay: pinRetryBaseDelay,
+		now:               nowFn,
 	}, nil
 }
 
@@ -122,6 +163,11 @@ func (p *PackagePersistence) Persist(ctx context.Context, env PackageEnvelope) (
 		Payload:         append([]byte(nil), env.Payload...),
 		State:           PackageStateOpen,
 		PersistedAt:     p.now().UTC(),
+		PinState:        PackagePinStateDisabled,
+	}
+	if p.ipfs != nil {
+		rec.PinState = PackagePinStatePending
+		rec.PinNextAttemptAt = rec.PersistedAt
 	}
 
 	if p.blobStore != nil {
@@ -137,14 +183,6 @@ func (p *PackagePersistence) Persist(ctx context.Context, env PackageEnvelope) (
 		}); err != nil {
 			return PackageRecord{}, err
 		}
-	}
-
-	if p.ipfs != nil {
-		cid, err := p.ipfs.PinJSON(ctx, env.Payload)
-		if err != nil {
-			return PackageRecord{}, err
-		}
-		rec.IPFSCID = strings.TrimSpace(cid)
 	}
 
 	if p.store != nil {
@@ -176,6 +214,84 @@ func (p *PackagePersistence) ListByState(ctx context.Context, state PackageState
 		return nil, fmt.Errorf("%w: package store required to list by state", ErrInvalidPersistenceConfig)
 	}
 	return p.store.ListByState(ctx, state)
+}
+
+func (p *PackagePersistence) ProcessPinJobs(ctx context.Context, limit int) (int, error) {
+	if p == nil || p.ipfs == nil {
+		return 0, nil
+	}
+	if p.store == nil {
+		return 0, fmt.Errorf("%w: package store required to process pin jobs", ErrInvalidPersistenceConfig)
+	}
+	if limit <= 0 {
+		return 0, nil
+	}
+
+	recs, err := p.store.ListReadyToPin(ctx, p.now().UTC(), limit)
+	if err != nil {
+		return 0, err
+	}
+
+	processed := 0
+	for _, rec := range recs {
+		attemptedAt := p.now().UTC()
+		cid, err := p.ipfs.PinJSON(ctx, rec.Payload)
+		rec.PinAttempts++
+		rec.PinLastAttemptAt = attemptedAt
+		if err != nil {
+			rec.PinState = PackagePinStateFailed
+			rec.PinLastError = pinErrorString(err)
+			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
+			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+				return processed, upsertErr
+			}
+			processed++
+			continue
+		}
+
+		cid = strings.TrimSpace(cid)
+		if cid == "" {
+			rec.PinState = PackagePinStateFailed
+			rec.PinLastError = "checkpoint/ipfs: empty cid in response"
+			rec.PinNextAttemptAt = attemptedAt.Add(p.pinRetryDelay(rec.PinAttempts))
+			if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+				return processed, upsertErr
+			}
+			processed++
+			continue
+		}
+
+		rec.IPFSCID = cid
+		rec.PinState = PackagePinStatePinned
+		rec.PinLastError = ""
+		rec.PinNextAttemptAt = time.Time{}
+		if upsertErr := p.store.UpsertPackage(ctx, rec); upsertErr != nil {
+			return processed, upsertErr
+		}
+		processed++
+	}
+	return processed, nil
+}
+
+func (p *PackagePersistence) pinRetryDelay(attempts int) time.Duration {
+	if attempts <= 0 {
+		return p.pinRetryBaseDelay
+	}
+	delay := p.pinRetryBaseDelay
+	for i := 1; i < attempts; i++ {
+		if delay >= 15*time.Minute {
+			return 15 * time.Minute
+		}
+		delay *= 2
+	}
+	if delay > 15*time.Minute {
+		return 15 * time.Minute
+	}
+	return delay
+}
+
+func pinErrorString(err error) string {
+	return strings.TrimSpace(err.Error())
 }
 
 func packageBlobKey(prefix string, baseChainID uint64, digest common.Hash) string {
@@ -234,6 +350,43 @@ func (s *MemoryPackageStore) ListByState(_ context.Context, state PackageState) 
 		}
 		return out[i].PersistedAt.Before(out[j].PersistedAt)
 	})
+	return out, nil
+}
+
+func (s *MemoryPackageStore) ListReadyToPin(_ context.Context, now time.Time, limit int) ([]PackageRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := make([]PackageRecord, 0, len(s.records))
+	for _, rec := range s.records {
+		if rec.PinState != PackagePinStatePending && rec.PinState != PackagePinStateFailed {
+			continue
+		}
+		if !rec.PinNextAttemptAt.IsZero() && rec.PinNextAttemptAt.After(now) {
+			continue
+		}
+		out = append(out, clonePackageRecord(rec))
+	}
+	sort.Slice(out, func(i, j int) bool {
+		left := out[i].PinNextAttemptAt
+		right := out[j].PinNextAttemptAt
+		switch {
+		case left.Equal(right):
+			if out[i].PersistedAt.Equal(out[j].PersistedAt) {
+				return out[i].Digest.Hex() < out[j].Digest.Hex()
+			}
+			return out[i].PersistedAt.Before(out[j].PersistedAt)
+		case left.IsZero():
+			return true
+		case right.IsZero():
+			return false
+		default:
+			return left.Before(right)
+		}
+	})
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
+	}
 	return out, nil
 }
 

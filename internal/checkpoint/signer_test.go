@@ -61,9 +61,10 @@ func TestSigner_SignTipMinusConfirmations(t *testing.T) {
 	}
 
 	s, err := NewSigner(src, digestSigner, SignerConfig{
-		BaseChainID:    baseChainID,
-		BridgeContract: bridge,
-		Now:            time.Now,
+		BaseChainID:     baseChainID,
+		BridgeContract:  bridge,
+		CommitmentStore: NewMemorySignerCommitmentStore(),
+		Now:             time.Now,
 	})
 	if err != nil {
 		t.Fatalf("NewSigner: %v", err)
@@ -114,9 +115,10 @@ func TestSigner_SignTipMinusConfirmations_RejectsWhenTipTooLow(t *testing.T) {
 	}
 
 	s, err := NewSigner(src, digestSigner, SignerConfig{
-		BaseChainID:    8453,
-		BridgeContract: common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
-		Now:            time.Now,
+		BaseChainID:     8453,
+		BridgeContract:  common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		CommitmentStore: NewMemorySignerCommitmentStore(),
+		Now:             time.Now,
 	})
 	if err != nil {
 		t.Fatalf("NewSigner: %v", err)
@@ -125,5 +127,96 @@ func TestSigner_SignTipMinusConfirmations_RejectsWhenTipTooLow(t *testing.T) {
 	_, err = s.SignTipMinusConfirmations(context.Background(), 100)
 	if err == nil {
 		t.Fatalf("expected error")
+	}
+}
+
+func TestSigner_SignHeight_AllowsSameDigestReplay(t *testing.T) {
+	t.Parallel()
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	digestSigner, err := NewLocalDigestSigner(key)
+	if err != nil {
+		t.Fatalf("NewLocalDigestSigner: %v", err)
+	}
+
+	cp := ChainCheckpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x64afe1a0c6c050e37d936aa20cb82b08bb8815baed208e7634d6df26fc37b091"),
+		FinalOrchardRoot: common.HexToHash("0xd6c66cad06fe14fdb6ce9297d80d32f24d7428996d0045cbf90cc345c677ba16"),
+	}
+	src := &fakeChainSource{
+		blocks: map[uint64]ChainCheckpoint{123: cp},
+	}
+
+	s, err := NewSigner(src, digestSigner, SignerConfig{
+		BaseChainID:     8453,
+		BridgeContract:  common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		CommitmentStore: NewMemorySignerCommitmentStore(),
+		Now:             time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	first, err := s.SignHeight(context.Background(), 123)
+	if err != nil {
+		t.Fatalf("SignHeight #1: %v", err)
+	}
+	second, err := s.SignHeight(context.Background(), 123)
+	if err != nil {
+		t.Fatalf("SignHeight #2: %v", err)
+	}
+	if first.Digest != second.Digest {
+		t.Fatalf("digest mismatch: first=%s second=%s", first.Digest, second.Digest)
+	}
+}
+
+func TestSigner_SignHeight_RejectsEquivocationForSameHeight(t *testing.T) {
+	t.Parallel()
+
+	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
+	if err != nil {
+		t.Fatalf("HexToECDSA: %v", err)
+	}
+	digestSigner, err := NewLocalDigestSigner(key)
+	if err != nil {
+		t.Fatalf("NewLocalDigestSigner: %v", err)
+	}
+
+	src := &fakeChainSource{
+		blocks: map[uint64]ChainCheckpoint{
+			123: {
+				Height:           123,
+				BlockHash:        common.HexToHash("0x64afe1a0c6c050e37d936aa20cb82b08bb8815baed208e7634d6df26fc37b091"),
+				FinalOrchardRoot: common.HexToHash("0xd6c66cad06fe14fdb6ce9297d80d32f24d7428996d0045cbf90cc345c677ba16"),
+			},
+		},
+	}
+
+	s, err := NewSigner(src, digestSigner, SignerConfig{
+		BaseChainID:     8453,
+		BridgeContract:  common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+		CommitmentStore: NewMemorySignerCommitmentStore(),
+		Now:             time.Now,
+	})
+	if err != nil {
+		t.Fatalf("NewSigner: %v", err)
+	}
+
+	if _, err := s.SignHeight(context.Background(), 123); err != nil {
+		t.Fatalf("SignHeight #1: %v", err)
+	}
+
+	src.blocks[123] = ChainCheckpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		FinalOrchardRoot: common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+	}
+
+	if _, err := s.SignHeight(context.Background(), 123); !errors.Is(err, ErrCheckpointEquivocation) {
+		t.Fatalf("expected ErrCheckpointEquivocation, got %v", err)
 	}
 }

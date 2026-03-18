@@ -63,14 +63,17 @@ func main() {
 			pgxpoolutil.DefaultHealthCheckPeriod,
 			"pgxpool health check period",
 		)
-		storeDriver    = flag.String("store-driver", "postgres", "checkpoint package metadata store driver: postgres|memory")
-		blobDriver     = flag.String("blob-driver", blobstore.DriverS3, "checkpoint mirror blobstore driver: s3|memory")
-		blobBucket     = flag.String("blob-bucket", "", "S3 bucket for checkpoint package mirror (required for s3)")
-		blobPrefix     = flag.String("blob-prefix", "checkpoint-packages", "checkpoint package mirror key prefix")
-		blobMaxGet     = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
-		ipfsEnabled    = flag.Bool("ipfs-enabled", true, "enable IPFS pinning for checkpoint packages")
-		ipfsAPIURL     = flag.String("ipfs-api-url", "http://127.0.0.1:5001", "IPFS API URL used for package pinning")
-		persistTimeout = flag.Duration("persist-timeout", 30*time.Second, "timeout for package persistence (IPFS + blob + db)")
+		storeDriver      = flag.String("store-driver", "postgres", "checkpoint package metadata store driver: postgres|memory")
+		blobDriver       = flag.String("blob-driver", blobstore.DriverS3, "checkpoint mirror blobstore driver: s3|memory")
+		blobBucket       = flag.String("blob-bucket", "", "S3 bucket for checkpoint package mirror (required for s3)")
+		blobPrefix       = flag.String("blob-prefix", "checkpoint-packages", "checkpoint package mirror key prefix")
+		blobMaxGet       = flag.Int64("blob-max-get-size", 16<<20, "max blob get size in bytes")
+		ipfsEnabled      = flag.Bool("ipfs-enabled", true, "enable IPFS pinning for checkpoint packages")
+		ipfsAPIURL       = flag.String("ipfs-api-url", "http://127.0.0.1:5001", "IPFS API URL used for package pinning")
+		ipfsPinInterval  = flag.Duration("ipfs-pin-interval", 15*time.Second, "interval between background IPFS pin attempts")
+		ipfsPinTimeout   = flag.Duration("ipfs-pin-timeout", 30*time.Second, "timeout for a single background IPFS pin attempt")
+		ipfsPinBatchSize = flag.Int("ipfs-pin-batch-size", 8, "maximum checkpoint packages pinned per background IPFS pass")
+		persistTimeout   = flag.Duration("persist-timeout", 30*time.Second, "timeout for package persistence (blob + db)")
 
 		queueDriver     = flag.String("queue-driver", queue.DriverKafka, "queue driver: kafka|stdio")
 		queueBrokers    = flag.String("queue-brokers", "", "comma-separated queue brokers (required for kafka)")
@@ -112,6 +115,10 @@ func main() {
 	}
 	if *persistTimeout <= 0 || *blobMaxGet <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --persist-timeout and --blob-max-get-size must be > 0")
+		os.Exit(2)
+	}
+	if *ipfsPinInterval <= 0 || *ipfsPinTimeout <= 0 || *ipfsPinBatchSize <= 0 {
+		fmt.Fprintln(os.Stderr, "error: --ipfs-pin-interval, --ipfs-pin-timeout, and --ipfs-pin-batch-size must be > 0")
 		os.Exit(2)
 	}
 	if normalizeBlobDriver(*blobDriver) == blobstore.DriverS3 && strings.TrimSpace(*blobBucket) == "" {
@@ -243,15 +250,22 @@ func main() {
 		log.Error("init aggregator", "err", err)
 		os.Exit(2)
 	}
-	if err := replayOpenCheckpointPackages(ctx, persist, agg, producer, *queueOutTopic, log); err != nil {
-		log.Error("replay open checkpoint packages", "err", err)
+	if err := restoreCheckpointState(ctx, persist, agg, producer, *queueOutTopic, log); err != nil {
+		log.Error("restore checkpoint state", "err", err)
 		os.Exit(2)
+	}
+
+	if *ipfsEnabled {
+		go runIPFSPinWorker(ctx, persist, *ipfsPinInterval, *ipfsPinBatchSize, *ipfsPinTimeout, log)
 	}
 
 	go func() {
 		opts := []healthz.Option{}
 		if pool != nil {
 			opts = append(opts, healthz.WithReadinessCheck(pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)))
+		}
+		if mirrorStore != nil {
+			opts = append(opts, healthz.WithReadinessCheck(blobStoreReadinessCheck(mirrorStore, *persistTimeout)))
 		}
 		if err := healthz.ListenAndServe(ctx, healthz.ListenAddr(*healthPort), "checkpoint-aggregator", opts...); err != nil {
 			log.Error("healthz server", "err", err)
@@ -401,6 +415,73 @@ func replayOpenCheckpointPackages(
 		}
 	}
 	return nil
+}
+
+func restoreCheckpointState(
+	ctx context.Context,
+	persist *checkpoint.PackagePersistence,
+	agg *checkpoint.Aggregator,
+	producer queue.Producer,
+	topic string,
+	log *slog.Logger,
+) error {
+	emitted, err := persist.ListByState(ctx, checkpoint.PackageStateEmitted)
+	if err != nil {
+		return err
+	}
+	for _, rec := range emitted {
+		agg.RestoreEmittedDigest(rec.Digest)
+		if log != nil {
+			log.Info("restored emitted checkpoint package", "digest", rec.Digest)
+		}
+	}
+	return replayOpenCheckpointPackages(ctx, persist, agg, producer, topic, log)
+}
+
+func runIPFSPinWorker(
+	ctx context.Context,
+	persist *checkpoint.PackagePersistence,
+	interval time.Duration,
+	batchSize int,
+	timeout time.Duration,
+	log *slog.Logger,
+) {
+	process := func() {
+		pinCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		processed, err := persist.ProcessPinJobs(pinCtx, batchSize)
+		if err != nil {
+			if log != nil {
+				log.Error("process checkpoint ipfs pin jobs", "err", err)
+			}
+			return
+		}
+		if processed > 0 && log != nil {
+			log.Info("processed checkpoint ipfs pin jobs", "count", processed)
+		}
+	}
+
+	process()
+
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			process()
+		}
+	}
+}
+
+func blobStoreReadinessCheck(store blobstore.Store, timeout time.Duration) func(context.Context) error {
+	return func(ctx context.Context) error {
+		readyCtx, cancel := context.WithTimeout(ctx, timeout)
+		defer cancel()
+		_, err := store.Exists(readyCtx, "healthz/checkpoint-aggregator-readiness")
+		return err
+	}
 }
 
 func marshalCheckpointPackage(pkg checkpoint.CheckpointPackageV1) ([]byte, error) {

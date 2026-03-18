@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/blobstore"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
 
@@ -212,5 +213,103 @@ func TestPublishCheckpointPackage_LeavesPackageOpenOnPublishFailure(t *testing.T
 	}
 	if rec.State != checkpoint.PackageStateOpen {
 		t.Fatalf("state: got %s want %s", rec.State, checkpoint.PackageStateOpen)
+	}
+}
+
+func TestRestoreCheckpointState_SkipsReplayForAlreadyEmittedPackages(t *testing.T) {
+	t.Parallel()
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x64afe1a0c6c050e37d936aa20cb82b08bb8815baed208e7634d6df26fc37b091"),
+		FinalOrchardRoot: common.HexToHash("0xd6c66cad06fe14fdb6ce9297d80d32f24d7428996d0045cbf90cc345c677ba16"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := checkpoint.Digest(cp)
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	store := checkpoint.NewMemoryPackageStore()
+	persist, err := checkpoint.NewPackagePersistence(checkpoint.PackagePersistenceConfig{
+		PackageStore: store,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence: %v", err)
+	}
+
+	payload, err := json.Marshal(checkpointPackageV1{
+		Version:         "checkpoints.package.v1",
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		CreatedAt:       now,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if _, err := persist.Persist(context.Background(), checkpoint.PackageEnvelope{
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Payload:         payload,
+	}); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	if _, err := persist.MarkEmitted(context.Background(), digest); err != nil {
+		t.Fatalf("MarkEmitted: %v", err)
+	}
+
+	agg, err := checkpoint.NewAggregator(checkpoint.AggregatorConfig{
+		BaseChainID:    cp.BaseChainID,
+		BridgeContract: cp.BridgeContract,
+		Operators:      []common.Address{common.HexToAddress("0x1111111111111111111111111111111111111111")},
+		Threshold:      1,
+		Now:            func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewAggregator: %v", err)
+	}
+	producer := &stubCheckpointProducer{}
+
+	if err := restoreCheckpointState(context.Background(), persist, agg, producer, "checkpoints.packages.v1", slog.Default()); err != nil {
+		t.Fatalf("restoreCheckpointState: %v", err)
+	}
+	if len(producer.payloads) != 0 {
+		t.Fatalf("expected no replay for emitted package, got %d publishes", len(producer.payloads))
+	}
+}
+
+type blobReadinessStore struct {
+	existsCalls int
+	err         error
+}
+
+func (s *blobReadinessStore) Put(context.Context, string, []byte, blobstore.PutOptions) error {
+	return nil
+}
+func (s *blobReadinessStore) Get(context.Context, string) (blobstore.Object, error) {
+	return blobstore.Object{}, nil
+}
+func (s *blobReadinessStore) Delete(context.Context, string) error { return nil }
+func (s *blobReadinessStore) Exists(context.Context, string) (bool, error) {
+	s.existsCalls++
+	return false, s.err
+}
+
+func TestBlobStoreReadinessCheck_UsesExists(t *testing.T) {
+	t.Parallel()
+
+	store := &blobReadinessStore{}
+	if err := blobStoreReadinessCheck(store, time.Second)(context.Background()); err != nil {
+		t.Fatalf("blobStoreReadinessCheck: %v", err)
+	}
+	if store.existsCalls != 1 {
+		t.Fatalf("exists calls: got %d want 1", store.existsCalls)
+	}
+
+	store.err = errors.New("blob unavailable")
+	if err := blobStoreReadinessCheck(store, time.Second)(context.Background()); err == nil {
+		t.Fatalf("expected readiness error")
 	}
 }

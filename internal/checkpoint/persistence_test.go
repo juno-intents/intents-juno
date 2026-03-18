@@ -3,6 +3,7 @@ package checkpoint
 import (
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -74,17 +75,17 @@ func TestPackagePersistence_PersistsToAllSinks(t *testing.T) {
 	if rec.State != PackageStateOpen {
 		t.Fatalf("state: got %s want %s", rec.State, PackageStateOpen)
 	}
-	if rec.IPFSCID != pinner.cid {
-		t.Fatalf("ipfs cid: got %q want %q", rec.IPFSCID, pinner.cid)
+	if rec.IPFSCID != "" {
+		t.Fatalf("ipfs cid: got %q want empty before background pinning", rec.IPFSCID)
 	}
 	if rec.PersistedAt != now {
 		t.Fatalf("persistedAt: got %s want %s", rec.PersistedAt, now)
 	}
-	if pinner.calls != 1 {
-		t.Fatalf("ipfs calls: got %d want 1", pinner.calls)
+	if rec.PinState != PackagePinStatePending {
+		t.Fatalf("pin state: got %s want %s", rec.PinState, PackagePinStatePending)
 	}
-	if !bytes.Equal(pinner.payload, payload) {
-		t.Fatalf("ipfs payload mismatch")
+	if pinner.calls != 0 {
+		t.Fatalf("ipfs calls: got %d want 0", pinner.calls)
 	}
 
 	if rec.BlobKey == "" {
@@ -107,6 +108,9 @@ func TestPackagePersistence_PersistsToAllSinks(t *testing.T) {
 	}
 	if stored.BlobKey != rec.BlobKey {
 		t.Fatalf("stored blob key: got %q want %q", stored.BlobKey, rec.BlobKey)
+	}
+	if stored.PinState != PackagePinStatePending {
+		t.Fatalf("stored pin state: got %s want %s", stored.PinState, PackagePinStatePending)
 	}
 	if stored.State != PackageStateOpen {
 		t.Fatalf("stored state: got %s want %s", stored.State, PackageStateOpen)
@@ -207,5 +211,130 @@ func TestPackagePersistence_MarkEmittedTransitionsState(t *testing.T) {
 	}
 	if emitted[0].Digest != digest {
 		t.Fatalf("digest: got %s want %s", emitted[0].Digest, digest)
+	}
+}
+
+func TestPackagePersistence_PersistDoesNotBlockOnIPFSFailure(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryPackageStore()
+	pinner := &fakePinner{err: errors.New("ipfs unavailable")}
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	persist, err := NewPackagePersistence(PackagePersistenceConfig{
+		PackageStore: store,
+		IPFSPinner:   pinner,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence: %v", err)
+	}
+
+	cp := Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := Digest(cp)
+
+	rec, err := persist.Persist(context.Background(), PackageEnvelope{
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Payload:         []byte(`{"version":"checkpoints.package.v1"}`),
+	})
+	if err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	if pinner.calls != 0 {
+		t.Fatalf("expected no inline ipfs call, got %d", pinner.calls)
+	}
+	if rec.PinState != PackagePinStatePending {
+		t.Fatalf("pin state: got %s want %s", rec.PinState, PackagePinStatePending)
+	}
+}
+
+func TestPackagePersistence_ProcessPinJobsBacksOffAndRecovers(t *testing.T) {
+	t.Parallel()
+
+	store := NewMemoryPackageStore()
+	pinner := &fakePinner{err: errors.New("ipfs unavailable")}
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	persist, err := NewPackagePersistence(PackagePersistenceConfig{
+		PackageStore: store,
+		IPFSPinner:   pinner,
+		Now:          func() time.Time { return now },
+	})
+	if err != nil {
+		t.Fatalf("NewPackagePersistence: %v", err)
+	}
+
+	cp := Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      8453,
+		BridgeContract:   common.HexToAddress("0x000000000000000000000000000000000000bEEF"),
+	}
+	digest := Digest(cp)
+
+	if _, err := persist.Persist(context.Background(), PackageEnvelope{
+		Digest:          digest,
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Payload:         []byte(`{"version":"checkpoints.package.v1"}`),
+	}); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+
+	processed, err := persist.ProcessPinJobs(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ProcessPinJobs #1: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed jobs #1: got %d want 1", processed)
+	}
+
+	rec, err := store.Get(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("store.Get #1: %v", err)
+	}
+	if rec.PinState != PackagePinStateFailed {
+		t.Fatalf("pin state after failure: got %s want %s", rec.PinState, PackagePinStateFailed)
+	}
+	if rec.PinAttempts != 1 {
+		t.Fatalf("pin attempts after failure: got %d want 1", rec.PinAttempts)
+	}
+	if rec.PinNextAttemptAt.IsZero() || !rec.PinNextAttemptAt.After(now) {
+		t.Fatalf("expected next attempt after %s, got %s", now, rec.PinNextAttemptAt)
+	}
+
+	now = rec.PinNextAttemptAt
+	pinner.err = nil
+	pinner.cid = "bafybeigdyrzt"
+
+	processed, err = persist.ProcessPinJobs(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ProcessPinJobs #2: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("processed jobs #2: got %d want 1", processed)
+	}
+
+	rec, err = store.Get(context.Background(), digest)
+	if err != nil {
+		t.Fatalf("store.Get #2: %v", err)
+	}
+	if rec.PinState != PackagePinStatePinned {
+		t.Fatalf("pin state after success: got %s want %s", rec.PinState, PackagePinStatePinned)
+	}
+	if rec.IPFSCID != pinner.cid {
+		t.Fatalf("ipfs cid: got %q want %q", rec.IPFSCID, pinner.cid)
+	}
+	if rec.PinAttempts != 2 {
+		t.Fatalf("pin attempts after success: got %d want 2", rec.PinAttempts)
 	}
 }
