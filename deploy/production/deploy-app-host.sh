@@ -366,6 +366,7 @@ bridge_wrapper_tmp="\$(mktemp)"
 cat >"\$bridge_wrapper_tmp" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
+bridge_api_bin="__RUNTIME_DIR__/bin/bridge-api"
 args=(
   --listen "\$BRIDGE_API_LISTEN_ADDR"
   --postgres-dsn "\$BRIDGE_API_POSTGRES_DSN"
@@ -373,17 +374,21 @@ args=(
   --base-chain-id "\$BRIDGE_API_BASE_CHAIN_ID"
   --bridge-address "\$BRIDGE_API_BRIDGE_ADDRESS"
   --owallet-ua "\$BRIDGE_API_OWALLET_UA"
-  --withdrawal-expiry-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS"
   --deposit-min-confirmations "\${BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS:-1}"
   --withdraw-planner-min-confirmations "\${BRIDGE_API_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
   --withdraw-batch-confirmations "\${BRIDGE_API_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
   --min-withdraw-amount "\$BRIDGE_API_MIN_WITHDRAW_AMOUNT"
   --fee-bps "\$BRIDGE_API_FEE_BPS"
 )
+if "\$bridge_api_bin" -h 2>&1 | grep -q -- '--withdrawal-expiry-window-seconds'; then
+  args+=(--withdrawal-expiry-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")
+else
+  args+=(--refund-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")
+fi
 if [[ -n "\${BRIDGE_API_WJUNO_ADDRESS:-}" ]]; then
   args+=(--wjuno-address "\$BRIDGE_API_WJUNO_ADDRESS")
 fi
-exec __RUNTIME_DIR__/bin/bridge-api "\${args[@]}"
+exec "\$bridge_api_bin" "\${args[@]}"
 WRAP
 sed -i.bak "s|__RUNTIME_DIR__|$runtime_dir|g" "\$bridge_wrapper_tmp"
 rm -f "\$bridge_wrapper_tmp.bak"
@@ -418,7 +423,9 @@ if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
   args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
 fi
 if [[ -n "\${BACKOFFICE_IPFS_API_BEARER_TOKEN:-}" ]]; then
-  args+=(--ipfs-api-bearer-token "\$BACKOFFICE_IPFS_API_BEARER_TOKEN")
+  if "\$backoffice_bin" -h 2>&1 | grep -q -- '--ipfs-api-bearer-token'; then
+    args+=(--ipfs-api-bearer-token "\$BACKOFFICE_IPFS_API_BEARER_TOKEN")
+  fi
 fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
   if "\$backoffice_bin" -h 2>&1 | grep -q -- '--juno-rpc-urls'; then
