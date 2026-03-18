@@ -268,6 +268,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
 	}
+	if err := c.syncMarkPaidCircuit(ctx); err != nil {
+		return err
+	}
 
 	var tickErr error
 	if err := c.resume(ctx); err != nil {
@@ -369,6 +372,18 @@ func (c *Coordinator) resume(ctx context.Context) error {
 		return err
 	}
 	for _, b := range bcast {
+		if err := c.assertLeadership(ctx); err != nil {
+			return err
+		}
+		if err := c.processBatchError(ctx, b.ID, "confirm", c.confirmBatch(ctx, b.ID)); err != nil && resumeErr == nil {
+			resumeErr = err
+		}
+	}
+	junoConfirmed, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateJunoConfirmed)
+	if err != nil {
+		return err
+	}
+	for _, b := range junoConfirmed {
 		if err := c.assertLeadership(ctx); err != nil {
 			return err
 		}
@@ -582,8 +597,11 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 	if b.State < withdraw.BatchStateBroadcasted {
 		return withdraw.ErrInvalidTransition
 	}
-	if !b.JunoConfirmedAt.IsZero() {
-		return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+	if isJunoConfirmedUnrecorded(b) {
+		if !b.NextRebroadcastAt.IsZero() && c.cfg.Now().UTC().Before(b.NextRebroadcastAt) {
+			return nil
+		}
+		return c.confirmPaidBatch(ctx, b)
 	}
 	c.log.Info("batch confirming", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
 	if err := c.assertLeadership(ctx); err != nil {
@@ -605,7 +623,11 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 					if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
 						return err
 					}
-					return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+					b.State = withdraw.BatchStateJunoConfirmed
+					if b.JunoConfirmedAt.IsZero() {
+						b.JunoConfirmedAt = c.cfg.Now().UTC()
+					}
+					return c.confirmPaidBatch(ctx, b)
 				case TxStatusMempool:
 					return nil
 				case TxStatusMissing:
@@ -635,10 +657,15 @@ func (c *Coordinator) confirmBatch(ctx context.Context, batchID [32]byte) error 
 	if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
 		return err
 	}
-	return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+	b.State = withdraw.BatchStateJunoConfirmed
+	if b.JunoConfirmedAt.IsZero() {
+		b.JunoConfirmedAt = c.cfg.Now().UTC()
+	}
+	return c.confirmPaidBatch(ctx, b)
 }
 
-func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, withdrawalIDs [][32]byte, junoTxID string) error {
+func (c *Coordinator) confirmPaidBatch(ctx context.Context, b withdraw.Batch) error {
+	batchID := b.ID
 	fence := c.storeFence()
 	if err := c.assertLeadership(ctx); err != nil {
 		return err
@@ -646,25 +673,26 @@ func (c *Coordinator) confirmPaidBatch(ctx context.Context, batchID [32]byte, wi
 	if c.paidMarker == nil {
 		return fmt.Errorf("%w: nil paid marker", ErrInvalidConfig)
 	}
-	if err := c.paidMarker.MarkPaid(ctx, withdrawalIDs); err != nil {
-		if _, ferr := c.store.RecordBatchMarkPaidFailure(ctx, batchID, fence, err.Error()); ferr != nil {
+	if err := c.paidMarker.MarkPaid(ctx, b.WithdrawalIDs); err != nil {
+		nextAt := c.cfg.Now().UTC().Add(c.markPaidBackoff(b.MarkPaidFailures + 1))
+		if _, ferr := c.store.RecordBatchMarkPaidFailure(ctx, batchID, fence, err.Error(), nextAt); ferr != nil {
 			return ferr
 		}
 		c.markPaidFailureStreak++
-		if c.markPaidFailureStreak >= markPaidFailureOpenThreshold {
-			c.markPaidCircuitOpen = true
-		}
+		c.markPaidCircuitOpen = true
 		return err
 	}
 	c.markPaidFailureStreak = 0
-	c.markPaidCircuitOpen = false
 	if err := c.store.ResetBatchMarkPaidFailures(ctx, batchID, fence); err != nil {
 		return err
 	}
 	if err := c.store.SetBatchConfirmed(ctx, batchID, fence); err != nil {
 		return err
 	}
-	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", junoTxID)
+	if err := c.syncMarkPaidCircuit(ctx); err != nil {
+		return err
+	}
+	c.log.Info("batch confirmed", "batch_id", hex.EncodeToString(batchID[:]), "juno_txid", b.JunoTxID)
 	return nil
 }
 
@@ -712,12 +740,21 @@ func (c *Coordinator) rebroadcastSignedBatch(ctx context.Context, batchID [32]by
 			if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
 				return err
 			}
-			return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, b.JunoTxID)
+			b.State = withdraw.BatchStateJunoConfirmed
+			if b.JunoConfirmedAt.IsZero() {
+				b.JunoConfirmedAt = c.cfg.Now().UTC()
+			}
+			return c.confirmPaidBatch(ctx, b)
 		case statuses[txid] == TxStatusConfirmed:
 			if err := c.store.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
 				return err
 			}
-			return c.confirmPaidBatch(ctx, batchID, b.WithdrawalIDs, txid)
+			b.State = withdraw.BatchStateJunoConfirmed
+			b.JunoTxID = txid
+			if b.JunoConfirmedAt.IsZero() {
+				b.JunoConfirmedAt = c.cfg.Now().UTC()
+			}
+			return c.confirmPaidBatch(ctx, b)
 		default:
 			return fmt.Errorf("withdrawcoordinator: rebroadcast txid mismatch: got %s want %s", txid, b.JunoTxID)
 		}
@@ -825,6 +862,13 @@ func (c *Coordinator) rebroadcastBackoff(attempts uint32) time.Duration {
 	return backoff
 }
 
+func (c *Coordinator) markPaidBackoff(attempts int) time.Duration {
+	if attempts < 1 {
+		attempts = 1
+	}
+	return c.rebroadcastBackoff(uint32(attempts))
+}
+
 func txPlanArtifactKey(batchID [32]byte) string {
 	return "withdrawals/batches/" + hex.EncodeToString(batchID[:]) + "/txplan.json"
 }
@@ -839,6 +883,11 @@ func (c *Coordinator) processBatchError(ctx context.Context, batchID [32]byte, s
 	}
 	if errors.Is(batchErr, ErrLeadershipLost) {
 		return batchErr
+	}
+	if stage == "confirm" {
+		if b, err := c.store.GetBatch(ctx, batchID); err == nil && isJunoConfirmedUnrecorded(b) {
+			return batchErr
+		}
 	}
 
 	fence := c.storeFence()
@@ -861,6 +910,39 @@ func (c *Coordinator) processBatchError(ctx context.Context, batchID [32]byte, s
 		return err
 	}
 	return batchErr
+}
+
+func isJunoConfirmedUnrecorded(b withdraw.Batch) bool {
+	return b.State == withdraw.BatchStateJunoConfirmed || (b.State == withdraw.BatchStateBroadcasted && !b.JunoConfirmedAt.IsZero())
+}
+
+func (c *Coordinator) hasJunoConfirmedUnrecorded(ctx context.Context) (bool, error) {
+	batches, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateJunoConfirmed)
+	if err != nil {
+		return false, err
+	}
+	if len(batches) > 0 {
+		return true, nil
+	}
+	legacy, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateBroadcasted)
+	if err != nil {
+		return false, err
+	}
+	for _, b := range legacy {
+		if !b.JunoConfirmedAt.IsZero() {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (c *Coordinator) syncMarkPaidCircuit(ctx context.Context) error {
+	hasUnrecorded, err := c.hasJunoConfirmedUnrecorded(ctx)
+	if err != nil {
+		return err
+	}
+	c.markPaidCircuitOpen = hasUnrecorded || c.markPaidFailureStreak >= markPaidFailureOpenThreshold
+	return nil
 }
 
 func batchErrorCode(stage string, err error) string {

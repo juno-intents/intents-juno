@@ -51,10 +51,12 @@ func batchStateLabel(s int16) string {
 	case 4:
 		return "broadcasted"
 	case 5:
-		return "confirmed"
+		return "juno_confirmed"
 	case 6:
-		return "finalizing"
+		return "confirmed"
 	case 7:
+		return "finalizing"
+	case 8:
 		return "finalized"
 	default:
 		return fmt.Sprintf("state_%d", s)
@@ -213,7 +215,7 @@ func (s *Server) handleStuckBatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Stuck withdrawal batches: state NOT IN (7=finalized) and updated_at old.
+	// Stuck withdrawal batches: state NOT IN (8=finalized) and updated_at old.
 	stuckWithdrawals, err := s.fetchStuckWithdrawalBatches(ctx, threshold)
 	if err != nil {
 		s.log.Error("fetch stuck withdrawal batches", "err", err)
@@ -265,7 +267,7 @@ func (s *Server) fetchStuckWithdrawalBatches(ctx context.Context, threshold time
 	rows, err := s.cfg.Pool.Query(ctx, `
 		SELECT batch_id, state, created_at, updated_at
 		FROM withdrawal_batches
-		WHERE state NOT IN (7)
+		WHERE state NOT IN (8)
 		  AND updated_at < $1
 		ORDER BY updated_at ASC
 		LIMIT 100`, threshold)

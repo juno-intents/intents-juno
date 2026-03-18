@@ -91,7 +91,7 @@ CREATE TABLE IF NOT EXISTS withdrawal_batches (
 	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
 	CONSTRAINT batch_id_len CHECK (octet_length(batch_id) = 32),
-	CONSTRAINT state_range CHECK (state >= 1 AND state <= 7),
+	CONSTRAINT state_range CHECK (state >= 1 AND state <= 8),
 	CONSTRAINT lease_owner_nonempty CHECK (lease_owner IS NULL OR lease_owner <> ''),
 	CONSTRAINT lease_version_positive CHECK (lease_version IS NULL OR lease_version > 0),
 	CONSTRAINT juno_txid_nonempty CHECK (juno_txid IS NULL OR juno_txid <> ''),
@@ -117,8 +117,24 @@ ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMP
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS dlq_at TIMESTAMPTZ;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS mark_paid_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS last_mark_paid_error TEXT;
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM pg_constraint
+		WHERE conname = 'state_range'
+		  AND conrelid = 'withdrawal_batches'::regclass
+		  AND pg_get_constraintdef(oid) LIKE '%state <= 7%'
+	) THEN
+		UPDATE withdrawal_batches
+		SET state = CASE
+			WHEN state BETWEEN 5 AND 7 THEN state + 1
+			ELSE state
+		END;
+	END IF;
+END $$;
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS state_range;
-ALTER TABLE withdrawal_batches ADD CONSTRAINT state_range CHECK (state >= 1 AND state <= 7);
+ALTER TABLE withdrawal_batches ADD CONSTRAINT state_range CHECK (state >= 1 AND state <= 8);
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS lease_owner_nonempty;
 ALTER TABLE withdrawal_batches ADD CONSTRAINT lease_owner_nonempty CHECK (lease_owner IS NULL OR lease_owner <> '');
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS lease_version_positive;
@@ -128,7 +144,7 @@ ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS base_tx_hash_nonempty;
 ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_nonempty CHECK (base_tx_hash IS NULL OR base_tx_hash <> '');
 
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS base_tx_hash_requires_finalized;
-ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_requires_finalized CHECK (base_tx_hash IS NULL OR state = 7);
+ALTER TABLE withdrawal_batches ADD CONSTRAINT base_tx_hash_requires_finalized CHECK (base_tx_hash IS NULL OR state = 8);
 
 ALTER TABLE withdrawal_batches DROP CONSTRAINT IF EXISTS rebroadcast_attempts_nonneg;
 ALTER TABLE withdrawal_batches ADD CONSTRAINT rebroadcast_attempts_nonneg CHECK (rebroadcast_attempts >= 0);
@@ -158,7 +174,7 @@ WHERE EXISTS (
 	FROM withdrawal_batch_items wbi
 	JOIN withdrawal_batches wb ON wb.batch_id = wbi.batch_id
 	WHERE wbi.withdrawal_id = withdrawal_requests.withdrawal_id
-	  AND wb.state >= 5
+	  AND wb.state >= 6
 );
 UPDATE withdrawal_requests
 SET status = 2

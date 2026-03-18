@@ -193,6 +193,16 @@ func TestStore_ClaimAndBatch_StateMachine(t *testing.T) {
 	if err := s.MarkBatchJunoConfirmed(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
 	}
+	if bConfirmed, err := s.GetBatch(ctx, batchID); err != nil {
+		t.Fatalf("GetBatch after MarkBatchJunoConfirmed: %v", err)
+	} else if bConfirmed.State != withdraw.BatchStateJunoConfirmed {
+		t.Fatalf("state after MarkBatchJunoConfirmed: got %s want %s", bConfirmed.State, withdraw.BatchStateJunoConfirmed)
+	}
+	if status, err := s.GetWithdrawalStatus(ctx, w0.ID); err != nil {
+		t.Fatalf("GetWithdrawalStatus after MarkBatchJunoConfirmed: %v", err)
+	} else if status != withdraw.WithdrawalStatusBatched {
+		t.Fatalf("status after MarkBatchJunoConfirmed: got %s want %s", status, withdraw.WithdrawalStatusBatched)
+	}
 
 	if err := s.SetBatchConfirmed(ctx, batchID, fenceA); err != nil {
 		t.Fatalf("SetBatchConfirmed: %v", err)
@@ -267,14 +277,23 @@ func TestStore_FencedBatchMutationAndFailureBookkeeping(t *testing.T) {
 	if err := s.SetBatchSigned(ctx, batchID, fenceB, []byte{0x09}); err != nil {
 		t.Fatalf("SetBatchSigned: %v", err)
 	}
+	if err := s.MarkBatchBroadcastLocked(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("MarkBatchBroadcastLocked: %v", err)
+	}
+	if err := s.SetBatchBroadcasted(ctx, batchID, fenceB, "tx-mark-paid"); err != nil {
+		t.Fatalf("SetBatchBroadcasted: %v", err)
+	}
+	if err := s.MarkBatchJunoConfirmed(ctx, batchID, fenceB); err != nil {
+		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
 	if got, err := s.RecordBatchFailure(ctx, batchID, fenceB, "broadcast", "broadcast_failed", "rpc unavailable"); err != nil {
 		t.Fatalf("RecordBatchFailure: %v", err)
 	} else if got.FailureCount != 1 || got.LastErrorCode != "broadcast_failed" {
 		t.Fatalf("unexpected failure bookkeeping: %+v", got)
 	}
-	if got, err := s.RecordBatchMarkPaidFailure(ctx, batchID, fenceB, "base relay down"); err != nil {
+	if got, err := s.RecordBatchMarkPaidFailure(ctx, batchID, fenceB, "base relay down", now.Add(time.Minute)); err != nil {
 		t.Fatalf("RecordBatchMarkPaidFailure: %v", err)
-	} else if got.MarkPaidFailures != 1 || got.LastMarkPaidError != "base relay down" {
+	} else if got.MarkPaidFailures != 1 || got.LastMarkPaidError != "base relay down" || got.State != withdraw.BatchStateJunoConfirmed {
 		t.Fatalf("unexpected mark-paid bookkeeping: %+v", got)
 	}
 	if err := s.ResetBatchMarkPaidFailures(ctx, batchID, fenceB); err != nil {

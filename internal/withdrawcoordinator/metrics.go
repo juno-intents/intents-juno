@@ -28,26 +28,27 @@ func (c *Coordinator) MetricsSummary(ctx context.Context) (MetricsSummary, error
 	}
 	summary.DLQDepth = dlqDepth
 
-	batches, err := c.store.ListBatchesByState(ctx, withdraw.BatchStateBroadcasted)
-	if err != nil {
-		return summary, err
-	}
-
 	now := c.cfg.Now().UTC()
 	var minExpiry time.Time
-	for _, b := range batches {
-		if b.JunoConfirmedAt.IsZero() {
-			continue
+	for _, state := range []withdraw.BatchState{withdraw.BatchStateBroadcasted, withdraw.BatchStateJunoConfirmed} {
+		batches, err := c.store.ListBatchesByState(ctx, state)
+		if err != nil {
+			return summary, err
 		}
-		summary.ConfirmedUnmarkedCount += len(b.WithdrawalIDs)
-		for _, withdrawalID := range b.WithdrawalIDs {
-			w, err := c.store.GetWithdrawal(ctx, withdrawalID)
-			if err != nil {
-				return summary, err
+		for _, b := range batches {
+			if !isJunoConfirmedUnrecorded(b) {
+				continue
 			}
-			if !summary.HasConfirmedUnmarked || w.Expiry.Before(minExpiry) {
-				minExpiry = w.Expiry
-				summary.HasConfirmedUnmarked = true
+			summary.ConfirmedUnmarkedCount += len(b.WithdrawalIDs)
+			for _, withdrawalID := range b.WithdrawalIDs {
+				w, err := c.store.GetWithdrawal(ctx, withdrawalID)
+				if err != nil {
+					return summary, err
+				}
+				if !summary.HasConfirmedUnmarked || w.Expiry.Before(minExpiry) {
+					minExpiry = w.Expiry
+					summary.HasConfirmedUnmarked = true
+				}
 			}
 		}
 	}

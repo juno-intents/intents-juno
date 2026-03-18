@@ -34,6 +34,7 @@ const (
 	BatchStateSigning
 	BatchStateSigned
 	BatchStateBroadcasted
+	BatchStateJunoConfirmed
 	BatchStateConfirmed
 	BatchStateFinalizing
 	BatchStateFinalized
@@ -49,6 +50,8 @@ func (s BatchState) String() string {
 		return "signed"
 	case BatchStateBroadcasted:
 		return "broadcasted"
+	case BatchStateJunoConfirmed:
+		return "juno_confirmed"
 	case BatchStateConfirmed:
 		return "confirmed"
 	case BatchStateFinalizing:
@@ -118,7 +121,8 @@ type Batch struct {
 
 	// RebroadcastAttempts tracks how many broadcast-tx-missing recovery cycles were attempted.
 	RebroadcastAttempts uint32
-	// NextRebroadcastAt is the earliest instant the coordinator may attempt another rebroadcast cycle.
+	// NextRebroadcastAt is the earliest instant the coordinator may attempt another
+	// post-broadcast recovery cycle (rebroadcast or Base mark-paid retry).
 	NextRebroadcastAt time.Time
 
 	FailureCount     int
@@ -155,7 +159,7 @@ type Store interface {
 	SetBatchRebroadcastBackoff(ctx context.Context, batchID [32]byte, fence Fence, attempts uint32, next time.Time) error
 	MarkBatchJunoConfirmed(ctx context.Context, batchID [32]byte, fence Fence) error
 	RecordBatchFailure(ctx context.Context, batchID [32]byte, fence Fence, stage string, errorCode string, errorMessage string) (Batch, error)
-	RecordBatchMarkPaidFailure(ctx context.Context, batchID [32]byte, fence Fence, errorMessage string) (Batch, error)
+	RecordBatchMarkPaidFailure(ctx context.Context, batchID [32]byte, fence Fence, errorMessage string, nextAttempt time.Time) (Batch, error)
 	ResetBatchMarkPaidFailures(ctx context.Context, batchID [32]byte, fence Fence) error
 	MarkBatchDLQ(ctx context.Context, batchID [32]byte, fence Fence) error
 	SetBatchConfirmed(ctx context.Context, batchID [32]byte, fence Fence) error

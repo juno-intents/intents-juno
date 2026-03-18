@@ -1426,7 +1426,7 @@ func TestCoordinator_WaitOneBlock_TxConfirmedAfterBlock(t *testing.T) {
 	}
 }
 
-func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *testing.T) {
+func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerPersistsJunoConfirmedRetryState(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
@@ -1434,6 +1434,7 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 
 	store := withdraw.NewMemoryStore(nowFn)
 	ctx := context.Background()
+	dlqStore := dlq.NewMemoryStore(nil)
 
 	w := withdraw.Withdrawal{ID: seq32(0x12), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, w)
@@ -1459,6 +1460,7 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 		MaxItems: 10,
 		MaxAge:   3 * time.Minute,
 		ClaimTTL: 10 * time.Second,
+		DLQStore: dlqStore,
 		Now:      nowFn,
 	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, confirmer, txChecker, nil)
 	if err != nil {
@@ -1474,8 +1476,8 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 	if err != nil {
 		t.Fatalf("GetBatch: %v", err)
 	}
-	if b.State != withdraw.BatchStateBroadcasted {
-		t.Fatalf("expected batch to remain broadcasted, got %s", b.State)
+	if b.State != withdraw.BatchStateJunoConfirmed {
+		t.Fatalf("expected batch to remain juno-confirmed, got %s", b.State)
 	}
 	status, err := store.GetWithdrawalStatus(ctx, w.ID)
 	if err != nil {
@@ -1484,9 +1486,30 @@ func TestCoordinator_ConfirmedTxWithoutSuccessfulPaidMarkerStaysBroadcasted(t *t
 	if status != withdraw.WithdrawalStatusBatched {
 		t.Fatalf("status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
 	}
+	if b.MarkPaidFailures != 1 {
+		t.Fatalf("mark_paid_failures: got %d want 1", b.MarkPaidFailures)
+	}
+	if !c.MarkPaidCircuitOpen() {
+		t.Fatal("expected mark-paid circuit to open while juno-confirmed batch is unrecorded")
+	}
+
+	for i := 0; i < 3; i++ {
+		now = now.Add(15 * time.Minute)
+		if err := c.Tick(ctx); err == nil {
+			t.Fatal("expected repeated mark-paid retry error")
+		}
+	}
+
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.WithdrawalBatches != 0 {
+		t.Fatalf("expected no withdrawal DLQ entries for juno-confirmed retry path, got %d", counts.WithdrawalBatches)
+	}
 }
 
-func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
+func TestCoordinator_JunoConfirmedBatchBlocksNewClaims(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
@@ -1509,6 +1532,7 @@ func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
 	_ = store.SetBatchSigned(ctx, stuckBatchID, testWithdrawFence("a"), []byte{0x01})
 	_ = store.MarkBatchBroadcastLocked(ctx, stuckBatchID, testWithdrawFence("a"))
 	_ = store.SetBatchBroadcasted(ctx, stuckBatchID, testWithdrawFence("a"), "tx-stuck")
+	_ = store.MarkBatchJunoConfirmed(ctx, stuckBatchID, testWithdrawFence("a"))
 
 	fresh := withdraw.Withdrawal{ID: seq32(0x21), Amount: 2, FeeBps: 0, RecipientUA: []byte{0x02}, Expiry: now.Add(24 * time.Hour)}
 	_, _, _ = store.UpsertRequested(ctx, fresh)
@@ -1545,30 +1569,29 @@ func TestCoordinator_RetryableResumeErrorDoesNotBlockNewClaims(t *testing.T) {
 	if paidMarker.calls != 1 {
 		t.Fatalf("paid marker calls: got %d want 1", paidMarker.calls)
 	}
-	if planner.calls != 1 {
-		t.Fatalf("planner calls: got %d want 1", planner.calls)
+	if planner.calls != 0 {
+		t.Fatalf("planner calls: got %d want 0", planner.calls)
 	}
-	if signer.calls != 1 {
-		t.Fatalf("signer calls: got %d want 1", signer.calls)
+	if signer.calls != 0 {
+		t.Fatalf("signer calls: got %d want 0", signer.calls)
 	}
-	if broadcaster.calls != 1 {
-		t.Fatalf("broadcaster calls: got %d want 1", broadcaster.calls)
+	if broadcaster.calls != 0 {
+		t.Fatalf("broadcaster calls: got %d want 0", broadcaster.calls)
 	}
 
 	status, err := store.GetWithdrawalStatus(ctx, fresh.ID)
 	if err != nil {
 		t.Fatalf("GetWithdrawalStatus: %v", err)
 	}
-	if status != withdraw.WithdrawalStatusBatched {
-		t.Fatalf("fresh status: got %s want %s", status, withdraw.WithdrawalStatusBatched)
+	if status != withdraw.WithdrawalStatusRequested {
+		t.Fatalf("fresh status: got %s want %s", status, withdraw.WithdrawalStatusRequested)
 	}
 
-	freshBatch, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{fresh.ID}))
-	if err != nil {
-		t.Fatalf("GetBatch(fresh): %v", err)
+	if _, err := store.GetBatch(ctx, batching.WithdrawalBatchIDV1([][32]byte{fresh.ID})); !errors.Is(err, withdraw.ErrNotFound) {
+		t.Fatalf("expected no batch for fresh withdrawal while mark-paid circuit is open, got %v", err)
 	}
-	if freshBatch.State != withdraw.BatchStateBroadcasted {
-		t.Fatalf("fresh batch state: got %s want %s", freshBatch.State, withdraw.BatchStateBroadcasted)
+	if !c.MarkPaidCircuitOpen() {
+		t.Fatal("expected mark-paid circuit to remain open")
 	}
 }
 

@@ -571,12 +571,13 @@ func (s *Store) MarkBatchSigning(ctx context.Context, batchID [32]byte, fence wi
 		  AND lease_owner = $2
 		  AND lease_version = $3
 		  AND dlq_at IS NULL
-		  AND state IN ($4, $5, $6, $7, $8, $9, $10)
+		  AND state IN ($4, $5, $6, $7, $8, $9, $10, $11)
 	`, batchID[:], fence.Owner, fence.LeaseVersion,
 		int16(withdraw.BatchStatePlanned),
 		int16(withdraw.BatchStateSigning),
 		int16(withdraw.BatchStateSigned),
 		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateJunoConfirmed),
 		int16(withdraw.BatchStateConfirmed),
 		int16(withdraw.BatchStateFinalizing),
 		int16(withdraw.BatchStateFinalized),
@@ -689,11 +690,12 @@ func (s *Store) MarkBatchBroadcastLocked(ctx context.Context, batchID [32]byte, 
 		WHERE batch_id = $1
 		  AND lease_owner = $2
 		  AND lease_version = $3
-		  AND state IN ($4, $5, $6, $7, $8)
+		  AND state IN ($4, $5, $6, $7, $8, $9)
 		  AND dlq_at IS NULL
 	`, batchID[:], fence.Owner, fence.LeaseVersion,
 		int16(withdraw.BatchStateSigned),
 		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateJunoConfirmed),
 		int16(withdraw.BatchStateConfirmed),
 		int16(withdraw.BatchStateFinalizing),
 		int16(withdraw.BatchStateFinalized),
@@ -731,12 +733,13 @@ func (s *Store) SetBatchBroadcasted(ctx context.Context, batchID [32]byte, fence
 		  AND lease_owner = $2
 		  AND lease_version = $3
 		  AND broadcast_locked_at IS NOT NULL
-		  AND state IN ($5, $6, $7, $8, $9)
+		  AND state IN ($5, $6, $7, $8, $9, $10)
 		  AND (juno_txid IS NULL OR juno_txid = $4)
 		  AND dlq_at IS NULL
 	`, batchID[:], fence.Owner, fence.LeaseVersion, txid,
 		int16(withdraw.BatchStateSigned),
 		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateJunoConfirmed),
 		int16(withdraw.BatchStateConfirmed),
 		int16(withdraw.BatchStateFinalizing),
 		int16(withdraw.BatchStateFinalized),
@@ -849,14 +852,17 @@ func (s *Store) MarkBatchJunoConfirmed(ctx context.Context, batchID [32]byte, fe
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET juno_confirmed_at = COALESCE(juno_confirmed_at, now()),
+		SET state = $4,
+			juno_confirmed_at = COALESCE(juno_confirmed_at, now()),
 			updated_at = now()
 		WHERE batch_id = $1
 		  AND lease_owner = $2
 		  AND lease_version = $3
-		  AND state = $4
+		  AND state IN ($5, $4)
 		  AND dlq_at IS NULL
-	`, batchID[:], fence.Owner, fence.LeaseVersion, int16(withdraw.BatchStateBroadcasted))
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStateJunoConfirmed),
+		int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
 		return fmt.Errorf("withdraw/postgres: mark juno confirmed: %w", err)
 	}
@@ -867,7 +873,7 @@ func (s *Store) MarkBatchJunoConfirmed(ctx context.Context, batchID [32]byte, fe
 	if ferr != nil {
 		return ferr
 	}
-	if b.State != withdraw.BatchStateBroadcasted {
+	if b.State != withdraw.BatchStateBroadcasted && b.State != withdraw.BatchStateJunoConfirmed {
 		return withdraw.ErrInvalidTransition
 	}
 	if !b.JunoConfirmedAt.IsZero() {
@@ -905,20 +911,31 @@ func (s *Store) RecordBatchFailure(ctx context.Context, batchID [32]byte, fence 
 	return s.GetBatch(ctx, batchID)
 }
 
-func (s *Store) RecordBatchMarkPaidFailure(ctx context.Context, batchID [32]byte, fence withdraw.Fence, errorMessage string) (withdraw.Batch, error) {
+func (s *Store) RecordBatchMarkPaidFailure(ctx context.Context, batchID [32]byte, fence withdraw.Fence, errorMessage string, nextAttempt time.Time) (withdraw.Batch, error) {
 	if err := fence.Validate(); err != nil {
 		return withdraw.Batch{}, err
 	}
+	if nextAttempt.IsZero() {
+		return withdraw.Batch{}, withdraw.ErrInvalidConfig
+	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET mark_paid_failures = mark_paid_failures + 1,
-			last_mark_paid_error = $4,
+		SET state = $4,
+			juno_confirmed_at = COALESCE(juno_confirmed_at, now()),
+			mark_paid_failures = mark_paid_failures + 1,
+			last_mark_paid_error = $5,
+			next_rebroadcast_at = $6,
 			updated_at = now()
 		WHERE batch_id = $1
 		  AND lease_owner = $2
 		  AND lease_version = $3
+		  AND state IN ($7, $4)
 		  AND dlq_at IS NULL
-	`, batchID[:], fence.Owner, fence.LeaseVersion, errorMessage)
+	`, batchID[:], fence.Owner, fence.LeaseVersion,
+		int16(withdraw.BatchStateJunoConfirmed),
+		errorMessage,
+		nextAttempt.UTC(),
+		int16(withdraw.BatchStateBroadcasted))
 	if err != nil {
 		return withdraw.Batch{}, fmt.Errorf("withdraw/postgres: record mark-paid failure: %w", err)
 	}
@@ -939,6 +956,7 @@ func (s *Store) ResetBatchMarkPaidFailures(ctx context.Context, batchID [32]byte
 		UPDATE withdrawal_batches
 		SET mark_paid_failures = 0,
 			last_mark_paid_error = '',
+			next_rebroadcast_at = NULL,
 			updated_at = now()
 		WHERE batch_id = $1
 		  AND lease_owner = $2
@@ -989,7 +1007,7 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte, fence w
 
 	tag, err := tx.Exec(ctx, `
 		UPDATE withdrawal_batches
-		SET state = CASE WHEN state = $4 THEN $5 ELSE state END,
+		SET state = CASE WHEN state IN ($4, $5) THEN $6 ELSE state END,
 			next_rebroadcast_at = NULL,
 			mark_paid_failures = 0,
 			last_mark_paid_error = '',
@@ -998,10 +1016,11 @@ func (s *Store) SetBatchConfirmed(ctx context.Context, batchID [32]byte, fence w
 		  AND lease_owner = $2
 		  AND lease_version = $3
 		  AND juno_confirmed_at IS NOT NULL
-		  AND state IN ($4, $5, $6, $7)
+		  AND state IN ($4, $5, $6, $7, $8)
 		  AND dlq_at IS NULL
 	`, batchID[:], fence.Owner, fence.LeaseVersion,
 		int16(withdraw.BatchStateBroadcasted),
+		int16(withdraw.BatchStateJunoConfirmed),
 		int16(withdraw.BatchStateConfirmed),
 		int16(withdraw.BatchStateFinalizing),
 		int16(withdraw.BatchStateFinalized),

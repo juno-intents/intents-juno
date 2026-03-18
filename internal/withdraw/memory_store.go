@@ -476,13 +476,14 @@ func (s *MemoryStore) MarkBatchJunoConfirmed(_ context.Context, batchID [32]byte
 	if err != nil {
 		return err
 	}
-	if b.State != BatchStateBroadcasted {
+	if b.State != BatchStateBroadcasted && b.State != BatchStateJunoConfirmed {
 		return ErrInvalidTransition
 	}
 	if b.JunoConfirmedAt.IsZero() {
 		b.JunoConfirmedAt = s.now().UTC()
-		s.batches[batchID] = b
 	}
+	b.State = BatchStateJunoConfirmed
+	s.batches[batchID] = b
 	return nil
 }
 
@@ -507,9 +508,12 @@ func (s *MemoryStore) RecordBatchFailure(_ context.Context, batchID [32]byte, fe
 	return cloneBatch(b), nil
 }
 
-func (s *MemoryStore) RecordBatchMarkPaidFailure(_ context.Context, batchID [32]byte, fence Fence, errorMessage string) (Batch, error) {
+func (s *MemoryStore) RecordBatchMarkPaidFailure(_ context.Context, batchID [32]byte, fence Fence, errorMessage string, nextAttempt time.Time) (Batch, error) {
 	if err := fence.Validate(); err != nil {
 		return Batch{}, err
+	}
+	if nextAttempt.IsZero() {
+		return Batch{}, ErrInvalidConfig
 	}
 
 	s.mu.Lock()
@@ -519,8 +523,13 @@ func (s *MemoryStore) RecordBatchMarkPaidFailure(_ context.Context, batchID [32]
 	if err != nil {
 		return Batch{}, err
 	}
+	if b.JunoConfirmedAt.IsZero() {
+		b.JunoConfirmedAt = s.now().UTC()
+	}
+	b.State = BatchStateJunoConfirmed
 	b.MarkPaidFailures++
 	b.LastMarkPaidError = errorMessage
+	b.NextRebroadcastAt = nextAttempt.UTC()
 	s.batches[batchID] = b
 	return cloneBatch(b), nil
 }
@@ -539,6 +548,7 @@ func (s *MemoryStore) ResetBatchMarkPaidFailures(_ context.Context, batchID [32]
 	}
 	b.MarkPaidFailures = 0
 	b.LastMarkPaidError = ""
+	b.NextRebroadcastAt = time.Time{}
 	s.batches[batchID] = b
 	return nil
 }

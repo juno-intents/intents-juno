@@ -309,6 +309,20 @@ func TestMemoryStore_WithdrawalStatusTransitions(t *testing.T) {
 	if err := s.MarkBatchJunoConfirmed(ctx, batchID, testFence("owner-a")); err != nil {
 		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
 	}
+	batch, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch juno-confirmed: %v", err)
+	}
+	if batch.State != BatchStateJunoConfirmed {
+		t.Fatalf("juno-confirmed state: got %s want %s", batch.State, BatchStateJunoConfirmed)
+	}
+	status, err = s.GetWithdrawalStatus(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawalStatus after juno confirmation: %v", err)
+	}
+	if status != WithdrawalStatusBatched {
+		t.Fatalf("status after juno confirmation: got %s want %s", status, WithdrawalStatusBatched)
+	}
 	if err := s.SetBatchConfirmed(ctx, batchID, testFence("owner-a")); err != nil {
 		t.Fatalf("SetBatchConfirmed: %v", err)
 	}
@@ -486,6 +500,11 @@ func TestMemoryStore_BatchStateMachine(t *testing.T) {
 	}
 	if err := s.MarkBatchJunoConfirmed(ctx, batchID, testFence("a")); err != nil {
 		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
+	if b, err := s.GetBatch(ctx, batchID); err != nil {
+		t.Fatalf("GetBatch after MarkBatchJunoConfirmed: %v", err)
+	} else if b.State != BatchStateJunoConfirmed {
+		t.Fatalf("state after MarkBatchJunoConfirmed: got %s want %s", b.State, BatchStateJunoConfirmed)
 	}
 
 	if err := s.SetBatchConfirmed(ctx, batchID, testFence("a")); err != nil {
