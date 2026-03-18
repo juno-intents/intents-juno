@@ -48,6 +48,8 @@ contract MockPanicVerifier is ISP1Verifier {
 
 contract BridgeTest is Test {
     event WithdrawalPaidRecorded(bytes32 indexed withdrawalId);
+    event WithdrawalPaidSkipped(bytes32 indexed withdrawalId, uint8 reason);
+    event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId, uint8 reason);
     event CheckpointAccepted(uint64 indexed height, bytes32 indexed blockHash, bytes32 indexed finalOrchardRoot);
 
     WJuno private token;
@@ -296,7 +298,7 @@ contract BridgeTest is Test {
         assertTrue(bridge.depositUsed(depositId));
     }
 
-    function test_requestWithdraw_andRefund() public {
+    function test_requestWithdraw_refundDisabled_beforeAndAfterExpiry() public {
         address alice = makeAddr("alice");
         uint256 amount = 50_000;
 
@@ -313,17 +315,18 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(alice), 0);
         assertEq(token.balanceOf(address(bridge)), amount);
 
-        vm.expectRevert(Bridge.WithdrawNotExpired.selector);
+        vm.expectRevert(Bridge.RefundDisabled.selector);
         bridge.refund(wid);
 
         vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        vm.expectRevert(Bridge.RefundDisabled.selector);
         bridge.refund(wid);
 
-        assertEq(token.balanceOf(alice), amount);
-        assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(token.balanceOf(alice), 0);
+        assertEq(token.balanceOf(address(bridge)), amount);
     }
 
-    function test_refund_allowed_whilePaused_afterExpiry() public {
+    function test_refund_disabled_whilePaused_afterExpiry() public {
         address alice = makeAddr("alice");
         uint256 amount = 50_000;
 
@@ -337,12 +340,13 @@ contract BridgeTest is Test {
 
         bridge.pause();
         vm.warp(block.timestamp + REFUND_WINDOW + 1);
+        vm.expectRevert(Bridge.RefundDisabled.selector);
         bridge.refund(wid);
 
-        assertEq(token.balanceOf(alice), amount);
+        assertEq(token.balanceOf(alice), 0);
     }
 
-    function test_markWithdrawPaidBatch_recordsMetadata_withoutBlockingRefundOrLateFinalize() public {
+    function test_markWithdrawPaidBatch_recordsMetadata_and_allowsFinalizeAfterExpiry() public {
         address alice = makeAddr("alice");
         uint256 amount = 100_000;
 
@@ -387,16 +391,79 @@ contract BridgeTest is Test {
 
         bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
-        vm.expectRevert(Bridge.WithdrawalExpired.selector);
         vm.prank(relayer);
         bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"05", journal);
 
+        vm.expectRevert(Bridge.RefundDisabled.selector);
         bridge.refund(wid);
 
-        assertEq(token.balanceOf(alice), amount);
-        assertEq(token.balanceOf(relayer), 0);
-        assertEq(token.balanceOf(address(distributor)), 0);
+        assertEq(token.balanceOf(alice), 0);
+        assertEq(token.balanceOf(relayer), tip);
+        assertEq(token.balanceOf(address(distributor)), feeToDist);
         assertEq(token.balanceOf(address(bridge)), 0);
+    }
+
+    function test_markWithdrawPaidBatch_skipsFinalizedAndAlreadyPaidItems() public {
+        address alice = makeAddr("alice");
+        address bob = makeAddr("bob");
+        uint256 amount = 100_000;
+
+        vm.prank(address(bridge));
+        token.mint(alice, amount);
+        vm.prank(address(bridge));
+        token.mint(bob, amount);
+
+        bytes memory uaAlice = bytes("uaddr1-alice");
+        bytes memory uaBob = bytes("uaddr1-bob");
+
+        vm.startPrank(alice);
+        token.approve(address(bridge), amount);
+        bytes32 widAlice = bridge.requestWithdraw(amount, uaAlice);
+        vm.stopPrank();
+
+        vm.startPrank(bob);
+        token.approve(address(bridge), amount);
+        bytes32 widBob = bridge.requestWithdraw(amount, uaBob);
+        vm.stopPrank();
+
+        bytes32[] memory aliceOnly = new bytes32[](1);
+        aliceOnly[0] = widAlice;
+        bytes32 aliceOnlyHash = keccak256(abi.encodePacked(aliceOnly));
+        bytes[] memory alicePaidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(aliceOnlyHash), _firstN(3));
+        bridge.markWithdrawPaidBatch(aliceOnly, alicePaidSigs);
+
+        uint256 fee = (amount * FEE_BPS) / 10_000;
+        uint256 net = amount - fee;
+        Bridge.Checkpoint memory cp = _checkpoint();
+        Bridge.FinalizeItem[] memory items = new Bridge.FinalizeItem[](1);
+        items[0] = Bridge.FinalizeItem({withdrawalId: widBob, recipientUAHash: keccak256(uaBob), netAmount: net});
+        bytes memory journal = abi.encode(
+            Bridge.WithdrawJournal({
+                finalOrchardRoot: cp.finalOrchardRoot,
+                baseChainId: cp.baseChainId,
+                bridgeContract: cp.bridgeContract,
+                items: items
+            })
+        );
+        verifier.setExpected(WITHDRAW_IMAGE_ID, journal, true);
+        bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
+        vm.prank(relayer);
+        bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"07", journal);
+
+        bytes32[] memory ids = new bytes32[](2);
+        ids[0] = widAlice;
+        ids[1] = widBob;
+        bytes32 idsHash = keccak256(abi.encodePacked(ids));
+        bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
+
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalPaidSkipped(widAlice, 2);
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawalPaidSkipped(widBob, 1);
+        bridge.markWithdrawPaidBatch(ids, paidSigs);
+
+        assertTrue(bridge.withdrawalPaid(widAlice));
+        assertFalse(bridge.withdrawalPaid(widBob));
     }
 
     function test_markWithdrawPaidBatch_requiresQuorumSignatures() public {
@@ -474,7 +541,7 @@ contract BridgeTest is Test {
         assertEq(token.balanceOf(address(bridge)), 0);
     }
 
-    function test_finalizeWithdrawBatch_skipsRefundedItemsAndFinalizesRemaining() public {
+    function test_finalizeWithdrawBatch_skipsExpiredUnpaidItemsAndFinalizesPaidExpiredItems() public {
         address alice = makeAddr("alice");
         address bob = makeAddr("bob");
         uint256 amount = 100_000;
@@ -499,14 +566,11 @@ contract BridgeTest is Test {
 
         bytes32[] memory ids = new bytes32[](1);
         ids[0] = widAlice;
-        (,, uint64 aliceExpiry,,,,) = bridge.getWithdrawal(widAlice);
-        uint64 extendedExpiry = aliceExpiry + MAX_EXTEND;
         bytes32 idsHash = keccak256(abi.encodePacked(ids));
-        bytes[] memory extendSigs = _sortedSigs(bridge.extendWithdrawDigest(idsHash, extendedExpiry), _firstN(3));
-        bridge.extendWithdrawExpiryBatch(ids, extendedExpiry, extendSigs);
+        bytes[] memory paidSigs = _sortedSigs(bridge.markWithdrawPaidDigest(idsHash), _firstN(3));
+        bridge.markWithdrawPaidBatch(ids, paidSigs);
 
         vm.warp(block.timestamp + REFUND_WINDOW + 1);
-        bridge.refund(widBob);
 
         uint256 fee = (amount * FEE_BPS) / 10_000;
         uint256 tip = (fee * TIP_BPS) / 10_000;
@@ -529,18 +593,20 @@ contract BridgeTest is Test {
 
         bytes[] memory checkpointSigs = _sortedSigs(bridge.checkpointDigest(cp), _firstN(3));
 
+        vm.expectEmit(true, false, false, true);
+        emit WithdrawFinalizedSkipped(widBob, 4);
         vm.prank(relayer);
         bridge.finalizeWithdrawBatch(cp, checkpointSigs, hex"06", journal);
 
         assertEq(token.balanceOf(relayer), tip);
         assertEq(token.balanceOf(address(distributor)), feeToDist);
-        assertEq(token.balanceOf(address(bridge)), 0);
+        assertEq(token.balanceOf(address(bridge)), amount);
 
         (,,,, bool finalizedAlice,,) = bridge.getWithdrawal(widAlice);
         (,,,, bool finalizedBob, bool refundedBob,) = bridge.getWithdrawal(widBob);
         assertTrue(finalizedAlice);
         assertFalse(finalizedBob);
-        assertTrue(refundedBob);
+        assertFalse(refundedBob);
     }
 
     function test_mintBatch_emitsCheckpointAccepted() public {

@@ -161,7 +161,7 @@ contract BridgeFlowIntegrationTest is Test {
 
         vm.warp(block.timestamp + REFUND_WINDOW + 1);
 
-        vm.expectRevert(Bridge.WithdrawalPaid.selector);
+        vm.expectRevert(Bridge.RefundDisabled.selector);
         bridge.refund(wid);
 
         Bridge.Checkpoint memory cp = _checkpoint();

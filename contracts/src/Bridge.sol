@@ -29,6 +29,7 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     error WithdrawalRefunded();
     error WithdrawalExpired();
     error WithdrawNotExpired();
+    error RefundDisabled();
     error NetAmountMismatch();
     error WithdrawalRecipientMismatch();
     error ZeroImageId();
@@ -112,6 +113,13 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
     bytes32 private constant MARK_WITHDRAW_PAID_TYPEHASH =
         keccak256("MarkWithdrawPaid(bytes32 withdrawalIdsHash,uint256 baseChainId,address bridgeContract)");
 
+    uint8 private constant WITHDRAW_PAID_SKIP_FINALIZED = 1;
+    uint8 private constant WITHDRAW_PAID_SKIP_ALREADY_PAID = 2;
+    uint8 private constant WITHDRAW_PAID_SKIP_REFUNDED = 3;
+    uint8 private constant WITHDRAW_FINALIZE_SKIP_FINALIZED = 1;
+    uint8 private constant WITHDRAW_FINALIZE_SKIP_REFUNDED = 2;
+    uint8 private constant WITHDRAW_FINALIZE_SKIP_EXPIRED_UNPAID = 4;
+
     // -------- State --------
     WJuno public immutable wjuno;
     FeeDistributor public immutable feeDistributor;
@@ -167,10 +175,11 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         uint96 feeBps
     );
     event WithdrawFinalized(bytes32 indexed withdrawalId, uint256 netAmount, uint256 fee, uint256 relayerTip);
-    event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId);
+    event WithdrawFinalizedSkipped(bytes32 indexed withdrawalId, uint8 reason);
     event WithdrawRefunded(bytes32 indexed withdrawalId);
     event WithdrawExpiryExtended(bytes32 indexed withdrawalId, uint64 oldExpiry, uint64 newExpiry);
     event WithdrawalPaidRecorded(bytes32 indexed withdrawalId);
+    event WithdrawalPaidSkipped(bytes32 indexed withdrawalId, uint8 reason);
     event CheckpointAccepted(uint64 indexed height, bytes32 indexed blockHash, bytes32 indexed finalOrchardRoot);
 
     constructor(
@@ -476,8 +485,18 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             bytes32 withdrawalId = withdrawalIds[i];
             Withdrawal storage w = _withdrawals[withdrawalId];
             if (w.requester == address(0)) revert WithdrawalNotFound();
-            if (w.finalized || withdrawalPaid[withdrawalId]) continue;
-            if (w.refunded) revert WithdrawalRefunded();
+            if (w.finalized) {
+                emit WithdrawalPaidSkipped(withdrawalId, WITHDRAW_PAID_SKIP_FINALIZED);
+                continue;
+            }
+            if (withdrawalPaid[withdrawalId]) {
+                emit WithdrawalPaidSkipped(withdrawalId, WITHDRAW_PAID_SKIP_ALREADY_PAID);
+                continue;
+            }
+            if (w.refunded) {
+                emit WithdrawalPaidSkipped(withdrawalId, WITHDRAW_PAID_SKIP_REFUNDED);
+                continue;
+            }
 
             withdrawalPaid[withdrawalId] = true;
             emit WithdrawalPaidRecorded(withdrawalId);
@@ -512,14 +531,17 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
             if (w.requester == address(0)) revert WithdrawalNotFound();
 
             if (w.finalized) {
-                emit WithdrawFinalizedSkipped(it.withdrawalId);
+                emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_FINALIZED);
                 continue;
             }
             if (w.refunded) {
-                emit WithdrawFinalizedSkipped(it.withdrawalId);
+                emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_REFUNDED);
                 continue;
             }
-            if (block.timestamp >= w.expiry) revert WithdrawalExpired();
+            if (block.timestamp >= w.expiry && !withdrawalPaid[it.withdrawalId]) {
+                emit WithdrawFinalizedSkipped(it.withdrawalId, WITHDRAW_FINALIZE_SKIP_EXPIRED_UNPAID);
+                continue;
+            }
 
             if (it.recipientUAHash != keccak256(w.recipientUA)) revert WithdrawalRecipientMismatch();
 
@@ -543,18 +565,9 @@ contract Bridge is Ownable2Step, Pausable, ReentrancyGuard, EIP712 {
         _recordCheckpoint(checkpoint);
     }
 
-    /// @notice Refund remains callable while paused so expired withdrawals can still be recovered
-    /// during operational incidents. Pausing blocks new bridge-side progress, not user recovery.
     function refund(bytes32 withdrawalId) external nonReentrant {
-        Withdrawal storage w = _withdrawals[withdrawalId];
-        if (w.requester == address(0)) revert WithdrawalNotFound();
-        if (w.finalized) revert WithdrawalFinalized();
-        if (w.refunded) revert WithdrawalRefunded();
-        if (block.timestamp < w.expiry) revert WithdrawNotExpired();
-
-        w.refunded = true;
-        IERC20(address(wjuno)).safeTransfer(w.requester, w.amount);
-        emit WithdrawRefunded(withdrawalId);
+        withdrawalId;
+        revert RefundDisabled();
     }
 
     // -------- Views --------
