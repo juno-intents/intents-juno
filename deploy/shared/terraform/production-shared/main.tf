@@ -764,6 +764,29 @@ data "aws_iam_policy_document" "proof_requestor_task_access" {
   }
 
   statement {
+    sid = "AllowMSKTopicAccess"
+    actions = [
+      "kafka-cluster:CreateTopic",
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:DescribeTopicDynamicConfiguration",
+      "kafka-cluster:AlterTopic",
+      "kafka-cluster:ReadData",
+      "kafka-cluster:WriteData",
+      "kafka-cluster:WriteDataIdempotently",
+    ]
+    resources = ["${local.shared_kafka_topic_arn_prefix}/*"]
+  }
+
+  statement {
+    sid = "AllowMSKGroupAccess"
+    actions = [
+      "kafka-cluster:AlterGroup",
+      "kafka-cluster:DescribeGroup",
+    ]
+    resources = ["${local.shared_kafka_group_arn_prefix}/*"]
+  }
+
+  statement {
     sid = "AllowReadProofRequestsTopic"
     actions = [
       "kafka-cluster:DescribeTopic",
