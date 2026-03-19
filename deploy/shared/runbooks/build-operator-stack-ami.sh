@@ -1677,6 +1677,10 @@ deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
 deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
+deposit_max_age="${DEPOSIT_RELAYER_MAX_AGE:-3m}"
+deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-7m}"
+deposit_flush_interval="${DEPOSIT_RELAYER_FLUSH_INTERVAL:-1s}"
+deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-5m}"
 
 args=(
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
@@ -1688,6 +1692,10 @@ args=(
   --deposit-image-id "${DEPOSIT_IMAGE_ID}"
   --base-relayer-url "${BASE_RELAYER_URL}"
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
+  --max-age "${deposit_max_age}"
+  --claim-ttl "${deposit_claim_ttl}"
+  --flush-interval "${deposit_flush_interval}"
+  --submit-timeout "${deposit_submit_timeout}"
   --max-items "${deposit_max_items}"
   --owner "${deposit_owner}"
   --proof-driver queue
