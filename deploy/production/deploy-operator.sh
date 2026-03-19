@@ -292,7 +292,12 @@ aws_describe_instance_field() {
 
 resolve_dkg_peer_host_from_manifest() {
   local manifest="$1"
-  local host profile region
+  local private_host host profile region
+  private_host="$(jq -r '(.private_endpoint // .operator_probe_host) // empty' "$manifest")"
+  if [[ -n "$private_host" ]]; then
+    printf '%s\n' "$private_host"
+    return 0
+  fi
   host="$(jq -r '(.operator_host // .public_endpoint) // empty' "$manifest")"
   [[ -n "$host" ]] || die "peer operator manifest missing operator_host/public_endpoint: $manifest"
   profile="$(jq -r '.aws_profile // empty' "$manifest")"

@@ -568,6 +568,117 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_prefers_manifest_private_endpoints_for_dkg_peer_hosts() {
+  local workdir output_dir manifest state_file log_dir fake_bin cert_b64 key_b64
+  local peer_manifest_one peer_manifest_two dkg_peer_hosts
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  log_dir="$workdir/logs"
+  fake_bin="$workdir/bin"
+  mkdir -p "$log_dir" "$fake_bin"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cert_b64="$(printf 'test-cert' | base64 | tr -d '\n')"
+  key_b64="$(printf 'test-key' | base64 | tr -d '\n')"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=env:TEST_BASE_RELAYER_AUTH_TOKEN
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_CERT_PEM_B64=literal:%s\n' "$cert_b64" >>"$workdir/operator-secrets.env"
+  printf 'BASE_RELAYER_TLS_KEY_PEM_B64=literal:%s\n' "$key_b64" >>"$workdir/operator-secrets.env"
+  export TEST_BASE_RELAYER_AUTH_TOKEN="token"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
+
+  manifest="$output_dir/alpha/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  state_file="$output_dir/alpha/rollout-state.json"
+  peer_manifest_one="$output_dir/alpha/operators/0x2222222222222222222222222222222222222222/operator-deploy.json"
+  peer_manifest_two="$output_dir/alpha/operators/0x3333333333333333333333333333333333333333/operator-deploy.json"
+  mkdir -p "$(dirname "$peer_manifest_one")" "$(dirname "$peer_manifest_two")"
+  jq -n '{
+    operator_id: "0x2222222222222222222222222222222222222222",
+    operator_host: "203.0.113.22",
+    public_endpoint: "203.0.113.22",
+    private_endpoint: "10.9.0.22",
+    operator_probe_host: "10.9.0.22",
+    aws_profile: "juno",
+    aws_region: "us-east-1"
+  }' >"$peer_manifest_one"
+  jq -n '{
+    operator_id: "0x3333333333333333333333333333333333333333",
+    operator_host: "203.0.113.33",
+    public_endpoint: "203.0.113.33",
+    private_endpoint: "10.9.0.33",
+    operator_probe_host: "10.9.0.33",
+    aws_profile: "juno",
+    aws_region: "us-east-1"
+  }' >"$peer_manifest_two"
+
+  cat >"$fake_bin/scp" <<EOF
+#!/usr/bin/env bash
+printf 'scp %s\n' "\$*" >>"$log_dir/scp.log"
+for arg in "\$@"; do
+  if [[ -f "\$arg" ]]; then
+    cp "\$arg" "$log_dir/\$(basename "\$arg")"
+  fi
+done
+exit 0
+EOF
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_dir/ssh.log"
+stdin_file="$log_dir/ssh.stdin.capture"
+cat >"\$stdin_file" || true
+cat "\$stdin_file" >>"$log_dir/ssh.stdin"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+elif [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":5000,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":0,"to_height":5000,"scanned_from":0,"scanned_to":5000,"next_height":5001,"inserted_notes":1,"inserted_events":2}'
+fi
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+if [[ "\$*" == *"describe-instances"* ]]; then
+  printf '10.0.0.11\n'
+  exit 0
+fi
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  dkg_peer_hosts="$(cat "$log_dir/dkg-peer-hosts.json")"
+  assert_eq "$(jq -r '.[] | select(.operator_id=="0x2222222222222222222222222222222222222222") | .host' <<<"$dkg_peer_hosts")" "10.9.0.22" "deploy uses manifest private endpoint for peer one"
+  assert_eq "$(jq -r '.[] | select(.operator_id=="0x3333333333333333333333333333333333333333") | .host' <<<"$dkg_peer_hosts")" "10.9.0.33" "deploy uses manifest private endpoint for peer two"
+  assert_eq "$(jq -r '.[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .host' <<<"$dkg_peer_hosts")" "10.0.0.11" "deploy still resolves the current operator host for local tls identity"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11" "deploy still resolves the current operator host for local tls identity"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "rollout status"
+  rm -rf "$workdir"
+}
+
 test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state() {
   local workdir output_dir log_dir fake_bin manifest state_file cert_b64 key_b64
   workdir="$(mktemp -d)"
@@ -1045,6 +1156,7 @@ main() {
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_respects_scan_backfill_from_height_override
   test_deploy_operator_stages_distributed_dkg_server_tls
+  test_deploy_operator_prefers_manifest_private_endpoints_for_dkg_peer_hosts
   test_deploy_operator_dry_run_does_not_mutate_rollout_or_remote_state
   test_deploy_operator_rejects_underfunded_base_relayer_before_rollout
   test_deploy_operator_force_reruns_done_operator
