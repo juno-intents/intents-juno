@@ -2706,6 +2706,7 @@ write_bootstrap_metadata() {
     }' > "\$HOME/operator-stack-bootstrap.json"
 }
 
+run_with_retry sudo dpkg --configure -a
 run_with_retry sudo apt-get update -y
 run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl unzip
 run_with_retry install_aws_cli

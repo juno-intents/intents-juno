@@ -19,6 +19,20 @@ assert_not_contains() {
   fi
 }
 
+assert_line_order() {
+  local haystack="$1"
+  local first="$2"
+  local second="$3"
+  local msg="$4"
+  local first_line second_line
+  first_line="$(printf '%s\n' "$haystack" | nl -ba | grep -F "$first" | head -n1 | awk '{print $1}')"
+  second_line="$(printf '%s\n' "$haystack" | nl -ba | grep -F "$second" | head -n1 | awk '{print $1}')"
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    printf 'assert_line_order failed: %s: first=%q second=%q first_line=%q second_line=%q\n' "$msg" "$first" "$second" "$first_line" "$second_line" >&2
+    exit 1
+  fi
+}
+
 extract_block() {
   local start="$1"
   local end="$2"
@@ -141,6 +155,15 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   assert_contains "$hydrator_unit" "EnvironmentFile=-/etc/intents-juno/operator-stack-hydrator.env" "config hydrator loads env file"
   assert_contains "$hydrator_unit" "ReadWritePaths=/etc/intents-juno /var/lib/intents-juno" "config hydrator scopes write paths"
   assert_standard_hardening "$hydrator_unit" "intents-juno-config-hydrator.service"
+}
+
+test_build_operator_stack_ami_repairs_dpkg_before_apt() {
+  local script_text
+  script_text="$(cat "$RUNBOOK_PATH")"
+
+  assert_contains "$script_text" 'run_with_retry sudo dpkg --configure -a' "builder repairs interrupted dpkg state before package installs"
+  assert_line_order "$script_text" 'run_with_retry sudo dpkg --configure -a' 'run_with_retry sudo apt-get update -y' "builder repairs dpkg before apt update"
+  assert_line_order "$script_text" 'run_with_retry sudo dpkg --configure -a' 'run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl unzip' "builder repairs dpkg before apt install"
 }
 
 test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
@@ -900,6 +923,7 @@ EOF
 
 main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
+  test_build_operator_stack_ami_repairs_dpkg_before_apt
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
