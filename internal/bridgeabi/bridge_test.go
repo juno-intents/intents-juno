@@ -2,15 +2,33 @@ package bridgeabi
 
 import (
 	"bytes"
+	"context"
 	"math/big"
 	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
+
+type stubLogFilterer struct {
+	t      *testing.T
+	logsFn func(q ethereum.FilterQuery) ([]types.Log, error)
+	queries []ethereum.FilterQuery
+}
+
+func (s *stubLogFilterer) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	s.t.Helper()
+	s.queries = append(s.queries, q)
+	if s.logsFn != nil {
+		return s.logsFn(q)
+	}
+	return nil, nil
+}
 
 func mustType(t *testing.T, typ string, comps []abi.ArgumentMarshaling) abi.Type {
 	t.Helper()
@@ -163,5 +181,97 @@ func TestPackMintBatchCalldata_UnpackMatches(t *testing.T) {
 	// Journal is passed verbatim as bytes.
 	if got := vals[3].([]byte); !bytes.Equal(got, journal) {
 		t.Fatalf("journal bytes mismatch")
+	}
+}
+
+func TestFindMintedDepositTxHashes_ChunksLargeLookbackAndStopsOnceFound(t *testing.T) {
+	t.Parallel()
+
+	if err := initABI(); err != nil {
+		t.Fatalf("initABI: %v", err)
+	}
+	mintedEvent := bridgeABI.Events["Minted"]
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000abc")
+	depositID := [32]byte{0x11}
+	mintedTxHash := common.HexToHash("0x1234")
+	toBlock := big.NewInt(25_000)
+
+	filterer := &stubLogFilterer{t: t}
+	filterer.logsFn = func(q ethereum.FilterQuery) ([]types.Log, error) {
+		if q.FromBlock == nil || q.ToBlock == nil {
+			t.Fatalf("expected bounded block window, got from=%v to=%v", q.FromBlock, q.ToBlock)
+		}
+		if q.ToBlock.Uint64()-q.FromBlock.Uint64() > 9_999 {
+			t.Fatalf("unexpected oversized block window: from=%s to=%s", q.FromBlock.String(), q.ToBlock.String())
+		}
+		if q.FromBlock.Uint64() == 15_001 && q.ToBlock.Uint64() == 25_000 {
+			return []types.Log{{
+				Address:     bridge,
+				Topics:      []common.Hash{mintedEvent.ID, common.BytesToHash(depositID[:])},
+				BlockNumber: 24_999,
+				TxHash:      mintedTxHash,
+			}}, nil
+		}
+		return nil, nil
+	}
+
+	got, err := FindMintedDepositTxHashes(context.Background(), filterer, bridge, [][32]byte{depositID}, toBlock)
+	if err != nil {
+		t.Fatalf("FindMintedDepositTxHashes: %v", err)
+	}
+	if len(filterer.queries) != 1 {
+		t.Fatalf("query count: got %d want %d", len(filterer.queries), 1)
+	}
+	if got[depositID] != [32]byte(mintedTxHash) {
+		t.Fatalf("minted tx hash: got %x want %x", got[depositID], [32]byte(mintedTxHash))
+	}
+}
+
+func TestFindMintedDepositTxHashes_WalksBackMultipleWindows(t *testing.T) {
+	t.Parallel()
+
+	if err := initABI(); err != nil {
+		t.Fatalf("initABI: %v", err)
+	}
+	mintedEvent := bridgeABI.Events["Minted"]
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000abc")
+	depositID := [32]byte{0x22}
+	mintedTxHash := common.HexToHash("0x5678")
+	toBlock := big.NewInt(25_000)
+
+	filterer := &stubLogFilterer{t: t}
+	filterer.logsFn = func(q ethereum.FilterQuery) ([]types.Log, error) {
+		if q.FromBlock == nil || q.ToBlock == nil {
+			t.Fatalf("expected bounded block window, got from=%v to=%v", q.FromBlock, q.ToBlock)
+		}
+		if q.ToBlock.Uint64()-q.FromBlock.Uint64() > 9_999 {
+			t.Fatalf("unexpected oversized block window: from=%s to=%s", q.FromBlock.String(), q.ToBlock.String())
+		}
+		if q.FromBlock.Uint64() == 5_001 && q.ToBlock.Uint64() == 15_000 {
+			return []types.Log{{
+				Address:     bridge,
+				Topics:      []common.Hash{mintedEvent.ID, common.BytesToHash(depositID[:])},
+				BlockNumber: 14_999,
+				TxHash:      mintedTxHash,
+			}}, nil
+		}
+		return nil, nil
+	}
+
+	got, err := FindMintedDepositTxHashes(context.Background(), filterer, bridge, [][32]byte{depositID}, toBlock)
+	if err != nil {
+		t.Fatalf("FindMintedDepositTxHashes: %v", err)
+	}
+	if len(filterer.queries) != 2 {
+		t.Fatalf("query count: got %d want %d", len(filterer.queries), 2)
+	}
+	if first := filterer.queries[0]; first.FromBlock.Uint64() != 15_001 || first.ToBlock.Uint64() != 25_000 {
+		t.Fatalf("first query: got from=%s to=%s", first.FromBlock.String(), first.ToBlock.String())
+	}
+	if second := filterer.queries[1]; second.FromBlock.Uint64() != 5_001 || second.ToBlock.Uint64() != 15_000 {
+		t.Fatalf("second query: got from=%s to=%s", second.FromBlock.String(), second.ToBlock.String())
+	}
+	if got[depositID] != [32]byte(mintedTxHash) {
+		t.Fatalf("minted tx hash: got %x want %x", got[depositID], [32]byte(mintedTxHash))
 	}
 }

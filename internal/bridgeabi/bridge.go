@@ -405,27 +405,62 @@ func FindMintedDepositTxHashes(
 		topics = append(topics, common.BytesToHash(id[:]))
 	}
 
-	logs, err := filterer.FilterLogs(ctx, ethereum.FilterQuery{
-		Addresses: []common.Address{bridge},
-		Topics:    [][]common.Hash{{mintedEvent.ID}, topics},
-		ToBlock:   toBlock,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("bridgeabi: filter minted deposit logs: %w", err)
-	}
-
 	byDeposit := make(map[[32]byte]types.Log, len(ids))
-	for _, lg := range logs {
-		if lg.Address != bridge || len(lg.Topics) == 0 || lg.Topics[0] != mintedEvent.ID {
-			continue
+	if toBlock == nil {
+		logs, err := filterer.FilterLogs(ctx, ethereum.FilterQuery{
+			Addresses: []common.Address{bridge},
+			Topics:    [][]common.Hash{{mintedEvent.ID}, topics},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("bridgeabi: filter minted deposit logs: %w", err)
 		}
-		if len(lg.Topics) < 2 {
-			return nil, fmt.Errorf("%w: Minted log missing indexed deposit id", ErrInvalidInput)
+		if err := collectMintedDepositLogs(byDeposit, logs, bridge, mintedEvent.ID); err != nil {
+			return nil, err
 		}
-		depositID := [32]byte(lg.Topics[1])
-		prev, ok := byDeposit[depositID]
-		if !ok || logComesEarlier(lg, prev) {
-			byDeposit[depositID] = lg
+	} else {
+		remaining := append([][32]byte(nil), ids...)
+		currentTo := new(big.Int).Set(toBlock)
+		maxSpan := big.NewInt(9_999)
+		one := big.NewInt(1)
+		zero := big.NewInt(0)
+
+		// Duplicate-skipped deposits come from near-concurrent submissions.
+		// Walk backward in 10k-block windows and stop once every requested
+		// deposit id has its Minted log, instead of issuing one genesis-sized
+		// query that public Base endpoints reject.
+		for currentTo.Cmp(zero) >= 0 && len(remaining) > 0 {
+			currentFrom := new(big.Int).Sub(currentTo, maxSpan)
+			if currentFrom.Sign() < 0 {
+				currentFrom = new(big.Int)
+			}
+			windowTopics := make([]common.Hash, 0, len(remaining))
+			for _, id := range remaining {
+				windowTopics = append(windowTopics, common.BytesToHash(id[:]))
+			}
+			logs, err := filterer.FilterLogs(ctx, ethereum.FilterQuery{
+				Addresses: []common.Address{bridge},
+				Topics:    [][]common.Hash{{mintedEvent.ID}, windowTopics},
+				FromBlock: new(big.Int).Set(currentFrom),
+				ToBlock:   new(big.Int).Set(currentTo),
+			})
+			if err != nil {
+				return nil, fmt.Errorf("bridgeabi: filter minted deposit logs: %w", err)
+			}
+			if err := collectMintedDepositLogs(byDeposit, logs, bridge, mintedEvent.ID); err != nil {
+				return nil, err
+			}
+			nextRemaining := remaining[:0]
+			for _, id := range remaining {
+				if _, ok := byDeposit[id]; ok {
+					continue
+				}
+				nextRemaining = append(nextRemaining, id)
+			}
+			remaining = append([][32]byte(nil), nextRemaining...)
+			if currentFrom.Sign() == 0 {
+				break
+			}
+			currentTo = new(big.Int).Sub(currentFrom, one)
 		}
 	}
 
@@ -434,6 +469,23 @@ func FindMintedDepositTxHashes(
 		out[depositID] = [32]byte(lg.TxHash)
 	}
 	return out, nil
+}
+
+func collectMintedDepositLogs(byDeposit map[[32]byte]types.Log, logs []types.Log, bridge common.Address, mintedEventID common.Hash) error {
+	for _, lg := range logs {
+		if lg.Address != bridge || len(lg.Topics) == 0 || lg.Topics[0] != mintedEventID {
+			continue
+		}
+		if len(lg.Topics) < 2 {
+			return fmt.Errorf("%w: Minted log missing indexed deposit id", ErrInvalidInput)
+		}
+		depositID := [32]byte(lg.Topics[1])
+		prev, ok := byDeposit[depositID]
+		if !ok || logComesEarlier(lg, prev) {
+			byDeposit[depositID] = lg
+		}
+	}
+	return nil
 }
 
 func logComesEarlier(a, b types.Log) bool {
