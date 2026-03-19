@@ -1977,10 +1977,10 @@ resource "aws_instance" "wireguard_gateway" {
     SYSEOF
     sysctl --system >/dev/null
 
-    systemctl enable dnsmasq
-    systemctl restart dnsmasq
     systemctl enable wg-quick@wg0
     systemctl restart wg-quick@wg0
+    systemctl enable dnsmasq
+    systemctl restart dnsmasq
 
     client_config="$(cat <<CFGEOF
     [Interface]

@@ -77,6 +77,14 @@ main() {
   assert_contains "$main_tf" 'dnsmasq' "production-shared configures dnsmasq for backoffice hostname resolution"
   assert_contains "$main_tf" 'address=/${var.shared_wireguard_backoffice_hostname}/${var.shared_wireguard_backoffice_private_endpoint}' "production-shared maps the backoffice hostname to the private app endpoint over wireguard"
   assert_contains "$main_tf" 'secretsmanager put-secret-value --secret-id "$wireguard_client_config_secret_arn"' "production-shared uploads the generated wireguard client config into Secrets Manager"
+  local wg_restart_line
+  local dnsmasq_restart_line
+  wg_restart_line="$(printf '%s\n' "$main_tf" | grep -n 'systemctl restart wg-quick@wg0' | cut -d: -f1)"
+  dnsmasq_restart_line="$(printf '%s\n' "$main_tf" | grep -n 'systemctl restart dnsmasq' | cut -d: -f1)"
+  if (( dnsmasq_restart_line <= wg_restart_line )); then
+    printf 'wireguard ordering assertion failed: production-shared must start wg0 before dnsmasq (wg=%s dns=%s)\n' "$wg_restart_line" "$dnsmasq_restart_line" >&2
+    exit 1
+  fi
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "production-shared exposes shared proof requestor address input"
   assert_contains "$variables_tf" 'variable "shared_ipfs_data_volume_size_gb"' "production-shared exposes dedicated IPFS data volume sizing"
   assert_contains "$variables_tf" 'variable "shared_wireguard_public_subnet_id"' "production-shared exposes the dedicated wireguard public subnet input"

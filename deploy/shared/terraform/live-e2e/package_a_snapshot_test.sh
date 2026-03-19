@@ -102,6 +102,14 @@ main() {
   assert_contains "$main_tf" "aws --region \${var.aws_region} ec2 describe-instances --instance-ids \"\$instance_id\"" "live-e2e waits for the elastic ip to appear via ec2 instead of relying on early imds public-ipv4"
   assert_contains "$main_tf" 'address=/${var.shared_wireguard_backoffice_hostname}/$${wireguard_backoffice_private_endpoint}' "live-e2e maps the backoffice hostname to the private app endpoint over wireguard"
   assert_contains "$main_tf" 'secretsmanager put-secret-value --secret-id "$wireguard_client_config_secret_arn"' "live-e2e uploads the generated wireguard client config into Secrets Manager"
+  local wg_restart_line
+  local dnsmasq_restart_line
+  wg_restart_line="$(printf '%s\n' "$main_tf" | grep -n 'systemctl restart wg-quick@wg0' | cut -d: -f1)"
+  dnsmasq_restart_line="$(printf '%s\n' "$main_tf" | grep -n 'systemctl restart dnsmasq' | cut -d: -f1)"
+  if (( dnsmasq_restart_line <= wg_restart_line )); then
+    printf 'wireguard ordering assertion failed: live-e2e must start wg0 before dnsmasq (wg=%s dns=%s)\n' "$wg_restart_line" "$dnsmasq_restart_line" >&2
+    exit 1
+  fi
   assert_contains "$main_tf" 'Sid    = "AllowSharedIPFSSecretRead"' "live-e2e runner/operator role can read the shared IPFS bearer token secret"
   assert_contains "$main_tf" '"kafka-cluster:Connect"' "live-e2e grants kafka connect permissions to proof task roles"
   assert_contains "$main_tf" 'resources = [local.shared_kafka_cluster_arn]' "live-e2e proof task roles re-use the guarded MSK cluster arn"
