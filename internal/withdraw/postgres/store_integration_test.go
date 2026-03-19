@@ -309,6 +309,72 @@ func TestStore_FencedBatchMutationAndFailureBookkeeping(t *testing.T) {
 	}
 }
 
+func TestStore_EnsureSchema_UpgradesLegacyWithdrawalBatchesWithoutDLQColumn(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	if _, err := pool.Exec(ctx, `
+CREATE TABLE withdrawal_batches (
+	batch_id BYTEA PRIMARY KEY,
+	state SMALLINT NOT NULL,
+	tx_plan BYTEA NOT NULL,
+	signed_tx BYTEA,
+	juno_txid TEXT,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+	CONSTRAINT batch_id_len CHECK (octet_length(batch_id) = 32),
+	CONSTRAINT state_range CHECK (state >= 1 AND state <= 7),
+	CONSTRAINT juno_txid_nonempty CHECK (juno_txid IS NULL OR juno_txid <> '')
+);`); err != nil {
+		t.Fatalf("seed legacy withdrawal_batches: %v", err)
+	}
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var hasDLQ bool
+	if err := pool.QueryRow(ctx, `
+SELECT EXISTS (
+	SELECT 1
+	FROM information_schema.columns
+	WHERE table_schema = 'public'
+	  AND table_name = 'withdrawal_batches'
+	  AND column_name = 'dlq_at'
+)`).Scan(&hasDLQ); err != nil {
+		t.Fatalf("query dlq_at column: %v", err)
+	}
+	if !hasDLQ {
+		t.Fatalf("expected EnsureSchema to add withdrawal_batches.dlq_at")
+	}
+
+	if count, err := s.CountDLQBatches(ctx); err != nil {
+		t.Fatalf("CountDLQBatches: %v", err)
+	} else if count != 0 {
+		t.Fatalf("expected zero dlq batches after schema upgrade, got %d", count)
+	}
+}
+
 func TestStore_UpsertRequested_RoundTripsBaseEventMetadata(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

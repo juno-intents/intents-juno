@@ -100,8 +100,6 @@ CREATE TABLE IF NOT EXISTS withdrawal_batches (
 	CONSTRAINT mark_paid_failures_nonneg CHECK (mark_paid_failures >= 0)
 );
 
-CREATE INDEX IF NOT EXISTS withdrawal_batches_state_idx ON withdrawal_batches (state) WHERE dlq_at IS NULL;
-
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS base_tx_hash TEXT;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS lease_owner TEXT;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS lease_version BIGINT;
@@ -117,6 +115,7 @@ ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS last_failed_at TIMESTAMP
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS dlq_at TIMESTAMPTZ;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS mark_paid_failures INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE withdrawal_batches ADD COLUMN IF NOT EXISTS last_mark_paid_error TEXT;
+CREATE INDEX IF NOT EXISTS withdrawal_batches_state_idx ON withdrawal_batches (state) WHERE dlq_at IS NULL;
 DO $$
 BEGIN
 	IF EXISTS (
