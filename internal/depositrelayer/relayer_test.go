@@ -26,6 +26,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
@@ -92,6 +93,20 @@ func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Req
 	p.gotReq.Journal = append([]byte(nil), req.Journal...)
 	p.gotReq.PrivateInput = append([]byte(nil), req.PrivateInput...)
 	return p.res, p.err
+}
+
+type stubProofStore struct {
+	calls int
+	rec   proof.JobRecord
+	err   error
+}
+
+func (s *stubProofStore) GetJob(_ context.Context, _ common.Hash) (proof.JobRecord, error) {
+	s.calls++
+	if s.err != nil {
+		return proof.JobRecord{}, s.err
+	}
+	return s.rec, nil
 }
 
 type stubDepositWitnessRefresher struct {
@@ -251,6 +266,314 @@ type stubPauseChecker struct {
 func (s *stubPauseChecker) IsPaused(context.Context) (bool, error) {
 	s.calls++
 	return s.paused, s.err
+}
+
+func TestRelayer_UsesPersistedFulfilledProofBeforeRequestingAgain(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	store := deposit.NewMemoryStore()
+	prover := &stubProofRequester{err: errors.New("proof request should not be sent")}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	proofStore := &stubProofStore{
+		rec: proof.JobRecord{
+			State: proof.StateFulfilled,
+			Seal:  []byte{0x99},
+		},
+	}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		ProofStore:        proofStore,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("IngestDeposit: %v", err)
+	}
+
+	if prover.calls != 0 {
+		t.Fatalf("expected no proof request, got %d calls", prover.calls)
+	}
+	if proofStore.calls == 0 {
+		t.Fatal("expected persisted proof lookup")
+	}
+	if sender.calls != 1 {
+		t.Fatalf("expected one bridge submission, got %d", sender.calls)
+	}
+
+	depositIDBytes, err := idempotency.DepositIDV1([32]byte(cm), 7)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	job, err := store.Get(ctx, depositIDBytes)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateFinalized; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+}
+
+func TestRelayer_RejectsDepositAfterTerminalProofFailure(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xbb
+	store := deposit.NewMemoryStore()
+	dlqStore := dlq.NewMemoryStore(nil)
+	prover := &stubProofRequester{
+		err: &proofclient.FailureError{
+			Code:      "sp1_request_unexecutable",
+			Retryable: false,
+			Message:   "bad witness",
+		},
+	}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		DLQStore:          dlqStore,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        9,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("IngestDeposit: %v", err)
+	}
+
+	if sender.calls != 0 {
+		t.Fatalf("expected no bridge submission, got %d calls", sender.calls)
+	}
+	if len(r.proofAttempts) != 0 {
+		t.Fatalf("expected proof attempts cleared, got %d entries", len(r.proofAttempts))
+	}
+
+	depositIDBytes, err := idempotency.DepositIDV1([32]byte(cm), 9)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	job, err := store.Get(ctx, depositIDBytes)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateRejected; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+	if got, want := job.RejectionReason, "proof failed: sp1_request_unexecutable"; got != want {
+		t.Fatalf("rejection reason: got %q want %q", got, want)
+	}
+
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.DepositBatches != 1 {
+		t.Fatalf("expected one deposit batch DLQ record, got %d", counts.DepositBatches)
+	}
+}
+
+func TestRelayer_RejectsDepositFromPersistedTerminalProofFailure(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xbc
+	store := deposit.NewMemoryStore()
+	dlqStore := dlq.NewMemoryStore(nil)
+	prover := &stubProofRequester{err: errors.New("proof request should not be sent")}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	proofStore := &stubProofStore{
+		rec: proof.JobRecord{
+			State:        proof.StateFailedTerminal,
+			ErrorCode:    "sp1_request_unexecutable",
+			ErrorMessage: "bad witness",
+		},
+	}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		DLQStore:          dlqStore,
+		ProofStore:        proofStore,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	if err := r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        10,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("IngestDeposit: %v", err)
+	}
+
+	if prover.calls != 0 {
+		t.Fatalf("expected no proof request, got %d calls", prover.calls)
+	}
+	if proofStore.calls == 0 {
+		t.Fatal("expected persisted proof lookup")
+	}
+	if sender.calls != 0 {
+		t.Fatalf("expected no bridge submission, got %d calls", sender.calls)
+	}
+
+	depositIDBytes, err := idempotency.DepositIDV1([32]byte(cm), 10)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	job, err := store.Get(ctx, depositIDBytes)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateRejected; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+	if got, want := job.RejectionReason, "proof failed: sp1_request_unexecutable"; got != want {
+		t.Fatalf("rejection reason: got %q want %q", got, want)
+	}
+
+	counts, err := dlqStore.CountUnacknowledged(ctx)
+	if err != nil {
+		t.Fatalf("CountUnacknowledged: %v", err)
+	}
+	if counts.DepositBatches != 1 {
+		t.Fatalf("expected one deposit batch DLQ record, got %d", counts.DepositBatches)
+	}
 }
 
 func TestRelayer_DefaultClaimTTLTracksProofRequestTimeout(t *testing.T) {

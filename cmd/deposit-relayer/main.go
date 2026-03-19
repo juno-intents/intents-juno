@@ -32,6 +32,8 @@ import (
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
+	"github.com/juno-intents/intents-juno/internal/proof"
+	proofpg "github.com/juno-intents/intents-juno/internal/proof/postgres"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/queue"
 	"github.com/juno-intents/intents-juno/internal/queueauth"
@@ -251,6 +253,7 @@ func main() {
 		pool          *pgxpool.Pool
 		store         deposit.Store
 		proofDLQStore dlq.Store
+		proofStore    proof.Store
 	)
 	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
 	case "postgres":
@@ -317,6 +320,17 @@ func main() {
 			log.Error("ensure proof dlq schema", "err", err)
 			os.Exit(2)
 		}
+
+		pgProofStore, err := proofpg.New(pool)
+		if err != nil {
+			log.Error("init proof store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgProofStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure proof store schema", "err", err)
+			os.Exit(2)
+		}
+		proofStore = pgProofStore
 	case "memory":
 		store = deposit.NewMemoryStore()
 	default:
@@ -398,6 +412,7 @@ func main() {
 		BridgeSettings:          bridgeSettingsCache,
 		TipHeightProvider:       rpcClient,
 		ReceiptReader:           baseRPCClient,
+		ProofStore:              proofStore,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)

@@ -201,15 +201,6 @@ func (c *QueueClient) handleResponseMessage(
 	}
 	if gotJobID != jobID {
 		c.cfg.Log.Warn("proofclient: ignore unmatched response payload", "job_id", gotJobID.Hex(), "expected_job_id", jobID.Hex())
-		if dlqErr := c.maybeDLQResponse(
-			ctx,
-			msg,
-			gotJobID,
-			"unmatched_response",
-			fmt.Sprintf("response job_id %s did not match active request %s", gotJobID.Hex(), jobID.Hex()),
-		); dlqErr != nil {
-			return Result{}, false, false, dlqErr
-		}
 		return Result{}, false, true, nil
 	}
 

@@ -24,6 +24,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/idempotency"
 	"github.com/juno-intents/intents-juno/internal/memo"
+	"github.com/juno-intents/intents-juno/internal/proof"
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/runtimeconfig"
@@ -67,6 +68,10 @@ type ReceiptReader interface {
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
 }
 
+type ProofStore interface {
+	GetJob(ctx context.Context, jobID common.Hash) (proof.JobRecord, error)
+}
+
 type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
@@ -100,6 +105,7 @@ type Config struct {
 	BridgeSettings          BridgeSettingsProvider
 	TipHeightProvider       TipHeightProvider
 	ReceiptReader           ReceiptReader
+	ProofStore              ProofStore
 
 	Now func() time.Time
 }
@@ -145,6 +151,7 @@ type Relayer struct {
 	bridgeSettings   BridgeSettingsProvider
 	tipHeightReader  TipHeightProvider
 	receiptReader    ReceiptReader
+	proofStore       ProofStore
 
 	// pauseChecker is an optional bridge pause checker.
 	pauseChecker PauseChecker
@@ -243,6 +250,7 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		bridgeSettings:     cfg.BridgeSettings,
 		tipHeightReader:    cfg.TipHeightProvider,
 		receiptReader:      cfg.ReceiptReader,
+		proofStore:         cfg.ProofStore,
 	}, nil
 }
 
@@ -649,17 +657,42 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		}
 	}
 
-	proofRes, err := r.prover.RequestProof(pctx, proofclient.Request{
-		JobID:        jobID,
-		Pipeline:     "deposit",
-		ImageID:      r.cfg.DepositImageID,
-		Journal:      journal,
-		PrivateInput: privateInput,
-		Deadline:     r.cfg.Now().Add(r.cfg.ProofRequestTimeout),
-		Priority:     r.cfg.ProofPriority,
-	})
+	proofRes, proofFailure, recovered, err := r.lookupProofOutcome(ctx, jobID)
 	if err != nil {
 		return err
+	}
+	if recovered {
+		if proofFailure != nil {
+			return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *proofFailure)
+		}
+	} else {
+		proofRes, err = r.prover.RequestProof(pctx, proofclient.Request{
+			JobID:        jobID,
+			Pipeline:     "deposit",
+			ImageID:      r.cfg.DepositImageID,
+			Journal:      journal,
+			PrivateInput: privateInput,
+			Deadline:     r.cfg.Now().Add(r.cfg.ProofRequestTimeout),
+			Priority:     r.cfg.ProofPriority,
+		})
+		if err != nil {
+			recoveredRes, proofFailure, recovered, recoverErr := r.lookupProofOutcome(ctx, jobID)
+			if recoverErr != nil {
+				return recoverErr
+			}
+			if recovered {
+				if proofFailure != nil {
+					return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *proofFailure)
+				}
+				proofRes = recoveredRes
+			} else {
+				var fail *proofclient.FailureError
+				if errors.As(err, &fail) && !fail.Retryable {
+					return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *fail)
+				}
+				return err
+			}
+		}
 	}
 	seal := proofRes.Seal
 	if len(seal) == 0 {
@@ -797,6 +830,82 @@ func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {
 	for _, item := range batch.Items {
 		delete(r.staged, common.Hash(item.ID))
 	}
+}
+
+func (r *Relayer) lookupProofOutcome(ctx context.Context, jobID common.Hash) (proofclient.Result, *proofclient.FailureError, bool, error) {
+	if r.proofStore == nil {
+		return proofclient.Result{}, nil, false, nil
+	}
+	rec, err := r.proofStore.GetJob(ctx, jobID)
+	if err != nil {
+		if errors.Is(err, proof.ErrNotFound) {
+			return proofclient.Result{}, nil, false, nil
+		}
+		return proofclient.Result{}, nil, false, fmt.Errorf("depositrelayer: load proof job %s: %w", jobID.Hex(), err)
+	}
+	switch rec.State {
+	case proof.StateFulfilled:
+		return proofclient.Result{
+			Seal:     append([]byte(nil), rec.Seal...),
+			Metadata: cloneProofMetadata(rec.Metadata),
+		}, nil, true, nil
+	case proof.StateFailedTerminal:
+		return proofclient.Result{}, &proofclient.FailureError{
+			Code:      rec.ErrorCode,
+			Retryable: false,
+			Message:   rec.ErrorMessage,
+		}, true, nil
+	default:
+		return proofclient.Result{}, nil, false, nil
+	}
+}
+
+func (r *Relayer) rejectBatchForProofFailure(
+	ctx context.Context,
+	batchID [32]byte,
+	batch batching.Batch[mintBatchItem],
+	failure proofclient.FailureError,
+) error {
+	if err := r.maybeDLQDepositBatch(ctx, batchID, batch, "proof", strings.TrimSpace(failure.Code), strings.TrimSpace(failure.Message), 0); err != nil {
+		return err
+	}
+	reason := proofFailureReason(failure)
+	for _, it := range batch.Items {
+		if err := r.store.MarkRejected(ctx, it.ID, reason, [32]byte{}); err != nil {
+			return fmt.Errorf("depositrelayer: reject proof-failed deposit %x: %w", it.ID[:8], err)
+		}
+	}
+	delete(r.proofAttempts, common.Hash(batchID))
+	r.log.Error("depositrelayer: rejected batch after terminal proof failure",
+		"batch_id", common.Hash(batchID).Hex(),
+		"error_code", failure.Code,
+		"message", failure.Message,
+		"items", len(batch.Items),
+	)
+	return nil
+}
+
+func proofFailureReason(failure proofclient.FailureError) string {
+	code := strings.TrimSpace(failure.Code)
+	if code != "" {
+		return "proof failed: " + code
+	}
+	message := strings.TrimSpace(failure.Message)
+	if message != "" {
+		return "proof failed: " + message
+	}
+	return "proof failed"
+}
+
+func cloneProofMetadata(in map[string]string) map[string]string {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func (r *Relayer) encodePrivateInput(cp checkpoint.Checkpoint, opSigs [][]byte, items []bridgeabi.MintItem, witnessItems [][]byte) ([]byte, error) {

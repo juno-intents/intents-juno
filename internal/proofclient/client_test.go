@@ -365,7 +365,7 @@ func TestQueueClient_RequestProofRoutesMalformedResponseToDLQ(t *testing.T) {
 	}
 }
 
-func TestQueueClient_RequestProofRoutesUnexpectedJobIDToDLQ(t *testing.T) {
+func TestQueueClient_RequestProofIgnoresUnexpectedJobIDWithoutDLQ(t *testing.T) {
 	t.Parallel()
 
 	producer := &fakeProducer{}
@@ -413,14 +413,8 @@ func TestQueueClient_RequestProofRoutesUnexpectedJobIDToDLQ(t *testing.T) {
 	if len(res.Seal) != 1 || res.Seal[0] != 0xaa {
 		t.Fatalf("seal mismatch: %x", res.Seal)
 	}
-	if len(dlqStore.proofs) != 1 {
-		t.Fatalf("expected 1 DLQ record, got %d", len(dlqStore.proofs))
-	}
-	if dlqStore.proofs[0].ErrorCode != "unmatched_response" {
-		t.Fatalf("ErrorCode: got %q want %q", dlqStore.proofs[0].ErrorCode, "unmatched_response")
-	}
-	if common.BytesToHash(dlqStore.proofs[0].JobID[:]) != otherJobID {
-		t.Fatalf("JobID: got %s want %s", common.BytesToHash(dlqStore.proofs[0].JobID[:]).Hex(), otherJobID.Hex())
+	if len(dlqStore.proofs) != 0 {
+		t.Fatalf("expected no DLQ records, got %d", len(dlqStore.proofs))
 	}
 }
 
@@ -526,7 +520,7 @@ func TestQueueClient_RequestProofDLQsMalformedResponseBeforeAck(t *testing.T) {
 	}
 }
 
-func TestQueueClient_RequestProofDLQsUnmatchedResponseBeforeAck(t *testing.T) {
+func TestQueueClient_RequestProofIgnoresUnmatchedResponseBeforeAck(t *testing.T) {
 	t.Parallel()
 
 	producer := &fakeProducer{}
@@ -578,14 +572,8 @@ func TestQueueClient_RequestProofDLQsUnmatchedResponseBeforeAck(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListProofDLQ: %v", err)
 	}
-	if len(recs) != 1 {
-		t.Fatalf("expected 1 dlq record, got %d", len(recs))
-	}
-	if recs[0].ErrorCode != "unmatched_response" {
-		t.Fatalf("ErrorCode = %q, want unmatched_response", recs[0].ErrorCode)
-	}
-	if !strings.Contains(recs[0].ErrorMessage, otherJobID.Hex()) {
-		t.Fatalf("ErrorMessage = %q", recs[0].ErrorMessage)
+	if len(recs) != 0 {
+		t.Fatalf("expected no dlq records, got %d", len(recs))
 	}
 }
 
