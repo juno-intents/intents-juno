@@ -101,6 +101,8 @@ main() {
   assert_contains "$main_tf" 'instance_id="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/instance-id)"' "live-e2e records the wireguard instance id during bootstrap"
   assert_contains "$main_tf" "aws --region \${var.aws_region} ec2 describe-instances --instance-ids \"\$instance_id\"" "live-e2e waits for the elastic ip to appear via ec2 instead of relying on early imds public-ipv4"
   assert_contains "$main_tf" 'address=/${var.shared_wireguard_backoffice_hostname}/$${wireguard_backoffice_private_endpoint}' "live-e2e maps the backoffice hostname to the private app endpoint over wireguard"
+  assert_contains "$main_tf" 'iptables -A FORWARD -i %i -j ACCEPT' "live-e2e allows forwarded traffic from the wireguard tunnel"
+  assert_contains "$main_tf" 'iptables -A FORWARD -o %i -j ACCEPT' "live-e2e allows forwarded return traffic to the wireguard tunnel"
   assert_contains "$main_tf" 'secretsmanager put-secret-value --secret-id "$wireguard_client_config_secret_arn"' "live-e2e uploads the generated wireguard client config into Secrets Manager"
   local wg_restart_line
   local dnsmasq_restart_line

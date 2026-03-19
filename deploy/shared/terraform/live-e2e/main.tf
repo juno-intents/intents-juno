@@ -1954,8 +1954,8 @@ resource "aws_instance" "wireguard_gateway" {
     Address = $${wireguard_gateway_address_cidr}
     ListenPort = $${wireguard_listen_port}
     PrivateKey = $${server_private_key}
-    PostUp = iptables -t nat -A POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
-    PostDown = iptables -t nat -D POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+    PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+    PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
 
     [Peer]
     PublicKey = $${client_public_key}

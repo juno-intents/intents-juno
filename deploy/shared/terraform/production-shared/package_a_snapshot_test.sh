@@ -76,6 +76,8 @@ main() {
   assert_contains "$main_tf" "aws --region \${var.aws_region} ec2 describe-instances --instance-ids \"\$instance_id\"" "production-shared waits for the elastic ip to appear via ec2 instead of relying on early imds public-ipv4"
   assert_contains "$main_tf" 'dnsmasq' "production-shared configures dnsmasq for backoffice hostname resolution"
   assert_contains "$main_tf" 'address=/${var.shared_wireguard_backoffice_hostname}/${var.shared_wireguard_backoffice_private_endpoint}' "production-shared maps the backoffice hostname to the private app endpoint over wireguard"
+  assert_contains "$main_tf" 'iptables -A FORWARD -i %i -j ACCEPT' "production-shared allows forwarded traffic from the wireguard tunnel"
+  assert_contains "$main_tf" 'iptables -A FORWARD -o %i -j ACCEPT' "production-shared allows forwarded return traffic to the wireguard tunnel"
   assert_contains "$main_tf" 'secretsmanager put-secret-value --secret-id "$wireguard_client_config_secret_arn"' "production-shared uploads the generated wireguard client config into Secrets Manager"
   local wg_restart_line
   local dnsmasq_restart_line
