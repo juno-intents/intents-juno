@@ -99,6 +99,12 @@ output "shared_ipfs_api_auth_secret_arn" {
   sensitive   = true
 }
 
+output "shared_kafka_critical_hmac_secret_arn" {
+  description = "Secrets Manager ARN containing the shared Kafka critical-topic HMAC key."
+  value       = try(aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0].arn, null)
+  sensitive   = true
+}
+
 output "shared_wireguard_gateway_private_ip" {
   description = "Private IPv4 address of the dedicated WireGuard gateway."
   value       = try(aws_instance.wireguard_gateway[0].private_ip, null)

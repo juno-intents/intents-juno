@@ -1633,7 +1633,7 @@ production_render_shared_manifest() {
 
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
-  local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn dkg_bucket dkg_prefix
+  local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
   local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
@@ -1683,6 +1683,7 @@ production_render_shared_manifest() {
   shared_sp1_rpc_url="$(production_tf_output_value "$tf_json" "shared_sp1_rpc_url" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
   ipfs_api_auth_secret_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_api_auth_secret_arn" false)"
+  kafka_critical_hmac_secret_arn="$(production_tf_output_value "$tf_json" "shared_kafka_critical_hmac_secret_arn" false)"
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
   wireguard_gateway_private_ip="$(production_tf_output_value "$tf_json" "shared_wireguard_gateway_private_ip" false)"
   wireguard_endpoint_host="$(production_tf_output_value "$tf_json" "shared_wireguard_endpoint_host" false)"
@@ -1782,6 +1783,8 @@ production_render_shared_manifest() {
     --arg kafka_brokers "$kafka_brokers" \
     --arg kafka_auth_mode "$(production_kafka_auth_mode_for_environment "$env_slug")" \
     --arg kafka_auth_aws_region "$aws_region" \
+    --arg kafka_critical_key_id "default" \
+    --arg kafka_critical_hmac_secret_arn "$kafka_critical_hmac_secret_arn" \
     --arg ecs_cluster_arn "$ecs_cluster_arn" \
     --arg proof_requestor_service_name "$proof_requestor_service_name" \
     --arg proof_funder_service_name "$proof_funder_service_name" \
@@ -1843,6 +1846,8 @@ production_render_shared_manifest() {
             mode: $kafka_auth_mode,
             aws_region: $kafka_auth_aws_region
           },
+          critical_key_id: $kafka_critical_key_id,
+          critical_hmac_secret_arn: (if $kafka_critical_hmac_secret_arn == "" then null else $kafka_critical_hmac_secret_arn end),
           min_insync_replicas: 2
         },
         ecs: {
@@ -2343,9 +2348,13 @@ production_render_operator_stack_env() {
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
+  local kafka_critical_key_id kafka_critical_hmac_secret_arn kafka_critical_hmac_key
   juno_txsign_signer_keys=""
   deposit_scan_wallet_id=""
   ipfs_api_bearer_token=""
+  kafka_critical_key_id=""
+  kafka_critical_hmac_secret_arn=""
+  kafka_critical_hmac_key=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
   withdraw_juno_fee_add_zat="$(production_default_withdraw_coordinator_juno_fee_add_zat)"
   runtime_deposit_min_confirmations="$(production_default_deposit_min_confirmations)"
@@ -2361,8 +2370,13 @@ production_render_operator_stack_env() {
   shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
   shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
   ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn')"
+  kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
+  kafka_critical_hmac_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_hmac_secret_arn')"
   if [[ -n "$ipfs_api_auth_secret_arn" ]]; then
     ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
+  fi
+  if [[ -n "$kafka_critical_hmac_secret_arn" ]]; then
+    kafka_critical_hmac_key="$(production_resolve_optional_aws_sm_secret "$kafka_critical_hmac_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
   fi
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
@@ -2455,6 +2469,12 @@ EOF
 
   if [[ -n "$ipfs_api_bearer_token" ]]; then
     printf 'CHECKPOINT_IPFS_API_BEARER_TOKEN=%s\n' "$ipfs_api_bearer_token" >>"$output_file"
+  fi
+  if [[ -n "$kafka_critical_key_id" ]]; then
+    printf 'JUNO_QUEUE_CRITICAL_KEY_ID=%s\n' "$kafka_critical_key_id" >>"$output_file"
+  fi
+  if [[ -n "$kafka_critical_hmac_key" ]]; then
+    printf 'JUNO_QUEUE_CRITICAL_HMAC_KEY=%s\n' "$kafka_critical_hmac_key" >>"$output_file"
   fi
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"

@@ -638,6 +638,21 @@ resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
   secret_string = random_password.shared_ipfs_api_bearer_token.result
 }
 
+resource "random_password" "shared_kafka_critical_hmac_key" {
+  length  = 48
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" {
+  name = "${local.resource_name}-shared-kafka-critical-hmac-key"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" {
+  secret_id     = aws_secretsmanager_secret.shared_kafka_critical_hmac_key.id
+  secret_string = random_password.shared_kafka_critical_hmac_key.result
+}
+
 data "aws_iam_policy_document" "proof_requestor_execution_access" {
   dynamic "statement" {
     for_each = local.shared_proof_service_image_requires_ecr_pull ? [1] : []

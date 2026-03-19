@@ -58,6 +58,37 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_aws_secret_reader() {
+  local target="$1"
+  local expected_secret_arn="$2"
+  local secret_value="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
+args=( "\$@" )
+for ((i=0; i<\${#args[@]}; i++)); do
+  if [[ "\${args[\$i]}" == "secretsmanager" && \$((i + 1)) -lt \${#args[@]} && "\${args[\$((i + 1))]}" == "get-secret-value" ]]; then
+    secret_arn=""
+    for ((j=0; j<\${#args[@]}; j++)); do
+      if [[ "\${args[\$j]}" == "--secret-id" && \$((j + 1)) -lt \${#args[@]} ]]; then
+        secret_arn="\${args[\$((j + 1))]}"
+        break
+      fi
+    done
+    [[ "\$secret_arn" == "$expected_secret_arn" ]] || {
+      printf 'unexpected secret id: %s\n' "\$secret_arn" >&2
+      exit 1
+    }
+    printf '%s\n' "$secret_value"
+    exit 0
+  fi
+done
+exit 0
+EOF
+  chmod +x "$target"
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -83,7 +114,7 @@ write_dkg_summary_with_operator_key() {
 }
 
 test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
-  local workdir output_dir manifest shared_manifest log_dir fake_bin state_file
+  local workdir output_dir manifest shared_manifest log_dir fake_bin state_file terraform_output queueauth_secret_arn
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   log_dir="$workdir/logs"
@@ -116,11 +147,16 @@ EOF
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
+  queueauth_secret_arn="arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-kafka-critical-hmac"
+  terraform_output="$workdir/terraform-output.json"
+  jq --arg arn "$queueauth_secret_arn" '.shared_kafka_critical_hmac_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$terraform_output"
+
   production_render_shared_manifest \
     "$workdir/inventory.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
     "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
-    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$terraform_output" \
     "$workdir/shared-manifest.json" \
     "$workdir"
   production_render_operator_handoffs "$workdir/inventory.json" "$workdir/shared-manifest.json" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$output_dir/alpha" "$workdir"
@@ -154,13 +190,9 @@ elif [[ "\$*" == *"/backfill"* ]]; then
 fi
 exit 0
 EOF
-  cat >"$fake_bin/aws" <<EOF
-#!/usr/bin/env bash
-printf 'aws %s\n' "\$*" >>"$log_dir/aws.log"
-exit 0
-EOF
+  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "queueauth-test-hmac-key"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
-  chmod +x "$fake_bin/scp" "$fake_bin/ssh" "$fake_bin/aws"
+  chmod +x "$fake_bin/scp" "$fake_bin/ssh"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
     --operator-deploy "$manifest" >/dev/null
@@ -244,7 +276,9 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0755 "$withdraw_finalizer_tmp" "$withdraw_finalizer_script"' "remote deploy installs the corrected withdraw-finalizer wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"' "remote deploy can patch the base-event-scanner wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "remote deploy restores base-event-scanner start block guard"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS' "remote deploy backfills exported signer env into the withdraw-coordinator wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "remote deploy backfills exported signer env into the withdraw-coordinator wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "remote deploy backfills queueauth env into queue-consuming wrappers"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "remote deploy backfills queueauth env into the base-event-scanner wrapper"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'coord_client_cert="$(env_get_value_remote "WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE")"' "remote deploy derives withdraw coordinator client cert path from staged env"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'openssl x509 -in "$coord_client_cert" -noout -purpose' "remote deploy validates the restored coordinator client cert purpose"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -D -m 0640 -o root -g intents-juno "$server_cert" "$coord_client_cert"' "remote deploy no longer fabricates coordinator client certs from the server cert"
@@ -315,6 +349,8 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "withdraw coordinator max expiry extension staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "withdraw coordinator extend signer staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "withdraw coordinator signer key staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_KEY_ID=default" "queueauth key id staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=queueauth-test-hmac-key" "queueauth HMAC key staged"
   assert_not_contains "$(cat "$log_dir/operator-stack.env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "staged env omits non-local withdraw signer keys"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "withdraw finalizer scan url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "base event scanner start block staged"

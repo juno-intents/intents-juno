@@ -251,6 +251,27 @@ resource "aws_secretsmanager_secret_version" "shared_ipfs_api_bearer_token" {
   secret_string = random_password.shared_ipfs_api_bearer_token[0].result
 }
 
+resource "random_password" "shared_kafka_critical_hmac_key" {
+  count = var.provision_shared_services ? 1 : 0
+
+  length  = 48
+  special = false
+}
+
+resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key" {
+  count = var.provision_shared_services ? 1 : 0
+
+  name = "${local.resource_name}-shared-kafka-critical-hmac-key"
+  tags = local.common_tags
+}
+
+resource "aws_secretsmanager_secret_version" "shared_kafka_critical_hmac_key" {
+  count = var.provision_shared_services ? 1 : 0
+
+  secret_id     = aws_secretsmanager_secret.shared_kafka_critical_hmac_key[0].id
+  secret_string = random_password.shared_kafka_critical_hmac_key[0].result
+}
+
 data "aws_iam_policy_document" "live_e2e_assume_role" {
   statement {
     actions = ["sts:AssumeRole"]

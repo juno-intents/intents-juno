@@ -102,6 +102,12 @@ output "shared_ipfs_api_auth_secret_arn" {
   sensitive   = true
 }
 
+output "shared_kafka_critical_hmac_secret_arn" {
+  description = "Secrets Manager ARN containing the shared Kafka critical-topic HMAC key."
+  value       = aws_secretsmanager_secret.shared_kafka_critical_hmac_key.arn
+  sensitive   = true
+}
+
 output "shared_ipfs_target_group_arn" {
   description = "IPFS API target group ARN."
   value       = aws_lb_target_group.ipfs_api.arn

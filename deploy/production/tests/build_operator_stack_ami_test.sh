@@ -273,7 +273,20 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$aggregator_wrapper" '${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"}' "checkpoint aggregator forwards the optional IPFS bearer token"
   assert_not_contains "$aggregator_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint aggregator does not bake bootstrap bridge address into wrapper"
 
+  local deposit_relayer_wrapper
+  deposit_relayer_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
+  assert_contains "$deposit_relayer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "deposit relayer exports queueauth env to the binary"
+
+  local withdraw_wrapper
+  withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
+  assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "withdraw coordinator exports queueauth env to the binary"
+
+  local withdraw_finalizer_wrapper
+  withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
+  assert_contains "$withdraw_finalizer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "withdraw finalizer exports queueauth env to the binary"
+
   base_event_scanner_wrapper="$(extract_block "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER")"
+  assert_contains "$base_event_scanner_wrapper" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports queueauth env to the binary"
   assert_contains "$base_event_scanner_wrapper" '[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {' "base-event-scanner requires explicit start block in operator env"
   assert_contains "$base_event_scanner_wrapper" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "base-event-scanner fails closed without start block"
   assert_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK}"' "base-event-scanner wrapper uses rendered start block without a genesis fallback"

@@ -148,6 +148,37 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_aws_secret_reader() {
+  local target="$1"
+  local expected_secret_arn="$2"
+  local secret_value="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+args=( "\$@" )
+for ((i=0; i<\${#args[@]}; i++)); do
+  if [[ "\${args[\$i]}" == "secretsmanager" && \$((i + 1)) -lt \${#args[@]} && "\${args[\$((i + 1))]}" == "get-secret-value" ]]; then
+    secret_arn=""
+    for ((j=0; j<\${#args[@]}; j++)); do
+      if [[ "\${args[\$j]}" == "--secret-id" && \$((j + 1)) -lt \${#args[@]} ]]; then
+        secret_arn="\${args[\$((j + 1))]}"
+        break
+      fi
+    done
+    [[ "\$secret_arn" == "$expected_secret_arn" ]] || {
+      printf 'unexpected secret id: %s\n' "\$secret_arn" >&2
+      exit 1
+    }
+    printf '%s\n' "$secret_value"
+    exit 0
+  fi
+done
+printf 'unexpected aws invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  chmod +x "$target"
+}
+
 setup_default_checkpoint_signer_kms_provisioner() {
   local workdir fake_bin fake_log
   workdir="$(mktemp -d)"
@@ -1703,6 +1734,66 @@ EOF
   assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env deposit scan url"
   assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-op1" "rendered env deposit scan wallet id"
   assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env deposit scan rpc url"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_injects_queueauth_secret_from_shared_manifest() {
+  local workdir shared_manifest handoff_dir resolved_env output_env tf_json fake_bin old_path
+  local queueauth_secret_arn
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  queueauth_secret_arn="arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-kafka-critical-hmac"
+  tf_json="$workdir/terraform-output.json"
+  jq --arg arn "$queueauth_secret_arn" '.shared_kafka_critical_hmac_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  assert_eq "$(jq -r '.shared_services.kafka.critical_key_id' "$shared_manifest")" "default" "shared manifest includes the default queueauth key id"
+  assert_eq "$(jq -r '.shared_services.kafka.critical_hmac_secret_arn' "$shared_manifest")" "$queueauth_secret_arn" "shared manifest includes the queueauth HMAC secret ARN"
+
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "queueauth-test-hmac-key"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$output_env")" "JUNO_QUEUE_CRITICAL_KEY_ID=default" "rendered env carries the queueauth key id"
+  assert_contains "$(cat "$output_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=queueauth-test-hmac-key" "rendered env carries the queueauth HMAC secret"
   rm -rf "$workdir"
 }
 
