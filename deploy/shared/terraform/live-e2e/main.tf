@@ -83,6 +83,11 @@ data "aws_subnet" "selected" {
   id = local.selected_subnet_id
 }
 
+data "aws_subnet" "wireguard_public" {
+  count = local.wireguard_enabled ? 1 : 0
+  id    = local.wireguard_public_subnet_id
+}
+
 check "runner_operator_public_subnet_default" {
   assert {
     condition     = var.subnet_id != "" || length(local.public_one_per_az) > 0
@@ -165,6 +170,7 @@ locals {
   ipfs_lb_name                   = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
   ipfs_target_group_name         = trim(substr("${local.resource_slug}-ipfstg", 0, 32), "-")
   ipfs_launch_name_prefix        = trim(substr("${local.resource_slug}-ipfs-", 0, 32), "-")
+  runner_private_ip              = cidrhost(data.aws_subnet.selected.cidr_block, 10)
   wireguard_enabled              = var.provision_shared_services && var.shared_wireguard_enabled
   wireguard_public_subnet_id     = local.wireguard_enabled ? (trimspace(var.shared_wireguard_public_subnet_id) != "" ? trimspace(var.shared_wireguard_public_subnet_id) : (length(local.public_one_per_az) > 0 ? local.public_one_per_az[0] : "")) : ""
   wireguard_network_prefix       = tonumber(split("/", var.shared_wireguard_network_cidr)[1])
@@ -172,6 +178,7 @@ locals {
   wireguard_gateway_address_cidr = local.wireguard_enabled ? "${local.wireguard_gateway_tunnel_ip}/${local.wireguard_network_prefix}" : ""
   wireguard_client_tunnel_ip     = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 2) : ""
   wireguard_client_address_cidr  = local.wireguard_enabled ? "${local.wireguard_client_tunnel_ip}/32" : ""
+  wireguard_gateway_private_ip = local.wireguard_enabled ? cidrhost(data.aws_subnet.wireguard_public[0].cidr_block, 11) : ""
   wireguard_backoffice_private_endpoint = local.wireguard_enabled ? (
     trimspace(var.shared_wireguard_backoffice_private_endpoint) != "" ? trimspace(var.shared_wireguard_backoffice_private_endpoint) : aws_instance.runner.private_ip
   ) : ""
@@ -1886,10 +1893,12 @@ resource "aws_instance" "wireguard_gateway" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.shared_wireguard_instance_type
   subnet_id                   = local.wireguard_public_subnet_id
+  private_ip                  = local.wireguard_gateway_private_ip
   vpc_security_group_ids      = [aws_security_group.wireguard[0].id]
   iam_instance_profile        = aws_iam_instance_profile.wireguard_gateway[0].name
   source_dest_check           = false
   associate_public_ip_address = false
+  user_data_replace_on_change = true
 
   root_block_device {
     volume_size           = 20
@@ -1963,6 +1972,7 @@ resource "aws_instance" "wireguard_gateway" {
     PersistentKeepalive = 25
     WGEOF
 
+    rm -f /etc/dnsmasq.d/intents-juno-wireguard.conf.*
     cat >/etc/dnsmasq.d/intents-juno-wireguard.conf <<DNSEOF
     interface=wg0
     bind-interfaces
@@ -2024,6 +2034,7 @@ resource "aws_instance" "runner" {
   instance_type          = var.instance_type
   key_name               = aws_key_pair.runner.key_name
   subnet_id              = local.selected_subnet_id
+  private_ip             = local.runner_private_ip
   vpc_security_group_ids = [aws_security_group.runner.id]
   iam_instance_profile   = local.instance_profile_name
 
