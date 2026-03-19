@@ -477,6 +477,47 @@ func (s *MemoryStore) SetBatchSubmissionTxHash(_ context.Context, batchID [32]by
 	return nil
 }
 
+func (s *MemoryStore) RequeueSubmittedBatch(_ context.Context, batchID [32]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	attempt, ok := s.attempts[batchID]
+	if !ok {
+		return ErrNotFound
+	}
+	if attempt.TxHash != ([32]byte{}) {
+		return ErrInvalidTransition
+	}
+
+	for _, id := range attempt.DepositIDs {
+		j, ok := s.jobs[id]
+		if !ok {
+			return ErrNotFound
+		}
+		if j.State == StateSubmitted {
+			j.State = StateConfirmed
+			j.ProofSeal = nil
+			j.TxHash = [32]byte{}
+			j.RejectionReason = ""
+			s.jobs[id] = j
+		}
+		delete(s.claim, id)
+		delete(s.attemptByDeposit, id)
+	}
+
+	delete(s.attempts, batchID)
+	delete(s.attemptClaim, batchID)
+	nextOrder := s.attemptOrder[:0]
+	for _, existing := range s.attemptOrder {
+		if existing == batchID {
+			continue
+		}
+		nextOrder = append(nextOrder, existing)
+	}
+	s.attemptOrder = nextOrder
+	return nil
+}
+
 func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

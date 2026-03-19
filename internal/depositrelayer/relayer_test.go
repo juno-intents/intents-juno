@@ -1136,6 +1136,98 @@ func TestRelayer_ApplyBatchOutcomeFromHash_ReconcilesMixedMintedAndSkipped(t *te
 	}
 }
 
+func TestRelayer_RecoverSubmittedAttempts_RequeuesStaleCheckpointBatch(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	dep := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0x81),
+		Commitment:    seq32ForRelayer(0x82),
+		LeafIndex:     1,
+		Amount:        500,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	staleCheckpoint := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0x83),
+		FinalOrchardRoot: seq32ForRelayer(0x84),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := store.MarkBatchSubmitted(
+		context.Background(),
+		"owner-1",
+		seq32ForRelayer(0x85),
+		[][32]byte{dep.DepositID},
+		staleCheckpoint,
+		[][]byte{{0xaa}},
+		[]byte{0xbb},
+	); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	sender := &stubSender{err: errors.New("send should not be called")}
+	r, err := New(Config{
+		BaseChainID:       uint32(staleCheckpoint.BaseChainID),
+		BridgeAddress:     staleCheckpoint.BridgeContract,
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+	}, store, sender, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	newerCheckpoint := staleCheckpoint
+	newerCheckpoint.Height = staleCheckpoint.Height + 10
+	newerCheckpoint.BlockHash = seq32ForRelayer(0x86)
+	newerCheckpoint.FinalOrchardRoot = seq32ForRelayer(0x87)
+	r.checkpoint = &newerCheckpoint
+	r.opSigs = [][]byte{{0xcc}}
+
+	if err := r.recoverSubmittedAttempts(context.Background()); err != nil {
+		t.Fatalf("recoverSubmittedAttempts: %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called %d times, want 0", sender.calls)
+	}
+
+	job, err := store.Get(context.Background(), dep.DepositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateConfirmed {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateConfirmed)
+	}
+	if len(job.ProofSeal) != 0 {
+		t.Fatalf("proof seal should be cleared, got %x", job.ProofSeal)
+	}
+
+	attempts, err := store.ClaimSubmittedAttempts(context.Background(), "worker-2", time.Second, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("submitted attempts len: got %d want 0", len(attempts))
+	}
+
+	reclaimed, err := store.ClaimConfirmed(context.Background(), "worker-2", time.Second, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed: %v", err)
+	}
+	if len(reclaimed) != 1 || reclaimed[0].Deposit.DepositID != dep.DepositID {
+		t.Fatalf("unexpected reclaimed jobs: %#v", reclaimed)
+	}
+}
+
 func TestRelayer_ApplyBatchOutcomeFromHash_ReconcilesDuplicateSkippedDepositToOriginalMint(t *testing.T) {
 	t.Parallel()
 

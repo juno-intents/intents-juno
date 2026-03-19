@@ -774,6 +774,75 @@ func (s *Store) SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, 
 	return nil
 }
 
+func (s *Store) RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: begin requeue submitted batch tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	attempt, found, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return deposit.ErrNotFound
+	}
+	if attempt.TxHash != ([32]byte{}) {
+		return deposit.ErrInvalidTransition
+	}
+
+	rawIDs := make([][]byte, 0, len(attempt.DepositIDs))
+	for _, id := range attempt.DepositIDs {
+		rawID := make([]byte, 32)
+		copy(rawID, id[:])
+		rawIDs = append(rawIDs, rawID)
+	}
+
+	if len(rawIDs) > 0 {
+		_, err = tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = CASE
+					WHEN state = $2 THEN $1
+					ELSE state
+				END,
+				proof_seal = CASE
+					WHEN state = $2 THEN NULL
+					ELSE proof_seal
+				END,
+				submit_batch_id = CASE
+					WHEN submit_batch_id = $3 THEN NULL
+					ELSE submit_batch_id
+				END,
+				claimed_by = NULL,
+				claim_expires_at = NULL,
+				rejection_reason = CASE
+					WHEN state = $2 THEN NULL
+					ELSE rejection_reason
+				END,
+				updated_at = now()
+			WHERE deposit_id = ANY($4)
+		`, int16(deposit.StateConfirmed), int16(deposit.StateSubmitted), batchID[:], rawIDs)
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: requeue submitted batch rows: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM deposit_batch_attempts WHERE batch_id = $1`, batchID[:]); err != nil {
+		return fmt.Errorf("deposit/postgres: delete submitted batch attempt: %w", err)
+	}
+
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("deposit/postgres: commit requeue submitted batch tx: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("%w: nil store", ErrInvalidConfig)

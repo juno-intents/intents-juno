@@ -475,11 +475,32 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 			}
 			continue
 		}
+		if r.currentCheckpointSupersedes(attempt.Checkpoint) {
+			if err := r.store.RequeueSubmittedBatch(ctx, attempt.BatchID); err != nil {
+				return fmt.Errorf("depositrelayer: requeue stale submitted batch: %w", err)
+			}
+			r.log.Info("requeued stale submitted batch",
+				"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
+				"attemptCheckpointHeight", attempt.Checkpoint.Height,
+				"currentCheckpointHeight", r.checkpoint.Height,
+			)
+			continue
+		}
 		if err := r.resubmitSubmittedAttempt(ctx, attempt); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func (r *Relayer) currentCheckpointSupersedes(attempt checkpoint.Checkpoint) bool {
+	if r == nil || r.checkpoint == nil {
+		return false
+	}
+	if r.checkpoint.BaseChainID != attempt.BaseChainID || r.checkpoint.BridgeContract != attempt.BridgeContract {
+		return false
+	}
+	return r.checkpoint.Height > attempt.Height
 }
 
 func (r *Relayer) ready(ctx context.Context) bool {

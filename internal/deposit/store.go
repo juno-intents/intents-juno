@@ -29,6 +29,7 @@ type Store interface {
 	RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
 	MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error
 	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
+	RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) error
 	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error
 	// FinalizeBatch atomically transitions the provided deposits to finalized.
 	// Implementations must ensure all-or-nothing behavior for this batch call.
