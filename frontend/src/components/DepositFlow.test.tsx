@@ -102,10 +102,18 @@ describe('DepositFlow', () => {
     const user = userEvent.setup()
     renderDepositFlow()
 
-    await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
+    const generateButton = await screen.findByRole('button', { name: 'Generate Deposit Instructions' })
 
-    expect(screen.getByText(/I will not send less than 2.01005025 JUNO/i)).toBeInTheDocument()
-    expect(screen.getByText(/I must include the memo exactly/i)).toBeInTheDocument()
+    expect(generateButton).toBeDisabled()
+    expect(screen.getByText(/Enter a deposit amount/i)).toBeInTheDocument()
+
+    await user.type(screen.getByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
+    expect(generateButton).toBeEnabled()
+
+    await user.click(generateButton)
+
+    expect(screen.getByText(/I will not send less than 2.01005025 JUNO or my funds will be permanently lost/i)).toBeInTheDocument()
+    expect(screen.getByText(/I must include the memo exactly or my funds will be permanently lost/i)).toBeInTheDocument()
     expect(screen.getByText(/Juno Intents is not responsible/i)).toBeInTheDocument()
     expect(getDepositMemo).not.toHaveBeenCalled()
 
@@ -124,6 +132,7 @@ describe('DepositFlow', () => {
     const user = userEvent.setup()
     renderDepositFlow()
 
+    await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
     await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
     await user.click(screen.getByRole('button', { name: 'I agree' }))
     await screen.findByRole('button', { name: 'Manual Send' })
@@ -135,6 +144,24 @@ describe('DepositFlow', () => {
     expect(screen.getByText('jtest1destinationwallet')).toBeInTheDocument()
     expect(screen.queryByText('junocash-cli')).not.toBeInTheDocument()
     expect(screen.queryByTestId('deposit-qr')).not.toBeInTheDocument()
+  })
+
+  it('shows a QR summary with the required amount and memo fallback details', async () => {
+    const user = userEvent.setup()
+    renderDepositFlow()
+
+    await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
+    await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
+    await user.click(screen.getByRole('button', { name: 'I agree' }))
+    await screen.findByRole('button', { name: 'QR Code' })
+
+    await user.click(screen.getByRole('button', { name: 'QR Code' }))
+
+    expect(screen.getByTestId('deposit-qr')).toBeInTheDocument()
+    expect(screen.getByText('Wallet will send')).toBeInTheDocument()
+    expect(screen.getAllByText('3 JUNO')).not.toHaveLength(0)
+    expect(screen.getByText('Memo fallback')).toBeInTheDocument()
+    expect(screen.getByText('136 hex characters ready to paste manually')).toBeInTheDocument()
   })
 
   it('does not carry a memo fetch error into the next warning modal open', async () => {
@@ -149,10 +176,11 @@ describe('DepositFlow', () => {
         nonce: '7',
         memoHex: `${'ab'.repeat(68)}${'00'.repeat(444)}`,
         memoBase64: 'memo-base-64',
-      })
+    })
 
     renderDepositFlow()
 
+    await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
     await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
     await user.click(screen.getByRole('button', { name: 'I agree' }))
 

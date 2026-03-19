@@ -710,7 +710,10 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   flex-direction: column;
   align-items: center;
   gap: 12px;
-  margin: 16px 0;
+  margin: 8px 0;
+  padding: 24px;
+  background: white;
+  border-radius: 12px;
 }
 
 .copy-field {
@@ -724,6 +727,14 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-family: var(--mono);
   font-size: 12px;
   word-break: break-all;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
+}
+
+.copy-field-value {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .copy-btn {
@@ -842,9 +853,21 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   border-bottom: 1px solid var(--border);
 }
 
+.modal-header-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .modal-title {
   font-size: 15px;
   font-weight: 700;
+}
+
+.modal-step {
+  font-size: 11px;
+  color: var(--text-dim);
+  font-weight: 500;
 }
 
 .modal-close {
@@ -924,23 +947,164 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .deposit-modal-body {
   display: grid;
-  gap: 16px;
+  gap: 20px;
+}
+
+.deposit-instructions-modal .modal-header {
+  background: linear-gradient(180deg, rgba(255, 77, 0, 0.05) 0%, transparent 100%);
+}
+
+/* Stepper */
+.deposit-stepper {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 0;
+}
+
+.deposit-stepper-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  min-width: 48px;
+}
+
+.deposit-stepper-num {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  background: var(--bg-input);
+  border: 1.5px solid var(--border);
+  color: var(--text-dim);
+  transition: all 0.2s;
+}
+
+.deposit-stepper-item.active .deposit-stepper-num {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: white;
+  box-shadow: 0 0 0 4px rgba(255, 77, 0, 0.15);
+}
+
+.deposit-stepper-item.done .deposit-stepper-num {
+  background: rgba(0, 200, 83, 0.15);
+  border-color: var(--green);
+  color: var(--green);
+}
+
+.deposit-stepper-label {
+  font-size: 10px;
+  color: var(--text-dim);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deposit-stepper-item.active .deposit-stepper-label {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.deposit-stepper-item.done .deposit-stepper-label {
+  color: var(--green);
+}
+
+.deposit-stepper-line {
+  flex: 1;
+  height: 2px;
+  background: var(--border);
+  margin: 13px 6px 0;
+  border-radius: 1px;
+  transition: background 0.2s;
+  min-width: 24px;
+}
+
+.deposit-stepper-line.filled {
+  background: var(--green);
 }
 
 .deposit-modal-copy {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--text-dim);
   line-height: 1.6;
   margin: 0;
 }
 
-.deposit-warning-list {
-  margin: 0;
-  padding-left: 18px;
+.deposit-modal-summary {
   display: grid;
   gap: 10px;
+  padding: 14px 16px;
+  border: 1px solid rgba(255, 77, 0, 0.15);
+  border-radius: 12px;
+  background:
+    linear-gradient(135deg, rgba(255, 77, 0, 0.08), rgba(255, 77, 0, 0.02)),
+    var(--bg-input);
+}
+
+.deposit-modal-summary-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.deposit-modal-summary-label {
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.deposit-modal-summary-value {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.deposit-warning-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
   font-size: 13px;
   line-height: 1.6;
+  counter-reset: deposit-warning;
+}
+
+.deposit-warning-list li {
+  counter-increment: deposit-warning;
+  position: relative;
+  padding: 12px 14px 12px 42px;
+  background: rgba(255, 77, 0, 0.06);
+  border: 1px solid rgba(255, 77, 0, 0.15);
+  border-radius: 8px;
+  color: var(--text);
+}
+
+.deposit-warning-list li::before {
+  content: counter(deposit-warning);
+  position: absolute;
+  left: 12px;
+  top: 12px;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: rgba(255, 77, 0, 0.15);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+  line-height: 22px;
 }
 
 .deposit-modal-actions {
@@ -948,6 +1112,8 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   justify-content: flex-end;
   gap: 10px;
   flex-wrap: wrap;
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
 }
 
 .deposit-modal-primary {
@@ -966,19 +1132,46 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   background: var(--bg-input);
   color: var(--text);
   border-radius: 12px;
-  padding: 14px 16px;
-  display: grid;
-  gap: 4px;
+  padding: 16px;
+  display: flex;
+  align-items: center;
+  gap: 14px;
   cursor: pointer;
   font-family: inherit;
+  transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
 
 .transport-option:hover {
   border-color: var(--accent);
+  background: rgba(255, 77, 0, 0.04);
+  box-shadow: 0 0 0 1px rgba(255, 77, 0, 0.08);
+}
+
+.transport-option-icon {
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: rgba(255, 77, 0, 0.08);
+  color: var(--accent);
+  transition: background 0.15s;
+}
+
+.transport-option:hover .transport-option-icon {
+  background: rgba(255, 77, 0, 0.14);
+}
+
+.transport-option-body {
+  display: grid;
+  gap: 2px;
+  flex: 1;
 }
 
 .transport-option-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 700;
 }
 
@@ -1009,6 +1202,34 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   font-size: 13px;
   color: var(--text-dim);
   line-height: 1.6;
+}
+
+/* QR payload summary */
+.qr-summary {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 14px;
+  display: grid;
+  gap: 6px;
+}
+
+.qr-summary-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 12px;
+}
+
+.qr-summary-label {
+  color: var(--text-dim);
+  font-weight: 500;
+}
+
+.qr-summary-value {
+  color: var(--text);
+  text-align: right;
+  overflow-wrap: anywhere;
 }
 
 @media (max-width: 900px) {
@@ -1047,5 +1268,42 @@ button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
   .header-actions {
     width: 100%;
     justify-content: space-between;
+  }
+
+  .deposit-stepper {
+    gap: 4px;
+  }
+
+  .deposit-stepper-item {
+    min-width: 0;
+    flex: 1;
+  }
+
+  .deposit-stepper-line {
+    min-width: 12px;
+    margin-left: 2px;
+    margin-right: 2px;
+  }
+
+  .deposit-modal-summary-row,
+  .qr-summary-row,
+  .deposit-modal-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .deposit-modal-summary-value,
+  .qr-summary-value {
+    text-align: left;
+  }
+
+  .transport-option {
+    padding: 14px;
+  }
+
+  .transport-option-icon {
+    width: 40px;
+    height: 40px;
+    min-width: 40px;
   }
 }

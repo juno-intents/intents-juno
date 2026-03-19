@@ -55,7 +55,7 @@ export function validateBaseRecipient(input: string, connectedAddress?: string):
 export function validateDepositAmount(input: string, minDepositAmount?: string): string | null {
   const trimmed = trimAmount(input)
   if (trimmed === '') {
-    return null
+    return 'Enter a deposit amount.'
   }
   if (decimalPlaces(trimmed) > 8) {
     return 'JUNO amounts support up to 8 decimal places.'

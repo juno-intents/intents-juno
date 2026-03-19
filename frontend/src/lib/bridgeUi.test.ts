@@ -11,8 +11,8 @@ import {
 } from './bridgeUi'
 
 describe('bridgeUi', () => {
-  it('accepts blank deposit amounts because they are optional', () => {
-    expect(validateDepositAmount('', '201005025')).toBeNull()
+  it('requires a deposit amount', () => {
+    expect(validateDepositAmount('', '201005025')).toMatch(/Enter a deposit amount/)
   })
 
   it('rejects deposit amounts with too many decimals', () => {

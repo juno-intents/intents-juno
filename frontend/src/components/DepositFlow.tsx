@@ -169,20 +169,40 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           <div className="qr-container">
             <QRCodeSVG value={qrValue} size={180} level="M" includeMargin />
           </div>
+          <div className="qr-summary">
+            <div className="qr-summary-row">
+              <span className="qr-summary-label">Destination</span>
+              <span className="qr-summary-value mono">
+                {memo.oWalletUA.length > 24
+                  ? `${memo.oWalletUA.slice(0, 14)}...${memo.oWalletUA.slice(-6)}`
+                  : memo.oWalletUA}
+              </span>
+            </div>
+            {cliAmount !== '' && (
+              <div className="qr-summary-row">
+                <span className="qr-summary-label">Wallet will send</span>
+                <span className="qr-summary-value">{cliAmount} JUNO</span>
+              </div>
+            )}
+            <div className="qr-summary-row">
+              <span className="qr-summary-label">Memo fallback</span>
+              <span className="qr-summary-value mono">{compactMemo.length} hex characters ready to paste manually</span>
+            </div>
+          </div>
           <p className="deposit-modal-copy">
             Scan with a Juno wallet. If the wallet does not preserve the memo automatically, use the manual details below.
           </p>
           <div className="field">
             <label className="label">Destination Address</label>
             <div className="copy-field">
-              <span style={{ flex: 1 }}>{memo.oWalletUA}</span>
+              <span className="copy-field-value">{memo.oWalletUA}</span>
               <CopyButton text={memo.oWalletUA} />
             </div>
           </div>
           <div className="field">
             <label className="label">Memo (required)</label>
             <div className="copy-field">
-              <span style={{ flex: 1 }}>{compactMemo}</span>
+              <span className="copy-field-value">{compactMemo}</span>
               <CopyButton text={compactMemo} />
             </div>
           </div>
@@ -212,14 +232,14 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         <div className="field">
           <label className="label">Destination Address</label>
           <div className="copy-field">
-            <span style={{ flex: 1 }}>{memo.oWalletUA}</span>
+            <span className="copy-field-value">{memo.oWalletUA}</span>
             <CopyButton text={memo.oWalletUA} />
           </div>
         </div>
         <div className="field">
           <label className="label">Memo (required)</label>
           <div className="copy-field">
-            <span style={{ flex: 1 }}>{compactMemo}</span>
+            <span className="copy-field-value">{compactMemo}</span>
             <CopyButton text={compactMemo} />
           </div>
         </div>
@@ -227,7 +247,7 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           <div className="field">
             <label className="label">Amount</label>
             <div className="copy-field">
-              <span style={{ flex: 1 }}>{cliAmount} JUNO</span>
+              <span className="copy-field-value">{cliAmount} JUNO</span>
               <CopyButton text={cliAmount} />
             </div>
           </div>
@@ -299,15 +319,15 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         </div>
         <div className="field">
           <label className="label" htmlFor="deposit-amount">
-            Amount (JUNO) <span className="optional-pill">Optional</span>{' '}
-            <InfoHint label="The amount only pre-fills the QR code and CLI instructions. The memo is what actually routes the deposit." />
+            Amount (JUNO) <span className="optional-pill">Required</span>{' '}
+            <InfoHint label="The amount is required and is used to generate exact deposit instructions alongside the memo." />
           </label>
           <input
             id="deposit-amount"
             type="number"
             step="0.00000001"
             min="0"
-            placeholder="Leave blank to fill this in later"
+            placeholder="0.00000000"
             value={amount}
             onChange={(event) => setAmount(event.target.value)}
           />
@@ -339,26 +359,61 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         <div className="modal-overlay" onClick={closeInstructions}>
           <div className="modal-content deposit-instructions-modal" onClick={(event) => event.stopPropagation()}>
             <div className="modal-header">
-              <span className="modal-title">
-                {instructionStep === 'warnings'
-                  ? 'Deposit Safety Check'
-                  : instructionStep === 'transport'
-                    ? 'Choose Instruction Format'
-                    : 'Deposit Instructions'}
-              </span>
+              <div className="modal-header-text">
+                <span className="modal-title">
+                  {instructionStep === 'warnings'
+                    ? 'Deposit Safety Check'
+                    : instructionStep === 'transport'
+                      ? 'Choose Instruction Format'
+                      : 'Deposit Instructions'}
+                </span>
+                <span className="modal-step">
+                  {instructionStep === 'warnings'
+                    ? 'Step 1 of 3'
+                    : instructionStep === 'transport'
+                      ? 'Step 2 of 3'
+                      : 'Step 3 of 3'}
+                </span>
+              </div>
               <button className="modal-close" onClick={closeInstructions} aria-label="Close deposit instructions">
                 &times;
               </button>
             </div>
             <div className="modal-body deposit-modal-body">
+              <div className="deposit-stepper" role="presentation">
+                <div className={`deposit-stepper-item${instructionStep === 'warnings' ? ' active' : ' done'}`}>
+                  <span className="deposit-stepper-num">1</span>
+                  <span className="deposit-stepper-label">Review</span>
+                </div>
+                <div className={`deposit-stepper-line${instructionStep !== 'warnings' ? ' filled' : ''}`} />
+                <div className={`deposit-stepper-item${instructionStep === 'transport' ? ' active' : instructionStep === 'content' ? ' done' : ''}`}>
+                  <span className="deposit-stepper-num">2</span>
+                  <span className="deposit-stepper-label">Format</span>
+                </div>
+                <div className={`deposit-stepper-line${instructionStep === 'content' ? ' filled' : ''}`} />
+                <div className={`deposit-stepper-item${instructionStep === 'content' ? ' active' : ''}`}>
+                  <span className="deposit-stepper-num">3</span>
+                  <span className="deposit-stepper-label">Send</span>
+                </div>
+              </div>
+              <div className="deposit-modal-summary">
+                <div className="deposit-modal-summary-row">
+                  <span className="deposit-modal-summary-label">Base recipient</span>
+                  <span className="deposit-modal-summary-value mono">{effectiveRecipient}</span>
+                </div>
+                <div className="deposit-modal-summary-row">
+                  <span className="deposit-modal-summary-label">Amount locked in</span>
+                  <span className="deposit-modal-summary-value">{cliAmount} JUNO</span>
+                </div>
+              </div>
               {instructionStep === 'warnings' && (
                 <>
                   <p className="deposit-modal-copy">
                     Review these warnings before generating the deposit memo and send instructions.
                   </p>
                   <ol className="deposit-warning-list">
-                    <li>I will not send less than {formattedMinDeposit} JUNO or my funds will be permenantly lost</li>
-                    <li>I must include the memo exactly or my funds will be permenantly lost</li>
+                    <li>I will not send less than {formattedMinDeposit} JUNO or my funds will be permanently lost</li>
+                    <li>I must include the memo exactly or my funds will be permanently lost</li>
                     <li>Juno Intents is not responsible for losses from incorrect sending params</li>
                   </ol>
                   {memoRequestError ? <div className="error-box">{memoRequestError}</div> : null}
@@ -385,8 +440,13 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
                       aria-label="QR Code"
                       onClick={() => handleSelectTransport('qr')}
                     >
-                      <span className="transport-option-title">QR Code</span>
-                      <span className="transport-option-copy">Best for scanning directly from a Juno wallet.</span>
+                      <span className="transport-option-icon" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 20 20" fill="none"><rect x="1" y="1" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5"/><rect x="12" y="1" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5"/><rect x="1" y="12" width="7" height="7" rx="1" stroke="currentColor" strokeWidth="1.5"/><rect x="3.5" y="3.5" width="2" height="2" fill="currentColor"/><rect x="14.5" y="3.5" width="2" height="2" fill="currentColor"/><rect x="3.5" y="14.5" width="2" height="2" fill="currentColor"/><rect x="13" y="13" width="2" height="2" fill="currentColor"/><rect x="17" y="17" width="2" height="2" fill="currentColor"/></svg>
+                      </span>
+                      <div className="transport-option-body">
+                        <span className="transport-option-title">QR Code</span>
+                        <span className="transport-option-copy">Best for scanning directly from a Juno wallet.</span>
+                      </div>
                     </button>
                     <button
                       type="button"
@@ -394,8 +454,13 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
                       aria-label="Junocash CLI"
                       onClick={() => handleSelectTransport('cli')}
                     >
-                      <span className="transport-option-title">Junocash CLI</span>
-                      <span className="transport-option-copy">Copy a ready-to-edit CLI command.</span>
+                      <span className="transport-option-icon" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 20 20" fill="none"><rect x="1" y="3" width="18" height="14" rx="2" stroke="currentColor" strokeWidth="1.5"/><path d="M5 8.5l3 1.5-3 1.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"/><line x1="10" y1="12" x2="15" y2="12" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                      </span>
+                      <div className="transport-option-body">
+                        <span className="transport-option-title">Junocash CLI</span>
+                        <span className="transport-option-copy">Copy a ready-to-edit CLI command.</span>
+                      </div>
                     </button>
                     <button
                       type="button"
@@ -403,8 +468,21 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
                       aria-label="Manual Send"
                       onClick={() => handleSelectTransport('manual')}
                     >
-                      <span className="transport-option-title">Manual Send</span>
-                      <span className="transport-option-copy">Copy the address and memo separately.</span>
+                      <span className="transport-option-icon" aria-hidden="true">
+                        <svg width="22" height="22" viewBox="0 0 20 20" fill="none"><rect x="3" y="1" width="14" height="18" rx="2" stroke="currentColor" strokeWidth="1.5"/><line x1="6.5" y1="6" x2="13.5" y2="6" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="6.5" y1="10" x2="13.5" y2="10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/><line x1="6.5" y1="14" x2="10" y2="14" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/></svg>
+                      </span>
+                      <div className="transport-option-body">
+                        <span className="transport-option-title">Manual Send</span>
+                        <span className="transport-option-copy">Copy the address and memo separately.</span>
+                      </div>
+                    </button>
+                  </div>
+                  <div className="deposit-modal-actions">
+                    <button type="button" className="ghost-btn" onClick={() => setInstructionStep('warnings')}>
+                      Back
+                    </button>
+                    <button type="button" className="ghost-btn" onClick={closeInstructions}>
+                      Close
                     </button>
                   </div>
                 </>
