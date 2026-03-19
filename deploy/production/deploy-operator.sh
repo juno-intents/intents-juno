@@ -1141,6 +1141,123 @@ EOF_DKG_WRAPPER
 sudo install -m 0755 "$dkg_admin_tmp" "$dkg_admin_serve_script"
 rm -f "$dkg_admin_tmp"
 
+tss_host_script="/usr/local/bin/intents-juno-tss-host.sh"
+tss_host_tmp="$(mktemp)"
+cat >"$tss_host_tmp" <<'EOF_TSS_HOST_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+[[ -s "${TSS_SIGNER_UFVK_FILE:-}" ]] || {
+  echo "tss-host signer UFVK file is missing or empty: ${TSS_SIGNER_UFVK_FILE:-unset}" >&2
+  exit 1
+}
+[[ -n "${TSS_SIGNER_WORK_DIR:-}" ]] || {
+  echo "tss-host signer work directory is not configured (TSS_SIGNER_WORK_DIR)" >&2
+  exit 1
+}
+[[ -s "${TSS_TLS_CERT_FILE:-}" ]] || {
+  echo "tss-host TLS cert is missing or empty: ${TSS_TLS_CERT_FILE:-unset}" >&2
+  exit 1
+}
+[[ -s "${TSS_TLS_KEY_FILE:-}" ]] || {
+  echo "tss-host TLS key is missing or empty: ${TSS_TLS_KEY_FILE:-unset}" >&2
+  exit 1
+}
+dev_mode_enabled() {
+  case "${JUNO_DEV_MODE:-false}" in
+    1|true|TRUE|yes|YES|on|ON) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+if ! dev_mode_enabled; then
+  [[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {
+    echo "tss-host production mode requires TSS_CLIENT_CA_FILE to reference a readable PEM file" >&2
+    exit 1
+  }
+fi
+runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
+case "$runtime_mode" in
+  nitro-enclave)
+    [[ -x "${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_SPENDAUTH_SIGNER_BIN executable: ${TSS_NITRO_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ENCLAVE_EIF_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ENCLAVE_EIF_FILE: ${TSS_NITRO_ENCLAVE_EIF_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -s "${TSS_NITRO_ATTESTATION_FILE:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_ATTESTATION_FILE: ${TSS_NITRO_ATTESTATION_FILE:-unset}" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR0:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR0" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR1:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR1" >&2
+      exit 1
+    }
+    [[ -n "${TSS_NITRO_EXPECTED_PCR2:-}" ]] || {
+      echo "tss-host nitro mode requires TSS_NITRO_EXPECTED_PCR2" >&2
+      exit 1
+    }
+    [[ "${TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS:-}" =~ ^[0-9]+$ ]] || {
+      echo "tss-host nitro mode requires numeric TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS" >&2
+      exit 1
+    }
+    ;;
+  host-process)
+    if ! dev_mode_enabled; then
+      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
+      exit 1
+    fi
+    [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
+      echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
+      exit 1
+    }
+    ;;
+  *)
+    echo "unsupported TSS_SIGNER_RUNTIME_MODE: ${TSS_SIGNER_RUNTIME_MODE:-unset} (expected nitro-enclave or host-process)" >&2
+    exit 1
+    ;;
+esac
+mkdir -p "${TSS_SIGNER_WORK_DIR}"
+tss_postgres_dsn_env="${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
+if ! dev_mode_enabled; then
+  [[ -n "${!tss_postgres_dsn_env:-}" ]] || {
+    echo "tss-host production mode requires ${tss_postgres_dsn_env} to reference a Postgres DSN" >&2
+    exit 1
+  }
+fi
+if [[ "${!tss_postgres_dsn_env+x}" == "x" ]]; then
+  export "$tss_postgres_dsn_env"
+fi
+args=(
+  --listen-addr "${TSS_LISTEN_ADDR:-127.0.0.1:9443}"
+  --tls-cert-file "${TSS_TLS_CERT_FILE}"
+  --tls-key-file "${TSS_TLS_KEY_FILE}"
+  --read-timeout 120s
+  --write-timeout 120s
+  --idle-timeout 120s
+  --postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
+  --signer-bin /usr/local/bin/tss-signer
+  --signer-arg --ufvk-file
+  --signer-arg "${TSS_SIGNER_UFVK_FILE}"
+  --signer-arg --spendauth-signer-bin
+  --signer-arg /usr/local/bin/intents-juno-spendauth-signer.sh
+  --signer-arg --work-dir
+  --signer-arg "${TSS_SIGNER_WORK_DIR}"
+)
+if [[ -n "${TSS_CLIENT_CA_FILE:-}" ]]; then
+  args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")
+fi
+exec /usr/local/bin/tss-host "${args[@]}"
+EOF_TSS_HOST_WRAPPER
+sudo install -m 0755 "$tss_host_tmp" "$tss_host_script"
+rm -f "$tss_host_tmp"
+
 if [[ "$(printf '%s' "$(env_get_value_remote "TSS_SIGNER_RUNTIME_MODE")" | tr '[:upper:]' '[:lower:]')" == "host-process" ]]; then
   spendauth_tmp="$(mktemp)"
   cat >"$spendauth_tmp" <<'EOF_SPENDAUTH_WRAPPER'

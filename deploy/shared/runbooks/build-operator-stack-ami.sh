@@ -584,6 +584,7 @@ TSS_LISTEN_ADDR=127.0.0.1:9443
 TSS_TLS_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.pem
 TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key
 TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
+TSS_HOST_POSTGRES_DSN_ENV=CHECKPOINT_POSTGRES_DSN
 ENV
   sudo install -m 0640 /tmp/operator-stack.env /etc/intents-juno/operator-stack.env
   sudo chown root:intents-juno /etc/intents-juno/operator-stack.env
@@ -1485,6 +1486,16 @@ case "$runtime_mode" in
     ;;
 esac
 mkdir -p "${TSS_SIGNER_WORK_DIR}"
+tss_postgres_dsn_env="${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
+if ! dev_mode_enabled; then
+  [[ -n "${!tss_postgres_dsn_env:-}" ]] || {
+    echo "tss-host production mode requires ${tss_postgres_dsn_env} to reference a Postgres DSN" >&2
+    exit 1
+  }
+fi
+if [[ "${!tss_postgres_dsn_env+x}" == "x" ]]; then
+  export "$tss_postgres_dsn_env"
+fi
 args=(
   --listen-addr "${TSS_LISTEN_ADDR:-127.0.0.1:9443}"
   --tls-cert-file "${TSS_TLS_CERT_FILE}"
@@ -1492,6 +1503,7 @@ args=(
   --read-timeout 120s
   --write-timeout 120s
   --idle-timeout 120s
+  --postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
   --signer-bin /usr/local/bin/tss-signer
   --signer-arg --ufvk-file
   --signer-arg "${TSS_SIGNER_UFVK_FILE}"

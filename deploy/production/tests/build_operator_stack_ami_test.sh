@@ -238,6 +238,8 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   tss_wrapper="$(extract_block "cat > /tmp/intents-juno-tss-host.sh <<'EOF_TSS'" "EOF_TSS")"
   assert_contains "$tss_wrapper" '[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {' "tss wrapper requires client CA in production"
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
+  assert_contains "$tss_wrapper" 'export "$tss_postgres_dsn_env"' "tss wrapper exports the selected postgres dsn env var"
+  assert_contains "$tss_wrapper" '--postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "tss wrapper passes postgres DSN by env indirection"
   assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires JUNO_DEV_MODE=true"' "tss wrapper blocks host-process outside dev mode"
 
   local dkg_wrapper
@@ -501,6 +503,43 @@ EOF
   fi
   assert_contains "$(cat "$stderr_file")" "tss-host production mode requires TSS_CLIENT_CA_FILE" "tss wrapper rejects non-mTLS production wiring"
 
+  cat >"$fake_bin/tss-host" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$tmp/tss.args"
+env | sort >"$tmp/tss.env"
+exit 0
+EOF
+  cat >"$tmp/nitro-signer" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$fake_bin/tss-host" "$tmp/nitro-signer"
+
+  printf 'ca' >"$tmp/ca.pem"
+  printf 'eif' >"$tmp/spendauth.eif"
+  printf 'attestation' >"$tmp/attestation.json"
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+CHECKPOINT_POSTGRES_DSN=postgres://tss?sslmode=require
+TSS_SIGNER_UFVK_FILE=$tmp/ufvk.txt
+TSS_SIGNER_WORK_DIR=$tmp/work
+TSS_TLS_CERT_FILE=$tmp/server.pem
+TSS_TLS_KEY_FILE=$tmp/server.key
+TSS_CLIENT_CA_FILE=$tmp/ca.pem
+TSS_NITRO_SPENDAUTH_SIGNER_BIN=$tmp/nitro-signer
+TSS_NITRO_ENCLAVE_EIF_FILE=$tmp/spendauth.eif
+TSS_NITRO_ATTESTATION_FILE=$tmp/attestation.json
+TSS_NITRO_EXPECTED_PCR0=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+TSS_NITRO_EXPECTED_PCR1=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+TSS_NITRO_EXPECTED_PCR2=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+TSS_NITRO_ATTESTATION_MAX_AGE_SECONDS=300
+EOF
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-tss-host.sh"
+  assert_contains "$(cat "$tmp/tss.args")" '--postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "tss wrapper forwards the postgres env name"
+  assert_not_contains "$(cat "$tmp/tss.args")" 'postgres://tss?sslmode=require' "tss wrapper does not pass raw postgres dsn in argv"
+  assert_contains "$(cat "$tmp/tss.env")" 'CHECKPOINT_POSTGRES_DSN=postgres://tss?sslmode=require' "tss wrapper preserves postgres dsn in env"
+
   cat >"$fake_bin/withdraw-coordinator" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >"$output_file"
@@ -517,7 +556,6 @@ exit 0
 EOF
   chmod 0755 "$fake_bin/withdraw-coordinator" "$fake_bin/juno-txbuild" "$tmp/extend-signer"
 
-  printf 'ca' >"$tmp/ca.pem"
   printf 'coord-cert' >"$tmp/coordinator-client.pem"
   printf 'coord-key' >"$tmp/coordinator-client.key"
   cat >"$env_file" <<EOF
