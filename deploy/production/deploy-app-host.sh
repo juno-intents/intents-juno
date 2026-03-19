@@ -367,6 +367,11 @@ cat >"\$bridge_wrapper_tmp" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 bridge_api_bin="__RUNTIME_DIR__/bin/bridge-api"
+supports_flag() {
+  local bin="\$1"
+  local flag_name="\$2"
+  "\$bin" -h 2>&1 | grep -qE "(^|[[:space:]])--?\${flag_name}([[:space:]]|$)"
+}
 args=(
   --listen "\$BRIDGE_API_LISTEN_ADDR"
   --postgres-dsn "\$BRIDGE_API_POSTGRES_DSN"
@@ -380,7 +385,7 @@ args=(
   --min-withdraw-amount "\$BRIDGE_API_MIN_WITHDRAW_AMOUNT"
   --fee-bps "\$BRIDGE_API_FEE_BPS"
 )
-if "\$bridge_api_bin" -h 2>&1 | grep -q -- '--withdrawal-expiry-window-seconds'; then
+if supports_flag "\$bridge_api_bin" 'withdrawal-expiry-window-seconds'; then
   args+=(--withdrawal-expiry-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")
 else
   args+=(--refund-window-seconds "\$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")
@@ -400,6 +405,11 @@ cat >"\$backoffice_wrapper_tmp" <<'WRAP'
 #!/usr/bin/env bash
 set -euo pipefail
 backoffice_bin="__RUNTIME_DIR__/bin/backoffice"
+supports_flag() {
+  local bin="\$1"
+  local flag_name="\$2"
+  "\$bin" -h 2>&1 | grep -qE "(^|[[:space:]])--?\${flag_name}([[:space:]]|$)"
+}
 args=(
   --listen "\$BACKOFFICE_LISTEN_ADDR"
   --postgres-dsn "\$BACKOFFICE_POSTGRES_DSN"
@@ -423,12 +433,12 @@ if [[ -n "\${BACKOFFICE_SP1_RPC_URL:-}" ]]; then
   args+=(--sp1-rpc-url "\$BACKOFFICE_SP1_RPC_URL")
 fi
 if [[ -n "\${BACKOFFICE_IPFS_API_BEARER_TOKEN:-}" ]]; then
-  if "\$backoffice_bin" -h 2>&1 | grep -q -- '--ipfs-api-bearer-token'; then
+  if supports_flag "\$backoffice_bin" 'ipfs-api-bearer-token'; then
     args+=(--ipfs-api-bearer-token "\$BACKOFFICE_IPFS_API_BEARER_TOKEN")
   fi
 fi
 if [[ -n "\${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
-  if "\$backoffice_bin" -h 2>&1 | grep -q -- '--juno-rpc-urls'; then
+  if supports_flag "\$backoffice_bin" 'juno-rpc-urls'; then
     args+=(--juno-rpc-urls "\$BACKOFFICE_JUNO_RPC_URLS")
   else
     IFS=, read -r backoffice_juno_rpc_url _ <<< "\$BACKOFFICE_JUNO_RPC_URLS"

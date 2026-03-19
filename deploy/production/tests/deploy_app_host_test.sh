@@ -205,7 +205,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/bridge-api.env' "bridge unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'EnvironmentFile=/etc/intents-juno/backoffice.env' "backoffice unit uses env file"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--base-rpc-url "$BRIDGE_API_BASE_RPC_URL"' "bridge wrapper passes base rpc url"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if "$bridge_api_bin" -h 2>&1 | grep -q -- '\''--withdrawal-expiry-window-seconds'\''; then' "bridge wrapper probes withdrawal expiry flag support"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'supports_flag() {' "wrappers define shared flag probing helper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if supports_flag "$bridge_api_bin" '\''withdrawal-expiry-window-seconds'\''; then' "bridge wrapper probes withdrawal expiry flag support"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'args+=(--withdrawal-expiry-window-seconds "$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")' "bridge wrapper uses the modern withdrawal expiry flag when supported"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'args+=(--refund-window-seconds "$BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS")' "bridge wrapper falls back to the legacy refund window flag"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--deposit-min-confirmations "${BRIDGE_API_DEPOSIT_MIN_CONFIRMATIONS:-1}"' "bridge wrapper passes deposit confirmation seed"
@@ -222,7 +223,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--sp1-requestor-address "$BACKOFFICE_SP1_REQUESTOR_ADDRESS"' "backoffice wrapper passes prover requestor address"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--sp1-rpc-url "$BACKOFFICE_SP1_RPC_URL"' "backoffice wrapper passes sp1 rpc url"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_IPFS_API_BEARER_TOKEN:-}" ]]; then' "backoffice wrapper guards the optional IPFS bearer token flag"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if "$backoffice_bin" -h 2>&1 | grep -q -- '\''--ipfs-api-bearer-token'\''; then' "backoffice wrapper probes IPFS bearer flag support"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if supports_flag "$backoffice_bin" '\''ipfs-api-bearer-token'\''; then' "backoffice wrapper probes IPFS bearer flag support"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--ipfs-api-bearer-token "$BACKOFFICE_IPFS_API_BEARER_TOKEN"' "backoffice wrapper passes the optional IPFS bearer token when supported"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo apt-get install -y caddy' "remote installs caddy when https is enabled"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '/etc/caddy/Caddyfile' "remote writes caddyfile"
@@ -262,6 +263,58 @@ EOF
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for fallback urls"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for fallback urls"
   assert_contains "$(cat "$log_dir/backoffice.env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"
+  rm -rf "$workdir"
+}
+
+test_deploy_app_host_bridge_wrapper_accepts_go_single_dash_help_flags() {
+  local workdir wrapper_template wrapper runtime_dir output_file
+  workdir="$(mktemp -d)"
+  runtime_dir="$workdir/runtime"
+  wrapper_template="$workdir/bridge-wrapper.tmpl"
+  wrapper="$workdir/bridge-wrapper.sh"
+  output_file="$workdir/bridge-api-args.txt"
+  mkdir -p "$runtime_dir/bin"
+
+  awk '
+    /bridge_wrapper_tmp/ && /<<'\''WRAP'\''/ { capture=1; next }
+    capture && /^WRAP$/ { exit }
+    capture { print }
+  ' "$REPO_ROOT/deploy/production/deploy-app-host.sh" >"$wrapper_template"
+  assert_file_exists "$wrapper_template" "bridge wrapper template extracted"
+  assert_contains "$(cat "$wrapper_template")" 'bridge_api_bin="__RUNTIME_DIR__/bin/bridge-api"' "bridge wrapper template contains runtime bridge api path"
+  sed -e "s|__RUNTIME_DIR__|$runtime_dir|g" -e 's/\\\$/\$/g' "$wrapper_template" >"$wrapper"
+  chmod +x "$wrapper"
+
+  cat >"$runtime_dir/bin/bridge-api" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "-h" ]]; then
+  cat <<'HELP'
+Usage of /fake/bridge-api:
+  -withdrawal-expiry-window-seconds uint
+  -wjuno-address string
+HELP
+  exit 0
+fi
+printf '%s\n' "\$*" >"$output_file"
+EOF
+  chmod +x "$runtime_dir/bin/bridge-api"
+
+  BRIDGE_API_LISTEN_ADDR=127.0.0.1:8082 \
+  BRIDGE_API_POSTGRES_DSN=postgres://example \
+  BRIDGE_API_BASE_RPC_URL=https://base.example.invalid \
+  BRIDGE_API_BASE_CHAIN_ID=84532 \
+  BRIDGE_API_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111 \
+  BRIDGE_API_OWALLET_UA=u1testexample \
+  BRIDGE_API_MIN_WITHDRAW_AMOUNT=200000000 \
+  BRIDGE_API_FEE_BPS=50 \
+  BRIDGE_API_WITHDRAWAL_EXPIRY_WINDOW_SECONDS=86400 \
+  BRIDGE_API_WJUNO_ADDRESS=0x2222222222222222222222222222222222222222 \
+    "$wrapper"
+
+  assert_contains "$(cat "$output_file")" "--withdrawal-expiry-window-seconds 86400" "bridge wrapper accepts Go single-dash help output"
+  assert_not_contains "$(cat "$output_file")" "--refund-window-seconds 86400" "bridge wrapper does not fall back to refund window when modern flag is supported"
+
   rm -rf "$workdir"
 }
 
@@ -377,7 +430,7 @@ EOF
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for fallback urls"
   assert_contains "$(cat "$log_dir/backoffice.env")" "BACKOFFICE_BASE_RELAYER_SIGNER_ADDRESSES=0xd68c28F414B210a6C519D05159014378A5b8Bc0F" "backoffice env still carries relayer signer addresses"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'if [[ -n "${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then' "backoffice wrapper guards juno rpc urls flag"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '"$backoffice_bin" -h 2>&1 | grep -q -- '\''--juno-rpc-urls'\''' "backoffice wrapper detects multi-url support"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'if supports_flag "$backoffice_bin" '\''juno-rpc-urls'\''; then' "backoffice wrapper detects multi-url support"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-rpc-urls "$BACKOFFICE_JUNO_RPC_URLS"' "backoffice wrapper uses multi-url flag when supported"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'IFS=, read -r backoffice_juno_rpc_url _ <<< "$BACKOFFICE_JUNO_RPC_URLS"' "backoffice wrapper extracts the first fallback url for legacy binaries"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '--juno-rpc-url "$backoffice_juno_rpc_url"' "backoffice wrapper falls back to the singular juno rpc flag for legacy binaries"
@@ -725,6 +778,7 @@ EOF
 
 main() {
   test_deploy_app_host_uses_release_assets_and_updates_remote_runtime
+  test_deploy_app_host_bridge_wrapper_accepts_go_single_dash_help_flags
   test_deploy_app_host_allows_missing_backoffice_juno_rpc_url
   test_deploy_app_host_preserves_preview_iam_kafka_auth
   test_deploy_app_host_provisions_edge_and_uses_origin_proxy
