@@ -146,20 +146,51 @@ cleanup() {
 }
 trap cleanup EXIT
 
+authoritative_resolve_target() {
+  local url="$1"
+  local host_port host port ip
+
+  [[ "$url" == https://* ]] || return 1
+  command -v dig >/dev/null 2>&1 || return 1
+
+  host_port="${url#https://}"
+  host_port="${host_port%%/*}"
+  host="${host_port%%:*}"
+  port="${host_port##*:}"
+  if [[ "$host" == "$port" ]]; then
+    port=443
+  fi
+
+  ip="$(dig @1.1.1.1 +short "$host" | awk 'NF { print; exit }')"
+  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || return 1
+  printf '%s:%s:%s\n' "$host" "$port" "$ip"
+}
+
 http_get_with_retry() {
   local url="$1"
   local label="$2"
   shift 2
-  local response_file error_file
+  local response_file error_file resolve_target
   local curl_status attempt
+  local -a curl_argv
+
+  resolve_target="$(authoritative_resolve_target "$url" || true)"
 
   response_file="$(mktemp)"
   error_file="$(mktemp)"
   for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
     : >"$response_file"
     : >"$error_file"
+    curl_argv=(curl -fsS)
+    if [[ -n "$resolve_target" ]]; then
+      curl_argv+=(--resolve "$resolve_target")
+    fi
+    if (($# > 0)); then
+      curl_argv+=("$@")
+    fi
+    curl_argv+=("$url")
     set +e
-    curl -fsS "$@" "$url" >"$response_file" 2>"$error_file"
+    "${curl_argv[@]}" >"$response_file" 2>"$error_file"
     curl_status=$?
     set -e
 

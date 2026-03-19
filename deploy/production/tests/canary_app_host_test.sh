@@ -142,23 +142,51 @@ if [[ "$*" == *"curl -fsS "* ]]; then
 fi
 exit 0
 EOF
+  cat >"$fake_bin/dig" <<'EOF'
+#!/usr/bin/env bash
+printf 'dig %s\n' "$*" >>"$TEST_LOG_DIR/dig.log"
+if [[ "$*" == *"bridge.alpha.intents-testing.thejunowallet.com"* ]]; then
+  printf '203.0.113.21\n'
+  exit 0
+fi
+exit 1
+EOF
   cat >"$fake_bin/curl" <<'EOF'
 #!/usr/bin/env bash
 printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
 url="${@: -1}"
+resolve_value=""
+next_is_resolve="false"
+for arg in "$@"; do
+  if [[ "$next_is_resolve" == "true" ]]; then
+    resolve_value="$arg"
+    next_is_resolve="false"
+    continue
+  fi
+  if [[ "$arg" == "--resolve" ]]; then
+    next_is_resolve="true"
+  fi
+done
 case "$url" in
-  https://bridge.alpha.intents-testing.thejunowallet.com/readyz|http://127.0.0.1:8090/readyz)
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"status":"ok"}\n'
+    ;;
+  http://127.0.0.1:8090/readyz)
     printf '{"status":"ok"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
     printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
     printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
     printf 'aa%.0s' $(seq 1 512)
     printf '"}\n'
     ;;
   https://bridge.alpha.intents-testing.thejunowallet.com/)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
     printf '<!doctype html><html><body>Bridge UI</body></html>\n'
     ;;
   http://127.0.0.1:8090/api/settings/runtime)
@@ -177,7 +205,7 @@ esac
 EOF
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
   write_fake_aws "$fake_bin/aws" 1 1
-  chmod +x "$fake_bin/ssh" "$fake_bin/curl"
+  chmod +x "$fake_bin/ssh" "$fake_bin/dig" "$fake_bin/curl"
 
   PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
@@ -186,6 +214,8 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.log")" "UserKnownHostsFile=$workdir/output/app/known_hosts" "canary uses known_hosts file"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active bridge-api" "bridge systemd checked"
   assert_contains "$(cat "$log_dir/ssh.log")" "systemctl is-active backoffice" "backoffice systemd checked"
+  assert_contains "$(cat "$log_dir/dig.log")" "@1.1.1.1 +short bridge.alpha.intents-testing.thejunowallet.com" "canary resolves bridge via public DNS fallback"
+  assert_contains "$(cat "$log_dir/curl.log")" "--resolve bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" "canary pins bridge probes to the authoritative edge IP"
   assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/config" "bridge config checked"
   assert_contains "$(cat "$log_dir/curl.log")" "https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111" "bridge deposit memo checked"
   assert_contains "$(cat "$log_dir/curl.log")" "http://127.0.0.1:8090/api/settings/runtime" "backoffice settings checked"
