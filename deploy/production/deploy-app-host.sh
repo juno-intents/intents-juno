@@ -274,6 +274,9 @@ if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; the
   if [[ "$edge_enabled" == "false" ]]; then
     production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$bridge_record_name" "$ttl_seconds" "$public_endpoint"
   fi
+  if [[ "$edge_enabled" == "true" && -n "$edge_origin_record_name" ]]; then
+    production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$edge_origin_record_name" "$ttl_seconds" "$public_endpoint"
+  fi
   production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
 fi
 

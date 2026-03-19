@@ -550,7 +550,7 @@ EOF
 }
 
 test_deploy_app_host_provisions_edge_and_uses_origin_proxy() {
-  local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag
+  local workdir fake_bin log_dir assets_dir shared_manifest app_manifest release_tag origin_record_name
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
   log_dir="$workdir/logs"
@@ -659,9 +659,10 @@ EOF
       --app-deploy "$app_manifest" \
       --release-tag "$release_tag" >/dev/null
 
+  origin_record_name="$(jq -r '.edge.origin_record_name' "$app_manifest")"
   assert_contains "$(cat "$log_dir/terraform.log")" "init" "edge terraform init"
   assert_contains "$(cat "$log_dir/terraform.log")" "apply" "edge terraform apply"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'origin.alpha.intents-testing.thejunowallet.com' "edge caddy serves the dedicated origin hostname"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" "$origin_record_name" "edge caddy serves the dedicated origin hostname"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'email $acme_account_email' "edge caddy uses acme for origin tls"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /bridge*' "edge caddy bridge origin route"
   assert_contains "$(cat "$log_dir/ssh.stdin")" '$backoffice_record_name {' "edge caddy serves backoffice on a direct hostname"
@@ -672,6 +673,7 @@ EOF
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /ops* {' "edge origin no longer publishes /ops"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'auto_https off' "edge caddy no longer disables direct tls"
   assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "edge path publishes direct backoffice dns"
+  assert_eq "$(grep -c 'route53 change-resource-record-sets' "$log_dir/aws.log")" "2" "edge path publishes both backoffice and origin dns before caddy startup"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "edge path opens public 443 for origin tls"
   assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":443' "edge path authorizes https ingress"
   assert_contains "$(cat "$log_dir/aws.log")" "revoke-security-group-ingress" "edge path revokes legacy direct http ingress"
