@@ -1859,11 +1859,12 @@ data "aws_iam_policy_document" "wireguard_gateway_access" {
   statement {
     sid = "AllowWireGuardClientConfigSecretWrite"
     actions = [
+      "ec2:DescribeInstances",
       "secretsmanager:DescribeSecret",
       "secretsmanager:GetSecretValue",
       "secretsmanager:PutSecretValue",
     ]
-    resources = [aws_secretsmanager_secret.shared_wireguard_client_config[0].arn]
+    resources = ["*"]
   }
 }
 
@@ -1916,12 +1917,15 @@ resource "aws_instance" "wireguard_gateway" {
     rm -rf /tmp/aws /tmp/awscliv2.zip
 
     imds_token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
+    instance_id="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/instance-id)"
     for _ in $(seq 1 30); do
-      public_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null || true)"
-      [[ -n "$public_ip" ]] && break
+      public_ip="$(AWS_PAGER="" aws --region ${var.aws_region} ec2 describe-instances --instance-ids "$instance_id" --query 'Reservations[0].Instances[0].PublicIpAddress' --output text 2>/dev/null || true)"
+      if [[ -n "$public_ip" && "$public_ip" != "None" ]]; then
+        break
+      fi
       sleep 2
     done
-    [[ -n "$public_ip" ]] || { echo "wireguard public IP is unavailable" >&2; exit 1; }
+    [[ -n "$public_ip" && "$public_ip" != "None" ]] || { echo "wireguard public IP is unavailable" >&2; exit 1; }
 
     wireguard_client_config_secret_arn="${aws_secretsmanager_secret.shared_wireguard_client_config[0].arn}"
     wireguard_gateway_address_cidr="${local.wireguard_gateway_address_cidr}"
