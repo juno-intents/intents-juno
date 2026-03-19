@@ -2364,6 +2364,8 @@ production_render_operator_stack_env() {
   withdraw_max_expiry_extension="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION || true)"
   juno_rpc_bind="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_BIND || true)"
   juno_rpc_allow_ips="$(production_env_first_value "$resolved_secret_env" JUNO_RPC_ALLOW_IPS || true)"
+  ipfs_api_bearer_token="$(production_env_first_value "$resolved_secret_env" CHECKPOINT_IPFS_API_BEARER_TOKEN || true)"
+  kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
@@ -2372,10 +2374,10 @@ production_render_operator_stack_env() {
   ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn')"
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
   kafka_critical_hmac_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_hmac_secret_arn')"
-  if [[ -n "$ipfs_api_auth_secret_arn" ]]; then
+  if [[ -z "$ipfs_api_bearer_token" && -n "$ipfs_api_auth_secret_arn" ]]; then
     ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
   fi
-  if [[ -n "$kafka_critical_hmac_secret_arn" ]]; then
+  if [[ -z "$kafka_critical_hmac_key" && -n "$kafka_critical_hmac_secret_arn" ]]; then
     kafka_critical_hmac_key="$(production_resolve_optional_aws_sm_secret "$kafka_critical_hmac_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
   fi
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"

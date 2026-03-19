@@ -1797,6 +1797,122 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_stack_env_prefers_inline_ipfs_bearer_token() {
+  local workdir shared_manifest handoff_dir resolved_env output_env tf_json fake_bin old_path
+  local ipfs_secret_arn
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+CHECKPOINT_IPFS_API_BEARER_TOKEN=literal:inline-ipfs-token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  ipfs_secret_arn="arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-ipfs-api-bearer-token"
+  tf_json="$workdir/terraform-output.json"
+  jq --arg arn "$ipfs_secret_arn" '.shared_ipfs_api_auth_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_secret_reader "$fake_bin/aws" "$ipfs_secret_arn" "aws-ipfs-token"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_IPFS_API_BEARER_TOKEN=inline-ipfs-token" "rendered env prefers inline ipfs bearer token"
+  assert_not_contains "$(cat "$output_env")" "CHECKPOINT_IPFS_API_BEARER_TOKEN=aws-ipfs-token" "rendered env ignores shared manifest ipfs secret when inline token is present"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_prefers_inline_queueauth_hmac_key() {
+  local workdir shared_manifest handoff_dir resolved_env output_env tf_json fake_bin old_path
+  local queueauth_secret_arn
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=literal:wallet-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+JUNO_QUEUE_CRITICAL_HMAC_KEY=literal:inline-queueauth-hmac
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+
+  queueauth_secret_arn="arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-kafka-critical-hmac"
+  tf_json="$workdir/terraform-output.json"
+  jq --arg arn "$queueauth_secret_arn" '.shared_kafka_critical_hmac_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "aws-queueauth-hmac"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$output_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=inline-queueauth-hmac" "rendered env prefers inline queueauth hmac key"
+  assert_not_contains "$(cat "$output_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=aws-queueauth-hmac" "rendered env ignores shared manifest queueauth secret when inline key is present"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_requires_juno_rpc_credentials() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -2602,6 +2718,8 @@ main() {
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_preserves_secure_preview_signer_configuration
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
+  test_render_operator_stack_env_prefers_inline_ipfs_bearer_token
+  test_render_operator_stack_env_prefers_inline_queueauth_hmac_key
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_withdraw_expiry_overrides
   test_render_operator_stack_env_rejects_private_key_with_kms_contract
