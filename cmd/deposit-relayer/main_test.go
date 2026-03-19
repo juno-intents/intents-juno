@@ -108,3 +108,11 @@ func TestParseDepositSourceEvent(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultClaimTTLDelegatesToRelayerSafeLease(t *testing.T) {
+	t.Parallel()
+
+	if got := defaultDepositRelayerClaimTTL(); got != 0 {
+		t.Fatalf("defaultDepositRelayerClaimTTL() = %s, want 0 to delegate to depositrelayer.New", got)
+	}
+}

@@ -68,6 +68,10 @@ type depositEventV2 struct {
 	LogIndex         *uint64 `json:"logIndex,omitempty"`
 }
 
+func defaultDepositRelayerClaimTTL() time.Duration {
+	return 0
+}
+
 func main() {
 	var (
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required when --store-driver=postgres)")
@@ -95,7 +99,7 @@ func main() {
 		maxItems      = flag.Int("max-items", 25, "maximum items per mint batch")
 		maxAge        = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
 		dedupeMax     = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
-		claimTTL      = flag.Duration("claim-ttl", 30*time.Second, "ttl for claimed confirmed deposits")
+		claimTTL      = flag.Duration("claim-ttl", defaultDepositRelayerClaimTTL(), "ttl for claimed deposits and submitted attempts (0 => proof timeout + 2m)")
 		owner         = flag.String("owner", "", "unique worker identity used for deposit claim leases (default: hostname-pid)")
 		gasLimit      = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
 		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
