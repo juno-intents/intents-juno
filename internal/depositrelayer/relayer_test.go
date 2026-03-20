@@ -95,6 +95,34 @@ func (p *stubProofRequester) RequestProof(_ context.Context, req proofclient.Req
 	return p.res, p.err
 }
 
+type scriptedProofRequesterStep struct {
+	res proofclient.Result
+	err error
+}
+
+type scriptedProofRequester struct {
+	calls int
+	got   []proofclient.Request
+	plan  []scriptedProofRequesterStep
+}
+
+func (p *scriptedProofRequester) RequestProof(_ context.Context, req proofclient.Request) (proofclient.Result, error) {
+	p.calls++
+	cloned := req
+	cloned.Journal = append([]byte(nil), req.Journal...)
+	cloned.PrivateInput = append([]byte(nil), req.PrivateInput...)
+	p.got = append(p.got, cloned)
+	idx := p.calls - 1
+	if idx < len(p.plan) {
+		return p.plan[idx].res, p.plan[idx].err
+	}
+	if len(p.plan) == 0 {
+		return proofclient.Result{}, nil
+	}
+	last := p.plan[len(p.plan)-1]
+	return last.res, last.err
+}
+
 type stubProofStore struct {
 	calls int
 	rec   proof.JobRecord
@@ -573,6 +601,138 @@ func TestRelayer_RejectsDepositFromPersistedTerminalProofFailure(t *testing.T) {
 	}
 	if counts.DepositBatches != 1 {
 		t.Fatalf("expected one deposit batch DLQ record, got %d", counts.DepositBatches)
+	}
+}
+
+func TestRelayer_QuarantinesTerminalProofFailureBySplittingBatch(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	store := deposit.NewMemoryStore()
+	prover := &scriptedProofRequester{
+		plan: []scriptedProofRequesterStep{
+			{
+				err: &proofclient.FailureError{
+					Code:      "sp1_request_unexecutable",
+					Retryable: false,
+					Message:   "bad witness",
+				},
+			},
+			{
+				err: &proofclient.FailureError{
+					Code:      "sp1_request_unexecutable",
+					Retryable: false,
+					Message:   "bad witness",
+				},
+			},
+			{
+				res: proofclient.Result{Seal: []byte{0xab}},
+			},
+		},
+	}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x02", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          2,
+		MaxAge:            3 * time.Minute,
+		DedupeMax:         1000,
+		Owner:             "worker-1",
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	deposits := []DepositEvent{
+		{
+			Commitment:       common.HexToHash("0xaa"),
+			LeafIndex:        7,
+			Amount:           1000,
+			Memo:             memoBytes[:],
+			ProofWitnessItem: testDepositWitnessItem(),
+		},
+		{
+			Commitment:       common.HexToHash("0xbb"),
+			LeafIndex:        8,
+			Amount:           1100,
+			Memo:             memoBytes[:],
+			ProofWitnessItem: testDepositWitnessItem(),
+		},
+	}
+	for _, ev := range deposits {
+		if err := r.IngestDeposit(ctx, ev); err != nil {
+			t.Fatalf("IngestDeposit(%x): %v", ev.Commitment[:4], err)
+		}
+	}
+
+	for i := 0; i < 6 && sender.calls < 1; i++ {
+		if err := r.FlushDue(ctx); err != nil {
+			t.Fatalf("FlushDue #%d: %v", i+1, err)
+		}
+	}
+
+	if got, want := prover.calls, 3; got != want {
+		t.Fatalf("proof calls: got %d want %d", got, want)
+	}
+	if got, want := sender.calls, 1; got != want {
+		t.Fatalf("send calls: got %d want %d", got, want)
+	}
+
+	rejected := 0
+	finalized := 0
+	for _, ev := range deposits {
+		depositID := idempotency.MustDepositIDV1([32]byte(ev.Commitment), ev.LeafIndex)
+		job, err := store.Get(ctx, depositID)
+		if err != nil {
+			t.Fatalf("Get(%x): %v", depositID[:4], err)
+		}
+		switch job.State {
+		case deposit.StateRejected:
+			rejected++
+		case deposit.StateFinalized:
+			finalized++
+		default:
+			t.Fatalf("unexpected state for %x: %s", depositID[:4], job.State)
+		}
+	}
+	if rejected != 1 || finalized != 1 {
+		t.Fatalf("expected one rejected and one finalized deposit, got rejected=%d finalized=%d", rejected, finalized)
 	}
 }
 

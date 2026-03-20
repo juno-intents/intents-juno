@@ -574,7 +574,7 @@ func (s *Store) SplitBatch(ctx context.Context, owner string, batchID [32]byte, 
 	if !found {
 		return deposit.Batch{}, deposit.Batch{}, deposit.ErrNotFound
 	}
-	if left.State != deposit.BatchStateClosed {
+	if left.State != deposit.BatchStateClosed && left.State != deposit.BatchStateProofRequested {
 		return deposit.Batch{}, deposit.Batch{}, deposit.ErrInvalidTransition
 	}
 
@@ -615,26 +615,69 @@ func (s *Store) SplitBatch(ctx context.Context, owner string, batchID [32]byte, 
 	}
 
 	if err := insertBatchTx(ctx, tx, deposit.Batch{
-		BatchID:            nextBatchID,
-		State:              deposit.BatchStateClosed,
-		Owner:              left.Owner,
-		LeaseOwner:         owner,
-		StartedAt:          left.StartedAt,
-		ClosedAt:           left.ClosedAt,
-		FailureReason:      left.FailureReason,
-		Checkpoint:         left.Checkpoint,
-		ProofRequested:     left.ProofRequested,
-		OperatorSignatures: left.OperatorSignatures,
-		ProofSeal:          left.ProofSeal,
-		TxHash:             left.TxHash,
+		BatchID:        nextBatchID,
+		State:          deposit.BatchStateClosed,
+		Owner:          left.Owner,
+		LeaseOwner:     owner,
+		StartedAt:      left.StartedAt,
+		ClosedAt:       left.ClosedAt,
+		FailureReason:  "",
+		Checkpoint:     checkpoint.Checkpoint{},
+		ProofRequested: false,
 	}, time.Time{}); err != nil {
 		return deposit.Batch{}, deposit.Batch{}, err
 	}
 	if err := insertActiveBatchItemsTx(ctx, tx, nextBatchID, move); err != nil {
 		return deposit.Batch{}, deposit.Batch{}, err
 	}
-	if err := updateBatchLeaseAndStateTx(ctx, tx, batchID, owner, time.Time{}, deposit.BatchStateClosed, time.Now().UTC(), left.ClosedAt); err != nil {
-		return deposit.Batch{}, deposit.Batch{}, err
+	if _, err := tx.Exec(ctx, `
+		UPDATE deposit_batches
+		SET
+			state = $2,
+			lease_owner = $3,
+			lease_expires_at = NULL,
+			failure_reason = NULL,
+			checkpoint_height = NULL,
+			checkpoint_block_hash = NULL,
+			checkpoint_final_orchard_root = NULL,
+			checkpoint_base_chain_id = NULL,
+			checkpoint_bridge_contract = NULL,
+			proof_requested = FALSE,
+			operator_signatures_json = '[]'::jsonb,
+			proof_seal = NULL,
+			tx_hash = NULL,
+			updated_at = now()
+		WHERE batch_id = $1
+	`, batchID[:], int16(deposit.BatchStateClosed), owner); err != nil {
+		return deposit.Batch{}, deposit.Batch{}, fmt.Errorf("deposit/postgres: reset split source batch: %w", err)
+	}
+
+	allIDs := append(cloneDepositIDs(stay), move...)
+	if len(allIDs) > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = CASE
+					WHEN state IN ($2, $3, $4) THEN $1
+					ELSE state
+				END,
+				checkpoint_height = NULL,
+				checkpoint_block_hash = NULL,
+				checkpoint_final_orchard_root = NULL,
+				checkpoint_base_chain_id = NULL,
+				checkpoint_bridge_contract = NULL,
+				proof_seal = NULL,
+				tx_hash = NULL,
+				rejection_reason = NULL,
+				submit_batch_id = NULL,
+				claimed_by = NULL,
+				claim_expires_at = NULL,
+				updated_at = now()
+			WHERE deposit_id = ANY($5)
+				AND state NOT IN ($6, $7)
+		`, int16(deposit.StateConfirmed), int16(deposit.StateProofRequested), int16(deposit.StateProofReady), int16(deposit.StateSubmitted), rawIDs(allIDs), int16(deposit.StateFinalized), int16(deposit.StateRejected)); err != nil {
+			return deposit.Batch{}, deposit.Batch{}, fmt.Errorf("deposit/postgres: reset split batch jobs: %w", err)
+		}
 	}
 
 	leftOut, err := getBatchWithQuerier(ctx, tx, batchID)

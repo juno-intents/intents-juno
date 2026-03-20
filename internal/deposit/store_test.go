@@ -745,6 +745,85 @@ func TestMemoryStore_SplitBatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_SplitBatch_ResetsProofRequestedState(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	mkDeposit := func(tag byte) Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+	d1 := mkDeposit(0x11)
+	d2 := mkDeposit(0x12)
+	for _, dep := range []Deposit{d1, d2} {
+		if _, _, err := s.UpsertConfirmed(ctx, dep); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", dep.DepositID[:4], err)
+		}
+	}
+
+	batchID := [32]byte{0xad}
+	if _, _, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, [32]byte{}, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready || batch.State != BatchStateClosed {
+		t.Fatalf("expected closed batch before split, got state=%s ready=%v", batch.State, ready)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := s.MarkBatchProofRequested(ctx, "worker-a", batchID, cp); err != nil {
+		t.Fatalf("MarkBatchProofRequested: %v", err)
+	}
+
+	splitBatchID := [32]byte{0xae}
+	left, right, err := s.SplitBatch(ctx, "worker-a", batchID, splitBatchID, [][32]byte{d2.DepositID})
+	if err != nil {
+		t.Fatalf("SplitBatch: %v", err)
+	}
+	if left.State != BatchStateClosed || right.State != BatchStateClosed {
+		t.Fatalf("split batches must be closed: left=%s right=%s", left.State, right.State)
+	}
+	if left.ProofRequested || right.ProofRequested {
+		t.Fatalf("split batches must clear proof_requested flag")
+	}
+	if left.Checkpoint != (checkpoint.Checkpoint{}) || right.Checkpoint != (checkpoint.Checkpoint{}) {
+		t.Fatalf("split batches must clear checkpoint state")
+	}
+
+	for _, depositID := range [][32]byte{d1.DepositID, d2.DepositID} {
+		job, err := s.Get(ctx, depositID)
+		if err != nil {
+			t.Fatalf("Get(%x): %v", depositID[:4], err)
+		}
+		if job.State != StateConfirmed {
+			t.Fatalf("job %x state: got=%s want=%s", depositID[:4], job.State, StateConfirmed)
+		}
+	}
+}
+
 func TestMemoryStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
 	t.Parallel()
 

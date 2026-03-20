@@ -385,7 +385,7 @@ func (s *MemoryStore) SplitBatch(_ context.Context, owner string, batchID [32]by
 	if !ok {
 		return Batch{}, Batch{}, ErrNotFound
 	}
-	if left.State != BatchStateClosed {
+	if left.State != BatchStateClosed && left.State != BatchStateProofRequested {
 		return Batch{}, Batch{}, ErrInvalidTransition
 	}
 
@@ -411,28 +411,50 @@ func (s *MemoryStore) SplitBatch(_ context.Context, owner string, batchID [32]by
 	}
 
 	left.DepositIDs = stay
+	left.State = BatchStateClosed
 	left.LeaseOwner = owner
+	left.LeaseExpiresAt = time.Time{}
+	left.FailureReason = ""
+	left.Checkpoint = checkpoint.Checkpoint{}
+	left.ProofRequested = false
+	left.OperatorSignatures = nil
+	left.ProofSeal = nil
+	left.TxHash = [32]byte{}
 	s.batches[batchID] = left
 
 	right := Batch{
-		BatchID:            nextBatchID,
-		State:              BatchStateClosed,
-		DepositIDs:         move,
-		Owner:              left.Owner,
-		LeaseOwner:         owner,
-		StartedAt:          left.StartedAt,
-		ClosedAt:           left.ClosedAt,
-		FailureReason:      left.FailureReason,
-		Checkpoint:         left.Checkpoint,
-		ProofRequested:     left.ProofRequested,
-		OperatorSignatures: clone2DBytes(left.OperatorSignatures),
-		ProofSeal:          append([]byte(nil), left.ProofSeal...),
-		TxHash:             left.TxHash,
+		BatchID:        nextBatchID,
+		State:          BatchStateClosed,
+		DepositIDs:     move,
+		Owner:          left.Owner,
+		LeaseOwner:     owner,
+		StartedAt:      left.StartedAt,
+		ClosedAt:       left.ClosedAt,
+		FailureReason:  "",
+		Checkpoint:     checkpoint.Checkpoint{},
+		ProofRequested: false,
 	}
 	s.batches[nextBatchID] = right
 	s.batchOrder = append(s.batchOrder, nextBatchID)
 	for _, id := range move {
 		s.batchByDeposit[id] = nextBatchID
+	}
+	for _, id := range append(cloneDepositIDs(stay), move...) {
+		j, ok := s.jobs[id]
+		if !ok {
+			return Batch{}, Batch{}, ErrNotFound
+		}
+		if j.State == StateFinalized || j.State == StateRejected {
+			continue
+		}
+		j.State = StateConfirmed
+		j.Checkpoint = checkpoint.Checkpoint{}
+		j.ProofSeal = nil
+		j.TxHash = [32]byte{}
+		j.RejectionReason = ""
+		s.jobs[id] = j
+		delete(s.claim, id)
+		delete(s.attemptByDeposit, id)
 	}
 
 	return cloneBatch(left), cloneBatch(right), nil

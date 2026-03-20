@@ -1002,6 +1002,28 @@ func (r *Relayer) rejectBatchForProofFailure(
 	batch durableMintBatch,
 	failure proofclient.FailureError,
 ) error {
+	proofBatchID := idempotency.DepositBatchIDV1(batchDepositHashes(batch.Items))
+	if len(batch.Meta.DepositIDs) > 1 {
+		movedDepositIDs := splitBatchTailDepositIDs(batch.Meta.DepositIDs)
+		if len(movedDepositIDs) == 0 {
+			return fmt.Errorf("depositrelayer: split proof-failed batch %x: no deposits selected for split", batchID[:8])
+		}
+		nextBatchID := nextSplitBatchID(batch.Meta.BatchID, movedDepositIDs)
+		left, right, err := r.store.SplitBatch(ctx, r.cfg.Owner, batch.Meta.BatchID, nextBatchID, movedDepositIDs)
+		if err != nil {
+			return fmt.Errorf("depositrelayer: split proof-failed batch %x: %w", batchID[:8], err)
+		}
+		delete(r.proofAttempts, proofBatchID)
+		r.log.Warn("depositrelayer: split batch after terminal proof failure",
+			"batch_id", common.Hash(batchID).Hex(),
+			"next_batch_id", common.Hash(right.BatchID).Hex(),
+			"error_code", failure.Code,
+			"message", failure.Message,
+			"left_items", len(left.DepositIDs),
+			"right_items", len(right.DepositIDs),
+		)
+		return nil
+	}
 	if err := r.maybeDLQDepositBatch(ctx, batchID, batch, "proof", strings.TrimSpace(failure.Code), strings.TrimSpace(failure.Message), 0); err != nil {
 		return err
 	}
@@ -1013,7 +1035,7 @@ func (r *Relayer) rejectBatchForProofFailure(
 	if err := r.store.FailBatch(ctx, r.cfg.Owner, batchID, reason, rejectedIDs); err != nil {
 		return fmt.Errorf("depositrelayer: fail proof-failed batch %x: %w", batchID[:8], err)
 	}
-	delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchDepositHashes(batch.Items)))
+	delete(r.proofAttempts, proofBatchID)
 	r.log.Error("depositrelayer: rejected batch after terminal proof failure",
 		"batch_id", common.Hash(batchID).Hex(),
 		"error_code", failure.Code,
