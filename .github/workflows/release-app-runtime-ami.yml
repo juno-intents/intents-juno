@@ -228,20 +228,22 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y ca-certificates curl jq nginx openssl
-          systemctl enable amazon-ssm-agent || true
-          install -d -m 0755 /usr/local/bin /var/lib/intents-juno/app-runtime /etc/intents-juno/app
-          install -m 0755 /dev/null /usr/local/bin/bridge-api
-          install -m 0755 /dev/null /usr/local/bin/backoffice
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/bridge-api_linux_amd64" -o /usr/local/bin/bridge-api
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/backoffice_linux_amd64" -o /usr/local/bin/backoffice
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/bridge-api_linux_amd64.sha256" -o /tmp/bridge-api_linux_amd64.sha256
-          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/backoffice_linux_amd64.sha256" -o /tmp/backoffice_linux_amd64.sha256
+          install -d -m 0755 /usr/local/bin /var/lib/intents-juno/app-runtime /etc/intents-juno/app /tmp/app-binaries
+          curl -fsSL "https://s3.${{ inputs.aws_region }}.amazonaws.com/amazon-ssm-${{ inputs.aws_region }}/latest/debian_amd64/amazon-ssm-agent.deb" -o /tmp/amazon-ssm-agent.deb
+          dpkg -i /tmp/amazon-ssm-agent.deb
+          systemctl enable amazon-ssm-agent
+          systemctl start amazon-ssm-agent
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/bridge-api_linux_amd64" -o /tmp/app-binaries/bridge-api_linux_amd64
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/backoffice_linux_amd64" -o /tmp/app-binaries/backoffice_linux_amd64
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/bridge-api_linux_amd64.sha256" -o /tmp/app-binaries/bridge-api_linux_amd64.sha256
+          curl -fsSL "https://github.com/${{ github.repository }}/releases/download/${APP_BINARIES_RELEASE_TAG}/backoffice_linux_amd64.sha256" -o /tmp/app-binaries/backoffice_linux_amd64.sha256
           (
-            cd /usr/local/bin
-            sha256sum -c /tmp/bridge-api_linux_amd64.sha256
-            sha256sum -c /tmp/backoffice_linux_amd64.sha256
+            cd /tmp/app-binaries
+            sha256sum -c bridge-api_linux_amd64.sha256
+            sha256sum -c backoffice_linux_amd64.sha256
           )
-          chmod 0755 /usr/local/bin/bridge-api /usr/local/bin/backoffice
+          install -m 0755 /tmp/app-binaries/bridge-api_linux_amd64 /usr/local/bin/bridge-api
+          install -m 0755 /tmp/app-binaries/backoffice_linux_amd64 /usr/local/bin/backoffice
           echo APP_RUNTIME_AMI_READY
           EOF
 

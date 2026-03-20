@@ -17,6 +17,9 @@ main() {
   assert_contains "$app_workflow" 'app-runtime-ami-manifest.json.sha256' "app runtime ami workflow publishes the app runtime checksum"
   assert_contains "$app_workflow" 'must not use latest tags' "app runtime ami workflow rejects latest tags"
   assert_contains "$app_workflow" 'gh release download "$app_binaries_release_tag"' "app runtime ami workflow downloads pinned app binaries"
+  assert_contains "$app_workflow" 'cd /tmp/app-binaries' "app runtime ami workflow verifies app binaries before installation"
+  assert_contains "$app_workflow" 'install -m 0755 /tmp/app-binaries/bridge-api_linux_amd64 /usr/local/bin/bridge-api' "app runtime ami workflow installs bridge-api after checksum verification"
+  assert_contains "$app_workflow" 'amazon-ssm-agent.deb' "app runtime ami workflow installs the SSM agent into the AMI"
   assert_contains "$app_workflow" 'aws-actions/configure-aws-credentials@v4' "app runtime ami workflow configures AWS credentials"
 
   assert_contains "$wireguard_workflow" 'wireguard-role-ami-manifest.json' "wireguard ami workflow publishes the wireguard manifest"
