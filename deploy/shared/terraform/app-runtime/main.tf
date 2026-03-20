@@ -4,6 +4,13 @@ provider "aws" {
 
 locals {
   resource_slug = trim(replace(lower("juno-app-runtime-${var.deployment_id}"), "_", "-"), "-")
+  public_bridge_lb_name         = trimsuffix(substr("${local.resource_slug}-bridge-lb", 0, 32), "-")
+  internal_backoffice_lb_name   = trimsuffix(substr("${local.resource_slug}-backoffice-lb", 0, 32), "-")
+  app_security_group_name       = trimsuffix(substr("${local.resource_slug}-app", 0, 32), "-")
+  public_bridge_alb_name        = trimsuffix(substr("${local.resource_slug}-bridge", 0, 32), "-")
+  internal_backoffice_alb_name  = trimsuffix(substr("${local.resource_slug}-backoffice", 0, 32), "-")
+  public_bridge_targetgrp_name  = trimsuffix(substr("${local.resource_slug}-bridge-tg", 0, 32), "-")
+  internal_backoffice_tg_name   = trimsuffix(substr("${local.resource_slug}-backoffice-tg", 0, 32), "-")
   common_tags = merge({
     Project    = "intents-juno"
     ManagedBy  = "terraform"
@@ -13,7 +20,7 @@ locals {
 }
 
 resource "aws_security_group" "public_bridge_lb" {
-  name        = substr("${local.resource_slug}-bridge-lb", 0, 32)
+  name        = local.public_bridge_lb_name
   description = "Public bridge application load balancer"
   vpc_id      = var.vpc_id
 
@@ -35,12 +42,12 @@ resource "aws_security_group" "public_bridge_lb" {
   }
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-bridge-lb", 0, 32)
+    Name = local.public_bridge_lb_name
   })
 }
 
 resource "aws_security_group" "internal_backoffice_lb" {
-  name        = substr("${local.resource_slug}-backoffice-lb", 0, 32)
+  name        = local.internal_backoffice_lb_name
   description = "Internal backoffice application load balancer"
   vpc_id      = var.vpc_id
 
@@ -61,12 +68,12 @@ resource "aws_security_group" "internal_backoffice_lb" {
   }
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-backoffice-lb", 0, 32)
+    Name = local.internal_backoffice_lb_name
   })
 }
 
 resource "aws_security_group" "app" {
-  name        = substr("${local.resource_slug}-app", 0, 32)
+  name        = local.app_security_group_name
   description = "App instances behind the bridge and backoffice load balancers"
   vpc_id      = var.vpc_id
 
@@ -95,12 +102,12 @@ resource "aws_security_group" "app" {
   }
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-app", 0, 32)
+    Name = local.app_security_group_name
   })
 }
 
 resource "aws_lb" "public_bridge" {
-  name                             = substr("${local.resource_slug}-bridge", 0, 32)
+  name                             = local.public_bridge_alb_name
   internal                         = false
   load_balancer_type               = "application"
   security_groups                  = [aws_security_group.public_bridge_lb.id]
@@ -110,12 +117,12 @@ resource "aws_lb" "public_bridge" {
   idle_timeout                     = 60
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-bridge", 0, 32)
+    Name = local.public_bridge_alb_name
   })
 }
 
 resource "aws_lb" "internal_backoffice" {
-  name                             = substr("${local.resource_slug}-backoffice", 0, 32)
+  name                             = local.internal_backoffice_alb_name
   internal                         = true
   load_balancer_type               = "application"
   security_groups                  = [aws_security_group.internal_backoffice_lb.id]
@@ -125,12 +132,12 @@ resource "aws_lb" "internal_backoffice" {
   idle_timeout                     = 60
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-backoffice", 0, 32)
+    Name = local.internal_backoffice_alb_name
   })
 }
 
 resource "aws_lb_target_group" "bridge" {
-  name        = substr("${local.resource_slug}-bridge-tg", 0, 32)
+  name        = local.public_bridge_targetgrp_name
   port        = var.app_https_port
   protocol    = "HTTPS"
   target_type = "instance"
@@ -149,12 +156,12 @@ resource "aws_lb_target_group" "bridge" {
   }
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-bridge-tg", 0, 32)
+    Name = local.public_bridge_targetgrp_name
   })
 }
 
 resource "aws_lb_target_group" "backoffice" {
-  name        = substr("${local.resource_slug}-backoffice-tg", 0, 32)
+  name        = local.internal_backoffice_tg_name
   port        = var.app_https_port
   protocol    = "HTTPS"
   target_type = "instance"
@@ -173,7 +180,7 @@ resource "aws_lb_target_group" "backoffice" {
   }
 
   tags = merge(local.common_tags, {
-    Name = substr("${local.resource_slug}-backoffice-tg", 0, 32)
+    Name = local.internal_backoffice_tg_name
   })
 }
 
