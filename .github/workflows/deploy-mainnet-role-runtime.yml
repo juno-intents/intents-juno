@@ -109,8 +109,9 @@ jobs:
           set -euo pipefail
           mkdir -p .ci/out
           preview_run_json="$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.preview_run_id }}")"
-          [[ "$(jq -r '.name' <<<"$preview_run_json")" == "deploy-preview-role-runtime" ]] || {
-            echo "preview_run_id must refer to deploy-preview-role-runtime" >&2
+          preview_workflow_name="$(jq -r '.name' <<<"$preview_run_json")"
+          [[ "$preview_workflow_name" == "deploy-preview-role-runtime" || "$preview_workflow_name" == "reset-preview-role-runtime" ]] || {
+            echo "preview_run_id must refer to deploy-preview-role-runtime or reset-preview-role-runtime" >&2
             exit 1
           }
           [[ "$(jq -r '.conclusion' <<<"$preview_run_json")" == "success" ]] || {

@@ -2582,7 +2582,9 @@ production_render_operator_handoffs() {
       known_hosts_src="$(production_abs_path "$inventory_dir" "$known_hosts_src")"
       [[ -f "$known_hosts_src" ]] || die "known_hosts file not found: $known_hosts_src"
       known_hosts_dst="$handoff_dir/known_hosts"
-      cp "$known_hosts_src" "$known_hosts_dst"
+      if [[ "$(cd "$(dirname "$known_hosts_src")" && pwd)/$(basename "$known_hosts_src")" != "$(cd "$(dirname "$known_hosts_dst")" && pwd)/$(basename "$known_hosts_dst")" ]]; then
+        cp "$known_hosts_src" "$known_hosts_dst"
+      fi
     fi
 
     secrets_dst=""

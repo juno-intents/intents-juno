@@ -1,0 +1,228 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+
+# shellcheck source=./lib.sh
+source "$SCRIPT_DIR/lib.sh"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  rebuild-preview-role-runtime.sh [options]
+
+Options:
+  --inventory PATH                             Preview inventory JSON (required)
+  --dkg-summary PATH                           DKG summary JSON (required)
+  --dkg-completion PATH                        Optional DKG completion JSON
+  --bridge-deploy-binary PATH                  Released bridge-deploy binary (required unless reusing bridge)
+  --deployer-key-file PATH                     Bridge deployer key file
+  --funder-key-file PATH                       Bridge deploy ephemeral funder key
+  --ephemeral-funding-amount-wei AMOUNT        Bridge deploy ephemeral funding amount
+  --existing-bridge-summary PATH               Optional bridge summary reuse path
+  --app-runtime-ami-release-tag TAG            Pinned app runtime AMI release tag (required)
+  --shared-proof-services-image-release-tag TAG Pinned shared proof image release tag (required)
+  --wireguard-role-ami-release-tag TAG         Pinned wireguard role AMI release tag (required)
+  --operator-stack-ami-release-tag TAG         Pinned operator stack AMI release tag (required)
+  --shared-infra-e2e-binary PATH               Released shared-infra-e2e binary (required)
+  --github-repo REPO                           GitHub repo for release resolution (default: juno-intents/intents-juno)
+  --output-dir DIR                             Output directory (default: ./preview-reset-output)
+EOF
+}
+
+inventory=""
+dkg_summary=""
+dkg_completion=""
+bridge_deploy_binary=""
+deployer_key_file=""
+funder_key_file=""
+ephemeral_funding_amount_wei=""
+existing_bridge_summary=""
+app_runtime_ami_release_tag=""
+shared_proof_services_image_release_tag=""
+wireguard_role_ami_release_tag=""
+operator_stack_ami_release_tag=""
+shared_infra_e2e_binary=""
+github_repo="juno-intents/intents-juno"
+output_root="./preview-reset-output"
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --inventory) inventory="$2"; shift 2 ;;
+    --dkg-summary) dkg_summary="$2"; shift 2 ;;
+    --dkg-completion) dkg_completion="$2"; shift 2 ;;
+    --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
+    --deployer-key-file) deployer_key_file="$2"; shift 2 ;;
+    --funder-key-file) funder_key_file="$2"; shift 2 ;;
+    --ephemeral-funding-amount-wei) ephemeral_funding_amount_wei="$2"; shift 2 ;;
+    --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
+    --app-runtime-ami-release-tag) app_runtime_ami_release_tag="$2"; shift 2 ;;
+    --shared-proof-services-image-release-tag) shared_proof_services_image_release_tag="$2"; shift 2 ;;
+    --wireguard-role-ami-release-tag) wireguard_role_ami_release_tag="$2"; shift 2 ;;
+    --operator-stack-ami-release-tag) operator_stack_ami_release_tag="$2"; shift 2 ;;
+    --shared-infra-e2e-binary) shared_infra_e2e_binary="$2"; shift 2 ;;
+    --github-repo) github_repo="$2"; shift 2 ;;
+    --output-dir) output_root="$2"; shift 2 ;;
+    --help|-h) usage; exit 0 ;;
+    *) die "unknown option: $1" ;;
+  esac
+done
+
+[[ -n "$inventory" ]] || die "--inventory is required"
+[[ -f "$inventory" ]] || die "inventory not found: $inventory"
+[[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
+[[ -f "$dkg_summary" ]] || die "dkg summary not found: $dkg_summary"
+[[ -n "$app_runtime_ami_release_tag" ]] || die "--app-runtime-ami-release-tag is required"
+[[ -n "$shared_proof_services_image_release_tag" ]] || die "--shared-proof-services-image-release-tag is required"
+[[ -n "$wireguard_role_ami_release_tag" ]] || die "--wireguard-role-ami-release-tag is required"
+[[ -n "$operator_stack_ami_release_tag" ]] || die "--operator-stack-ami-release-tag is required"
+[[ -n "$shared_infra_e2e_binary" ]] || die "--shared-infra-e2e-binary is required"
+[[ -f "$shared_infra_e2e_binary" ]] || die "shared-infra-e2e binary not found: $shared_infra_e2e_binary"
+
+upgrade_preview_inventory_bin="${PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN:-$SCRIPT_DIR/upgrade-preview-inventory.sh}"
+destroy_preview_role_runtime_bin="${PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN:-$SCRIPT_DIR/destroy-preview-role-runtime.sh}"
+resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN:-$SCRIPT_DIR/resolve-role-runtime-release-inputs.sh}"
+deploy_coordinator_bin="${PRODUCTION_DEPLOY_COORDINATOR_BIN:-$SCRIPT_DIR/deploy-coordinator.sh}"
+provision_app_edge_bin="${PRODUCTION_PROVISION_APP_EDGE_BIN:-$SCRIPT_DIR/provision-app-edge.sh}"
+canary_shared_bin="${PRODUCTION_CANARY_SHARED_BIN:-$SCRIPT_DIR/canary-shared-services.sh}"
+canary_app_bin="${PRODUCTION_CANARY_APP_BIN:-$SCRIPT_DIR/canary-app-host.sh}"
+roll_preview_operators_bin="${PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN:-$SCRIPT_DIR/roll-preview-operators.sh}"
+
+for cmd in \
+  "$upgrade_preview_inventory_bin" \
+  "$destroy_preview_role_runtime_bin" \
+  "$resolve_role_runtime_release_inputs_bin" \
+  "$deploy_coordinator_bin" \
+  "$provision_app_edge_bin" \
+  "$canary_shared_bin" \
+  "$canary_app_bin" \
+  "$roll_preview_operators_bin"; do
+  [[ -x "$cmd" ]] || have_cmd "$cmd" || die "required command not found: $cmd"
+done
+
+env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+output_dir="$output_root/$env_slug"
+mkdir -p "$output_dir/canaries" "$output_dir/e2e"
+
+upgraded_inventory="$output_dir/inventory.preview-runtime.json"
+resolved_inventory="$output_dir/inventory.resolved.json"
+current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/production-output"
+
+"$upgrade_preview_inventory_bin" \
+  --inventory "$inventory" \
+  --output "$upgraded_inventory" \
+  --app-runtime-ami-release-tag "$app_runtime_ami_release_tag" \
+  --shared-proof-services-image-release-tag "$shared_proof_services_image_release_tag" \
+  --wireguard-role-ami-release-tag "$wireguard_role_ami_release_tag"
+
+"$resolve_role_runtime_release_inputs_bin" \
+  --inventory "$upgraded_inventory" \
+  --output "$resolved_inventory" \
+  --github-repo "$github_repo"
+
+"$destroy_preview_role_runtime_bin" \
+  --inventory "$resolved_inventory" \
+  --current-output-root "$current_output_root" \
+  --skip-missing-edge-state
+
+coordinator_args=(
+  "$deploy_coordinator_bin"
+  --inventory "$resolved_inventory"
+  --dkg-summary "$dkg_summary"
+  --bridge-deploy-binary "$bridge_deploy_binary"
+  --output-dir "$output_root"
+  --github-repo "$github_repo"
+)
+if [[ -n "$dkg_completion" ]]; then
+  coordinator_args+=(--dkg-completion "$dkg_completion")
+fi
+if [[ -n "$existing_bridge_summary" ]]; then
+  coordinator_args+=(--existing-bridge-summary "$existing_bridge_summary")
+fi
+if [[ -n "$deployer_key_file" ]]; then
+  coordinator_args+=(--deployer-key-file "$deployer_key_file")
+fi
+if [[ -n "$funder_key_file" ]]; then
+  coordinator_args+=(--funder-key-file "$funder_key_file")
+fi
+if [[ -n "$ephemeral_funding_amount_wei" ]]; then
+  coordinator_args+=(--ephemeral-funding-amount-wei "$ephemeral_funding_amount_wei")
+fi
+"${coordinator_args[@]}"
+
+app_deploy="$output_root/$env_slug/app/app-deploy.json"
+shared_manifest="$output_root/$env_slug/shared-manifest.json"
+[[ -f "$app_deploy" ]] || die "rebuilt preview app deploy manifest not found: $app_deploy"
+[[ -f "$shared_manifest" ]] || die "rebuilt preview shared manifest not found: $shared_manifest"
+
+"$provision_app_edge_bin" --app-deploy "$app_deploy"
+"$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/shared-services.json")" == "true" ]] || die "shared services canary failed"
+"$canary_app_bin" --app-deploy "$app_deploy" >"$output_dir/canaries/app.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/app.json")" == "true" ]] || die "app canary failed"
+
+resolved_env="$(mktemp)"
+trap 'rm -f "$resolved_env"' EXIT
+aws_profile="$(jq -r '.aws_profile // empty' "$app_deploy")"
+aws_region="$(jq -r '.aws_region // empty' "$app_deploy")"
+allow_local_resolvers="false"
+if production_environment_allows_local_secret_resolvers "$env_slug"; then
+  allow_local_resolvers="true"
+fi
+production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_deploy")" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
+checkpoint_postgres_dsn="$(production_env_first_value "$resolved_env" CHECKPOINT_POSTGRES_DSN APP_POSTGRES_DSN)"
+kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
+ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
+checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
+checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
+checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
+required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics}"
+"$shared_infra_e2e_binary" \
+  --postgres-dsn "$checkpoint_postgres_dsn" \
+  --kafka-brokers "$kafka_brokers" \
+  --required-kafka-topics "$required_topics" \
+  --checkpoint-ipfs-api-url "$ipfs_api_url" \
+  --checkpoint-operators "$checkpoint_operators" \
+  --checkpoint-threshold "$checkpoint_threshold" \
+  --output "$output_dir/e2e/shared-infra-e2e.json"
+
+"$roll_preview_operators_bin" \
+  --inventory "$resolved_inventory" \
+  --shared-manifest "$shared_manifest" \
+  --dkg-summary "$dkg_summary" \
+  --operator-stack-ami-release-tag "$operator_stack_ami_release_tag" \
+  --output-dir "$output_dir/operator-rollout" \
+  --github-repo "$github_repo" >"$output_dir/operator-rollout.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/operator-rollout.json")" == "true" ]] || die "operator rollout failed"
+
+bridge_summary_path="$output_root/$env_slug/bridge-summary.json"
+release_lock="$output_dir/role-runtime-release-lock.json"
+jq -n \
+  --arg workflow "reset-preview-role-runtime" \
+  --arg inventory_path "$inventory" \
+  --arg app_runtime_ami_release_tag "$app_runtime_ami_release_tag" \
+  --arg shared_proof_services_image_release_tag "$shared_proof_services_image_release_tag" \
+  --arg wireguard_role_ami_release_tag "$wireguard_role_ami_release_tag" \
+  --arg operator_stack_ami_release_tag "$operator_stack_ami_release_tag" \
+  --arg shared_manifest "$shared_manifest" \
+  --arg app_deploy "$app_deploy" \
+  --arg bridge_summary_path "$bridge_summary_path" \
+  --arg operator_rollout_path "$output_dir/operator-rollout.json" \
+  --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
+    {
+      workflow: $workflow,
+      inventory_path: $inventory_path,
+      app_runtime_ami_release_tag: $app_runtime_ami_release_tag,
+      shared_proof_services_image_release_tag: $shared_proof_services_image_release_tag,
+      wireguard_role_ami_release_tag: $wireguard_role_ami_release_tag,
+      operator_stack_ami_release_tag: $operator_stack_ami_release_tag,
+      shared_manifest: $shared_manifest,
+      app_deploy: $app_deploy,
+      bridge_summary_path: $bridge_summary_path,
+      operator_rollout_path: $operator_rollout_path,
+      preview_completed_at: $preview_completed_at
+    }
+  ' >"$release_lock"

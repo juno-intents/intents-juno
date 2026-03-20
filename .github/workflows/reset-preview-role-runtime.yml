@@ -1,0 +1,180 @@
+name: reset-preview-role-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_path:
+        description: "Preview deployment inventory JSON path"
+        required: true
+        type: string
+      dkg_summary_path:
+        description: "DKG summary JSON path"
+        required: true
+        type: string
+      dkg_completion_path:
+        description: "Optional DKG completion JSON path"
+        required: false
+        default: ""
+        type: string
+      existing_bridge_summary_path:
+        description: "Optional existing bridge summary JSON path"
+        required: false
+        default: ""
+        type: string
+      app_binaries_release_tag:
+        description: "Pinned app binaries release tag"
+        required: true
+        type: string
+      app_runtime_ami_release_tag:
+        description: "Pinned app runtime AMI release tag"
+        required: true
+        type: string
+      shared_proof_services_image_release_tag:
+        description: "Pinned shared proof image release tag"
+        required: true
+        type: string
+      wireguard_role_ami_release_tag:
+        description: "Pinned wireguard role AMI release tag"
+        required: true
+        type: string
+      operator_stack_ami_release_tag:
+        description: "Pinned operator stack AMI release tag"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  reset-preview:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Validate Pinned Release Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=(
+            "${{ inputs.app_binaries_release_tag }}"
+            "${{ inputs.app_runtime_ami_release_tag }}"
+            "${{ inputs.shared_proof_services_image_release_tag }}"
+            "${{ inputs.wireguard_role_ami_release_tag }}"
+            "${{ inputs.operator_stack_ami_release_tag }}"
+          )
+          for tag in "${tags[@]}"; do
+            [[ "$tag" != *latest* ]] || {
+              echo "must not use latest tags: $tag" >&2
+              exit 1
+            }
+          done
+          case "${{ inputs.app_binaries_release_tag }}" in
+            *-testnet) release_tier="testnet" ;;
+            *-mainnet) release_tier="mainnet" ;;
+            *)
+              echo "release tags must end with -testnet or -mainnet" >&2
+              exit 1
+              ;;
+          esac
+          for tag in "${tags[@]}"; do
+            [[ "$tag" == *-"$release_tier" ]] || {
+              echo "release tag does not match tier $release_tier: $tag" >&2
+              exit 1
+            }
+          done
+
+      - name: Download Released Deployment Binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/bin
+          gh release download "${{ inputs.app_binaries_release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "bridge-deploy_linux_amd64" \
+            --pattern "bridge-deploy_linux_amd64.sha256" \
+            --pattern "shared-infra-e2e_linux_amd64" \
+            --pattern "shared-infra-e2e_linux_amd64.sha256" \
+            --dir .ci/bin \
+            --clobber
+          (
+            cd .ci/bin
+            sha256sum -c bridge-deploy_linux_amd64.sha256
+            sha256sum -c shared-infra-e2e_linux_amd64.sha256
+            chmod 0755 bridge-deploy_linux_amd64 shared-infra-e2e_linux_amd64
+          )
+
+      - name: Reset And Rebuild Preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          # rebuild-preview-role-runtime.sh wraps:
+          # - upgrade-preview-inventory.sh
+          # - destroy-preview-role-runtime.sh
+          # - roll-preview-operators.sh
+          args=(
+            ./deploy/production/rebuild-preview-role-runtime.sh
+            --inventory "${{ inputs.inventory_path }}"
+            --dkg-summary "${{ inputs.dkg_summary_path }}"
+            --bridge-deploy-binary .ci/bin/bridge-deploy_linux_amd64
+            --shared-infra-e2e-binary .ci/bin/shared-infra-e2e_linux_amd64
+            --app-runtime-ami-release-tag "${{ inputs.app_runtime_ami_release_tag }}"
+            --shared-proof-services-image-release-tag "${{ inputs.shared_proof_services_image_release_tag }}"
+            --wireguard-role-ami-release-tag "${{ inputs.wireguard_role_ami_release_tag }}"
+            --operator-stack-ami-release-tag "${{ inputs.operator_stack_ami_release_tag }}"
+            --github-repo "${{ github.repository }}"
+            --output-dir .ci/preview-reset-output
+          )
+          if [[ -n "${{ inputs.dkg_completion_path }}" ]]; then
+            args+=(--dkg-completion "${{ inputs.dkg_completion_path }}")
+          fi
+          if [[ -n "${{ inputs.existing_bridge_summary_path }}" ]]; then
+            args+=(--existing-bridge-summary "${{ inputs.existing_bridge_summary_path }}")
+          elif [[ -n "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" ]]; then
+            printf '%s\n' "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" > .ci/preview-deployer.key
+            chmod 0600 .ci/preview-deployer.key
+            args+=(--deployer-key-file .ci/preview-deployer.key)
+          else
+            echo "existing_bridge_summary_path or PREVIEW_BRIDGE_DEPLOYER_KEY secret is required" >&2
+            exit 1
+          fi
+          "${args[@]}"
+
+      - name: Upload Preview Lock And Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-role-runtime-lock
+          path: |
+            .ci/preview-reset-output/preview/role-runtime-release-lock.json
+            .ci/preview-reset-output/preview/canaries/shared-services.json
+            .ci/preview-reset-output/preview/canaries/app.json
+            .ci/preview-reset-output/preview/e2e/shared-infra-e2e.json
+            .ci/preview-reset-output/preview/operator-rollout.json
+            .ci/preview-reset-output/preview/operator-rollout/**
+            .ci/preview-reset-output/preview/bridge-summary.json
