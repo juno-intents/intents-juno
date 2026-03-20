@@ -227,21 +227,41 @@ func (e *Engine) checkStuckDepositBatches(ctx context.Context) {
 	}
 }
 
+func withdrawalBatchStateIsStuck(state int16) bool {
+	return state < 8
+}
+
 // checkStuckWithdrawalBatches looks for withdrawal batches stuck in non-terminal states.
 func (e *Engine) checkStuckWithdrawalBatches(ctx context.Context) {
 	const ruleID = "stuck_withdrawal_batch"
 	minutes := e.cfg.StuckBatchMinutes
 
-	// withdrawal_batches: terminal state is 7 (BatchStateFinalized).
+	// Keep this aligned with the backoffice stuck-batches view: every state
+	// below finalized is considered unresolved and alertable.
 	var count int
-	err := e.cfg.Pool.QueryRow(ctx, `
-		SELECT COUNT(*) FROM withdrawal_batches
-		WHERE state < 7
-		  AND updated_at < now() - make_interval(mins := $1)`,
-		minutes,
-	).Scan(&count)
+	rows, err := e.cfg.Pool.Query(ctx, `
+		SELECT state
+		FROM withdrawal_batches
+		WHERE updated_at < now() - make_interval(mins := $1)`,
+		minutes)
 	if err != nil {
 		slog.Warn("alert check: stuck withdrawal query failed", "error", err)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var state int16
+		if err := rows.Scan(&state); err != nil {
+			slog.Warn("alert check: stuck withdrawal scan failed", "error", err)
+			return
+		}
+		if withdrawalBatchStateIsStuck(state) {
+			count++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Warn("alert check: stuck withdrawal rows failed", "error", err)
 		return
 	}
 
