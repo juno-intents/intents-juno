@@ -379,35 +379,30 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
-  local public_subdomain backoffice_dns_label backoffice_hostname
-  local backoffice_private_endpoint wireguard_public_subnet_id app_role_json wireguard_role_json
+  local public_subdomain backoffice_hostname app_role_json wireguard_role_json
+  local wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json
 
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
-  backoffice_dns_label="$(production_inventory_backoffice_dns_label "$inventory")"
-  [[ -n "$backoffice_dns_label" ]] || die "app_role.backoffice_dns_label or app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
   app_role_json="$(production_inventory_app_role_json "$inventory")"
-  backoffice_private_endpoint="$(jq -r '(.private_endpoint // .backoffice_private_endpoint // empty)' <<<"$app_role_json")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
-  wireguard_public_subnet_id="$(jq -r '(.public_subnet_id // .public_subnet_ids[0] // empty)' <<<"$wireguard_role_json")"
-  if [[ -n "$backoffice_private_endpoint" ]]; then
-    [[ "$backoffice_private_endpoint" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-      || die "app_role.private_endpoint must be an IPv4 address for wireguard backoffice routing"
-  fi
-  backoffice_hostname="${backoffice_dns_label}.${public_subdomain}"
+  backoffice_hostname="$(jq -r '(.backoffice_hostname // empty)' <<<"$wireguard_role_json")"
+  wireguard_public_subnet_ids_json="$(jq -c '(.public_subnet_ids // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  backoffice_private_endpoint_ips_json="$(jq -c '(.backoffice_private_endpoint_ips // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
 
   jq -n \
-    --arg wireguard_public_subnet_id "$wireguard_public_subnet_id" \
+    --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
     --arg backoffice_hostname "$backoffice_hostname" \
-    --arg backoffice_private_endpoint "$backoffice_private_endpoint" \
+    --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
     '{
       shared_wireguard_enabled: true,
       shared_wireguard_backoffice_hostname: $backoffice_hostname
     }
-    + (if $wireguard_public_subnet_id == "" then {} else {
-      shared_wireguard_public_subnet_id: $wireguard_public_subnet_id
+    + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
+      shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
     } end)
-    + (if $backoffice_private_endpoint == "" then {} else {
-      shared_wireguard_backoffice_private_endpoint: $backoffice_private_endpoint
+    + (if ($backoffice_private_endpoint_ips | length) == 0 then {} else {
+      shared_wireguard_backoffice_private_endpoint_ips: $backoffice_private_endpoint_ips
     } end)' >"$output_file"
 }
 
@@ -1777,10 +1772,7 @@ production_render_shared_manifest() {
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
-  local ecs_cluster_arn proof_requestor_service_name proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
-  local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
-  local wireguard_network_cidr wireguard_client_address_cidr wireguard_client_config_secret_arn
   local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
   local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
   local operator_ids_csv threshold operators_json roster_json secret_keys_json governance_json
@@ -1822,21 +1814,12 @@ production_render_shared_manifest() {
   postgres_port="$(production_tf_output_value "$tf_json" "shared_postgres_port" true)"
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
-  ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
-  proof_requestor_service_name="$(production_tf_output_value "$tf_json" "shared_proof_requestor_service_name" false)"
-  proof_funder_service_name="$(production_tf_output_value "$tf_json" "shared_proof_funder_service_name" false)"
   shared_sp1_requestor_address="$(production_tf_output_value "$tf_json" "shared_sp1_requestor_address" false)"
   shared_sp1_rpc_url="$(production_tf_output_value "$tf_json" "shared_sp1_rpc_url" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
   ipfs_api_auth_secret_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_api_auth_secret_arn" false)"
   kafka_critical_hmac_secret_arn="$(production_tf_output_value "$tf_json" "shared_kafka_critical_hmac_secret_arn" false)"
   ipfs_target_group_arn="$(production_tf_output_value "$tf_json" "shared_ipfs_target_group_arn" false)"
-  wireguard_gateway_private_ip="$(production_tf_output_value "$tf_json" "shared_wireguard_gateway_private_ip" false)"
-  wireguard_endpoint_host="$(production_tf_output_value "$tf_json" "shared_wireguard_endpoint_host" false)"
-  wireguard_listen_port="$(production_tf_output_value "$tf_json" "shared_wireguard_listen_port" false)"
-  wireguard_network_cidr="$(production_tf_output_value "$tf_json" "shared_wireguard_network_cidr" false)"
-  wireguard_client_address_cidr="$(production_tf_output_value "$tf_json" "shared_wireguard_client_address_cidr" false)"
-  wireguard_client_config_secret_arn="$(production_tf_output_value "$tf_json" "shared_wireguard_client_config_secret_arn" false)"
   dkg_bucket="$(production_tf_output_value "$tf_json" "dkg_s3_bucket" false)"
   dkg_prefix="$(production_tf_output_value "$tf_json" "dkg_s3_key_prefix" false)"
   dkg_kms_key_arn="$(production_tf_output_value "$tf_json" "dkg_kms_key_arn" false)"
@@ -1882,44 +1865,8 @@ production_render_shared_manifest() {
   wireguard_role_json="$(
     jq -cn \
       --argjson inventory_role "$(production_inventory_wireguard_role_json "$inventory")" \
-      --argjson tf_role "$tf_wireguard_role_json" \
-      --arg gateway_private_ip "$wireguard_gateway_private_ip" \
-      --arg endpoint_host "$wireguard_endpoint_host" \
-      --arg listen_port "$wireguard_listen_port" \
-      --arg network_cidr "$wireguard_network_cidr" \
-      --arg client_address_cidr "$wireguard_client_address_cidr" \
-      --arg client_config_secret_arn "$wireguard_client_config_secret_arn" '
+      --argjson tf_role "$tf_wireguard_role_json" '
         ($inventory_role + $tf_role)
-        | if (.gateway_private_ip // "") == "" and $gateway_private_ip != "" then
-            .gateway_private_ip = $gateway_private_ip
-          else
-            .
-          end
-        | if (.endpoint_host // "") == "" and $endpoint_host != "" then
-            .endpoint_host = $endpoint_host
-          else
-            .
-          end
-        | if (.listen_port // "") == "" and $listen_port != "" then
-            .listen_port = ($listen_port | tonumber)
-          else
-            .
-          end
-        | if (.network_cidr // "") == "" and $network_cidr != "" then
-            .network_cidr = $network_cidr
-          else
-            .
-          end
-        | if (.client_address_cidr // "") == "" and $client_address_cidr != "" then
-            .client_address_cidr = $client_address_cidr
-          else
-            .
-          end
-        | if (.client_config_secret_arn // "") == "" and $client_config_secret_arn != "" then
-            .client_config_secret_arn = $client_config_secret_arn
-          else
-            .
-          end
       '
   )"
   proof_role_runtime_enabled="false"
@@ -2029,9 +1976,6 @@ production_render_shared_manifest() {
     --arg kafka_auth_aws_region "$aws_region" \
     --arg kafka_critical_key_id "default" \
     --arg kafka_critical_hmac_secret_arn "$kafka_critical_hmac_secret_arn" \
-    --arg ecs_cluster_arn "$ecs_cluster_arn" \
-    --arg proof_requestor_service_name "$proof_requestor_service_name" \
-    --arg proof_funder_service_name "$proof_funder_service_name" \
     --arg shared_sp1_requestor_address "$shared_sp1_requestor_address" \
     --arg shared_sp1_rpc_url "$shared_sp1_rpc_url" \
     --arg ipfs_api_url "$ipfs_api_url" \
@@ -2099,11 +2043,6 @@ production_render_shared_manifest() {
           critical_hmac_secret_arn: (if $kafka_critical_hmac_secret_arn == "" then null else $kafka_critical_hmac_secret_arn end),
           min_insync_replicas: 2
         },
-        ecs: {
-          cluster_arn: (if $proof_role_runtime_enabled == "true" or $ecs_cluster_arn == "" then null else $ecs_cluster_arn end),
-          proof_requestor_service_name: (if $proof_role_runtime_enabled == "true" or $proof_requestor_service_name == "" then null else $proof_requestor_service_name end),
-          proof_funder_service_name: (if $proof_role_runtime_enabled == "true" or $proof_funder_service_name == "" then null else $proof_funder_service_name end)
-        },
         proof: {
           requestor_address: (if $shared_sp1_requestor_address == "" then null else $shared_sp1_requestor_address end),
           rpc_url: (if $shared_sp1_rpc_url == "" then null else $shared_sp1_rpc_url end)
@@ -2112,15 +2051,6 @@ production_render_shared_manifest() {
           api_url: $ipfs_api_url,
           api_auth_secret_arn: (if $ipfs_api_auth_secret_arn == "" then null else $ipfs_api_auth_secret_arn end),
           target_group_arn: (if $ipfs_target_group_arn == "" then null else $ipfs_target_group_arn end)
-        },
-        wireguard: {
-          gateway_private_ip: (if $wireguard_gateway_private_ip == "" then null else $wireguard_gateway_private_ip end),
-          endpoint_host: (if $wireguard_endpoint_host == "" then null else $wireguard_endpoint_host end),
-          listen_port: (if $wireguard_listen_port == "" then null else ($wireguard_listen_port | tonumber) end),
-          network_cidr: (if $wireguard_network_cidr == "" then null else $wireguard_network_cidr end),
-          client_address_cidr: (if $wireguard_client_address_cidr == "" then null else $wireguard_client_address_cidr end),
-          client_config_secret_arn: (if $wireguard_client_config_secret_arn == "" then null else $wireguard_client_config_secret_arn end),
-          source_cidrs: $wireguard_source_cidrs
         },
         artifacts: {
           checkpoint_blob_bucket: (if $dkg_bucket == "" then null else $dkg_bucket end),
@@ -2188,17 +2118,16 @@ production_render_app_handoff() {
   local app_json app_dir manifest_path known_hosts_src secret_contract_src
   local known_hosts_dst secret_contract_dst app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
-  local bridge_dns_label backoffice_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
-  local bridge_record_name backoffice_record_name bridge_public_url backoffice_public_url
+  local bridge_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
+  local bridge_record_name bridge_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
-  local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
-  local wireguard_client_address_cidr wireguard_client_config_secret_arn wireguard_source_cidrs_json
-  local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json publish_backoffice_dns
+  local wireguard_source_cidrs_json
+  local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -2214,10 +2143,6 @@ production_render_app_handoff() {
   proof_role_json="$(production_inventory_proof_role_json "$inventory")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
-  publish_backoffice_dns="true"
-  if ! production_inventory_publish_backoffice_dns "$inventory"; then
-    publish_backoffice_dns="false"
-  fi
 
   app_host="$(jq -r '.host // empty' <<<"$app_json")"
   [[ -n "$app_host" ]] || die "app_role.host is required when inventory.app_role or inventory.app_host is present"
@@ -2230,11 +2155,7 @@ production_render_app_handoff() {
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
-  backoffice_dns_label="$(jq -r '(.backoffice_dns_label | select(type == "string" and length > 0)) // (.ops_public_dns_label | select(type == "string" and length > 0)) // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
-  if [[ "$publish_backoffice_dns" == "true" ]]; then
-    [[ -n "$backoffice_dns_label" ]] || die "app_role.backoffice_dns_label or app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when backoffice public publishing is enabled"
-  fi
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
   [[ "$public_scheme" == "https" ]] || die "app_role.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"
@@ -2253,17 +2174,20 @@ production_render_app_handoff() {
     die "shared_services.alarm_actions must be a non-empty array when inventory.app_role or inventory.app_host is present"
   fi
   edge_alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
-  wireguard_endpoint_host="$(production_json_required "$shared_manifest" '.shared_services.wireguard.endpoint_host | select(type == "string" and length > 0)')"
-  wireguard_listen_port="$(production_json_required "$shared_manifest" '.shared_services.wireguard.listen_port')"
-  wireguard_client_address_cidr="$(production_json_required "$shared_manifest" '.shared_services.wireguard.client_address_cidr | select(type == "string" and length > 0)')"
-  wireguard_client_config_secret_arn="$(production_json_required "$shared_manifest" '.shared_services.wireguard.client_config_secret_arn | select(type == "string" and length > 0)')"
-  wireguard_source_cidrs_json="$(jq -c '(.shared_services.wireguard.source_cidrs // []) | if type == "array" then . else [] end' "$shared_manifest")"
-  if [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]]; then
-    backoffice_wireguard_source_cidrs_json="$wireguard_source_cidrs_json"
-  else
-    wireguard_gateway_private_ip="$(production_json_required "$shared_manifest" '.shared_services.wireguard.gateway_private_ip | select(type == "string" and length > 0)')"
-    backoffice_wireguard_source_cidrs_json="$(jq -cn --arg gateway_ip "$wireguard_gateway_private_ip" '[($gateway_ip + "/32")]')"
-  fi
+  wireguard_source_cidrs_json="$(jq -c '
+    if ((.wireguard_role.source_cidrs // []) | type == "array" and length > 0) then
+      .wireguard_role.source_cidrs
+    else
+      (.wireguard_role.endpoint_host // "")
+      | if test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") then
+          [ . + "/32" ]
+        else
+          []
+        end
+    end
+  ' "$shared_manifest")"
+  [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty"
+  backoffice_wireguard_source_cidrs_json="$wireguard_source_cidrs_json"
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi
@@ -2279,22 +2203,11 @@ production_render_app_handoff() {
   [[ -f "$secret_contract_src" ]] || die "app secret contract file not found: $secret_contract_src"
 
   bridge_record_name="${bridge_dns_label}.${public_subdomain}"
-  backoffice_record_name=""
-  if [[ "$publish_backoffice_dns" == "true" ]]; then
-    backoffice_record_name="${backoffice_dns_label}.${public_subdomain}"
-  fi
   bridge_public_url="$(production_origin_url "$public_scheme" "$bridge_record_name")"
-  backoffice_public_url=""
-  if [[ -n "$backoffice_record_name" ]]; then
-    backoffice_public_url="$(production_origin_url "$public_scheme" "$backoffice_record_name")"
-  fi
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
   backoffice_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
   bridge_probe_url="$bridge_public_url"
   backoffice_probe_url="$backoffice_internal_url"
-  if [[ -n "$backoffice_public_url" ]]; then
-    backoffice_probe_url="$backoffice_public_url"
-  fi
   edge_enabled="true"
   edge_output_root="$(dirname "$output_dir")"
   edge_state_dir="$edge_output_root/edge-state"
@@ -2340,15 +2253,9 @@ production_render_app_handoff() {
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
-    --arg backoffice_public_url "$backoffice_public_url" \
     --arg backoffice_probe_url "$backoffice_probe_url" \
     --arg backoffice_internal_url "$backoffice_internal_url" \
-    --arg backoffice_record_name "$backoffice_record_name" \
     --argjson backoffice_wireguard_source_cidrs "$backoffice_wireguard_source_cidrs_json" \
-    --arg wireguard_endpoint_host "$wireguard_endpoint_host" \
-    --argjson wireguard_listen_port "$wireguard_listen_port" \
-    --arg wireguard_client_address_cidr "$wireguard_client_address_cidr" \
-    --arg wireguard_client_config_secret_arn "$wireguard_client_config_secret_arn" \
     --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
     --arg zone_id "$zone_id" \
@@ -2368,7 +2275,6 @@ production_render_app_handoff() {
     --argjson proof_role "$proof_role_json" \
     --argjson wireguard_role "$wireguard_role_json" \
     --argjson shared_roles "$shared_roles_json" \
-    --argjson publish_backoffice_dns "$publish_backoffice_dns" \
     '{
       version: $version,
       environment: $environment,
@@ -2405,18 +2311,14 @@ production_render_app_handoff() {
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,
-          public_url: (if $backoffice_public_url == "" then null else $backoffice_public_url end),
-          probe_url: (if $backoffice_public_url == "" then $backoffice_probe_url else $backoffice_probe_url end),
+          public_url: null,
+          probe_url: $backoffice_probe_url,
           internal_url: $backoffice_internal_url,
-          record_name: (if $backoffice_record_name == "" then null else $backoffice_record_name end),
+          record_name: null,
           access: {
             mode: "wireguard",
             source_cidrs: $backoffice_wireguard_source_cidrs,
-            endpoint_host: $wireguard_endpoint_host,
-            listen_port: $wireguard_listen_port,
-            client_address_cidr: $wireguard_client_address_cidr,
-            client_config_secret_arn: $wireguard_client_config_secret_arn,
-            publish_public_dns: $publish_backoffice_dns
+            publish_public_dns: false
           }
         }
       },

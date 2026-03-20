@@ -38,21 +38,6 @@ output "shared_kafka_bootstrap_brokers_tls" {
   value       = aws_msk_cluster.shared.bootstrap_brokers_tls
 }
 
-output "shared_ecs_cluster_arn" {
-  description = "Shared ECS cluster ARN."
-  value       = aws_ecs_cluster.shared.arn
-}
-
-output "shared_proof_requestor_service_name" {
-  description = "Proof-requestor ECS service name."
-  value       = aws_ecs_service.proof_requestor.name
-}
-
-output "shared_proof_funder_service_name" {
-  description = "Proof-funder ECS service name."
-  value       = aws_ecs_service.proof_funder.name
-}
-
 output "shared_sp1_requestor_address" {
   description = "Shared SP1 requestor address used by proof services."
   value       = var.shared_sp1_requestor_address
@@ -128,11 +113,6 @@ output "shared_ipfs_instance_profile" {
   value       = aws_iam_instance_profile.ipfs.name
 }
 
-output "shared_wireguard_gateway_private_ip" {
-  description = "Private IPv4 address of the dedicated WireGuard gateway."
-  value       = var.shared_wireguard_enabled ? aws_instance.wireguard_gateway[0].private_ip : null
-}
-
 output "shared_wireguard_role_asg_name" {
   description = "Autoscaling group name for the WireGuard gateway role foundation."
   value       = var.shared_wireguard_enabled ? aws_autoscaling_group.wireguard_role[0].name : null
@@ -148,11 +128,6 @@ output "shared_wireguard_nlb_dns_name" {
   value       = var.shared_wireguard_enabled ? aws_lb.wireguard[0].dns_name : null
 }
 
-output "shared_wireguard_endpoint_host" {
-  description = "Public endpoint host used by the generated WireGuard client config."
-  value       = var.shared_wireguard_enabled ? aws_eip.wireguard_gateway[0].public_ip : null
-}
-
 output "shared_wireguard_listen_port" {
   description = "UDP port exposed by the dedicated WireGuard gateway."
   value       = var.shared_wireguard_enabled ? var.shared_wireguard_listen_port : null
@@ -161,17 +136,6 @@ output "shared_wireguard_listen_port" {
 output "shared_wireguard_network_cidr" {
   description = "Tunnel CIDR assigned to the dedicated WireGuard gateway."
   value       = var.shared_wireguard_enabled ? var.shared_wireguard_network_cidr : null
-}
-
-output "shared_wireguard_client_address_cidr" {
-  description = "Client tunnel address generated for the dedicated backoffice WireGuard profile."
-  value       = var.shared_wireguard_enabled ? local.wireguard_client_address_cidr : null
-}
-
-output "shared_wireguard_client_config_secret_arn" {
-  description = "Secrets Manager ARN containing the generated backoffice WireGuard client config."
-  value       = var.shared_wireguard_enabled ? aws_secretsmanager_secret.shared_wireguard_client_config[0].arn : null
-  sensitive   = true
 }
 
 output "shared_wireguard_server_key_secret_arn" {

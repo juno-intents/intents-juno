@@ -23,24 +23,6 @@
   "shared_ipfs_api_url": {
     "value": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001"
   },
-  "shared_wireguard_gateway_private_ip": {
-    "value": "10.0.2.50"
-  },
-  "shared_wireguard_endpoint_host": {
-    "value": "198.51.100.25"
-  },
-  "shared_wireguard_listen_port": {
-    "value": 51820
-  },
-  "shared_wireguard_network_cidr": {
-    "value": "10.66.0.0/24"
-  },
-  "shared_wireguard_client_address_cidr": {
-    "value": "10.66.0.2/32"
-  },
-  "shared_wireguard_client_config_secret_arn": {
-    "value": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config"
-  },
   "shared_ipfs_target_group_arn": {
     "value": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
   },

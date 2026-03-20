@@ -59,6 +59,7 @@ write_inventory_fixture() {
           network_cidr: "10.66.0.0/24",
           backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
           backoffice_private_endpoint: "10.0.10.21",
+          source_cidrs: ["10.0.2.50/32"],
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
           endpoint_host: "198.51.100.25",
           publish_public_dns: false

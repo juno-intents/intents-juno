@@ -126,46 +126,6 @@ resource "aws_cloudwatch_metric_alarm" "shared_kafka_offline_partitions" {
   }
 }
 
-resource "aws_cloudwatch_metric_alarm" "proof_requestor_running" {
-  count               = var.shared_ecs_desired_count > 0 ? 1 : 0
-  alarm_name          = "${local.resource_name}-proof-requestor-running"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "RunningTaskCount"
-  namespace           = "ECS/ContainerInsights"
-  period              = 300
-  statistic           = "Average"
-  threshold           = var.shared_ecs_desired_count
-  alarm_description   = "proof-requestor ECS service has fewer running tasks than expected."
-  alarm_actions       = var.alarm_actions
-  ok_actions          = var.alarm_actions
-
-  dimensions = {
-    ClusterName = aws_ecs_cluster.shared.name
-    ServiceName = aws_ecs_service.proof_requestor.name
-  }
-}
-
-resource "aws_cloudwatch_metric_alarm" "proof_funder_running" {
-  count               = var.shared_ecs_desired_count > 0 ? 1 : 0
-  alarm_name          = "${local.resource_name}-proof-funder-running"
-  comparison_operator = "LessThanThreshold"
-  evaluation_periods  = 2
-  metric_name         = "RunningTaskCount"
-  namespace           = "ECS/ContainerInsights"
-  period              = 300
-  statistic           = "Average"
-  threshold           = var.shared_ecs_desired_count
-  alarm_description   = "proof-funder ECS service has fewer running tasks than expected."
-  alarm_actions       = var.alarm_actions
-  ok_actions          = var.alarm_actions
-
-  dimensions = {
-    ClusterName = aws_ecs_cluster.shared.name
-    ServiceName = aws_ecs_service.proof_funder.name
-  }
-}
-
 resource "aws_cloudwatch_metric_alarm" "ipfs_unhealthy_hosts" {
   alarm_name          = "${local.resource_name}-ipfs-unhealthy"
   comparison_operator = "GreaterThanThreshold"

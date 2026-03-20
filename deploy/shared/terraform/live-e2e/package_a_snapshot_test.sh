@@ -149,9 +149,6 @@ main() {
   assert_contains "$outputs_tf" 'trimspace(var.shared_sp1_rpc_url)' "live-e2e output keeps the rendered succinct rpc url"
   assert_contains "$outputs_tf" 'output "shared_ipfs_api_auth_secret_arn"' "live-e2e exports the shared IPFS bearer token secret ARN"
   assert_contains "$outputs_tf" 'output "shared_kafka_critical_hmac_secret_arn"' "live-e2e exports the Kafka critical-topic HMAC secret ARN"
-  assert_contains "$outputs_tf" 'output "shared_wireguard_gateway_private_ip"' "live-e2e exports the wireguard gateway private ip"
-  assert_contains "$outputs_tf" 'output "shared_wireguard_endpoint_host"' "live-e2e exports the wireguard public endpoint host"
-  assert_contains "$outputs_tf" 'output "shared_wireguard_client_config_secret_arn"' "live-e2e exports the wireguard client config secret arn"
 
   assert_contains "$main_tf" 'name  = "SP1_NETWORK_RPC_URL"' "live-e2e proof task env includes SP1 rpc url"
   assert_contains "$main_tf" 'name  = "JUNO_QUEUE_KAFKA_AUTH_MODE"' "live-e2e proof task env includes kafka auth mode"

@@ -80,6 +80,7 @@ write_inventory_fixture() {
           network_cidr: "10.66.0.0/24",
           backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
           backoffice_private_endpoint: $app_private_endpoint,
+          source_cidrs: ["10.0.2.50/32"],
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
           endpoint_host: "198.51.100.25",
           publish_public_dns: false
@@ -91,6 +92,7 @@ write_inventory_fixture() {
           network_cidr: "10.66.0.0/24",
           backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
           backoffice_private_endpoint: $app_private_endpoint,
+          source_cidrs: ["10.0.2.50/32"],
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
           endpoint_host: "198.51.100.25",
           publish_public_dns: false
@@ -406,6 +408,29 @@ EOF
     | .shared_proof_funder_service_name = {
       value: "alpha-proof-funder"
     }
+    | .shared_proof_role = {
+        value: {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+          requestor_address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+          rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+        }
+      }
+    | .shared_wireguard_role = {
+        value: {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+          endpoint_host: "nlb-alpha-wireguard.example.internal",
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+          peer_roster_secret_arns: [
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+          ],
+          server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+        }
+      }
   ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -426,21 +451,18 @@ EOF
   assert_eq "$(jq -r '.contracts.bridge_params.min_deposit_amount' "$shared_manifest")" "201005025" "bridge min deposit amount"
   assert_eq "$(jq -r '.contracts.bridge_params.min_withdraw_amount' "$shared_manifest")" "200000000" "bridge min withdraw amount"
   assert_eq "$(jq -r '.version' "$shared_manifest")" "2" "shared manifest version"
-  assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0x1234567890abcdef1234567890abcdef12345678" "shared roles proof requestor address"
-  assert_eq "$(jq -r '.shared_roles.proof.rpc_url' "$shared_manifest")" "https://rpc.mainnet.succinct.xyz" "shared roles proof rpc url"
+  assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" "shared roles proof requestor address"
+  assert_eq "$(jq -r '.shared_roles.proof.rpc_url' "$shared_manifest")" "https://rpc.role.mainnet.succinct.xyz" "shared roles proof rpc url"
   assert_eq "$(jq -r '.shared_roles.wireguard.backoffice_private_endpoint' "$shared_manifest")" "10.0.10.21" "shared roles wireguard backoffice endpoint"
   assert_eq "$(jq -r '.wireguard_role.publish_public_dns' "$shared_manifest")" "false" "wireguard role suppresses public dns"
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
   assert_eq "$(jq -r '.shared_services.ipfs.target_group_arn' "$shared_manifest")" "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111" "ipfs target group arn"
-  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
-  assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "proof requestor service name"
-  assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "alpha-proof-funder" "proof funder service name"
-  assert_eq "$(jq -r '.shared_services.wireguard.gateway_private_ip' "$shared_manifest")" "10.0.2.50" "wireguard gateway private ip"
-  assert_eq "$(jq -r '.shared_services.wireguard.endpoint_host' "$shared_manifest")" "198.51.100.25" "wireguard endpoint host"
-  assert_eq "$(jq -r '.shared_services.wireguard.listen_port' "$shared_manifest")" "51820" "wireguard listen port"
-  assert_eq "$(jq -r '.shared_services.wireguard.client_address_cidr' "$shared_manifest")" "10.66.0.2/32" "wireguard client address cidr"
-  assert_eq "$(jq -r '.shared_services.wireguard.client_config_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "wireguard client config secret arn"
+  assert_eq "$(jq -r '.shared_roles.proof.asg' "$shared_manifest")" "alpha-proof-role" "proof role asg"
+  assert_eq "$(jq -r '.shared_roles.proof.launch_template.id' "$shared_manifest")" "lt-proof0123456789abcdef" "proof role launch template"
+  assert_eq "$(jq -r '.wireguard_role.asg' "$shared_manifest")" "alpha-wireguard-role" "wireguard role asg"
+  assert_eq "$(jq -r '.wireguard_role.launch_template.id' "$shared_manifest")" "lt-wireguard0123456789ab" "wireguard role launch template"
+  assert_eq "$(jq -r '.wireguard_role.source_cidrs[0]' "$shared_manifest")" "10.0.20.0/24" "wireguard source cidrs"
   assert_eq "$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id' "$shared_manifest")" "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "shared manifest checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
@@ -534,11 +556,10 @@ EOF
   assert_eq "$(jq -r '.shared_roles.proof.asg' "$shared_manifest")" "alpha-proof-role" "shared manifest prefers proof role asg"
   assert_eq "$(jq -r '.shared_roles.proof.launch_template.id' "$shared_manifest")" "lt-proof0123456789abcdef" "shared manifest prefers proof role launch template"
   assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" "shared manifest prefers proof role requestor"
-  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn // empty' "$shared_manifest")" "" "shared manifest omits ecs cluster when role outputs are present"
   assert_eq "$(jq -r '.wireguard_role.asg' "$shared_manifest")" "alpha-wireguard-role" "shared manifest prefers wireguard role asg"
   assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "shared manifest includes wireguard server key secret"
-  assert_eq "$(jq -r '.shared_services.wireguard.endpoint_host' "$shared_manifest")" "nlb-alpha-wireguard.example.internal" "shared manifest prefers wireguard nlb endpoint"
-  assert_eq "$(jq -r '.shared_services.wireguard.source_cidrs[0]' "$shared_manifest")" "10.0.20.0/24" "shared manifest exposes wireguard source cidrs"
+  assert_eq "$(jq -r '.wireguard_role.endpoint_host' "$shared_manifest")" "nlb-alpha-wireguard.example.internal" "shared manifest prefers wireguard nlb endpoint"
+  assert_eq "$(jq -r '.wireguard_role.source_cidrs[0]' "$shared_manifest")" "10.0.20.0/24" "shared manifest exposes wireguard source cidrs"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.20.0/24" "app handoff uses wireguard role source cidr"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$app_manifest")" "10.0.21.0/24" "app handoff uses all wireguard role source cidrs"
   rm -rf "$workdir"
@@ -2323,9 +2344,8 @@ EOF
   assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$app_manifest")" "false" "backoffice public publishing suppressed"
   assert_eq "$(jq -r '.services.backoffice.access.mode' "$app_manifest")" "wireguard" "backoffice access mode"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.2.50/32" "backoffice wireguard source cidr"
-  assert_eq "$(jq -r '.services.backoffice.access.client_config_secret_arn' "$app_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "backoffice wireguard client config secret"
-  assert_eq "$(jq -r '.services.backoffice.access.endpoint_host' "$app_manifest")" "198.51.100.25" "backoffice wireguard endpoint host"
-  assert_eq "$(jq -r '.services.backoffice.access.listen_port' "$app_manifest")" "51820" "backoffice wireguard listen port"
+  assert_eq "$(jq -r '.services.backoffice.access.client_config_secret_arn // empty' "$app_manifest")" "" "backoffice wireguard client config secret removed from manifest"
+  assert_eq "$(jq -r '.wireguard_role.endpoint_host' "$app_manifest")" "198.51.100.25" "backoffice wireguard endpoint host"
   assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
   assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"

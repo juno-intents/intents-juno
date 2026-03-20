@@ -268,6 +268,7 @@ write_inventory_fixture() {
           network_cidr: "10.66.0.0/24",
           backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
           backoffice_private_endpoint: $app_private_endpoint,
+          source_cidrs: ["10.0.2.50/32"],
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
           endpoint_host: "198.51.100.25",
           publish_public_dns: false
@@ -362,7 +363,7 @@ EOF
           rpc_url: "https://rpc.role.mainnet.succinct.xyz"
         }
       }
-    | .shared_wireguard_role = {
+      | .shared_wireguard_role = {
         value: {
           asg: "alpha-wireguard-role",
           launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
@@ -388,7 +389,6 @@ EOF
     --output-dir "$output_dir" >/dev/null
 
   assert_eq "$(jq -r '.shared_roles.proof.asg' "$output_dir/alpha/shared-manifest.json")" "alpha-proof-role" "deploy coordinator prefers proof role asg"
-  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn // empty' "$output_dir/alpha/shared-manifest.json")" "" "deploy coordinator suppresses ecs metadata when proof role is present"
   assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$output_dir/alpha/shared-manifest.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "deploy coordinator renders wireguard server key secret"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.20.0/24" "deploy coordinator prefers wireguard role source cidrs"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$output_dir/alpha/app/app-deploy.json")" "10.0.21.0/24" "deploy coordinator keeps all wireguard role source cidrs"
@@ -472,9 +472,6 @@ EOF
     | del(.shared_services.wireguard.public_subnet_id)
     | .app_host.private_endpoint = ""
     | .app_host.publish_public_dns = true
-    | del(.app_role)
-    | del(.shared_roles)
-    | del(.wireguard_role)
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
@@ -487,7 +484,7 @@ EOF
     --skip-terraform-apply \
     --output-dir "$output_dir" >/dev/null
 
-  assert_eq "$(jq -r '.services.backoffice.record_name' "$output_dir/alpha/app/app-deploy.json")" "ops.alpha.intents-testing.thejunowallet.com" "preview legacy inventory still renders backoffice record name"
+  assert_eq "$(jq -r '.services.backoffice.record_name // empty' "$output_dir/alpha/app/app-deploy.json")" "" "preview legacy inventory suppresses backoffice record name"
   rm -rf "$workdir"
 }
 
@@ -961,10 +958,10 @@ EOF
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"
   assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated wireguard override file"
-  assert_contains "$combined_log" 'terraform-var-file-contents {   "shared_wireguard_enabled": true,' "deploy-coordinator writes a wireguard-enabled override file"
-  assert_contains "$combined_log" '"shared_wireguard_public_subnet_id": "subnet-0abc1234def567890"' "deploy-coordinator forwards the wireguard public subnet into terraform"
-  assert_contains "$combined_log" '"shared_wireguard_backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com"' "deploy-coordinator forwards the backoffice hostname into terraform"
-  assert_contains "$combined_log" '"shared_wireguard_backoffice_private_endpoint": "10.0.10.21"' "deploy-coordinator forwards the private app endpoint into terraform"
+  assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the wireguard override file"
+  assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "true" "deploy-coordinator writes a wireguard-enabled override file"
+  assert_eq "$(jq -r '.shared_wireguard_public_subnet_ids[0]' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "subnet-0abc1234def567890" "deploy-coordinator forwards the wireguard public subnet into terraform"
+  assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "ops.alpha.intents-testing.thejunowallet.com" "deploy-coordinator forwards the backoffice hostname into terraform"
   assert_line_order "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator bootstraps backend storage before terraform init"
   rm -rf "$workdir"
 }
