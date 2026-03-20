@@ -97,6 +97,21 @@ ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
   artifacts_object_lock_required="false"
 fi
+skip_postgres_local_check="false"
+skip_kafka_local_check="false"
+skip_ipfs_local_check="false"
+if [[ "$environment" == "preview" && -n "$postgres_cluster_arn" ]]; then
+  skip_postgres_local_check="true"
+  postgres_detail="awaiting aurora health verification"
+fi
+if [[ "$environment" == "preview" && -n "$kafka_cluster_arn" ]]; then
+  skip_kafka_local_check="true"
+  kafka_detail="awaiting msk health verification"
+fi
+if [[ "$environment" == "preview" && -n "$ipfs_target_group_arn" ]]; then
+  skip_ipfs_local_check="true"
+  ipfs_detail="awaiting ipfs target-group health verification"
+fi
 
 aws_auth_status="passed"
 aws_auth_detail="verified"
@@ -145,23 +160,25 @@ else
     kafka_detail="shared manifest kafka.auth.mode must be aws-msk-iam"
   fi
 
-  if ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then
+  if [[ "$skip_postgres_local_check" != "true" ]] && ! pg_isready -h "$postgres_endpoint" -p "$postgres_port" >/dev/null 2>&1; then
     postgres_status="failed"
     postgres_detail="pg_isready failed"
   fi
 
-  IFS=',' read -r -a broker_array <<<"$kafka_brokers"
-  for broker in "${broker_array[@]}"; do
-    broker="$(trim "$broker")"
-    [[ -n "$broker" ]] || continue
-    broker_host="${broker%:*}"
-    broker_port="${broker##*:}"
-    if ! nc -z "$broker_host" "$broker_port" >/dev/null 2>&1; then
-      kafka_status="failed"
-      kafka_detail="broker unreachable: $broker"
-      break
-    fi
-  done
+  if [[ "$skip_kafka_local_check" != "true" ]]; then
+    IFS=',' read -r -a broker_array <<<"$kafka_brokers"
+    for broker in "${broker_array[@]}"; do
+      broker="$(trim "$broker")"
+      [[ -n "$broker" ]] || continue
+      broker_host="${broker%:*}"
+      broker_port="${broker##*:}"
+      if ! nc -z "$broker_host" "$broker_port" >/dev/null 2>&1; then
+        kafka_status="failed"
+        kafka_detail="broker unreachable: $broker"
+        break
+      fi
+    done
+  fi
 
   if [[ "$kafka_auth_mode" == "aws-msk-iam" || -n "$postgres_cluster_arn" || -n "$kafka_cluster_arn" || -n "$ipfs_target_group_arn" || -n "$checkpoint_blob_bucket" ]]; then
     have_cmd aws || die "required command not found: aws"
@@ -177,14 +194,14 @@ else
     aws_auth_detail="no aws-backed checks configured"
   fi
 
-  if [[ "$aws_auth_status" == "passed" && -n "$ipfs_api_auth_secret_arn" ]]; then
+  if [[ "$skip_ipfs_local_check" != "true" && "$aws_auth_status" == "passed" && -n "$ipfs_api_auth_secret_arn" ]]; then
     ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$aws_profile" "$aws_region")"
     if [[ -n "$ipfs_api_bearer_token" ]]; then
       ipfs_auth_header=(-H "Authorization: Bearer ${ipfs_api_bearer_token}")
     fi
   fi
 
-  if ! curl -fsS "${ipfs_auth_header[@]}" -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
+  if [[ "$skip_ipfs_local_check" != "true" ]] && ! curl -fsS "${ipfs_auth_header[@]}" -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
     ipfs_status="failed"
     ipfs_detail="ipfs api unreachable"
   fi
@@ -199,6 +216,8 @@ else
     elif [[ "$postgres_cluster_azs" -lt 2 ]]; then
       postgres_status="failed"
       postgres_detail="aurora cluster does not span at least two availability zones"
+    elif [[ "$skip_postgres_local_check" == "true" ]]; then
+      postgres_detail="aurora cluster is available across at least two availability zones"
     fi
   fi
 
@@ -212,6 +231,8 @@ else
     elif [[ "$kafka_cluster_subnets" -lt 2 ]]; then
       kafka_status="failed"
       kafka_detail="msk cluster does not span at least two subnets"
+    elif [[ "$skip_kafka_local_check" == "true" ]]; then
+      kafka_detail="msk cluster is active across at least two subnets with aws-msk-iam"
     fi
   fi
 
@@ -221,6 +242,8 @@ else
     if [[ "$ipfs_healthy_targets" -lt 2 ]]; then
       ipfs_status="failed"
       ipfs_detail="ipfs target group has fewer than two healthy targets"
+    elif [[ "$skip_ipfs_local_check" == "true" ]]; then
+      ipfs_detail="ipfs target group has at least two healthy targets"
     fi
   fi
 

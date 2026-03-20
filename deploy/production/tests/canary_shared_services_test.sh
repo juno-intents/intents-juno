@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 test_shared_services_canary_checks_postgres_kafka_and_ipfs() {
   local tmp manifest fake_bin log_file output_json
   tmp="$(mktemp -d)"
@@ -416,11 +426,106 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_uses_aws_health_for_preview_private_services() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "preview",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "postgres": {
+      "endpoint": "intents-juno-shared-preview-shared-aurora.cluster-codac6aua6oa.us-east-1.rds.amazonaws.com",
+      "port": 5432,
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:preview-shared"
+    },
+    "kafka": {
+      "bootstrap_brokers": "b-1.preview.kafka.us-east-1.amazonaws.com:9098,b-2.preview.kafka.us-east-1.amazonaws.com:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      },
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/preview-shared/11111111-2222-3333-4444-555555555555-1"
+    },
+    "ipfs": {
+      "api_url": "http://preview-ipfs.elb.us-east-1.amazonaws.com:5001",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/preview-ipfs/1111111111111111"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 1
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 1
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+exit 1
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"rds describe-db-clusters"*)
+    printf '{"DBClusters":[{"Status":"available","AvailabilityZones":["us-east-1a","us-east-1b"]}]}\n'
+    ;;
+  *"kafka describe-cluster-v2"*)
+    printf '{"ClusterInfo":{"State":"ACTIVE","Provisioned":{"BrokerNodeGroupInfo":{"ClientSubnets":["subnet-a","subnet-b"]}}}}\n'
+    ;;
+  *"elbv2 describe-target-health"*)
+    printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"healthy"}}]}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_not_contains "$(cat "$log_file")" "pg_isready " "preview canary skips local postgres checks when aurora metadata exists"
+  assert_not_contains "$(cat "$log_file")" "nc -z " "preview canary skips local kafka socket checks when msk metadata exists"
+  assert_not_contains "$(cat "$log_file")" "curl -fsS " "preview canary skips local ipfs checks when target group metadata exists"
+  assert_eq "$(jq -r '.checks.postgres.status' "$output_json")" "passed" "preview canary postgres status"
+  assert_eq "$(jq -r '.checks.kafka.status' "$output_json")" "passed" "preview canary kafka status"
+  assert_eq "$(jq -r '.checks.ipfs.status' "$output_json")" "passed" "preview canary ipfs status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview canary remains deployable with aws health checks"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
   test_shared_services_canary_requires_preview_iam_kafka_auth
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
+  test_shared_services_canary_uses_aws_health_for_preview_private_services
 }
 
 main "$@"
