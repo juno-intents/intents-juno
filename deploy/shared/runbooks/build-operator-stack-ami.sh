@@ -532,6 +532,7 @@ BASE_EVENT_SCANNER_BASE_RPC_URL=
 BASE_EVENT_SCANNER_BRIDGE_ADDRESS=
 BASE_EVENT_SCANNER_POLL_INTERVAL=3s
 BASE_EVENT_SCANNER_START_BLOCK=
+JUNO_SCAN_BACKFILL_FROM_HEIGHT=0
 BASE_EVENT_SCANNER_WITHDRAW_EVENT_TOPIC=withdrawals.requested.v2
 CHECKPOINT_SIGNER_HEALTH_PORT=18301
 CHECKPOINT_AGGREGATOR_HEALTH_PORT=18302
@@ -1035,6 +1036,156 @@ exec /usr/local/bin/juno-scan \
   -listen 127.0.0.1:8080
 EOF_SCAN
   sudo install -m 0755 /tmp/intents-juno-juno-scan.sh /usr/local/bin/intents-juno-juno-scan.sh
+
+  cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+
+log() {
+  printf '[juno-scan-backfill] %s\n' "$*" >&2
+}
+
+select_first_value() {
+  local value
+  for value in "$@"; do
+    if [[ -n "$value" ]]; then
+      printf '%s\n' "$value"
+      return 0
+    fi
+  done
+  return 1
+}
+
+write_state() {
+  local status="$1"
+  local next_height="$2"
+  local to_height="$3"
+  local last_error="${4-}"
+  local tmp updated_at
+  updated_at="$(date -u +%FT%TZ)"
+  tmp="$(mktemp "${state_file}.XXXXXX")"
+  jq -cn \
+    --arg status "$status" \
+    --arg wallet_id "$wallet_id" \
+    --arg scan_url "$scan_url" \
+    --arg ufvk_file "$ufvk_file" \
+    --arg updated_at "$updated_at" \
+    --arg error "$last_error" \
+    --argjson configured_from_height "$configured_from_height" \
+    --argjson next_height "$next_height" \
+    --argjson to_height "$to_height" \
+    '{
+      status: $status,
+      wallet_id: $wallet_id,
+      scan_url: $scan_url,
+      ufvk_file: $ufvk_file,
+      configured_from_height: $configured_from_height,
+      next_height: $next_height,
+      to_height: $to_height,
+      updated_at: $updated_at
+    } + if $error == "" then {} else {last_error: $error} end' >"$tmp"
+  mv "$tmp" "$state_file"
+}
+
+wait_for_scan_tip() {
+  local health_response
+  while true; do
+    health_response="$(
+      curl -fsS --max-time 10 "${curl_headers[@]}" "${scan_url%/}/v1/health" 2>/dev/null || true
+    )"
+    if [[ -n "$health_response" ]] && jq -e '.status == "ok" and ((.scanned_height | type) == "number")' >/dev/null <<<"$health_response"; then
+      return 0
+    fi
+    sleep 5
+  done
+}
+
+configured_from_height="${JUNO_SCAN_BACKFILL_FROM_HEIGHT:-0}"
+[[ "$configured_from_height" =~ ^[0-9]+$ ]] || {
+  echo "juno-scan-backfill requires JUNO_SCAN_BACKFILL_FROM_HEIGHT to be a non-negative integer" >&2
+  exit 1
+}
+
+wallet_id="$(select_first_value "${DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID:-}" "${WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID:-}" "${WITHDRAW_COORDINATOR_JUNO_WALLET_ID:-}" || true)"
+scan_url="$(select_first_value "${DEPOSIT_SCAN_JUNO_SCAN_URL:-}" "${WITHDRAW_FINALIZER_JUNO_SCAN_URL:-}" "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL:-}" || true)"
+if [[ -z "$wallet_id" || -z "$scan_url" ]]; then
+  log "no scan wallet configured; skipping"
+  exit 0
+fi
+
+ufvk_file="${JUNO_SCAN_BACKFILL_UFVK_FILE:-/var/lib/intents-juno/operator-runtime/ufvk.txt}"
+[[ -s "$ufvk_file" ]] || {
+  echo "juno-scan-backfill requires a readable UFVK file: $ufvk_file" >&2
+  exit 1
+}
+
+batch_size="${JUNO_SCAN_BACKFILL_BATCH_SIZE:-10000}"
+[[ "$batch_size" =~ ^[1-9][0-9]*$ ]] || {
+  echo "juno-scan-backfill requires JUNO_SCAN_BACKFILL_BATCH_SIZE to be a positive integer" >&2
+  exit 1
+}
+
+state_dir="${JUNO_SCAN_BACKFILL_STATE_DIR:-/var/lib/intents-juno/juno-scan-backfill}"
+state_file="${state_dir%/}/state.json"
+mkdir -p "$state_dir"
+chmod 0750 "$state_dir"
+
+next_height="$configured_from_height"
+if [[ -f "$state_file" ]]; then
+  resume_next_height="$(jq -er --arg wallet_id "$wallet_id" --arg scan_url "$scan_url" '. | select(.wallet_id == $wallet_id and .scan_url == $scan_url) | .next_height' "$state_file" 2>/dev/null || true)"
+  if [[ "$resume_next_height" =~ ^[0-9]+$ ]] && (( resume_next_height > next_height )); then
+    next_height="$resume_next_height"
+  fi
+fi
+to_height="$next_height"
+
+export_optional_env_vars JUNO_SCAN_BEARER_TOKEN
+curl_headers=()
+if [[ -n "${JUNO_SCAN_BEARER_TOKEN:-}" ]]; then
+  curl_headers=(-H "Authorization: Bearer ${JUNO_SCAN_BEARER_TOKEN}")
+fi
+
+on_error() {
+  local exit_code=$?
+  write_state "failed" "$next_height" "$to_height" "wallet backfill failed"
+  exit "$exit_code"
+}
+trap on_error ERR
+
+wait_for_scan_tip
+
+ufvk="$(tr -d '\r\n' < "$ufvk_file")"
+wallet_payload="$(jq -cn --arg wallet_id "$wallet_id" --arg ufvk "$ufvk" '{wallet_id: $wallet_id, ufvk: $ufvk}')"
+curl -fsS -X POST "${curl_headers[@]}" -H 'Content-Type: application/json' --data "$wallet_payload" "${scan_url%/}/v1/wallets" >/dev/null
+
+write_state "running" "$next_height" "$to_height"
+while :; do
+  backfill_payload="$(jq -cn --argjson from_height "$next_height" --argjson batch_size "$batch_size" '{from_height: $from_height, batch_size: $batch_size}')"
+  backfill_response="$(curl -fsS -X POST "${curl_headers[@]}" -H 'Content-Type: application/json' --data "$backfill_payload" "${scan_url%/}/v1/wallets/${wallet_id}/backfill")"
+  to_height="$(jq -er '.to_height' <<<"$backfill_response")"
+  next_height="$(jq -er '.next_height' <<<"$backfill_response")"
+  write_state "running" "$next_height" "$to_height"
+  if (( next_height > to_height )); then
+    break
+  fi
+done
+
+write_state "complete" "$next_height" "$to_height"
+trap - ERR
+log "wallet backfill complete wallet_id=$wallet_id next_height=$next_height to_height=$to_height"
+EOF_SCAN_BACKFILL
+  sudo install -m 0755 /tmp/intents-juno-juno-scan-backfill.sh /usr/local/bin/intents-juno-juno-scan-backfill.sh
 
   cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'
 #!/usr/bin/env bash
@@ -2261,6 +2412,43 @@ WantedBy=multi-user.target
 EOF_SCAN_SERVICE
   sudo install -m 0644 /tmp/juno-scan.service /etc/systemd/system/juno-scan.service
 
+  cat > /tmp/juno-scan-backfill.service <<'EOF_SCAN_BACKFILL_SERVICE'
+[Unit]
+Description=Intents Juno Operator juno-scan historical wallet backfill
+After=juno-scan.service intents-juno-config-hydrator.service
+Requires=juno-scan.service
+Wants=intents-juno-config-hydrator.service
+
+[Service]
+Type=simple
+User=intents-juno
+Group=intents-juno
+ExecStart=/usr/local/bin/intents-juno-juno-scan-backfill.sh
+Restart=on-failure
+RestartSec=15
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=1G
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
+EOF_SCAN_BACKFILL_SERVICE
+  sudo install -m 0644 /tmp/juno-scan-backfill.service /etc/systemd/system/juno-scan-backfill.service
+
   cat > /tmp/intents-juno-config-hydrator.service <<'EOF_CONFIG_HYDRATOR_SERVICE'
 [Unit]
 Description=Intents Juno Operator config hydrator
@@ -2716,6 +2904,7 @@ write_bootstrap_metadata() {
         "intents-juno-config-hydrator.service",
         "junocashd.service",
         "juno-scan.service",
+        "juno-scan-backfill.service",
         "checkpoint-signer.service",
         "checkpoint-aggregator.service",
         "tss-host.service",
@@ -2741,7 +2930,7 @@ install_intents_binaries
 write_stack_config
 
 sudo systemctl daemon-reload
-sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
+sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service juno-scan-backfill.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
 sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
@@ -2752,7 +2941,7 @@ done
 
 write_bootstrap_metadata
 
-sudo systemctl stop juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
+sudo systemctl stop juno-scan-backfill.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
 rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true

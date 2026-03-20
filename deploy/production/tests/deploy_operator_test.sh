@@ -366,12 +366,15 @@ EOF
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "withdraw coordinator signer key staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_KEY_ID=default" "queueauth key id staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=queueauth-test-hmac-key" "queueauth HMAC key staged"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_SCAN_BACKFILL_FROM_HEIGHT=0" "scanner backfill floor staged"
   assert_not_contains "$(grep '^JUNO_TXSIGN_SIGNER_KEYS=' "$log_dir/operator-stack.env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "staged env keeps the local juno txsign signer key isolated"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "withdraw finalizer scan url staged"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "base event scanner start block staged"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'curl -fsS -X POST "${curl_headers[@]}" -H "Content-Type: application/json" --data "$payload" "${scan_url%/}${path}"' "deploy posts scan wallet mutations through curl"
-  assert_contains "$(cat "$log_dir/ssh.log")" "bash -s -- http://127.0.0.1:8080 /v1/wallets" "deploy runs wallet registration over ssh"
-  assert_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy runs wallet backfill over ssh"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'juno_scan_backfill_script="/usr/local/bin/intents-juno-juno-scan-backfill.sh"' "remote deploy can patch the scanner backfill wrapper"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo install -m 0644 "$juno_scan_backfill_service_tmp" /etc/systemd/system/juno-scan-backfill.service' "remote deploy installs the scanner backfill service unit"
+  assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl enable juno-scan-backfill.service >/dev/null' "remote deploy enables the scanner backfill service"
+  assert_contains "$(cat "$log_dir/ssh.log")" "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service" "deploy starts scanner backfill asynchronously after the main services are healthy"
+  assert_not_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy no longer blocks on synchronous wallet backfill over ssh"
   assert_contains "$(cat "$log_dir/operator-stack.env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "tss ufvk path staged"
   assert_contains "$(cat "$log_dir/ufvk.txt")" "uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq" "ufvk value staged"
   assert_contains "$(cat "$log_dir/junocashd.conf")" "rpcuser=juno" "junocashd config rpc user staged"
@@ -434,6 +437,11 @@ EOF
 
   cat >"$fake_bin/scp" <<EOF
 #!/usr/bin/env bash
+for arg in "\$@"; do
+  if [[ -f "\$arg" ]]; then
+    cp "\$arg" "$log_dir/\$(basename "\$arg")"
+  fi
+done
 exit 0
 EOF
   cat >"$fake_bin/ssh" <<EOF
@@ -460,7 +468,9 @@ EOF
   PRODUCTION_DEPLOY_SCAN_BACKFILL_FROM_HEIGHT=100000 PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/deploy-operator.sh" --operator-deploy "$manifest" >/dev/null
 
-  assert_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill eyJmcm9tX2hlaWdodCI6MTAwMDAw" "deploy uses the configured scan backfill start height"
+  assert_contains "$(cat "$log_dir/operator-stack.env")" "JUNO_SCAN_BACKFILL_FROM_HEIGHT=100000" "deploy stages the configured scanner backfill start height"
+  assert_contains "$(cat "$log_dir/ssh.log")" "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service" "deploy starts scanner backfill asynchronously when a custom floor is configured"
+  assert_not_contains "$(cat "$log_dir/ssh.log")" "/v1/wallets/wallet-op1/backfill" "deploy does not issue synchronous wallet backfill requests when a custom floor is configured"
   rm -rf "$workdir"
 }
 

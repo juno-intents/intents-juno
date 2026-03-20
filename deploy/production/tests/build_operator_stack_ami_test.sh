@@ -77,6 +77,7 @@ unit_marker_start() {
   case "$1" in
     junocashd.service) printf "%s" "cat > /tmp/junocashd.service <<'EOF_JUNOD'" ;;
     juno-scan.service) printf "%s" "cat > /tmp/juno-scan.service <<'EOF_SCAN_SERVICE'" ;;
+    juno-scan-backfill.service) printf "%s" "cat > /tmp/juno-scan-backfill.service <<'EOF_SCAN_BACKFILL_SERVICE'" ;;
     checkpoint-signer.service) printf "%s" "cat > /tmp/checkpoint-signer.service <<'EOF_SIGNER_SERVICE'" ;;
     checkpoint-aggregator.service) printf "%s" "cat > /tmp/checkpoint-aggregator.service <<'EOF_AGG_SERVICE'" ;;
     dkg-admin-serve.service) printf "%s" "cat > /tmp/dkg-admin-serve.service <<'EOF_DKG_SERVE_SERVICE'" ;;
@@ -94,6 +95,7 @@ unit_marker_end() {
   case "$1" in
     junocashd.service) printf "%s" "EOF_JUNOD" ;;
     juno-scan.service) printf "%s" "EOF_SCAN_SERVICE" ;;
+    juno-scan-backfill.service) printf "%s" "EOF_SCAN_BACKFILL_SERVICE" ;;
     checkpoint-signer.service) printf "%s" "EOF_SIGNER_SERVICE" ;;
     checkpoint-aggregator.service) printf "%s" "EOF_AGG_SERVICE" ;;
     dkg-admin-serve.service) printf "%s" "EOF_DKG_SERVE_SERVICE" ;;
@@ -132,6 +134,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
   for unit in \
     junocashd.service \
     juno-scan.service \
+    juno-scan-backfill.service \
     checkpoint-signer.service \
     checkpoint-aggregator.service \
     dkg-admin-serve.service \
@@ -149,6 +152,12 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
     assert_not_contains "$unit_text" "User=ubuntu" "$unit does not run as ubuntu"
     assert_standard_hardening "$unit_text" "$unit"
   done
+
+  local juno_scan_backfill_unit
+  juno_scan_backfill_unit="$(extract_block "$(unit_marker_start "juno-scan-backfill.service")" "$(unit_marker_end "juno-scan-backfill.service")")"
+  assert_contains "$juno_scan_backfill_unit" "ExecStart=/usr/local/bin/intents-juno-juno-scan-backfill.sh" "scanner backfill unit runs the dedicated wrapper"
+  assert_contains "$juno_scan_backfill_unit" "After=juno-scan.service intents-juno-config-hydrator.service" "scanner backfill unit waits for scanner health dependencies"
+  assert_contains "$juno_scan_backfill_unit" "Restart=on-failure" "scanner backfill unit retries failed historical catch-up"
 
   hydrator_unit="$(extract_block "cat > /tmp/intents-juno-config-hydrator.service <<'EOF_CONFIG_HYDRATOR_SERVICE'" "EOF_CONFIG_HYDRATOR_SERVICE")"
   assert_contains "$hydrator_unit" "User=root" "config hydrator runs as root"
@@ -316,6 +325,13 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
   assert_contains "$withdraw_finalizer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "withdraw finalizer exports queueauth env to the binary"
 
+  local juno_scan_backfill_wrapper
+  juno_scan_backfill_wrapper="$(extract_block "cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'" "EOF_SCAN_BACKFILL")"
+  assert_contains "$juno_scan_backfill_wrapper" 'configured_from_height="${JUNO_SCAN_BACKFILL_FROM_HEIGHT:-0}"' "scanner backfill wrapper reads the configured floor from env"
+  assert_contains "$juno_scan_backfill_wrapper" 'resume_next_height="$(jq -er --arg wallet_id "$wallet_id" --arg scan_url "$scan_url"' "scanner backfill wrapper resumes durable progress for the matching wallet"
+  assert_contains "$juno_scan_backfill_wrapper" 'write_state "complete" "$next_height" "$to_height"' "scanner backfill wrapper records completion state"
+  assert_contains "$juno_scan_backfill_wrapper" 'curl -fsS -X POST "${curl_headers[@]}" -H '\''Content-Type: application/json'\'' --data "$backfill_payload" "${scan_url%/}/v1/wallets/${wallet_id}/backfill"' "scanner backfill wrapper performs batched historical backfill"
+
   base_event_scanner_wrapper="$(extract_block "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER")"
   assert_contains "$base_event_scanner_wrapper" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports queueauth env to the binary"
   assert_contains "$base_event_scanner_wrapper" '[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {' "base-event-scanner requires explicit start block in operator env"
@@ -332,6 +348,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_not_contains "$script_text" 'rpc_password: $junocash_rpc_pass' "bootstrap metadata does not publish RPC password"
   assert_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=' "bootstrap env leaves base-event-scanner start block unset until deploy"
   assert_not_contains "$script_text" 'BASE_EVENT_SCANNER_START_BLOCK=0' "bootstrap env does not default base-event-scanner to genesis"
+  assert_contains "$script_text" 'JUNO_SCAN_BACKFILL_FROM_HEIGHT=0' "bootstrap env pins the scanner backfill floor"
   assert_contains "$script_text" 'BASE_RELAYER_MIN_READY_BALANCE_WEI=1000000000000000' "bootstrap env pins the base relayer readiness balance floor"
   assert_contains "$script_text" 'BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605,0xfe097d57' "bootstrap env pins the base relayer selector allowlist"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h' "bootstrap env pins the withdraw expiry safety margin"
@@ -506,6 +523,78 @@ EOF
   assert_eq "$(cat "$count_file")" "3" "juno-scan wrapper retries until junocashd rpc is ready"
   assert_eq "$(cat "$sequence_file")" $'curl-1\nsleep-5\ncurl-2\nsleep-5\ncurl-3\nscan' "juno-scan wrapper waits through transport and loading-block-index failures before starting the scanner"
   assert_contains "$(cat "$output_file")" '-db-path /var/lib/intents-juno/juno-scan.db' "juno-scan wrapper uses the dedicated rocksdb state directory"
+
+  rm -rf "$tmp"
+}
+
+test_build_operator_stack_ami_juno_scan_backfill_wrapper_resumes_progress() {
+  local tmp env_file fake_bin state_dir curl_log state_file
+  tmp="$(mktemp -d)"
+  env_file="$tmp/operator-stack.env"
+  fake_bin="$tmp/bin"
+  state_dir="$tmp/state"
+  curl_log="$tmp/curl.log"
+  state_file="$state_dir/state.json"
+  mkdir -p "$fake_bin" "$state_dir"
+
+  cat >"$env_file" <<EOF
+DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080
+DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-op1
+JUNO_SCAN_BACKFILL_FROM_HEIGHT=100000
+JUNO_SCAN_BACKFILL_STATE_DIR=$state_dir
+JUNO_SCAN_BACKFILL_UFVK_FILE=$tmp/ufvk.txt
+EOF
+  printf 'uview1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq\n' >"$tmp/ufvk.txt"
+  jq -n \
+    --arg wallet_id "wallet-op1" \
+    --arg scan_url "http://127.0.0.1:8080" \
+    --arg status "running" \
+    --arg ufvk_file "$tmp/ufvk.txt" \
+    --arg updated_at "2026-03-20T00:00:00Z" \
+    --argjson configured_from_height 100000 \
+    --argjson next_height 110000 \
+    --argjson to_height 118298 \
+    '{
+      wallet_id: $wallet_id,
+      scan_url: $scan_url,
+      status: $status,
+      ufvk_file: $ufvk_file,
+      configured_from_height: $configured_from_height,
+      next_height: $next_height,
+      to_height: $to_height,
+      updated_at: $updated_at
+    }' >"$state_file"
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'" \
+    "EOF_SCAN_BACKFILL" \
+    "$tmp/intents-juno-juno-scan-backfill.sh" \
+    "$env_file"
+
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "\$*" >>"$curl_log"
+if [[ "\$*" == *"/v1/health"* ]]; then
+  printf '%s\n' '{"status":"ok","scanned_height":118298,"scanned_hash":"0001"}'
+elif [[ "\$*" == *"/v1/wallets/wallet-op1/backfill"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1","from_height":110000,"to_height":118298,"next_height":118299,"inserted_notes":1,"inserted_events":2}'
+elif [[ "\$*" == *"/v1/wallets"* ]]; then
+  printf '%s\n' '{"status":"ok","wallet_id":"wallet-op1"}'
+else
+  printf 'unexpected curl call: %s\n' "\$*" >&2
+  exit 1
+fi
+EOF
+  chmod 0755 "$fake_bin/curl"
+
+  PATH="$fake_bin:$PATH" "$tmp/intents-juno-juno-scan-backfill.sh"
+
+  assert_contains "$(cat "$curl_log")" '/v1/health' "scanner backfill wrapper waits for scanner health before backfilling"
+  assert_contains "$(cat "$curl_log")" '/v1/wallets' "scanner backfill wrapper registers the wallet before backfill"
+  assert_contains "$(cat "$curl_log")" '"from_height":110000' "scanner backfill wrapper resumes from durable progress instead of the configured floor"
+  assert_eq "$(jq -r '.status' "$state_file")" "complete" "scanner backfill wrapper records completion in durable state"
+  assert_eq "$(jq -r '.next_height' "$state_file")" "118299" "scanner backfill wrapper persists the next resume height"
 
   rm -rf "$tmp"
 }
@@ -953,6 +1042,7 @@ main() {
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
+  test_build_operator_stack_ami_juno_scan_backfill_wrapper_resumes_progress
   test_build_operator_stack_ami_wrapper_smoke
 }
 
