@@ -65,14 +65,19 @@ write_inventory_fixture() {
           publish_public_dns: false
         }
       | .shared_roles.proof = {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
           rpc_url: "https://rpc.mainnet.succinct.xyz"
         }
       | .shared_roles.wireguard = {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
           public_subnet_id: "subnet-0abc1234def567890",
           public_subnet_ids: ["subnet-0abc1234def567890"],
           listen_port: 51820,
           network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
           backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
           backoffice_private_endpoint: "10.0.10.21",
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
@@ -108,6 +113,12 @@ write_fake_aws() {
   local log_file="${target%/*}/../logs/aws.log"
   local desired_count="${2:-1}"
   local running_count="${3:-1}"
+  local asg_desired_capacity="0"
+  local asg_instances="[]"
+  if (( desired_count >= 1 && running_count >= 1 )); then
+    asg_desired_capacity="2"
+    asg_instances='[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]'
+  fi
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 printf 'aws %s\n' "\$*" >>"$log_file"
@@ -122,7 +133,7 @@ if [[ "\$1" == "ecs" && "\$2" == "describe-services" ]]; then
   exit 0
 fi
 if [[ "\$1" == "autoscaling" && "\$2" == "describe-auto-scaling-groups" ]]; then
-  printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+  printf '{"AutoScalingGroups":[{"DesiredCapacity":%s,"Instances":%s}]}\n' "$asg_desired_capacity" '$asg_instances'
   exit 0
 fi
 printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -281,7 +292,7 @@ EOF
   assert_contains "$(cat "$log_dir/curl.log")" "http://127.0.0.1:8090/" "backoffice ui checked"
   assert_contains "$(cat "$log_dir/cast.log")" "wallet address --private-key 0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "canary derives configured min deposit admin signer"
   assert_contains "$(cat "$log_dir/cast.log")" "call --rpc-url https://base-sepolia.example.invalid 0x2222222222222222222222222222222222222222 minDepositAdmin()(address)" "canary checks on-chain minDepositAdmin"
-  assert_contains "$(cat "$log_dir/aws.log")" "ecs describe-services --cluster arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared --services alpha-proof-requestor alpha-proof-funder" "canary checks shared proof services"
+  assert_contains "$(cat "$log_dir/aws.log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-proof-role" "canary checks shared proof role capacity"
   assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary ready for test"
   assert_eq "$(jq -r '.checks.bridge_config.status' "$output_json")" "passed" "bridge config passed"
   assert_eq "$(jq -r '.checks.deposit_memo.status' "$output_json")" "passed" "deposit memo passed"
@@ -725,7 +736,7 @@ EOF
 
   assert_eq "$(jq -r '.ready_for_test' "$output_json")" "false" "app canary blocks missing proof services"
   assert_eq "$(jq -r '.checks.shared_proof_services.status' "$output_json")" "failed" "shared proof services failed"
-  assert_contains "$(jq -r '.checks.shared_proof_services.detail' "$output_json")" "desiredCount/runningCount" "shared proof services failure detail"
+  assert_contains "$(jq -r '.checks.shared_proof_services.detail' "$output_json")" "two healthy in-service instances" "shared proof services failure detail"
   rm -rf "$workdir"
 }
 
