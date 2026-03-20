@@ -19,15 +19,30 @@ type Store interface {
 	UpsertConfirmed(ctx context.Context, d Deposit) (Job, bool, error)
 	PromoteSeenToConfirmed(ctx context.Context, tipHeight int64, minConfirmations int64, limit int) ([]Job, error)
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
+	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
 	ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Job, error)
 	ClaimSubmittedAttempts(ctx context.Context, owner string, ttl time.Duration, limit int) ([]SubmittedBatchAttempt, error)
+	PrepareNextBatch(
+		ctx context.Context,
+		owner string,
+		ttl time.Duration,
+		nextBatchID [32]byte,
+		maxItems int,
+		maxAge time.Duration,
+		limit int,
+		now time.Time,
+	) (Batch, bool, error)
+	SplitBatch(ctx context.Context, owner string, batchID [32]byte, nextBatchID [32]byte, movedDepositIDs [][32]byte) (Batch, Batch, error)
 
 	MarkProofRequested(ctx context.Context, depositID [32]byte, cp checkpoint.Checkpoint) error
+	MarkBatchProofRequested(ctx context.Context, owner string, batchID [32]byte, cp checkpoint.Checkpoint) (Batch, error)
+	MarkBatchProofReady(ctx context.Context, owner string, batchID [32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (Batch, error)
 	SetProofReady(ctx context.Context, depositID [32]byte, seal []byte) error
 	MarkFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
 	RepairFinalized(ctx context.Context, depositID [32]byte, txHash [32]byte) error
 	MarkRejected(ctx context.Context, depositID [32]byte, reason string, txHash [32]byte) error
+	FailBatch(ctx context.Context, owner string, batchID [32]byte, reason string, rejectedIDs [][32]byte) error
 	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
 	RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) error
 	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error

@@ -351,6 +351,117 @@ func TestStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
 	}
 }
 
+func TestStore_PrepareNextBatch_PersistsAndSplitsDurableBatch(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Unix(1_700_000_000, 0).UTC()
+	mkDeposit := func(tag byte) deposit.Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return deposit.Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+
+	d1 := mkDeposit(0x01)
+	d2 := mkDeposit(0x02)
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed(d1): %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed(d2): %v", err)
+	}
+
+	batchID := [32]byte{0xaa}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	}
+	if ready {
+		t.Fatalf("expected first prepare to keep batch open")
+	}
+	if got, want := batch.State, deposit.BatchStateAssembling; got != want {
+		t.Fatalf("batch state: got=%s want=%s", got, want)
+	}
+	if got, want := len(batch.DepositIDs), 1; got != want {
+		t.Fatalf("batch deposit count after first prepare: got=%d want=%d", got, want)
+	}
+
+	persisted, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if got, want := len(persisted.DepositIDs), 1; got != want {
+		t.Fatalf("persisted deposit count: got=%d want=%d", got, want)
+	}
+
+	readyBatch, ready, err := s.PrepareNextBatch(ctx, "worker-b", time.Minute, [32]byte{0xbb}, 2, 3*time.Minute, 10, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected second prepare to close batch")
+	}
+	if readyBatch.BatchID != batchID {
+		t.Fatalf("expected durable batch reuse: got=%x want=%x", readyBatch.BatchID, batchID)
+	}
+	if got, want := readyBatch.State, deposit.BatchStateClosed; got != want {
+		t.Fatalf("closed batch state: got=%s want=%s", got, want)
+	}
+	if got, want := len(readyBatch.DepositIDs), 2; got != want {
+		t.Fatalf("closed batch deposit count: got=%d want=%d", got, want)
+	}
+
+	splitBatchID := [32]byte{0xcc}
+	left, right, err := s.SplitBatch(ctx, "worker-c", batchID, splitBatchID, [][32]byte{d2.DepositID})
+	if err != nil {
+		t.Fatalf("SplitBatch: %v", err)
+	}
+	if got, want := len(left.DepositIDs), 1; got != want {
+		t.Fatalf("left deposit count: got=%d want=%d", got, want)
+	}
+	if got, want := len(right.DepositIDs), 1; got != want {
+		t.Fatalf("right deposit count: got=%d want=%d", got, want)
+	}
+	if left.DepositIDs[0] != d1.DepositID {
+		t.Fatalf("left deposit mismatch: got=%x want=%x", left.DepositIDs[0], d1.DepositID)
+	}
+	if right.DepositIDs[0] != d2.DepositID {
+		t.Fatalf("right deposit mismatch: got=%x want=%x", right.DepositIDs[0], d2.DepositID)
+	}
+}
+
 func TestStore_MarkRejectedDoesNotOverrideFinalizedState(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

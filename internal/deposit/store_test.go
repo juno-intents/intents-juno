@@ -479,6 +479,195 @@ func TestMemoryStore_ClaimConfirmed_ReclaimsProofRequestedAfterLeaseExpiry(t *te
 	}
 }
 
+func TestMemoryStore_PrepareNextBatch_PersistsAssemblingWindow(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	mkDeposit := func(tag byte) Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+
+	d1 := mkDeposit(0x01)
+	d2 := mkDeposit(0x02)
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed(d1): %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed(d2): %v", err)
+	}
+
+	var batchID [32]byte
+	batchID[0] = 0xaa
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	}
+	if ready {
+		t.Fatalf("expected assembling batch to stay open")
+	}
+	if batch.BatchID != batchID {
+		t.Fatalf("batch id mismatch: got=%x want=%x", batch.BatchID, batchID)
+	}
+	if got, want := batch.State, BatchStateAssembling; got != want {
+		t.Fatalf("batch state: got=%s want=%s", got, want)
+	}
+	if len(batch.DepositIDs) != 1 || batch.DepositIDs[0] != d1.DepositID {
+		t.Fatalf("assembled deposits after first prepare: got=%x", batch.DepositIDs)
+	}
+
+	persisted, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if got, want := len(persisted.DepositIDs), 1; got != want {
+		t.Fatalf("persisted deposit count: got=%d want=%d", got, want)
+	}
+
+	var ignoredNewBatchID [32]byte
+	ignoredNewBatchID[0] = 0xbb
+	readyBatch, ready, err := s.PrepareNextBatch(ctx, "worker-b", time.Minute, ignoredNewBatchID, 2, 3*time.Minute, 10, now.Add(30*time.Second))
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected batch to close at max items")
+	}
+	if readyBatch.BatchID != batchID {
+		t.Fatalf("expected existing durable batch to be reused: got=%x want=%x", readyBatch.BatchID, batchID)
+	}
+	if got, want := readyBatch.State, BatchStateClosed; got != want {
+		t.Fatalf("ready batch state: got=%s want=%s", got, want)
+	}
+	if got, want := len(readyBatch.DepositIDs), 2; got != want {
+		t.Fatalf("ready batch deposit count: got=%d want=%d", got, want)
+	}
+}
+
+func TestMemoryStore_PrepareNextBatch_ClosesOnAge(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	var id [32]byte
+	id[0] = 0x01
+	var cm [32]byte
+	cm[0] = 0x01
+	var recip [20]byte
+	recip[19] = 0x01
+	if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     1,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	var batchID [32]byte
+	batchID[0] = 0xcc
+	if _, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 25, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	} else if ready {
+		t.Fatalf("expected first prepare to keep batch open")
+	}
+
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-b", time.Minute, [32]byte{}, 25, 3*time.Minute, 10, now.Add(4*time.Minute))
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected aged batch to close")
+	}
+	if batch.BatchID != batchID {
+		t.Fatalf("batch id mismatch: got=%x want=%x", batch.BatchID, batchID)
+	}
+	if got, want := batch.State, BatchStateClosed; got != want {
+		t.Fatalf("batch state: got=%s want=%s", got, want)
+	}
+}
+
+func TestMemoryStore_SplitBatch(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+	now := time.Unix(1_700_000_000, 0).UTC()
+
+	mkDeposit := func(tag byte) Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     uint64(tag),
+			Amount:        1000 + uint64(tag),
+			BaseRecipient: recip,
+		}
+	}
+	d1 := mkDeposit(0x01)
+	d2 := mkDeposit(0x02)
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed(d1): %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed(d2): %v", err)
+	}
+
+	var batchID [32]byte
+	batchID[0] = 0xdd
+	if _, _, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, [32]byte{}, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready || batch.State != BatchStateClosed {
+		t.Fatalf("expected closed batch before split, got state=%s ready=%v", batch.State, ready)
+	}
+
+	var splitBatchID [32]byte
+	splitBatchID[0] = 0xee
+	left, right, err := s.SplitBatch(ctx, "worker-a", batchID, splitBatchID, [][32]byte{d2.DepositID})
+	if err != nil {
+		t.Fatalf("SplitBatch: %v", err)
+	}
+	if got, want := len(left.DepositIDs), 1; got != want {
+		t.Fatalf("left count: got=%d want=%d", got, want)
+	}
+	if got, want := len(right.DepositIDs), 1; got != want {
+		t.Fatalf("right count: got=%d want=%d", got, want)
+	}
+	if left.DepositIDs[0] != d1.DepositID {
+		t.Fatalf("left deposit mismatch: got=%x want=%x", left.DepositIDs[0], d1.DepositID)
+	}
+	if right.DepositIDs[0] != d2.DepositID {
+		t.Fatalf("right deposit mismatch: got=%x want=%x", right.DepositIDs[0], d2.DepositID)
+	}
+}
+
 func TestMemoryStore_UpsertConfirmed_SourceEventReplay(t *testing.T) {
 	t.Parallel()
 

@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +16,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/juno-intents/intents-juno/internal/batching"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
@@ -137,8 +138,6 @@ type Relayer struct {
 
 	expectedBridgeMemo [20]byte
 
-	batcher       *batching.Batcher[mintBatchItem]
-	staged        map[common.Hash]struct{}
 	proofAttempts map[common.Hash]int // per-batch proof attempt count
 
 	quorumVerifier *checkpoint.QuorumVerifier
@@ -163,8 +162,14 @@ type PauseChecker interface {
 }
 
 type mintBatchItem struct {
+	ID               [32]byte
 	Mint             bridgeabi.MintItem
 	ProofWitnessItem []byte
+}
+
+type durableMintBatch struct {
+	Meta  deposit.Batch
+	Items []mintBatchItem
 }
 
 func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
@@ -217,15 +222,6 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		log = slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	}
 
-	b, err := batching.New[mintBatchItem](batching.Config{
-		MaxItems: cfg.MaxItems,
-		MaxAge:   cfg.MaxAge,
-		Now:      cfg.Now,
-	})
-	if err != nil {
-		return nil, err
-	}
-
 	quorumVerifier, err := checkpoint.NewQuorumVerifier(cfg.OperatorAddresses, cfg.OperatorThreshold)
 	if err != nil {
 		return nil, err
@@ -241,8 +237,6 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		sender:             sender,
 		prover:             prover,
 		expectedBridgeMemo: bridge20,
-		batcher:            b,
-		staged:             make(map[common.Hash]struct{}, cfg.MaxItems*2),
 		proofAttempts:      make(map[common.Hash]int),
 		quorumVerifier:     quorumVerifier,
 		readinessChecker:   cfg.ReadinessChecker,
@@ -350,15 +344,6 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 	if err := r.refillFromStore(ctx); err != nil {
 		return err
 	}
-	batch, ok := r.batcher.FlushDue()
-	if !ok {
-		return nil
-	}
-	if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
-		r.unstageBatch(batch)
-		return err
-	}
-	r.unstageBatch(batch)
 	return nil
 }
 
@@ -375,15 +360,6 @@ func (r *Relayer) Flush(ctx context.Context) error {
 	if err := r.refillFromStore(ctx); err != nil {
 		return err
 	}
-	batch, ok := r.batcher.Flush()
-	if !ok {
-		return nil
-	}
-	if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
-		r.unstageBatch(batch)
-		return err
-	}
-	r.unstageBatch(batch)
 	return nil
 }
 
@@ -413,37 +389,40 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	}
 
 	for _, job := range jobs {
-		if !checkpointCoversDepositHeight(*r.checkpoint, job.Deposit) {
-			continue
-		}
 		if minDeposit > 0 && job.Deposit.Amount < minDeposit {
 			if err := r.store.MarkRejected(ctx, job.Deposit.DepositID, belowMinDepositReason(minDeposit), [32]byte{}); err != nil {
 				return fmt.Errorf("depositrelayer: reject below-min deposit %x: %w", job.Deposit.DepositID[:8], err)
 			}
-			continue
 		}
-		id := common.Hash(job.Deposit.DepositID)
-		if _, ok := r.staged[id]; ok {
-			continue
-		}
-		item := bridgeabi.MintItem{
-			DepositId: id,
-			Recipient: common.Address(job.Deposit.BaseRecipient),
-			Amount:    new(big.Int).SetUint64(job.Deposit.Amount),
-		}
-		r.staged[id] = struct{}{}
-		batch, ok := r.batcher.Add(job.Deposit.DepositID, mintBatchItem{
-			Mint:             item,
-			ProofWitnessItem: append([]byte(nil), job.Deposit.ProofWitnessItem...),
-		})
-		if !ok {
-			continue
-		}
-		if err := r.submitBatch(ctx, *r.checkpoint, r.opSigs, batch); err != nil {
-			r.unstageBatch(batch)
-			return err
-		}
-		r.unstageBatch(batch)
+	}
+
+	nextBatchID := r.nextDurableBatchID()
+	batch, ready, err := r.store.PrepareNextBatch(
+		ctx,
+		r.cfg.Owner,
+		r.cfg.ClaimTTL,
+		nextBatchID,
+		r.cfg.MaxItems,
+		r.cfg.MaxAge,
+		limit,
+		r.cfg.Now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: prepare durable batch: %w", err)
+	}
+	if batch.BatchID == ([32]byte{}) || !ready {
+		return nil
+	}
+
+	durableBatch, err := r.loadDurableMintBatch(ctx, batch, minDeposit)
+	if err != nil {
+		return err
+	}
+	if durableBatch.Meta.BatchID == ([32]byte{}) {
+		return nil
+	}
+	if err := r.submitBatch(ctx, durableBatch); err != nil {
+		return err
 	}
 	return nil
 }
@@ -453,6 +432,52 @@ func checkpointCoversDepositHeight(cp checkpoint.Checkpoint, dep deposit.Deposit
 		return true
 	}
 	return cp.Height >= uint64(dep.JunoHeight)
+}
+
+func (r *Relayer) nextDurableBatchID() [32]byte {
+	return [32]byte(crypto.Keccak256Hash([]byte("deposit-durable-batch-v1|" + r.cfg.Owner + "|" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10))))
+}
+
+func (r *Relayer) loadDurableMintBatch(ctx context.Context, batch deposit.Batch, minDeposit uint64) (durableMintBatch, error) {
+	if len(batch.DepositIDs) == 0 {
+		return durableMintBatch{}, nil
+	}
+
+	items := make([]mintBatchItem, 0, len(batch.DepositIDs))
+	rejected := make([][32]byte, 0)
+	for _, depositID := range batch.DepositIDs {
+		job, err := r.store.Get(ctx, depositID)
+		if err != nil {
+			return durableMintBatch{}, fmt.Errorf("depositrelayer: load batch deposit %x: %w", depositID[:8], err)
+		}
+		if minDeposit > 0 && job.Deposit.Amount < minDeposit {
+			rejected = append(rejected, depositID)
+			continue
+		}
+		if !checkpointCoversDepositHeight(*r.checkpoint, job.Deposit) {
+			return durableMintBatch{}, nil
+		}
+		items = append(items, mintBatchItem{
+			ID: depositID,
+			Mint: bridgeabi.MintItem{
+				DepositId: common.Hash(job.Deposit.DepositID),
+				Recipient: common.Address(job.Deposit.BaseRecipient),
+				Amount:    new(big.Int).SetUint64(job.Deposit.Amount),
+			},
+			ProofWitnessItem: append([]byte(nil), job.Deposit.ProofWitnessItem...),
+		})
+	}
+
+	if len(rejected) > 0 {
+		if err := r.store.FailBatch(ctx, r.cfg.Owner, batch.BatchID, belowMinDepositReason(minDeposit), rejected); err != nil {
+			return durableMintBatch{}, fmt.Errorf("depositrelayer: fail durable batch for below-min deposits: %w", err)
+		}
+		return durableMintBatch{}, nil
+	}
+	if len(items) == 0 {
+		return durableMintBatch{}, nil
+	}
+	return durableMintBatch{Meta: batch, Items: items}, nil
 }
 
 func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
@@ -594,7 +619,7 @@ func (r *Relayer) loadMintItems(ctx context.Context, depositIDs [][32]byte) ([]b
 	return items, nil
 }
 
-func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opSigs [][]byte, batch batching.Batch[mintBatchItem]) error {
+func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error {
 	if len(batch.Items) == 0 {
 		return nil
 	}
@@ -603,30 +628,36 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
+	cp := *r.checkpoint
+	opSigs := r.opSigs
+	if batch.Meta.Checkpoint == cp && len(batch.Meta.OperatorSignatures) > 0 {
+		opSigs = batch.Meta.OperatorSignatures
+	}
+
 	// Check per-batch proof attempt limits.
 	depositIDs := make([]common.Hash, 0, len(batch.Items))
 	for _, it := range batch.Items {
 		depositIDs = append(depositIDs, common.Hash(it.ID))
 	}
-	batchID := idempotency.DepositBatchIDV1(depositIDs)
+	proofBatchID := idempotency.DepositBatchIDV1(depositIDs)
 	if r.cfg.MaxProofAttempts > 0 {
-		r.proofAttempts[batchID]++
-		attempts := r.proofAttempts[batchID]
+		r.proofAttempts[proofBatchID]++
+		attempts := r.proofAttempts[proofBatchID]
 		if attempts >= r.cfg.MaxProofAttempts {
-			if err := r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "proof", "proof_attempts_exhausted",
+			if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
 				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
 				return err
 			}
-			delete(r.proofAttempts, batchID)
-			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, batchID[:8], attempts)
+			delete(r.proofAttempts, proofBatchID)
+			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
 		}
 	}
 
 	items := make([]bridgeabi.MintItem, 0, len(batch.Items))
 	witnessItems := make([][]byte, 0, len(batch.Items))
 	for i, it := range batch.Items {
-		items = append(items, it.Val.Mint)
-		witness := append([]byte(nil), it.Val.ProofWitnessItem...)
+		items = append(items, it.Mint)
+		witness := append([]byte(nil), it.ProofWitnessItem...)
 		if len(r.cfg.OWalletIVKBytes) == 64 && r.cfg.DepositWitnessRefresher != nil {
 			if cp.Height > math.MaxInt64 {
 				return fmt.Errorf("depositrelayer: checkpoint height %d exceeds int64", cp.Height)
@@ -662,62 +693,68 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		return err
 	}
 
-	privateInput, err := r.encodePrivateInput(cp, opSigs, items, witnessItems)
-	if err != nil {
-		return err
-	}
-
-	jobID := idempotency.ProofJobIDV1("deposit", batchID, r.cfg.DepositImageID, journal, privateInput)
-
-	pctx, cancel := context.WithTimeout(ctx, r.cfg.ProofRequestTimeout)
-	defer cancel()
-
-	for _, it := range batch.Items {
-		if err := r.store.MarkProofRequested(ctx, it.ID, cp); err != nil {
-			return fmt.Errorf("depositrelayer: mark proof requested %x: %w", it.ID[:8], err)
+	seal := append([]byte(nil), batch.Meta.ProofSeal...)
+	needsFreshProof := batch.Meta.State != deposit.BatchStateProofReady || batch.Meta.Checkpoint != cp || len(seal) == 0
+	if needsFreshProof {
+		if _, err := r.store.MarkBatchProofRequested(ctx, r.cfg.Owner, batch.Meta.BatchID, cp); err != nil {
+			return fmt.Errorf("depositrelayer: mark batch proof requested %x: %w", batch.Meta.BatchID[:8], err)
 		}
-	}
 
-	proofRes, proofFailure, recovered, err := r.lookupProofOutcome(ctx, jobID)
-	if err != nil {
-		return err
-	}
-	if recovered {
-		if proofFailure != nil {
-			return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *proofFailure)
-		}
-	} else {
-		proofRes, err = r.prover.RequestProof(pctx, proofclient.Request{
-			JobID:        jobID,
-			Pipeline:     "deposit",
-			ImageID:      r.cfg.DepositImageID,
-			Journal:      journal,
-			PrivateInput: privateInput,
-			Deadline:     r.cfg.Now().Add(r.cfg.ProofRequestTimeout),
-			Priority:     r.cfg.ProofPriority,
-		})
+		privateInput, err := r.encodePrivateInput(cp, opSigs, items, witnessItems)
 		if err != nil {
-			recoveredRes, proofFailure, recovered, recoverErr := r.lookupProofOutcome(ctx, jobID)
-			if recoverErr != nil {
-				return recoverErr
+			return err
+		}
+
+		jobID := idempotency.ProofJobIDV1("deposit", proofBatchID, r.cfg.DepositImageID, journal, privateInput)
+		pctx, cancel := context.WithTimeout(ctx, r.cfg.ProofRequestTimeout)
+		defer cancel()
+
+		proofRes, proofFailure, recovered, err := r.lookupProofOutcome(ctx, jobID)
+		if err != nil {
+			return err
+		}
+		if recovered {
+			if proofFailure != nil {
+				return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *proofFailure)
 			}
-			if recovered {
-				if proofFailure != nil {
-					return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *proofFailure)
+		} else {
+			proofRes, err = r.prover.RequestProof(pctx, proofclient.Request{
+				JobID:        jobID,
+				Pipeline:     "deposit",
+				ImageID:      r.cfg.DepositImageID,
+				Journal:      journal,
+				PrivateInput: privateInput,
+				Deadline:     r.cfg.Now().Add(r.cfg.ProofRequestTimeout),
+				Priority:     r.cfg.ProofPriority,
+			})
+			if err != nil {
+				recoveredRes, proofFailure, recovered, recoverErr := r.lookupProofOutcome(ctx, jobID)
+				if recoverErr != nil {
+					return recoverErr
 				}
-				proofRes = recoveredRes
-			} else {
-				var fail *proofclient.FailureError
-				if errors.As(err, &fail) && !fail.Retryable {
-					return r.rejectBatchForProofFailure(ctx, [32]byte(batchID), batch, *fail)
+				if recovered {
+					if proofFailure != nil {
+						return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *proofFailure)
+					}
+					proofRes = recoveredRes
+				} else {
+					var fail *proofclient.FailureError
+					if errors.As(err, &fail) && !fail.Retryable {
+						return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *fail)
+					}
+					return err
 				}
-				return err
 			}
 		}
-	}
-	seal := proofRes.Seal
-	if len(seal) == 0 {
-		return fmt.Errorf("depositrelayer: empty proof seal from proof requester")
+		seal = proofRes.Seal
+		if len(seal) == 0 {
+			return fmt.Errorf("depositrelayer: empty proof seal from proof requester")
+		}
+		if updatedBatch, err := r.store.MarkBatchProofReady(ctx, r.cfg.Owner, batch.Meta.BatchID, cp, opSigs, seal); err != nil {
+			return fmt.Errorf("depositrelayer: mark batch proof ready %x: %w", batch.Meta.BatchID[:8], err)
+		} else {
+			batch.Meta = updatedBatch
+		}
 	}
 
 	calldata, err := bridgeabi.PackMintBatchCalldata(cp, opSigs, seal, journal)
@@ -735,7 +772,7 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	for _, it := range batch.Items {
 		finalizeIDs = append(finalizeIDs, it.ID)
 	}
-	if _, err := r.store.MarkBatchSubmitted(ctx, r.cfg.Owner, [32]byte(batchID), finalizeIDs, cp, opSigs, seal); err != nil {
+	if _, err := r.store.MarkBatchSubmitted(ctx, r.cfg.Owner, batch.Meta.BatchID, finalizeIDs, cp, opSigs, seal); err != nil {
 		return fmt.Errorf("depositrelayer: mark batch submitted: %w", err)
 	}
 
@@ -755,7 +792,7 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 		if revertDetail != "" {
 			errorMessage = fmt.Sprintf("%s (%s)", errorMessage, revertDetail)
 		}
-		if err := r.maybeDLQDepositBatch(ctx, [32]byte(batchID), batch, "bridge_tx", "tx_reverted",
+		if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "bridge_tx", "tx_reverted",
 			errorMessage, 0); err != nil {
 			return err
 		}
@@ -766,15 +803,15 @@ func (r *Relayer) submitBatch(ctx context.Context, cp checkpoint.Checkpoint, opS
 	}
 
 	txHash := common.HexToHash(res.TxHash)
-	if err := r.store.SetBatchSubmissionTxHash(ctx, [32]byte(batchID), [32]byte(txHash)); err != nil {
+	if err := r.store.SetBatchSubmissionTxHash(ctx, batch.Meta.BatchID, [32]byte(txHash)); err != nil {
 		return fmt.Errorf("depositrelayer: set batch tx hash: %w", err)
 	}
-	if err := r.applyBatchOutcomeFromHash(ctx, [32]byte(batchID), finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
+	if err := r.applyBatchOutcomeFromHash(ctx, batch.Meta.BatchID, finalizeIDs, cp, seal, [32]byte(txHash)); err != nil {
 		return err
 	}
 
 	// Clear proof attempt counter on success.
-	delete(r.proofAttempts, batchID)
+	delete(r.proofAttempts, proofBatchID)
 
 	r.log.Info("submitted mintBatch",
 		"checkpointHeight", cp.Height,
@@ -810,7 +847,7 @@ func cloneSourceEvent(src *deposit.SourceEvent) *deposit.SourceEvent {
 
 // maybeDLQDepositBatch inserts a deposit batch into the dead-letter queue.
 // If DLQStore is nil, this is a no-op.
-func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, batch batching.Batch[mintBatchItem], failureStage, errorCode, errorMessage string, attemptCount int) error {
+func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, batch durableMintBatch, failureStage, errorCode, errorMessage string, attemptCount int) error {
 	if r.cfg.DLQStore == nil {
 		return nil
 	}
@@ -847,12 +884,6 @@ func (r *Relayer) maybeDLQDepositBatch(ctx context.Context, batchID [32]byte, ba
 	return nil
 }
 
-func (r *Relayer) unstageBatch(batch batching.Batch[mintBatchItem]) {
-	for _, item := range batch.Items {
-		delete(r.staged, common.Hash(item.ID))
-	}
-}
-
 func (r *Relayer) lookupProofOutcome(ctx context.Context, jobID common.Hash) (proofclient.Result, *proofclient.FailureError, bool, error) {
 	if r.proofStore == nil {
 		return proofclient.Result{}, nil, false, nil
@@ -884,19 +915,21 @@ func (r *Relayer) lookupProofOutcome(ctx context.Context, jobID common.Hash) (pr
 func (r *Relayer) rejectBatchForProofFailure(
 	ctx context.Context,
 	batchID [32]byte,
-	batch batching.Batch[mintBatchItem],
+	batch durableMintBatch,
 	failure proofclient.FailureError,
 ) error {
 	if err := r.maybeDLQDepositBatch(ctx, batchID, batch, "proof", strings.TrimSpace(failure.Code), strings.TrimSpace(failure.Message), 0); err != nil {
 		return err
 	}
 	reason := proofFailureReason(failure)
+	rejectedIDs := make([][32]byte, 0, len(batch.Items))
 	for _, it := range batch.Items {
-		if err := r.store.MarkRejected(ctx, it.ID, reason, [32]byte{}); err != nil {
-			return fmt.Errorf("depositrelayer: reject proof-failed deposit %x: %w", it.ID[:8], err)
-		}
+		rejectedIDs = append(rejectedIDs, it.ID)
 	}
-	delete(r.proofAttempts, common.Hash(batchID))
+	if err := r.store.FailBatch(ctx, r.cfg.Owner, batchID, reason, rejectedIDs); err != nil {
+		return fmt.Errorf("depositrelayer: fail proof-failed batch %x: %w", batchID[:8], err)
+	}
+	delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchDepositHashes(batch.Items)))
 	r.log.Error("depositrelayer: rejected batch after terminal proof failure",
 		"batch_id", common.Hash(batchID).Hex(),
 		"error_code", failure.Code,
@@ -904,6 +937,22 @@ func (r *Relayer) rejectBatchForProofFailure(
 		"items", len(batch.Items),
 	)
 	return nil
+}
+
+func batchDepositHashes(items []mintBatchItem) []common.Hash {
+	out := make([]common.Hash, 0, len(items))
+	for _, item := range items {
+		out = append(out, common.Hash(item.ID))
+	}
+	return out
+}
+
+func batchIDsToHashes(ids [][32]byte) []common.Hash {
+	out := make([]common.Hash, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, common.Hash(id))
+	}
+	return out
 }
 
 func proofFailureReason(failure proofclient.FailureError) string {
@@ -995,7 +1044,7 @@ func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit
 		if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, attempt.TxHash); err != nil {
 			return fmt.Errorf("depositrelayer: finalize batch without receipt reader: %w", err)
 		}
-		delete(r.proofAttempts, common.Hash(attempt.BatchID))
+		delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(attempt.DepositIDs)))
 		return nil
 	}
 
@@ -1014,6 +1063,7 @@ func (r *Relayer) applyBatchOutcomeFromHash(ctx context.Context, batchID [32]byt
 		if err := r.store.FinalizeBatch(ctx, depositIDs, cp, seal, txHash); err != nil {
 			return fmt.Errorf("depositrelayer: finalize batch without receipt reader: %w", err)
 		}
+		delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(depositIDs)))
 		return nil
 	}
 	receipt, err := r.receiptReader.TransactionReceipt(ctx, common.Hash(txHash))
@@ -1057,7 +1107,7 @@ func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depos
 			"unresolved", len(unresolved),
 		)
 	}
-	delete(r.proofAttempts, common.Hash(batchID))
+	delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(depositIDs)))
 	return nil
 }
 

@@ -2,6 +2,7 @@ package deposit
 
 import (
 	"fmt"
+	"time"
 
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
@@ -87,6 +88,61 @@ type SubmittedBatchAttempt struct {
 	Epoch uint64
 
 	Checkpoint         checkpoint.Checkpoint
+	OperatorSignatures [][]byte
+
+	ProofSeal []byte
+	TxHash    [32]byte
+}
+
+type BatchState uint8
+
+const (
+	BatchStateUnknown BatchState = iota
+	BatchStateAssembling
+	BatchStateClosed
+	BatchStateProofRequested
+	BatchStateProofReady
+	BatchStateSubmitted
+	BatchStateFinalized
+	BatchStateFailed
+)
+
+func (s BatchState) String() string {
+	switch s {
+	case BatchStateAssembling:
+		return "assembling"
+	case BatchStateClosed:
+		return "closed"
+	case BatchStateProofRequested:
+		return "proof_requested"
+	case BatchStateProofReady:
+		return "proof_ready"
+	case BatchStateSubmitted:
+		return "submitted"
+	case BatchStateFinalized:
+		return "finalized"
+	case BatchStateFailed:
+		return "failed"
+	default:
+		return fmt.Sprintf("unknown(%d)", uint8(s))
+	}
+}
+
+type Batch struct {
+	BatchID [32]byte
+	State   BatchState
+
+	DepositIDs [][32]byte
+
+	Owner          string
+	LeaseOwner     string
+	LeaseExpiresAt time.Time
+	StartedAt      time.Time
+	ClosedAt       time.Time
+	FailureReason  string
+	Checkpoint     checkpoint.Checkpoint
+	ProofRequested bool
+
 	OperatorSignatures [][]byte
 
 	ProofSeal []byte
