@@ -228,10 +228,51 @@ write_inventory_fixture() {
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
+      | .operators[0].asg = "juno-op1"
+      | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.private_endpoint = $app_private_endpoint
+      | .app_host.publish_public_dns = false
       | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
+      | .app_role = {
+          host: "203.0.113.21",
+          user: "ubuntu",
+          runtime_dir: "/var/lib/intents-juno/app-runtime",
+          public_endpoint: "203.0.113.21",
+          private_endpoint: $app_private_endpoint,
+          aws_profile: "juno",
+          aws_region: "us-east-1",
+          account_id: "021490342184",
+          security_group_id: "sg-0123456789abcdef0",
+          known_hosts_file: $app_kh,
+          secret_contract_file: $app_secrets,
+          bridge_public_dns_label: "bridge",
+          backoffice_dns_label: "ops",
+          public_scheme: "https",
+          bridge_api_listen: "127.0.0.1:8082",
+          backoffice_listen: "127.0.0.1:8090",
+          juno_rpc_url: "http://127.0.0.1:18232",
+          service_urls: ["bridge-api=http://127.0.0.1:8082/readyz"],
+          operator_endpoints: [],
+          publish_public_dns: false
+        }
+      | .shared_roles.proof = {
+          requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          rpc_url: "https://rpc.mainnet.succinct.xyz"
+        }
+      | .shared_roles.wireguard = {
+          public_subnet_id: $wireguard_public_subnet_id,
+          public_subnet_ids: [$wireguard_public_subnet_id],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: $app_private_endpoint,
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+          endpoint_host: "198.51.100.25",
+          publish_public_dns: false
+        }
+      | .wireguard_role = .shared_roles.wireguard
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -327,6 +368,9 @@ EOF
   assert_eq "$(jq -r '.shared_manifest_path' "$operator_dir/operator-deploy.json")" "$run_dir/shared-manifest.json" "run label shared manifest path"
   assert_eq "$(jq -r '.rollout_state_file' "$operator_dir/operator-deploy.json")" "$run_dir/rollout-state.json" "run label rollout state path"
   assert_eq "$(jq -r '.shared_manifest_path' "$run_dir/app/app-deploy.json")" "$run_dir/shared-manifest.json" "run label app shared manifest path"
+  assert_eq "$(jq -r '.version' "$run_dir/shared-manifest.json")" "2" "run label shared manifest version"
+  assert_eq "$(jq -r '.version' "$run_dir/app/app-deploy.json")" "2" "run label app deploy version"
+  assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$run_dir/app/app-deploy.json")" "false" "run label app deploy suppresses public backoffice dns"
   rm -rf "$workdir"
 }
 
@@ -358,6 +402,10 @@ EOF
     | .app_host.ops_public_dns_label = "ops"
     | del(.shared_services.wireguard.public_subnet_id)
     | .app_host.private_endpoint = ""
+    | .app_host.publish_public_dns = true
+    | del(.app_role)
+    | del(.shared_roles)
+    | del(.wireguard_role)
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"

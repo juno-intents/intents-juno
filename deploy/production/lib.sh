@@ -237,34 +237,145 @@ production_inventory_backoffice_dns_label() {
   local inventory="$1"
   local label
 
-  label="$(production_json_optional "$inventory" '.app_host.backoffice_dns_label | select(type == "string" and length > 0)')"
+  label="$(production_json_optional "$inventory" '
+    (.app_role.backoffice_dns_label // .app_host.backoffice_dns_label)
+      | select(type == "string" and length > 0)
+  ')"
   if [[ -n "$label" ]]; then
     printf '%s\n' "$label"
     return 0
   fi
 
-  production_json_optional "$inventory" '.app_host.ops_public_dns_label | select(type == "string" and length > 0)'
+  production_json_optional "$inventory" '
+    (.app_role.ops_public_dns_label // .app_host.ops_public_dns_label)
+      | select(type == "string" and length > 0)
+  '
+}
+
+production_inventory_publish_backoffice_dns() {
+  local inventory="$1"
+  local publish
+
+  publish="$(
+    jq -er '
+      if (.app_role? | type == "object") then
+        (.app_role.publish_public_dns // false)
+      elif (.app_host? | type == "object") then
+        (.app_host.publish_public_dns // true)
+      else
+        false
+      end
+    ' "$inventory" 2>/dev/null || true
+  )"
+  [[ "$publish" == "true" ]]
+}
+
+production_inventory_app_role_json() {
+  local inventory="$1"
+
+  jq -c '
+    if (.app_role? | type == "object") then
+      .app_role
+    elif (.app_host? | type == "object") then
+      {
+        host: .app_host.host,
+        user: .app_host.user,
+        runtime_dir: .app_host.runtime_dir,
+        public_endpoint: .app_host.public_endpoint,
+        aws_profile: .app_host.aws_profile,
+        aws_region: .app_host.aws_region,
+        account_id: .app_host.account_id,
+        security_group_id: .app_host.security_group_id,
+        known_hosts_file: .app_host.known_hosts_file,
+        secret_contract_file: .app_host.secret_contract_file,
+        bridge_public_dns_label: .app_host.bridge_public_dns_label,
+        backoffice_dns_label: .app_host.backoffice_dns_label,
+        ops_public_dns_label: .app_host.ops_public_dns_label,
+        public_scheme: .app_host.public_scheme,
+        bridge_api_listen: .app_host.bridge_api_listen,
+        backoffice_listen: .app_host.backoffice_listen,
+        juno_rpc_url: .app_host.juno_rpc_url,
+        service_urls: .app_host.service_urls,
+        operator_endpoints: .app_host.operator_endpoints,
+        publish_public_dns: true
+      }
+    else
+      {}
+    end
+  ' "$inventory"
+}
+
+production_inventory_wireguard_role_json() {
+  local inventory="$1"
+
+  jq -c '
+    if (.wireguard_role? | type == "object") then
+      .wireguard_role
+    elif (.shared_roles.wireguard? | type == "object") then
+      .shared_roles.wireguard
+    elif (.shared_services.wireguard? | type == "object") then
+      {
+        public_subnet_id: .shared_services.wireguard.public_subnet_id,
+        public_subnet_ids: (if (.shared_services.wireguard.public_subnet_id? | type == "string" and length > 0) then [.shared_services.wireguard.public_subnet_id] else [] end),
+        listen_port: .shared_services.wireguard.listen_port,
+        network_cidr: .shared_services.wireguard.network_cidr,
+        backoffice_hostname: (.shared_services.wireguard.backoffice_hostname // .app_role.backoffice_dns_label // .app_host.backoffice_dns_label // .app_host.ops_public_dns_label),
+        backoffice_private_endpoint: (.shared_services.wireguard.backoffice_private_endpoint // .app_role.private_endpoint // .app_host.private_endpoint),
+        client_config_secret_arn: .shared_services.wireguard.client_config_secret_arn,
+        endpoint_host: .shared_services.wireguard.endpoint_host,
+        publish_public_dns: true
+      }
+    else
+      {}
+    end
+  ' "$inventory"
+}
+
+production_inventory_proof_role_json() {
+  local inventory="$1"
+
+  jq -c '
+    if (.shared_roles.proof? | type == "object") then
+      .shared_roles.proof
+    elif (.shared_services.proof? | type == "object") then
+      .shared_services.proof
+    else
+      {}
+    end
+  ' "$inventory"
+}
+
+production_inventory_has_v2_roles() {
+  local inventory="$1"
+  jq -e '
+    (.app_role? | type == "object")
+    or (.shared_roles? | type == "object")
+    or (.wireguard_role? | type == "object")
+    or (.operators[]? | has("asg") or has("launch_template") or has("role"))
+  ' "$inventory" >/dev/null 2>&1
 }
 
 production_write_shared_terraform_override_tfvars() {
   local inventory="$1"
   local output_file="$2"
 
-  if ! jq -e '.app_host? | type == "object"' "$inventory" >/dev/null 2>&1; then
+  if ! jq -e '((.app_host? | type == "object") or (.app_role? | type == "object"))' "$inventory" >/dev/null 2>&1; then
     return 0
   fi
 
   local public_subdomain backoffice_dns_label backoffice_hostname
-  local backoffice_private_endpoint wireguard_public_subnet_id
+  local backoffice_private_endpoint wireguard_public_subnet_id app_role_json wireguard_role_json
 
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   backoffice_dns_label="$(production_inventory_backoffice_dns_label "$inventory")"
-  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
-  backoffice_private_endpoint="$(production_json_optional "$inventory" '.app_host.private_endpoint | select(type == "string" and length > 0)')"
-  wireguard_public_subnet_id="$(production_json_optional "$inventory" '.shared_services.wireguard.public_subnet_id | select(type == "string" and length > 0)')"
+  [[ -n "$backoffice_dns_label" ]] || die "app_role.backoffice_dns_label or app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
+  app_role_json="$(production_inventory_app_role_json "$inventory")"
+  backoffice_private_endpoint="$(jq -r '(.private_endpoint // .backoffice_private_endpoint // empty)' <<<"$app_role_json")"
+  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  wireguard_public_subnet_id="$(jq -r '(.public_subnet_id // .public_subnet_ids[0] // empty)' <<<"$wireguard_role_json")"
   if [[ -n "$backoffice_private_endpoint" ]]; then
     [[ "$backoffice_private_endpoint" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] \
-      || die "app_host.private_endpoint must be an IPv4 address for wireguard backoffice routing"
+      || die "app_role.private_endpoint must be an IPv4 address for wireguard backoffice routing"
   fi
   backoffice_hostname="${backoffice_dns_label}.${public_subdomain}"
 
@@ -1660,6 +1771,7 @@ production_render_shared_manifest() {
   local dkg_completion_network signer_ufvk inventory_owallet_ua bridge_summary_owallet_ua
   local summary_owallet_ua completion_owallet_ua effective_owallet_ua base_event_scanner_start_block
   local dkg_kms_key_arn
+  local manifest_version proof_role_json wireguard_role_json shared_roles_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
@@ -1720,6 +1832,13 @@ production_render_shared_manifest() {
   operator_ids_csv="$(production_operator_ids_csv "$dkg_summary")"
   [[ -n "$operator_ids_csv" ]] || die "dkg summary does not contain operator ids"
   threshold="$(production_threshold "$dkg_summary")"
+  manifest_version="1"
+  if production_inventory_has_v2_roles "$inventory"; then
+    manifest_version="2"
+  fi
+  proof_role_json="$(production_inventory_proof_role_json "$inventory")"
+  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
   operators_json="$(jq -c '[.operators[].operator_id]' "$dkg_summary")"
   roster_json="$(
     jq -c '.operators' "$inventory" | jq -c '
@@ -1781,7 +1900,7 @@ production_render_shared_manifest() {
   [[ -n "$signer_ufvk" ]] || die "dkg summary and completion are missing ufvk"
 
   jq -n \
-    --arg version "1" \
+    --arg version "$manifest_version" \
     --arg environment "$env_slug" \
     --arg generated_at "$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
     --arg juno_network "$juno_network" \
@@ -1841,6 +1960,9 @@ production_render_shared_manifest() {
     --argjson operator_roster "$roster_json" \
     --argjson secret_reference_names "$secret_keys_json" \
     --argjson governance "$governance_json" \
+    --argjson proof_role "$proof_role_json" \
+    --argjson wireguard_role "$wireguard_role_json" \
+    --argjson shared_roles "$shared_roles_json" \
     '{
       version: $version,
       environment: $environment,
@@ -1915,6 +2037,8 @@ production_render_shared_manifest() {
         withdraw_image_id: (if $withdraw_image_id == "" then null else $withdraw_image_id end),
         owallet_ua: (if $effective_owallet_ua == "" then null else $effective_owallet_ua end)
       },
+      shared_roles: $shared_roles,
+      wireguard_role: $wireguard_role,
       checkpoint: {
         operators: $checkpoint_operators,
         threshold: $checkpoint_threshold,
@@ -1941,7 +2065,7 @@ production_render_app_handoff() {
   local output_dir="$3"
   local inventory_dir="$4"
 
-  if ! jq -e '.app_host? | type == "object"' "$inventory" >/dev/null 2>&1; then
+  if ! jq -e '((.app_host? | type == "object") or (.app_role? | type == "object"))' "$inventory" >/dev/null 2>&1; then
     return 0
   fi
 
@@ -1954,7 +2078,7 @@ production_render_app_handoff() {
   local public_endpoint aws_profile aws_region account_id security_group_id
   local bridge_dns_label backoffice_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name backoffice_record_name bridge_public_url backoffice_public_url
-  local bridge_probe_url backoffice_probe_url bridge_internal_url backoffice_internal_url
+  local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
@@ -1962,34 +2086,49 @@ production_render_app_handoff() {
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
   local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
   local wireguard_client_address_cidr wireguard_client_config_secret_arn
+  local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json publish_backoffice_dns
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
-  app_json="$(jq -c '.app_host' "$inventory")"
+  app_json="$(production_inventory_app_role_json "$inventory")"
+  manifest_version="1"
+  if production_inventory_has_v2_roles "$inventory"; then
+    manifest_version="2"
+  fi
+  app_role_json="$app_json"
+  proof_role_json="$(production_inventory_proof_role_json "$inventory")"
+  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
+  publish_backoffice_dns="true"
+  if ! production_inventory_publish_backoffice_dns "$inventory"; then
+    publish_backoffice_dns="false"
+  fi
 
   app_host="$(jq -r '.host // empty' <<<"$app_json")"
-  [[ -n "$app_host" ]] || die "app_host.host is required when inventory.app_host is present"
+  [[ -n "$app_host" ]] || die "app_role.host is required when inventory.app_role or inventory.app_host is present"
   app_user="$(jq -r '.user // "ubuntu"' <<<"$app_json")"
   runtime_dir="$(jq -r '.runtime_dir // "/var/lib/intents-juno/app-runtime"' <<<"$app_json")"
   public_endpoint="$(jq -r '.public_endpoint // .host // empty' <<<"$app_json")"
-  [[ -n "$public_endpoint" ]] || die "app_host.public_endpoint is required when inventory.app_host is present"
+  [[ -n "$public_endpoint" ]] || die "app_role.public_endpoint is required when inventory.app_role or inventory.app_host is present"
   aws_profile="$(jq -r '.aws_profile // empty' <<<"$app_json")"
   aws_region="$(jq -r '.aws_region // empty' <<<"$app_json")"
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
   backoffice_dns_label="$(jq -r '(.backoffice_dns_label | select(type == "string" and length > 0)) // (.ops_public_dns_label | select(type == "string" and length > 0)) // empty' <<<"$app_json")"
-  [[ -n "$bridge_dns_label" ]] || die "app_host.bridge_public_dns_label is required when inventory.app_host is present"
-  [[ -n "$backoffice_dns_label" ]] || die "app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when inventory.app_host is present"
+  [[ -n "$bridge_dns_label" ]] || die "app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
+  if [[ "$publish_backoffice_dns" == "true" ]]; then
+    [[ -n "$backoffice_dns_label" ]] || die "app_role.backoffice_dns_label or app_host.backoffice_dns_label or app_host.ops_public_dns_label is required when backoffice public publishing is enabled"
+  fi
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
-  [[ "$public_scheme" == "https" ]] || die "app_host.public_scheme must be https"
+  [[ "$public_scheme" == "https" ]] || die "app_role.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"
   backoffice_listen_addr="$(jq -r '.backoffice_listen // "0.0.0.0:8090"' <<<"$app_json")"
-  production_require_loopback_listen_addr "$bridge_listen_addr" "app_host.bridge_api_listen"
-  production_require_loopback_listen_addr "$backoffice_listen_addr" "app_host.backoffice_listen"
+  production_require_loopback_listen_addr "$bridge_listen_addr" "app_role.bridge_api_listen"
+  production_require_loopback_listen_addr "$backoffice_listen_addr" "app_role.backoffice_listen"
   bridge_withdrawal_expiry_window_seconds="$(production_json_required "$shared_manifest" '.contracts.bridge_params.withdrawal_expiry_window_seconds')"
   bridge_min_deposit_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_deposit_amount')"
   bridge_min_withdraw_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_withdraw_amount')"
@@ -1999,7 +2138,7 @@ production_render_app_handoff() {
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
   if ! jq -e '.shared_services.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$inventory" >/dev/null 2>&1; then
-    die "shared_services.alarm_actions must be a non-empty array when inventory.app_host is present"
+    die "shared_services.alarm_actions must be a non-empty array when inventory.app_role or inventory.app_host is present"
   fi
   edge_alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
   wireguard_gateway_private_ip="$(production_json_required "$shared_manifest" '.shared_services.wireguard.gateway_private_ip | select(type == "string" and length > 0)')"
@@ -2023,13 +2162,22 @@ production_render_app_handoff() {
   [[ -f "$secret_contract_src" ]] || die "app secret contract file not found: $secret_contract_src"
 
   bridge_record_name="${bridge_dns_label}.${public_subdomain}"
-  backoffice_record_name="${backoffice_dns_label}.${public_subdomain}"
+  backoffice_record_name=""
+  if [[ "$publish_backoffice_dns" == "true" ]]; then
+    backoffice_record_name="${backoffice_dns_label}.${public_subdomain}"
+  fi
   bridge_public_url="$(production_origin_url "$public_scheme" "$bridge_record_name")"
-  backoffice_public_url="$(production_origin_url "$public_scheme" "$backoffice_record_name")"
-  bridge_probe_url="$bridge_public_url"
-  backoffice_probe_url="$backoffice_public_url"
+  backoffice_public_url=""
+  if [[ -n "$backoffice_record_name" ]]; then
+    backoffice_public_url="$(production_origin_url "$public_scheme" "$backoffice_record_name")"
+  fi
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
   backoffice_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
+  bridge_probe_url="$bridge_public_url"
+  backoffice_probe_url="$backoffice_internal_url"
+  if [[ -n "$backoffice_public_url" ]]; then
+    backoffice_probe_url="$backoffice_public_url"
+  fi
   edge_enabled="true"
   edge_output_root="$(dirname "$output_dir")"
   edge_state_dir="$edge_output_root/edge-state"
@@ -2051,7 +2199,7 @@ production_render_app_handoff() {
   manifest_path="$app_dir/app-deploy.json"
 
   jq -n \
-    --arg version "1" \
+    --arg version "$manifest_version" \
     --arg environment "$env_slug" \
     --arg shared_manifest_path "$shared_manifest" \
     --arg known_hosts_file "$known_hosts_dst" \
@@ -2099,6 +2247,11 @@ production_render_app_handoff() {
     --argjson edge_rate_limit "$edge_rate_limit" \
     --argjson edge_alarm_actions "$edge_alarm_actions_json" \
     --arg edge_enable_shield_advanced "$edge_enable_shield_advanced" \
+    --argjson app_role "$app_role_json" \
+    --argjson proof_role "$proof_role_json" \
+    --argjson wireguard_role "$wireguard_role_json" \
+    --argjson shared_roles "$shared_roles_json" \
+    --argjson publish_backoffice_dns "$publish_backoffice_dns" \
     '{
       version: $version,
       environment: $environment,
@@ -2106,6 +2259,9 @@ production_render_app_handoff() {
       known_hosts_file: $known_hosts_file,
       secret_contract_file: $secret_contract_file,
       app_host: $app_host,
+      app_role: $app_role,
+      wireguard_role: $wireguard_role,
+      shared_roles: $shared_roles,
       app_user: $app_user,
       runtime_dir: $runtime_dir,
       public_endpoint: $public_endpoint,
@@ -2132,17 +2288,18 @@ production_render_app_handoff() {
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,
-          public_url: $backoffice_public_url,
-          probe_url: $backoffice_probe_url,
+          public_url: (if $backoffice_public_url == "" then null else $backoffice_public_url end),
+          probe_url: (if $backoffice_public_url == "" then $backoffice_probe_url else $backoffice_probe_url end),
           internal_url: $backoffice_internal_url,
-          record_name: $backoffice_record_name,
+          record_name: (if $backoffice_record_name == "" then null else $backoffice_record_name end),
           access: {
             mode: "wireguard",
             source_cidrs: $backoffice_wireguard_source_cidrs,
             endpoint_host: $wireguard_endpoint_host,
             listen_port: $wireguard_listen_port,
             client_address_cidr: $wireguard_client_address_cidr,
-            client_config_secret_arn: $wireguard_client_config_secret_arn
+            client_config_secret_arn: $wireguard_client_config_secret_arn,
+            publish_public_dns: $publish_backoffice_dns
           }
         }
       },
@@ -2199,6 +2356,7 @@ production_render_operator_handoffs() {
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
+  local manifest_version
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
@@ -2213,6 +2371,10 @@ production_render_operator_handoffs() {
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   derived_deposit_owallet_ivk=""
   derived_withdraw_owallet_ovk=""
+  manifest_version="1"
+  if production_inventory_has_v2_roles "$inventory"; then
+    manifest_version="2"
+  fi
 
   local rollout_state="$output_dir/rollout-state.json"
   production_write_rollout_state "$inventory" "$rollout_state"
@@ -2235,6 +2397,17 @@ production_render_operator_handoffs() {
     backup_zip_src="$(jq -r '.dkg_backup_zip // empty' <<<"$operator_json")"
     public_endpoint="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
     public_dns_name="$(jq -r --arg subdomain "$public_subdomain" '.public_dns_label + "." + $subdomain' <<<"$operator_json")"
+    local operator_role_json
+    operator_role_json="$(jq -c '{
+      asg: (.asg // .launch_template.asg // .role // null),
+      launch_template: (.launch_template // null),
+      public_dns_label: (.public_dns_label // null),
+      public_endpoint: (.public_endpoint // .operator_host // null),
+      operator_host: (.operator_host // null),
+      operator_user: (.operator_user // "ubuntu"),
+      runtime_dir: (.runtime_dir // "/var/lib/intents-juno/operator-runtime"),
+      publish_public_dns: (.publish_public_dns // true)
+    }' <<<"$operator_json")"
     checkpoint_signer_driver="$(jq -r '.checkpoint_signer_driver // "aws-kms"' <<<"$operator_json")"
     checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
     checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
@@ -2306,7 +2479,7 @@ production_render_operator_handoffs() {
     fi
 
     jq -n \
-      --arg version "1" \
+      --arg version "$manifest_version" \
       --arg environment "$env_slug" \
       --arg shared_manifest_path "$shared_manifest" \
       --arg rollout_state_file "$rollout_state" \
@@ -2326,12 +2499,14 @@ production_render_operator_handoffs() {
       --arg dns_mode "$dns_mode" \
       --argjson ttl_seconds "$ttl_seconds" \
       --argjson operator "$operator_json" \
+      --argjson operator_role "$operator_role_json" \
       '{
         version: $version,
         environment: $environment,
         shared_manifest_path: $shared_manifest_path,
         rollout_state_file: $rollout_state_file,
         operator_id: $operator.operator_id,
+        operator_role: $operator_role,
         operator_address: (if $operator_address == "" then null else $operator_address end),
         checkpoint_signer_driver: $checkpoint_signer_driver,
         checkpoint_signer_kms_key_id: (if $checkpoint_signer_kms_key_id == "" then null else $checkpoint_signer_kms_key_id end),

@@ -38,10 +38,44 @@ write_inventory_fixture() {
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
       | .operators[0].operator_address = $operator_address
+      | .operators[0].asg = "juno-op1"
+      | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
       | .app_host.public_endpoint = $app_public_endpoint
+      | .app_host.publish_public_dns = false
+      | .app_role = {
+          host: $app_host,
+          user: "ubuntu",
+          runtime_dir: "/var/lib/intents-juno/app-runtime",
+          public_endpoint: $app_public_endpoint,
+          bridge_public_dns_label: "bridge",
+          backoffice_dns_label: "ops",
+          public_scheme: "https",
+          bridge_api_listen: "127.0.0.1:8082",
+          backoffice_listen: "127.0.0.1:8090",
+          juno_rpc_url: "http://127.0.0.1:18232",
+          service_urls: ["bridge-api=http://127.0.0.1:8082/readyz"],
+          operator_endpoints: [],
+          publish_public_dns: false
+        }
+      | .shared_roles.proof = {
+          requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          rpc_url: "https://rpc.mainnet.succinct.xyz"
+        }
+      | .shared_roles.wireguard = {
+          public_subnet_id: "subnet-0abc1234def567890",
+          public_subnet_ids: ["subnet-0abc1234def567890"],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: "10.0.10.21",
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+          endpoint_host: "198.51.100.25",
+          publish_public_dns: false
+        }
+      | .wireguard_role = .shared_roles.wireguard
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 

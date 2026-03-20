@@ -15,6 +15,11 @@
   "aws_region": "us-east-1",
   "account_id": "021490342184",
   "operator_host": "203.0.113.11",
+  "asg": "juno-op1",
+  "launch_template": {
+    "id": "lt-0123456789abcdef0",
+    "version": "1"
+  },
   "operator_user": "ubuntu",
   "runtime_dir": "/var/lib/intents-juno/operator-runtime",
   "dkg_backup_zip": "production-output/alpha/operators/0x1111111111111111111111111111111111111111/dkg-backup.zip",

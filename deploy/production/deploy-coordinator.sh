@@ -172,8 +172,9 @@ done < <(jq -c '.operators[]' "$inventory")
 min_deposit_admin_address=""
 governance_safe_address=""
 pause_guardian_address=""
-if jq -e '.app_host != null' "$inventory" >/dev/null 2>&1; then
-  app_secret_contract_rel="$(jq -r '.app_host.secret_contract_file | select(type == "string" and length > 0)' "$inventory")"
+app_role_json="$(production_inventory_app_role_json "$inventory")"
+if [[ "$(jq -r 'length' <<<"$app_role_json")" != "0" ]]; then
+  app_secret_contract_rel="$(jq -r '.secret_contract_file | select(type == "string" and length > 0)' <<<"$app_role_json")"
   app_secret_contract_file="$(production_abs_path "$inventory_dir" "$app_secret_contract_rel")"
   [[ -f "$app_secret_contract_file" ]] || die "app secret contract file not found: $app_secret_contract_file"
   resolved_app_secret_env="$preflight_secret_dir/app.env"

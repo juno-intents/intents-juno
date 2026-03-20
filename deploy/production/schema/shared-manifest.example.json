@@ -25,6 +25,14 @@
       "api_url": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001",
       "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
     },
+    "wireguard": {
+      "gateway_private_ip": "10.0.2.50",
+      "endpoint_host": "198.51.100.25",
+      "listen_port": 51820,
+      "network_cidr": "10.66.0.0/24",
+      "client_address_cidr": "10.66.0.2/32",
+      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config"
+    },
     "artifacts": {
       "checkpoint_blob_bucket": "alpha-dkg-keypackages",
       "checkpoint_blob_prefix": "dkg/keypackages",
@@ -66,6 +74,30 @@
       "address": "0x8888888888888888888888888888888888888888",
       "min_delay_seconds": 172800
     }
+  },
+  "shared_roles": {
+    "proof": {
+      "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
+      "rpc_url": "https://rpc.mainnet.succinct.xyz"
+    },
+    "wireguard": {
+      "gateway_private_ip": "10.0.2.50",
+      "endpoint_host": "198.51.100.25",
+      "listen_port": 51820,
+      "network_cidr": "10.66.0.0/24",
+      "client_address_cidr": "10.66.0.2/32",
+      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+      "publish_public_dns": false
+    }
+  },
+  "wireguard_role": {
+    "gateway_private_ip": "10.0.2.50",
+    "endpoint_host": "198.51.100.25",
+    "listen_port": 51820,
+    "network_cidr": "10.66.0.0/24",
+    "client_address_cidr": "10.66.0.2/32",
+    "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+    "publish_public_dns": false
   },
   "operator_roster": [
     {

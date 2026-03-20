@@ -78,10 +78,18 @@ if production_environment_allows_local_secret_resolvers "$environment"; then
   allow_local_resolvers="true"
 fi
 
-app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
-app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
-runtime_dir="$(production_json_required "$app_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
-public_endpoint="$(production_json_required "$app_deploy" '.public_endpoint | select(type == "string" and length > 0)')"
+app_role_json="$(production_json_optional "$app_deploy" '.app_role')"
+if [[ -n "$app_role_json" ]] && [[ "$(jq -r 'length' <<<"$app_role_json")" != "0" ]]; then
+  app_host="$(jq -r '.host // empty' <<<"$app_role_json")"
+  app_user="$(jq -r '.user // "ubuntu"' <<<"$app_role_json")"
+  runtime_dir="$(jq -r '.runtime_dir // "/var/lib/intents-juno/app-runtime"' <<<"$app_role_json")"
+  public_endpoint="$(jq -r '.public_endpoint // .host // empty' <<<"$app_role_json")"
+else
+  app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
+  app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
+  runtime_dir="$(production_json_required "$app_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
+  public_endpoint="$(production_json_required "$app_deploy" '.public_endpoint | select(type == "string" and length > 0)')"
+fi
 aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$app_deploy" '.aws_region')"
 security_group_id="$(production_json_optional "$app_deploy" '.security_group_id')"
@@ -98,11 +106,15 @@ edge_origin_record_name="$(production_json_optional "$app_deploy" '.edge.origin_
 
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 bridge_listen_addr="$(production_json_required "$app_deploy" '.services.bridge_api.listen_addr | select(type == "string" and length > 0)')"
-backoffice_record_name="$(production_json_required "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
+backoffice_record_name="$(production_json_optional "$app_deploy" '.services.backoffice.record_name | select(type == "string" and length > 0)')"
 backoffice_listen_addr="$(production_json_required "$app_deploy" '.services.backoffice.listen_addr | select(type == "string" and length > 0)')"
 if ! jq -e '.services.backoffice.access.mode == "wireguard"
   and ((.services.backoffice.access.source_cidrs // []) | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))' "$app_deploy" >/dev/null 2>&1; then
   die "services.backoffice.access must be wireguard with a non-empty source_cidrs array"
+fi
+publish_backoffice_dns="$(production_json_optional "$app_deploy" '.services.backoffice.access.publish_public_dns')"
+if [[ "$publish_backoffice_dns" != "true" ]]; then
+  publish_backoffice_dns="false"
 fi
 mapfile -t backoffice_wireguard_source_cidrs < <(jq -r '.services.backoffice.access.source_cidrs[]? | select(type == "string" and length > 0)' "$app_deploy")
 shared_kafka_brokers="$(production_json_required "$shared_manifest_path" '.shared_services.kafka.bootstrap_brokers | select(type == "string" and length > 0)')"
@@ -238,7 +250,9 @@ download_release_asset "bridge-api_linux_amd64"
 download_release_asset "backoffice_linux_amd64"
 download_release_asset "shared-infra-e2e_linux_amd64"
 
-direct_backoffice_caddy_block="$(cat <<EOF
+direct_backoffice_caddy_block=""
+if [[ "$publish_backoffice_dns" == "true" && -n "$backoffice_record_name" ]]; then
+  direct_backoffice_caddy_block="$(cat <<EOF
 \$backoffice_record_name {
   encode zstd gzip
   @backoffice_wireguard {
@@ -251,6 +265,7 @@ direct_backoffice_caddy_block="$(cat <<EOF
 }
 EOF
 )"
+fi
 
 if [[ "$dry_run" == "true" ]]; then
   log "[DRY RUN] would deploy bridge-api and backoffice to $ssh_target from release $release_tag"
@@ -277,7 +292,9 @@ if [[ "$dns_mode" == "public-zone" && -n "$zone_id" && -n "$ttl_seconds" ]]; the
   if [[ "$edge_enabled" == "true" && -n "$edge_origin_record_name" ]]; then
     production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$edge_origin_record_name" "$ttl_seconds" "$public_endpoint"
   fi
-  production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
+  if [[ "$publish_backoffice_dns" == "true" && -n "$backoffice_record_name" ]]; then
+    production_publish_dns_record "$aws_profile" "$aws_region" "$zone_id" "$backoffice_record_name" "$ttl_seconds" "$public_endpoint"
+  fi
 fi
 
 remote_stage_dir="/tmp/intents-juno-app-deploy"

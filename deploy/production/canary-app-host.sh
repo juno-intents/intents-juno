@@ -66,14 +66,21 @@ fi
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 known_hosts_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.known_hosts_file | select(type == "string" and length > 0)')")"
 secret_contract_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.secret_contract_file | select(type == "string" and length > 0)')")"
-app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
-app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
-runtime_dir="$(production_json_required "$app_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
+app_role_json="$(production_json_optional "$app_deploy" '.app_role')"
+if [[ -n "$app_role_json" ]] && [[ "$(jq -r 'length' <<<"$app_role_json")" != "0" ]]; then
+  app_host="$(jq -r '.host // empty' <<<"$app_role_json")"
+  app_user="$(jq -r '.user // "ubuntu"' <<<"$app_role_json")"
+  runtime_dir="$(jq -r '.runtime_dir // "/var/lib/intents-juno/app-runtime"' <<<"$app_role_json")"
+else
+  app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
+  app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
+  runtime_dir="$(production_json_required "$app_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
+fi
 aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$app_deploy" '.aws_region')"
 public_scheme="$(production_json_required "$app_deploy" '.public_scheme | select(type == "string" and length > 0)')"
 bridge_probe_url="$(production_json_required "$app_deploy" '.services.bridge_api.public_url | select(type == "string" and length > 0)')"
-backoffice_public_url="$(production_json_required "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
+backoffice_public_url="$(production_json_optional "$app_deploy" '.services.backoffice.public_url | select(type == "string" and length > 0)')"
 backoffice_internal_url="$(production_json_required "$app_deploy" '.services.backoffice.internal_url | select(type == "string" and length > 0)')"
 backoffice_access_mode="$(production_json_required "$app_deploy" '.services.backoffice.access.mode | select(type == "string" and length > 0)')"
 backoffice_probe_url="$backoffice_public_url"
@@ -97,6 +104,7 @@ shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_p
 [[ "$bridge_probe_url" == https://* ]] || die "bridge probe url must use https: $bridge_probe_url"
 case "$backoffice_probe_transport" in
   direct)
+    [[ -n "$backoffice_probe_url" ]] || die "backoffice probe url is required when directly accessible"
     [[ "$backoffice_probe_url" == https://* ]] || die "backoffice probe url must use https when directly accessible: $backoffice_probe_url"
     ;;
   ssh-local)

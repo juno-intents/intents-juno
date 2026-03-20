@@ -38,12 +38,63 @@ write_inventory_fixture() {
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
       | .operators[0].operator_address = $operator_address
+      | .operators[0].asg = "juno-op1"
+      | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
       | .app_host.public_endpoint = $app_public_endpoint
       | .app_host.private_endpoint = $app_private_endpoint
+      | .app_host.publish_public_dns = false
+      | .app_role = {
+          host: $app_host,
+          user: "ubuntu",
+          runtime_dir: "/var/lib/intents-juno/app-runtime",
+          public_endpoint: $app_public_endpoint,
+          private_endpoint: $app_private_endpoint,
+          aws_profile: "juno",
+          aws_region: "us-east-1",
+          account_id: "021490342184",
+          security_group_id: "sg-0123456789abcdef0",
+          known_hosts_file: $app_kh,
+          secret_contract_file: $app_secrets,
+          bridge_public_dns_label: "bridge",
+          backoffice_dns_label: "ops",
+          public_scheme: "https",
+          bridge_api_listen: "127.0.0.1:8082",
+          backoffice_listen: "127.0.0.1:8090",
+          juno_rpc_url: "http://127.0.0.1:18232",
+          service_urls: ["bridge-api=http://127.0.0.1:8082/readyz"],
+          operator_endpoints: [],
+          publish_public_dns: false
+        }
       | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
+      | .shared_roles.proof = {
+          requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          rpc_url: "https://rpc.mainnet.succinct.xyz"
+        }
+      | .shared_roles.wireguard = {
+          public_subnet_id: $wireguard_public_subnet_id,
+          public_subnet_ids: [$wireguard_public_subnet_id],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: $app_private_endpoint,
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+          endpoint_host: "198.51.100.25",
+          publish_public_dns: false
+        }
+      | .wireguard_role = {
+          public_subnet_id: $wireguard_public_subnet_id,
+          public_subnet_ids: [$wireguard_public_subnet_id],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: $app_private_endpoint,
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+          endpoint_host: "198.51.100.25",
+          publish_public_dns: false
+        }
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -374,6 +425,11 @@ EOF
   assert_eq "$(jq -r '.contracts.bridge_params.max_expiry_extension_seconds' "$shared_manifest")" "43200" "bridge max expiry extension"
   assert_eq "$(jq -r '.contracts.bridge_params.min_deposit_amount' "$shared_manifest")" "201005025" "bridge min deposit amount"
   assert_eq "$(jq -r '.contracts.bridge_params.min_withdraw_amount' "$shared_manifest")" "200000000" "bridge min withdraw amount"
+  assert_eq "$(jq -r '.version' "$shared_manifest")" "2" "shared manifest version"
+  assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0x1234567890abcdef1234567890abcdef12345678" "shared roles proof requestor address"
+  assert_eq "$(jq -r '.shared_roles.proof.rpc_url' "$shared_manifest")" "https://rpc.mainnet.succinct.xyz" "shared roles proof rpc url"
+  assert_eq "$(jq -r '.shared_roles.wireguard.backoffice_private_endpoint' "$shared_manifest")" "10.0.10.21" "shared roles wireguard backoffice endpoint"
+  assert_eq "$(jq -r '.wireguard_role.publish_public_dns' "$shared_manifest")" "false" "wireguard role suppresses public dns"
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
   assert_eq "$(jq -r '.shared_services.ipfs.target_group_arn' "$shared_manifest")" "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111" "ipfs target group arn"
@@ -405,8 +461,14 @@ EOF
   assert_eq "$(jq -r '.checkpoint_blob_bucket' "$handoff_dir/operator-deploy.json")" "alpha-op1-dkg-keypackages" "handoff checkpoint blob bucket"
   assert_eq "$(jq -r '.checkpoint_blob_prefix' "$handoff_dir/operator-deploy.json")" "operators/op1/checkpoint-packages" "handoff checkpoint blob prefix"
   assert_eq "$(jq -r '.checkpoint_blob_sse_kms_key_id' "$handoff_dir/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/bbbbbbbb-cccc-dddd-eeee-ffffffffffff" "handoff checkpoint blob sse kms key id"
+  assert_eq "$(jq -r '.version' "$handoff_dir/operator-deploy.json")" "2" "operator handoff version"
+  assert_eq "$(jq -r '.operator_role.asg' "$handoff_dir/operator-deploy.json")" "juno-op1" "operator handoff asg"
   assert_eq "$(jq -r '.current_operator_id // ""' "$workdir/output/rollout-state.json")" "" "initial rollout state"
   assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff derives operator endpoint probes"
+  assert_eq "$(jq -r '.version' "$workdir/output/app/app-deploy.json")" "2" "app handoff version"
+  assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$workdir/output/app/app-deploy.json")" "false" "app handoff suppresses public backoffice dns"
+  assert_eq "$(jq -r '.services.backoffice.public_url // empty' "$workdir/output/app/app-deploy.json")" "" "app handoff omits backoffice public url"
+  assert_eq "$(jq -r '.services.backoffice.record_name // empty' "$workdir/output/app/app-deploy.json")" "" "app handoff omits backoffice record name"
   rm -rf "$workdir"
 }
 
@@ -2185,7 +2247,8 @@ EOF
   assert_eq "$(jq -r '.services.bridge_api.public_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge public url"
   assert_eq "$(jq -r '.services.bridge_api.probe_url' "$app_manifest")" "https://bridge.alpha.intents-testing.thejunowallet.com" "bridge probe url"
   assert_eq "$(jq -r '.services.bridge_api.internal_url' "$app_manifest")" "http://127.0.0.1:8082" "bridge internal url"
-  assert_eq "$(jq -r '.services.backoffice.public_url' "$app_manifest")" "https://ops.alpha.intents-testing.thejunowallet.com" "backoffice public url"
+  assert_eq "$(jq -r '.services.backoffice.public_url // empty' "$app_manifest")" "" "backoffice public url"
+  assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$app_manifest")" "false" "backoffice public publishing suppressed"
   assert_eq "$(jq -r '.services.backoffice.access.mode' "$app_manifest")" "wireguard" "backoffice access mode"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.2.50/32" "backoffice wireguard source cidr"
   assert_eq "$(jq -r '.services.backoffice.access.client_config_secret_arn' "$app_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "backoffice wireguard client config secret"
@@ -2267,7 +2330,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  jq 'del(.app_host.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  jq 'del(.app_host.juno_rpc_url) | del(.app_role.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -2383,7 +2446,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  jq '.app_host.juno_rpc_url = "https://juno-rpc.example.invalid"' "$workdir/inventory.json" >"$workdir/inventory.next"
+  jq '.app_host.juno_rpc_url = "https://juno-rpc.example.invalid" | .app_role.juno_rpc_url = "https://juno-rpc.example.invalid"' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -2583,7 +2646,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  jq '.app_host.public_scheme = "http"' "$workdir/inventory.json" >"$workdir/inventory.next"
+  jq '.app_host.public_scheme = "http" | .app_role.public_scheme = "http"' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -2622,7 +2685,7 @@ JUNO_RPC_USER=literal:juno
 JUNO_RPC_PASS=literal:rpcpass
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  jq '.app_host.bridge_api_listen = "0.0.0.0:8082"' "$workdir/inventory.json" >"$workdir/inventory.next"
+  jq '.app_host.bridge_api_listen = "0.0.0.0:8082" | .app_role.bridge_api_listen = "0.0.0.0:8082"' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -2651,7 +2714,14 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
     | .app_host.backoffice_dns_label = ""
     | .app_host.ops_public_dns_label = "ops"
     | del(.shared_services.wireguard.public_subnet_id)
+    | del(.shared_roles.wireguard.public_subnet_id)
+    | del(.shared_roles.wireguard.public_subnet_ids)
+    | del(.shared_roles.wireguard.backoffice_private_endpoint)
+    | del(.wireguard_role.public_subnet_id)
+    | del(.wireguard_role.public_subnet_ids)
+    | del(.wireguard_role.backoffice_private_endpoint)
     | .app_host.private_endpoint = ""
+    | .app_role.private_endpoint = ""
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 

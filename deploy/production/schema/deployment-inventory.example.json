@@ -15,6 +15,38 @@
       "public_subnet_id": "subnet-0123456789abcdef0"
     }
   },
+  "shared_roles": {
+    "proof": {
+      "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
+      "rpc_url": "https://rpc.mainnet.succinct.xyz"
+    },
+    "wireguard": {
+      "public_subnet_id": "subnet-0123456789abcdef0",
+      "public_subnet_ids": [
+        "subnet-0123456789abcdef0"
+      ],
+      "listen_port": 51820,
+      "network_cidr": "10.66.0.0/24",
+      "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
+      "backoffice_private_endpoint": "10.0.10.21",
+      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+      "endpoint_host": "198.51.100.25",
+      "publish_public_dns": false
+    }
+  },
+  "wireguard_role": {
+    "public_subnet_id": "subnet-0123456789abcdef0",
+    "public_subnet_ids": [
+      "subnet-0123456789abcdef0"
+    ],
+    "listen_port": 51820,
+    "network_cidr": "10.66.0.0/24",
+    "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
+    "backoffice_private_endpoint": "10.0.10.21",
+    "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+    "endpoint_host": "198.51.100.25",
+    "publish_public_dns": false
+  },
   "contracts": {
     "juno_network": "testnet",
     "base_rpc_url": "https://base-sepolia.example.invalid",
@@ -50,6 +82,30 @@
     ],
     "operator_endpoints": []
   },
+  "app_role": {
+    "host": "203.0.113.21",
+    "user": "ubuntu",
+    "runtime_dir": "/var/lib/intents-juno/app-runtime",
+    "public_endpoint": "203.0.113.21",
+    "private_endpoint": "10.0.10.21",
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "account_id": "021490342184",
+    "security_group_id": "sg-0123456789abcdef0",
+    "known_hosts_file": "app/known_hosts",
+    "secret_contract_file": "app/app-secrets.env",
+    "bridge_public_dns_label": "bridge",
+    "backoffice_dns_label": "ops",
+    "public_scheme": "https",
+    "bridge_api_listen": "127.0.0.1:8082",
+    "backoffice_listen": "127.0.0.1:8090",
+    "juno_rpc_url": "http://127.0.0.1:18232",
+    "service_urls": [
+      "bridge-api=http://127.0.0.1:8082/readyz"
+    ],
+    "operator_endpoints": [],
+    "publish_public_dns": false
+  },
   "operators": [
     {
       "index": 1,
@@ -68,6 +124,11 @@
       "runtime_dir": "/var/lib/intents-juno/operator-runtime",
       "public_dns_label": "op1",
       "public_endpoint": "203.0.113.11",
+      "asg": "juno-op1",
+      "launch_template": {
+        "id": "lt-0123456789abcdef0",
+        "version": "1"
+      },
       "known_hosts_file": "operators/op1/known_hosts",
       "dkg_backup_zip": "operators/op1/dkg-backup.zip",
       "secret_contract_file": "operators/op1/operator-secrets.env"

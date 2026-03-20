@@ -34,10 +34,51 @@ write_inventory_fixture() {
       .operators[0].known_hosts_file = $kh
       | .operators[0].dkg_backup_zip = $backup
       | .operators[0].secret_contract_file = $secrets
+      | .operators[0].asg = "juno-op1"
+      | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
       | .app_host.public_endpoint = $app_public_endpoint
+      | .app_host.publish_public_dns = false
+      | .app_role = {
+          host: $app_host,
+          user: "ubuntu",
+          runtime_dir: "/var/lib/intents-juno/app-runtime",
+          public_endpoint: $app_public_endpoint,
+          private_endpoint: "10.0.10.21",
+          aws_profile: "juno",
+          aws_region: "us-east-1",
+          account_id: "021490342184",
+          security_group_id: "sg-0123456789abcdef0",
+          known_hosts_file: $app_kh,
+          secret_contract_file: $app_secrets,
+          bridge_public_dns_label: "bridge",
+          backoffice_dns_label: "ops",
+          public_scheme: "https",
+          bridge_api_listen: "127.0.0.1:8082",
+          backoffice_listen: "127.0.0.1:8090",
+          juno_rpc_url: "http://127.0.0.1:18232",
+          service_urls: ["bridge-api=http://127.0.0.1:8082/readyz"],
+          operator_endpoints: [],
+          publish_public_dns: false
+        }
+      | .shared_roles.proof = {
+          requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          rpc_url: "https://rpc.mainnet.succinct.xyz"
+        }
+      | .shared_roles.wireguard = {
+          public_subnet_id: "subnet-0abc1234def567890",
+          public_subnet_ids: ["subnet-0abc1234def567890"],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          backoffice_hostname: "ops.alpha.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: "10.0.10.21",
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+          endpoint_host: "198.51.100.25",
+          publish_public_dns: false
+        }
+      | .wireguard_role = .shared_roles.wireguard
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -230,7 +271,7 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'acme_account_email="ops@thejunowallet.com"' "remote configures acme account email"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'email $acme_account_email' "caddyfile uses configured acme account email"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'reverse_proxy 127.0.0.1:8082' "bridge caddy reverse proxy"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'reverse_proxy 127.0.0.1:8090' "backoffice caddy reverse proxy"
+  assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'reverse_proxy 127.0.0.1:8090' "new path must not publish a public backoffice proxy"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart bridge-api' "remote bridge restart"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart backoffice' "remote backoffice restart"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'sudo systemctl restart caddy' "remote caddy restart"
@@ -343,7 +384,7 @@ EOF
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
   cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
-  jq 'del(.app_host.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
+  jq 'del(.app_host.juno_rpc_url) | del(.app_role.juno_rpc_url)' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   shared_manifest="$workdir/shared-manifest.json"
@@ -665,15 +706,12 @@ EOF
   assert_contains "$(cat "$log_dir/ssh.stdin")" "$origin_record_name" "edge caddy serves the dedicated origin hostname"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'email $acme_account_email' "edge caddy uses acme for origin tls"
   assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /bridge*' "edge caddy bridge origin route"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '$backoffice_record_name {' "edge caddy serves backoffice on a direct hostname"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" '@backoffice_wireguard {' "edge caddy defines a wireguard matcher for backoffice"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'remote_ip 10.0.2.50/32' "edge caddy restricts backoffice to the wireguard gateway source ip"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'handle @backoffice_wireguard {' "edge caddy only proxies allowed wireguard backoffice traffic"
-  assert_contains "$(cat "$log_dir/ssh.stdin")" 'respond "forbidden" 403' "edge caddy returns forbidden for non-wireguard backoffice traffic"
+  assert_not_contains "$(cat "$log_dir/ssh.stdin")" '$backoffice_record_name {' "edge caddy does not publish a public backoffice hostname in the new path"
+  assert_not_contains "$(cat "$log_dir/ssh.stdin")" '@backoffice_wireguard {' "edge caddy does not expose a public backoffice route in the new path"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'handle_path /ops* {' "edge origin no longer publishes /ops"
   assert_not_contains "$(cat "$log_dir/ssh.stdin")" 'auto_https off' "edge caddy no longer disables direct tls"
-  assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "edge path publishes direct backoffice dns"
-  assert_eq "$(grep -c 'route53 change-resource-record-sets' "$log_dir/aws.log")" "2" "edge path publishes both backoffice and origin dns before caddy startup"
+  assert_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "edge path publishes the origin dns"
+  assert_eq "$(grep -c 'route53 change-resource-record-sets' "$log_dir/aws.log")" "1" "edge path publishes only the origin dns in the new path"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress" "edge path opens public 443 for origin tls"
   assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":443' "edge path authorizes https ingress"
   assert_contains "$(cat "$log_dir/aws.log")" "revoke-security-group-ingress" "edge path revokes legacy direct http ingress"

@@ -5,6 +5,23 @@
   "known_hosts_file": "production-output/alpha/app/known_hosts",
   "secret_contract_file": "production-output/alpha/app/app-secrets.env",
   "app_host": "203.0.113.21",
+  "app_role": {
+    "host": "203.0.113.21",
+    "user": "ubuntu",
+    "runtime_dir": "/var/lib/intents-juno/app-runtime",
+    "public_endpoint": "203.0.113.21",
+    "bridge_public_dns_label": "bridge",
+    "backoffice_dns_label": "ops",
+    "public_scheme": "https",
+    "bridge_api_listen": "127.0.0.1:8082",
+    "backoffice_listen": "127.0.0.1:8090",
+    "juno_rpc_url": "http://127.0.0.1:18232",
+    "service_urls": [
+      "bridge-api=http://127.0.0.1:8082/readyz"
+    ],
+    "operator_endpoints": [],
+    "publish_public_dns": false
+  },
   "app_user": "ubuntu",
   "runtime_dir": "/var/lib/intents-juno/app-runtime",
   "public_endpoint": "203.0.113.21",
@@ -34,10 +51,10 @@
     },
     "backoffice": {
       "listen_addr": "127.0.0.1:8090",
-      "public_url": "https://ops.alpha.intents-testing.thejunowallet.com",
-      "probe_url": "https://ops.alpha.intents-testing.thejunowallet.com",
+      "public_url": null,
+      "probe_url": "http://127.0.0.1:8090",
       "internal_url": "http://127.0.0.1:8090",
-      "record_name": "ops.alpha.intents-testing.thejunowallet.com",
+      "record_name": null,
       "access": {
         "mode": "wireguard",
         "source_cidrs": [
@@ -46,7 +63,8 @@
         "endpoint_host": "198.51.100.25",
         "listen_port": 51820,
         "client_address_cidr": "10.66.0.2/32",
-        "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config"
+        "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+        "publish_public_dns": false
       }
     }
   },

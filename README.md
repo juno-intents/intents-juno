@@ -63,26 +63,6 @@ flowchart LR
 | Public auditability | Anyone with the UFVK can independently scan deposits, spends, and witnesses. | The published UFVK matches the active keyset. | [`deploy/operators/dkg/README.md`](deploy/operators/dkg/README.md), [`cmd/juno-witness-extract/main.go`](cmd/juno-witness-extract/main.go) |
 | Proof boundary | Deposit and withdrawal proofs bind concrete events to a signed Orchard root. | The signed checkpoint root is honest; proof infrastructure remains available. | [`internal/proverinput/private_input.go`](internal/proverinput/private_input.go), [`cmd/proof-requestor/main.go`](cmd/proof-requestor/main.go), [`cmd/proof-funder/main.go`](cmd/proof-funder/main.go) |
 
-## Current Maturity
-
-- Current design and code evidence in this repo:
-  [`cmd/checkpoint-signer/main.go`](cmd/checkpoint-signer/main.go),
-  [`cmd/checkpoint-aggregator/main.go`](cmd/checkpoint-aggregator/main.go),
-  [`cmd/proof-requestor/main.go`](cmd/proof-requestor/main.go),
-  [`cmd/proof-funder/main.go`](cmd/proof-funder/main.go),
-  [`cmd/bridge-e2e/main.go`](cmd/bridge-e2e/main.go)
-- Current operator workflow documentation:
-  [`deploy/operators/dkg/README.md`](deploy/operators/dkg/README.md),
-  [`deploy/operators/dkg/e2e/README.md`](deploy/operators/dkg/e2e/README.md)
-- Planned dependencies that should be read as planned, not complete:
-  upstream `dkg-ceremony`,
-  upstream `dkg-admin`,
-  upstream `juno-txsign` external spend-auth signing mode
-
 ## Read Next
 
 - [DKG trust whitepaper](docs/dkg-trust-whitepaper.md)
-- [Operator DKG workflow](deploy/operators/dkg/README.md)
-- [DKG + Base testnet e2e](deploy/operators/dkg/e2e/README.md)
-- [Checkpoint signing implementation](cmd/checkpoint-signer/main.go)
-- [Checkpoint digest + verification code](internal/checkpoint/checkpoint.go)
