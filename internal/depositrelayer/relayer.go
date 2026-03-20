@@ -174,6 +174,12 @@ type durableMintBatch struct {
 	Items []mintBatchItem
 }
 
+type MetricsSummary struct {
+	ConfirmedCount      int
+	ProofRequestedCount int
+	SubmittedCount      int
+}
+
 func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Client, log *slog.Logger) (*Relayer, error) {
 	if cfg.BaseChainID == 0 {
 		return nil, fmt.Errorf("%w: BaseChainID must be non-zero", ErrInvalidConfig)
@@ -1115,6 +1121,25 @@ func (r *Relayer) currentMinDepositAmount(ctx context.Context) (uint64, error) {
 		return 0, fmt.Errorf("depositrelayer: load bridge settings: %w", err)
 	}
 	return snapshot.MinDepositAmount, nil
+}
+
+func (r *Relayer) MetricsSummary(ctx context.Context) (MetricsSummary, error) {
+	summary := MetricsSummary{}
+	if r == nil || r.store == nil {
+		return summary, fmt.Errorf("%w: nil relayer/store", ErrInvalidConfig)
+	}
+
+	var err error
+	if summary.ConfirmedCount, err = r.store.CountByState(ctx, deposit.StateConfirmed); err != nil {
+		return MetricsSummary{}, err
+	}
+	if summary.ProofRequestedCount, err = r.store.CountByState(ctx, deposit.StateProofRequested); err != nil {
+		return MetricsSummary{}, err
+	}
+	if summary.SubmittedCount, err = r.store.CountByState(ctx, deposit.StateSubmitted); err != nil {
+		return MetricsSummary{}, err
+	}
+	return summary, nil
 }
 
 func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {

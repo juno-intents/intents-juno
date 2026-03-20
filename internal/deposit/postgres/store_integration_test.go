@@ -145,6 +145,104 @@ func TestStore_StateMachine(t *testing.T) {
 	}
 }
 
+func TestStore_CountByState(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	mkDeposit := func(tag byte) deposit.Deposit {
+		var id [32]byte
+		id[0] = tag
+		var cm [32]byte
+		cm[0] = tag
+		var recip [20]byte
+		recip[19] = tag
+		return deposit.Deposit{
+			DepositID:        id,
+			Commitment:       cm,
+			LeafIndex:        uint64(tag),
+			Amount:           1000 + uint64(tag),
+			BaseRecipient:    recip,
+			ProofWitnessItem: bytes.Repeat([]byte{tag}, 1848),
+		}
+	}
+
+	d1 := mkDeposit(0x21)
+	d2 := mkDeposit(0x22)
+	d3 := mkDeposit(0x23)
+	for _, dep := range []deposit.Deposit{d1, d2, d3} {
+		if _, _, err := s.UpsertConfirmed(ctx, dep); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", dep.DepositID[:4], err)
+		}
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if err := s.MarkProofRequested(ctx, d2.DepositID, cp); err != nil {
+		t.Fatalf("MarkProofRequested d2: %v", err)
+	}
+	if err := s.MarkProofRequested(ctx, d3.DepositID, cp); err != nil {
+		t.Fatalf("MarkProofRequested d3: %v", err)
+	}
+	if err := s.SetProofReady(ctx, d3.DepositID, []byte{0x01}); err != nil {
+		t.Fatalf("SetProofReady d3: %v", err)
+	}
+	if err := s.MarkFinalized(ctx, d3.DepositID, [32]byte{0x77}); err != nil {
+		t.Fatalf("MarkFinalized d3: %v", err)
+	}
+
+	confirmedCount, err := s.CountByState(ctx, deposit.StateConfirmed)
+	if err != nil {
+		t.Fatalf("CountByState confirmed: %v", err)
+	}
+	if confirmedCount != 1 {
+		t.Fatalf("confirmed count: got %d want 1", confirmedCount)
+	}
+
+	proofRequestedCount, err := s.CountByState(ctx, deposit.StateProofRequested)
+	if err != nil {
+		t.Fatalf("CountByState proof_requested: %v", err)
+	}
+	if proofRequestedCount != 1 {
+		t.Fatalf("proof_requested count: got %d want 1", proofRequestedCount)
+	}
+
+	finalizedCount, err := s.CountByState(ctx, deposit.StateFinalized)
+	if err != nil {
+		t.Fatalf("CountByState finalized: %v", err)
+	}
+	if finalizedCount != 1 {
+		t.Fatalf("finalized count: got %d want 1", finalizedCount)
+	}
+}
+
 func TestStore_UpsertSeen_RefreshesWitnessWithoutMismatch(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

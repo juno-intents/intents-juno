@@ -21,6 +21,7 @@ type Store interface {
 	Get(ctx context.Context, depositID [32]byte) (Job, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListByState(ctx context.Context, state State, limit int) ([]Job, error)
+	CountByState(ctx context.Context, state State) (int, error)
 	ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Job, error)
 	ClaimSubmittedAttempts(ctx context.Context, owner string, ttl time.Duration, limit int) ([]SubmittedBatchAttempt, error)
 	PrepareNextBatch(

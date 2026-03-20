@@ -27,6 +27,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/depositscanner"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -67,6 +68,8 @@ type depositEventV2 struct {
 	TxHash           string  `json:"txHash,omitempty"`
 	LogIndex         *uint64 `json:"logIndex,omitempty"`
 }
+
+const depositMetricInterval = time.Minute
 
 func defaultDepositRelayerClaimTTL() time.Duration {
 	return 0
@@ -140,6 +143,18 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, metricsErr := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "deposit-relayer",
+		},
+	})
+	if metricsErr != nil {
+		log.Error("init metrics emitter", "err", metricsErr)
+		os.Exit(2)
+	}
 
 	if *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *depositImageID == "" || *baseRelayerURL == "" || *baseRPCURL == "" || *junoRPCURL == "" {
 		fmt.Fprintln(os.Stderr, "error: --base-chain-id, --bridge-address, --operators, --operator-threshold, --deposit-image-id, --base-relayer-url, --base-rpc-url, and --juno-rpc-url are required")
@@ -479,6 +494,8 @@ func main() {
 
 	t := time.NewTicker(*flushEvery)
 	defer t.Stop()
+	metricsTicker := time.NewTicker(depositMetricInterval)
+	defer metricsTicker.Stop()
 	msgCh := consumer.Messages()
 	errCh := consumer.Errors()
 
@@ -506,6 +523,8 @@ func main() {
 			if err != nil {
 				log.Error("flush due", "err", err)
 			}
+		case <-metricsTicker.C:
+			emitDepositMetrics(ctx, relayer, metricsEmitter, log)
 		case qmsg, ok := <-msgCh:
 			if !ok {
 				// Input stream closed (stdio EOF or consumer shutdown): flush any remaining and exit.
@@ -612,6 +631,31 @@ func main() {
 				continue
 			}
 		}
+	}
+}
+
+func emitDepositMetrics(
+	ctx context.Context,
+	relayer *depositrelayer.Relayer,
+	emitter *emf.Emitter,
+	log *slog.Logger,
+) {
+	if relayer == nil || emitter == nil {
+		return
+	}
+	summary, err := relayer.MetricsSummary(ctx)
+	if err != nil {
+		if log != nil {
+			log.Warn("deposit metrics summary", "err", err)
+		}
+		return
+	}
+	if err := emitter.Emit(
+		emf.Metric{Name: "DepositConfirmedCount", Unit: emf.UnitCount, Value: float64(summary.ConfirmedCount)},
+		emf.Metric{Name: "DepositProofRequestedCount", Unit: emf.UnitCount, Value: float64(summary.ProofRequestedCount)},
+		emf.Metric{Name: "DepositSubmittedCount", Unit: emf.UnitCount, Value: float64(summary.SubmittedCount)},
+	); err != nil && log != nil {
+		log.Warn("emit deposit metrics", "err", err)
 	}
 }
 

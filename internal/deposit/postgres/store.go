@@ -275,6 +275,22 @@ func (s *Store) ListByState(ctx context.Context, state deposit.State, limit int)
 	return out, nil
 }
 
+func (s *Store) CountByState(ctx context.Context, state deposit.State) (int, error) {
+	if s == nil || s.pool == nil {
+		return 0, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	var count int
+	if err := s.pool.QueryRow(ctx, `
+		SELECT COUNT(*)
+		FROM deposit_jobs
+		WHERE state = $1
+	`, int16(state)).Scan(&count); err != nil {
+		return 0, fmt.Errorf("deposit/postgres: count by state: %w", err)
+	}
+	return count, nil
+}
+
 func (s *Store) ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]deposit.Job, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)

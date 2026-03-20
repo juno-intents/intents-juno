@@ -203,6 +203,19 @@ func (s *MemoryStore) ListByState(_ context.Context, state State, limit int) ([]
 	return out, nil
 }
 
+func (s *MemoryStore) CountByState(_ context.Context, state State) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for _, id := range s.order {
+		if s.jobs[id].State == state {
+			count++
+		}
+	}
+	return count, nil
+}
+
 func (s *MemoryStore) ClaimConfirmed(_ context.Context, owner string, ttl time.Duration, limit int) ([]Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -335,14 +348,14 @@ func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time
 	}
 
 	batch := Batch{
-		BatchID:     nextBatchID,
-		State:       BatchStateAssembling,
-		DepositIDs:  [][32]byte{depositID},
-		Owner:       owner,
-		LeaseOwner:  owner,
+		BatchID:        nextBatchID,
+		State:          BatchStateAssembling,
+		DepositIDs:     [][32]byte{depositID},
+		Owner:          owner,
+		LeaseOwner:     owner,
 		LeaseExpiresAt: now.Add(ttl),
-		StartedAt:   now,
-		FailureReason: "",
+		StartedAt:      now,
+		FailureReason:  "",
 	}
 	s.batches[nextBatchID] = batch
 	s.batchOrder = append(s.batchOrder, nextBatchID)

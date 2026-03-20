@@ -213,6 +213,48 @@ resource "aws_cloudwatch_metric_alarm" "confirmed_unmarked_count" {
   ok_actions          = var.alarm_actions
 }
 
+resource "aws_cloudwatch_metric_alarm" "mark_paid_circuit_open" {
+  alarm_name          = "${local.resource_name}-mark-paid-circuit-open"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "MarkPaidCircuitOpen"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Withdraw paid-marker circuit is open and automatic Base marking is disabled."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "deposit_proof_requested_count" {
+  alarm_name          = "${local.resource_name}-deposit-proof-requested-count"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 10
+  metric_name         = "DepositProofRequestedCount"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Deposits have remained proof-requested for at least 10 minutes."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
+resource "aws_cloudwatch_metric_alarm" "deposit_submitted_count" {
+  alarm_name          = "${local.resource_name}-deposit-submitted-count"
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 10
+  metric_name         = "DepositSubmittedCount"
+  namespace           = local.operations_metric_namespace
+  period              = 60
+  statistic           = "Maximum"
+  threshold           = 0
+  alarm_description   = "Deposits have remained submitted for at least 10 minutes."
+  alarm_actions       = var.alarm_actions
+  ok_actions          = var.alarm_actions
+}
+
 resource "aws_cloudwatch_metric_alarm" "min_withdrawal_time_to_expiry_seconds" {
   alarm_name          = "${local.resource_name}-min-withdrawal-time-to-expiry"
   comparison_operator = "LessThanOrEqualToThreshold"

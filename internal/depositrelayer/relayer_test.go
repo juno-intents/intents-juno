@@ -1370,6 +1370,109 @@ func TestRelayer_RejectsOversizedSingleDepositBatchBeforeProofRequest(t *testing
 	}
 }
 
+func TestRelayer_MetricsSummary(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	ctx := context.Background()
+
+	deposits := []deposit.Deposit{
+		{
+			DepositID:     seq32ForRelayer(0x41),
+			Commitment:    seq32ForRelayer(0x51),
+			LeafIndex:     1,
+			Amount:        500,
+			BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+		},
+		{
+			DepositID:     seq32ForRelayer(0x42),
+			Commitment:    seq32ForRelayer(0x52),
+			LeafIndex:     2,
+			Amount:        600,
+			BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000457")),
+		},
+		{
+			DepositID:     seq32ForRelayer(0x43),
+			Commitment:    seq32ForRelayer(0x53),
+			LeafIndex:     3,
+			Amount:        700,
+			BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000458")),
+		},
+	}
+	for _, dep := range deposits {
+		if _, _, err := store.UpsertConfirmed(ctx, dep); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", dep.DepositID[:4], err)
+		}
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if err := store.MarkProofRequested(ctx, deposits[1].DepositID, cp); err != nil {
+		t.Fatalf("MarkProofRequested: %v", err)
+	}
+
+	submittedBatch, ready, err := store.PrepareNextBatch(
+		ctx,
+		"worker-1",
+		time.Minute,
+		seq32ForRelayer(0x62),
+		1,
+		time.Minute,
+		10,
+		time.Now().UTC(),
+	)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch submitted: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected submitted batch to be ready")
+	}
+	if _, err := store.MarkBatchProofRequested(ctx, "worker-1", submittedBatch.BatchID, cp); err != nil {
+		t.Fatalf("MarkBatchProofRequested submitted: %v", err)
+	}
+	if _, err := store.MarkBatchProofReady(ctx, "worker-1", submittedBatch.BatchID, cp, [][]byte{[]byte{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchProofReady submitted: %v", err)
+	}
+	if _, err := store.MarkBatchSubmitted(ctx, "worker-1", submittedBatch.BatchID, submittedBatch.DepositIDs, cp, [][]byte{[]byte{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	r, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+	}, store, &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	summary, err := r.MetricsSummary(ctx)
+	if err != nil {
+		t.Fatalf("MetricsSummary: %v", err)
+	}
+	if summary.ConfirmedCount != 1 {
+		t.Fatalf("confirmed count: got %d want 1", summary.ConfirmedCount)
+	}
+	if summary.ProofRequestedCount != 1 {
+		t.Fatalf("proof_requested count: got %d want 1", summary.ProofRequestedCount)
+	}
+	if summary.SubmittedCount != 1 {
+		t.Fatalf("submitted count: got %d want 1", summary.SubmittedCount)
+	}
+}
+
 func TestRelayer_ApplyBatchOutcomeFromHash_ReconcilesMixedMintedAndSkipped(t *testing.T) {
 	t.Parallel()
 
