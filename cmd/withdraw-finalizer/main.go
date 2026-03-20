@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -578,9 +579,10 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 	if req.AnchorHeight != nil && e.minAnchorHeight != nil {
 		minHeight, err := e.minAnchorHeight(ctx, txHash)
 		if err != nil {
-			return nil, fmt.Errorf("withdraw witness extractor: derive tx minimum anchor height: %w", err)
-		}
-		if *req.AnchorHeight < minHeight {
+			if !errors.Is(err, junorpc.ErrTxNotFound) {
+				return nil, fmt.Errorf("withdraw witness extractor: derive tx minimum anchor height: %w", err)
+			}
+		} else if *req.AnchorHeight < minHeight {
 			return nil, fmt.Errorf(
 				"withdraw witness extractor: anchor height %d below tx minimum anchor height %d for txid=%s",
 				*req.AnchorHeight,

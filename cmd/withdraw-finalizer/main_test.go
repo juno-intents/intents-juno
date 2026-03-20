@@ -445,6 +445,67 @@ func TestWithdrawWitnessExtractor_ExtractDefersWhenAnchorBelowTxMinimumHeight(t 
 	}
 }
 
+func TestWithdrawWitnessExtractor_ExtractSkipsAnchorGuardWhenTxMetadataMissing(t *testing.T) {
+	t.Parallel()
+
+	scan := &stubWitnessScanClient{
+		notes: []witnessextract.WalletNote{
+			{
+				TxID:        strings.Repeat("ab", 32),
+				ActionIndex: 0,
+				Position:    ptrInt64(7),
+				ValueZat:    995,
+			},
+		},
+		witness: witnessextract.WitnessResponse{
+			AnchorHeight: 654,
+			Root:         "0x" + strings.Repeat("cd", 32),
+			Paths: []witnessextract.WitnessPath{
+				{
+					Position: 7,
+					AuthPath: testAuthPathHex(),
+				},
+			},
+		},
+	}
+	rpc := &stubWitnessRPCClient{
+		action: testRPCAction(),
+	}
+
+	var gotAnchorTxID string
+	extractor := &withdrawWitnessExtractor{
+		walletID: "wallet-1",
+		builder:  witnessextract.New(scan, rpc),
+		minAnchorHeight: func(_ context.Context, txid string) (int64, error) {
+			gotAnchorTxID = txid
+			return 0, junorpc.ErrTxNotFound
+		},
+	}
+
+	recipientRaw := bytes.Repeat([]byte{0x7a}, 43)
+	anchorHeight := int64(654)
+	got, err := extractor.ExtractWithdrawWitness(context.Background(), withdrawfinalizer.WithdrawWitnessExtractRequest{
+		TxHash:           strings.Repeat("ab", 32),
+		ActionIndex:      0,
+		ExpectedValueZat: ptrUint64(995),
+		AnchorHeight:     &anchorHeight,
+		WithdrawalID:     [32]byte{},
+		RecipientUA:      recipientRaw,
+	})
+	if err != nil {
+		t.Fatalf("ExtractWithdrawWitness: %v", err)
+	}
+	if len(got) != proverinput.WithdrawWitnessItemLen {
+		t.Fatalf("witness len: got %d want %d", len(got), proverinput.WithdrawWitnessItemLen)
+	}
+	if gotAnchorTxID != strings.Repeat("ab", 32) {
+		t.Fatalf("anchor guard txid: got %q want %q", gotAnchorTxID, strings.Repeat("ab", 32))
+	}
+	if rpc.gotTxID != strings.Repeat("ab", 32) {
+		t.Fatalf("expected orchard action lookup to proceed, got txid=%q", rpc.gotTxID)
+	}
+}
+
 type stubWitnessScanClient struct {
 	notes           []witnessextract.WalletNote
 	notesByWallet   map[string][]witnessextract.WalletNote
