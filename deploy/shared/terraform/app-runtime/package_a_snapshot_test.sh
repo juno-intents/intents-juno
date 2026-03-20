@@ -8,11 +8,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$REPO_ROOT/deploy/production/tests/common_test.sh"
 
 main() {
-  local main_tf variables_tf outputs_tf app_asg app_lt public_lb internal_lb
+  local main_tf variables_tf outputs_tf versions_tf app_asg app_lt public_lb internal_lb
 
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
+  versions_tf="$(cat "$SCRIPT_DIR/versions.tf")"
   app_asg="$(awk '
     /resource "aws_autoscaling_group" "app" \{/ { in_block = 1 }
     in_block { print }
@@ -80,6 +81,7 @@ main() {
   assert_contains "$variables_tf" 'alarm_actions must include at least one CloudWatch action ARN.' "app-runtime requires CloudWatch alarm actions"
   assert_contains "$variables_tf" 'At least two private subnet IDs across AZs for the app autoscaling group.' "app-runtime documents the private subnet requirement"
   assert_contains "$variables_tf" 'At least two public subnet IDs across AZs for the public bridge load balancer.' "app-runtime documents the public subnet requirement"
+  assert_contains "$versions_tf" 'backend "s3" {}' "app-runtime declares an s3 backend block for coordinator bootstrap"
 
   assert_contains "$outputs_tf" 'output "app_role"' "app-runtime exports a structured app role object"
   assert_contains "$outputs_tf" 'asg = aws_autoscaling_group.app.name' "app-runtime structured output includes the app autoscaling group name"
