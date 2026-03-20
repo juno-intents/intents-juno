@@ -61,20 +61,20 @@ flowchart LR
 
 | Symbol | Meaning |
 | --- | --- |
-| $$n$$ | Number of registered operators in the active keyset. |
-| $$t$$ | Threshold required both for checkpoint quorum and Orchard threshold spend control. |
-| $$O = {1, 2, ..., n}$$ | Operator identifier set. |
-| $$S$$ | A subset of operators participating in one signing event, with $S ⊆ O$. |
-| $$C_h$$ | Checkpoint tuple for Junocash height $hx$. |
-| $$ak$$ | Group Orchard spend validating key produced by the threshold key ceremony. |
-| $$nk$$ | Nullifier deriving key used in the Orchard full viewing key. |
-| $$rivk$$ | Orchard commitment randomness key used in the full viewing key. |
-| $$UFVK$$ | Unified full viewing key published for public auditing and witness construction. |
+| $n$ | Number of registered operators in the active keyset. |
+| $t$ | Threshold required both for checkpoint quorum and Orchard threshold spend control. |
+| $O = \{1, 2, \dots, n\}$ | Operator identifier set. |
+| $S$ | A subset of operators participating in one signing event, with $S \subseteq O$. |
+| $C_h$ | Checkpoint tuple for Junocash height $h$. |
+| $ak$ | Group Orchard spend validating key produced by the threshold key ceremony. |
+| $nk$ | Nullifier deriving key used in the Orchard full viewing key. |
+| $rivk$ | Orchard commitment randomness key used in the full viewing key. |
+| $\mathrm{UFVK}$ | Unified full viewing key published for public auditing and witness construction. |
 
 The checkpoint tuple is:
 
 $$
-C_h = (h, blockHash_h, finalOrchardRoot_h, baseChainId, bridgeContract).
+C_h = \left(h, \mathtt{blockHash}_h, \mathtt{finalOrchardRoot}_h, \mathtt{baseChainId}, \mathtt{bridgeContract}\right).
 $$
 
 The Bridge-side threshold condition is:
@@ -139,12 +139,14 @@ The actual FROST signing path does not reconstruct $a_0$ during normal operation
 The UFVK side is deterministic and public-auditable. The current architecture defines:
 
 $$
-nk = H\_to\_base(\text{"WJUNO\_NK\_V1"} \; || \; ak\_bytes)
+nk = \operatorname{HToBase}(d_{nk} \parallel ak_{\mathrm{bytes}})
 $$
 
 $$
-rivk = H\_to\_scalar(\text{"WJUNO\_RIVK\_V1"} \; || \; ak\_bytes)
+rivk = \operatorname{HToScalar}(d_{rivk} \parallel ak_{\mathrm{bytes}})
 $$
+
+where `d_nk` is the literal domain tag `WJUNO_NK_V1`, and `d_rivk` is the literal domain tag `WJUNO_RIVK_V1`.
 
 The full viewing material is then constructed from `(ak, nk, rivk)` and published as a UFVK so deposits, spends, and witnesses can be independently checked without exposing spend authority.
 
@@ -187,14 +189,14 @@ $$
 \exists S \subseteq O \text{ such that } |S| \ge t \text{ and every } i \in S \text{ signed } \mathrm{Digest}(C_h).
 $$
 
-The proof layer then operates strictly relative to $finalOrchardRoot_h$.
+The proof layer then operates strictly relative to $\mathtt{finalOrchardRoot}_h$.
 
 Deposit-side claim:
 
 $$
-\text{deposit\_item} \Rightarrow
+\operatorname{DepositItem} \Rightarrow
 \begin{cases}
-\text{note commitment is in } finalOrchardRoot_h \\
+\text{note commitment is in } \mathtt{finalOrchardRoot}_h \\
 \text{note decrypts under the UFVK-derived viewing material} \\
 \text{memo parses to the intended Base recipient and domain} \\
 \text{amount and deposit identifier are derived deterministically}
@@ -204,9 +206,9 @@ $$
 Withdraw-side claim:
 
 $$
-\text{withdraw\_item} \Rightarrow
+\operatorname{WithdrawItem} \Rightarrow
 \begin{cases}
-\text{output note is in } finalOrchardRoot_h \\
+\text{output note is in } \mathtt{finalOrchardRoot}_h \\
 \text{memo binds the withdrawal identifier and batch identifier} \\
 \text{recipient and net amount match the batch package}
 \end{cases}
@@ -252,18 +254,18 @@ flowchart LR
 For a `3`-of-`5` quorum, the probability that at least three operators are compromised, given per-operator compromise probability `p`, is:
 
 $$
-P\_\text{compromise}(p) = \sum\_{k=3}^{5} \binom{5}{k} p^k (1-p)^{5-k}.
+P_{\mathrm{compromise}}(p) = \sum_{k=3}^{5} \binom{5}{k} p^k (1-p)^{5-k}.
 $$
 
 The probability that the system remains live for threshold signing, given per-operator outage probability `q`, is:
 
 $$
-P\_\text{live}(q) = \sum\_{k=3}^{5} \binom{5}{k} (1-q)^k q^{5-k}.
+P_{\mathrm{live}}(q) = \sum_{k=3}^{5} \binom{5}{k} (1-q)^k q^{5-k}.
 $$
 
 Selected values:
 
-| Per-operator probability | Quorum compromise `P_compromise` | Threshold liveness `P_live` |
+| Per-operator probability | Quorum compromise $P_{\mathrm{compromise}}$ | Threshold liveness $P_{\mathrm{live}}$ |
 | --- | --- | --- |
 | `5%` | `0.1158%` | `99.8842%` |
 | `10%` | `0.8560%` | `99.1440%` |
