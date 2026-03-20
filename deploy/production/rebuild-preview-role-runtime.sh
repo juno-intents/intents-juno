@@ -180,7 +180,7 @@ checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manif
 checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
 checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
 required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics}"
-"$shared_infra_e2e_binary" \
+production_run_release_binary "$shared_infra_e2e_binary" \
   --postgres-dsn "$checkpoint_postgres_dsn" \
   --kafka-brokers "$kafka_brokers" \
   --required-kafka-topics "$required_topics" \

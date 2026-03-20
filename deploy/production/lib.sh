@@ -123,6 +123,66 @@ production_tf_output_json() {
   printf '%s\n' "$value"
 }
 
+production_host_os() {
+  if [[ -n "${PRODUCTION_HOST_OS_OVERRIDE:-}" ]]; then
+    printf '%s\n' "$PRODUCTION_HOST_OS_OVERRIDE"
+    return 0
+  fi
+  uname -s
+}
+
+production_release_binary_runner_image() {
+  printf '%s\n' "${PRODUCTION_RELEASE_BINARY_RUNNER_IMAGE:-docker.io/library/golang:1.24.13-bookworm}"
+}
+
+production_release_binary_requires_runner() {
+  local binary="$1"
+  local file_desc=""
+
+  if [[ "${PRODUCTION_FORCE_RELEASE_BINARY_RUNNER:-false}" == "true" ]]; then
+    return 0
+  fi
+  [[ "$(production_host_os)" == "Linux" ]] && return 1
+  have_cmd file || return 1
+  file_desc="$(file -Lb "$binary" 2>/dev/null || true)"
+  [[ "$file_desc" == ELF* ]]
+}
+
+production_release_binary_mount_root() {
+  local binary="$1"
+  local binary_abs
+
+  binary_abs="$(production_abs_path "$(pwd)" "$binary")"
+  case "$binary_abs" in
+    "$REPO_ROOT"/*)
+      printf '%s\n' "$REPO_ROOT"
+      ;;
+    *)
+      die "release binary must live under repo root on non-linux hosts: $binary_abs"
+      ;;
+  esac
+}
+
+production_run_release_binary() {
+  local binary="$1"
+  shift
+
+  if production_release_binary_requires_runner "$binary"; then
+    local mount_root image
+    have_cmd docker || die "docker is required to run released linux binaries on $(production_host_os)"
+    mount_root="$(production_release_binary_mount_root "$binary")"
+    image="$(production_release_binary_runner_image)"
+    docker run --rm --platform linux/amd64 \
+      --user "$(id -u):$(id -g)" \
+      -v "$mount_root:$mount_root" \
+      -w "$(pwd)" \
+      "$image" /bin/sh -lc 'exec "$@"' sh "$binary" "$@"
+    return 0
+  fi
+
+  "$binary" "$@"
+}
+
 production_inventory_terraform_dir() {
   local inventory="$1"
   local inventory_dir="$2"

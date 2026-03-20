@@ -423,7 +423,7 @@ else
   if [[ -n "$min_deposit_admin_address" ]]; then
     bridge_deploy_cmd+=(--min-deposit-admin-address "$min_deposit_admin_address")
   fi
-  "${bridge_deploy_cmd[@]}"
+  production_run_release_binary "${bridge_deploy_cmd[@]}"
 fi
 production_refresh_bridge_summary_owallet_ua "$bridge_summary" "$dkg_summary" "$dkg_completion"
 

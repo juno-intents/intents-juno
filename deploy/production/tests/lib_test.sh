@@ -252,6 +252,38 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_docker_runner() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'docker %s\n' "\$*" >>"$log_file"
+args=( "\$@" )
+idx=0
+if [[ "\${args[0]:-}" == "run" ]]; then
+  idx=1
+fi
+while [[ \$idx -lt \${#args[@]} ]]; do
+  case "\${args[\$idx]}" in
+    --rm)
+      idx=\$((idx + 1))
+      ;;
+    --platform|--user|-v|-w)
+      idx=\$((idx + 2))
+      ;;
+    *)
+      printf 'image=%s\n' "\${args[\$idx]}" >>"$log_file"
+      idx=\$((idx + 1))
+      break
+      ;;
+  esac
+done
+"\${args[@]:\$idx}"
+EOF
+  chmod +x "$target"
+}
+
 setup_default_checkpoint_signer_kms_provisioner() {
   local workdir fake_bin fake_log
   workdir="$(mktemp -d)"
@@ -2878,6 +2910,56 @@ EOF
   rm -rf "$workdir"
 }
 
+test_production_run_release_binary_executes_directly_on_host_when_runner_not_required() {
+  local workdir fake_binary log_file
+  workdir="$(mktemp -d)"
+  fake_binary="$workdir/fake-release-binary.sh"
+  log_file="$workdir/binary.log"
+
+  cat >"$fake_binary" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'binary %s\n' "\$*" >>"$log_file"
+EOF
+  chmod +x "$fake_binary"
+
+  PRODUCTION_HOST_OS_OVERRIDE=Linux production_run_release_binary "$fake_binary" --hello world
+
+  assert_contains "$(cat "$log_file")" "binary --hello world" "release binary runs directly on linux hosts"
+  rm -rf "$workdir"
+}
+
+test_production_run_release_binary_uses_docker_runner_when_forced() {
+  local workdir fake_binary binary_log fake_docker docker_log path_backup
+  workdir="$(mktemp -d)"
+  fake_binary="$REPO_ROOT/tmp/test-release-binary.sh"
+  binary_log="$workdir/binary.log"
+  fake_docker="$workdir/docker"
+  docker_log="$workdir/docker.log"
+  path_backup="$PATH"
+
+  cat >"$fake_binary" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'binary %s\n' "\$*" >>"$binary_log"
+EOF
+  chmod +x "$fake_binary"
+  write_fake_docker_runner "$fake_docker" "$docker_log"
+
+  PATH="$workdir:$PATH" \
+    PRODUCTION_FORCE_RELEASE_BINARY_RUNNER=true \
+    production_run_release_binary "$fake_binary" --hello container
+
+  assert_contains "$(cat "$docker_log")" "--platform linux/amd64" "docker runner uses linux amd64 platform"
+  assert_contains "$(cat "$docker_log")" "image=docker.io/library/golang:1.24.13-bookworm" "docker runner uses pinned image"
+  assert_contains "$(cat "$docker_log")" "-v $REPO_ROOT:$REPO_ROOT" "docker runner mounts the repo root"
+  assert_contains "$(cat "$binary_log")" "binary --hello container" "docker runner executes the release binary command"
+
+  rm -f "$fake_binary"
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
 main() {
   setup_default_checkpoint_signer_kms_provisioner
   trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
@@ -2920,6 +3002,8 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
+  test_production_run_release_binary_executes_directly_on_host_when_runner_not_required
+  test_production_run_release_binary_uses_docker_runner_when_forced
 }
 
 main "$@"
