@@ -82,6 +82,8 @@ main() {
   assert_contains "$outputs_tf" 'asg = aws_autoscaling_group.app.name' "app-runtime structured output includes the app autoscaling group name"
   assert_contains "$outputs_tf" 'public_lb = {' "app-runtime structured output includes the public load balancer contract"
   assert_contains "$outputs_tf" 'internal_lb = {' "app-runtime structured output includes the internal load balancer contract"
+  assert_contains "$outputs_tf" 'target_group_arn  = aws_lb_target_group.bridge.arn' "app-runtime structured output includes the public bridge target group arn"
+  assert_contains "$outputs_tf" 'target_group_arn  = aws_lb_target_group.backoffice.arn' "app-runtime structured output includes the internal backoffice target group arn"
   assert_contains "$outputs_tf" 'output "app_role_asg_name"' "app-runtime exports the app autoscaling group name"
   assert_contains "$outputs_tf" 'output "app_role_launch_template_id"' "app-runtime exports the app launch template id"
   assert_contains "$outputs_tf" 'output "app_role_launch_template_latest_version"' "app-runtime exports the app launch template version"

@@ -10,11 +10,13 @@ output "app_role" {
       dns_name          = aws_lb.public_bridge.dns_name
       zone_id           = aws_lb.public_bridge.zone_id
       security_group_id = aws_security_group.public_bridge_lb.id
+      target_group_arn  = aws_lb_target_group.bridge.arn
     }
     internal_lb = {
       dns_name          = aws_lb.internal_backoffice.dns_name
       zone_id           = aws_lb.internal_backoffice.zone_id
       security_group_id = aws_security_group.internal_backoffice_lb.id
+      target_group_arn  = aws_lb_target_group.backoffice.arn
     }
   }
 }

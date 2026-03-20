@@ -51,11 +51,6 @@ done
 for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
-if [[ "$dry_run" != "true" ]]; then
-  for cmd in ssh curl cast aws; do
-    have_cmd "$cmd" || die "required command not found: $cmd"
-  done
-fi
 
 manifest_dir="$(cd "$(dirname "$app_deploy")" && pwd)"
 environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
@@ -67,10 +62,20 @@ shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_r
 known_hosts_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.known_hosts_file | select(type == "string" and length > 0)')")"
 secret_contract_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$app_deploy" '.secret_contract_file | select(type == "string" and length > 0)')")"
 app_role_json="$(production_json_optional "$app_deploy" '.app_role')"
+app_role_asg=""
+app_public_lb_target_group_arn=""
+app_internal_lb_target_group_arn=""
+app_role_mode="false"
 if [[ -n "$app_role_json" ]] && [[ "$(jq -r 'length' <<<"$app_role_json")" != "0" ]]; then
   app_host="$(jq -r '.host // empty' <<<"$app_role_json")"
   app_user="$(jq -r '.user // "ubuntu"' <<<"$app_role_json")"
   runtime_dir="$(jq -r '.runtime_dir // "/var/lib/intents-juno/app-runtime"' <<<"$app_role_json")"
+  app_role_asg="$(jq -r '.asg // empty' <<<"$app_role_json")"
+  app_public_lb_target_group_arn="$(jq -r '.public_lb.target_group_arn // empty' <<<"$app_role_json")"
+  app_internal_lb_target_group_arn="$(jq -r '.internal_lb.target_group_arn // empty' <<<"$app_role_json")"
+  if [[ -n "$app_role_asg" && -n "$app_public_lb_target_group_arn" && -n "$app_internal_lb_target_group_arn" ]]; then
+    app_role_mode="true"
+  fi
 else
   app_host="$(production_json_required "$app_deploy" '.app_host | select(type == "string" and length > 0)')"
   app_user="$(production_json_required "$app_deploy" '.app_user | select(type == "string" and length > 0)')"
@@ -87,7 +92,11 @@ backoffice_probe_url="$backoffice_public_url"
 backoffice_probe_transport="direct"
 if [[ "$backoffice_access_mode" == "wireguard" ]]; then
   backoffice_probe_url="$backoffice_internal_url"
-  backoffice_probe_transport="ssh-local"
+  if [[ "$app_role_mode" == "true" ]]; then
+    backoffice_probe_transport="ssm-local"
+  else
+    backoffice_probe_transport="ssh-local"
+  fi
 fi
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
 base_chain_id="$(production_json_required "$shared_manifest_path" '.contracts.base_chain_id')"
@@ -99,10 +108,20 @@ shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_p
 shared_proof_role_asg="$(production_json_optional "$shared_manifest_path" '.shared_roles.proof.asg')"
 
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
-[[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
 [[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"
+if [[ "$app_role_mode" != "true" ]]; then
+  [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
+fi
 [[ "$public_scheme" == "https" ]] || die "app deploy manifest must use public_scheme=https"
 [[ "$bridge_probe_url" == https://* ]] || die "bridge probe url must use https: $bridge_probe_url"
+if [[ "$dry_run" != "true" ]]; then
+  for cmd in curl cast aws; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+  if [[ "$app_role_mode" != "true" ]]; then
+    have_cmd ssh || die "required command not found: ssh"
+  fi
+fi
 case "$backoffice_probe_transport" in
   direct)
     [[ -n "$backoffice_probe_url" ]] || die "backoffice probe url is required when directly accessible"
@@ -111,15 +130,28 @@ case "$backoffice_probe_transport" in
   ssh-local)
     [[ "$backoffice_probe_url" == http://127.0.0.1:* ]] || die "wireguard backoffice probes must use host-local http via ssh: $backoffice_probe_url"
     ;;
+  ssm-local)
+    [[ "$backoffice_probe_url" == http://127.0.0.1:* ]] || die "wireguard backoffice probes must use host-local http via ssm: $backoffice_probe_url"
+    ;;
   *)
     die "unsupported backoffice probe transport: $backoffice_probe_transport"
     ;;
 esac
 
+aws_args=()
+[[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
+[[ -n "$aws_region" ]] && aws_args+=(--region "$aws_region")
+
 input_status="passed"
 input_detail="handoff inputs present"
 systemd_status="passed"
 systemd_detail="bridge-api and backoffice active"
+app_capacity_status="skipped"
+app_capacity_detail="legacy host runtime"
+public_bridge_lb_status="skipped"
+public_bridge_lb_detail="legacy host runtime"
+internal_backoffice_lb_status="skipped"
+internal_backoffice_lb_detail="legacy host runtime"
 bridge_ready_status="passed"
 bridge_ready_detail="bridge-api /readyz passed"
 bridge_config_status="passed"
@@ -150,6 +182,7 @@ deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
 tmp_dir="$(mktemp -d)"
 resolved_env="$tmp_dir/app-secrets.resolved.env"
+app_ssm_instance_id=""
 cleanup() {
   rm -rf "$tmp_dir"
 }
@@ -275,12 +308,132 @@ ssh_http_get_with_retry() {
   return 1
 }
 
-backoffice_http_get_with_retry() {
-  if [[ "$backoffice_probe_transport" == "ssh-local" ]]; then
-    ssh_http_get_with_retry "$@"
-  else
-    http_get_with_retry "$@"
+ssm_run_shell_command() {
+  local instance_id="$1"
+  local command="$2"
+  local send_json command_id invocation_json invocation_status stderr stdout parameters_json
+
+  parameters_json="$(jq -cn --arg command "$command" '{commands: [$command]}')"
+
+  send_json="$(AWS_PAGER="" aws "${aws_args[@]}" ssm send-command \
+    --instance-ids "$instance_id" \
+    --document-name "AWS-RunShellScript" \
+    --parameters "$parameters_json" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$send_json" ]] || return 1
+  command_id="$(jq -r '.Command.CommandId // empty' <<<"$send_json")"
+  [[ -n "$command_id" ]] || return 1
+
+  invocation_json="$(AWS_PAGER="" aws "${aws_args[@]}" ssm get-command-invocation \
+    --command-id "$command_id" \
+    --instance-id "$instance_id" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$invocation_json" ]] || return 1
+  invocation_status="$(jq -r '.Status // empty' <<<"$invocation_json")"
+  stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
+  stderr="$(jq -r '.StandardErrorContent // ""' <<<"$invocation_json")"
+  if [[ "$invocation_status" != "Success" ]]; then
+    [[ -n "$stderr" ]] && printf '%s\n' "$stderr" >&2
+    return 1
   fi
+  printf '%s' "$stdout"
+}
+
+ssm_http_get_with_retry() {
+  local url="$1"
+  local label="$2"
+  shift 2
+  local response_file error_file
+  local ssm_status attempt remote_cmd
+  local -a remote_argv=(curl -fsS)
+
+  [[ -n "$app_ssm_instance_id" ]] || return 1
+
+  response_file="$(mktemp)"
+  error_file="$(mktemp)"
+  for ((attempt = 1; attempt <= http_retry_max_attempts; attempt++)); do
+    : >"$response_file"
+    : >"$error_file"
+    remote_argv=(curl -fsS)
+    if (($# > 0)); then
+      remote_argv+=("$@")
+    fi
+    remote_argv+=("$url")
+    printf -v remote_cmd '%q ' "${remote_argv[@]}"
+    set +e
+    ssm_run_shell_command "$app_ssm_instance_id" "$remote_cmd" >"$response_file" 2>"$error_file"
+    ssm_status=$?
+    set -e
+
+    if (( ssm_status == 0 )); then
+      cat "$response_file"
+      rm -f "$response_file"
+      rm -f "$error_file"
+      return 0
+    fi
+
+    if (( attempt < http_retry_max_attempts )); then
+      sleep "$http_retry_sleep_seconds"
+    fi
+  done
+
+  if [[ -s "$response_file" ]]; then
+    cat "$response_file" >&2
+  fi
+  if [[ -s "$error_file" ]]; then
+    cat "$error_file" >&2
+  fi
+  printf 'ssm http probe failed label=%s url=%s\n' "$label" "$url" >&2
+  rm -f "$response_file"
+  rm -f "$error_file"
+  return 1
+}
+
+check_asg_capacity() {
+  local asg_name="$1"
+  local min_healthy="$2"
+  local asg_json
+
+  asg_json="$(AWS_PAGER="" aws "${aws_args[@]}" autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names "$asg_name" --output json 2>/dev/null || true)"
+  if [[ -z "$asg_json" ]] \
+    || ! jq -e --argjson min_healthy "$min_healthy" '
+      (.AutoScalingGroups | length) == 1
+      and ((.AutoScalingGroups[0].DesiredCapacity // 0) >= $min_healthy)
+      and ([.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")] | length) >= $min_healthy
+    ' >/dev/null <<<"$asg_json"; then
+    return 1
+  fi
+  printf '%s' "$asg_json"
+}
+
+check_target_group_health() {
+  local target_group_arn="$1"
+  local min_healthy="$2"
+  local target_health_json
+
+  target_health_json="$(AWS_PAGER="" aws "${aws_args[@]}" elbv2 describe-target-health \
+    --target-group-arn "$target_group_arn" --output json 2>/dev/null || true)"
+  if [[ -z "$target_health_json" ]] \
+    || ! jq -e --argjson min_healthy "$min_healthy" '
+      ([.TargetHealthDescriptions[]? | select(.TargetHealth.State == "healthy")] | length) >= $min_healthy
+    ' >/dev/null <<<"$target_health_json"; then
+    return 1
+  fi
+}
+
+backoffice_http_get_with_retry() {
+  case "$backoffice_probe_transport" in
+    ssh-local)
+      ssh_http_get_with_retry "$@"
+      ;;
+    ssm-local)
+      ssm_http_get_with_retry "$@"
+      ;;
+    *)
+      http_get_with_retry "$@"
+      ;;
+  esac
 }
 
 if [[ "$dry_run" == "true" ]]; then
@@ -288,6 +441,12 @@ if [[ "$dry_run" == "true" ]]; then
   input_detail="dry run"
   systemd_status="skipped"
   systemd_detail="dry run"
+  app_capacity_status="skipped"
+  app_capacity_detail="dry run"
+  public_bridge_lb_status="skipped"
+  public_bridge_lb_detail="dry run"
+  internal_backoffice_lb_status="skipped"
+  internal_backoffice_lb_detail="dry run"
   bridge_ready_status="skipped"
   bridge_ready_detail="dry run"
   bridge_config_status="skipped"
@@ -312,15 +471,58 @@ if [[ "$dry_run" == "true" ]]; then
   shared_proof_services_detail="dry run"
 else
   production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
-  ssh_target="${app_user}@${app_host}"
-  for svc in bridge-api backoffice; do
-    svc_status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
-    if [[ "$svc_status" != "active" ]]; then
-      systemd_status="failed"
-      systemd_detail="service inactive: $svc"
-      break
+  if [[ "$app_role_mode" == "true" ]]; then
+    [[ -n "$aws_region" ]] || die "app deploy manifest is missing aws_region"
+    app_asg_json="$(check_asg_capacity "$app_role_asg" 2 || true)"
+    if [[ -z "$app_asg_json" ]]; then
+      app_capacity_status="failed"
+      app_capacity_detail="app role asg does not have two healthy in-service instances"
+    else
+      app_capacity_status="passed"
+      app_capacity_detail="app role asg healthy"
+      app_ssm_instance_id="$(jq -r '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")][0].InstanceId // empty' <<<"$app_asg_json")"
     fi
-  done
+
+    if ! check_target_group_health "$app_public_lb_target_group_arn" 2; then
+      public_bridge_lb_status="failed"
+      public_bridge_lb_detail="public bridge target group does not have two healthy targets"
+    else
+      public_bridge_lb_status="passed"
+      public_bridge_lb_detail="public bridge target group healthy"
+    fi
+
+    if ! check_target_group_health "$app_internal_lb_target_group_arn" 2; then
+      internal_backoffice_lb_status="failed"
+      internal_backoffice_lb_detail="internal backoffice target group does not have two healthy targets"
+    else
+      internal_backoffice_lb_status="passed"
+      internal_backoffice_lb_detail="internal backoffice target group healthy"
+    fi
+
+    if [[ -z "$app_ssm_instance_id" ]]; then
+      systemd_status="failed"
+      systemd_detail="app role asg does not expose a healthy instance id for ssm checks"
+    else
+      for svc in bridge-api backoffice; do
+        svc_status="$(ssm_run_shell_command "$app_ssm_instance_id" "sudo systemctl is-active $svc" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
+        if [[ "$svc_status" != "active" ]]; then
+          systemd_status="failed"
+          systemd_detail="service inactive: $svc"
+          break
+        fi
+      done
+    fi
+  else
+    ssh_target="${app_user}@${app_host}"
+    for svc in bridge-api backoffice; do
+      svc_status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
+      if [[ "$svc_status" != "active" ]]; then
+        systemd_status="failed"
+        systemd_detail="service inactive: $svc"
+        break
+      fi
+    done
+  fi
 
   if ! http_get_with_retry "${bridge_probe_url}/readyz" "bridge readyz" >/dev/null; then
     bridge_ready_status="failed"
@@ -474,17 +676,7 @@ else
 
   if [[ -n "$shared_proof_role_asg" ]]; then
     [[ -n "$aws_region" ]] || die "app deploy manifest is missing aws_region"
-    aws_args=()
-    [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
-    aws_args+=(--region "$aws_region")
-    proof_role_asg_json="$(AWS_PAGER="" aws "${aws_args[@]}" autoscaling describe-auto-scaling-groups \
-      --auto-scaling-group-names "$shared_proof_role_asg" --output json 2>/dev/null || true)"
-    if [[ -z "$proof_role_asg_json" ]] \
-      || ! jq -e '
-        (.AutoScalingGroups | length) == 1
-        and ((.AutoScalingGroups[0].DesiredCapacity // 0) >= 2)
-        and ([.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")] | length) >= 2
-      ' >/dev/null <<<"$proof_role_asg_json"; then
+    if ! proof_role_asg_json="$(check_asg_capacity "$shared_proof_role_asg" 2 || true)" || [[ -z "$proof_role_asg_json" ]]; then
       shared_proof_services_status="failed"
       shared_proof_services_detail="shared proof role asg does not have two healthy in-service instances"
     else
@@ -516,6 +708,9 @@ ready_for_test="true"
 for status in \
   "$input_status" \
   "$systemd_status" \
+  "$app_capacity_status" \
+  "$public_bridge_lb_status" \
+  "$internal_backoffice_lb_status" \
   "$bridge_ready_status" \
   "$bridge_config_status" \
   "$deposit_memo_status" \
@@ -546,6 +741,12 @@ jq -n \
   --arg input_detail "$input_detail" \
   --arg systemd_status "$systemd_status" \
   --arg systemd_detail "$systemd_detail" \
+  --arg app_capacity_status "$app_capacity_status" \
+  --arg app_capacity_detail "$app_capacity_detail" \
+  --arg public_bridge_lb_status "$public_bridge_lb_status" \
+  --arg public_bridge_lb_detail "$public_bridge_lb_detail" \
+  --arg internal_backoffice_lb_status "$internal_backoffice_lb_status" \
+  --arg internal_backoffice_lb_detail "$internal_backoffice_lb_detail" \
   --arg bridge_ready_status "$bridge_ready_status" \
   --arg bridge_ready_detail "$bridge_ready_detail" \
   --arg bridge_config_status "$bridge_config_status" \
@@ -585,6 +786,18 @@ jq -n \
       systemd: {
         status: $systemd_status,
         detail: $systemd_detail
+      },
+      app_capacity: {
+        status: $app_capacity_status,
+        detail: $app_capacity_detail
+      },
+      public_bridge_lb: {
+        status: $public_bridge_lb_status,
+        detail: $public_bridge_lb_detail
+      },
+      internal_backoffice_lb: {
+        status: $internal_backoffice_lb_status,
+        detail: $internal_backoffice_lb_detail
       },
       bridge_ready: {
         status: $bridge_ready_status,
