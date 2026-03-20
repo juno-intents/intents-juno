@@ -156,12 +156,19 @@ jobs:
           fi
           if [[ -n "${{ inputs.existing_bridge_summary_path }}" ]]; then
             args+=(--existing-bridge-summary "${{ inputs.existing_bridge_summary_path }}")
-          elif [[ -n "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" ]]; then
-            printf '%s\n' "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" > .ci/preview-deployer.key
-            chmod 0600 .ci/preview-deployer.key
-            args+=(--deployer-key-file .ci/preview-deployer.key)
+          elif [[ -n "${{ secrets.PREVIEW_BRIDGE_FUNDER_KEY }}" ]]; then
+            [[ -n "${{ vars.PREVIEW_BRIDGE_EPHEMERAL_FUNDING_AMOUNT_WEI }}" ]] || {
+              echo "PREVIEW_BRIDGE_EPHEMERAL_FUNDING_AMOUNT_WEI variable is required when redeploying the preview bridge" >&2
+              exit 1
+            }
+            printf '%s\n' "${{ secrets.PREVIEW_BRIDGE_FUNDER_KEY }}" > .ci/preview-funder.key
+            chmod 0600 .ci/preview-funder.key
+            args+=(
+              --funder-key-file .ci/preview-funder.key
+              --ephemeral-funding-amount-wei "${{ vars.PREVIEW_BRIDGE_EPHEMERAL_FUNDING_AMOUNT_WEI }}"
+            )
           else
-            echo "existing_bridge_summary_path or PREVIEW_BRIDGE_DEPLOYER_KEY secret is required" >&2
+            echo "existing_bridge_summary_path or PREVIEW_BRIDGE_FUNDER_KEY secret is required" >&2
             exit 1
           fi
           "${args[@]}"

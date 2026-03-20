@@ -34,6 +34,8 @@ main() {
   assert_contains "$reset_preview_workflow" 'shared-infra-e2e_linux_amd64' "preview reset workflow downloads the released shared-infra-e2e binary"
   assert_contains "$reset_preview_workflow" 'role-runtime-release-lock.json' "preview reset workflow publishes a release lock artifact"
   assert_contains "$reset_preview_workflow" 'must not use latest tags' "preview reset workflow rejects latest tags"
+  assert_contains "$reset_preview_workflow" 'PREVIEW_BRIDGE_FUNDER_KEY' "preview reset workflow uses the preview bridge funder secret for ephemeral bridge deployment"
+  assert_contains "$reset_preview_workflow" 'PREVIEW_BRIDGE_EPHEMERAL_FUNDING_AMOUNT_WEI' "preview reset workflow requires an explicit preview bridge ephemeral funding amount"
 
   assert_contains "$mainnet_workflow" 'preview_run_id' "mainnet deploy workflow requires the preview workflow run id"
   assert_contains "$mainnet_workflow" 'environment: production' "mainnet deploy workflow is gated by the production environment"
