@@ -1,4 +1,4 @@
-# DKG Trust Whitepaper
+# Juno Intents Whitepaper
 
 ## 1. Thesis And Threat Model
 
