@@ -101,6 +101,7 @@ main() {
   assert_contains "$variables_tf" 'variable "shared_ipfs_data_volume_size_gb"' "production-shared exposes dedicated IPFS data volume sizing"
   assert_contains "$variables_tf" 'variable "shared_wireguard_public_subnet_id"' "production-shared exposes the dedicated wireguard public subnet input"
   assert_contains "$variables_tf" 'variable "shared_wireguard_public_subnet_ids"' "production-shared exposes the active-active wireguard public subnet inputs"
+  assert_contains "$variables_tf" 'variable "shared_wireguard_source_cidrs"' "production-shared exposes wireguard source cidrs for handoff and backoffice allowlisting"
   assert_contains "$variables_tf" 'variable "shared_wireguard_role_ami_id"' "production-shared exposes the wireguard role ami input"
   assert_contains "$variables_tf" 'variable "shared_wireguard_named_peers"' "production-shared exposes named wireguard peers"
   assert_contains "$variables_tf" 'variable "shared_wireguard_backoffice_private_endpoint_ips"' "production-shared exposes backoffice private endpoint IPs for wireguard peers"

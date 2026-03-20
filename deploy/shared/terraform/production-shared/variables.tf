@@ -471,6 +471,12 @@ variable "shared_wireguard_network_cidr" {
   default     = "10.66.0.0/24"
 }
 
+variable "shared_wireguard_source_cidrs" {
+  description = "CIDR blocks that represent the WireGuard gateway source ranges used by downstream handoffs and allowlists."
+  type        = list(string)
+  default     = []
+}
+
 variable "shared_wireguard_backoffice_hostname" {
   description = "Backoffice hostname resolved over the dedicated WireGuard gateway when shared_wireguard_enabled=true."
   type        = string
