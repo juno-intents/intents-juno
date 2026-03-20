@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-labelledby="title desc">
+  <title id="title">Quorum compromise probability for a 3-of-5 operator set</title>
+  <desc id="desc">Line chart showing the probability that at least three of five operators are compromised as per-operator compromise probability increases from zero to fifty percent.</desc>
+  <rect width="900" height="520" fill="#ffffff" />
+
+  <text x="44" y="36" fill="#111827" font-size="24" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">Quorum Compromise Probability</text>
+  <text x="44" y="60" fill="#4b5563" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">3-of-5 operator quorum. x-axis: per-operator compromise probability p. y-axis: probability that at least 3 of 5 are compromised.</text>
+
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="110" y1="340" x2="800" y2="340" />
+    <line x1="110" y1="292" x2="800" y2="292" />
+    <line x1="110" y1="244" x2="800" y2="244" />
+    <line x1="110" y1="196" x2="800" y2="196" />
+    <line x1="110" y1="148" x2="800" y2="148" />
+    <line x1="110" y1="100" x2="800" y2="100" />
+
+    <line x1="110" y1="100" x2="110" y2="340" />
+    <line x1="248" y1="100" x2="248" y2="340" />
+    <line x1="386" y1="100" x2="386" y2="340" />
+    <line x1="524" y1="100" x2="524" y2="340" />
+    <line x1="662" y1="100" x2="662" y2="340" />
+    <line x1="800" y1="100" x2="800" y2="340" />
+  </g>
+
+  <g stroke="#111827" stroke-width="1.5">
+    <line x1="110" y1="340" x2="800" y2="340" />
+    <line x1="110" y1="100" x2="110" y2="340" />
+  </g>
+
+  <polygon
+    fill="#fef2f2"
+    points="110.0,340.0 137.6,340.0 165.2,339.7 192.8,339.1 220.4,337.8 248.0,335.9 275.6,333.1 303.2,329.4 330.8,324.8 358.4,319.0 386.0,312.2 413.6,304.3 441.2,295.2 468.8,285.1 496.4,273.9 524.0,261.7 551.6,248.5 579.2,234.5 606.8,219.6 634.4,203.9 662.0,187.6 689.6,170.8 717.2,153.5 744.8,135.8 772.4,118.0 800.0,100.0 800,340 110,340"
+  />
+  <polyline
+    fill="none"
+    stroke="#b91c1c"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    points="110.0,340.0 137.6,340.0 165.2,339.7 192.8,339.1 220.4,337.8 248.0,335.9 275.6,333.1 303.2,329.4 330.8,324.8 358.4,319.0 386.0,312.2 413.6,304.3 441.2,295.2 468.8,285.1 496.4,273.9 524.0,261.7 551.6,248.5 579.2,234.5 606.8,219.6 634.4,203.9 662.0,187.6 689.6,170.8 717.2,153.5 744.8,135.8 772.4,118.0 800.0,100.0"
+  />
+
+  <g fill="#b91c1c" stroke="#ffffff" stroke-width="2">
+    <circle cx="248" cy="335.9" r="5" />
+    <circle cx="386" cy="312.2" r="5" />
+    <circle cx="524" cy="261.7" r="5" />
+  </g>
+
+  <g fill="#111827" font-size="11" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="72" y="344">0%</text>
+    <text x="66" y="296">10%</text>
+    <text x="66" y="248">20%</text>
+    <text x="66" y="200">30%</text>
+    <text x="66" y="152">40%</text>
+    <text x="66" y="104">50%</text>
+
+    <text x="102" y="362">0%</text>
+    <text x="236" y="362">10%</text>
+    <text x="374" y="362">20%</text>
+    <text x="512" y="362">30%</text>
+    <text x="650" y="362">40%</text>
+    <text x="788" y="362">50%</text>
+  </g>
+
+  <rect x="110" y="388" width="690" height="88" rx="12" fill="#f9fafb" stroke="#e5e7eb" />
+  <g font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <circle cx="138" cy="414" r="5" fill="#b91c1c" />
+    <text x="154" y="418" fill="#111827">p = 10% -> quorum compromise = 0.856%</text>
+    <circle cx="138" cy="438" r="5" fill="#b91c1c" />
+    <text x="154" y="442" fill="#111827">p = 20% -> quorum compromise = 5.792%</text>
+    <circle cx="138" cy="462" r="5" fill="#b91c1c" />
+    <text x="154" y="466" fill="#111827">p = 30% -> quorum compromise = 16.308%</text>
+  </g>
+
+  <text x="390" y="502" fill="#111827" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">Per-operator compromise probability p</text>
+  <text x="0" y="0" fill="#111827" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" text-anchor="middle" dominant-baseline="middle" transform="translate(34 220) rotate(-90)">Probability that at least 3 of 5 are compromised</text>
+</svg>

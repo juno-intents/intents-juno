@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 900 520" role="img" aria-labelledby="title desc">
+  <title id="title">Threshold liveness probability for a 3-of-5 operator set</title>
+  <desc id="desc">Line chart showing the probability that at least three of five operators remain available for signing as per-operator outage probability increases from zero to fifty percent.</desc>
+  <rect width="900" height="520" fill="#ffffff" />
+
+  <text x="44" y="36" fill="#111827" font-size="24" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">Threshold Liveness Probability</text>
+  <text x="44" y="60" fill="#4b5563" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">3-of-5 operator quorum. x-axis: per-operator outage probability q. y-axis: probability that at least 3 of 5 remain available.</text>
+
+  <g stroke="#e5e7eb" stroke-width="1">
+    <line x1="110" y1="340" x2="800" y2="340" />
+    <line x1="110" y1="292" x2="800" y2="292" />
+    <line x1="110" y1="244" x2="800" y2="244" />
+    <line x1="110" y1="196" x2="800" y2="196" />
+    <line x1="110" y1="148" x2="800" y2="148" />
+    <line x1="110" y1="100" x2="800" y2="100" />
+
+    <line x1="110" y1="100" x2="110" y2="340" />
+    <line x1="248" y1="100" x2="248" y2="340" />
+    <line x1="386" y1="100" x2="386" y2="340" />
+    <line x1="524" y1="100" x2="524" y2="340" />
+    <line x1="662" y1="100" x2="662" y2="340" />
+    <line x1="800" y1="100" x2="800" y2="340" />
+  </g>
+
+  <g stroke="#111827" stroke-width="1.5">
+    <line x1="110" y1="340" x2="800" y2="340" />
+    <line x1="110" y1="100" x2="110" y2="340" />
+  </g>
+
+  <polygon
+    fill="#ecfdf5"
+    points="110.0,100.0 137.6,100.0 165.2,100.3 192.8,100.9 220.4,102.2 248.0,104.1 275.6,106.9 303.2,110.6 330.8,115.2 358.4,121.0 386.0,127.8 413.6,135.7 441.2,144.8 468.8,154.9 496.4,166.1 524.0,178.3 551.6,191.5 579.2,205.5 606.8,220.4 634.4,236.1 662.0,252.4 689.6,269.2 717.2,286.5 744.8,304.2 772.4,322.0 800.0,340.0 800,340 110,340"
+  />
+  <polyline
+    fill="none"
+    stroke="#047857"
+    stroke-width="3"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+    points="110.0,100.0 137.6,100.0 165.2,100.3 192.8,100.9 220.4,102.2 248.0,104.1 275.6,106.9 303.2,110.6 330.8,115.2 358.4,121.0 386.0,127.8 413.6,135.7 441.2,144.8 468.8,154.9 496.4,166.1 524.0,178.3 551.6,191.5 579.2,205.5 606.8,220.4 634.4,236.1 662.0,252.4 689.6,269.2 717.2,286.5 744.8,304.2 772.4,322.0 800.0,340.0"
+  />
+
+  <g fill="#047857" stroke="#ffffff" stroke-width="2">
+    <circle cx="248" cy="104.1" r="5" />
+    <circle cx="386" cy="127.8" r="5" />
+    <circle cx="524" cy="178.3" r="5" />
+  </g>
+
+  <g fill="#111827" font-size="11" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <text x="66" y="344">50%</text>
+    <text x="66" y="296">60%</text>
+    <text x="66" y="248">70%</text>
+    <text x="66" y="200">80%</text>
+    <text x="66" y="152">90%</text>
+    <text x="60" y="104">100%</text>
+
+    <text x="102" y="362">0%</text>
+    <text x="236" y="362">10%</text>
+    <text x="374" y="362">20%</text>
+    <text x="512" y="362">30%</text>
+    <text x="650" y="362">40%</text>
+    <text x="788" y="362">50%</text>
+  </g>
+
+  <rect x="110" y="388" width="690" height="88" rx="12" fill="#f9fafb" stroke="#e5e7eb" />
+  <g font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">
+    <circle cx="138" cy="414" r="5" fill="#047857" />
+    <text x="154" y="418" fill="#111827">q = 10% -> threshold liveness = 99.144%</text>
+    <circle cx="138" cy="438" r="5" fill="#047857" />
+    <text x="154" y="442" fill="#111827">q = 20% -> threshold liveness = 94.208%</text>
+    <circle cx="138" cy="462" r="5" fill="#047857" />
+    <text x="154" y="466" fill="#111827">q = 30% -> threshold liveness = 83.692%</text>
+  </g>
+
+  <text x="410" y="502" fill="#111827" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif">Per-operator outage probability q</text>
+  <text x="0" y="0" fill="#111827" font-size="12" font-family="ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, Segoe UI, sans-serif" text-anchor="middle" dominant-baseline="middle" transform="translate(34 220) rotate(-90)">Probability that at least 3 of 5 remain available</text>
+</svg>
