@@ -19,7 +19,9 @@ main() {
   assert_contains "$app_workflow" 'gh release download "$app_binaries_release_tag"' "app runtime ami workflow downloads pinned app binaries"
   assert_contains "$app_workflow" 'cd /tmp/app-binaries' "app runtime ami workflow verifies app binaries before installation"
   assert_contains "$app_workflow" 'install -m 0755 /tmp/app-binaries/bridge-api_linux_amd64 /usr/local/bin/bridge-api' "app runtime ami workflow installs bridge-api after checksum verification"
-  assert_contains "$app_workflow" 'amazon-ssm-agent.deb' "app runtime ami workflow installs the SSM agent into the AMI"
+  assert_contains "$app_workflow" 'snap list amazon-ssm-agent' "app runtime ami workflow detects the preinstalled snap-based SSM agent"
+  assert_contains "$app_workflow" 'snap.amazon-ssm-agent.amazon-ssm-agent.service' "app runtime ami workflow manages the snap-based SSM service when present"
+  assert_contains "$app_workflow" 'amazon-ssm-agent.deb' "app runtime ami workflow keeps a deb-based SSM fallback"
   assert_contains "$app_workflow" 'aws-actions/configure-aws-credentials@v4' "app runtime ami workflow configures AWS credentials"
 
   assert_contains "$wireguard_workflow" 'wireguard-role-ami-manifest.json' "wireguard ami workflow publishes the wireguard manifest"
