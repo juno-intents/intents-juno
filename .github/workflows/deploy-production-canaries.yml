@@ -4,12 +4,24 @@ on:
   pull_request:
     paths:
       - "deploy/production/**"
+      - ".github/workflows/release-app-binaries.yml"
+      - ".github/workflows/release-app-runtime-ami.yml"
+      - ".github/workflows/release-wireguard-role-ami.yml"
+      - ".github/workflows/release-shared-proof-services-image.yml"
+      - ".github/workflows/deploy-preview-role-runtime.yml"
+      - ".github/workflows/deploy-mainnet-role-runtime.yml"
       - ".github/workflows/deploy-production-canaries.yml"
   push:
     branches:
       - main
     paths:
       - "deploy/production/**"
+      - ".github/workflows/release-app-binaries.yml"
+      - ".github/workflows/release-app-runtime-ami.yml"
+      - ".github/workflows/release-wireguard-role-ami.yml"
+      - ".github/workflows/release-shared-proof-services-image.yml"
+      - ".github/workflows/deploy-preview-role-runtime.yml"
+      - ".github/workflows/deploy-mainnet-role-runtime.yml"
       - ".github/workflows/deploy-production-canaries.yml"
 
 jobs:

@@ -1,0 +1,283 @@
+name: deploy-preview-role-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      inventory_path:
+        description: "Deployment inventory JSON path"
+        required: true
+        type: string
+      dkg_summary_path:
+        description: "DKG summary JSON path"
+        required: true
+        type: string
+      dkg_completion_path:
+        description: "Optional DKG completion JSON path"
+        required: false
+        default: ""
+        type: string
+      existing_bridge_summary_path:
+        description: "Optional existing bridge summary JSON path"
+        required: false
+        default: ""
+        type: string
+      app_binaries_release_tag:
+        description: "Pinned app binaries release tag"
+        required: true
+        type: string
+      app_runtime_ami_release_tag:
+        description: "Pinned app runtime AMI release tag"
+        required: true
+        type: string
+      shared_proof_services_image_release_tag:
+        description: "Pinned shared proof image release tag"
+        required: true
+        type: string
+      wireguard_role_ami_release_tag:
+        description: "Pinned wireguard role AMI release tag"
+        required: true
+        type: string
+      operator_stack_ami_release_tag:
+        description: "Optional operator stack AMI release tag"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  deploy-preview:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Validate Pinned Release Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=(
+            "${{ inputs.app_binaries_release_tag }}"
+            "${{ inputs.app_runtime_ami_release_tag }}"
+            "${{ inputs.shared_proof_services_image_release_tag }}"
+            "${{ inputs.wireguard_role_ami_release_tag }}"
+          )
+          if [[ -n "${{ inputs.operator_stack_ami_release_tag }}" ]]; then
+            tags+=("${{ inputs.operator_stack_ami_release_tag }}")
+          fi
+          for tag in "${tags[@]}"; do
+            [[ "$tag" != *latest* ]] || {
+              echo "must not use latest tags: $tag" >&2
+              exit 1
+            }
+          done
+
+          case "${{ inputs.app_binaries_release_tag }}" in
+            *-testnet) release_tier="testnet" ;;
+            *-mainnet) release_tier="mainnet" ;;
+            *)
+              echo "release tags must end with -testnet or -mainnet" >&2
+              exit 1
+              ;;
+          esac
+          for tag in "${tags[@]}"; do
+            [[ "$tag" == *-"$release_tier" ]] || {
+              echo "release tag does not match tier $release_tier: $tag" >&2
+              exit 1
+            }
+          done
+
+      - name: Download Released Deployment Binaries
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/bin
+          gh release download "${{ inputs.app_binaries_release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "bridge-deploy_linux_amd64" \
+            --pattern "bridge-deploy_linux_amd64.sha256" \
+            --pattern "shared-infra-e2e_linux_amd64" \
+            --pattern "shared-infra-e2e_linux_amd64.sha256" \
+            --dir .ci/bin \
+            --clobber
+          (
+            cd .ci/bin
+            sha256sum -c bridge-deploy_linux_amd64.sha256
+            sha256sum -c shared-infra-e2e_linux_amd64.sha256
+            chmod 0755 bridge-deploy_linux_amd64 shared-infra-e2e_linux_amd64
+          )
+
+      - name: Patch Inventory With Selected Release Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          jq \
+            --arg app_runtime_ami_release_tag "${{ inputs.app_runtime_ami_release_tag }}" \
+            --arg shared_proof_services_image_release_tag "${{ inputs.shared_proof_services_image_release_tag }}" \
+            --arg wireguard_role_ami_release_tag "${{ inputs.wireguard_role_ami_release_tag }}" \
+            '
+              .app_role.ami_release_tag = $app_runtime_ami_release_tag
+              | .shared_roles.proof.image_release_tag = $shared_proof_services_image_release_tag
+              | .shared_roles.wireguard.ami_release_tag = $wireguard_role_ami_release_tag
+              | .wireguard_role.ami_release_tag = $wireguard_role_ami_release_tag
+            ' "${{ inputs.inventory_path }}" > .ci/out/inventory.release-inputs.json
+
+      - name: Resolve Role Runtime Release Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/resolve-role-runtime-release-inputs.sh \
+            --inventory .ci/out/inventory.release-inputs.json \
+            --output .ci/out/inventory.resolved.json \
+            --github-repo "${{ github.repository }}"
+
+      - name: Run Deploy Coordinator
+        shell: bash
+        run: |
+          set -euo pipefail
+          coordinator_args=(
+            ./deploy/production/deploy-coordinator.sh
+            --inventory .ci/out/inventory.resolved.json
+            --dkg-summary "${{ inputs.dkg_summary_path }}"
+            --bridge-deploy-binary .ci/bin/bridge-deploy_linux_amd64
+            --output-dir .ci/preview-output
+            --github-repo "${{ github.repository }}"
+          )
+          if [[ -n "${{ inputs.dkg_completion_path }}" ]]; then
+            coordinator_args+=(--dkg-completion "${{ inputs.dkg_completion_path }}")
+          fi
+          if [[ -n "${{ inputs.existing_bridge_summary_path }}" ]]; then
+            coordinator_args+=(--existing-bridge-summary "${{ inputs.existing_bridge_summary_path }}")
+          elif [[ -n "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" ]]; then
+            printf '%s\n' "${{ secrets.PREVIEW_BRIDGE_DEPLOYER_KEY }}" > .ci/out/preview-deployer.key
+            chmod 0600 .ci/out/preview-deployer.key
+            coordinator_args+=(--deployer-key-file .ci/out/preview-deployer.key)
+          else
+            echo "existing_bridge_summary_path or PREVIEW_BRIDGE_DEPLOYER_KEY secret is required" >&2
+            exit 1
+          fi
+          "${coordinator_args[@]}"
+
+      - name: Provision App Edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/provision-app-edge.sh \
+            --app-deploy .ci/preview-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/app/app-deploy.json
+
+      - name: Run Shared Services Canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out/canaries
+          ./deploy/production/canary-shared-services.sh \
+            --shared-manifest .ci/preview-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/shared-manifest.json \
+            > .ci/out/canaries/shared-services.json
+          [[ "$(jq -r '.ready_for_deploy' .ci/out/canaries/shared-services.json)" == "true" ]]
+
+      - name: Run App Canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/canary-app-host.sh \
+            --app-deploy .ci/preview-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/app/app-deploy.json \
+            > .ci/out/canaries/app.json
+          [[ "$(jq -r '.ready_for_deploy' .ci/out/canaries/app.json)" == "true" ]]
+
+      - name: Run Shared Infra E2E
+        shell: bash
+        run: |
+          set -euo pipefail
+          source ./deploy/production/lib.sh
+          mkdir -p .ci/out/e2e
+          environment="$(jq -r '.environment' .ci/out/inventory.resolved.json)"
+          shared_manifest=".ci/preview-output/${environment}/shared-manifest.json"
+          app_deploy=".ci/preview-output/${environment}/app/app-deploy.json"
+          resolved_env="$(mktemp)"
+          aws_profile="$(jq -r '.aws_profile // empty' "$app_deploy")"
+          aws_region="$(jq -r '.aws_region // empty' "$app_deploy")"
+          allow_local_resolvers="false"
+          if production_environment_allows_local_secret_resolvers "$environment"; then
+            allow_local_resolvers="true"
+          fi
+          production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_deploy")" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_env"
+          checkpoint_postgres_dsn="$(production_env_first_value "$resolved_env" CHECKPOINT_POSTGRES_DSN APP_POSTGRES_DSN)"
+          kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
+          ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
+          checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
+          checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
+          checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
+          required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics}"
+          ./.ci/bin/shared-infra-e2e_linux_amd64 \
+            --postgres-dsn "$checkpoint_postgres_dsn" \
+            --kafka-brokers "$kafka_brokers" \
+            --required-kafka-topics "$required_topics" \
+            --checkpoint-ipfs-api-url "$ipfs_api_url" \
+            --checkpoint-operators "$checkpoint_operators" \
+            --checkpoint-threshold "$checkpoint_threshold" \
+            --output .ci/out/e2e/shared-infra-e2e.json
+
+      - name: Write Release Lock
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          jq -n \
+            --arg workflow "deploy-preview-role-runtime" \
+            --arg inventory_path "${{ inputs.inventory_path }}" \
+            --arg app_binaries_release_tag "${{ inputs.app_binaries_release_tag }}" \
+            --arg app_runtime_ami_release_tag "${{ inputs.app_runtime_ami_release_tag }}" \
+            --arg shared_proof_services_image_release_tag "${{ inputs.shared_proof_services_image_release_tag }}" \
+            --arg wireguard_role_ami_release_tag "${{ inputs.wireguard_role_ami_release_tag }}" \
+            --arg operator_stack_ami_release_tag "${{ inputs.operator_stack_ami_release_tag }}" \
+            --arg preview_run_id "${{ github.run_id }}" \
+            --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+            '{
+              workflow: $workflow,
+              inventory_path: $inventory_path,
+              app_binaries_release_tag: $app_binaries_release_tag,
+              app_runtime_ami_release_tag: $app_runtime_ami_release_tag,
+              shared_proof_services_image_release_tag: $shared_proof_services_image_release_tag,
+              wireguard_role_ami_release_tag: $wireguard_role_ami_release_tag,
+              operator_stack_ami_release_tag: $operator_stack_ami_release_tag,
+              preview_run_id: $preview_run_id,
+              preview_completed_at: $preview_completed_at
+            }' > .ci/out/role-runtime-release-lock.json
+
+      - name: Upload Preview Lock And Outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-role-runtime-lock
+          path: |
+            .ci/out/role-runtime-release-lock.json
+            .ci/out/canaries/shared-services.json
+            .ci/out/canaries/app.json
+            .ci/out/e2e/shared-infra-e2e.json

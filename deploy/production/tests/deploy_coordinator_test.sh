@@ -94,6 +94,65 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_role_runtime_release_resolver() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'resolve-role-runtime-release-inputs %s\n' "\$*" >>"$log_file"
+inventory=""
+output=""
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    --inventory) inventory="\$2"; shift 2 ;;
+    --output) output="\$2"; shift 2 ;;
+    --github-repo|--aws-profile|--aws-region) shift 2 ;;
+    *) echo "unexpected resolver arg: \$1" >&2; exit 1 ;;
+  esac
+done
+[[ -n "\$inventory" && -n "\$output" ]] || {
+  echo "resolver requires --inventory and --output" >&2
+  exit 1
+}
+jq '
+  .app_role.app_ami_id = "ami-0resolvedapp1234567"
+  | .shared_roles.proof.image_uri = "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:resolved"
+  | .shared_roles.proof.image_ecr_repository_arn = "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services"
+  | .shared_roles.wireguard.ami_id = "ami-0resolvedwireguard1"
+  | .wireguard_role.ami_id = "ami-0resolvedwireguard1"
+' "\$inventory" >"\$output"
+EOF
+  chmod +x "$target"
+}
+
+write_fake_provision_app_edge_binary() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'provision-app-edge %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  chmod +x "$target"
+}
+
+write_fake_ready_canary_binary() {
+  local target="$1"
+  local log_file="$2"
+  local label="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf '%s %s\n' "$label" "\$*" >>"$log_file"
+cat <<'JSON'
+{"ready_for_deploy":true}
+JSON
+EOF
+  chmod +x "$target"
+}
+
 write_fake_aws_backend_bootstrap() {
   local target="$1"
   local log_file="$2"
@@ -136,6 +195,69 @@ case "\${args[0]:-} \${args[1]:-}" in
     exit 1
     ;;
 esac
+EOF
+  chmod +x "$target"
+}
+
+write_local_sha256_file() {
+  local input="$1"
+  local output="$2"
+  local digest
+  if command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "$input" | awk '{print $1}')"
+  else
+    digest="$(shasum -a 256 "$input" | awk '{print $1}')"
+  fi
+  printf '%s  %s\n' "$digest" "$(basename "$input")" >"$output"
+}
+
+write_fake_gh_release_downloader() {
+  local target="$1"
+  local release_root="$2"
+  local log_file="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'gh %s\n' "\$*" >>"$log_file"
+if [[ "\$1" == "release" && "\$2" == "download" ]]; then
+  tag="\$3"
+  shift 3
+  dir=""
+  patterns=()
+  while [[ \$# -gt 0 ]]; do
+    case "\$1" in
+      --repo)
+        shift 2
+        ;;
+      --pattern)
+        patterns+=("\$2")
+        shift 2
+        ;;
+      --dir)
+        dir="\$2"
+        shift 2
+        ;;
+      --clobber)
+        shift
+        ;;
+      *)
+        printf 'unexpected gh release download arg: %s\n' "\$1" >&2
+        exit 1
+        ;;
+    esac
+  done
+  [[ -n "\$dir" ]] || {
+    printf 'missing --dir\n' >&2
+    exit 1
+  }
+  mkdir -p "\$dir"
+  for pattern in "\${patterns[@]}"; do
+    cp "$release_root/\$tag/\$pattern" "\$dir/\$pattern"
+  done
+  exit 0
+fi
+printf 'unexpected gh invocation: %s\n' "\$*" >&2
+exit 1
 EOF
   chmod +x "$target"
 }
@@ -440,6 +562,122 @@ EOF
   assert_eq "$(jq -r '.edge.public_lb_dns_name' "$output_dir/alpha/app/app-deploy.json")" "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com" "deploy coordinator renders edge from the public load balancer"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.20.0/24" "deploy coordinator prefers wireguard role source cidrs"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$output_dir/alpha/app/app-deploy.json")" "10.0.21.0/24" "deploy coordinator keeps all wireguard role source cidrs"
+  rm -rf "$workdir"
+}
+
+test_deploy_coordinator_resolves_role_runtime_inputs_and_runs_post_deploy_checks() {
+  local workdir output_dir fake_bin log_dir shared_tf_json app_tf_json resolver_log provision_log shared_canary_log app_canary_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  resolver_log="$log_dir/resolver.log"
+  provision_log="$log_dir/provision.log"
+  shared_canary_log="$log_dir/shared-canary.log"
+  app_canary_log="$log_dir/app-canary.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.app_ami_id = ""
+    | .shared_roles.proof.image_uri = ""
+    | .shared_roles.proof.image_ecr_repository_arn = ""
+    | .shared_roles.wireguard.ami_id = ""
+    | .wireguard_role.ami_id = ""
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  write_fake_role_runtime_release_resolver "$fake_bin/resolve-role-runtime-release-inputs.sh" "$resolver_log"
+  write_fake_provision_app_edge_binary "$fake_bin/provision-app-edge.sh" "$provision_log"
+  write_fake_ready_canary_binary "$fake_bin/canary-shared-services.sh" "$shared_canary_log" "canary-shared-services"
+  write_fake_ready_canary_binary "$fake_bin/canary-app-host.sh" "$app_canary_log" "canary-app-host"
+
+  shared_tf_json="$workdir/shared-terraform-output.json"
+  jq '
+    .shared_proof_role = {
+      value: {
+        asg: "alpha-proof-role",
+        launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+        requestor_address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+        rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+      }
+    }
+    | .shared_wireguard_role = {
+      value: {
+        asg: "alpha-wireguard-role",
+        launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+        endpoint_host: "nlb-alpha-wireguard.example.internal",
+        listen_port: 51820,
+        network_cidr: "10.66.0.0/24",
+        source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+        peer_roster_secret_arns: ["arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop"],
+        server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+      }
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$shared_tf_json"
+  app_tf_json="$workdir/app-terraform-output.json"
+  jq -n '
+    {
+      app_role: {
+        value: {
+          asg: "alpha-app-role",
+          launch_template: { id: "lt-app0123456789abcdef", version: "13" },
+          public_lb: {
+            dns_name: "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z35SXDOTRQ7X7K",
+            security_group_id: "sg-publicbridge012345678",
+            target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/bridge/1234"
+          },
+          internal_lb: {
+            dns_name: "internal-ops-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z2P70J7EXAMPLE",
+            security_group_id: "sg-internalops012345678",
+            target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/backoffice/1234"
+          }
+        }
+      }
+    }
+  ' >"$app_tf_json"
+
+  PATH="$fake_bin:$PATH" \
+  PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+  PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+  PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+  PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+      --inventory "$workdir/inventory.json" \
+      --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+      --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+      --shared-terraform-output-json "$shared_tf_json" \
+      --app-terraform-output-json "$app_tf_json" \
+      --skip-terraform-apply \
+      --run-post-deploy-checks \
+      --output-dir "$output_dir" >/dev/null
+
+  assert_file_exists "$output_dir/alpha/inventory.release-resolved.json" "deploy coordinator writes resolved role runtime inventory"
+  assert_eq "$(jq -r '.app_role.app_ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedapp1234567" "deploy coordinator resolves app ami id before tfvars"
+  assert_eq "$(jq -r '.wireguard_role.ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedwireguard1" "deploy coordinator resolves wireguard ami id before tfvars"
+  assert_contains "$(cat "$resolver_log")" "--github-repo juno-intents/intents-juno" "deploy coordinator forwards the default github repo to the release resolver"
+  assert_contains "$(cat "$provision_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator provisions the app edge from the rendered handoff"
+  assert_contains "$(cat "$shared_canary_log")" "--shared-manifest $output_dir/alpha/shared-manifest.json" "deploy coordinator runs the shared canary after rendering the manifest"
+  assert_contains "$(cat "$app_canary_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator runs the app canary after rendering the handoff"
+  assert_file_exists "$output_dir/alpha/canaries/shared-services.json" "deploy coordinator stores the shared canary output"
+  assert_file_exists "$output_dir/alpha/canaries/app.json" "deploy coordinator stores the app canary output"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/canaries/shared-services.json")" "true" "deploy coordinator requires a passing shared canary"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/canaries/app.json")" "true" "deploy coordinator requires a passing app canary"
   rm -rf "$workdir"
 }
 
@@ -1042,9 +1280,142 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_resolves_role_runtime_release_inputs_when_inventory_is_unresolved() {
+  local workdir output_dir fake_bin log_dir shared_tf_json app_tf_json releases_dir gh_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  releases_dir="$workdir/releases"
+  gh_log="$log_dir/gh.log"
+  mkdir -p "$fake_bin" "$log_dir" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.app_ami_id = ""
+    | .shared_roles.proof.image_uri = ""
+    | .shared_roles.proof.image_ecr_repository_arn = ""
+    | .shared_roles.wireguard.ami_id = ""
+    | .wireguard_role.ami_id = ""
+  ' "$workdir/inventory.json" >"$workdir/inventory.tmp"
+  mv "$workdir/inventory.tmp" "$workdir/inventory.json"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+
+  cat >"$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" <<'EOF'
+{
+  "repo_commit": "1111111111111111111111111111111111111111",
+  "built_at_utc": "2026-03-20T00:00:00Z",
+  "app_binaries_release_tag": "app-binaries-v1.2.3-testnet",
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0app123456789abcd"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json.sha256"
+
+  cat >"$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" <<'EOF'
+{
+  "repo_commit": "2222222222222222222222222222222222222222",
+  "built_at_utc": "2026-03-20T00:00:00Z",
+  "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
+  "regions": {
+    "us-east-1": {
+      "repository_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services",
+      "repository_arn": "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
+      "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json.sha256"
+
+  cat >"$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" <<'EOF'
+{
+  "repo_commit": "3333333333333333333333333333333333333333",
+  "built_at_utc": "2026-03-20T00:00:00Z",
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0wireguard1234567"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json.sha256"
+  write_fake_gh_release_downloader "$fake_bin/gh" "$releases_dir" "$gh_log"
+
+  shared_tf_json="$workdir/shared-terraform-output.json"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" "$shared_tf_json"
+  app_tf_json="$workdir/app-terraform-output.json"
+  jq -n '
+    {
+      app_role: {
+        value: {
+          asg: "alpha-app-role",
+          launch_template: { id: "lt-app0123456789abcdef", version: "13" },
+          public_lb: {
+            dns_name: "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z35SXDOTRQ7X7K",
+            security_group_id: "sg-publicbridge012345678",
+            target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-bridge/123"
+          },
+          internal_lb: {
+            dns_name: "internal-ops-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z2P70J7EXAMPLE",
+            security_group_id: "sg-internalops012345678",
+            target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-backoffice/456"
+          }
+        }
+      }
+    }
+  ' >"$app_tf_json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    --shared-terraform-output-json "$shared_tf_json" \
+    --app-terraform-output-json "$app_tf_json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_file_exists "$output_dir/alpha/inventory.release-resolved.json" "deploy-coordinator writes the release-resolved inventory"
+  assert_eq "$(jq -r '.app_role.app_ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0app123456789abcd" "deploy-coordinator resolves the app runtime ami id"
+  assert_eq "$(jq -r '.shared_roles.proof.image_uri' "$output_dir/alpha/inventory.release-resolved.json")" "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef" "deploy-coordinator resolves the shared proof image uri"
+  assert_eq "$(jq -r '.wireguard_role.ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0wireguard1234567" "deploy-coordinator resolves the wireguard ami id"
+  assert_contains "$(cat "$gh_log")" "release download app-runtime-ami-v1.2.3-testnet" "deploy-coordinator downloads the app runtime ami manifest"
+  assert_contains "$(cat "$gh_log")" "release download shared-proof-services-image-v1.2.3-testnet" "deploy-coordinator downloads the shared proof image manifest"
+  assert_contains "$(cat "$gh_log")" "release download wireguard-role-ami-v1.2.3-testnet" "deploy-coordinator downloads the wireguard ami manifest"
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_coordinator_generates_handoffs
   test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs
+  test_deploy_coordinator_resolves_role_runtime_inputs_and_runs_post_deploy_checks
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_supports_preview_legacy_wireguard_inventory
   test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it
@@ -1056,6 +1427,7 @@ main() {
   test_deploy_coordinator_rejects_direct_deployer_outside_alpha
   test_deploy_coordinator_invokes_production_bridge_deploy_binary
   test_deploy_coordinator_bootstraps_terraform_backend_before_init
+  test_deploy_coordinator_resolves_role_runtime_release_inputs_when_inventory_is_unresolved
 }
 
 main "$@"

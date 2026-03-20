@@ -1,0 +1,242 @@
+name: deploy-mainnet-role-runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      preview_run_id:
+        description: "Successful preview workflow run id used for promotion"
+        required: true
+        type: string
+      inventory_path:
+        description: "Deployment inventory JSON path"
+        required: true
+        type: string
+      dkg_summary_path:
+        description: "DKG summary JSON path"
+        required: true
+        type: string
+      dkg_completion_path:
+        description: "Optional DKG completion JSON path"
+        required: false
+        default: ""
+        type: string
+      existing_bridge_summary_path:
+        description: "Optional existing bridge summary JSON path"
+        required: false
+        default: ""
+        type: string
+      app_binaries_release_tag:
+        description: "Pinned app binaries release tag"
+        required: true
+        type: string
+      app_runtime_ami_release_tag:
+        description: "Pinned app runtime AMI release tag"
+        required: true
+        type: string
+      shared_proof_services_image_release_tag:
+        description: "Pinned shared proof image release tag"
+        required: true
+        type: string
+      wireguard_role_ami_release_tag:
+        description: "Pinned wireguard role AMI release tag"
+        required: true
+        type: string
+      operator_stack_ami_release_tag:
+        description: "Optional operator stack AMI release tag"
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  deploy-mainnet:
+    runs-on: ubuntu-latest
+    environment: production
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: us-east-1
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: us-east-1
+
+      - name: Validate Pinned Release Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          tags=(
+            "${{ inputs.app_binaries_release_tag }}"
+            "${{ inputs.app_runtime_ami_release_tag }}"
+            "${{ inputs.shared_proof_services_image_release_tag }}"
+            "${{ inputs.wireguard_role_ami_release_tag }}"
+          )
+          if [[ -n "${{ inputs.operator_stack_ami_release_tag }}" ]]; then
+            tags+=("${{ inputs.operator_stack_ami_release_tag }}")
+          fi
+          for tag in "${tags[@]}"; do
+            [[ "$tag" != *latest* ]] || {
+              echo "must not use latest tags: $tag" >&2
+              exit 1
+            }
+          done
+
+      - name: Verify Preview Success And Soak
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          preview_run_json="$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.preview_run_id }}")"
+          [[ "$(jq -r '.name' <<<"$preview_run_json")" == "deploy-preview-role-runtime" ]] || {
+            echo "preview_run_id must refer to deploy-preview-role-runtime" >&2
+            exit 1
+          }
+          [[ "$(jq -r '.conclusion' <<<"$preview_run_json")" == "success" ]] || {
+            echo "preview deploy must have concluded successfully" >&2
+            exit 1
+          }
+          preview_completed_at="$(jq -r '.updated_at' <<<"$preview_run_json")"
+          preview_completed_epoch="$(date -u -d "$preview_completed_at" +%s)"
+          now_epoch="$(date -u +%s)"
+          (( now_epoch - preview_completed_epoch >= 86400 )) || {
+            echo "preview deploy must soak for at least 24 hours before mainnet promotion" >&2
+            exit 1
+          }
+
+          artifact_id="$(gh api "repos/${{ github.repository }}/actions/runs/${{ inputs.preview_run_id }}/artifacts" \
+            | jq -r '.artifacts[] | select(.name == "preview-role-runtime-lock") | .id' \
+            | head -n 1)"
+          [[ -n "$artifact_id" ]] || {
+            echo "preview release lock artifact not found" >&2
+            exit 1
+          }
+
+          gh api "repos/${{ github.repository }}/actions/artifacts/${artifact_id}/zip" > .ci/out/preview-role-runtime-lock.zip
+          unzip -q .ci/out/preview-role-runtime-lock.zip -d .ci/out/preview-role-runtime-lock
+          lock_file=".ci/out/preview-role-runtime-lock/role-runtime-release-lock.json"
+          [[ -f "$lock_file" ]] || {
+            echo "role-runtime-release-lock.json missing from preview artifact" >&2
+            exit 1
+          }
+
+          [[ "$(jq -r '.app_binaries_release_tag' "$lock_file")" == "${{ inputs.app_binaries_release_tag }}" ]] || exit 1
+          [[ "$(jq -r '.app_runtime_ami_release_tag' "$lock_file")" == "${{ inputs.app_runtime_ami_release_tag }}" ]] || exit 1
+          [[ "$(jq -r '.shared_proof_services_image_release_tag' "$lock_file")" == "${{ inputs.shared_proof_services_image_release_tag }}" ]] || exit 1
+          [[ "$(jq -r '.wireguard_role_ami_release_tag' "$lock_file")" == "${{ inputs.wireguard_role_ami_release_tag }}" ]] || exit 1
+
+      - name: Download Released Deployment Binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/bin
+          gh release download "${{ inputs.app_binaries_release_tag }}" \
+            --repo "${{ github.repository }}" \
+            --pattern "bridge-deploy_linux_amd64" \
+            --pattern "bridge-deploy_linux_amd64.sha256" \
+            --dir .ci/bin \
+            --clobber
+          (
+            cd .ci/bin
+            sha256sum -c bridge-deploy_linux_amd64.sha256
+            chmod 0755 bridge-deploy_linux_amd64
+          )
+
+      - name: Patch Inventory With Selected Release Tags
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          jq \
+            --arg app_runtime_ami_release_tag "${{ inputs.app_runtime_ami_release_tag }}" \
+            --arg shared_proof_services_image_release_tag "${{ inputs.shared_proof_services_image_release_tag }}" \
+            --arg wireguard_role_ami_release_tag "${{ inputs.wireguard_role_ami_release_tag }}" \
+            '
+              .app_role.ami_release_tag = $app_runtime_ami_release_tag
+              | .shared_roles.proof.image_release_tag = $shared_proof_services_image_release_tag
+              | .shared_roles.wireguard.ami_release_tag = $wireguard_role_ami_release_tag
+              | .wireguard_role.ami_release_tag = $wireguard_role_ami_release_tag
+            ' "${{ inputs.inventory_path }}" > .ci/out/inventory.release-inputs.json
+
+      - name: Resolve Role Runtime Release Inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/resolve-role-runtime-release-inputs.sh \
+            --inventory .ci/out/inventory.release-inputs.json \
+            --output .ci/out/inventory.resolved.json \
+            --github-repo "${{ github.repository }}"
+
+      - name: Run Deploy Coordinator
+        shell: bash
+        run: |
+          set -euo pipefail
+          coordinator_args=(
+            ./deploy/production/deploy-coordinator.sh
+            --inventory .ci/out/inventory.resolved.json
+            --dkg-summary "${{ inputs.dkg_summary_path }}"
+            --bridge-deploy-binary .ci/bin/bridge-deploy_linux_amd64
+            --output-dir .ci/mainnet-output
+            --github-repo "${{ github.repository }}"
+          )
+          if [[ -n "${{ inputs.dkg_completion_path }}" ]]; then
+            coordinator_args+=(--dkg-completion "${{ inputs.dkg_completion_path }}")
+          fi
+          if [[ -n "${{ inputs.existing_bridge_summary_path }}" ]]; then
+            coordinator_args+=(--existing-bridge-summary "${{ inputs.existing_bridge_summary_path }}")
+          elif [[ -n "${{ secrets.MAINNET_BRIDGE_DEPLOYER_KEY }}" ]]; then
+            printf '%s\n' "${{ secrets.MAINNET_BRIDGE_DEPLOYER_KEY }}" > .ci/out/mainnet-deployer.key
+            chmod 0600 .ci/out/mainnet-deployer.key
+            coordinator_args+=(--deployer-key-file .ci/out/mainnet-deployer.key)
+          else
+            echo "existing_bridge_summary_path or MAINNET_BRIDGE_DEPLOYER_KEY secret is required" >&2
+            exit 1
+          fi
+          "${coordinator_args[@]}"
+
+      - name: Provision App Edge
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/provision-app-edge.sh \
+            --app-deploy .ci/mainnet-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/app/app-deploy.json
+
+      - name: Run Shared Services Canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out/canaries
+          ./deploy/production/canary-shared-services.sh \
+            --shared-manifest .ci/mainnet-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/shared-manifest.json \
+            > .ci/out/canaries/shared-services.json
+          [[ "$(jq -r '.ready_for_deploy' .ci/out/canaries/shared-services.json)" == "true" ]]
+
+      - name: Run App Canary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./deploy/production/canary-app-host.sh \
+            --app-deploy .ci/mainnet-output/$(jq -r '.environment' .ci/out/inventory.resolved.json)/app/app-deploy.json \
+            > .ci/out/canaries/app.json
+          [[ "$(jq -r '.ready_for_deploy' .ci/out/canaries/app.json)" == "true" ]]

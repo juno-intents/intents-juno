@@ -50,8 +50,13 @@ write_inventory_fixture() {
           host: $app_host,
           user: "ubuntu",
           runtime_dir: "/var/lib/intents-juno/app-runtime",
+          terraform_dir: "deploy/shared/terraform/app-runtime",
           public_endpoint: $app_public_endpoint,
           private_endpoint: $app_private_endpoint,
+          asg: "juno-app",
+          launch_template: { id: "lt-0appcafebabefeed0", version: "3" },
+          app_ami_id: "ami-0123456789abcdef0",
+          ami_release_tag: "app-runtime-ami-v1.2.3-testnet",
           public_lb: {
             dns_name: "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
             zone_id: "Z35SXDOTRQ7X7K",
@@ -81,9 +86,13 @@ write_inventory_fixture() {
       | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
-          rpc_url: "https://rpc.mainnet.succinct.xyz"
+          rpc_url: "https://rpc.mainnet.succinct.xyz",
+          image_uri: "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          image_ecr_repository_arn: "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
+          image_release_tag: "shared-proof-services-image-v1.2.3-testnet"
         }
       | .shared_roles.wireguard = {
+          ami_id: "ami-0wireguardcafebeef0",
           public_subnet_id: $wireguard_public_subnet_id,
           public_subnet_ids: [$wireguard_public_subnet_id],
           listen_port: 51820,
@@ -96,6 +105,7 @@ write_inventory_fixture() {
           publish_public_dns: false
         }
       | .wireguard_role = {
+          ami_id: "ami-0wireguardcafebeef0",
           public_subnet_id: $wireguard_public_subnet_id,
           public_subnet_ids: [$wireguard_public_subnet_id],
           listen_port: 51820,

@@ -31,6 +31,8 @@ Options:
   --app-terraform-output-json PATH
                              Use a precomputed app runtime terraform output -json file
   --terraform-output-json PATH Deprecated alias for --shared-terraform-output-json
+  --run-post-deploy-checks    Run role-based edge provisioning plus shared/app canaries
+  --github-repo REPO          GitHub repo used for release asset resolution (default: juno-intents/intents-juno)
   --skip-terraform-apply       Do not run terraform init/apply
   --output-dir DIR             Output root (default: ./production-output)
   --run-label LABEL            Optional subdirectory under <output-dir>/<environment> (example: run-20260311T120000Z)
@@ -49,10 +51,16 @@ sweep_recipient=""
 existing_bridge_summary=""
 shared_terraform_output_json=""
 app_terraform_output_json=""
+run_post_deploy_checks="false"
+github_repo="juno-intents/intents-juno"
 skip_terraform_apply="false"
 output_root="./production-output"
 run_label=""
 dry_run="false"
+resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN:-$SCRIPT_DIR/resolve-role-runtime-release-inputs.sh}"
+provision_app_edge_bin="${PRODUCTION_PROVISION_APP_EDGE_BIN:-$SCRIPT_DIR/provision-app-edge.sh}"
+canary_shared_bin="${PRODUCTION_CANARY_SHARED_BIN:-$SCRIPT_DIR/canary-shared-services.sh}"
+canary_app_bin="${PRODUCTION_CANARY_APP_BIN:-$SCRIPT_DIR/canary-app-host.sh}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -68,6 +76,8 @@ while [[ $# -gt 0 ]]; do
     --shared-terraform-output-json) shared_terraform_output_json="$2"; shift 2 ;;
     --app-terraform-output-json) app_terraform_output_json="$2"; shift 2 ;;
     --terraform-output-json) shared_terraform_output_json="$2"; shift 2 ;;
+    --run-post-deploy-checks) run_post_deploy_checks="true"; shift ;;
+    --github-repo) github_repo="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
     --output-dir) output_root="$2"; shift 2 ;;
     --run-label) run_label="$2"; shift 2 ;;
@@ -101,6 +111,11 @@ fi
 for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
+if [[ "$run_post_deploy_checks" == "true" ]]; then
+  for cmd in "$provision_app_edge_bin" "$canary_shared_bin" "$canary_app_bin"; do
+    have_cmd "$cmd" || [[ -x "$cmd" ]] || die "required command not found: $cmd"
+  done
+fi
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -174,6 +189,54 @@ if [[ -z "$(production_json_optional "$inventory" '.dkg_tls_dir | select(type ==
   production_generate_dkg_tls_bundle "$generated_dkg_tls_dir"
   coordinator_inventory="$output_dir/inventory.render.json"
   jq --arg dkg_tls_dir "$generated_dkg_tls_dir" '.dkg_tls_dir = $dkg_tls_dir' "$inventory" >"$coordinator_inventory"
+fi
+
+role_runtime_release_resolution_required="$(
+  jq -r '
+    (
+      (.app_role.ami_release_tag // "") != ""
+      and (.app_role.app_ami_id // "") == ""
+    )
+    or (
+      (.shared_roles.proof.image_release_tag // "") != ""
+      and (
+        (.shared_roles.proof.image_uri // "") == ""
+        or (.shared_roles.proof.image_ecr_repository_arn // "") == ""
+      )
+    )
+    or (
+      (
+        (.wireguard_role.ami_release_tag // "")
+        // (.shared_roles.wireguard.ami_release_tag // "")
+      ) != ""
+      and (
+        (
+          (.wireguard_role.ami_id // "")
+          // (.shared_roles.wireguard.ami_id // "")
+        ) == ""
+      )
+    )
+    | if . then "true" else "false" end
+  ' "$coordinator_inventory"
+)"
+if [[ "$role_runtime_release_resolution_required" == "true" ]]; then
+  have_cmd "$resolve_role_runtime_release_inputs_bin" || [[ -x "$resolve_role_runtime_release_inputs_bin" ]] || \
+    die "required command not found: $resolve_role_runtime_release_inputs_bin"
+  resolved_role_runtime_inventory="$output_dir/inventory.release-resolved.json"
+  resolve_role_runtime_release_args=(
+    "$resolve_role_runtime_release_inputs_bin"
+    --inventory "$coordinator_inventory"
+    --output "$resolved_role_runtime_inventory"
+    --github-repo "$github_repo"
+  )
+  if [[ -n "$inventory_aws_profile" ]]; then
+    resolve_role_runtime_release_args+=(--aws-profile "$inventory_aws_profile")
+  fi
+  if [[ -n "$inventory_aws_region" ]]; then
+    resolve_role_runtime_release_args+=(--aws-region "$inventory_aws_region")
+  fi
+  "${resolve_role_runtime_release_args[@]}"
+  coordinator_inventory="$resolved_role_runtime_inventory"
 fi
 
 minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
@@ -371,6 +434,37 @@ if [[ -n "$generated_dkg_tls_dir" ]]; then
   production_rewrite_operator_handoffs_dkg_tls_dir "$output_dir" "$generated_dkg_tls_dir"
 fi
 production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir" "$app_tf_output_json"
+
+if [[ "$run_post_deploy_checks" == "true" ]]; then
+  canary_output_dir="$output_dir/canaries"
+  mkdir -p "$canary_output_dir"
+
+  if [[ -f "$output_dir/app/app-deploy.json" ]]; then
+    post_deploy_app_args=("$provision_app_edge_bin" --app-deploy "$output_dir/app/app-deploy.json")
+    if [[ "$dry_run" == "true" ]]; then
+      post_deploy_app_args+=(--dry-run)
+    fi
+    "${post_deploy_app_args[@]}"
+  fi
+
+  post_deploy_shared_canary_args=("$canary_shared_bin" --shared-manifest "$shared_manifest")
+  if [[ "$dry_run" == "true" ]]; then
+    post_deploy_shared_canary_args+=(--dry-run)
+  fi
+  "${post_deploy_shared_canary_args[@]}" >"$canary_output_dir/shared-services.json"
+  [[ "$(jq -r '.ready_for_deploy' "$canary_output_dir/shared-services.json")" == "true" ]] || \
+    die "shared services canary failed: $canary_output_dir/shared-services.json"
+
+  if [[ -f "$output_dir/app/app-deploy.json" ]]; then
+    post_deploy_app_canary_args=("$canary_app_bin" --app-deploy "$output_dir/app/app-deploy.json")
+    if [[ "$dry_run" == "true" ]]; then
+      post_deploy_app_canary_args+=(--dry-run)
+    fi
+    "${post_deploy_app_canary_args[@]}" >"$canary_output_dir/app.json"
+    [[ "$(jq -r '.ready_for_deploy' "$canary_output_dir/app.json")" == "true" ]] || \
+      die "app canary failed: $canary_output_dir/app.json"
+  fi
+fi
 
 log "shared manifest: $shared_manifest"
 log "rollout state: $output_dir/rollout-state.json"

@@ -135,7 +135,15 @@ write_summary() {
     printf -- '- [deployment-inventory.json](%s)\n' "$run_dir/deployment-inventory.json"
     printf -- '- [bridge-summary.json](%s)\n' "$run_dir/bridge-summary.json"
     printf -- '- [shared-manifest.json](%s)\n' "$run_dir/shared-manifest.json"
-    printf -- '- [terraform-output.json](%s)\n' "$run_dir/terraform-output.json"
+    if [[ -f "$run_dir/shared-terraform-output.json" ]]; then
+      printf -- '- [shared-terraform-output.json](%s)\n' "$run_dir/shared-terraform-output.json"
+    fi
+    if [[ -f "$run_dir/app-terraform-output.json" ]]; then
+      printf -- '- [app-terraform-output.json](%s)\n' "$run_dir/app-terraform-output.json"
+    fi
+    if [[ -f "$run_dir/terraform-output.json" ]]; then
+      printf -- '- [terraform-output.json](%s)\n' "$run_dir/terraform-output.json"
+    fi
     printf -- '- [rollout-state.json](%s)\n' "$state_file"
     printf -- '- [canaries](%s)\n' "$run_dir/canaries"
     printf '\n## Operator Status\n\n'

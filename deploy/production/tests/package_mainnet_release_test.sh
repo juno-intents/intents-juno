@@ -49,6 +49,11 @@ write_inventory_fixture() {
           host: $app_host,
           user: "ubuntu",
           runtime_dir: "/var/lib/intents-juno/app-runtime",
+          terraform_dir: "deploy/shared/terraform/app-runtime",
+          asg: "juno-app",
+          launch_template: { id: "lt-0appcafebabefeed0", version: "3" },
+          app_ami_id: "ami-0123456789abcdef0",
+          ami_release_tag: "app-runtime-ami-v1.2.3-testnet",
           public_endpoint: $app_public_endpoint,
           bridge_public_dns_label: "bridge",
           backoffice_dns_label: "ops",
@@ -62,9 +67,13 @@ write_inventory_fixture() {
         }
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
-          rpc_url: "https://rpc.mainnet.succinct.xyz"
+          rpc_url: "https://rpc.mainnet.succinct.xyz",
+          image_uri: "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          image_ecr_repository_arn: "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
+          image_release_tag: "shared-proof-services-image-v1.2.3-testnet"
         }
       | .shared_roles.wireguard = {
+          ami_id: "ami-0wireguardcafebeef0",
           public_subnet_id: "subnet-0abc1234def567890",
           public_subnet_ids: ["subnet-0abc1234def567890"],
           listen_port: 51820,

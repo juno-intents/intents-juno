@@ -24,6 +24,8 @@
       },
       "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
       "rpc_url": "https://rpc.mainnet.succinct.xyz",
+      "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "image_ecr_repository_arn": "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
       "image_release_tag": "shared-proof-services-image-v1.2.3-testnet"
     },
     "wireguard": {
@@ -32,6 +34,7 @@
         "id": "lt-0wireguardcafebeef",
         "version": "9"
       },
+      "ami_id": "ami-0wireguardcafebeef0",
       "public_subnet_id": "subnet-0123456789abcdef0",
       "public_subnet_ids": [
         "subnet-0123456789abcdef0"
@@ -61,6 +64,7 @@
       "id": "lt-0wireguardcafebeef",
       "version": "9"
     },
+    "ami_id": "ami-0wireguardcafebeef0",
     "public_subnet_id": "subnet-0123456789abcdef0",
     "public_subnet_ids": [
       "subnet-0123456789abcdef0"

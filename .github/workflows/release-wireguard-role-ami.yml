@@ -1,0 +1,321 @@
+name: release-wireguard-role-ami
+
+on:
+  workflow_dispatch:
+    inputs:
+      aws_region:
+        description: "AWS region for the WireGuard role AMI"
+        required: true
+        default: "us-east-1"
+        type: string
+      aws_instance_type:
+        description: "EC2 instance type for the temporary AMI builder"
+        required: true
+        default: "t3.small"
+        type: string
+      aws_name_prefix:
+        description: "Name prefix for the AMI and temporary build resources"
+        required: true
+        default: "intents-juno-wireguard-role"
+        type: string
+      aws_vpc_id:
+        description: "Optional VPC id for the temporary builder instance"
+        required: false
+        default: ""
+        type: string
+      aws_subnet_id:
+        description: "Optional subnet id for the temporary builder instance"
+        required: false
+        default: ""
+        type: string
+      source_ami_id:
+        description: "Optional source AMI id for the temporary builder instance"
+        required: false
+        default: ""
+        type: string
+      release_tag:
+        description: "Release tag to create/update (example: wireguard-role-ami-v1.2.3-testnet)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  id-token: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ROLE_TO_ASSUME: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+      AWS_STATIC_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_STATIC_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials (OIDC Role)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID == '' && env.AWS_STATIC_SECRET_ACCESS_KEY == '' && env.AWS_ROLE_TO_ASSUME != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE_TO_ASSUME }}
+          role-duration-seconds: 21600
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Configure AWS Credentials (Static Secrets)
+        if: ${{ env.AWS_STATIC_ACCESS_KEY_ID != '' && env.AWS_STATIC_SECRET_ACCESS_KEY != '' }}
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Validate Required AWS Auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -n "${{ secrets.AWS_ACCESS_KEY_ID }}" || -n "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+            if [[ -z "${{ secrets.AWS_ACCESS_KEY_ID }}" || -z "${{ secrets.AWS_SECRET_ACCESS_KEY }}" ]]; then
+              echo "Both AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY must be set when using static AWS credentials"
+              exit 1
+            fi
+          elif [[ -z "${{ secrets.AWS_ROLE_TO_ASSUME }}" ]]; then
+            echo "Either AWS_ROLE_TO_ASSUME or static AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY secrets are required"
+            exit 1
+          fi
+
+      - name: Resolve and Validate Release Tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${{ inputs.release_tag }}"
+          [[ "$release_tag" != *latest* ]] || {
+            echo "must not use latest tags: $release_tag" >&2
+            exit 1
+          }
+          case "$release_tag" in
+            *-testnet|*-mainnet) ;;
+            *)
+              echo "release tag must end with -testnet or -mainnet: $release_tag" >&2
+              exit 1
+              ;;
+          esac
+          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
+
+      - name: Resolve Builder Network
+        id: resolve_network
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          resolved_vpc_id="${{ inputs.aws_vpc_id }}"
+          if [[ -z "$resolved_vpc_id" ]]; then
+            resolved_vpc_id="$(aws ec2 describe-vpcs --filters Name=isDefault,Values=true Name=state,Values=available --query 'Vpcs[0].VpcId' --output text)"
+            if [[ "$resolved_vpc_id" == "None" ]]; then
+              resolved_vpc_id=""
+            fi
+          fi
+          if [[ -z "$resolved_vpc_id" ]]; then
+            resolved_vpc_id="$(aws ec2 describe-vpcs --filters Name=state,Values=available --query 'Vpcs[0].VpcId' --output text)"
+            if [[ "$resolved_vpc_id" == "None" ]]; then
+              resolved_vpc_id=""
+            fi
+          fi
+          [[ -n "$resolved_vpc_id" ]] || {
+            echo "failed to resolve VPC id; set workflow input aws_vpc_id" >&2
+            exit 1
+          }
+
+          resolved_subnet_id="${{ inputs.aws_subnet_id }}"
+          if [[ -z "$resolved_subnet_id" ]]; then
+            resolved_subnet_id="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$resolved_vpc_id" Name=state,Values=available Name=map-public-ip-on-launch,Values=true --query 'Subnets[0].SubnetId' --output text)"
+            if [[ "$resolved_subnet_id" == "None" ]]; then
+              resolved_subnet_id=""
+            fi
+          fi
+          if [[ -z "$resolved_subnet_id" ]]; then
+            resolved_subnet_id="$(aws ec2 describe-subnets --filters Name=vpc-id,Values="$resolved_vpc_id" Name=state,Values=available --query 'Subnets[0].SubnetId' --output text)"
+            if [[ "$resolved_subnet_id" == "None" ]]; then
+              resolved_subnet_id=""
+            fi
+          fi
+          [[ -n "$resolved_subnet_id" ]] || {
+            echo "failed to resolve subnet id; set workflow input aws_subnet_id" >&2
+            exit 1
+          }
+
+          echo "vpc_id=$resolved_vpc_id" >>"$GITHUB_OUTPUT"
+          echo "subnet_id=$resolved_subnet_id" >>"$GITHUB_OUTPUT"
+
+      - name: Resolve Source AMI
+        id: resolve_source_ami
+        shell: bash
+        run: |
+          set -euo pipefail
+          source_ami_id="${{ inputs.source_ami_id }}"
+          if [[ -z "$source_ami_id" ]]; then
+            source_ami_id="$(aws ec2 describe-images \
+              --owners 099720109477 \
+              --filters Name=name,Values='ubuntu/images/hvm-ssd-gp3/ubuntu-noble-24.04-amd64-server-*' Name=virtualization-type,Values=hvm \
+              --query 'Images | sort_by(@, &CreationDate)[-1].ImageId' \
+              --output text)"
+          fi
+          [[ -n "$source_ami_id" && "$source_ami_id" != "None" ]] || {
+            echo "failed to resolve source AMI id" >&2
+            exit 1
+          }
+          echo "source_ami_id=$source_ami_id" >>"$GITHUB_OUTPUT"
+
+      - name: Launch Temporary Builder
+        id: launch_builder
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          builder_sg_id="$(aws ec2 create-security-group \
+            --group-name "${{ inputs.aws_name_prefix }}-${GITHUB_RUN_ID}" \
+            --description "Temporary wireguard role AMI builder" \
+            --vpc-id "${{ steps.resolve_network.outputs.vpc_id }}" \
+            --query 'GroupId' \
+            --output text)"
+          aws ec2 authorize-security-group-egress \
+            --group-id "$builder_sg_id" \
+            --ip-permissions 'IpProtocol=-1,IpRanges=[{CidrIp=0.0.0.0/0}]' >/dev/null 2>&1 || true
+
+          cat >.ci/out/wireguard-role-user-data.sh <<'EOF'
+          #!/usr/bin/env bash
+          set -euxo pipefail
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -y
+          apt-get install -y ca-certificates curl dnsmasq iptables jq python3 unzip wireguard
+          systemctl enable amazon-ssm-agent || true
+          install -d -m 0755 /etc/intents-juno /var/lib/intents-juno/wireguard-health
+          printf 'ok\n' >/var/lib/intents-juno/wireguard-health/healthz
+          echo WIREGUARD_ROLE_AMI_READY
+          EOF
+
+          instance_id="$(aws ec2 run-instances \
+            --image-id "${{ steps.resolve_source_ami.outputs.source_ami_id }}" \
+            --instance-type "${{ inputs.aws_instance_type }}" \
+            --subnet-id "${{ steps.resolve_network.outputs.subnet_id }}" \
+            --security-group-ids "$builder_sg_id" \
+            --tag-specifications "ResourceType=instance,Tags=[{Key=Name,Value=${{ inputs.aws_name_prefix }}-${GITHUB_RUN_ID}}]" \
+            --user-data "file://.ci/out/wireguard-role-user-data.sh" \
+            --query 'Instances[0].InstanceId' \
+            --output text)"
+          [[ -n "$instance_id" && "$instance_id" != "None" ]] || {
+            echo "failed to launch wireguard role builder instance" >&2
+            exit 1
+          }
+
+          echo "builder_security_group_id=$builder_sg_id" >>"$GITHUB_OUTPUT"
+          echo "instance_id=$instance_id" >>"$GITHUB_OUTPUT"
+
+      - name: Wait For Builder Bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance_id="${{ steps.launch_builder.outputs.instance_id }}"
+          aws ec2 wait instance-status-ok --instance-ids "$instance_id"
+          for _ in $(seq 1 40); do
+            if aws ec2 get-console-output --instance-id "$instance_id" --latest --output text 2>/dev/null | grep -q 'WIREGUARD_ROLE_AMI_READY'; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "timed out waiting for wireguard role builder bootstrap marker" >&2
+          exit 1
+
+      - name: Create WireGuard Role AMI
+        id: create_ami
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          instance_id="${{ steps.launch_builder.outputs.instance_id }}"
+          aws ec2 stop-instances --instance-ids "$instance_id" >/dev/null
+          aws ec2 wait instance-stopped --instance-ids "$instance_id"
+          ami_name="${{ inputs.aws_name_prefix }}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ami_id="$(aws ec2 create-image \
+            --instance-id "$instance_id" \
+            --name "$ami_name" \
+            --description "WireGuard role AMI for ${RELEASE_TAG}" \
+            --no-reboot \
+            --query 'ImageId' \
+            --output text)"
+          aws ec2 wait image-available --image-ids "$ami_id"
+          echo "ami_id=$ami_id" >>"$GITHUB_OUTPUT"
+
+      - name: Build Manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .ci/out
+          built_at_utc="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          jq -n \
+            --arg region "${{ inputs.aws_region }}" \
+            --arg ami_id "${{ steps.create_ami.outputs.ami_id }}" \
+            --arg source_ami_id "${{ steps.resolve_source_ami.outputs.source_ami_id }}" \
+            --arg repo_commit "$GITHUB_SHA" \
+            --arg built_at_utc "$built_at_utc" \
+            '{
+              repo_commit: $repo_commit,
+              built_at_utc: $built_at_utc,
+              regions: {
+                ($region): {
+                  ami_id: $ami_id,
+                  source_ami_id: $source_ami_id
+                }
+              }
+            }' > .ci/out/wireguard-role-ami-manifest.json
+          sha256sum .ci/out/wireguard-role-ami-manifest.json > .ci/out/wireguard-role-ami-manifest.json.sha256
+
+      - name: Create or Update Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          region="${{ inputs.aws_region }}"
+          ami_id="$(jq -r --arg region "$region" '.regions[$region].ami_id // empty' .ci/out/wireguard-role-ami-manifest.json)"
+          notes="WireGuard role AMI release for ${region}
+
+          AMI: ${ami_id}
+          Repo commit: ${GITHUB_SHA}"
+
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" \
+              .ci/out/wireguard-role-ami-manifest.json \
+              .ci/out/wireguard-role-ami-manifest.json.sha256 \
+              --clobber
+            gh release edit "$tag" --title "$tag" --notes "$notes"
+          else
+            gh release create "$tag" \
+              .ci/out/wireguard-role-ami-manifest.json \
+              .ci/out/wireguard-role-ami-manifest.json.sha256 \
+              --title "$tag" \
+              --notes "$notes"
+          fi
+
+      - name: Cleanup Temporary Builder
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          instance_id="${{ steps.launch_builder.outputs.instance_id }}"
+          builder_sg_id="${{ steps.launch_builder.outputs.builder_security_group_id }}"
+          if [[ -n "$instance_id" ]]; then
+            aws ec2 terminate-instances --instance-ids "$instance_id" >/dev/null 2>&1 || true
+          fi
+          if [[ -n "$builder_sg_id" ]]; then
+            aws ec2 delete-security-group --group-id "$builder_sg_id" >/dev/null 2>&1 || true
+          fi
+
+      - name: Upload Build Artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wireguard-role-ami-release
+          path: |
+            .ci/out/wireguard-role-ami-manifest.json
+            .ci/out/wireguard-role-ami-manifest.json.sha256

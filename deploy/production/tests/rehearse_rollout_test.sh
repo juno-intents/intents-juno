@@ -12,6 +12,8 @@ write_inventory_fixture() {
   local workdir="$2"
   jq \
     --arg base_dir "$workdir/operators" \
+    --arg app_kh "$workdir/app-known_hosts" \
+    --arg app_secrets "$workdir/app-secrets.env" \
     '
       .operators = [
         {
@@ -70,6 +72,8 @@ write_inventory_fixture() {
         }
       ]
       | .app_host = null
+      | .app_role.known_hosts_file = $app_kh
+      | .app_role.secret_contract_file = $app_secrets
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -88,6 +92,15 @@ BASE_RELAYER_AUTH_TOKEN=literal:token
 EOF
     append_default_owallet_proof_keys "$workdir/operators/$op/operator-secrets.env"
   done
+
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
 }
 
 write_dkg_summary_fixture() {
@@ -253,7 +266,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
   assert_file_exists "$run_dir/deployment-inventory.json" "inventory snapshot"
   assert_file_exists "$run_dir/bridge-summary.json" "bridge summary"
   assert_file_exists "$run_dir/shared-manifest.json" "shared manifest"
-  assert_file_exists "$run_dir/terraform-output.json" "terraform output"
+  assert_file_exists "$run_dir/shared-terraform-output.json" "shared terraform output"
   assert_file_exists "$run_dir/rollout-state.json" "rollout state"
   assert_file_exists "$run_dir/canaries/shared-services.json" "shared canary"
   assert_file_exists "$run_dir/canaries/0x1111111111111111111111111111111111111111.json" "op1 canary"
@@ -275,6 +288,7 @@ test_rehearse_rollout_creates_timestamped_run_and_resumes() {
   assert_eq "$(jq '[.operators[] | select(.status == "done")] | length' "$run_dir/rollout-state.json")" "3" "all operators done after resume"
   assert_file_exists "$run_dir/canaries/0x7777777777777777777777777777777777777777.json" "op3 canary after resume"
   assert_contains "$(cat "$run_dir/summary.md")" "Run dir: \`$run_dir\`" "summary includes run dir"
+  assert_contains "$(cat "$run_dir/summary.md")" "[shared-terraform-output.json]($run_dir/shared-terraform-output.json)" "summary includes shared terraform artifact"
   assert_contains "$(cat "$log_file")" "deploy-operator --operator-deploy $run_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "first operator deploy logged"
   assert_contains "$(cat "$log_file")" "deploy-operator --operator-deploy $run_dir/operators/0x7777777777777777777777777777777777777777/operator-deploy.json" "resume operator deploy logged"
 
