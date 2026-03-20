@@ -42,6 +42,8 @@ main() {
   assert_contains "$main_tf" 'resource "aws_instance" "wireguard_gateway"' "live-e2e provisions a dedicated wireguard gateway instance"
   assert_contains "$main_tf" 'private_ip                  = local.wireguard_gateway_private_ip' "live-e2e assigns the wireguard gateway the stable private ip"
   assert_contains "$main_tf" 'user_data_replace_on_change = true' "live-e2e replaces the wireguard gateway when its bootstrap config changes"
+  assert_contains "$main_tf" 'instance_refresh {' "live-e2e rolls operator autoscaling instances when the launch template changes"
+  assert_contains "$main_tf" 'triggers = ["launch_template"]' "live-e2e ties operator instance refreshes to launch template updates"
   assert_contains "$main_tf" "rm -f /etc/dnsmasq.d/intents-juno-wireguard.conf.*" "live-e2e removes stale wireguard dnsmasq backup files before restart"
   assert_contains "$variables_tf" $'variable "shared_ecs_desired_count" {\n  description = "Desired task count for each shared proof service ECS service (proof-requestor and proof-funder)."\n  type        = number\n  default     = 1' "live-e2e enables proof services by default"
   assert_contains "$variables_tf" 'If empty, the first two private subnets in distinct AZs in the selected VPC are used.' "live-e2e documents private shared subnet auto-selection"

@@ -2128,6 +2128,17 @@ resource "aws_autoscaling_group" "operator" {
     version = "$Latest"
   }
 
+  instance_refresh {
+    strategy = "Rolling"
+
+    preferences {
+      instance_warmup        = 120
+      min_healthy_percentage = 0
+    }
+
+    triggers = ["launch_template"]
+  }
+
   tag {
     key                 = "Name"
     value               = "${local.resource_name}-operator-${count.index + 1}"
