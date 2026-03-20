@@ -139,14 +139,14 @@ The actual FROST signing path does not reconstruct $a_0$ during normal operation
 The UFVK side is deterministic and public-auditable. The current architecture defines:
 
 $$
-nk = \operatorname{HToBase}(d_{nk} \parallel ak_{\mathrm{bytes}})
+nk = \mathrm{HToBase}(d_{nk} \parallel ak_{\mathrm{bytes}})
 $$
 
 $$
-rivk = \operatorname{HToScalar}(d_{rivk} \parallel ak_{\mathrm{bytes}})
+rivk = \mathrm{HToScalar}(d_{rivk} \parallel ak_{\mathrm{bytes}})
 $$
 
-where `d_nk` is the literal domain tag `WJUNO_NK_V1`, and `d_rivk` is the literal domain tag `WJUNO_RIVK_V1`.
+where $d_{nk}$ is the literal domain tag `WJUNO_NK_V1`, and $d_{rivk}$ is the literal domain tag `WJUNO_RIVK_V1`.
 
 The full viewing material is then constructed from `(ak, nk, rivk)` and published as a UFVK so deposits, spends, and witnesses can be independently checked without exposing spend authority.
 
@@ -194,7 +194,7 @@ The proof layer then operates strictly relative to $\mathtt{finalOrchardRoot}_h$
 Deposit-side claim:
 
 $$
-\operatorname{DepositItem} \Rightarrow
+\mathrm{DepositItem} \Rightarrow
 \begin{cases}
 \text{note commitment is in } \mathtt{finalOrchardRoot}_h \\
 \text{note decrypts under the UFVK-derived viewing material} \\
@@ -206,7 +206,7 @@ $$
 Withdraw-side claim:
 
 $$
-\operatorname{WithdrawItem} \Rightarrow
+\mathrm{WithdrawItem} \Rightarrow
 \begin{cases}
 \text{output note is in } \mathtt{finalOrchardRoot}_h \\
 \text{memo binds the withdrawal identifier and batch identifier} \\
