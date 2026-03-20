@@ -96,14 +96,15 @@ func main() {
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
 		baseRPCURL         = flag.String("base-rpc-url", "", "Base/EVM JSON-RPC URL (required)")
 
-		maxItems      = flag.Int("max-items", 25, "maximum items per mint batch")
-		maxAge        = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
-		dedupeMax     = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
-		claimTTL      = flag.Duration("claim-ttl", defaultDepositRelayerClaimTTL(), "ttl for claimed deposits and submitted attempts (0 => proof timeout + 2m)")
-		owner         = flag.String("owner", "", "unique worker identity used for deposit claim leases (default: hostname-pid)")
-		gasLimit      = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
-		flushEvery    = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
-		submitTimeout = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
+		maxItems             = flag.Int("max-items", 25, "maximum items per mint batch")
+		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
+		dedupeMax            = flag.Int("dedupe-max", 10_000, "max deposit ids remembered for in-memory dedupe")
+		maxBatchWitnessBytes = flag.Int("max-batch-witness-bytes", 0, "maximum aggregate proof witness bytes per batch (0 = disabled)")
+		claimTTL             = flag.Duration("claim-ttl", defaultDepositRelayerClaimTTL(), "ttl for claimed deposits and submitted attempts (0 => proof timeout + 2m)")
+		owner                = flag.String("owner", "", "unique worker identity used for deposit claim leases (default: hostname-pid)")
+		gasLimit             = flag.Uint64("gas-limit", 0, "optional gas limit override; 0 => estimate")
+		flushEvery           = flag.Duration("flush-interval", 1*time.Second, "interval for time-based flush checks")
+		submitTimeout        = flag.Duration("submit-timeout", 5*time.Minute, "per-batch timeout (proof request + base-relayer)")
 
 		proofDriver        = flag.String("proof-driver", "queue", "proof client driver: queue|mock")
 		proofRequestTopic  = flag.String("proof-request-topic", "proof.requests.v1", "proof request topic")
@@ -154,6 +155,10 @@ func main() {
 	}
 	if *maxItems <= 0 || *dedupeMax <= 0 || *maxLineBytes <= 0 || *queueMaxBytes <= 0 {
 		fmt.Fprintln(os.Stderr, "error: --max-items, --dedupe-max, --max-line-bytes, and --queue-max-bytes must be > 0")
+		os.Exit(2)
+	}
+	if *maxBatchWitnessBytes < 0 {
+		fmt.Fprintln(os.Stderr, "error: --max-batch-witness-bytes must be >= 0")
 		os.Exit(2)
 	}
 	if *maxAge <= 0 || *claimTTL <= 0 || *flushEvery <= 0 || *submitTimeout <= 0 {
@@ -402,6 +407,7 @@ func main() {
 		MaxItems:                *maxItems,
 		MaxAge:                  *maxAge,
 		DedupeMax:               *dedupeMax,
+		MaxBatchWitnessBytes:    *maxBatchWitnessBytes,
 		Owner:                   workerOwner,
 		ClaimTTL:                *claimTTL,
 		GasLimit:                *gasLimit,

@@ -90,6 +90,8 @@ type Config struct {
 	Owner     string
 	ClaimTTL  time.Duration
 
+	MaxBatchWitnessBytes int
+
 	GasLimit uint64
 
 	ProofRequestTimeout time.Duration
@@ -193,6 +195,9 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 	}
 	if cfg.DedupeMax <= 0 {
 		return nil, fmt.Errorf("%w: DedupeMax must be > 0", ErrInvalidConfig)
+	}
+	if cfg.MaxBatchWitnessBytes < 0 {
+		return nil, fmt.Errorf("%w: MaxBatchWitnessBytes must be >= 0", ErrInvalidConfig)
 	}
 	if cfg.Owner == "" {
 		cfg.Owner = fmt.Sprintf("deposit-relayer-%d", time.Now().UnixNano())
@@ -438,6 +443,26 @@ func (r *Relayer) nextDurableBatchID() [32]byte {
 	return [32]byte(crypto.Keccak256Hash([]byte("deposit-durable-batch-v1|" + r.cfg.Owner + "|" + strconv.FormatInt(time.Now().UTC().UnixNano(), 10))))
 }
 
+func nextSplitBatchID(batchID [32]byte, movedDepositIDs [][32]byte) [32]byte {
+	payload := make([]byte, 0, len("deposit-durable-batch-split-v1|")+32+(32*len(movedDepositIDs)))
+	payload = append(payload, []byte("deposit-durable-batch-split-v1|")...)
+	payload = append(payload, batchID[:]...)
+	for _, depositID := range movedDepositIDs {
+		payload = append(payload, depositID[:]...)
+	}
+	return [32]byte(crypto.Keccak256Hash(payload))
+}
+
+func splitBatchTailDepositIDs(depositIDs [][32]byte) [][32]byte {
+	if len(depositIDs) <= 1 {
+		return nil
+	}
+	splitAt := len(depositIDs) / 2
+	moved := make([][32]byte, 0, len(depositIDs)-splitAt)
+	moved = append(moved, depositIDs[splitAt:]...)
+	return moved
+}
+
 func (r *Relayer) loadDurableMintBatch(ctx context.Context, batch deposit.Batch, minDeposit uint64) (durableMintBatch, error) {
 	if len(batch.DepositIDs) == 0 {
 		return durableMintBatch{}, nil
@@ -634,25 +659,6 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		opSigs = batch.Meta.OperatorSignatures
 	}
 
-	// Check per-batch proof attempt limits.
-	depositIDs := make([]common.Hash, 0, len(batch.Items))
-	for _, it := range batch.Items {
-		depositIDs = append(depositIDs, common.Hash(it.ID))
-	}
-	proofBatchID := idempotency.DepositBatchIDV1(depositIDs)
-	if r.cfg.MaxProofAttempts > 0 {
-		r.proofAttempts[proofBatchID]++
-		attempts := r.proofAttempts[proofBatchID]
-		if attempts >= r.cfg.MaxProofAttempts {
-			if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
-				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
-				return err
-			}
-			delete(r.proofAttempts, proofBatchID)
-			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
-		}
-	}
-
 	items := make([]bridgeabi.MintItem, 0, len(batch.Items))
 	witnessItems := make([][]byte, 0, len(batch.Items))
 	for i, it := range batch.Items {
@@ -681,6 +687,31 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 			witness = refreshedWitness
 		}
 		witnessItems = append(witnessItems, witness)
+	}
+
+	if handled, err := r.handleOversizedBatchWitness(ctx, batch, witnessItems); err != nil {
+		return err
+	} else if handled {
+		return nil
+	}
+
+	// Check per-batch proof attempt limits after any pre-proof split/reject path.
+	depositIDs := make([]common.Hash, 0, len(batch.Items))
+	for _, it := range batch.Items {
+		depositIDs = append(depositIDs, common.Hash(it.ID))
+	}
+	proofBatchID := idempotency.DepositBatchIDV1(depositIDs)
+	if r.cfg.MaxProofAttempts > 0 {
+		r.proofAttempts[proofBatchID]++
+		attempts := r.proofAttempts[proofBatchID]
+		if attempts >= r.cfg.MaxProofAttempts {
+			if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
+				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
+				return err
+			}
+			delete(r.proofAttempts, proofBatchID)
+			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
+		}
 	}
 
 	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
@@ -819,6 +850,53 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+func (r *Relayer) handleOversizedBatchWitness(ctx context.Context, batch durableMintBatch, witnessItems [][]byte) (bool, error) {
+	if r.cfg.MaxBatchWitnessBytes <= 0 || batch.Meta.State != deposit.BatchStateClosed {
+		return false, nil
+	}
+	totalWitnessBytes := 0
+	for _, witness := range witnessItems {
+		totalWitnessBytes += len(witness)
+	}
+	if totalWitnessBytes <= r.cfg.MaxBatchWitnessBytes {
+		return false, nil
+	}
+
+	reason := batchWitnessBytesExceededReason(totalWitnessBytes, r.cfg.MaxBatchWitnessBytes)
+	if len(batch.Meta.DepositIDs) <= 1 {
+		rejectedIDs := make([][32]byte, 0, len(batch.Meta.DepositIDs))
+		rejectedIDs = append(rejectedIDs, batch.Meta.DepositIDs...)
+		if err := r.store.FailBatch(ctx, r.cfg.Owner, batch.Meta.BatchID, reason, rejectedIDs); err != nil {
+			return false, fmt.Errorf("depositrelayer: reject oversized durable batch %x: %w", batch.Meta.BatchID[:8], err)
+		}
+		r.log.Warn("rejected oversized durable batch",
+			"batchID", fmt.Sprintf("%x", batch.Meta.BatchID[:8]),
+			"witnessBytes", totalWitnessBytes,
+			"maxWitnessBytes", r.cfg.MaxBatchWitnessBytes,
+		)
+		return true, nil
+	}
+
+	movedDepositIDs := splitBatchTailDepositIDs(batch.Meta.DepositIDs)
+	if len(movedDepositIDs) == 0 {
+		return false, fmt.Errorf("depositrelayer: split oversized durable batch %x: no deposits selected for split", batch.Meta.BatchID[:8])
+	}
+	nextBatchID := nextSplitBatchID(batch.Meta.BatchID, movedDepositIDs)
+	left, right, err := r.store.SplitBatch(ctx, r.cfg.Owner, batch.Meta.BatchID, nextBatchID, movedDepositIDs)
+	if err != nil {
+		return false, fmt.Errorf("depositrelayer: split oversized durable batch %x: %w", batch.Meta.BatchID[:8], err)
+	}
+	r.log.Warn("split oversized durable batch",
+		"batchID", fmt.Sprintf("%x", batch.Meta.BatchID[:8]),
+		"nextBatchID", fmt.Sprintf("%x", right.BatchID[:8]),
+		"witnessBytes", totalWitnessBytes,
+		"maxWitnessBytes", r.cfg.MaxBatchWitnessBytes,
+		"leftItems", len(left.DepositIDs),
+		"rightItems", len(right.DepositIDs),
+	)
+	return true, nil
 }
 
 func (r *Relayer) checkBridgePause(ctx context.Context) error {
@@ -1168,4 +1246,8 @@ func belowMinDepositReason(minDeposit uint64) string {
 		return "deposit skipped by bridge"
 	}
 	return fmt.Sprintf("deposit amount is below the current minimum deposit (%d)", minDeposit)
+}
+
+func batchWitnessBytesExceededReason(totalWitnessBytes int, maxWitnessBytes int) string {
+	return fmt.Sprintf("proof witness bytes %d exceed max batch witness bytes %d", totalWitnessBytes, maxWitnessBytes)
 }
