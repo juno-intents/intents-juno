@@ -30,7 +30,7 @@ export default function ApiDocs() {
       <h4 style={{ marginTop: 16, marginBottom: 8, color: 'var(--accent)' }}>Response Format</h4>
       <p>All responses include <code>"version": "v1"</code>.</p>
       <p>List endpoints return <code>&#123;"data": [...], "total": N, "limit": L, "offset": O&#125;</code>.</p>
-      <p>Amounts are in zatoshi (1 JUNO = 10^8 zatoshi). IDs/hashes are 0x-prefixed hex.</p>
+      <p>Amounts are in Monetas (1 JUNO = 10^8 Monetas). IDs/hashes are 0x-prefixed hex.</p>
     </div>
   )
 }
