@@ -295,6 +295,117 @@ func TestMemoryStore_ClaimAndBatch(t *testing.T) {
 	}
 }
 
+func TestMemoryStore_ClaimBatchesByStateAndAge(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	ctx := context.Background()
+	store := NewMemoryStore(nowFn)
+
+	makeSignedBatch := func(idSeed byte, owner string) ([32]byte, [32]byte) {
+		wid := seq32(idSeed)
+		w := Withdrawal{ID: wid, Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+		if _, _, err := store.UpsertRequested(ctx, w); err != nil {
+			t.Fatalf("UpsertRequested(%x): %v", wid[:1], err)
+		}
+		if _, err := store.ClaimUnbatched(ctx, testFence(owner), 10*time.Second, 1); err != nil {
+			t.Fatalf("ClaimUnbatched(%x): %v", wid[:1], err)
+		}
+		batchID := seq32(idSeed ^ 0xa5)
+		if err := store.CreatePlannedBatch(ctx, testFence(owner), Batch{
+			ID:            batchID,
+			WithdrawalIDs: [][32]byte{wid},
+			State:         BatchStatePlanned,
+			TxPlan:        []byte(`{"v":1}`),
+		}); err != nil {
+			t.Fatalf("CreatePlannedBatch(%x): %v", wid[:1], err)
+		}
+		if err := store.MarkBatchSigning(ctx, batchID, testFence(owner)); err != nil {
+			t.Fatalf("MarkBatchSigning(%x): %v", wid[:1], err)
+		}
+		if err := store.SetBatchSigned(ctx, batchID, testFence(owner), []byte{0x01}); err != nil {
+			t.Fatalf("SetBatchSigned(%x): %v", wid[:1], err)
+		}
+		return wid, batchID
+	}
+
+	_, staleBatchID := makeSignedBatch(0x10, "owner-a")
+	now = now.Add(10 * time.Minute)
+	_, freshBatchID := makeSignedBatch(0x20, "owner-a")
+	cutoff := now.Add(-5 * time.Minute)
+
+	listed, err := store.ListBatchesByStatesOlderThan(ctx, []BatchState{BatchStateSigned}, cutoff, 10)
+	if err != nil {
+		t.Fatalf("ListBatchesByStatesOlderThan: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("listed stale batches: got %d want 1", len(listed))
+	}
+	if listed[0].ID != staleBatchID {
+		t.Fatalf("listed stale batches: got %x want %x", listed[0].ID[:1], staleBatchID[:1])
+	}
+
+	claimed, err := store.ClaimBatches(ctx, Fence{Owner: "owner-a", LeaseVersion: 2}, []BatchState{BatchStateSigned}, cutoff, 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed stale batches: got %d want 1", len(claimed))
+	}
+	if claimed[0].ID != staleBatchID {
+		t.Fatalf("claimed stale batches: got %x want %x", claimed[0].ID[:1], staleBatchID[:1])
+	}
+	if claimed[0].LeaseOwner != "owner-a" || claimed[0].LeaseVersion != 2 {
+		t.Fatalf("claimed batch lease mismatch: %+v", claimed[0])
+	}
+
+	fresh, err := store.GetBatch(ctx, freshBatchID)
+	if err != nil {
+		t.Fatalf("GetBatch fresh: %v", err)
+	}
+	if fresh.LeaseVersion != 1 {
+		t.Fatalf("fresh lease version changed unexpectedly: %d", fresh.LeaseVersion)
+	}
+}
+
+func TestMemoryStore_ScanBackfillCursorRoundTrips(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	store := NewMemoryStore(func() time.Time { return now })
+	ctx := context.Background()
+
+	if _, _, ok, err := store.GetScanBackfillCursor(ctx, "wallet-1"); err != nil {
+		t.Fatalf("GetScanBackfillCursor missing: %v", err)
+	} else if ok {
+		t.Fatalf("expected missing cursor")
+	}
+
+	if err := store.SetScanBackfillCursor(ctx, "wallet-1", 123); err != nil {
+		t.Fatalf("SetScanBackfillCursor #1: %v", err)
+	}
+	height, updatedAt, ok, err := store.GetScanBackfillCursor(ctx, "wallet-1")
+	if err != nil {
+		t.Fatalf("GetScanBackfillCursor #1: %v", err)
+	}
+	if !ok || height != 123 || updatedAt.IsZero() {
+		t.Fatalf("cursor round-trip mismatch: ok=%v height=%d updatedAt=%s", ok, height, updatedAt)
+	}
+
+	now = now.Add(5 * time.Minute)
+	if err := store.SetScanBackfillCursor(ctx, "wallet-1", 456); err != nil {
+		t.Fatalf("SetScanBackfillCursor #2: %v", err)
+	}
+	height, updatedAt2, ok, err := store.GetScanBackfillCursor(ctx, "wallet-1")
+	if err != nil {
+		t.Fatalf("GetScanBackfillCursor #2: %v", err)
+	}
+	if !ok || height != 456 || !updatedAt2.After(updatedAt) {
+		t.Fatalf("cursor update mismatch: ok=%v height=%d updatedAt2=%s updatedAt=%s", ok, height, updatedAt2, updatedAt)
+	}
+}
+
 func TestMemoryStore_WithdrawalStatusTransitions(t *testing.T) {
 	t.Parallel()
 

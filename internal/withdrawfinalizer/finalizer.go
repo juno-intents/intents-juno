@@ -219,6 +219,11 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 		return nil
 	}
 
+	var repairErr error
+	if err := f.repairStaleBatches(ctx); err != nil {
+		repairErr = err
+	}
+
 	ids := make([][32]byte, 0, f.cfg.MaxBatches)
 	seen := make(map[[32]byte]struct{}, f.cfg.MaxBatches)
 	appendState := func(state withdraw.BatchState) error {
@@ -248,11 +253,11 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 		}
 	}
 	if len(ids) == 0 {
-		return nil
+		return repairErr
 	}
 	if f.readinessChecker != nil {
 		if err := f.readinessChecker.Ready(ctx); err != nil {
-			return nil
+			return repairErr
 		}
 	}
 
@@ -267,7 +272,26 @@ func (f *Finalizer) Tick(ctx context.Context) error {
 			continue
 		}
 	}
-	return lastErr
+	return errors.Join(repairErr, lastErr)
+}
+
+func (f *Finalizer) repairStaleBatches(ctx context.Context) error {
+	staleCutoff := f.cfg.LeaseTTL
+	if staleCutoff <= 0 {
+		staleCutoff = 15 * time.Minute
+	}
+	staleBefore := time.Now().UTC().Add(-staleCutoff)
+	batches, err := f.store.ClaimBatches(ctx, finalizerFence(f.cfg.Owner), []withdraw.BatchState{withdraw.BatchStateFinalizing, withdraw.BatchStateConfirmed}, staleBefore, f.cfg.MaxBatches)
+	if err != nil {
+		return err
+	}
+	var repairErr error
+	for _, b := range batches {
+		if err := f.finalizeBatch(ctx, b.ID); err != nil && repairErr == nil {
+			repairErr = err
+		}
+	}
+	return repairErr
 }
 
 func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {

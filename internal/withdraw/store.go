@@ -131,11 +131,15 @@ type Batch struct {
 
 	MarkPaidFailures  int
 	LastMarkPaidError string
+
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 type Store interface {
 	UpsertRequested(ctx context.Context, w Withdrawal) (Withdrawal, bool, error)
 	ClaimUnbatched(ctx context.Context, fence Fence, ttl time.Duration, max int) ([]Withdrawal, error)
+	ClaimBatches(ctx context.Context, fence Fence, states []BatchState, olderThan time.Time, max int) ([]Batch, error)
 	CreatePlannedBatch(ctx context.Context, fence Fence, b Batch) error
 
 	GetWithdrawal(ctx context.Context, id [32]byte) (Withdrawal, error)
@@ -143,7 +147,10 @@ type Store interface {
 	GetWithdrawalStatus(ctx context.Context, id [32]byte) (WithdrawalStatus, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
+	ListBatchesByStatesOlderThan(ctx context.Context, states []BatchState, olderThan time.Time, max int) ([]Batch, error)
 	CountDLQBatches(ctx context.Context) (int, error)
+	GetScanBackfillCursor(ctx context.Context, walletID string) (height int64, updatedAt time.Time, ok bool, err error)
+	SetScanBackfillCursor(ctx context.Context, walletID string, height int64) error
 
 	AdoptBatch(ctx context.Context, batchID [32]byte, fence Fence) error
 	MarkBatchSigning(ctx context.Context, batchID [32]byte, fence Fence) error

@@ -13,6 +13,9 @@ type MetricsSummary struct {
 	MinTimeToExpiry        time.Duration
 	HasConfirmedUnmarked   bool
 	MarkPaidCircuitOpen    bool
+	StaleBatchBacklogCount  int
+	OldestStaleBatchAge     time.Duration
+	HasStaleBacklog        bool
 }
 
 func (c *Coordinator) MetricsSummary(ctx context.Context) (MetricsSummary, error) {
@@ -55,6 +58,29 @@ func (c *Coordinator) MetricsSummary(ctx context.Context) (MetricsSummary, error
 	if summary.HasConfirmedUnmarked {
 		if minExpiry.After(now) {
 			summary.MinTimeToExpiry = minExpiry.Sub(now)
+		}
+	}
+
+	staleCutoff := now.Add(-c.cfg.MaxAge)
+	staleStates := []withdraw.BatchState{
+		withdraw.BatchStatePlanned,
+		withdraw.BatchStateSigning,
+		withdraw.BatchStateSigned,
+		withdraw.BatchStateBroadcasted,
+		withdraw.BatchStateJunoConfirmed,
+		withdraw.BatchStateConfirmed,
+		withdraw.BatchStateFinalizing,
+	}
+	staleBatches, err := c.store.ListBatchesByStatesOlderThan(ctx, staleStates, staleCutoff, int(^uint(0)>>1))
+	if err != nil {
+		return summary, err
+	}
+	summary.StaleBatchBacklogCount = len(staleBatches)
+	for _, b := range staleBatches {
+		age := now.Sub(b.UpdatedAt)
+		if !summary.HasStaleBacklog || age > summary.OldestStaleBatchAge {
+			summary.OldestStaleBatchAge = age
+			summary.HasStaleBacklog = true
 		}
 	}
 	return summary, nil

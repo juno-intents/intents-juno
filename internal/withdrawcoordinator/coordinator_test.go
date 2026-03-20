@@ -516,6 +516,79 @@ func TestCoordinator_BroadcastedPendingDoesNotFailTick(t *testing.T) {
 	}
 }
 
+func TestCoordinator_TickRepairsStaleSignedBatchBeforeResume(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	ctx := context.Background()
+	baseStore := withdraw.NewMemoryStore(nowFn)
+	store := &repairOnlyWithdrawStore{MemoryStore: baseStore}
+
+	w := withdraw.Withdrawal{ID: seq32(0x42), Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+	if _, _, err := baseStore.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+	if _, err := baseStore.ClaimUnbatched(ctx, testWithdrawFence("a"), 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+	batchID := seq32(0x99)
+	if err := baseStore.CreatePlannedBatch(ctx, testWithdrawFence("a"), withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := baseStore.MarkBatchSigning(ctx, batchID, testWithdrawFence("a")); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := baseStore.SetBatchSigned(ctx, batchID, testWithdrawFence("a"), []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	now = now.Add(20 * time.Minute)
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:    "a",
+		MaxItems: 1,
+		MaxAge:   10 * time.Minute,
+		ClaimTTL: 10 * time.Second,
+		Now:      nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{txid: "tx1"}, &stubConfirmer{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := c.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+
+	b, err := baseStore.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateBroadcasted {
+		t.Fatalf("expected stale batch to be broadcasted by repair loop, got %s", b.State)
+	}
+	if b.JunoTxID != "tx1" {
+		t.Fatalf("expected broadcast txid tx1, got %q", b.JunoTxID)
+	}
+}
+
+type repairOnlyWithdrawStore struct {
+	*withdraw.MemoryStore
+}
+
+func (s *repairOnlyWithdrawStore) ListBatchesByState(ctx context.Context, state withdraw.BatchState) ([]withdraw.Batch, error) {
+	switch state {
+	case withdraw.BatchStateSigned, withdraw.BatchStateBroadcasted, withdraw.BatchStateJunoConfirmed:
+		return nil, nil
+	default:
+		return s.MemoryStore.ListBatchesByState(ctx, state)
+	}
+}
+
 func TestCoordinator_ReplansWhenBroadcastTxMissing(t *testing.T) {
 	t.Parallel()
 

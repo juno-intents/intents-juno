@@ -783,11 +783,17 @@ func emitWithdrawMetrics(
 	if summary.MarkPaidCircuitOpen {
 		circuitOpen = 1
 	}
+	staleAgeSeconds := 0.0
+	if summary.HasStaleBacklog {
+		staleAgeSeconds = summary.OldestStaleBatchAge.Seconds()
+	}
 	if err := emitter.Emit(
 		emf.Metric{Name: "WithdrawalDLQDepth", Unit: emf.UnitCount, Value: float64(summary.DLQDepth)},
 		emf.Metric{Name: "ConfirmedUnmarkedCount", Unit: emf.UnitCount, Value: float64(summary.ConfirmedUnmarkedCount)},
 		emf.Metric{Name: "MinWithdrawalTimeToExpirySeconds", Unit: emf.UnitSeconds, Value: minExpirySeconds},
 		emf.Metric{Name: "MarkPaidCircuitOpen", Unit: emf.UnitCount, Value: circuitOpen},
+		emf.Metric{Name: "WithdrawalStaleBatchBacklogCount", Unit: emf.UnitCount, Value: float64(summary.StaleBatchBacklogCount)},
+		emf.Metric{Name: "WithdrawalStaleBatchAgeSeconds", Unit: emf.UnitSeconds, Value: staleAgeSeconds},
 	); err != nil && log != nil {
 		log.Warn("emit withdraw metrics", "err", err)
 	}

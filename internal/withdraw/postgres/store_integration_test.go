@@ -311,6 +311,116 @@ func TestStore_FencedBatchMutationAndFailureBookkeeping(t *testing.T) {
 	}
 }
 
+func TestStore_ClaimBatchesAndScanBackfillCursorRoundTrip(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Now().UTC()
+	fence := withdraw.Fence{Owner: "owner-a", LeaseVersion: 1}
+	claimFence := withdraw.Fence{Owner: "owner-a", LeaseVersion: 2}
+
+	makeSignedBatch := func(seed byte) ([32]byte, [32]byte) {
+		wid := seq32(seed)
+		w := withdraw.Withdrawal{ID: wid, Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour)}
+		if _, created, err := s.UpsertRequested(ctx, w); err != nil || !created {
+			t.Fatalf("UpsertRequested(%x): created=%v err=%v", wid[:1], created, err)
+		}
+		if _, err := s.ClaimUnbatched(ctx, fence, 10*time.Second, 1); err != nil {
+			t.Fatalf("ClaimUnbatched(%x): %v", wid[:1], err)
+		}
+		batchID := seq32(seed ^ 0xb7)
+		if err := s.CreatePlannedBatch(ctx, fence, withdraw.Batch{
+			ID:            batchID,
+			WithdrawalIDs: [][32]byte{wid},
+			State:         withdraw.BatchStatePlanned,
+			TxPlan:        []byte(`{"v":1}`),
+		}); err != nil {
+			t.Fatalf("CreatePlannedBatch(%x): %v", wid[:1], err)
+		}
+		if err := s.MarkBatchSigning(ctx, batchID, fence); err != nil {
+			t.Fatalf("MarkBatchSigning(%x): %v", wid[:1], err)
+		}
+		if err := s.SetBatchSigned(ctx, batchID, fence, []byte{0x01}); err != nil {
+			t.Fatalf("SetBatchSigned(%x): %v", wid[:1], err)
+		}
+		return wid, batchID
+	}
+
+	_, staleBatchID := makeSignedBatch(0x11)
+	if _, err := pool.Exec(ctx, `UPDATE withdrawal_batches SET updated_at = now() - interval '1 hour' WHERE batch_id = $1`, staleBatchID[:]); err != nil {
+		t.Fatalf("age stale batch: %v", err)
+	}
+	_, freshBatchID := makeSignedBatch(0x22)
+
+	cutoff := time.Now().UTC().Add(-30 * time.Minute)
+	listed, err := s.ListBatchesByStatesOlderThan(ctx, []withdraw.BatchState{withdraw.BatchStateSigned}, cutoff, 10)
+	if err != nil {
+		t.Fatalf("ListBatchesByStatesOlderThan: %v", err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("listed stale batches: got %d want 1", len(listed))
+	}
+	if listed[0].ID != staleBatchID {
+		t.Fatalf("listed stale batches: got %x want %x", listed[0].ID[:1], staleBatchID[:1])
+	}
+
+	claimed, err := s.ClaimBatches(ctx, claimFence, []withdraw.BatchState{withdraw.BatchStateSigned}, cutoff, 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches: %v", err)
+	}
+	if len(claimed) != 1 {
+		t.Fatalf("claimed stale batches: got %d want 1", len(claimed))
+	}
+	if claimed[0].ID != staleBatchID {
+		t.Fatalf("claimed stale batches: got %x want %x", claimed[0].ID[:1], staleBatchID[:1])
+	}
+	if claimed[0].LeaseOwner != claimFence.Owner || claimed[0].LeaseVersion != claimFence.LeaseVersion {
+		t.Fatalf("claimed stale batch lease mismatch: %+v", claimed[0])
+	}
+
+	fresh, err := s.GetBatch(ctx, freshBatchID)
+	if err != nil {
+		t.Fatalf("GetBatch fresh: %v", err)
+	}
+	if fresh.LeaseVersion != fence.LeaseVersion {
+		t.Fatalf("fresh batch lease version changed unexpectedly: %d", fresh.LeaseVersion)
+	}
+
+	if err := s.SetScanBackfillCursor(ctx, "wallet-1", 77); err != nil {
+		t.Fatalf("SetScanBackfillCursor: %v", err)
+	}
+	h, updatedAt, ok, err := s.GetScanBackfillCursor(ctx, "wallet-1")
+	if err != nil {
+		t.Fatalf("GetScanBackfillCursor: %v", err)
+	}
+	if !ok || h != 77 || updatedAt.IsZero() {
+		t.Fatalf("cursor round-trip mismatch: ok=%v height=%d updatedAt=%s", ok, h, updatedAt)
+	}
+}
+
 func TestStore_EnsureSchema_UpgradesLegacyWithdrawalBatchesWithoutDLQColumn(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

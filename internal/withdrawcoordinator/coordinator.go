@@ -273,6 +273,9 @@ func (c *Coordinator) Tick(ctx context.Context) error {
 	}
 
 	var tickErr error
+	if err := c.repairStaleBatches(ctx); err != nil {
+		tickErr = err
+	}
 	if err := c.resume(ctx); err != nil {
 		tickErr = err
 	}
@@ -392,6 +395,48 @@ func (c *Coordinator) resume(ctx context.Context) error {
 		}
 	}
 	return resumeErr
+}
+
+func (c *Coordinator) repairStaleBatches(ctx context.Context) error {
+	staleCutoff := c.cfg.Now().Add(-c.cfg.MaxAge)
+	groups := []struct {
+		states []withdraw.BatchState
+		stage  string
+		action func(context.Context, [32]byte) error
+	}{
+		{
+			states: []withdraw.BatchState{withdraw.BatchStatePlanned, withdraw.BatchStateSigning},
+			stage:  "signing",
+			action: c.signBatch,
+		},
+		{
+			states: []withdraw.BatchState{withdraw.BatchStateSigned},
+			stage:  "broadcast",
+			action: c.broadcastBatch,
+		},
+		{
+			states: []withdraw.BatchState{withdraw.BatchStateBroadcasted, withdraw.BatchStateJunoConfirmed},
+			stage:  "confirm",
+			action: c.confirmBatch,
+		},
+	}
+
+	var repairErr error
+	for _, group := range groups {
+		batches, err := c.store.ClaimBatches(ctx, c.storeFence(), group.states, staleCutoff, c.cfg.MaxItems)
+		if err != nil {
+			return err
+		}
+		for _, b := range batches {
+			if err := c.assertLeadership(ctx); err != nil {
+				return err
+			}
+			if err := c.processBatchError(ctx, b.ID, group.stage, group.action(ctx, b.ID)); err != nil && repairErr == nil {
+				repairErr = err
+			}
+		}
+	}
+	return repairErr
 }
 
 func (c *Coordinator) processNewBatch(ctx context.Context, batch batching.Batch[withdraw.Withdrawal]) error {

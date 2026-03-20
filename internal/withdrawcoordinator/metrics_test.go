@@ -118,3 +118,74 @@ func TestCoordinatorMetricsSummaryReportsDLQAndConfirmedUnmarked(t *testing.T) {
 		t.Fatalf("MarkPaidCircuitOpen accessor = false, want true")
 	}
 }
+
+func TestCoordinatorMetricsSummaryReportsStaleBatchBacklog(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	now := time.Date(2026, 3, 18, 12, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := withdraw.NewMemoryStore(nowFn)
+	fence := withdraw.Fence{Owner: "coordinator-a", LeaseVersion: 1}
+
+	makeSignedBatch := func(seed byte) [32]byte {
+		wid := seq32(seed)
+		w := withdraw.Withdrawal{ID: wid, Amount: 1, FeeBps: 0, RecipientUA: []byte{0x01}, Expiry: now.Add(45 * time.Minute)}
+		if _, created, err := store.UpsertRequested(ctx, w); err != nil || !created {
+			t.Fatalf("UpsertRequested(%x): created=%v err=%v", wid[:1], created, err)
+		}
+		if _, err := store.ClaimUnbatched(ctx, fence, time.Minute, 1); err != nil {
+			t.Fatalf("ClaimUnbatched(%x): %v", wid[:1], err)
+		}
+		batchID := batching.WithdrawalBatchIDV1([][32]byte{wid})
+		if err := store.CreatePlannedBatch(ctx, fence, withdraw.Batch{
+			ID:            batchID,
+			WithdrawalIDs: [][32]byte{wid},
+			State:         withdraw.BatchStatePlanned,
+			TxPlan:        []byte(`{"v":1}`),
+		}); err != nil {
+			t.Fatalf("CreatePlannedBatch(%x): %v", wid[:1], err)
+		}
+		if err := store.MarkBatchSigning(ctx, batchID, fence); err != nil {
+			t.Fatalf("MarkBatchSigning(%x): %v", wid[:1], err)
+		}
+		if err := store.SetBatchSigned(ctx, batchID, fence, []byte{0x01}); err != nil {
+			t.Fatalf("SetBatchSigned(%x): %v", wid[:1], err)
+		}
+		return batchID
+	}
+
+	staleBatchID := makeSignedBatch(0x10)
+	now = now.Add(20 * time.Minute)
+	freshBatchID := makeSignedBatch(0x20)
+	now = now.Add(10 * time.Minute)
+
+	coord, err := New(Config{
+		Owner:    fence.Owner,
+		MaxItems: 10,
+		MaxAge:   15 * time.Minute,
+		ClaimTTL: time.Minute,
+		Now:      nowFn,
+	}, store, &stubPlanner{}, &stubSigner{}, &stubBroadcaster{}, &stubConfirmer{}, &stubTxChecker{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	coord.markPaidCircuitOpen = true
+
+	summary, err := coord.MetricsSummary(ctx)
+	if err != nil {
+		t.Fatalf("MetricsSummary: %v", err)
+	}
+	if summary.StaleBatchBacklogCount != 1 {
+		t.Fatalf("StaleBatchBacklogCount = %d, want 1", summary.StaleBatchBacklogCount)
+	}
+	if !summary.HasStaleBacklog {
+		t.Fatalf("HasStaleBacklog = false, want true")
+	}
+	if summary.OldestStaleBatchAge != 30*time.Minute {
+		t.Fatalf("OldestStaleBatchAge = %s, want %s", summary.OldestStaleBatchAge, 30*time.Minute)
+	}
+	if summary.StaleBatchBacklogCount == 0 || staleBatchID == freshBatchID {
+		t.Fatalf("unexpected test setup")
+	}
+}

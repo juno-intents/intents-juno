@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/withdraw"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
@@ -158,12 +160,70 @@ func TestNewWithdrawWitnessExtractor_RequiresRPCCredentials(t *testing.T) {
 	t.Setenv("JUNO_RPC_USER", "")
 	t.Setenv("JUNO_RPC_PASS", "")
 
-	_, err := newWithdrawWitnessExtractor(cfg)
+	_, err := newWithdrawWitnessExtractor(cfg, nil)
 	if err == nil {
 		t.Fatalf("expected error")
 	}
 	if !strings.Contains(err.Error(), "missing junocashd RPC credentials") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestWithdrawWitnessExtractor_ExtractPersistsScanBackfillCursor(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 20, 12, 0, 0, 0, time.UTC)
+	store := withdraw.NewMemoryStore(func() time.Time { return now })
+
+	scan := &stubWitnessScanClient{
+		notes: []witnessextract.WalletNote{
+			{
+				TxID:        strings.Repeat("ab", 32),
+				ActionIndex: 2,
+				Position:    ptrInt64(7),
+			},
+		},
+		witness: witnessextract.WitnessResponse{
+			AnchorHeight: 321,
+			Root:         "0x" + strings.Repeat("cd", 32),
+			Paths: []witnessextract.WitnessPath{{Position: 7, AuthPath: testAuthPathHex()}},
+		},
+	}
+	rpc := &stubWitnessRPCClient{action: testRPCAction()}
+	extractor := &withdrawWitnessExtractor{
+		walletID: "wallet-1",
+		builder:  witnessextract.New(scan, rpc),
+		minAnchorHeight: func(context.Context, string) (int64, error) {
+			return 123, nil
+		},
+		cursorStore: store,
+	}
+
+	var withdrawalID [32]byte
+	withdrawalID[0] = 0x11
+	recipientRaw := bytes.Repeat([]byte{0x7a}, 43)
+	anchorHeight := int64(321)
+
+	got, err := extractor.ExtractWithdrawWitness(context.Background(), withdrawfinalizer.WithdrawWitnessExtractRequest{
+		TxHash:       strings.Repeat("ab", 32),
+		ActionIndex:  2,
+		AnchorHeight: &anchorHeight,
+		WithdrawalID: withdrawalID,
+		RecipientUA:  recipientRaw,
+	})
+	if err != nil {
+		t.Fatalf("ExtractWithdrawWitness: %v", err)
+	}
+	if len(got) != proverinput.WithdrawWitnessItemLen {
+		t.Fatalf("witness item len: got %d want %d", len(got), proverinput.WithdrawWitnessItemLen)
+	}
+
+	height, updatedAt, ok, err := store.GetScanBackfillCursor(context.Background(), "wallet-1")
+	if err != nil {
+		t.Fatalf("GetScanBackfillCursor: %v", err)
+	}
+	if !ok || height != 123 || updatedAt.IsZero() {
+		t.Fatalf("cursor persistence mismatch: ok=%v height=%d updatedAt=%s", ok, height, updatedAt)
 	}
 }
 

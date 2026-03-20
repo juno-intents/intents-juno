@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -246,6 +247,42 @@ func (s *Store) ClaimUnbatched(ctx context.Context, fence withdraw.Fence, ttl ti
 	return out, nil
 }
 
+func (s *Store) ClaimBatches(ctx context.Context, fence withdraw.Fence, states []withdraw.BatchState, olderThan time.Time, max int) ([]withdraw.Batch, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	if olderThan.IsZero() || max <= 0 || len(states) == 0 {
+		return nil, withdraw.ErrInvalidConfig
+	}
+
+	batches, err := s.ListBatchesByStatesOlderThan(ctx, states, olderThan, max)
+	if err != nil {
+		return nil, err
+	}
+
+	out := make([]withdraw.Batch, 0, len(batches))
+	for _, b := range batches {
+		if b.LeaseOwner != "" && b.LeaseOwner != fence.Owner {
+			continue
+		}
+		if err := s.AdoptBatch(ctx, b.ID, fence); err != nil {
+			continue
+		}
+		claimed, err := s.GetBatch(ctx, b.ID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, claimed)
+		if len(out) >= max {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (s *Store) CreatePlannedBatch(ctx context.Context, fence withdraw.Fence, b withdraw.Batch) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
@@ -407,12 +444,14 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 		dlqAt           *time.Time
 		markPaidFails   int32
 		lastMarkPaidErr *string
+		createdAt       time.Time
+		updatedAt       time.Time
 	)
 	err := s.pool.QueryRow(ctx, `
-		SELECT batch_id, state, lease_owner, lease_version, tx_plan, signed_tx, broadcast_locked_at, juno_txid, juno_confirmed_at, base_tx_hash, rebroadcast_attempts, next_rebroadcast_at, failure_count, last_failure_stage, last_error_code, last_error_message, last_failed_at, dlq_at, mark_paid_failures, last_mark_paid_error
+		SELECT batch_id, state, lease_owner, lease_version, tx_plan, signed_tx, broadcast_locked_at, juno_txid, juno_confirmed_at, base_tx_hash, rebroadcast_attempts, next_rebroadcast_at, failure_count, last_failure_stage, last_error_code, last_error_message, last_failed_at, dlq_at, mark_paid_failures, last_mark_paid_error, created_at, updated_at
 		FROM withdrawal_batches
 		WHERE batch_id = $1
-	`, batchID[:]).Scan(&idRaw, &state, &leaseOwner, &leaseVersion, &txPlan, &signedTx, &broadcastLocked, &junoTxID, &junoConfirmed, &baseTxHash, &rebAttempts, &nextRebroadcast, &failureCount, &lastFailure, &lastErrorCode, &lastErrorMsg, &lastFailedAt, &dlqAt, &markPaidFails, &lastMarkPaidErr)
+	`, batchID[:]).Scan(&idRaw, &state, &leaseOwner, &leaseVersion, &txPlan, &signedTx, &broadcastLocked, &junoTxID, &junoConfirmed, &baseTxHash, &rebAttempts, &nextRebroadcast, &failureCount, &lastFailure, &lastErrorCode, &lastErrorMsg, &lastFailedAt, &dlqAt, &markPaidFails, &lastMarkPaidErr, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return withdraw.Batch{}, withdraw.ErrNotFound
@@ -464,6 +503,8 @@ func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (withdraw.Batch,
 		RebroadcastAttempts: uint32(rebAttempts),
 		FailureCount:        int(failureCount),
 		MarkPaidFailures:    int(markPaidFails),
+		CreatedAt:           createdAt.UTC(),
+		UpdatedAt:           updatedAt.UTC(),
 	}
 	if leaseOwner != nil {
 		out.LeaseOwner = *leaseOwner
@@ -538,6 +579,113 @@ func (s *Store) ListBatchesByState(ctx context.Context, state withdraw.BatchStat
 		return nil, fmt.Errorf("withdraw/postgres: list batches rows: %w", err)
 	}
 	return out, nil
+}
+
+func (s *Store) ListBatchesByStatesOlderThan(ctx context.Context, states []withdraw.BatchState, olderThan time.Time, max int) ([]withdraw.Batch, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if olderThan.IsZero() || max <= 0 || len(states) == 0 {
+		return nil, withdraw.ErrInvalidConfig
+	}
+
+	stateIDs := make([]int16, 0, len(states))
+	seen := make(map[withdraw.BatchState]struct{}, len(states))
+	for _, state := range states {
+		if state == withdraw.BatchStateUnknown {
+			continue
+		}
+		if _, ok := seen[state]; ok {
+			continue
+		}
+		seen[state] = struct{}{}
+		stateIDs = append(stateIDs, int16(state))
+	}
+	if len(stateIDs) == 0 {
+		return nil, withdraw.ErrInvalidConfig
+	}
+
+	rows, err := s.pool.Query(ctx, `
+		SELECT batch_id
+		FROM withdrawal_batches
+		WHERE dlq_at IS NULL
+		  AND updated_at <= $1
+		  AND state = ANY($2::smallint[])
+		ORDER BY updated_at ASC, batch_id ASC
+		LIMIT $3
+	`, olderThan.UTC(), stateIDs, max)
+	if err != nil {
+		return nil, fmt.Errorf("withdraw/postgres: list batches older than: %w", err)
+	}
+	defer rows.Close()
+
+	var out []withdraw.Batch
+	for rows.Next() {
+		var idRaw []byte
+		if err := rows.Scan(&idRaw); err != nil {
+			return nil, fmt.Errorf("withdraw/postgres: scan stale batch id: %w", err)
+		}
+		id, err := to32(idRaw)
+		if err != nil {
+			return nil, err
+		}
+		b, err := s.GetBatch(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("withdraw/postgres: list batches older than rows: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Store) GetScanBackfillCursor(ctx context.Context, walletID string) (int64, time.Time, bool, error) {
+	if s == nil || s.pool == nil {
+		return 0, time.Time{}, false, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return 0, time.Time{}, false, withdraw.ErrInvalidConfig
+	}
+
+	var height int64
+	var updatedAt time.Time
+	err := s.pool.QueryRow(ctx, `
+		SELECT cursor_height, updated_at
+		FROM withdraw_scan_backfill_cursors
+		WHERE wallet_id = $1
+	`, walletID).Scan(&height, &updatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return 0, time.Time{}, false, nil
+		}
+		return 0, time.Time{}, false, fmt.Errorf("withdraw/postgres: get scan backfill cursor: %w", err)
+	}
+	return height, updatedAt.UTC(), true, nil
+}
+
+func (s *Store) SetScanBackfillCursor(ctx context.Context, walletID string, height int64) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" || height < 0 {
+		return withdraw.ErrInvalidConfig
+	}
+
+	_, err := s.pool.Exec(ctx, `
+		INSERT INTO withdraw_scan_backfill_cursors (wallet_id, cursor_height, created_at, updated_at)
+		VALUES ($1, $2, now(), now())
+		ON CONFLICT (wallet_id) DO UPDATE
+		SET cursor_height = EXCLUDED.cursor_height,
+			updated_at = now()
+	`, walletID, height)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: set scan backfill cursor: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) CountDLQBatches(ctx context.Context) (int, error) {

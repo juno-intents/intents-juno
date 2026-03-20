@@ -23,6 +23,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
+	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
@@ -122,6 +123,18 @@ func main() {
 	flag.Parse()
 
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	metricsEmitter, metricsErr := emf.New(emf.Config{
+		Namespace: emf.OperationsNamespace,
+		Writer:    os.Stdout,
+		Now:       time.Now,
+		Fields: map[string]any{
+			"service": "withdraw-finalizer",
+		},
+	})
+	if metricsErr != nil {
+		log.Error("init metrics emitter", "err", metricsErr)
+		os.Exit(2)
+	}
 
 	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" {
 		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --operators, --operator-threshold, --withdraw-image-id, --base-relayer-url, and --owner are required")
@@ -193,12 +206,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
-	witnessExtractor, err := newWithdrawWitnessExtractor(extractorCfg)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: init witness extractor: %v\n", err)
-		os.Exit(2)
-	}
-
 	authToken := os.Getenv(*baseRelayerAuthEnv)
 	if authToken == "" {
 		fmt.Fprintf(os.Stderr, "error: missing base-relayer auth token in env %s\n", *baseRelayerAuthEnv)
@@ -254,6 +261,11 @@ func main() {
 	}
 	if err := store.EnsureSchema(ctx); err != nil {
 		log.Error("ensure withdraw schema", "err", err)
+		os.Exit(2)
+	}
+	witnessExtractor, err := newWithdrawWitnessExtractor(extractorCfg, store)
+	if err != nil {
+		log.Error("init witness extractor", "err", err)
 		os.Exit(2)
 	}
 
@@ -386,6 +398,7 @@ func main() {
 			if err != nil {
 				log.Error("tick", "err", err)
 			}
+			emitWithdrawFinalizerMetrics(ctx, store, metricsEmitter, log, extractorCfg.WalletID)
 		case qmsg, ok := <-msgCh:
 			if !ok {
 				return
@@ -492,7 +505,7 @@ func validateWithdrawWitnessExtractorConfig(cfg withdrawWitnessExtractorConfig) 
 	return nil
 }
 
-func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig) (withdrawfinalizer.WithdrawWitnessExtractor, error) {
+func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig, cursorStore withdrawBackfillCursorStore) (withdrawfinalizer.WithdrawWitnessExtractor, error) {
 	if err := validateWithdrawWitnessExtractorConfig(cfg); err != nil {
 		return nil, err
 	}
@@ -520,18 +533,25 @@ func newWithdrawWitnessExtractor(cfg withdrawWitnessExtractorConfig) (withdrawfi
 		hc:      &http.Client{Timeout: 15 * time.Second},
 	}
 	return &withdrawWitnessExtractor{
-		walletID: strings.TrimSpace(cfg.WalletID),
-		builder:  witnessextract.New(scanClient, rpcClient),
+		walletID:    strings.TrimSpace(cfg.WalletID),
+		builder:     witnessextract.New(scanClient, rpcClient),
+		cursorStore: cursorStore,
 		minAnchorHeight: func(ctx context.Context, txid string) (int64, error) {
 			return txMinAnchorHeight(ctx, rpcClient, txid)
 		},
 	}, nil
 }
 
+type withdrawBackfillCursorStore interface {
+	SetScanBackfillCursor(context.Context, string, int64) error
+	GetScanBackfillCursor(context.Context, string) (int64, time.Time, bool, error)
+}
+
 type withdrawWitnessExtractor struct {
 	walletID        string
 	builder         *witnessextract.Builder
 	minAnchorHeight func(ctx context.Context, txid string) (int64, error)
+	cursorStore     withdrawBackfillCursorStore
 }
 
 func txMinAnchorHeight(ctx context.Context, rpcClient *junorpc.Client, txid string) (int64, error) {
@@ -593,6 +613,11 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 					txHash,
 				)
 			}
+		}
+	}
+	if backfillFromHeight != nil && e.cursorStore != nil {
+		if err := e.cursorStore.SetScanBackfillCursor(ctx, e.walletID, *backfillFromHeight); err != nil {
+			return nil, fmt.Errorf("withdraw witness extractor: persist scan backfill cursor: %w", err)
 		}
 	}
 
@@ -981,6 +1006,38 @@ func validateWithdrawProofInputConfig(owalletOVKBytes []byte) error {
 		return fmt.Errorf("--owallet-ovk is required and must be 32 bytes, got %d", len(owalletOVKBytes))
 	}
 	return nil
+}
+
+func emitWithdrawFinalizerMetrics(
+	ctx context.Context,
+	store withdrawBackfillCursorStore,
+	emitter *emf.Emitter,
+	log *slog.Logger,
+	walletID string,
+) {
+	if store == nil || emitter == nil || strings.TrimSpace(walletID) == "" {
+		return
+	}
+	height, updatedAt, ok, err := store.GetScanBackfillCursor(ctx, strings.TrimSpace(walletID))
+	if err != nil {
+		if log != nil {
+			log.Warn("withdraw finalizer scan backfill cursor", "err", err)
+		}
+		return
+	}
+	lagSeconds := 0.0
+	if ok && !updatedAt.IsZero() {
+		lagSeconds = time.Since(updatedAt).Seconds()
+		if lagSeconds < 0 {
+			lagSeconds = 0
+		}
+	}
+	if err := emitter.Emit(
+		emf.Metric{Name: "WithdrawalScanBackfillCursorHeight", Unit: emf.UnitCount, Value: float64(height)},
+		emf.Metric{Name: "WithdrawalScanBackfillLagSeconds", Unit: emf.UnitSeconds, Value: lagSeconds},
+	); err != nil && log != nil {
+		log.Warn("emit withdraw finalizer metrics", "err", err)
+	}
 }
 
 func parseHash32Strict(s string) (common.Hash, error) {

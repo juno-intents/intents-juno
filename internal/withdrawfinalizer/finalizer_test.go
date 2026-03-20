@@ -448,6 +448,111 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	}
 }
 
+func TestFinalizer_TickRepairsStaleConfirmedBatchBeforeResume(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	ctx := context.Background()
+	baseStore := withdraw.NewMemoryStore(nowFn)
+	store := &repairOnlyFinalizerStore{MemoryStore: baseStore}
+	leaseStore := leases.NewMemoryStore(nowFn)
+	fence := testFence("f1")
+
+	w := withdraw.Withdrawal{ID: seq32(0x55), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
+	if _, _, err := baseStore.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+	if _, err := baseStore.ClaimUnbatched(ctx, fence, 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+	batchID := seq32(0x56)
+	if err := baseStore.CreatePlannedBatch(ctx, fence, withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := baseStore.MarkBatchSigning(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := baseStore.SetBatchSigned(ctx, batchID, fence, []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	if err := baseStore.MarkBatchBroadcastLocked(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchBroadcastLocked: %v", err)
+	}
+	if err := baseStore.SetBatchBroadcasted(ctx, batchID, fence, "tx1"); err != nil {
+		t.Fatalf("SetBatchBroadcasted: %v", err)
+	}
+	if err := baseStore.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
+	if err := baseStore.SetBatchConfirmed(ctx, batchID, fence); err != nil {
+		t.Fatalf("SetBatchConfirmed: %v", err)
+	}
+	now = now.Add(20 * time.Minute)
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	withdrawImageID := common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02")
+	cp := checkpoint.Checkpoint{Height: 1, BlockHash: common.Hash{}, FinalOrchardRoot: common.Hash{}, BaseChainID: 31337, BridgeContract: bridgeAddr}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &recordingSender{res: httpapi.SendResponse{TxHash: "0xabc", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+	artifacts := &recordingBlobStore{}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   withdrawImageID,
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	f.WithBlobStore(artifacts)
+
+	if err := f.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	if err := f.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	b, err := baseStore.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateFinalized {
+		t.Fatalf("expected stale batch to be finalized by repair loop, got %s", b.State)
+	}
+	if b.BaseTxHash != "0xabc" {
+		t.Fatalf("expected finalization tx hash recorded, got %q", b.BaseTxHash)
+	}
+}
+
+type repairOnlyFinalizerStore struct {
+	*withdraw.MemoryStore
+}
+
+func (s *repairOnlyFinalizerStore) ListBatchesByState(ctx context.Context, state withdraw.BatchState) ([]withdraw.Batch, error) {
+	switch state {
+	case withdraw.BatchStateConfirmed, withdraw.BatchStateFinalizing:
+		return nil, nil
+	default:
+		return s.MemoryStore.ListBatchesByState(ctx, state)
+	}
+}
+
 func TestFinalizer_TickReturnsDecodedRevertReason(t *testing.T) {
 	t.Parallel()
 

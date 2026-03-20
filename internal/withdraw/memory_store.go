@@ -14,6 +14,12 @@ type MemoryStore struct {
 
 	withdrawals map[[32]byte]withdrawalRec
 	batches     map[[32]byte]Batch
+	scanCursor  map[string]scanBackfillCursorRec
+}
+
+type scanBackfillCursorRec struct {
+	height    int64
+	updatedAt time.Time
 }
 
 type withdrawalRec struct {
@@ -35,6 +41,7 @@ func NewMemoryStore(now func() time.Time) *MemoryStore {
 		now:         now,
 		withdrawals: make(map[[32]byte]withdrawalRec),
 		batches:     make(map[[32]byte]Batch),
+		scanCursor:  make(map[string]scanBackfillCursorRec),
 	}
 }
 
@@ -107,6 +114,39 @@ func (s *MemoryStore) ClaimUnbatched(_ context.Context, fence Fence, ttl time.Du
 	return out, nil
 }
 
+func (s *MemoryStore) ClaimBatches(_ context.Context, fence Fence, states []BatchState, olderThan time.Time, max int) ([]Batch, error) {
+	if err := fence.Validate(); err != nil {
+		return nil, err
+	}
+	if olderThan.IsZero() || max <= 0 || len(states) == 0 {
+		return nil, ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := s.now().UTC()
+	capHint := len(s.batches)
+	if max > 0 && max < capHint {
+		capHint = max
+	}
+	out := make([]Batch, 0, capHint)
+	for _, b := range s.listBatchesByStatesOlderThanLocked(states, olderThan, max) {
+		if b.LeaseOwner != "" && b.LeaseOwner != fence.Owner {
+			continue
+		}
+		b.LeaseOwner = fence.Owner
+		b.LeaseVersion = fence.LeaseVersion
+		b.UpdatedAt = now
+		s.batches[b.ID] = b
+		out = append(out, cloneBatch(b))
+		if len(out) >= max {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) CreatePlannedBatch(_ context.Context, fence Fence, b Batch) error {
 	if err := fence.Validate(); err != nil {
 		return err
@@ -158,6 +198,8 @@ func (s *MemoryStore) CreatePlannedBatch(_ context.Context, fence Fence, b Batch
 		LeaseOwner:    fence.Owner,
 		LeaseVersion:  fence.LeaseVersion,
 		TxPlan:        append([]byte(nil), b.TxPlan...),
+		CreatedAt:     s.now().UTC(),
+		UpdatedAt:     s.now().UTC(),
 	}
 	s.batches[b.ID] = nb
 
@@ -233,6 +275,48 @@ func (s *MemoryStore) ListBatchesByState(_ context.Context, state BatchState) ([
 	return out, nil
 }
 
+func (s *MemoryStore) ListBatchesByStatesOlderThan(_ context.Context, states []BatchState, olderThan time.Time, max int) ([]Batch, error) {
+	if olderThan.IsZero() || max <= 0 || len(states) == 0 {
+		return nil, ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	out := s.listBatchesByStatesOlderThanLocked(states, olderThan, max)
+	result := make([]Batch, 0, len(out))
+	for _, b := range out {
+		result = append(result, cloneBatch(b))
+	}
+	return result, nil
+}
+
+func (s *MemoryStore) GetScanBackfillCursor(_ context.Context, walletID string) (int64, time.Time, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.scanCursor[walletID]
+	if !ok {
+		return 0, time.Time{}, false, nil
+	}
+	return rec.height, rec.updatedAt, true, nil
+}
+
+func (s *MemoryStore) SetScanBackfillCursor(_ context.Context, walletID string, height int64) error {
+	if walletID == "" || height < 0 {
+		return ErrInvalidConfig
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.scanCursor[walletID] = scanBackfillCursorRec{
+		height:    height,
+		updatedAt: s.now().UTC(),
+	}
+	return nil
+}
+
 func (s *MemoryStore) CountDLQBatches(_ context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -264,6 +348,7 @@ func (s *MemoryStore) AdoptBatch(_ context.Context, batchID [32]byte, fence Fenc
 	if b.LeaseVersion == fence.LeaseVersion {
 		if b.LeaseOwner == "" || b.LeaseOwner == fence.Owner {
 			b.LeaseOwner = fence.Owner
+			b.UpdatedAt = s.now().UTC()
 			s.batches[batchID] = b
 			return nil
 		}
@@ -271,6 +356,7 @@ func (s *MemoryStore) AdoptBatch(_ context.Context, batchID [32]byte, fence Fenc
 	}
 	b.LeaseOwner = fence.Owner
 	b.LeaseVersion = fence.LeaseVersion
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -290,6 +376,7 @@ func (s *MemoryStore) MarkBatchSigning(_ context.Context, batchID [32]byte, fenc
 	switch b.State {
 	case BatchStatePlanned, BatchStateSigning:
 		b.State = BatchStateSigning
+		b.UpdatedAt = s.now().UTC()
 		s.batches[batchID] = b
 		return nil
 	default:
@@ -326,6 +413,7 @@ func (s *MemoryStore) ResetBatchSigning(_ context.Context, batchID [32]byte, fen
 	b.JunoTxID = ""
 	b.BaseTxHash = ""
 	b.NextRebroadcastAt = time.Time{}
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -357,6 +445,7 @@ func (s *MemoryStore) SetBatchSigned(_ context.Context, batchID [32]byte, fence 
 
 	b.State = BatchStateSigned
 	b.SignedTx = append([]byte(nil), signedTx...)
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -381,6 +470,7 @@ func (s *MemoryStore) MarkBatchBroadcastLocked(_ context.Context, batchID [32]by
 	}
 	if b.BroadcastLockedAt.IsZero() {
 		b.BroadcastLockedAt = s.now().UTC()
+		b.UpdatedAt = b.BroadcastLockedAt
 		s.batches[batchID] = b
 	}
 	return nil
@@ -417,6 +507,7 @@ func (s *MemoryStore) SetBatchBroadcasted(_ context.Context, batchID [32]byte, f
 	b.State = BatchStateBroadcasted
 	b.JunoTxID = txid
 	b.NextRebroadcastAt = time.Time{}
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -448,6 +539,7 @@ func (s *MemoryStore) ResetBatchPlanned(_ context.Context, batchID [32]byte, fen
 	b.SignedTx = nil
 	b.JunoTxID = ""
 	b.NextRebroadcastAt = time.Time{}
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -473,6 +565,7 @@ func (s *MemoryStore) SetBatchRebroadcastBackoff(_ context.Context, batchID [32]
 
 	b.RebroadcastAttempts = attempts
 	b.NextRebroadcastAt = next.UTC()
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -496,6 +589,7 @@ func (s *MemoryStore) MarkBatchJunoConfirmed(_ context.Context, batchID [32]byte
 		b.JunoConfirmedAt = s.now().UTC()
 	}
 	b.State = BatchStateJunoConfirmed
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -517,6 +611,7 @@ func (s *MemoryStore) RecordBatchFailure(_ context.Context, batchID [32]byte, fe
 	b.LastErrorCode = errorCode
 	b.LastErrorMessage = errorMessage
 	b.LastFailedAt = s.now().UTC()
+	b.UpdatedAt = b.LastFailedAt
 	s.batches[batchID] = b
 	return cloneBatch(b), nil
 }
@@ -543,6 +638,7 @@ func (s *MemoryStore) RecordBatchMarkPaidFailure(_ context.Context, batchID [32]
 	b.MarkPaidFailures++
 	b.LastMarkPaidError = errorMessage
 	b.NextRebroadcastAt = nextAttempt.UTC()
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return cloneBatch(b), nil
 }
@@ -562,6 +658,7 @@ func (s *MemoryStore) ResetBatchMarkPaidFailures(_ context.Context, batchID [32]
 	b.MarkPaidFailures = 0
 	b.LastMarkPaidError = ""
 	b.NextRebroadcastAt = time.Time{}
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -580,6 +677,7 @@ func (s *MemoryStore) MarkBatchDLQ(_ context.Context, batchID [32]byte, fence Fe
 	}
 	if b.DLQAt.IsZero() {
 		b.DLQAt = s.now().UTC()
+		b.UpdatedAt = b.DLQAt
 		s.batches[batchID] = b
 	}
 	return nil
@@ -611,6 +709,7 @@ func (s *MemoryStore) SetBatchConfirmed(_ context.Context, batchID [32]byte, fen
 	b.NextRebroadcastAt = time.Time{}
 	b.MarkPaidFailures = 0
 	b.LastMarkPaidError = ""
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	for _, id := range b.WithdrawalIDs {
 		rec := s.withdrawals[id]
@@ -640,6 +739,7 @@ func (s *MemoryStore) MarkBatchFinalizing(_ context.Context, batchID [32]byte, f
 	}
 
 	b.State = BatchStateFinalizing
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -671,6 +771,7 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, fen
 
 	b.State = BatchStateFinalized
 	b.BaseTxHash = baseTxHash
+	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil
 }
@@ -684,6 +785,43 @@ func (s *MemoryStore) batchForMutation(batchID [32]byte, fence Fence) (Batch, er
 		return Batch{}, ErrInvalidTransition
 	}
 	return b, nil
+}
+
+func (s *MemoryStore) listBatchesByStatesOlderThanLocked(states []BatchState, olderThan time.Time, max int) []Batch {
+	stateSet := make(map[BatchState]struct{}, len(states))
+	for _, state := range states {
+		if state == BatchStateUnknown {
+			continue
+		}
+		stateSet[state] = struct{}{}
+	}
+
+	capHint := len(s.batches)
+	if max > 0 && max < capHint {
+		capHint = max
+	}
+	out := make([]Batch, 0, capHint)
+	for _, b := range s.batches {
+		if b.DLQAt.IsZero() {
+			if _, ok := stateSet[b.State]; ok && !b.UpdatedAt.IsZero() && !b.UpdatedAt.After(olderThan) {
+				out = append(out, cloneBatch(b))
+			}
+		}
+	}
+
+	slices.SortFunc(out, func(a, b Batch) int {
+		if !a.UpdatedAt.Equal(b.UpdatedAt) {
+			if a.UpdatedAt.Before(b.UpdatedAt) {
+				return -1
+			}
+			return 1
+		}
+		return bytes.Compare(a.ID[:], b.ID[:])
+	})
+	if len(out) > max {
+		out = out[:max]
+	}
+	return out
 }
 
 func cloneWithdrawal(w Withdrawal) Withdrawal {

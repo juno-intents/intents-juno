@@ -190,4 +190,22 @@ CREATE INDEX IF NOT EXISTS withdrawal_batches_unconfirmed_idx ON withdrawal_batc
 CREATE UNIQUE INDEX IF NOT EXISTS withdrawal_requests_base_event_key_idx
   ON withdrawal_requests (base_tx_hash, base_log_index)
   WHERE base_tx_hash IS NOT NULL AND base_log_index IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS withdraw_scan_backfill_cursors (
+	wallet_id TEXT PRIMARY KEY,
+	cursor_height BIGINT NOT NULL,
+	created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+	CONSTRAINT wallet_id_nonempty CHECK (wallet_id <> ''),
+	CONSTRAINT cursor_height_nonneg CHECK (cursor_height >= 0)
+);
+
+ALTER TABLE withdraw_scan_backfill_cursors ADD COLUMN IF NOT EXISTS cursor_height BIGINT NOT NULL DEFAULT 0;
+ALTER TABLE withdraw_scan_backfill_cursors ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE withdraw_scan_backfill_cursors ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE withdraw_scan_backfill_cursors DROP CONSTRAINT IF EXISTS wallet_id_nonempty;
+ALTER TABLE withdraw_scan_backfill_cursors ADD CONSTRAINT wallet_id_nonempty CHECK (wallet_id <> '');
+ALTER TABLE withdraw_scan_backfill_cursors DROP CONSTRAINT IF EXISTS cursor_height_nonneg;
+ALTER TABLE withdraw_scan_backfill_cursors ADD CONSTRAINT cursor_height_nonneg CHECK (cursor_height >= 0);
 `
