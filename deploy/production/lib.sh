@@ -298,6 +298,7 @@ production_inventory_app_role_json() {
         user: .app_host.user,
         runtime_dir: .app_host.runtime_dir,
         public_endpoint: .app_host.public_endpoint,
+        private_endpoint: .app_host.private_endpoint,
         aws_profile: .app_host.aws_profile,
         aws_region: .app_host.aws_region,
         account_id: .app_host.account_id,
@@ -404,6 +405,74 @@ production_write_shared_terraform_override_tfvars() {
     + (if ($backoffice_private_endpoint_ips | length) == 0 then {} else {
       shared_wireguard_backoffice_private_endpoint_ips: $backoffice_private_endpoint_ips
     } end)' >"$output_file"
+}
+
+production_write_app_terraform_override_tfvars() {
+  local inventory="$1"
+  local output_file="$2"
+
+  if ! jq -e '((.app_host? | type == "object") or (.app_role? | type == "object"))' "$inventory" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local env_slug app_role_json wireguard_role_json wireguard_cidr_blocks_json
+  local aws_region vpc_id public_subnet_ids_json private_subnet_ids_json
+  local app_ami_id app_instance_profile_name public_bridge_certificate_arn internal_backoffice_certificate_arn
+  local alarm_actions_json
+
+  env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+  app_role_json="$(production_inventory_app_role_json "$inventory")"
+  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  aws_region="$(jq -r '.aws_region // empty' <<<"$app_role_json")"
+  if [[ -z "$aws_region" ]]; then
+    aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
+  fi
+  vpc_id="$(jq -r '.vpc_id // empty' <<<"$app_role_json")"
+  [[ -n "$vpc_id" ]] || die "app_role.vpc_id is required for app runtime terraform"
+  public_subnet_ids_json="$(jq -c '(.public_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
+  private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
+  [[ "$(jq -r 'length' <<<"$public_subnet_ids_json")" -ge 2 ]] || die "app_role.public_subnet_ids must include at least two subnet ids"
+  [[ "$(jq -r 'length' <<<"$private_subnet_ids_json")" -ge 2 ]] || die "app_role.private_subnet_ids must include at least two subnet ids"
+  wireguard_cidr_blocks_json="$(jq -c '(.source_cidrs // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  [[ "$(jq -r 'length' <<<"$wireguard_cidr_blocks_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty for app runtime terraform"
+  app_ami_id="$(jq -r '.app_ami_id // empty' <<<"$app_role_json")"
+  [[ -n "$app_ami_id" ]] || die "app_role.app_ami_id is required for app runtime terraform"
+  app_instance_profile_name="$(jq -r '.app_instance_profile_name // empty' <<<"$app_role_json")"
+  [[ -n "$app_instance_profile_name" ]] || die "app_role.app_instance_profile_name is required for app runtime terraform"
+  public_bridge_certificate_arn="$(jq -r '.public_bridge_certificate_arn // empty' <<<"$app_role_json")"
+  [[ -n "$public_bridge_certificate_arn" ]] || die "app_role.public_bridge_certificate_arn is required for app runtime terraform"
+  internal_backoffice_certificate_arn="$(jq -r '.internal_backoffice_certificate_arn // empty' <<<"$app_role_json")"
+  [[ -n "$internal_backoffice_certificate_arn" ]] || die "app_role.internal_backoffice_certificate_arn is required for app runtime terraform"
+  if ! jq -e '.shared_services.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$inventory" >/dev/null 2>&1; then
+    die "shared_services.alarm_actions must be a non-empty array when inventory.app_role or inventory.app_host is present"
+  fi
+  alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
+
+  jq -n \
+    --arg aws_region "$aws_region" \
+    --arg deployment_id "$env_slug" \
+    --arg vpc_id "$vpc_id" \
+    --argjson public_subnet_ids "$public_subnet_ids_json" \
+    --argjson private_subnet_ids "$private_subnet_ids_json" \
+    --argjson wireguard_cidr_blocks "$wireguard_cidr_blocks_json" \
+    --arg app_ami_id "$app_ami_id" \
+    --arg app_instance_profile_name "$app_instance_profile_name" \
+    --arg public_bridge_certificate_arn "$public_bridge_certificate_arn" \
+    --arg internal_backoffice_certificate_arn "$internal_backoffice_certificate_arn" \
+    --argjson alarm_actions "$alarm_actions_json" \
+    '{
+      aws_region: $aws_region,
+      deployment_id: $deployment_id,
+      vpc_id: $vpc_id,
+      public_subnet_ids: $public_subnet_ids,
+      private_subnet_ids: $private_subnet_ids,
+      wireguard_cidr_blocks: $wireguard_cidr_blocks,
+      app_ami_id: $app_ami_id,
+      app_instance_profile_name: $app_instance_profile_name,
+      public_bridge_certificate_arn: $public_bridge_certificate_arn,
+      internal_backoffice_certificate_arn: $internal_backoffice_certificate_arn,
+      alarm_actions: $alarm_actions
+    }' >"$output_file"
 }
 
 production_parse_postgres_dsn_field() {
@@ -2106,6 +2175,7 @@ production_render_app_handoff() {
   local shared_manifest="$2"
   local output_dir="$3"
   local inventory_dir="$4"
+  local app_tf_json="${5:-}"
 
   if ! jq -e '((.app_host? | type == "object") or (.app_role? | type == "object"))' "$inventory" >/dev/null 2>&1; then
     return 0
@@ -2116,7 +2186,7 @@ production_render_app_handoff() {
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds
   local app_json app_dir manifest_path known_hosts_src secret_contract_src
-  local known_hosts_dst secret_contract_dst app_host app_user runtime_dir
+  local known_hosts_dst="" secret_contract_dst app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
   local bridge_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name bridge_public_url
@@ -2125,9 +2195,10 @@ production_render_app_handoff() {
   local juno_rpc_url operator_addresses_json
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
+  local edge_public_lb_dns_name edge_public_lb_zone_id
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
   local wireguard_source_cidrs_json
-  local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json
+  local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json tf_app_role_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
@@ -2135,25 +2206,48 @@ production_render_app_handoff() {
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
   app_json="$(production_inventory_app_role_json "$inventory")"
+  tf_app_role_json='{}'
+  if [[ -n "$app_tf_json" ]]; then
+    [[ -f "$app_tf_json" ]] || die "app terraform output json not found: $app_tf_json"
+    tf_app_role_json="$(production_tf_output_json "$app_tf_json" "app_role" false)"
+    app_json="$(
+      jq -cn \
+        --argjson inventory_role "$app_json" \
+        --argjson tf_role "$tf_app_role_json" '
+          if ($tf_role | length) > 0 then
+            ($inventory_role + $tf_role)
+          else
+            $inventory_role
+          end
+        '
+    )"
+  fi
   manifest_version="1"
-  if production_inventory_has_v2_roles "$inventory"; then
+  if production_inventory_has_v2_roles "$inventory" || [[ "$(jq -r 'length' <<<"$tf_app_role_json")" != "0" ]]; then
     manifest_version="2"
   fi
   app_role_json="$app_json"
-  proof_role_json="$(production_inventory_proof_role_json "$inventory")"
-  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  proof_role_json="$(production_json_optional "$shared_manifest" '.shared_roles.proof // {}')"
+  if [[ -z "$proof_role_json" || "$proof_role_json" == "null" ]]; then
+    proof_role_json="$(production_inventory_proof_role_json "$inventory")"
+  fi
+  wireguard_role_json="$(production_json_optional "$shared_manifest" '.wireguard_role // .shared_roles.wireguard // {}')"
+  if [[ -z "$wireguard_role_json" || "$wireguard_role_json" == "null" ]]; then
+    wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  fi
   shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
 
   app_host="$(jq -r '.host // empty' <<<"$app_json")"
-  [[ -n "$app_host" ]] || die "app_role.host is required when inventory.app_role or inventory.app_host is present"
   app_user="$(jq -r '.user // "ubuntu"' <<<"$app_json")"
   runtime_dir="$(jq -r '.runtime_dir // "/var/lib/intents-juno/app-runtime"' <<<"$app_json")"
-  public_endpoint="$(jq -r '.public_endpoint // .host // empty' <<<"$app_json")"
-  [[ -n "$public_endpoint" ]] || die "app_role.public_endpoint is required when inventory.app_role or inventory.app_host is present"
+  edge_public_lb_dns_name="$(jq -r '.public_lb.dns_name // empty' <<<"$app_json")"
+  edge_public_lb_zone_id="$(jq -r '.public_lb.zone_id // empty' <<<"$app_json")"
+  public_endpoint="$(jq -r '.public_lb.dns_name // .public_endpoint // .host // empty' <<<"$app_json")"
+  [[ -n "$public_endpoint" || -n "$edge_public_lb_dns_name" ]] || die "app_role.public_endpoint or app_role.public_lb.dns_name is required when inventory.app_role or inventory.app_host is present"
   aws_profile="$(jq -r '.aws_profile // empty' <<<"$app_json")"
   aws_region="$(jq -r '.aws_region // empty' <<<"$app_json")"
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
-  security_group_id="$(jq -r '.security_group_id // empty' <<<"$app_json")"
+  security_group_id="$(jq -r '.public_lb.security_group_id // .security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
@@ -2193,12 +2287,14 @@ production_render_app_handoff() {
   fi
 
   known_hosts_src="$(jq -r '.known_hosts_file // empty' <<<"$app_json")"
-  [[ -n "$known_hosts_src" ]] || die "app_host.known_hosts_file is required when inventory.app_host is present"
-  known_hosts_src="$(production_abs_path "$inventory_dir" "$known_hosts_src")"
-  [[ -f "$known_hosts_src" ]] || die "app known_hosts file not found: $known_hosts_src"
+  if [[ -n "$app_host" ]]; then
+    [[ -n "$known_hosts_src" ]] || die "app_host.known_hosts_file is required when inventory.app_host is present"
+    known_hosts_src="$(production_abs_path "$inventory_dir" "$known_hosts_src")"
+    [[ -f "$known_hosts_src" ]] || die "app known_hosts file not found: $known_hosts_src"
+  fi
 
   secret_contract_src="$(jq -r '.secret_contract_file // empty' <<<"$app_json")"
-  [[ -n "$secret_contract_src" ]] || die "app_host.secret_contract_file is required when inventory.app_host is present"
+  [[ -n "$secret_contract_src" ]] || die "app_host.secret_contract_file is required when inventory.app_role or inventory.app_host is present"
   secret_contract_src="$(production_abs_path "$inventory_dir" "$secret_contract_src")"
   [[ -f "$secret_contract_src" ]] || die "app secret contract file not found: $secret_contract_src"
 
@@ -2214,16 +2310,21 @@ production_render_app_handoff() {
   mkdir -p "$edge_state_dir"
   edge_state_path="$edge_state_dir/${env_slug}.tfstate"
   edge_origin_record_name="origin.${public_subdomain}"
-  edge_origin_endpoint="$public_endpoint"
+  edge_origin_endpoint=""
+  if [[ -z "$edge_public_lb_dns_name" ]]; then
+    edge_origin_endpoint="$public_endpoint"
+  fi
   edge_origin_http_port=443
   edge_rate_limit=2000
   edge_enable_shield_advanced="false"
 
   app_dir="$(production_app_dir "$output_dir")"
   mkdir -p "$app_dir"
-  known_hosts_dst="$app_dir/known_hosts"
+  if [[ -n "$known_hosts_src" ]]; then
+    known_hosts_dst="$app_dir/known_hosts"
+    cp "$known_hosts_src" "$known_hosts_dst"
+  fi
   secret_contract_dst="$app_dir/app-secrets.env"
-  cp "$known_hosts_src" "$known_hosts_dst"
   cp "$secret_contract_src" "$secret_contract_dst"
   production_refresh_app_secret_contract "$inventory" "$inventory_dir" "$shared_manifest" "$secret_contract_dst"
   manifest_path="$app_dir/app-deploy.json"
@@ -2266,6 +2367,8 @@ production_render_app_handoff() {
     --arg edge_enabled "$edge_enabled" \
     --arg edge_state_path "$edge_state_path" \
     --arg edge_origin_record_name "$edge_origin_record_name" \
+    --arg edge_public_lb_dns_name "$edge_public_lb_dns_name" \
+    --arg edge_public_lb_zone_id "$edge_public_lb_zone_id" \
     --arg edge_origin_endpoint "$edge_origin_endpoint" \
     --argjson edge_origin_http_port "$edge_origin_http_port" \
     --argjson edge_rate_limit "$edge_rate_limit" \
@@ -2279,15 +2382,15 @@ production_render_app_handoff() {
       version: $version,
       environment: $environment,
       shared_manifest_path: $shared_manifest_path,
-      known_hosts_file: $known_hosts_file,
+      known_hosts_file: (if $known_hosts_file == "" then null else $known_hosts_file end),
       secret_contract_file: $secret_contract_file,
-      app_host: $app_host,
+      app_host: (if $app_host == "" then null else $app_host end),
       app_role: $app_role,
       wireguard_role: $wireguard_role,
       shared_roles: $shared_roles,
       app_user: $app_user,
       runtime_dir: $runtime_dir,
-      public_endpoint: $public_endpoint,
+      public_endpoint: (if $public_endpoint == "" then null else $public_endpoint end),
       aws_profile: (if $aws_profile == "" then null else $aws_profile end),
       aws_region: (if $aws_region == "" then null else $aws_region end),
       account_id: (if $account_id == "" then null else $account_id end),
@@ -2327,16 +2430,26 @@ production_render_app_handoff() {
         zone_id: $zone_id,
         ttl_seconds: $ttl_seconds
       },
-      edge: {
-        enabled: ($edge_enabled == "true"),
-        state_path: $edge_state_path,
-        origin_record_name: $edge_origin_record_name,
-        origin_endpoint: $edge_origin_endpoint,
-        origin_http_port: $edge_origin_http_port,
-        rate_limit: $edge_rate_limit,
-        alarm_actions: $edge_alarm_actions,
-        enable_shield_advanced: ($edge_enable_shield_advanced == "true")
-      }
+      edge: (
+        {
+          enabled: ($edge_enabled == "true"),
+          state_path: $edge_state_path,
+          origin_record_name: $edge_origin_record_name,
+          origin_http_port: $edge_origin_http_port,
+          rate_limit: $edge_rate_limit,
+          alarm_actions: $edge_alarm_actions,
+          enable_shield_advanced: ($edge_enable_shield_advanced == "true")
+        }
+        + (if $edge_public_lb_dns_name == "" then {} else {
+          public_lb_dns_name: $edge_public_lb_dns_name
+        } end)
+        + (if $edge_public_lb_zone_id == "" then {} else {
+          public_lb_zone_id: $edge_public_lb_zone_id
+        } end)
+        + (if $edge_origin_endpoint == "" then {} else {
+          origin_endpoint: $edge_origin_endpoint
+        } end)
+      )
     }' >"$manifest_path"
 }
 

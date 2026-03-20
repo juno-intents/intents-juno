@@ -1471,6 +1471,11 @@ resource "aws_autoscaling_group" "proof_role" {
     version = "$Latest"
   }
 
+  instance_refresh {
+    strategy = "Rolling"
+    triggers = ["launch_template"]
+  }
+
   tag {
     key                 = "Name"
     value               = "${local.resource_name}-proof-role"
@@ -2018,6 +2023,11 @@ resource "aws_autoscaling_group" "wireguard_role" {
   launch_template {
     id      = aws_launch_template.wireguard_role[0].id
     version = "$Latest"
+  }
+
+  instance_refresh {
+    strategy = "Rolling"
+    triggers = ["launch_template"]
   }
 
   tag {

@@ -1,3 +1,24 @@
+output "app_role" {
+  description = "Structured app role contract for deployment handoffs."
+  value = {
+    asg = aws_autoscaling_group.app.name
+    launch_template = {
+      id      = aws_launch_template.app.id
+      version = tostring(aws_launch_template.app.latest_version)
+    }
+    public_lb = {
+      dns_name          = aws_lb.public_bridge.dns_name
+      zone_id           = aws_lb.public_bridge.zone_id
+      security_group_id = aws_security_group.public_bridge_lb.id
+    }
+    internal_lb = {
+      dns_name          = aws_lb.internal_backoffice.dns_name
+      zone_id           = aws_lb.internal_backoffice.zone_id
+      security_group_id = aws_security_group.internal_backoffice_lb.id
+    }
+  }
+}
+
 output "app_role_asg_name" {
   description = "App autoscaling group name."
   value       = aws_autoscaling_group.app.name

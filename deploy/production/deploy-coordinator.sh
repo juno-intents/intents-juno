@@ -26,7 +26,11 @@ Options:
   --sweep-recipient ADDRESS    Optional sweep recipient for the ephemeral deployer
   --existing-bridge-summary PATH
                                Reuse an existing bridge summary instead of deploying
-  --terraform-output-json PATH Use a precomputed terraform output -json file
+  --shared-terraform-output-json PATH
+                             Use a precomputed shared terraform output -json file
+  --app-terraform-output-json PATH
+                             Use a precomputed app runtime terraform output -json file
+  --terraform-output-json PATH Deprecated alias for --shared-terraform-output-json
   --skip-terraform-apply       Do not run terraform init/apply
   --output-dir DIR             Output root (default: ./production-output)
   --run-label LABEL            Optional subdirectory under <output-dir>/<environment> (example: run-20260311T120000Z)
@@ -43,7 +47,8 @@ funder_key_file=""
 ephemeral_funding_amount_wei=""
 sweep_recipient=""
 existing_bridge_summary=""
-terraform_output_json=""
+shared_terraform_output_json=""
+app_terraform_output_json=""
 skip_terraform_apply="false"
 output_root="./production-output"
 run_label=""
@@ -60,7 +65,9 @@ while [[ $# -gt 0 ]]; do
     --ephemeral-funding-amount-wei) ephemeral_funding_amount_wei="$2"; shift 2 ;;
     --sweep-recipient) sweep_recipient="$2"; shift 2 ;;
     --existing-bridge-summary) existing_bridge_summary="$2"; shift 2 ;;
-    --terraform-output-json) terraform_output_json="$2"; shift 2 ;;
+    --shared-terraform-output-json) shared_terraform_output_json="$2"; shift 2 ;;
+    --app-terraform-output-json) app_terraform_output_json="$2"; shift 2 ;;
+    --terraform-output-json) shared_terraform_output_json="$2"; shift 2 ;;
     --skip-terraform-apply) skip_terraform_apply="true"; shift ;;
     --output-dir) output_root="$2"; shift 2 ;;
     --run-label) run_label="$2"; shift 2 ;;
@@ -134,14 +141,27 @@ if production_environment_allows_local_secret_resolvers "$env_slug"; then
 fi
 inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
 inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
-terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
-terraform_dir="$(production_abs_path "$REPO_ROOT" "$terraform_dir_rel")"
-[[ -d "$terraform_dir" ]] || die "terraform dir not found: $terraform_dir"
-terraform_backend_bucket=""
-terraform_backend_table=""
-terraform_backend_key=""
-terraform_backend_args=()
-terraform_var_file=""
+shared_terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+shared_terraform_dir="$(production_abs_path "$REPO_ROOT" "$shared_terraform_dir_rel")"
+[[ -d "$shared_terraform_dir" ]] || die "terraform dir not found: $shared_terraform_dir"
+app_terraform_dir=""
+app_terraform_dir_rel="$(production_json_optional "$inventory" '.app_role.terraform_dir | select(type == "string" and length > 0)')"
+if [[ -n "$app_terraform_dir_rel" ]]; then
+  app_terraform_dir="$(production_abs_path "$REPO_ROOT" "$app_terraform_dir_rel")"
+  [[ -d "$app_terraform_dir" ]] || die "app terraform dir not found: $app_terraform_dir"
+fi
+shared_terraform_backend_bucket=""
+shared_terraform_backend_table=""
+shared_terraform_backend_key=""
+shared_terraform_backend_args=()
+shared_terraform_var_file=""
+shared_tf_output_json=""
+app_terraform_backend_bucket=""
+app_terraform_backend_table=""
+app_terraform_backend_key=""
+app_terraform_backend_args=()
+app_terraform_var_file=""
+app_tf_output_json=""
 if [[ -n "$run_label" ]]; then
   output_dir="$output_root/$env_slug/$(production_safe_slug "$run_label")"
 else
@@ -191,37 +211,58 @@ if jq -e '.governance != null' "$inventory" >/dev/null 2>&1; then
   pause_guardian_address="$(production_json_optional "$inventory" '.governance.pause_guardian')"
 fi
 
-if [[ "$skip_terraform_apply" != "true" || -z "$terraform_output_json" ]]; then
+if [[ "$skip_terraform_apply" != "true" || -z "$shared_terraform_output_json" ]]; then
   for cmd in terraform aws; do
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
   terraform_backend_output="$(
-    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$terraform_dir"
+    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$shared_terraform_dir"
   )" || die "failed to bootstrap terraform backend"
   mapfile -t terraform_backend_config <<<"$terraform_backend_output"
   (( ${#terraform_backend_config[@]} == 3 )) || die "terraform backend bootstrap returned incomplete configuration"
-  terraform_backend_bucket="${terraform_backend_config[0]}"
-  terraform_backend_table="${terraform_backend_config[1]}"
-  terraform_backend_key="${terraform_backend_config[2]}"
-  terraform_backend_args=(
+  shared_terraform_backend_bucket="${terraform_backend_config[0]}"
+  shared_terraform_backend_table="${terraform_backend_config[1]}"
+  shared_terraform_backend_key="${terraform_backend_config[2]}"
+  shared_terraform_backend_args=(
     -reconfigure
-    "-backend-config=bucket=$terraform_backend_bucket"
-    "-backend-config=dynamodb_table=$terraform_backend_table"
-    "-backend-config=key=$terraform_backend_key"
+    "-backend-config=bucket=$shared_terraform_backend_bucket"
+    "-backend-config=dynamodb_table=$shared_terraform_backend_table"
+    "-backend-config=key=$shared_terraform_backend_key"
+    "-backend-config=region=$inventory_aws_region"
+  )
+fi
+
+if [[ -n "$app_terraform_dir" && "$skip_terraform_apply" != "true" ]]; then
+  for cmd in terraform aws; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+  app_terraform_backend_output="$(
+    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$app_terraform_dir"
+  )" || die "failed to bootstrap app terraform backend"
+  mapfile -t app_terraform_backend_config <<<"$app_terraform_backend_output"
+  (( ${#app_terraform_backend_config[@]} == 3 )) || die "app terraform backend bootstrap returned incomplete configuration"
+  app_terraform_backend_bucket="${app_terraform_backend_config[0]}"
+  app_terraform_backend_table="${app_terraform_backend_config[1]}"
+  app_terraform_backend_key="${app_terraform_backend_config[2]}"
+  app_terraform_backend_args=(
+    -reconfigure
+    "-backend-config=bucket=$app_terraform_backend_bucket"
+    "-backend-config=dynamodb_table=$app_terraform_backend_table"
+    "-backend-config=key=$app_terraform_backend_key"
     "-backend-config=region=$inventory_aws_region"
   )
 fi
 
 if [[ "$skip_terraform_apply" != "true" ]]; then
-  terraform_var_file="$output_dir/shared-terraform.auto.tfvars.json"
-  production_write_shared_terraform_override_tfvars "$coordinator_inventory" "$terraform_var_file"
-  log "Applying shared-services terraform in $terraform_dir"
+  shared_terraform_var_file="$output_dir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$coordinator_inventory" "$shared_terraform_var_file"
+  log "Applying shared-services terraform in $shared_terraform_dir"
   if [[ "$dry_run" != "true" ]]; then
     (
-      cd "$terraform_dir"
-      terraform init -input=false "${terraform_backend_args[@]}"
-      if [[ -f "$terraform_var_file" ]]; then
-        terraform apply -auto-approve -input=false -var-file="$terraform_var_file"
+      cd "$shared_terraform_dir"
+      terraform init -input=false "${shared_terraform_backend_args[@]}"
+      if [[ -f "$shared_terraform_var_file" ]]; then
+        terraform apply -auto-approve -input=false -var-file="$shared_terraform_var_file"
       else
         terraform apply -auto-approve -input=false
       fi
@@ -229,20 +270,51 @@ if [[ "$skip_terraform_apply" != "true" ]]; then
   else
     log "[DRY RUN] skipped terraform apply"
   fi
+
+  if [[ -n "$app_terraform_dir" ]]; then
+    app_terraform_var_file="$output_dir/app-terraform.auto.tfvars.json"
+    production_write_app_terraform_override_tfvars "$coordinator_inventory" "$app_terraform_var_file"
+    log "Applying app runtime terraform in $app_terraform_dir"
+    if [[ "$dry_run" != "true" ]]; then
+      (
+        cd "$app_terraform_dir"
+        terraform init -input=false "${app_terraform_backend_args[@]}"
+        if [[ -f "$app_terraform_var_file" ]]; then
+          terraform apply -auto-approve -input=false -var-file="$app_terraform_var_file"
+        else
+          terraform apply -auto-approve -input=false
+        fi
+      )
+    else
+      log "[DRY RUN] skipped app runtime terraform apply"
+    fi
+  fi
 fi
 
-if [[ -n "$terraform_output_json" ]]; then
-  [[ -f "$terraform_output_json" ]] || die "terraform output json not found: $terraform_output_json"
-  tf_output_json="$output_dir/terraform-output.json"
-  cp "$terraform_output_json" "$tf_output_json"
+if [[ -n "$shared_terraform_output_json" ]]; then
+  [[ -f "$shared_terraform_output_json" ]] || die "terraform output json not found: $shared_terraform_output_json"
+  shared_tf_output_json="$output_dir/shared-terraform-output.json"
+  cp "$shared_terraform_output_json" "$shared_tf_output_json"
 else
-  tf_output_json="$output_dir/terraform-output.json"
+  shared_tf_output_json="$output_dir/shared-terraform-output.json"
   (
-    cd "$terraform_dir"
+    cd "$shared_terraform_dir"
     if [[ "$skip_terraform_apply" == "true" ]]; then
-      terraform init -input=false "${terraform_backend_args[@]}"
+      terraform init -input=false "${shared_terraform_backend_args[@]}"
     fi
-    terraform output -json >"$tf_output_json"
+    terraform output -json >"$shared_tf_output_json"
+  )
+fi
+
+if [[ -n "$app_terraform_output_json" ]]; then
+  [[ -f "$app_terraform_output_json" ]] || die "app terraform output json not found: $app_terraform_output_json"
+  app_tf_output_json="$output_dir/app-terraform-output.json"
+  cp "$app_terraform_output_json" "$app_tf_output_json"
+elif [[ -n "$app_terraform_dir" && "$skip_terraform_apply" != "true" ]]; then
+  app_tf_output_json="$output_dir/app-terraform-output.json"
+  (
+    cd "$app_terraform_dir"
+    terraform output -json >"$app_tf_output_json"
   )
 fi
 
@@ -293,12 +365,12 @@ fi
 production_refresh_bridge_summary_owallet_ua "$bridge_summary" "$dkg_summary" "$dkg_completion"
 
 shared_manifest="$output_dir/shared-manifest.json"
-production_render_shared_manifest "$coordinator_inventory" "$bridge_summary" "$dkg_summary" "$tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
+production_render_shared_manifest "$coordinator_inventory" "$bridge_summary" "$dkg_summary" "$shared_tf_output_json" "$shared_manifest" "$inventory_dir" "$dkg_completion"
 production_render_operator_handoffs "$coordinator_inventory" "$shared_manifest" "$dkg_summary" "$output_dir" "$inventory_dir"
 if [[ -n "$generated_dkg_tls_dir" ]]; then
   production_rewrite_operator_handoffs_dkg_tls_dir "$output_dir" "$generated_dkg_tls_dir"
 fi
-production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir"
+production_render_app_handoff "$coordinator_inventory" "$shared_manifest" "$output_dir" "$inventory_dir" "$app_tf_output_json"
 
 log "shared manifest: $shared_manifest"
 log "rollout state: $output_dir/rollout-state.json"

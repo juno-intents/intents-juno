@@ -52,6 +52,16 @@ write_inventory_fixture() {
           runtime_dir: "/var/lib/intents-juno/app-runtime",
           public_endpoint: $app_public_endpoint,
           private_endpoint: $app_private_endpoint,
+          public_lb: {
+            dns_name: "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z35SXDOTRQ7X7K",
+            security_group_id: "sg-publicbridge012345678"
+          },
+          internal_lb: {
+            dns_name: "internal-ops-alpha-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z2P70J7EXAMPLE",
+            security_group_id: "sg-internalops012345678"
+          },
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",
@@ -2346,10 +2356,12 @@ EOF
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.2.50/32" "backoffice wireguard source cidr"
   assert_eq "$(jq -r '.services.backoffice.access.client_config_secret_arn // empty' "$app_manifest")" "" "backoffice wireguard client config secret removed from manifest"
   assert_eq "$(jq -r '.wireguard_role.endpoint_host' "$app_manifest")" "198.51.100.25" "backoffice wireguard endpoint host"
-  assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-0123456789abcdef0" "security group id"
+  assert_eq "$(jq -r '.security_group_id' "$app_manifest")" "sg-publicbridge012345678" "security group id"
   assert_eq "$(jq -r '.edge.enabled' "$app_manifest")" "true" "edge enabled"
   assert_eq "$(jq -r '.edge.origin_record_name' "$app_manifest")" "origin.alpha.intents-testing.thejunowallet.com" "edge origin record"
-  assert_eq "$(jq -r '.edge.origin_endpoint' "$app_manifest")" "203.0.113.21" "edge origin endpoint"
+  assert_eq "$(jq -r '.edge.public_lb_dns_name' "$app_manifest")" "bridge-alpha-123456.us-east-1.elb.amazonaws.com" "edge public load balancer dns name"
+  assert_eq "$(jq -r '.edge.public_lb_zone_id' "$app_manifest")" "Z35SXDOTRQ7X7K" "edge public load balancer zone id"
+  assert_eq "$(jq -r '.edge.origin_endpoint // empty' "$app_manifest")" "" "edge origin endpoint removed from the active app contract"
   assert_eq "$(jq -r '.edge.origin_http_port' "$app_manifest")" "443" "edge origin port"
   assert_eq "$(jq -r '.edge.rate_limit' "$app_manifest")" "2000" "edge rate limit"
   assert_eq "$(jq -r '.edge.alarm_actions[0]' "$app_manifest")" "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts" "edge alarm actions"

@@ -16,10 +16,14 @@
       "version": "3"
     },
     "public_lb": {
-      "dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com"
+      "dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
+      "zone_id": "Z35SXDOTRQ7X7K",
+      "security_group_id": "sg-publicbridge012345678"
     },
     "internal_lb": {
-      "dns_name": "internal-ops-alpha-123456.us-east-1.elb.amazonaws.com"
+      "dns_name": "internal-ops-alpha-123456.us-east-1.elb.amazonaws.com",
+      "zone_id": "Z2P70J7EXAMPLE",
+      "security_group_id": "sg-internalops012345678"
     },
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
@@ -35,11 +39,11 @@
   },
   "app_user": "ubuntu",
   "runtime_dir": "/var/lib/intents-juno/app-runtime",
-  "public_endpoint": "203.0.113.21",
+  "public_endpoint": "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
   "aws_profile": "juno",
   "aws_region": "us-east-1",
   "account_id": "021490342184",
-  "security_group_id": "sg-0123456789abcdef0",
+  "security_group_id": "sg-publicbridge012345678",
   "juno_rpc_url": "http://127.0.0.1:18232",
   "operator_addresses": [
     "0x9999999999999999999999999999999999999999"
@@ -89,7 +93,8 @@
     "enabled": true,
     "state_path": "production-output/alpha/app/edge.tfstate",
     "origin_record_name": "origin.alpha.intents-testing.thejunowallet.com",
-    "origin_endpoint": "203.0.113.21",
+    "public_lb_dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
+    "public_lb_zone_id": "Z35SXDOTRQ7X7K",
     "origin_http_port": 80,
     "rate_limit": 2000,
     "alarm_actions": [

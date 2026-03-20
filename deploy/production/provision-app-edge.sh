@@ -14,7 +14,7 @@ usage() {
 Usage:
   provision-app-edge.sh --app-deploy PATH [--dry-run]
 
-Creates or updates the CloudFront/WAF front door for an app host handoff.
+Creates or updates the CloudFront/WAF front door for a role-backed app handoff.
 EOF
 }
 
@@ -55,7 +55,7 @@ aws_region="$(production_json_required "$app_deploy" '.aws_region | select(type 
 zone_id="$(production_json_required "$app_deploy" '.dns.zone_id | select(type == "string" and length > 0)')"
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 origin_record_name="$(production_json_required "$app_deploy" '.edge.origin_record_name | select(type == "string" and length > 0)')"
-origin_endpoint="$(production_json_required "$app_deploy" '.edge.origin_endpoint | select(type == "string" and length > 0)')"
+public_lb_dns_name="$(production_json_required "$app_deploy" '.edge.public_lb_dns_name | select(type == "string" and length > 0)')"
 origin_http_port="$(production_json_required "$app_deploy" '.edge.origin_http_port')"
 rate_limit="$(production_json_required "$app_deploy" '.edge.rate_limit')"
 if ! jq -e '.edge.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$app_deploy" >/dev/null 2>&1; then
@@ -90,7 +90,7 @@ cat >"$work_dir/terraform.tfvars.json" <<EOF
   "zone_id": $(jq -Rn --arg v "$zone_id" '$v'),
   "bridge_record_name": $(jq -Rn --arg v "$bridge_record_name" '$v'),
   "origin_record_name": $(jq -Rn --arg v "$origin_record_name" '$v'),
-  "origin_endpoint": $(jq -Rn --arg v "$origin_endpoint" '$v'),
+  "public_lb_dns_name": $(jq -Rn --arg v "$public_lb_dns_name" '$v'),
   "origin_http_port": $origin_http_port,
   "security_group_id": $(jq -Rn --arg v "$security_group_id" '$v'),
   "rate_limit": $rate_limit,

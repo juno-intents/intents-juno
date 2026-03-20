@@ -18,12 +18,22 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
   versions_tf="$(cat "$SCRIPT_DIR/versions.tf")"
+  proof_role_asg="$(awk '
+    /resource "aws_autoscaling_group" "proof_role" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  wireguard_role_asg="$(awk '
+    /resource "aws_autoscaling_group" "wireguard_role" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
   password_block="$(awk '
     /variable "shared_postgres_password" \{/ { in_block = 1 }
     in_block { print }
@@ -107,8 +117,10 @@ main() {
   assert_contains "$outputs_tf" 'output "shared_kafka_critical_hmac_secret_arn"' "production-shared exports the Kafka critical-topic HMAC secret ARN"
   assert_contains "$outputs_tf" 'output "shared_proof_role_asg_name"' "production-shared exports the proof-role autoscaling group name"
   assert_contains "$outputs_tf" 'output "shared_proof_role_launch_template_id"' "production-shared exports the proof-role launch template id"
+  assert_contains "$outputs_tf" 'output "shared_proof_role"' "production-shared exports the structured proof-role contract"
   assert_contains "$outputs_tf" 'output "shared_wireguard_role_asg_name"' "production-shared exports the wireguard-role autoscaling group name"
   assert_contains "$outputs_tf" 'output "shared_wireguard_role_launch_template_id"' "production-shared exports the wireguard-role launch template id"
+  assert_contains "$outputs_tf" 'output "shared_wireguard_role"' "production-shared exports the structured wireguard-role contract"
   assert_contains "$outputs_tf" 'output "shared_wireguard_nlb_dns_name"' "production-shared exports the wireguard nlb dns name"
   assert_contains "$outputs_tf" 'output "shared_wireguard_server_key_secret_arn"' "production-shared exports the wireguard server-key secret arn"
   assert_contains "$outputs_tf" 'output "shared_wireguard_peer_config_secret_arns"' "production-shared exports the named wireguard peer config secret arns"
@@ -170,9 +182,15 @@ main() {
   assert_contains "$main_tf" 'desired_capacity          = var.shared_proof_role_desired_capacity' "production-shared drives proof-role capacity from explicit ASG inputs"
   assert_contains "$main_tf" 'min_size                  = var.shared_proof_role_min_size' "production-shared exposes proof-role minimum size on the ASG"
   assert_contains "$main_tf" 'max_size                  = var.shared_proof_role_max_size' "production-shared exposes proof-role maximum size on the ASG"
+  assert_contains "$proof_role_asg" 'instance_refresh {' "production-shared refreshes proof-role instances on launch template changes"
+  assert_contains "$proof_role_asg" 'strategy = "Rolling"' "production-shared uses rolling refresh for proof-role instances"
+  assert_contains "$proof_role_asg" 'triggers = ["launch_template"]' "production-shared ties proof-role refresh to launch template changes"
   assert_contains "$main_tf" 'desired_capacity          = var.shared_wireguard_desired_capacity' "production-shared drives wireguard-role capacity from explicit ASG inputs"
   assert_contains "$main_tf" 'min_size                  = var.shared_wireguard_min_size' "production-shared exposes wireguard-role minimum size on the ASG"
   assert_contains "$main_tf" 'max_size                  = var.shared_wireguard_max_size' "production-shared exposes wireguard-role maximum size on the ASG"
+  assert_contains "$wireguard_role_asg" 'instance_refresh {' "production-shared refreshes wireguard-role instances on launch template changes"
+  assert_contains "$wireguard_role_asg" 'strategy = "Rolling"' "production-shared uses rolling refresh for wireguard-role instances"
+  assert_contains "$wireguard_role_asg" 'triggers = ["launch_template"]' "production-shared ties wireguard-role refresh to launch template changes"
 
   assert_contains "$main_tf" 'health_check_type         = "ELB"' "IPFS ASG uses ELB health"
   assert_contains "$main_tf" 'shared_ipfs_min_size must be at least 2 to avoid a single-node IPFS deployment.' "IPFS redundancy precondition"

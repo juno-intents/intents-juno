@@ -56,10 +56,12 @@ write_fake_terraform_binary() {
   local target="$1"
   local log_file="$2"
   local output_fixture="$3"
+  local app_output_fixture="${4:-$3}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'terraform %s\n' "\$*" >>"$log_file"
+printf 'terraform-cwd %s\n' "\$PWD" >>"$log_file"
 case "\${1:-}" in
   init|apply)
     for arg in "\$@"; do
@@ -75,7 +77,14 @@ case "\${1:-}" in
       printf 'unexpected terraform output invocation: %s\n' "\$*" >&2
       exit 1
     }
-    cat "$output_fixture"
+    case "\$PWD" in
+      */app-runtime)
+        cat "$app_output_fixture"
+        ;;
+      *)
+        cat "$output_fixture"
+        ;;
+    esac
     exit 0
     ;;
 esac
@@ -241,6 +250,15 @@ write_inventory_fixture() {
           runtime_dir: "/var/lib/intents-juno/app-runtime",
           public_endpoint: "203.0.113.21",
           private_endpoint: $app_private_endpoint,
+          terraform_dir: "deploy/shared/terraform/app-runtime",
+          vpc_id: "vpc-0123456789abcdef0",
+          public_subnet_ids: ["subnet-0apppublica", "subnet-0apppublicb"],
+          private_subnet_ids: ["subnet-0appprivatea", "subnet-0appprivateb"],
+          app_ami_id: "ami-0123456789abcdef0",
+          ami_release_tag: "app-runtime-ami-v1.2.3-testnet",
+          app_instance_profile_name: "juno-app-role",
+          public_bridge_certificate_arn: "arn:aws:acm:us-east-1:021490342184:certificate/public-bridge",
+          internal_backoffice_certificate_arn: "arn:aws:acm:us-east-1:021490342184:certificate/internal-backoffice",
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",
@@ -259,7 +277,8 @@ write_inventory_fixture() {
         }
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
-          rpc_url: "https://rpc.mainnet.succinct.xyz"
+          rpc_url: "https://rpc.mainnet.succinct.xyz",
+          image_release_tag: "shared-proof-services-image-v1.2.3-testnet"
         }
       | .shared_roles.wireguard = {
           public_subnet_id: $wireguard_public_subnet_id,
@@ -274,6 +293,7 @@ write_inventory_fixture() {
           publish_public_dns: false
         }
       | .wireguard_role = .shared_roles.wireguard
+      | .wireguard_role.ami_release_tag = "wireguard-role-ami-v1.2.3-testnet"
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
 }
 
@@ -328,7 +348,7 @@ EOF
 }
 
 test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs() {
-  local workdir output_dir fake_bin log_dir tf_json
+  local workdir output_dir fake_bin log_dir shared_tf_json app_tf_json
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   fake_bin="$workdir/bin"
@@ -350,7 +370,7 @@ APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
-  tf_json="$workdir/terraform-output.json"
+  shared_tf_json="$workdir/shared-terraform-output.json"
   jq '
     .shared_ecs_cluster_arn = { value: "arn:aws:ecs:us-east-1:021490342184:cluster/legacy-shared" }
     | .shared_proof_requestor_service_name = { value: "legacy-proof-requestor" }
@@ -378,18 +398,43 @@ EOF
           server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
         }
       }
-  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$shared_tf_json"
+  app_tf_json="$workdir/app-terraform-output.json"
+  jq -n '
+    {
+      app_role: {
+        value: {
+          asg: "alpha-app-role",
+          launch_template: { id: "lt-app0123456789abcdef", version: "13" },
+          public_lb: {
+            dns_name: "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z35SXDOTRQ7X7K",
+            security_group_id: "sg-publicbridge012345678"
+          },
+          internal_lb: {
+            dns_name: "internal-ops-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z2P70J7EXAMPLE",
+            security_group_id: "sg-internalops012345678"
+          }
+        }
+      }
+    }
+  ' >"$app_tf_json"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
-    --terraform-output-json "$tf_json" \
+    --shared-terraform-output-json "$shared_tf_json" \
+    --app-terraform-output-json "$app_tf_json" \
     --skip-terraform-apply \
     --output-dir "$output_dir" >/dev/null
 
   assert_eq "$(jq -r '.shared_roles.proof.asg' "$output_dir/alpha/shared-manifest.json")" "alpha-proof-role" "deploy coordinator prefers proof role asg"
   assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$output_dir/alpha/shared-manifest.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "deploy coordinator renders wireguard server key secret"
+  assert_eq "$(jq -r '.app_role.asg' "$output_dir/alpha/app/app-deploy.json")" "alpha-app-role" "deploy coordinator prefers app role asg"
+  assert_eq "$(jq -r '.app_role.public_lb.dns_name' "$output_dir/alpha/app/app-deploy.json")" "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com" "deploy coordinator prefers app role public load balancer"
+  assert_eq "$(jq -r '.edge.public_lb_dns_name' "$output_dir/alpha/app/app-deploy.json")" "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com" "deploy coordinator renders edge from the public load balancer"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.20.0/24" "deploy coordinator prefers wireguard role source cidrs"
   assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$output_dir/alpha/app/app-deploy.json")" "10.0.21.0/24" "deploy coordinator keeps all wireguard role source cidrs"
   rm -rf "$workdir"
@@ -920,7 +965,7 @@ EOF
 }
 
 test_deploy_coordinator_bootstraps_terraform_backend_before_init() {
-  local workdir output_dir fake_bin log_dir aws_log terraform_log combined_log
+  local workdir output_dir fake_bin log_dir aws_log terraform_log combined_log app_tf_fixture
   workdir="$(mktemp -d)"
   output_dir="$workdir/output"
   fake_bin="$workdir/bin"
@@ -945,7 +990,28 @@ EOF
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_aws_backend_bootstrap "$fake_bin/aws" "$aws_log"
-  write_fake_terraform_binary "$fake_bin/terraform" "$terraform_log" "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json"
+  app_tf_fixture="$workdir/app-terraform-output.json"
+  jq -n '
+    {
+      app_role: {
+        value: {
+          asg: "alpha-app-role",
+          launch_template: { id: "lt-app0123456789abcdef", version: "13" },
+          public_lb: {
+            dns_name: "bridge-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z35SXDOTRQ7X7K",
+            security_group_id: "sg-publicbridge012345678"
+          },
+          internal_lb: {
+            dns_name: "internal-ops-alpha-role-123456.us-east-1.elb.amazonaws.com",
+            zone_id: "Z2P70J7EXAMPLE",
+            security_group_id: "sg-internalops012345678"
+          }
+        }
+      }
+    }
+  ' >"$app_tf_fixture"
+  write_fake_terraform_binary "$fake_bin/terraform" "$terraform_log" "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" "$app_tf_fixture"
 
   PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
@@ -958,11 +1024,18 @@ EOF
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"
   assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated wireguard override file"
+  assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=app-runtime/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes app runtime terraform against the bootstrapped backend"
+  assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator applies app runtime terraform with the generated role override file"
   assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the wireguard override file"
+  assert_file_exists "$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator writes the app runtime override file"
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "true" "deploy-coordinator writes a wireguard-enabled override file"
   assert_eq "$(jq -r '.shared_wireguard_public_subnet_ids[0]' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "subnet-0abc1234def567890" "deploy-coordinator forwards the wireguard public subnet into terraform"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "ops.alpha.intents-testing.thejunowallet.com" "deploy-coordinator forwards the backoffice hostname into terraform"
+  assert_eq "$(jq -r '.deployment_id' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "alpha" "deploy-coordinator writes the app runtime deployment id"
+  assert_eq "$(jq -r '.wireguard_cidr_blocks[0]' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "10.0.2.50/32" "deploy-coordinator forwards wireguard source cidrs into the app runtime"
+  assert_eq "$(jq -r '.app_ami_id' "$output_dir/alpha/app-terraform.auto.tfvars.json")" "ami-0123456789abcdef0" "deploy-coordinator forwards the app ami into the app runtime"
   assert_line_order "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator bootstraps backend storage before terraform init"
+  assert_line_order "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=app-runtime/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator applies shared terraform before app runtime terraform"
   rm -rf "$workdir"
 }
 

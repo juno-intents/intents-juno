@@ -58,6 +58,19 @@ output "shared_proof_role_asg_name" {
   value       = aws_autoscaling_group.proof_role.name
 }
 
+output "shared_proof_role" {
+  description = "Structured proof-role contract for deployment handoffs."
+  value = {
+    asg = aws_autoscaling_group.proof_role.name
+    launch_template = {
+      id      = aws_launch_template.proof_role.id
+      version = tostring(aws_launch_template.proof_role.latest_version)
+    }
+    requestor_address = var.shared_sp1_requestor_address
+    rpc_url           = var.shared_sp1_rpc_url
+  }
+}
+
 output "shared_proof_role_launch_template_id" {
   description = "Launch template ID for the shared proof-role foundation."
   value       = aws_launch_template.proof_role.id
@@ -116,6 +129,26 @@ output "shared_ipfs_instance_profile" {
 output "shared_wireguard_role_asg_name" {
   description = "Autoscaling group name for the WireGuard gateway role foundation."
   value       = var.shared_wireguard_enabled ? aws_autoscaling_group.wireguard_role[0].name : null
+}
+
+output "shared_wireguard_role" {
+  description = "Structured wireguard role contract for deployment handoffs."
+  value = var.shared_wireguard_enabled ? {
+    asg = aws_autoscaling_group.wireguard_role[0].name
+    launch_template = {
+      id      = aws_launch_template.wireguard_role[0].id
+      version = tostring(aws_launch_template.wireguard_role[0].latest_version)
+    }
+    endpoint_host                   = aws_lb.wireguard[0].dns_name
+    listen_port                     = var.shared_wireguard_listen_port
+    network_cidr                    = var.shared_wireguard_network_cidr
+    source_cidrs                    = var.shared_wireguard_source_cidrs
+    server_key_secret_arn           = aws_secretsmanager_secret.shared_wireguard_server_key[0].arn
+    peer_roster_secret_arns         = [for secret in values(aws_secretsmanager_secret.shared_wireguard_peer_config) : secret.arn]
+    peer_config_secret_arns         = { for name, secret in aws_secretsmanager_secret.shared_wireguard_peer_config : name => secret.arn }
+    backoffice_private_endpoint_ips = local.shared_wireguard_backoffice_private_endpoint_ips
+  } : {}
+  sensitive = true
 }
 
 output "shared_wireguard_role_launch_template_id" {
