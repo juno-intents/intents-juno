@@ -65,4 +65,4 @@ flowchart LR
 
 ## Read Next
 
-- [DKG trust whitepaper](docs/dkg-trust-whitepaper.md)
+- [Juno Intents Whitepaper](docs/Juno%20Intents%20Whitepaper.md)
