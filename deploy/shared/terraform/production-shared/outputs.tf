@@ -147,7 +147,18 @@ output "shared_wireguard_role" {
     peer_roster_secret_arns         = [for secret in values(aws_secretsmanager_secret.shared_wireguard_peer_config) : secret.arn]
     peer_config_secret_arns         = { for name, secret in aws_secretsmanager_secret.shared_wireguard_peer_config : name => secret.arn }
     backoffice_private_endpoint_ips = local.shared_wireguard_backoffice_private_endpoint_ips
-  } : {}
+  } : {
+    asg               = null
+    launch_template   = { id = null, version = null }
+    endpoint_host     = null
+    listen_port       = null
+    network_cidr      = null
+    source_cidrs      = []
+    server_key_secret_arn           = null
+    peer_roster_secret_arns         = []
+    peer_config_secret_arns         = {}
+    backoffice_private_endpoint_ips = []
+  }
   sensitive = true
 }
 
