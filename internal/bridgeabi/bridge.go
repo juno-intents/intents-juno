@@ -12,6 +12,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
 
@@ -312,6 +313,43 @@ func UnpackMinDepositAdminResult(raw []byte) (common.Address, error) {
 		return common.Address{}, fmt.Errorf("%w: unexpected minDepositAdmin output type", ErrInvalidInput)
 	}
 	return admin, nil
+}
+
+func PackLastAcceptedCheckpointHeightCalldata() ([]byte, error) {
+	return crypto.Keccak256([]byte("lastAcceptedCheckpointHeight()"))[:4], nil
+}
+
+func UnpackLastAcceptedCheckpointHeightResult(raw []byte) (uint64, error) {
+	if len(raw) < 32 {
+		return 0, fmt.Errorf("%w: lastAcceptedCheckpointHeight result too short", ErrInvalidInput)
+	}
+	height := new(big.Int).SetBytes(raw[len(raw)-32:])
+	if height.Sign() < 0 || height.BitLen() > 64 {
+		return 0, fmt.Errorf("%w: unexpected lastAcceptedCheckpointHeight output type", ErrInvalidInput)
+	}
+	return height.Uint64(), nil
+}
+
+func PackLastAcceptedCheckpointBlockHashCalldata() ([]byte, error) {
+	return crypto.Keccak256([]byte("lastAcceptedCheckpointBlockHash()"))[:4], nil
+}
+
+func UnpackLastAcceptedCheckpointBlockHashResult(raw []byte) (common.Hash, error) {
+	if len(raw) < 32 {
+		return common.Hash{}, fmt.Errorf("%w: lastAcceptedCheckpointBlockHash result too short", ErrInvalidInput)
+	}
+	return common.BytesToHash(raw[len(raw)-32:]), nil
+}
+
+func PackLastAcceptedCheckpointFinalOrchardRootCalldata() ([]byte, error) {
+	return crypto.Keccak256([]byte("lastAcceptedCheckpointFinalOrchardRoot()"))[:4], nil
+}
+
+func UnpackLastAcceptedCheckpointFinalOrchardRootResult(raw []byte) (common.Hash, error) {
+	if len(raw) < 32 {
+		return common.Hash{}, fmt.Errorf("%w: lastAcceptedCheckpointFinalOrchardRoot result too short", ErrInvalidInput)
+	}
+	return common.BytesToHash(raw[len(raw)-32:]), nil
 }
 
 func PackSetMinDepositAmountCalldata(amount uint64) ([]byte, error) {

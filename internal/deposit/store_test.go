@@ -1064,6 +1064,209 @@ func TestMemoryStore_SubmittedAttemptsHonorClaimTTLAndClearOnFinalize(t *testing
 	}
 }
 
+func TestMemoryStore_ClaimBatchesHonorsOlderThanAndLease(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	d1 := Deposit{
+		DepositID:     [32]byte{0x41},
+		Commitment:    [32]byte{0x42},
+		LeafIndex:     1,
+		Amount:        1000,
+		BaseRecipient: [20]byte{0x01},
+	}
+	d2 := Deposit{
+		DepositID:     [32]byte{0x43},
+		Commitment:    [32]byte{0x44},
+		LeafIndex:     2,
+		Amount:        2000,
+		BaseRecipient: [20]byte{0x02},
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed d1: %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed d2: %v", err)
+	}
+
+	now := time.Date(2020, 3, 20, 12, 0, 0, 0, time.UTC)
+	batchID := [32]byte{0x45}
+	if _, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	} else if ready {
+		t.Fatalf("expected assembling batch on first prepare")
+	}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, [32]byte{}, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected closed batch to be ready")
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := s.MarkBatchProofRequested(ctx, "worker-a", batch.BatchID, cp); err != nil {
+		t.Fatalf("MarkBatchProofRequested: %v", err)
+	}
+
+	claimed, err := s.ClaimBatches(ctx, "repair-a", 80*time.Millisecond, []BatchState{BatchStateProofRequested}, time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches repair-a: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].BatchID != batchID {
+		t.Fatalf("unexpected claimed batches: %#v", claimed)
+	}
+
+	other, err := s.ClaimBatches(ctx, "repair-b", 80*time.Millisecond, []BatchState{BatchStateProofRequested}, time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches repair-b: %v", err)
+	}
+	if len(other) != 0 {
+		t.Fatalf("expected repair-b exclusion while batch lease active")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+
+	afterExpiry, err := s.ClaimBatches(ctx, "repair-b", 80*time.Millisecond, []BatchState{BatchStateProofRequested}, time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches repair-b after expiry: %v", err)
+	}
+	if len(afterExpiry) != 1 || afterExpiry[0].BatchID != batchID {
+		t.Fatalf("expected repair-b to claim batch after expiry")
+	}
+
+	tooOld, err := s.ClaimBatches(ctx, "repair-c", 80*time.Millisecond, []BatchState{BatchStateProofRequested}, time.Now().Add(-time.Hour), 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches repair-c olderThan: %v", err)
+	}
+	if len(tooOld) != 0 {
+		t.Fatalf("expected olderThan filter to exclude recently updated batch")
+	}
+}
+
+func TestMemoryStore_ResetBatchClearsSubmittedMetadataAndRequeuesDeposits(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	d1 := Deposit{
+		DepositID:     [32]byte{0x51},
+		Commitment:    [32]byte{0x52},
+		LeafIndex:     1,
+		Amount:        1000,
+		BaseRecipient: [20]byte{0x03},
+	}
+	d2 := Deposit{
+		DepositID:     [32]byte{0x53},
+		Commitment:    [32]byte{0x54},
+		LeafIndex:     2,
+		Amount:        2000,
+		BaseRecipient: [20]byte{0x04},
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed d1: %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed d2: %v", err)
+	}
+
+	now := time.Date(2020, 3, 20, 12, 0, 0, 0, time.UTC)
+	batchID := [32]byte{0x55}
+	if _, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	} else if ready {
+		t.Fatalf("expected assembling batch on first prepare")
+	}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, [32]byte{}, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected closed batch to be ready")
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := s.MarkBatchProofRequested(ctx, "worker-a", batch.BatchID, cp); err != nil {
+		t.Fatalf("MarkBatchProofRequested: %v", err)
+	}
+	if _, err := s.MarkBatchProofReady(ctx, "worker-a", batch.BatchID, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
+		t.Fatalf("MarkBatchProofReady: %v", err)
+	}
+	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batch.BatchID, batch.DepositIDs, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	reset, err := s.ResetBatch(ctx, "repair-a", batchID)
+	if err != nil {
+		t.Fatalf("ResetBatch: %v", err)
+	}
+	if reset.State != BatchStateClosed {
+		t.Fatalf("reset state: got %s want %s", reset.State, BatchStateClosed)
+	}
+	if reset.Checkpoint != (checkpoint.Checkpoint{}) {
+		t.Fatalf("expected reset checkpoint to be cleared, got %+v", reset.Checkpoint)
+	}
+	if reset.ProofRequested {
+		t.Fatalf("expected proof_requested to be false after reset")
+	}
+	if len(reset.OperatorSignatures) != 0 {
+		t.Fatalf("expected operator signatures to be cleared")
+	}
+	if len(reset.ProofSeal) != 0 {
+		t.Fatalf("expected proof seal to be cleared")
+	}
+
+	attempts, err := s.ClaimSubmittedAttempts(ctx, "repair-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected submitted batch attempts to clear after reset")
+	}
+
+	for _, depositID := range batch.DepositIDs {
+		job, err := s.Get(ctx, depositID)
+		if err != nil {
+			t.Fatalf("Get(%x): %v", depositID[:4], err)
+		}
+		if job.State != StateConfirmed {
+			t.Fatalf("job %x state: got %s want %s", depositID[:4], job.State, StateConfirmed)
+		}
+		if job.Checkpoint != (checkpoint.Checkpoint{}) {
+			t.Fatalf("job %x checkpoint not cleared: %+v", depositID[:4], job.Checkpoint)
+		}
+		if len(job.ProofSeal) != 0 {
+			t.Fatalf("job %x proof seal should be cleared", depositID[:4])
+		}
+		if job.TxHash != ([32]byte{}) {
+			t.Fatalf("job %x tx hash should be cleared", depositID[:4])
+		}
+	}
+
+	confirmed, err := s.ClaimConfirmed(ctx, "worker-b", time.Second, 10)
+	if err != nil {
+		t.Fatalf("ClaimConfirmed: %v", err)
+	}
+	if len(confirmed) != 2 {
+		t.Fatalf("expected two confirmed deposits after reset, got %d", len(confirmed))
+	}
+}
+
 func TestMemoryStore_FinalizeBatch_Atomic(t *testing.T) {
 	t.Parallel()
 

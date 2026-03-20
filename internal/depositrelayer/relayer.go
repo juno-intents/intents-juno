@@ -73,6 +73,10 @@ type ProofStore interface {
 	GetJob(ctx context.Context, jobID common.Hash) (proof.JobRecord, error)
 }
 
+type BridgeCaller interface {
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+}
+
 type Config struct {
 	BaseChainID    uint32
 	BridgeAddress  common.Address
@@ -109,6 +113,7 @@ type Config struct {
 	TipHeightProvider       TipHeightProvider
 	ReceiptReader           ReceiptReader
 	ProofStore              ProofStore
+	BridgeCaller            BridgeCaller
 
 	Now func() time.Time
 }
@@ -153,6 +158,7 @@ type Relayer struct {
 	tipHeightReader  TipHeightProvider
 	receiptReader    ReceiptReader
 	proofStore       ProofStore
+	bridgeCaller     BridgeCaller
 
 	// pauseChecker is an optional bridge pause checker.
 	pauseChecker PauseChecker
@@ -256,6 +262,7 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		tipHeightReader:    cfg.TipHeightProvider,
 		receiptReader:      cfg.ReceiptReader,
 		proofStore:         cfg.ProofStore,
+		bridgeCaller:       cfg.BridgeCaller,
 	}, nil
 }
 
@@ -349,6 +356,9 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 	if err := r.recoverSubmittedAttempts(ctx); err != nil {
 		return err
 	}
+	if err := r.recoverStaleBatches(ctx); err != nil {
+		return err
+	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
@@ -363,6 +373,9 @@ func (r *Relayer) Flush(ctx context.Context) error {
 		return nil
 	}
 	if err := r.recoverSubmittedAttempts(ctx); err != nil {
+		return err
+	}
+	if err := r.recoverStaleBatches(ctx); err != nil {
 		return err
 	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
@@ -531,15 +544,12 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 			}
 			continue
 		}
-		if r.currentCheckpointSupersedes(attempt.Checkpoint) {
-			if err := r.store.RequeueSubmittedBatch(ctx, attempt.BatchID); err != nil {
-				return fmt.Errorf("depositrelayer: requeue stale submitted batch: %w", err)
+		if stale, reason, err := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint); err != nil {
+			return err
+		} else if stale {
+			if err := r.resetBatch(ctx, attempt.BatchID, reason); err != nil {
+				return err
 			}
-			r.log.Info("requeued stale submitted batch",
-				"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
-				"attemptCheckpointHeight", attempt.Checkpoint.Height,
-				"currentCheckpointHeight", r.checkpoint.Height,
-			)
 			continue
 		}
 		if err := r.resubmitSubmittedAttempt(ctx, attempt); err != nil {
@@ -556,7 +566,11 @@ func (r *Relayer) currentCheckpointSupersedes(attempt checkpoint.Checkpoint) boo
 	if r.checkpoint.BaseChainID != attempt.BaseChainID || r.checkpoint.BridgeContract != attempt.BridgeContract {
 		return false
 	}
-	return r.checkpoint.Height > attempt.Height
+	if r.checkpoint.Height > attempt.Height {
+		return true
+	}
+	return r.checkpoint.Height == attempt.Height &&
+		(r.checkpoint.BlockHash != attempt.BlockHash || r.checkpoint.FinalOrchardRoot != attempt.FinalOrchardRoot)
 }
 
 func (r *Relayer) ready(ctx context.Context) bool {
@@ -615,6 +629,18 @@ func (r *Relayer) resubmitSubmittedAttempt(ctx context.Context, attempt deposit.
 		return fmt.Errorf("depositrelayer: base-relayer did not return a receipt")
 	}
 	if res.Receipt.Status != 1 {
+		revertDetail := strings.TrimSpace(res.Receipt.RevertReason)
+		if revertDetail == "" {
+			revertDetail = strings.TrimSpace(res.Receipt.RevertData)
+		}
+		if stale, reason, err := r.classifyStaleCheckpointRevert(ctx, attempt.Checkpoint, revertDetail); err != nil {
+			return err
+		} else if stale {
+			return r.resetBatch(ctx, attempt.BatchID, reason)
+		}
+		if revertDetail != "" {
+			return fmt.Errorf("depositrelayer: mintBatch tx reverted: %s", revertDetail)
+		}
 		return fmt.Errorf("depositrelayer: mintBatch tx reverted")
 	}
 
@@ -825,6 +851,12 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		if revertDetail == "" {
 			revertDetail = strings.TrimSpace(res.Receipt.RevertData)
 		}
+		if stale, reason, err := r.classifyStaleCheckpointRevert(ctx, cp, revertDetail); err != nil {
+			return err
+		} else if stale {
+			delete(r.proofAttempts, proofBatchID)
+			return r.resetBatch(ctx, batch.Meta.BatchID, reason)
+		}
 		errorMessage := fmt.Sprintf("mintBatch tx reverted: %s", res.TxHash)
 		if revertDetail != "" {
 			errorMessage = fmt.Sprintf("%s (%s)", errorMessage, revertDetail)
@@ -854,6 +886,154 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		"checkpointHeight", cp.Height,
 		"items", len(items),
 		"txHash", res.TxHash,
+	)
+	return nil
+}
+
+func (r *Relayer) recoverStaleBatches(ctx context.Context) error {
+	if !r.ready(ctx) {
+		return nil
+	}
+	olderThan := r.cfg.Now().UTC().Add(-r.cfg.ClaimTTL)
+	states := []deposit.BatchState{deposit.BatchStateProofRequested, deposit.BatchStateProofReady}
+	batches, err := r.store.ClaimBatches(ctx, r.cfg.Owner, r.cfg.ClaimTTL, states, olderThan, r.cfg.MaxItems)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: claim stale batches: %w", err)
+	}
+	for _, batch := range batches {
+		if err := r.resetBatch(ctx, batch.BatchID, "stale_"+batch.State.String()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (r *Relayer) submittedAttemptCheckpointStale(ctx context.Context, cp checkpoint.Checkpoint) (bool, string, error) {
+	if r.currentCheckpointSupersedes(cp) {
+		return true, "checkpoint_superseded", nil
+	}
+	accepted, ok, err := r.readAcceptedCheckpoint(ctx, cp)
+	if err != nil {
+		return false, "", fmt.Errorf("depositrelayer: read accepted checkpoint: %w", err)
+	}
+	if !ok {
+		return false, "", nil
+	}
+	if accepted.Height > cp.Height {
+		return true, "checkpoint_height_regression", nil
+	}
+	if accepted.Height == cp.Height &&
+		(accepted.BlockHash != cp.BlockHash || accepted.FinalOrchardRoot != cp.FinalOrchardRoot) {
+		return true, "checkpoint_conflict", nil
+	}
+	return false, "", nil
+}
+
+func (r *Relayer) classifyStaleCheckpointRevert(ctx context.Context, cp checkpoint.Checkpoint, revertDetail string) (bool, string, error) {
+	revertDetail = strings.TrimSpace(revertDetail)
+	accepted, ok, err := r.readAcceptedCheckpoint(ctx, cp)
+	if err != nil {
+		if hasCheckpointHeightRegression(revertDetail) {
+			return true, "checkpoint_height_regression_inferred", nil
+		}
+		if hasCheckpointConflict(revertDetail) {
+			return true, "checkpoint_conflict_inferred", nil
+		}
+		return false, "", fmt.Errorf("depositrelayer: read accepted checkpoint: %w", err)
+	}
+	if ok {
+		if accepted.Height > cp.Height {
+			return true, "checkpoint_height_regression", nil
+		}
+		if accepted.Height == cp.Height &&
+			(accepted.BlockHash != cp.BlockHash || accepted.FinalOrchardRoot != cp.FinalOrchardRoot) {
+			return true, "checkpoint_conflict", nil
+		}
+	}
+	if hasCheckpointHeightRegression(revertDetail) {
+		return true, "checkpoint_height_regression_inferred", nil
+	}
+	if hasCheckpointConflict(revertDetail) {
+		return true, "checkpoint_conflict_inferred", nil
+	}
+	return false, "", nil
+}
+
+func (r *Relayer) readAcceptedCheckpoint(ctx context.Context, cp checkpoint.Checkpoint) (checkpoint.Checkpoint, bool, error) {
+	if r == nil || r.bridgeCaller == nil {
+		return checkpoint.Checkpoint{}, false, nil
+	}
+
+	heightCall, err := bridgeabi.PackLastAcceptedCheckpointHeightCalldata()
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	heightRaw, err := r.bridgeCaller.CallContract(ctx, ethereum.CallMsg{To: &cp.BridgeContract, Data: heightCall}, nil)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	height, err := bridgeabi.UnpackLastAcceptedCheckpointHeightResult(heightRaw)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+
+	blockHashCall, err := bridgeabi.PackLastAcceptedCheckpointBlockHashCalldata()
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	blockHashRaw, err := r.bridgeCaller.CallContract(ctx, ethereum.CallMsg{To: &cp.BridgeContract, Data: blockHashCall}, nil)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	blockHash, err := bridgeabi.UnpackLastAcceptedCheckpointBlockHashResult(blockHashRaw)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+
+	rootCall, err := bridgeabi.PackLastAcceptedCheckpointFinalOrchardRootCalldata()
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	rootRaw, err := r.bridgeCaller.CallContract(ctx, ethereum.CallMsg{To: &cp.BridgeContract, Data: rootCall}, nil)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+	root, err := bridgeabi.UnpackLastAcceptedCheckpointFinalOrchardRootResult(rootRaw)
+	if err != nil {
+		return checkpoint.Checkpoint{}, false, err
+	}
+
+	accepted := checkpoint.Checkpoint{
+		Height:           height,
+		BlockHash:        blockHash,
+		FinalOrchardRoot: root,
+		BaseChainID:      cp.BaseChainID,
+		BridgeContract:   cp.BridgeContract,
+	}
+	if accepted.Height == 0 && accepted.BlockHash == (common.Hash{}) && accepted.FinalOrchardRoot == (common.Hash{}) {
+		return checkpoint.Checkpoint{}, false, nil
+	}
+	return accepted, true, nil
+}
+
+func hasCheckpointHeightRegression(detail string) bool {
+	return strings.Contains(detail, "CheckpointHeightRegression")
+}
+
+func hasCheckpointConflict(detail string) bool {
+	return strings.Contains(detail, "CheckpointConflict")
+}
+
+func (r *Relayer) resetBatch(ctx context.Context, batchID [32]byte, reason string) error {
+	batch, err := r.store.ResetBatch(ctx, r.cfg.Owner, batchID)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: reset batch %x: %w", batchID[:8], err)
+	}
+	delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(batch.DepositIDs)))
+	r.log.Info("reset stale durable batch",
+		"batchID", fmt.Sprintf("%x", batchID[:8]),
+		"reason", reason,
+		"items", len(batch.DepositIDs),
 	)
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"crypto/ecdsa"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"math"
 	"math/big"
 	"reflect"
@@ -19,6 +20,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/juno-intents/intents-juno/internal/bridgeabi"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/deposit"
@@ -975,6 +977,26 @@ func (s *stubReceiptReader) FilterLogs(context.Context, ethereum.FilterQuery) ([
 	return append([]types.Log(nil), s.filterLogs...), nil
 }
 
+type stubBridgeCaller struct {
+	responses map[string][]byte
+	err       error
+}
+
+func (s *stubBridgeCaller) CallContract(_ context.Context, msg ethereum.CallMsg, _ *big.Int) ([]byte, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	if len(msg.Data) < 4 {
+		return nil, fmt.Errorf("unexpected calldata length %d", len(msg.Data))
+	}
+	key := hex.EncodeToString(msg.Data[:4])
+	raw, ok := s.responses[key]
+	if !ok {
+		return nil, fmt.Errorf("unexpected bridge call selector %s", key)
+	}
+	return append([]byte(nil), raw...), nil
+}
+
 func mustOperatorKey(t *testing.T) *ecdsa.PrivateKey {
 	t.Helper()
 	key, err := crypto.HexToECDSA("4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
@@ -1813,6 +1835,173 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesStaleCheckpointBatch(t *testin
 	}
 	if len(reclaimed) != 1 || reclaimed[0].Deposit.DepositID != dep.DepositID {
 		t.Fatalf("unexpected reclaimed jobs: %#v", reclaimed)
+	}
+}
+
+func TestRelayer_RecoverSubmittedAttempts_ResetsSameHeightCheckpointConflict(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	dep := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0x88),
+		Commitment:    seq32ForRelayer(0x89),
+		LeafIndex:     1,
+		Amount:        500,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	conflictingCheckpoint := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0x8a),
+		FinalOrchardRoot: seq32ForRelayer(0x8b),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := store.MarkBatchSubmitted(
+		context.Background(),
+		"owner-1",
+		seq32ForRelayer(0x8c),
+		[][32]byte{dep.DepositID},
+		conflictingCheckpoint,
+		[][]byte{{0xaa}},
+		[]byte{0xbb},
+	); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	sender := &stubSender{err: errors.New("send should not be called")}
+	r, err := New(Config{
+		BaseChainID:       uint32(conflictingCheckpoint.BaseChainID),
+		BridgeAddress:     conflictingCheckpoint.BridgeContract,
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+	}, store, sender, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	sameHeightCheckpoint := conflictingCheckpoint
+	sameHeightCheckpoint.BlockHash = seq32ForRelayer(0x8d)
+	sameHeightCheckpoint.FinalOrchardRoot = seq32ForRelayer(0x8e)
+	r.checkpoint = &sameHeightCheckpoint
+	r.opSigs = [][]byte{{0xcc}}
+
+	if err := r.recoverSubmittedAttempts(context.Background()); err != nil {
+		t.Fatalf("recoverSubmittedAttempts: %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called %d times, want 0", sender.calls)
+	}
+
+	job, err := store.Get(context.Background(), dep.DepositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateConfirmed {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateConfirmed)
+	}
+}
+
+func TestRelayer_RecoverSubmittedAttempts_ResetsOnChainStaleCheckpointRevert(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	dep := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0x90),
+		Commitment:    seq32ForRelayer(0x91),
+		LeafIndex:     1,
+		Amount:        500,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	staleCheckpoint := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0x92),
+		FinalOrchardRoot: seq32ForRelayer(0x93),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := store.MarkBatchSubmitted(
+		context.Background(),
+		"owner-1",
+		seq32ForRelayer(0x94),
+		[][32]byte{dep.DepositID},
+		staleCheckpoint,
+		[][]byte{{0xaa}},
+		[]byte{0xbb},
+	); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	heightCall, err := bridgeabi.PackLastAcceptedCheckpointHeightCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointHeightCalldata: %v", err)
+	}
+	blockHashCall, err := bridgeabi.PackLastAcceptedCheckpointBlockHashCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointBlockHashCalldata: %v", err)
+	}
+	rootCall, err := bridgeabi.PackLastAcceptedCheckpointFinalOrchardRootCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointFinalOrchardRootCalldata: %v", err)
+	}
+	acceptedBlockHash := seq32ForRelayer(0x95)
+	acceptedRoot := seq32ForRelayer(0x96)
+
+	sender := &stubSender{res: httpapi.SendResponse{
+		TxHash: "0xdeadbeef",
+		Receipt: &httpapi.ReceiptResponse{
+			Status:       0,
+			RevertReason: "CheckpointHeightRegression(123,124)",
+		},
+	}}
+	r, err := New(Config{
+		BaseChainID:       uint32(staleCheckpoint.BaseChainID),
+		BridgeAddress:     staleCheckpoint.BridgeContract,
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
+			hex.EncodeToString(heightCall[:4]):    common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
+			hex.EncodeToString(blockHashCall[:4]): acceptedBlockHash[:],
+			hex.EncodeToString(rootCall[:4]):      acceptedRoot[:],
+		}},
+	}, store, sender, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.checkpoint = &staleCheckpoint
+	r.opSigs = [][]byte{{0xcc}}
+
+	if err := r.recoverSubmittedAttempts(context.Background()); err != nil {
+		t.Fatalf("recoverSubmittedAttempts: %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender calls: got %d want 0", sender.calls)
+	}
+
+	job, err := store.Get(context.Background(), dep.DepositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateConfirmed {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateConfirmed)
 	}
 }
 
@@ -3731,5 +3920,123 @@ func TestRelayer_DLQ_BridgeTxReverted(t *testing.T) {
 	}
 	if !strings.Contains(recs[0].ErrorMessage, "bridge paused") {
 		t.Fatalf("expected revert reason in DLQ error message, got %q", recs[0].ErrorMessage)
+	}
+}
+
+func TestRelayer_StaleCheckpointTxRevertResetsBatchInsteadOfDLQ(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	heightCall, err := bridgeabi.PackLastAcceptedCheckpointHeightCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointHeightCalldata: %v", err)
+	}
+	blockHashCall, err := bridgeabi.PackLastAcceptedCheckpointBlockHashCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointBlockHashCalldata: %v", err)
+	}
+	rootCall, err := bridgeabi.PackLastAcceptedCheckpointFinalOrchardRootCalldata()
+	if err != nil {
+		t.Fatalf("PackLastAcceptedCheckpointFinalOrchardRootCalldata: %v", err)
+	}
+	acceptedBlockHash := common.HexToHash("0x2202030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20")
+	acceptedRoot := common.HexToHash("0x2212131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30")
+
+	var cm common.Hash
+	cm[0] = 0xaa
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	sender := &stubSender{
+		res: httpapi.SendResponse{
+			TxHash: "0xdeadbeef",
+			Receipt: &httpapi.ReceiptResponse{
+				Status:       0,
+				RevertReason: "CheckpointHeightRegression(123,124)",
+			},
+		},
+	}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+	dlqStore := dlq.NewMemoryStore(nil)
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		DLQStore:          dlqStore,
+		Now:               time.Now,
+		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
+			hex.EncodeToString(heightCall[:4]):    common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
+			hex.EncodeToString(blockHashCall[:4]): acceptedBlockHash.Bytes(),
+			hex.EncodeToString(rootCall[:4]):      acceptedRoot.Bytes(),
+		}},
+	}, deposit.NewMemoryStore(), sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	if err := r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        7,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
+	}); err != nil {
+		t.Fatalf("IngestDeposit: %v", err)
+	}
+
+	counts, cerr := dlqStore.CountUnacknowledged(ctx)
+	if cerr != nil {
+		t.Fatalf("CountUnacknowledged: %v", cerr)
+	}
+	if counts.DepositBatches != 0 {
+		t.Fatalf("expected no deposit batch DLQ entries, got %d", counts.DepositBatches)
+	}
+
+	depositID, err := idempotency.DepositIDV1([32]byte(cm), 7)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	job, err := r.store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateConfirmed {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateConfirmed)
 	}
 }

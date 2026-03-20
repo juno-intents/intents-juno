@@ -13,6 +13,10 @@ import (
 	"time"
 )
 
+func depositStateIsStuck(s int16) bool {
+	return s < 6
+}
+
 // depositStateLabel maps deposit_jobs.state int16 to a human-readable label.
 func depositStateLabel(s int16) string {
 	switch s {
@@ -207,7 +211,7 @@ func (s *Server) handleStuckBatches(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	threshold := time.Now().UTC().Add(-30 * time.Minute)
 
-	// Stuck deposit jobs: state NOT IN (5=submitted, 6=finalized, 7=rejected) and updated_at old.
+	// Stuck deposit jobs: unresolved states (including submitted) with old updated_at.
 	stuckDeposits, err := s.fetchStuckDeposits(ctx, threshold)
 	if err != nil {
 		s.log.Error("fetch stuck deposits", "err", err)
@@ -235,8 +239,7 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 	rows, err := s.cfg.Pool.Query(ctx, `
 		SELECT deposit_id, state, created_at, updated_at
 		FROM deposit_jobs
-		WHERE state NOT IN (5, 6, 7)
-		  AND updated_at < $1
+		WHERE updated_at < $1
 		ORDER BY updated_at ASC
 		LIMIT 100`, threshold)
 	if err != nil {
@@ -251,6 +254,9 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 		var createdAt, updatedAt time.Time
 		if err := rows.Scan(&depositID, &state, &createdAt, &updatedAt); err != nil {
 			return nil, err
+		}
+		if !depositStateIsStuck(state) {
+			continue
 		}
 		items = append(items, map[string]any{
 			"depositId": "0x" + hex.EncodeToString(depositID),

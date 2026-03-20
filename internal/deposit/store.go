@@ -24,6 +24,7 @@ type Store interface {
 	CountByState(ctx context.Context, state State) (int, error)
 	ClaimConfirmed(ctx context.Context, owner string, ttl time.Duration, limit int) ([]Job, error)
 	ClaimSubmittedAttempts(ctx context.Context, owner string, ttl time.Duration, limit int) ([]SubmittedBatchAttempt, error)
+	ClaimBatches(ctx context.Context, owner string, ttl time.Duration, states []BatchState, olderThan time.Time, limit int) ([]Batch, error)
 	PrepareNextBatch(
 		ctx context.Context,
 		owner string,
@@ -46,6 +47,7 @@ type Store interface {
 	FailBatch(ctx context.Context, owner string, batchID [32]byte, reason string, rejectedIDs [][32]byte) error
 	MarkBatchSubmitted(ctx context.Context, owner string, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, operatorSignatures [][]byte, seal []byte) (SubmittedBatchAttempt, error)
 	RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) error
+	ResetBatch(ctx context.Context, owner string, batchID [32]byte) (Batch, error)
 	SetBatchSubmissionTxHash(ctx context.Context, batchID [32]byte, txHash [32]byte) error
 	// FinalizeBatch atomically transitions the provided deposits to finalized.
 	// Implementations must ensure all-or-nothing behavior for this batch call.

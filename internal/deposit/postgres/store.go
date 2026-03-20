@@ -411,6 +411,79 @@ func (s *Store) ClaimSubmittedAttempts(ctx context.Context, owner string, ttl ti
 	return out, nil
 }
 
+func (s *Store) ClaimBatches(ctx context.Context, owner string, ttl time.Duration, states []deposit.BatchState, olderThan time.Time, limit int) ([]deposit.Batch, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if owner == "" || ttl <= 0 || limit <= 0 || len(states) == 0 {
+		return nil, nil
+	}
+
+	stateValues := make([]int16, 0, len(states))
+	seen := make(map[deposit.BatchState]struct{}, len(states))
+	for _, state := range states {
+		if _, ok := seen[state]; ok {
+			continue
+		}
+		seen[state] = struct{}{}
+		stateValues = append(stateValues, int16(state))
+	}
+
+	expiresAt := time.Now().UTC().Add(ttl)
+	rows, err := s.pool.Query(ctx, `
+		WITH picked AS (
+			SELECT batch_id
+			FROM deposit_batches
+			WHERE
+				state = ANY($1)
+				AND updated_at < $2
+				AND (
+					lease_expires_at IS NULL
+					OR lease_expires_at <= now()
+					OR lease_owner = $3
+				)
+			ORDER BY updated_at ASC, batch_id ASC
+			FOR UPDATE SKIP LOCKED
+			LIMIT $4
+		)
+		UPDATE deposit_batches db
+		SET lease_owner = $3, lease_expires_at = $5, updated_at = now()
+		FROM picked
+		WHERE db.batch_id = picked.batch_id
+		RETURNING db.batch_id
+	`, stateValues, olderThan.UTC(), owner, limit, expiresAt)
+	if err != nil {
+		return nil, fmt.Errorf("deposit/postgres: claim batches: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([][32]byte, 0, limit)
+	for rows.Next() {
+		var batchIDRaw []byte
+		if err := rows.Scan(&batchIDRaw); err != nil {
+			return nil, fmt.Errorf("deposit/postgres: scan claimed batch row: %w", err)
+		}
+		batchID, err := to32(batchIDRaw)
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, batchID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("deposit/postgres: claim batches rows: %w", err)
+	}
+
+	out := make([]deposit.Batch, 0, len(ids))
+	for _, batchID := range ids {
+		batch, err := s.GetBatch(ctx, batchID)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, batch)
+	}
+	return out, nil
+}
+
 func (s *Store) GetBatch(ctx context.Context, batchID [32]byte) (deposit.Batch, error) {
 	if s == nil || s.pool == nil {
 		return deposit.Batch{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
@@ -1468,6 +1541,136 @@ func (s *Store) RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) err
 		return fmt.Errorf("deposit/postgres: commit requeue submitted batch tx: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) ResetBatch(ctx context.Context, owner string, batchID [32]byte) (deposit.Batch, error) {
+	if s == nil || s.pool == nil {
+		return deposit.Batch{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	if owner == "" {
+		return deposit.Batch{}, deposit.ErrInvalidTransition
+	}
+
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	if err != nil {
+		return deposit.Batch{}, fmt.Errorf("deposit/postgres: begin reset batch tx: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	batch, found, err := loadBatchTx(ctx, tx, batchID, true)
+	if err != nil {
+		return deposit.Batch{}, err
+	}
+	if !found {
+		return deposit.Batch{}, deposit.ErrNotFound
+	}
+	if batch.State != deposit.BatchStateClosed &&
+		batch.State != deposit.BatchStateProofRequested &&
+		batch.State != deposit.BatchStateProofReady &&
+		batch.State != deposit.BatchStateSubmitted {
+		return deposit.Batch{}, deposit.ErrInvalidTransition
+	}
+	if batch.TxHash != ([32]byte{}) {
+		return deposit.Batch{}, deposit.ErrInvalidTransition
+	}
+
+	attempt, foundAttempt, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
+	if err != nil {
+		return deposit.Batch{}, err
+	}
+	if foundAttempt && attempt.TxHash != ([32]byte{}) {
+		return deposit.Batch{}, deposit.ErrInvalidTransition
+	}
+
+	if len(batch.DepositIDs) > 0 {
+		if _, err := tx.Exec(ctx, `
+			UPDATE deposit_jobs
+			SET
+				state = CASE
+					WHEN state IN ($2, $3) THEN state
+					ELSE $1
+				END,
+				checkpoint_height = CASE
+					WHEN state IN ($2, $3) THEN checkpoint_height
+					ELSE NULL
+				END,
+				checkpoint_block_hash = CASE
+					WHEN state IN ($2, $3) THEN checkpoint_block_hash
+					ELSE NULL
+				END,
+				checkpoint_final_orchard_root = CASE
+					WHEN state IN ($2, $3) THEN checkpoint_final_orchard_root
+					ELSE NULL
+				END,
+				checkpoint_base_chain_id = CASE
+					WHEN state IN ($2, $3) THEN checkpoint_base_chain_id
+					ELSE NULL
+				END,
+				checkpoint_bridge_contract = CASE
+					WHEN state IN ($2, $3) THEN checkpoint_bridge_contract
+					ELSE NULL
+				END,
+				proof_seal = CASE
+					WHEN state IN ($2, $3) THEN proof_seal
+					ELSE NULL
+				END,
+				tx_hash = CASE
+					WHEN state IN ($2, $3) THEN tx_hash
+					ELSE NULL
+				END,
+				rejection_reason = CASE
+					WHEN state IN ($2, $3) THEN rejection_reason
+					ELSE NULL
+				END,
+				submit_batch_id = CASE
+					WHEN submit_batch_id = $4 THEN NULL
+					ELSE submit_batch_id
+				END,
+				claimed_by = NULL,
+				claim_expires_at = NULL,
+				updated_at = now()
+			WHERE deposit_id = ANY($5)
+		`, int16(deposit.StateConfirmed), int16(deposit.StateFinalized), int16(deposit.StateRejected), batchID[:], rawIDs(batch.DepositIDs)); err != nil {
+			return deposit.Batch{}, fmt.Errorf("deposit/postgres: reset batch jobs: %w", err)
+		}
+	}
+
+	if foundAttempt {
+		if _, err := tx.Exec(ctx, `DELETE FROM deposit_batch_attempts WHERE batch_id = $1`, batchID[:]); err != nil {
+			return deposit.Batch{}, fmt.Errorf("deposit/postgres: delete reset batch attempt: %w", err)
+		}
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE deposit_batches
+		SET
+			state = $2,
+			lease_owner = NULL,
+			lease_expires_at = NULL,
+			failure_reason = NULL,
+			checkpoint_height = NULL,
+			checkpoint_block_hash = NULL,
+			checkpoint_final_orchard_root = NULL,
+			checkpoint_base_chain_id = NULL,
+			checkpoint_bridge_contract = NULL,
+			proof_requested = FALSE,
+			operator_signatures_json = '[]'::jsonb,
+			proof_seal = NULL,
+			tx_hash = NULL,
+			updated_at = now()
+		WHERE batch_id = $1
+	`, batchID[:], int16(deposit.BatchStateClosed)); err != nil {
+		return deposit.Batch{}, fmt.Errorf("deposit/postgres: reset batch metadata: %w", err)
+	}
+
+	out, err := getBatchWithQuerier(ctx, tx, batchID)
+	if err != nil {
+		return deposit.Batch{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return deposit.Batch{}, fmt.Errorf("deposit/postgres: commit reset batch tx: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash [32]byte, finalizedIDs [][32]byte, rejectedIDs [][32]byte, rejectionReason string) error {

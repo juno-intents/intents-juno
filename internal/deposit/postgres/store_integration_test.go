@@ -1299,6 +1299,128 @@ func TestStore_RequeueSubmittedBatch(t *testing.T) {
 	}
 }
 
+func TestStore_ClaimBatchesAndResetBatch(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	d1 := deposit.Deposit{
+		DepositID:     [32]byte{0xa1},
+		Commitment:    [32]byte{0xa2},
+		LeafIndex:     1,
+		Amount:        1000,
+		BaseRecipient: [20]byte{0x01},
+	}
+	d2 := deposit.Deposit{
+		DepositID:     [32]byte{0xa3},
+		Commitment:    [32]byte{0xa4},
+		LeafIndex:     2,
+		Amount:        2000,
+		BaseRecipient: [20]byte{0x02},
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d1); err != nil {
+		t.Fatalf("UpsertConfirmed d1: %v", err)
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, d2); err != nil {
+		t.Fatalf("UpsertConfirmed d2: %v", err)
+	}
+
+	now := time.Date(2020, 3, 20, 12, 0, 0, 0, time.UTC)
+	batchID := [32]byte{0xa5}
+	if _, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, batchID, 2, 3*time.Minute, 10, now); err != nil {
+		t.Fatalf("PrepareNextBatch #1: %v", err)
+	} else if ready {
+		t.Fatalf("expected assembling batch on first prepare")
+	}
+	batch, ready, err := s.PrepareNextBatch(ctx, "worker-a", time.Minute, [32]byte{}, 2, 3*time.Minute, 10, now)
+	if err != nil {
+		t.Fatalf("PrepareNextBatch #2: %v", err)
+	}
+	if !ready {
+		t.Fatalf("expected closed batch to be ready")
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	if _, err := s.MarkBatchProofRequested(ctx, "worker-a", batch.BatchID, cp); err != nil {
+		t.Fatalf("MarkBatchProofRequested: %v", err)
+	}
+
+	claimed, err := s.ClaimBatches(ctx, "repair-a", 80*time.Millisecond, []deposit.BatchState{deposit.BatchStateProofRequested}, time.Now().Add(time.Second), 10)
+	if err != nil {
+		t.Fatalf("ClaimBatches: %v", err)
+	}
+	if len(claimed) != 1 || claimed[0].BatchID != batchID {
+		t.Fatalf("unexpected claimed batches: %#v", claimed)
+	}
+
+	if _, err := s.MarkBatchProofReady(ctx, "worker-a", batch.BatchID, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
+		t.Fatalf("MarkBatchProofReady: %v", err)
+	}
+	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batch.BatchID, batch.DepositIDs, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	reset, err := s.ResetBatch(ctx, "repair-a", batchID)
+	if err != nil {
+		t.Fatalf("ResetBatch: %v", err)
+	}
+	if reset.State != deposit.BatchStateClosed {
+		t.Fatalf("reset state: got %s want %s", reset.State, deposit.BatchStateClosed)
+	}
+	if reset.Checkpoint != (checkpoint.Checkpoint{}) {
+		t.Fatalf("expected reset checkpoint to be cleared, got %+v", reset.Checkpoint)
+	}
+	if reset.ProofRequested {
+		t.Fatalf("expected proof_requested to be false after reset")
+	}
+
+	attempts, err := s.ClaimSubmittedAttempts(ctx, "repair-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected submitted attempts to clear after reset")
+	}
+
+	for _, depositID := range batch.DepositIDs {
+		job, err := s.Get(ctx, depositID)
+		if err != nil {
+			t.Fatalf("Get(%x): %v", depositID[:4], err)
+		}
+		if job.State != deposit.StateConfirmed {
+			t.Fatalf("job %x state: got %s want %s", depositID[:4], job.State, deposit.StateConfirmed)
+		}
+	}
+}
+
 func mustFreePort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

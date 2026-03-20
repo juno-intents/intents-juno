@@ -438,6 +438,7 @@ func main() {
 		TipHeightProvider:       rpcClient,
 		ReceiptReader:           baseRPCClient,
 		ProofStore:              proofStore,
+		BridgeCaller:            baseRPCClient,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init deposit relayer", "err", err)

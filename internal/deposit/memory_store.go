@@ -17,6 +17,7 @@ type MemoryStore struct {
 	claim map[[32]byte]claimLease
 
 	batches        map[[32]byte]Batch
+	batchTouched   map[[32]byte]time.Time
 	batchOrder     [][32]byte
 	batchByDeposit map[[32]byte][32]byte
 
@@ -37,6 +38,7 @@ func NewMemoryStore() *MemoryStore {
 		jobs:             make(map[[32]byte]Job),
 		claim:            make(map[[32]byte]claimLease),
 		batches:          make(map[[32]byte]Batch),
+		batchTouched:     make(map[[32]byte]time.Time),
 		batchByDeposit:   make(map[[32]byte][32]byte),
 		attempts:         make(map[[32]byte]SubmittedBatchAttempt),
 		attemptClaim:     make(map[[32]byte]claimLease),
@@ -286,6 +288,48 @@ func (s *MemoryStore) ClaimSubmittedAttempts(_ context.Context, owner string, tt
 	return out, nil
 }
 
+func (s *MemoryStore) ClaimBatches(_ context.Context, owner string, ttl time.Duration, states []BatchState, olderThan time.Time, limit int) ([]Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if owner == "" || ttl <= 0 || limit <= 0 || len(states) == 0 {
+		return nil, nil
+	}
+
+	stateSet := make(map[BatchState]struct{}, len(states))
+	for _, state := range states {
+		stateSet[state] = struct{}{}
+	}
+
+	now := time.Now().UTC()
+	expiresAt := now.Add(ttl)
+	out := make([]Batch, 0, limit)
+	for _, batchID := range s.batchOrder {
+		batch, ok := s.batches[batchID]
+		if !ok {
+			continue
+		}
+		if _, ok := stateSet[batch.State]; !ok {
+			continue
+		}
+		touchedAt := s.batchTouchedAt(batchID, batch)
+		if !olderThan.IsZero() && !touchedAt.Before(olderThan) {
+			continue
+		}
+		if batch.LeaseOwner != "" && batch.LeaseOwner != owner && batch.LeaseExpiresAt.After(now) {
+			continue
+		}
+		batch.LeaseOwner = owner
+		batch.LeaseExpiresAt = expiresAt
+		s.putBatch(batch)
+		out = append(out, cloneBatch(batch))
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
 func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time.Duration, nextBatchID [32]byte, maxItems int, maxAge time.Duration, limit int, now time.Time) (Batch, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -301,7 +345,7 @@ func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time
 		batch := s.batches[batchID]
 		batch.LeaseOwner = owner
 		batch.LeaseExpiresAt = now.Add(ttl)
-		s.batches[batchID] = batch
+		s.putBatch(batch)
 		return cloneBatch(batch), true, nil
 	}
 
@@ -315,7 +359,7 @@ func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time
 			if batch.ClosedAt.IsZero() {
 				batch.ClosedAt = now
 			}
-			s.batches[batchID] = batch
+			s.putBatch(batch)
 			return cloneBatch(batch), true, nil
 		}
 
@@ -325,12 +369,12 @@ func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time
 			if len(batch.DepositIDs) >= maxItems {
 				batch.State = BatchStateClosed
 				batch.ClosedAt = now
-				s.batches[batchID] = batch
+				s.putBatch(batch)
 				return cloneBatch(batch), true, nil
 			}
-			s.batches[batchID] = batch
+			s.putBatch(batch)
 		} else {
-			s.batches[batchID] = batch
+			s.putBatch(batch)
 		}
 		return cloneBatch(batch), false, nil
 	}
@@ -357,14 +401,14 @@ func (s *MemoryStore) PrepareNextBatch(_ context.Context, owner string, ttl time
 		StartedAt:      now,
 		FailureReason:  "",
 	}
-	s.batches[nextBatchID] = batch
+	s.putBatch(batch)
 	s.batchOrder = append(s.batchOrder, nextBatchID)
 	s.batchByDeposit[depositID] = nextBatchID
 
 	if maxItems == 1 {
 		batch.State = BatchStateClosed
 		batch.ClosedAt = now
-		s.batches[nextBatchID] = batch
+		s.putBatch(batch)
 		return cloneBatch(batch), true, nil
 	}
 	return cloneBatch(batch), false, nil
@@ -420,7 +464,7 @@ func (s *MemoryStore) SplitBatch(_ context.Context, owner string, batchID [32]by
 	left.OperatorSignatures = nil
 	left.ProofSeal = nil
 	left.TxHash = [32]byte{}
-	s.batches[batchID] = left
+	s.putBatch(left)
 
 	right := Batch{
 		BatchID:        nextBatchID,
@@ -434,7 +478,7 @@ func (s *MemoryStore) SplitBatch(_ context.Context, owner string, batchID [32]by
 		Checkpoint:     checkpoint.Checkpoint{},
 		ProofRequested: false,
 	}
-	s.batches[nextBatchID] = right
+	s.putBatch(right)
 	s.batchOrder = append(s.batchOrder, nextBatchID)
 	for _, id := range move {
 		s.batchByDeposit[id] = nextBatchID
@@ -505,7 +549,7 @@ func (s *MemoryStore) MarkBatchProofRequested(_ context.Context, owner string, b
 	batch.Checkpoint = cp
 	batch.ProofRequested = true
 	batch.LeaseOwner = owner
-	s.batches[batchID] = batch
+	s.putBatch(batch)
 
 	for _, depositID := range batch.DepositIDs {
 		j, ok := s.jobs[depositID]
@@ -574,7 +618,7 @@ func (s *MemoryStore) MarkBatchProofReady(_ context.Context, owner string, batch
 	batch.OperatorSignatures = clone2DBytes(operatorSignatures)
 	batch.ProofSeal = append([]byte(nil), seal...)
 	batch.LeaseOwner = owner
-	s.batches[batchID] = batch
+	s.putBatch(batch)
 
 	for _, depositID := range batch.DepositIDs {
 		j, ok := s.jobs[depositID]
@@ -712,7 +756,7 @@ func (s *MemoryStore) FailBatch(_ context.Context, owner string, batchID [32]byt
 	batch.State = BatchStateFailed
 	batch.LeaseOwner = owner
 	batch.FailureReason = reason
-	s.batches[batchID] = batch
+	s.putBatch(batch)
 
 	for _, depositID := range batch.DepositIDs {
 		j, ok := s.jobs[depositID]
@@ -782,7 +826,7 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 			batch.OperatorSignatures = clone2DBytes(operatorSignatures)
 			batch.ProofSeal = append([]byte(nil), seal...)
 			batch.LeaseOwner = owner
-			s.batches[batchID] = batch
+			s.putBatch(batch)
 		}
 		for _, id := range ids {
 			s.attemptByDeposit[id] = batchID
@@ -808,9 +852,9 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 		batch.OperatorSignatures = clone2DBytes(operatorSignatures)
 		batch.ProofSeal = append([]byte(nil), seal...)
 		batch.LeaseOwner = owner
-		s.batches[batchID] = batch
+		s.putBatch(batch)
 	} else {
-		s.batches[batchID] = Batch{
+		s.putBatch(Batch{
 			BatchID:            batchID,
 			State:              BatchStateSubmitted,
 			DepositIDs:         cloneDepositIDs(ids),
@@ -822,7 +866,7 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 			ProofRequested:     true,
 			OperatorSignatures: clone2DBytes(operatorSignatures),
 			ProofSeal:          append([]byte(nil), seal...),
-		}
+		})
 		s.batchOrder = append(s.batchOrder, batchID)
 	}
 
@@ -858,7 +902,7 @@ func (s *MemoryStore) SetBatchSubmissionTxHash(_ context.Context, batchID [32]by
 	if batch, ok := s.batches[batchID]; ok {
 		batch.State = BatchStateSubmitted
 		batch.TxHash = txHash
-		s.batches[batchID] = batch
+		s.putBatch(batch)
 	}
 	return nil
 }
@@ -899,7 +943,7 @@ func (s *MemoryStore) RequeueSubmittedBatch(_ context.Context, batchID [32]byte)
 		batch.OperatorSignatures = nil
 		batch.Checkpoint = checkpoint.Checkpoint{}
 		batch.LeaseOwner = ""
-		s.batches[batchID] = batch
+		s.putBatch(batch)
 	}
 
 	delete(s.attempts, batchID)
@@ -913,6 +957,73 @@ func (s *MemoryStore) RequeueSubmittedBatch(_ context.Context, batchID [32]byte)
 	}
 	s.attemptOrder = nextOrder
 	return nil
+}
+
+func (s *MemoryStore) ResetBatch(_ context.Context, owner string, batchID [32]byte) (Batch, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if owner == "" {
+		return Batch{}, ErrInvalidTransition
+	}
+	batch, ok := s.batches[batchID]
+	if !ok {
+		return Batch{}, ErrNotFound
+	}
+	if batch.State != BatchStateClosed && batch.State != BatchStateProofRequested && batch.State != BatchStateProofReady && batch.State != BatchStateSubmitted {
+		return Batch{}, ErrInvalidTransition
+	}
+	if batch.TxHash != ([32]byte{}) {
+		return Batch{}, ErrInvalidTransition
+	}
+	if attempt, ok := s.attempts[batchID]; ok {
+		if attempt.TxHash != ([32]byte{}) {
+			return Batch{}, ErrInvalidTransition
+		}
+		delete(s.attempts, batchID)
+		delete(s.attemptClaim, batchID)
+		nextOrder := s.attemptOrder[:0]
+		for _, existing := range s.attemptOrder {
+			if existing == batchID {
+				continue
+			}
+			nextOrder = append(nextOrder, existing)
+		}
+		s.attemptOrder = nextOrder
+	}
+
+	for _, depositID := range batch.DepositIDs {
+		j, ok := s.jobs[depositID]
+		if !ok {
+			return Batch{}, ErrNotFound
+		}
+		if j.State != StateFinalized && j.State != StateRejected {
+			j.State = StateConfirmed
+			j.Checkpoint = checkpoint.Checkpoint{}
+			j.ProofSeal = nil
+			j.TxHash = [32]byte{}
+			j.RejectionReason = ""
+			s.jobs[depositID] = j
+		}
+		delete(s.claim, depositID)
+		delete(s.attemptByDeposit, depositID)
+		s.batchByDeposit[depositID] = batchID
+	}
+
+	batch.State = BatchStateClosed
+	batch.LeaseOwner = ""
+	batch.LeaseExpiresAt = time.Time{}
+	batch.FailureReason = ""
+	batch.Checkpoint = checkpoint.Checkpoint{}
+	batch.ProofRequested = false
+	batch.OperatorSignatures = nil
+	batch.ProofSeal = nil
+	batch.TxHash = [32]byte{}
+	if batch.ClosedAt.IsZero() {
+		batch.ClosedAt = time.Now().UTC()
+	}
+	s.putBatch(batch)
+	return cloneBatch(batch), nil
 }
 
 func (s *MemoryStore) FinalizeBatch(_ context.Context, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
@@ -1151,6 +1262,21 @@ func cloneSubmittedBatchAttempt(a SubmittedBatchAttempt) SubmittedBatchAttempt {
 	a.OperatorSignatures = clone2DBytes(a.OperatorSignatures)
 	a.ProofSeal = append([]byte(nil), a.ProofSeal...)
 	return a
+}
+
+func (s *MemoryStore) putBatch(batch Batch) {
+	s.batches[batch.BatchID] = batch
+	s.batchTouched[batch.BatchID] = time.Now().UTC()
+}
+
+func (s *MemoryStore) batchTouchedAt(batchID [32]byte, batch Batch) time.Time {
+	if touchedAt, ok := s.batchTouched[batchID]; ok && !touchedAt.IsZero() {
+		return touchedAt
+	}
+	if !batch.ClosedAt.IsZero() {
+		return batch.ClosedAt
+	}
+	return batch.StartedAt
 }
 
 func cloneBatch(b Batch) Batch {

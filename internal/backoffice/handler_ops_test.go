@@ -26,3 +26,17 @@ func TestProbeIPFS_UsesBearerTokenWhenConfigured(t *testing.T) {
 		t.Fatalf("Authorization header = %q, want %q", gotAuth, "Bearer secret-token")
 	}
 }
+
+func TestDepositStateIsStuckIncludesSubmitted(t *testing.T) {
+	t.Parallel()
+
+	if !depositStateIsStuck(5) {
+		t.Fatalf("expected submitted deposits to be considered stuck when stale")
+	}
+	if depositStateIsStuck(6) {
+		t.Fatalf("expected finalized deposits to be excluded from stuck view")
+	}
+	if depositStateIsStuck(7) {
+		t.Fatalf("expected rejected deposits to be excluded from stuck view")
+	}
+}
