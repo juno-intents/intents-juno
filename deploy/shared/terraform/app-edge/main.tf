@@ -15,9 +15,8 @@ locals {
     Stack      = "app-edge"
     Deployment = var.deployment_id
   }
-  origin_is_ipv4                       = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", trimspace(var.origin_endpoint)))
-  cloudfront_cache_policy_id           = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-  cloudfront_origin_request_policy_id  = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+  cloudfront_cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+  cloudfront_origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
 }
 
 data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
@@ -25,28 +24,18 @@ data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
   name  = "com.amazonaws.global.cloudfront.origin-facing"
 }
 
-resource "aws_route53_record" "origin_a" {
-  count   = local.origin_is_ipv4 ? 1 : 0
-  zone_id = var.zone_id
-  name    = var.origin_record_name
-  type    = "A"
-  ttl     = 60
-  records = [var.origin_endpoint]
-}
-
 resource "aws_route53_record" "origin_cname" {
-  count   = local.origin_is_ipv4 ? 0 : 1
   zone_id = var.zone_id
   name    = var.origin_record_name
   type    = "CNAME"
   ttl     = 60
-  records = [var.origin_endpoint]
+  records = [var.public_lb_dns_name]
 }
 
 resource "aws_acm_certificate" "viewer" {
-  provider                  = aws.us_east_1
-  domain_name               = var.bridge_record_name
-  validation_method         = "DNS"
+  provider          = aws.us_east_1
+  domain_name       = var.bridge_record_name
+  validation_method = "DNS"
 
   lifecycle {
     create_before_destroy = true
@@ -202,20 +191,20 @@ resource "aws_cloudfront_distribution" "bridge" {
     origin_path = "/bridge"
 
     custom_origin_config {
-      http_port              = var.origin_http_port
-      https_port             = 443
+      http_port              = 80
+      https_port             = var.origin_http_port
       origin_protocol_policy = "https-only"
       origin_ssl_protocols   = ["TLSv1.2"]
     }
   }
 
   default_cache_behavior {
-    target_origin_id       = "app-origin"
-    viewer_protocol_policy = "redirect-to-https"
-    allowed_methods        = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
-    cached_methods         = ["GET", "HEAD", "OPTIONS"]
-    compress               = true
-    cache_policy_id        = local.cloudfront_cache_policy_id
+    target_origin_id         = "app-origin"
+    viewer_protocol_policy   = "redirect-to-https"
+    allowed_methods          = ["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]
+    cached_methods           = ["GET", "HEAD", "OPTIONS"]
+    compress                 = true
+    cache_policy_id          = local.cloudfront_cache_policy_id
     origin_request_policy_id = local.cloudfront_origin_request_policy_id
   }
 

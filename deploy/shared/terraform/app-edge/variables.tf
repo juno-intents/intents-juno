@@ -18,13 +18,13 @@ variable "origin_record_name" {
   type = string
 }
 
-variable "origin_endpoint" {
+variable "public_lb_dns_name" {
   type = string
 }
 
 variable "origin_http_port" {
   type    = number
-  default = 80
+  default = 443
 }
 
 variable "security_group_id" {
