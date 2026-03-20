@@ -326,6 +326,75 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs() {
+  local workdir output_dir fake_bin log_dir tf_json
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = { value: "arn:aws:ecs:us-east-1:021490342184:cluster/legacy-shared" }
+    | .shared_proof_requestor_service_name = { value: "legacy-proof-requestor" }
+    | .shared_proof_funder_service_name = { value: "legacy-proof-funder" }
+    | .shared_proof_role = {
+        value: {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+          requestor_address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+          rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+        }
+      }
+    | .shared_wireguard_role = {
+        value: {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+          endpoint_host: "nlb-alpha-wireguard.example.internal",
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+          peer_roster_secret_arns: [
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+          ],
+          server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+        }
+      }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    --terraform-output-json "$tf_json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_eq "$(jq -r '.shared_roles.proof.asg' "$output_dir/alpha/shared-manifest.json")" "alpha-proof-role" "deploy coordinator prefers proof role asg"
+  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn // empty' "$output_dir/alpha/shared-manifest.json")" "" "deploy coordinator suppresses ecs metadata when proof role is present"
+  assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$output_dir/alpha/shared-manifest.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "deploy coordinator renders wireguard server key secret"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$output_dir/alpha/app/app-deploy.json")" "10.0.20.0/24" "deploy coordinator prefers wireguard role source cidrs"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$output_dir/alpha/app/app-deploy.json")" "10.0.21.0/24" "deploy coordinator keeps all wireguard role source cidrs"
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_supports_run_label() {
   local workdir output_dir run_dir operator_dir fake_bin log_dir
   workdir="$(mktemp -d)"
@@ -902,6 +971,7 @@ EOF
 
 main() {
   test_deploy_coordinator_generates_handoffs
+  test_deploy_coordinator_prefers_role_outputs_in_shared_and_app_handoffs
   test_deploy_coordinator_supports_run_label
   test_deploy_coordinator_supports_preview_legacy_wireguard_inventory
   test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it

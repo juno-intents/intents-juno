@@ -17,33 +17,66 @@
   },
   "shared_roles": {
     "proof": {
+      "asg": "juno-shared-proof",
+      "launch_template": {
+        "id": "lt-0feedfacecafebeef",
+        "version": "5"
+      },
       "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
       "rpc_url": "https://rpc.mainnet.succinct.xyz"
     },
     "wireguard": {
+      "asg": "juno-wireguard",
+      "launch_template": {
+        "id": "lt-0wireguardcafebeef",
+        "version": "9"
+      },
       "public_subnet_id": "subnet-0123456789abcdef0",
       "public_subnet_ids": [
         "subnet-0123456789abcdef0"
       ],
       "listen_port": 51820,
       "network_cidr": "10.66.0.0/24",
+      "source_cidrs": [
+        "10.0.20.0/24",
+        "10.0.21.0/24"
+      ],
       "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
       "backoffice_private_endpoint": "10.0.10.21",
       "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+      "peer_roster_secret_arns": [
+        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+      ],
+      "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
       "endpoint_host": "198.51.100.25",
       "publish_public_dns": false
     }
   },
   "wireguard_role": {
+    "asg": "juno-wireguard",
+    "launch_template": {
+      "id": "lt-0wireguardcafebeef",
+      "version": "9"
+    },
     "public_subnet_id": "subnet-0123456789abcdef0",
     "public_subnet_ids": [
       "subnet-0123456789abcdef0"
     ],
     "listen_port": 51820,
     "network_cidr": "10.66.0.0/24",
+    "source_cidrs": [
+      "10.0.20.0/24",
+      "10.0.21.0/24"
+    ],
     "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
     "backoffice_private_endpoint": "10.0.10.21",
     "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
+    "peer_roster_secret_arns": [
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+    ],
+    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
     "endpoint_host": "198.51.100.25",
     "publish_public_dns": false
   },
@@ -88,6 +121,17 @@
     "runtime_dir": "/var/lib/intents-juno/app-runtime",
     "public_endpoint": "203.0.113.21",
     "private_endpoint": "10.0.10.21",
+    "asg": "juno-app",
+    "launch_template": {
+      "id": "lt-0appcafebabefeed0",
+      "version": "3"
+    },
+    "public_lb": {
+      "dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com"
+    },
+    "internal_lb": {
+      "dns_name": "internal-ops-alpha-123456.us-east-1.elb.amazonaws.com"
+    },
     "aws_profile": "juno",
     "aws_region": "us-east-1",
     "account_id": "021490342184",

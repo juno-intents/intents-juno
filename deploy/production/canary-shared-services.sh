@@ -24,6 +24,22 @@ Output:
 EOF
 }
 
+check_asg_capacity() {
+  local aws_args_name="$1"
+  local asg_name="$2"
+  local min_healthy="$3"
+  local asg_json desired healthy
+
+  declare -n aws_args_ref="$aws_args_name"
+  asg_json="$(AWS_PAGER="" "${aws_args_ref[@]}" autoscaling describe-auto-scaling-groups --auto-scaling-group-names "$asg_name" --output json 2>/dev/null || true)"
+  desired="$(jq -r '.AutoScalingGroups[0].DesiredCapacity // 0' <<<"$asg_json")"
+  healthy="$(jq -r '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")] | length' <<<"$asg_json")"
+  [[ -n "$asg_json" ]] || return 1
+  [[ "$desired" =~ ^[0-9]+$ ]] || return 1
+  [[ "$healthy" =~ ^[0-9]+$ ]] || return 1
+  (( desired >= min_healthy && healthy >= min_healthy ))
+}
+
 shared_manifest=""
 dry_run="false"
 
@@ -72,6 +88,10 @@ ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared
 ipfs_target_group_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.target_group_arn | select(type == "string" and length > 0)')"
 checkpoint_blob_bucket="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 artifacts_object_lock_required="$(production_json_optional "$shared_manifest" '.shared_services.artifacts.object_lock_required')"
+shared_proof_role_asg="$(production_json_optional "$shared_manifest" '.shared_roles.proof.asg | select(type == "string" and length > 0)')"
+shared_wireguard_role_asg="$(production_json_optional "$shared_manifest" '.wireguard_role.asg | select(type == "string" and length > 0)')"
+wireguard_server_key_secret_arn="$(production_json_optional "$shared_manifest" '.wireguard_role.server_key_secret_arn | select(type == "string" and length > 0)')"
+wireguard_peer_roster_secret_arns_json="$(jq -c '(.wireguard_role.peer_roster_secret_arns // []) | if type == "array" then . else [] end' "$shared_manifest")"
 environment="$(production_json_required "$shared_manifest" '.environment | select(type == "string" and length > 0)')"
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
@@ -92,10 +112,14 @@ postgres_status="passed"
 kafka_status="passed"
 ipfs_status="passed"
 artifacts_status="skipped"
+shared_proof_role_status="skipped"
+wireguard_role_status="skipped"
 postgres_detail="reachable"
 kafka_detail="all brokers reachable"
 ipfs_detail="api reachable"
 artifacts_detail="no artifact bucket configured"
+shared_proof_role_detail="legacy ecs path"
+wireguard_role_detail="legacy singleton path"
 ipfs_auth_header=()
 
 if [[ "$dry_run" == "true" ]]; then
@@ -105,10 +129,14 @@ if [[ "$dry_run" == "true" ]]; then
   kafka_status="skipped"
   ipfs_status="skipped"
   artifacts_status="skipped"
+  shared_proof_role_status="skipped"
+  wireguard_role_status="skipped"
   postgres_detail="dry run"
   kafka_detail="dry run"
   ipfs_detail="dry run"
   artifacts_detail="dry run"
+  shared_proof_role_detail="dry run"
+  wireguard_role_detail="dry run"
 else
   if [[ "$kafka_auth_mode" == "aws-msk-iam" ]]; then
     kafka_detail="all brokers reachable with aws-msk-iam"
@@ -221,10 +249,53 @@ else
       fi
     fi
   fi
+
+  if [[ -n "$shared_proof_role_asg" ]]; then
+    if [[ "$aws_auth_status" != "passed" ]]; then
+      shared_proof_role_status="failed"
+      shared_proof_role_detail="proof role could not be verified because aws auth failed"
+    elif check_asg_capacity aws_args "$shared_proof_role_asg" 2; then
+      shared_proof_role_status="passed"
+      shared_proof_role_detail="proof role asg has at least two healthy instances"
+    else
+      shared_proof_role_status="failed"
+      shared_proof_role_detail="proof role asg does not have two healthy in-service instances"
+    fi
+  fi
+
+  if [[ -n "$shared_wireguard_role_asg" ]]; then
+    if [[ "$aws_auth_status" != "passed" ]]; then
+      wireguard_role_status="failed"
+      wireguard_role_detail="wireguard role could not be verified because aws auth failed"
+    elif ! check_asg_capacity aws_args "$shared_wireguard_role_asg" 2; then
+      wireguard_role_status="failed"
+      wireguard_role_detail="wireguard role asg does not have two healthy in-service instances"
+    elif [[ -z "$wireguard_server_key_secret_arn" ]]; then
+      wireguard_role_status="failed"
+      wireguard_role_detail="wireguard role is missing server_key_secret_arn"
+    elif [[ "$(jq -r 'length' <<<"$wireguard_peer_roster_secret_arns_json")" -eq 0 ]]; then
+      wireguard_role_status="failed"
+      wireguard_role_detail="wireguard role is missing peer_roster_secret_arns"
+    elif ! AWS_PAGER="" "${aws_args[@]}" secretsmanager describe-secret --secret-id "$wireguard_server_key_secret_arn" --output json >/dev/null 2>&1; then
+      wireguard_role_status="failed"
+      wireguard_role_detail="wireguard server key secret is unreachable"
+    else
+      wireguard_role_status="passed"
+      wireguard_role_detail="wireguard role asg and secret material verified"
+      while IFS= read -r peer_secret_arn; do
+        [[ -n "$peer_secret_arn" ]] || continue
+        if ! AWS_PAGER="" "${aws_args[@]}" secretsmanager describe-secret --secret-id "$peer_secret_arn" --output json >/dev/null 2>&1; then
+          wireguard_role_status="failed"
+          wireguard_role_detail="wireguard peer config secret is unreachable"
+          break
+        fi
+      done < <(jq -r '.[]' <<<"$wireguard_peer_roster_secret_arns_json")
+    fi
+  fi
 fi
 
 ready_for_deploy="true"
-for status in "$aws_auth_status" "$postgres_status" "$kafka_status" "$ipfs_status" "$artifacts_status"; do
+for status in "$aws_auth_status" "$postgres_status" "$kafka_status" "$ipfs_status" "$artifacts_status" "$shared_proof_role_status" "$wireguard_role_status"; do
   if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
     ready_for_deploy="false"
   fi
@@ -247,6 +318,10 @@ jq -n \
   --arg ipfs_detail "$ipfs_detail" \
   --arg artifacts_status "$artifacts_status" \
   --arg artifacts_detail "$artifacts_detail" \
+  --arg shared_proof_role_status "$shared_proof_role_status" \
+  --arg shared_proof_role_detail "$shared_proof_role_detail" \
+  --arg wireguard_role_status "$wireguard_role_status" \
+  --arg wireguard_role_detail "$wireguard_role_detail" \
   --argjson ready_for_deploy "$ready_for_deploy" \
   '{
     version: $version,
@@ -273,6 +348,14 @@ jq -n \
       artifacts: {
         status: $artifacts_status,
         detail: $artifacts_detail
+      },
+      shared_proof_role: {
+        status: $shared_proof_role_status,
+        detail: $shared_proof_role_detail
+      },
+      wireguard_role: {
+        status: $wireguard_role_status,
+        detail: $wireguard_role_detail
       }
     }
   }'

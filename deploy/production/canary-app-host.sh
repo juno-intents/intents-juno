@@ -96,6 +96,7 @@ wjuno_address="$(production_json_optional "$shared_manifest_path" '.contracts.wj
 shared_ecs_cluster_arn="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.cluster_arn')"
 shared_proof_requestor_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_requestor_service_name')"
 shared_proof_funder_service_name="$(production_json_optional "$shared_manifest_path" '.shared_services.ecs.proof_funder_service_name')"
+shared_proof_role_asg="$(production_json_optional "$shared_manifest_path" '.shared_roles.proof.asg')"
 
 [[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
@@ -471,9 +472,27 @@ else
     fi
   fi
 
-  if [[ -z "$shared_ecs_cluster_arn" || -z "$shared_proof_requestor_service_name" || -z "$shared_proof_funder_service_name" ]]; then
+  if [[ -n "$shared_proof_role_asg" ]]; then
+    [[ -n "$aws_region" ]] || die "app deploy manifest is missing aws_region"
+    aws_args=()
+    [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
+    aws_args+=(--region "$aws_region")
+    proof_role_asg_json="$(AWS_PAGER="" aws "${aws_args[@]}" autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names "$shared_proof_role_asg" --output json 2>/dev/null || true)"
+    if [[ -z "$proof_role_asg_json" ]] \
+      || ! jq -e '
+        (.AutoScalingGroups | length) == 1
+        and ((.AutoScalingGroups[0].DesiredCapacity // 0) >= 2)
+        and ([.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy")] | length) >= 2
+      ' >/dev/null <<<"$proof_role_asg_json"; then
+      shared_proof_services_status="failed"
+      shared_proof_services_detail="shared proof role asg does not have two healthy in-service instances"
+    else
+      shared_proof_services_detail="shared proof role asg healthy"
+    fi
+  elif [[ -z "$shared_ecs_cluster_arn" || -z "$shared_proof_requestor_service_name" || -z "$shared_proof_funder_service_name" ]]; then
     shared_proof_services_status="failed"
-    shared_proof_services_detail="shared manifest is missing ECS proof service metadata"
+    shared_proof_services_detail="shared manifest is missing proof role or ECS proof service metadata"
   else
     [[ -n "$aws_region" ]] || die "app deploy manifest is missing aws_region"
     aws_args=()

@@ -472,6 +472,78 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard() {
+  local workdir shared_manifest app_manifest tf_json
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_ecs_cluster_arn = { value: "arn:aws:ecs:us-east-1:021490342184:cluster/legacy-shared" }
+    | .shared_proof_requestor_service_name = { value: "legacy-proof-requestor" }
+    | .shared_proof_funder_service_name = { value: "legacy-proof-funder" }
+    | .shared_proof_role = {
+        value: {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+          requestor_address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+          rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+        }
+      }
+    | .shared_wireguard_role = {
+        value: {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+          endpoint_host: "nlb-alpha-wireguard.example.internal",
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+          peer_roster_secret_arns: [
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+            "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+          ],
+          server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+        }
+      }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  assert_eq "$(jq -r '.shared_roles.proof.asg' "$shared_manifest")" "alpha-proof-role" "shared manifest prefers proof role asg"
+  assert_eq "$(jq -r '.shared_roles.proof.launch_template.id' "$shared_manifest")" "lt-proof0123456789abcdef" "shared manifest prefers proof role launch template"
+  assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" "shared manifest prefers proof role requestor"
+  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn // empty' "$shared_manifest")" "" "shared manifest omits ecs cluster when role outputs are present"
+  assert_eq "$(jq -r '.wireguard_role.asg' "$shared_manifest")" "alpha-wireguard-role" "shared manifest prefers wireguard role asg"
+  assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "shared manifest includes wireguard server key secret"
+  assert_eq "$(jq -r '.shared_services.wireguard.endpoint_host' "$shared_manifest")" "nlb-alpha-wireguard.example.internal" "shared manifest prefers wireguard nlb endpoint"
+  assert_eq "$(jq -r '.shared_services.wireguard.source_cidrs[0]' "$shared_manifest")" "10.0.20.0/24" "shared manifest exposes wireguard source cidrs"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[0]' "$app_manifest")" "10.0.20.0/24" "app handoff uses wireguard role source cidr"
+  assert_eq "$(jq -r '.services.backoffice.access.source_cidrs[1]' "$app_manifest")" "10.0.21.0/24" "app handoff uses all wireguard role source cidrs"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_prefers_operator_checkpoint_blob_storage() {
   local workdir shared_manifest handoff_dir resolved_env output_env
   workdir="$(mktemp -d)"
@@ -2770,6 +2842,7 @@ main() {
   test_resolve_secret_contract_allows_alpha_literals
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
+  test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard
   test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network

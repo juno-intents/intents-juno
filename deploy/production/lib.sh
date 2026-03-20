@@ -107,6 +107,22 @@ production_tf_output_value() {
   printf '%s\n' "$value"
 }
 
+production_tf_output_json() {
+  local tf_json="$1"
+  local name="$2"
+  local required="${3:-true}"
+  local value
+  value="$(jq -cer --arg name "$name" '.[$name].value // empty' "$tf_json" 2>/dev/null || true)"
+  if [[ "$required" == "true" && -z "$value" ]]; then
+    die "missing required terraform output: $name"
+  fi
+  if [[ -z "$value" ]]; then
+    printf '{}\n'
+    return 0
+  fi
+  printf '%s\n' "$value"
+}
+
 production_inventory_terraform_dir() {
   local inventory="$1"
   local inventory_dir="$2"
@@ -1772,6 +1788,8 @@ production_render_shared_manifest() {
   local summary_owallet_ua completion_owallet_ua effective_owallet_ua base_event_scanner_start_block
   local dkg_kms_key_arn
   local manifest_version proof_role_json wireguard_role_json shared_roles_json
+  local tf_proof_role_json tf_wireguard_role_json proof_role_runtime_enabled wireguard_role_runtime_enabled
+  local wireguard_source_cidrs_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   juno_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
@@ -1832,12 +1850,103 @@ production_render_shared_manifest() {
   operator_ids_csv="$(production_operator_ids_csv "$dkg_summary")"
   [[ -n "$operator_ids_csv" ]] || die "dkg summary does not contain operator ids"
   threshold="$(production_threshold "$dkg_summary")"
+  tf_proof_role_json="$(production_tf_output_json "$tf_json" "shared_proof_role" false)"
+  tf_wireguard_role_json="$(production_tf_output_json "$tf_json" "shared_wireguard_role" false)"
+  proof_role_json="$(
+    jq -cn \
+      --argjson inventory_role "$(production_inventory_proof_role_json "$inventory")" \
+      --argjson tf_role "$tf_proof_role_json" \
+      --arg requestor_address "$shared_sp1_requestor_address" \
+      --arg rpc_url "$shared_sp1_rpc_url" '
+        (if ($tf_role | length) > 0 then
+          ($inventory_role + $tf_role)
+        else
+          $inventory_role
+        end)
+        | if ($requestor_address != "" and ($tf_role | length) == 0) then
+            .requestor_address = $requestor_address
+          elif (.requestor_address // "") == "" and $requestor_address != "" then
+            .requestor_address = $requestor_address
+          else
+            .
+          end
+        | if ($rpc_url != "" and ($tf_role | length) == 0) then
+            .rpc_url = $rpc_url
+          elif (.rpc_url // "") == "" and $rpc_url != "" then
+            .rpc_url = $rpc_url
+          else
+            .
+          end
+      '
+  )"
+  wireguard_role_json="$(
+    jq -cn \
+      --argjson inventory_role "$(production_inventory_wireguard_role_json "$inventory")" \
+      --argjson tf_role "$tf_wireguard_role_json" \
+      --arg gateway_private_ip "$wireguard_gateway_private_ip" \
+      --arg endpoint_host "$wireguard_endpoint_host" \
+      --arg listen_port "$wireguard_listen_port" \
+      --arg network_cidr "$wireguard_network_cidr" \
+      --arg client_address_cidr "$wireguard_client_address_cidr" \
+      --arg client_config_secret_arn "$wireguard_client_config_secret_arn" '
+        ($inventory_role + $tf_role)
+        | if (.gateway_private_ip // "") == "" and $gateway_private_ip != "" then
+            .gateway_private_ip = $gateway_private_ip
+          else
+            .
+          end
+        | if (.endpoint_host // "") == "" and $endpoint_host != "" then
+            .endpoint_host = $endpoint_host
+          else
+            .
+          end
+        | if (.listen_port // "") == "" and $listen_port != "" then
+            .listen_port = ($listen_port | tonumber)
+          else
+            .
+          end
+        | if (.network_cidr // "") == "" and $network_cidr != "" then
+            .network_cidr = $network_cidr
+          else
+            .
+          end
+        | if (.client_address_cidr // "") == "" and $client_address_cidr != "" then
+            .client_address_cidr = $client_address_cidr
+          else
+            .
+          end
+        | if (.client_config_secret_arn // "") == "" and $client_config_secret_arn != "" then
+            .client_config_secret_arn = $client_config_secret_arn
+          else
+            .
+          end
+      '
+  )"
+  proof_role_runtime_enabled="false"
+  if jq -e '(.asg // "") != "" or ((.launch_template // {}) | type == "object" and length > 0)' >/dev/null <<<"$proof_role_json"; then
+    proof_role_runtime_enabled="true"
+  fi
+  wireguard_role_runtime_enabled="false"
+  if jq -e '
+    (.asg // "") != ""
+    or ((.launch_template // {}) | type == "object" and length > 0)
+    or ((.source_cidrs // []) | type == "array" and length > 0)
+  ' >/dev/null <<<"$wireguard_role_json"; then
+    wireguard_role_runtime_enabled="true"
+  fi
   manifest_version="1"
-  if production_inventory_has_v2_roles "$inventory"; then
+  if production_inventory_has_v2_roles "$inventory" || [[ "$proof_role_runtime_enabled" == "true" ]] || [[ "$wireguard_role_runtime_enabled" == "true" ]]; then
     manifest_version="2"
   fi
-  proof_role_json="$(production_inventory_proof_role_json "$inventory")"
-  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  shared_sp1_requestor_address="$(jq -r '.requestor_address // empty' <<<"$proof_role_json")"
+  shared_sp1_rpc_url="$(jq -r '.rpc_url // empty' <<<"$proof_role_json")"
+  wireguard_gateway_private_ip="$(jq -r '.gateway_private_ip // empty' <<<"$wireguard_role_json")"
+  wireguard_endpoint_host="$(jq -r '.endpoint_host // empty' <<<"$wireguard_role_json")"
+  wireguard_listen_port="$(jq -r '.listen_port // empty' <<<"$wireguard_role_json")"
+  wireguard_network_cidr="$(jq -r '.network_cidr // empty' <<<"$wireguard_role_json")"
+  wireguard_client_address_cidr="$(jq -r '.client_address_cidr // empty' <<<"$wireguard_role_json")"
+  wireguard_client_config_secret_arn="$(jq -r '.client_config_secret_arn // empty' <<<"$wireguard_role_json")"
+  wireguard_source_cidrs_json="$(jq -c '(.source_cidrs // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
   shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
   operators_json="$(jq -c '[.operators[].operator_id]' "$dkg_summary")"
   roster_json="$(
@@ -1934,6 +2043,7 @@ production_render_shared_manifest() {
     --arg wireguard_network_cidr "$wireguard_network_cidr" \
     --arg wireguard_client_address_cidr "$wireguard_client_address_cidr" \
     --arg wireguard_client_config_secret_arn "$wireguard_client_config_secret_arn" \
+    --argjson wireguard_source_cidrs "$wireguard_source_cidrs_json" \
     --arg dkg_bucket "$dkg_bucket" \
     --arg dkg_prefix "$dkg_prefix" \
     --arg dkg_kms_key_arn "$dkg_kms_key_arn" \
@@ -1963,6 +2073,7 @@ production_render_shared_manifest() {
     --argjson proof_role "$proof_role_json" \
     --argjson wireguard_role "$wireguard_role_json" \
     --argjson shared_roles "$shared_roles_json" \
+    --arg proof_role_runtime_enabled "$proof_role_runtime_enabled" \
     '{
       version: $version,
       environment: $environment,
@@ -1989,9 +2100,9 @@ production_render_shared_manifest() {
           min_insync_replicas: 2
         },
         ecs: {
-          cluster_arn: (if $ecs_cluster_arn == "" then null else $ecs_cluster_arn end),
-          proof_requestor_service_name: (if $proof_requestor_service_name == "" then null else $proof_requestor_service_name end),
-          proof_funder_service_name: (if $proof_funder_service_name == "" then null else $proof_funder_service_name end)
+          cluster_arn: (if $proof_role_runtime_enabled == "true" or $ecs_cluster_arn == "" then null else $ecs_cluster_arn end),
+          proof_requestor_service_name: (if $proof_role_runtime_enabled == "true" or $proof_requestor_service_name == "" then null else $proof_requestor_service_name end),
+          proof_funder_service_name: (if $proof_role_runtime_enabled == "true" or $proof_funder_service_name == "" then null else $proof_funder_service_name end)
         },
         proof: {
           requestor_address: (if $shared_sp1_requestor_address == "" then null else $shared_sp1_requestor_address end),
@@ -2008,7 +2119,8 @@ production_render_shared_manifest() {
           listen_port: (if $wireguard_listen_port == "" then null else ($wireguard_listen_port | tonumber) end),
           network_cidr: (if $wireguard_network_cidr == "" then null else $wireguard_network_cidr end),
           client_address_cidr: (if $wireguard_client_address_cidr == "" then null else $wireguard_client_address_cidr end),
-          client_config_secret_arn: (if $wireguard_client_config_secret_arn == "" then null else $wireguard_client_config_secret_arn end)
+          client_config_secret_arn: (if $wireguard_client_config_secret_arn == "" then null else $wireguard_client_config_secret_arn end),
+          source_cidrs: $wireguard_source_cidrs
         },
         artifacts: {
           checkpoint_blob_bucket: (if $dkg_bucket == "" then null else $dkg_bucket end),
@@ -2085,7 +2197,7 @@ production_render_app_handoff() {
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
   local wireguard_gateway_private_ip wireguard_endpoint_host wireguard_listen_port
-  local wireguard_client_address_cidr wireguard_client_config_secret_arn
+  local wireguard_client_address_cidr wireguard_client_config_secret_arn wireguard_source_cidrs_json
   local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json publish_backoffice_dns
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -2141,12 +2253,17 @@ production_render_app_handoff() {
     die "shared_services.alarm_actions must be a non-empty array when inventory.app_role or inventory.app_host is present"
   fi
   edge_alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
-  wireguard_gateway_private_ip="$(production_json_required "$shared_manifest" '.shared_services.wireguard.gateway_private_ip | select(type == "string" and length > 0)')"
   wireguard_endpoint_host="$(production_json_required "$shared_manifest" '.shared_services.wireguard.endpoint_host | select(type == "string" and length > 0)')"
   wireguard_listen_port="$(production_json_required "$shared_manifest" '.shared_services.wireguard.listen_port')"
   wireguard_client_address_cidr="$(production_json_required "$shared_manifest" '.shared_services.wireguard.client_address_cidr | select(type == "string" and length > 0)')"
   wireguard_client_config_secret_arn="$(production_json_required "$shared_manifest" '.shared_services.wireguard.client_config_secret_arn | select(type == "string" and length > 0)')"
-  backoffice_wireguard_source_cidrs_json="$(jq -cn --arg gateway_ip "$wireguard_gateway_private_ip" '[($gateway_ip + "/32")]')"
+  wireguard_source_cidrs_json="$(jq -c '(.shared_services.wireguard.source_cidrs // []) | if type == "array" then . else [] end' "$shared_manifest")"
+  if [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]]; then
+    backoffice_wireguard_source_cidrs_json="$wireguard_source_cidrs_json"
+  else
+    wireguard_gateway_private_ip="$(production_json_required "$shared_manifest" '.shared_services.wireguard.gateway_private_ip | select(type == "string" and length > 0)')"
+    backoffice_wireguard_source_cidrs_json="$(jq -cn --arg gateway_ip "$wireguard_gateway_private_ip" '[($gateway_ip + "/32")]')"
+  fi
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi

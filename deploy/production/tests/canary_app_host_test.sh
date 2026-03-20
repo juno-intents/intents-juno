@@ -9,6 +9,16 @@ source "$SCRIPT_DIR/common_test.sh"
 # shellcheck source=../lib.sh
 source "$REPO_ROOT/deploy/production/lib.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 write_inventory_fixture() {
   local target="$1"
   local workdir="$2"
@@ -109,6 +119,10 @@ if [[ "\$1" == "--region" ]]; then
 fi
 if [[ "\$1" == "ecs" && "\$2" == "describe-services" ]]; then
   printf '{"services":[{"desiredCount":%s,"runningCount":%s},{"desiredCount":%s,"runningCount":%s}]}\n' "$desired_count" "$running_count" "$desired_count" "$running_count"
+  exit 0
+fi
+if [[ "\$1" == "autoscaling" && "\$2" == "describe-auto-scaling-groups" ]]; then
+  printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
   exit 0
 fi
 printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -997,6 +1011,161 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_prefers_role_capacity_checks_over_ecs_when_present() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    del(.shared_ecs_cluster_arn)
+    | del(.shared_proof_requestor_service_name)
+    | del(.shared_proof_funder_service_name)
+    | .shared_proof_role = {
+        value: {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+          requestor_address: "0x4444444444444444444444444444444444444444",
+          rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+        }
+      }
+    | .shared_wireguard_role = {
+        value: {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+          endpoint_host: "nlb-alpha-wireguard.example.internal",
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config"
+        }
+      }
+    | .shared_sp1_requestor_address = {
+        value: "0x4444444444444444444444444444444444444444"
+      }
+    | .shared_sp1_rpc_url = {
+        value: "https://rpc.role.mainnet.succinct.xyz"
+      }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  output_json="$workdir/canary.json"
+
+cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "$*" == *"curl -fsS "* ]]; then
+  eval "${@: -1}"
+  exit $?
+fi
+exit 0
+EOF
+  cat >"$fake_bin/dig" <<'EOF'
+#!/usr/bin/env bash
+printf 'dig %s\n' "$*" >>"$TEST_LOG_DIR/dig.log"
+if [[ "$*" == *"bridge.alpha.intents-testing.thejunowallet.com"* ]]; then
+  printf '203.0.113.21\n'
+  exit 0
+fi
+exit 1
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
+url="${@: -1}"
+resolve_value=""
+next_is_resolve="false"
+for arg in "$@"; do
+  if [[ "$next_is_resolve" == "true" ]]; then
+    resolve_value="$arg"
+    next_is_resolve="false"
+    continue
+  fi
+  if [[ "$arg" == "--resolve" ]]; then
+    next_is_resolve="true"
+  fi
+done
+case "$url" in
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"status":"ok"}\n'
+    ;;
+  http://127.0.0.1:8090/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  http://127.0.0.1:8090/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  http://127.0.0.1:8090/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
+    ;;
+  http://127.0.0.1:8090/)
+    printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  write_fake_aws "$fake_bin/aws" 1 1
+  chmod +x "$fake_bin/ssh" "$fake_bin/dig" "$fake_bin/curl"
+
+  PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_contains "$(cat "$log_dir/aws.log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-proof-role" "app canary checks proof role autoscaling group"
+  assert_not_contains "$(cat "$log_dir/aws.log")" "ecs describe-services" "app canary does not require ecs when proof role is present"
+  assert_eq "$(jq -r '.checks.shared_proof_services.status' "$output_json")" "passed" "app canary accepts proof role capacity"
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "app canary remains ready with proof role checks"
+  rm -rf "$workdir"
+}
+
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
   test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc
@@ -1006,6 +1175,7 @@ main() {
   test_canary_app_host_blocks_deposit_memo_probe_failure
   test_canary_app_host_retries_transient_public_tls_failures
   test_canary_app_host_rejects_non_https_manifest
+  test_canary_app_host_prefers_role_capacity_checks_over_ecs_when_present
 }
 
 main "$@"

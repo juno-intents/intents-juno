@@ -1,5 +1,5 @@
 {
-  "version": "1",
+  "version": "2",
   "environment": "alpha",
   "shared_manifest_path": "production-output/alpha/shared-manifest.json",
   "known_hosts_file": "production-output/alpha/app/known_hosts",
@@ -10,6 +10,17 @@
     "user": "ubuntu",
     "runtime_dir": "/var/lib/intents-juno/app-runtime",
     "public_endpoint": "203.0.113.21",
+    "asg": "juno-app",
+    "launch_template": {
+      "id": "lt-0appcafebabefeed0",
+      "version": "3"
+    },
+    "public_lb": {
+      "dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com"
+    },
+    "internal_lb": {
+      "dns_name": "internal-ops-alpha-123456.us-east-1.elb.amazonaws.com"
+    },
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
     "public_scheme": "https",
@@ -58,7 +69,8 @@
       "access": {
         "mode": "wireguard",
         "source_cidrs": [
-          "10.0.2.50/32"
+          "10.0.20.0/24",
+          "10.0.21.0/24"
         ],
         "endpoint_host": "198.51.100.25",
         "listen_port": 51820,

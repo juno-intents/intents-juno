@@ -256,10 +256,171 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present() {
+  local tmp manifest fake_bin log_file output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "version": "2",
+  "environment": "alpha",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "postgres": {
+      "endpoint": "postgres.alpha.internal",
+      "port": 5432,
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared"
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.alpha.internal:9098,broker-2.alpha.internal:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      },
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1"
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.alpha.internal",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
+    },
+    "wireguard": {
+      "endpoint_host": "nlb-alpha-wireguard.example.internal",
+      "listen_port": 51820,
+      "network_cidr": "10.66.0.0/24",
+      "source_cidrs": ["10.0.20.0/24", "10.0.21.0/24"]
+    }
+  },
+  "shared_roles": {
+    "proof": {
+      "asg": "alpha-proof-role",
+      "launch_template": {
+        "id": "lt-proof0123456789abcdef",
+        "version": "7"
+      },
+      "requestor_address": "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+      "rpc_url": "https://rpc.role.mainnet.succinct.xyz"
+    },
+    "wireguard": {
+      "asg": "alpha-wireguard-role",
+      "launch_template": {
+        "id": "lt-wireguard0123456789ab",
+        "version": "11"
+      },
+      "endpoint_host": "nlb-alpha-wireguard.example.internal",
+      "listen_port": 51820,
+      "network_cidr": "10.66.0.0/24",
+      "source_cidrs": ["10.0.20.0/24", "10.0.21.0/24"],
+      "peer_roster_secret_arns": [
+        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+      ],
+      "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+    }
+  },
+  "wireguard_role": {
+    "asg": "alpha-wireguard-role",
+    "launch_template": {
+      "id": "lt-wireguard0123456789ab",
+      "version": "11"
+    },
+    "endpoint_host": "nlb-alpha-wireguard.example.internal",
+    "listen_port": 51820,
+    "network_cidr": "10.66.0.0/24",
+    "source_cidrs": ["10.0.20.0/24", "10.0.21.0/24"],
+    "peer_roster_secret_arns": [
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
+    ],
+    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<EOF
+#!/usr/bin/env bash
+printf 'pg_isready %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<EOF
+#!/usr/bin/env bash
+printf 'nc %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<EOF
+#!/usr/bin/env bash
+printf 'curl %s\n' "\$*" >>"$log_file"
+printf '{"Version":"0.25.0"}\n'
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+printf 'aws %s\n' "\$*" >>"$log_file"
+case "\$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"rds describe-db-clusters"*)
+    printf '{"DBClusters":[{"Status":"available","AvailabilityZones":["us-east-1a","us-east-1b"]}]}\n'
+    ;;
+  *"kafka describe-cluster-v2"*)
+    printf '{"ClusterInfo":{"State":"ACTIVE","Provisioned":{"BrokerNodeGroupInfo":{"ClientSubnets":["subnet-a","subnet-b"]}}}}\n'
+    ;;
+  *"elbv2 describe-target-health"*)
+    printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"healthy"}}]}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"alpha-proof-role"*)
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"alpha-wireguard-role"*)
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"secretsmanager describe-secret"*"alpha-wireguard-server-key"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"}\n'
+    ;;
+  *"secretsmanager describe-secret"*"alpha-wireguard-peer-ops-laptop"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop"}\n'
+    ;;
+  *"secretsmanager describe-secret"*"alpha-wireguard-peer-ops-phone"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+exit 0
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_contains "$(cat "$log_file")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-proof-role" "shared canary checks proof role asg"
+  assert_contains "$(cat "$log_file")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names alpha-wireguard-role" "shared canary checks wireguard role asg"
+  assert_contains "$(cat "$log_file")" "secretsmanager describe-secret --secret-id arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "shared canary checks wireguard server key secret"
+  assert_contains "$(cat "$log_file")" "secretsmanager describe-secret --secret-id arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop" "shared canary checks first peer config secret"
+  assert_eq "$(jq -r '.checks.shared_proof_role.status' "$output_json")" "passed" "shared canary shared proof role status"
+  assert_eq "$(jq -r '.checks.wireguard_role.status' "$output_json")" "passed" "shared canary wireguard role status"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "shared canary remains deployable with role checks"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
   test_shared_services_canary_requires_preview_iam_kafka_auth
+  test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
 }
 
 main "$@"
