@@ -3,6 +3,7 @@ package witnessextract
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -302,6 +303,73 @@ func TestBuilder_BuildWithdraw_FallbackWalletIDByTxMatch(t *testing.T) {
 	}
 }
 
+func TestBuilder_BuildWithdraw_BackfillsWalletOnNoteMiss(t *testing.T) {
+	t.Parallel()
+
+	expectedValue := uint64(9900)
+	txID := "39abd5a44a45b46c913e3d5ed1da22b25f08db8b9c3e52a3dbc9f4e23944998e"
+	backfillFromHeight := int64(123456)
+	scan := &stubScan{
+		notesByWallet: map[string][]WalletNote{
+			"wallet-primary": nil,
+		},
+		backfillNotesByWallet: map[string][]WalletNote{
+			"wallet-primary": {
+				{
+					TxID:        txID,
+					ActionIndex: 1,
+					Position:    ptrInt64(7),
+					ValueZat:    expectedValue,
+				},
+			},
+		},
+		walletIDs: []string{"wallet-primary"},
+		witness: WitnessResponse{
+			Root: "0x" + strings.Repeat("88", 32),
+			Paths: []WitnessPath{
+				{
+					Position: 7,
+					AuthPath: testAuthPathHex(),
+				},
+			},
+		},
+	}
+	rpc := &stubRPC{
+		action: testRPCAction(),
+	}
+
+	var withdrawalID [32]byte
+	withdrawalID[0] = 0xaa
+	var recipientRaw [43]byte
+	recipientRaw[0] = 0xbb
+
+	b := New(scan, rpc)
+	got, err := b.BuildWithdraw(context.Background(), WithdrawRequest{
+		WalletID:            "wallet-primary",
+		TxID:                txID,
+		ActionIndex:         0,
+		ExpectedValueZat:    &expectedValue,
+		BackfillFromHeight:  &backfillFromHeight,
+		WithdrawalID:        withdrawalID,
+		RecipientRawAddress: recipientRaw,
+	})
+	if err != nil {
+		t.Fatalf("BuildWithdraw: %v", err)
+	}
+	if got.Position != 7 {
+		t.Fatalf("position mismatch: got=%d want=7", got.Position)
+	}
+	if rpc.gotActionIndex != 1 {
+		t.Fatalf("rpc action index mismatch: got=%d want=1", rpc.gotActionIndex)
+	}
+	if len(scan.backfillCalls) != 1 {
+		t.Fatalf("backfill calls mismatch: got=%d want=1", len(scan.backfillCalls))
+	}
+	if got, want := scan.backfillCalls[0], "wallet-primary:123456"; got != want {
+		t.Fatalf("backfill call mismatch: got=%s want=%s", got, want)
+	}
+}
+
 func TestBuilder_RefreshWithdrawWitness_Success(t *testing.T) {
 	t.Parallel()
 
@@ -370,13 +438,15 @@ func TestBuilder_RefreshWithdrawWitness_Success(t *testing.T) {
 }
 
 type stubScan struct {
-	notes           []WalletNote
-	notesByWallet   map[string][]WalletNote
-	walletIDs       []string
-	witness         WitnessResponse
-	err             error
-	gotAnchorHeight *int64
-	gotPositions    []uint32
+	notes                 []WalletNote
+	notesByWallet         map[string][]WalletNote
+	backfillNotesByWallet map[string][]WalletNote
+	walletIDs             []string
+	witness               WitnessResponse
+	err                   error
+	gotAnchorHeight       *int64
+	gotPositions          []uint32
+	backfillCalls         []string
 }
 
 func (s *stubScan) ListWalletIDs(ctx context.Context) ([]string, error) {
@@ -418,6 +488,17 @@ func (s *stubScan) OrchardWitness(ctx context.Context, anchorHeight *int64, posi
 	}
 	s.gotPositions = append([]uint32(nil), positions...)
 	return s.witness, nil
+}
+
+func (s *stubScan) BackfillWallet(_ context.Context, walletID string, fromHeight int64) error {
+	if s.err != nil {
+		return s.err
+	}
+	s.backfillCalls = append(s.backfillCalls, fmt.Sprintf("%s:%d", walletID, fromHeight))
+	if s.notesByWallet != nil && s.backfillNotesByWallet != nil {
+		s.notesByWallet[walletID] = append([]WalletNote(nil), s.backfillNotesByWallet[walletID]...)
+	}
+	return nil
 }
 
 type stubRPC struct {

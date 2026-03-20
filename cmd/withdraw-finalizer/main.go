@@ -576,19 +576,23 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 
 	var recipientRaw [43]byte
 	copy(recipientRaw[:], req.RecipientUA)
+	var backfillFromHeight *int64
 	if req.AnchorHeight != nil && e.minAnchorHeight != nil {
 		minHeight, err := e.minAnchorHeight(ctx, txHash)
 		if err != nil {
 			if !errors.Is(err, junorpc.ErrTxNotFound) {
 				return nil, fmt.Errorf("withdraw witness extractor: derive tx minimum anchor height: %w", err)
 			}
-		} else if *req.AnchorHeight < minHeight {
-			return nil, fmt.Errorf(
-				"withdraw witness extractor: anchor height %d below tx minimum anchor height %d for txid=%s",
-				*req.AnchorHeight,
-				minHeight,
-				txHash,
-			)
+		} else {
+			backfillFromHeight = &minHeight
+			if *req.AnchorHeight < minHeight {
+				return nil, fmt.Errorf(
+					"withdraw witness extractor: anchor height %d below tx minimum anchor height %d for txid=%s",
+					*req.AnchorHeight,
+					minHeight,
+					txHash,
+				)
+			}
 		}
 	}
 
@@ -598,6 +602,7 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 		ActionIndex:         req.ActionIndex,
 		ExpectedValueZat:    req.ExpectedValueZat,
 		AnchorHeight:        req.AnchorHeight,
+		BackfillFromHeight:  backfillFromHeight,
 		WithdrawalID:        req.WithdrawalID,
 		RecipientRawAddress: recipientRaw,
 	})
@@ -628,6 +633,40 @@ type scanHTTPClient struct {
 	baseURL string
 	bearer  string
 	hc      *http.Client
+}
+
+func (c *scanHTTPClient) BackfillWallet(ctx context.Context, walletID string, fromHeight int64) error {
+	if c == nil || c.hc == nil {
+		return fmt.Errorf("scan client is nil")
+	}
+	if strings.TrimSpace(c.baseURL) == "" {
+		return fmt.Errorf("scan client base URL is empty")
+	}
+	walletID = strings.TrimSpace(walletID)
+	if walletID == "" {
+		return fmt.Errorf("scan wallet id is empty")
+	}
+	if fromHeight < 0 {
+		return fmt.Errorf("scan backfill from height must be >= 0")
+	}
+
+	raw, err := json.Marshal(map[string]any{
+		"from_height": fromHeight,
+		"batch_size":  10_000,
+	})
+	if err != nil {
+		return fmt.Errorf("encode juno-scan backfill request: %w", err)
+	}
+
+	endpoint := c.baseURL + "/v1/wallets/" + url.PathEscape(walletID) + "/backfill"
+	body, status, err := c.do(ctx, http.MethodPost, endpoint, raw)
+	if err != nil {
+		return err
+	}
+	if status != http.StatusOK {
+		return fmt.Errorf("juno-scan wallet backfill status=%d body=%s", status, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func (c *scanHTTPClient) ListWalletIDs(ctx context.Context) ([]string, error) {

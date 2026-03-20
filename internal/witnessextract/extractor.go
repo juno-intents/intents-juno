@@ -27,6 +27,10 @@ type ScanClient interface {
 	OrchardWitness(ctx context.Context, anchorHeight *int64, positions []uint32) (WitnessResponse, error)
 }
 
+type WalletBackfiller interface {
+	BackfillWallet(ctx context.Context, walletID string, fromHeight int64) error
+}
+
 type RPCClient interface {
 	GetOrchardAction(ctx context.Context, txid string, actionIndex uint32) (junorpc.OrchardAction, error)
 }
@@ -69,6 +73,7 @@ type WithdrawRequest struct {
 	ActionIndex         uint32
 	ExpectedValueZat    *uint64
 	AnchorHeight        *int64
+	BackfillFromHeight  *int64
 	WithdrawalID        [32]byte
 	RecipientRawAddress [43]byte
 }
@@ -198,7 +203,7 @@ func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (Build
 	if b == nil || b.scan == nil || b.rpc == nil {
 		return BuildResult{}, fmt.Errorf("%w: nil clients", ErrInvalidConfig)
 	}
-	position, actionIndex, err := b.findWithdrawNote(ctx, req.WalletID, req.TxID, req.ActionIndex, req.ExpectedValueZat)
+	position, actionIndex, err := b.findWithdrawNote(ctx, req.WalletID, req.TxID, req.ActionIndex, req.ExpectedValueZat, req.BackfillFromHeight)
 	if err != nil {
 		return BuildResult{}, err
 	}
@@ -240,7 +245,7 @@ func (b *Builder) BuildWithdraw(ctx context.Context, req WithdrawRequest) (Build
 	}, nil
 }
 
-func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, uint32, error) {
+func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, actionIndex uint32, expectedValueZat *uint64, backfillFromHeight *int64) (uint32, uint32, error) {
 	wallet := strings.TrimSpace(walletID)
 	if wallet == "" {
 		return 0, 0, fmt.Errorf("%w: wallet id is required", ErrInvalidConfig)
@@ -261,12 +266,42 @@ func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, a
 		}
 	}
 
+	position, selectedActionIndex, found, matchingSeen, err := b.findWithdrawNoteInWallets(ctx, walletsToTry, txid, actionIndex, expectedValueZat)
+	if err != nil {
+		return 0, 0, err
+	}
+	if found {
+		return position, selectedActionIndex, nil
+	}
+
+	if !matchingSeen && backfillFromHeight != nil && *backfillFromHeight > 0 {
+		if backfiller, ok := b.scan.(WalletBackfiller); ok {
+			if err := backfillWallets(ctx, backfiller, walletsToTry, *backfillFromHeight, wallet); err != nil {
+				return 0, 0, err
+			}
+			position, selectedActionIndex, found, _, err = b.findWithdrawNoteInWallets(ctx, walletsToTry, txid, actionIndex, expectedValueZat)
+			if err != nil {
+				return 0, 0, err
+			}
+			if found {
+				return position, selectedActionIndex, nil
+			}
+		}
+	}
+
+	if expectedValueZat != nil {
+		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d expected_value_zat=%d", ErrNoteNotFound, wallet, txid, actionIndex, *expectedValueZat)
+	}
+	return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+}
+
+func (b *Builder) findWithdrawNoteInWallets(ctx context.Context, wallets []string, txid string, actionIndex uint32, expectedValueZat *uint64) (uint32, uint32, bool, bool, error) {
 	matchingSeen := false
-	for _, candidateWallet := range walletsToTry {
+	for _, candidateWallet := range wallets {
 		notes, err := b.scan.ListWalletNotes(ctx, candidateWallet)
 		if err != nil {
-			if candidateWallet == wallet {
-				return 0, 0, fmt.Errorf("witnessextract: list wallet notes: %w", err)
+			if candidateWallet == wallets[0] {
+				return 0, 0, false, false, fmt.Errorf("witnessextract: list wallet notes: %w", err)
 			}
 			continue
 		}
@@ -278,19 +313,24 @@ func (b *Builder) findWithdrawNote(ctx context.Context, walletID, txid string, a
 		matchingSeen = true
 
 		if pos, selectedActionIndex, ok, err := selectWithdrawNote(matching, txid, actionIndex, expectedValueZat); err != nil {
-			return 0, 0, err
+			return 0, 0, false, false, err
 		} else if ok {
-			return pos, selectedActionIndex, nil
+			return pos, selectedActionIndex, true, true, nil
 		}
 	}
 
-	if expectedValueZat != nil {
-		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d expected_value_zat=%d", ErrNoteNotFound, wallet, txid, actionIndex, *expectedValueZat)
+	return 0, 0, false, matchingSeen, nil
+}
+
+func backfillWallets(ctx context.Context, backfiller WalletBackfiller, wallets []string, fromHeight int64, primaryWallet string) error {
+	for _, walletID := range wallets {
+		if err := backfiller.BackfillWallet(ctx, walletID, fromHeight); err != nil {
+			if walletID == primaryWallet {
+				return fmt.Errorf("witnessextract: backfill wallet %s from height %d: %w", walletID, fromHeight, err)
+			}
+		}
 	}
-	if matchingSeen {
-		return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
-	}
-	return 0, 0, fmt.Errorf("%w: wallet=%s txid=%s action_index=%d", ErrNoteNotFound, wallet, txid, actionIndex)
+	return nil
 }
 
 func filterNotesByTxID(notes []WalletNote, txid string) []WalletNote {
