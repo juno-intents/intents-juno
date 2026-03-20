@@ -220,6 +220,7 @@ locals {
   wireguard_gateway_address_cidr = local.wireguard_enabled ? "${local.wireguard_gateway_tunnel_ip}/${local.wireguard_network_prefix}" : ""
   wireguard_client_tunnel_ip     = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 2) : ""
   wireguard_client_address_cidr  = local.wireguard_enabled ? "${local.wireguard_client_tunnel_ip}/32" : ""
+  wireguard_legacy_enabled       = local.wireguard_enabled && length(var.shared_wireguard_public_subnet_ids) == 0
   shared_wireguard_public_subnet_ids = length(var.shared_wireguard_public_subnet_ids) > 0 ? sort(var.shared_wireguard_public_subnet_ids) : compact([
     trimspace(var.shared_wireguard_public_subnet_id),
   ])
@@ -2069,7 +2070,7 @@ resource "aws_security_group" "wireguard" {
 }
 
 data "aws_iam_policy_document" "wireguard_gateway_assume_role" {
-  count = local.wireguard_enabled ? 1 : 0
+  count = local.wireguard_legacy_enabled ? 1 : 0
 
   statement {
     actions = ["sts:AssumeRole"]
@@ -2082,20 +2083,20 @@ data "aws_iam_policy_document" "wireguard_gateway_assume_role" {
 }
 
 resource "aws_iam_role" "wireguard_gateway" {
-  count              = local.wireguard_enabled ? 1 : 0
+  count              = local.wireguard_legacy_enabled ? 1 : 0
   name               = "${local.resource_name}-wireguard-role"
   assume_role_policy = data.aws_iam_policy_document.wireguard_gateway_assume_role[0].json
   tags               = local.common_tags
 }
 
 resource "aws_secretsmanager_secret" "shared_wireguard_client_config" {
-  count = local.wireguard_enabled ? 1 : 0
+  count = local.wireguard_legacy_enabled ? 1 : 0
   name  = "${local.resource_name}-wireguard-client-config"
   tags  = local.common_tags
 }
 
 data "aws_iam_policy_document" "wireguard_gateway_access" {
-  count = local.wireguard_enabled ? 1 : 0
+  count = local.wireguard_legacy_enabled ? 1 : 0
 
   statement {
     sid = "AllowWireGuardClientConfigSecretWrite"
@@ -2110,20 +2111,20 @@ data "aws_iam_policy_document" "wireguard_gateway_access" {
 }
 
 resource "aws_iam_role_policy" "wireguard_gateway_access" {
-  count  = local.wireguard_enabled ? 1 : 0
+  count  = local.wireguard_legacy_enabled ? 1 : 0
   name   = "${local.resource_name}-wireguard-access"
   role   = aws_iam_role.wireguard_gateway[0].id
   policy = data.aws_iam_policy_document.wireguard_gateway_access[0].json
 }
 
 resource "aws_iam_instance_profile" "wireguard_gateway" {
-  count = local.wireguard_enabled ? 1 : 0
+  count = local.wireguard_legacy_enabled ? 1 : 0
   name  = "${local.resource_name}-wireguard-profile"
   role  = aws_iam_role.wireguard_gateway[0].name
 }
 
 resource "aws_instance" "wireguard_gateway" {
-  count                       = local.wireguard_enabled ? 1 : 0
+  count                       = local.wireguard_legacy_enabled ? 1 : 0
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.shared_wireguard_instance_type
   subnet_id                   = var.shared_wireguard_public_subnet_id
@@ -2252,7 +2253,7 @@ resource "aws_instance" "wireguard_gateway" {
 }
 
 resource "aws_eip" "wireguard_gateway" {
-  count    = local.wireguard_enabled ? 1 : 0
+  count    = local.wireguard_legacy_enabled ? 1 : 0
   domain   = "vpc"
   instance = aws_instance.wireguard_gateway[0].id
 
