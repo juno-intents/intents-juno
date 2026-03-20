@@ -119,11 +119,15 @@ func (c *Client) Send(ctx context.Context, req SendRequest) (SendResponse, error
 			msg = resp.Status
 		} else {
 			var er struct {
-				Error string `json:"error"`
+				Error  string `json:"error"`
+				Detail string `json:"detail"`
 			}
 			if json.Unmarshal(body, &er) == nil && er.Error != "" {
 				code = er.Error
 				msg = er.Error
+				if strings.TrimSpace(er.Detail) != "" {
+					msg = er.Error + ": " + strings.TrimSpace(er.Detail)
+				}
 			}
 		}
 		if code == "fee_cap_reached" {

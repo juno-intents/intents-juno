@@ -289,6 +289,31 @@ func TestHandler_RejectsSendWhenContractAllowlistIsEmpty(t *testing.T) {
 	}
 }
 
+func TestHandler_SendReturnsInternalDetailOnFailure(t *testing.T) {
+	t.Parallel()
+
+	sender := &stubSender{err: errors.New("execution reverted: threshold not met")}
+	h := NewHandler(sender, Config{
+		AuthToken:        "secret",
+		MaxBodyBytes:     1024,
+		MaxWaitSeconds:   60,
+		AllowedContracts: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000001")},
+		AllowedSelectors: [][]byte{{0x53, 0xa5, 0x8a, 0x48}},
+	})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/send", bytes.NewBufferString(`{"to":"0x0000000000000000000000000000000000000001","data":"0x53a58a48"}`))
+	req.Header.Set("Authorization", "Bearer secret")
+	rr := httptest.NewRecorder()
+	h.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("status: got %d want %d body=%s", rr.Code, http.StatusInternalServerError, rr.Body.String())
+	}
+	if !bytes.Contains(rr.Body.Bytes(), []byte(`"detail":"execution reverted: threshold not met"`)) {
+		t.Fatalf("body missing failure detail: %s", rr.Body.String())
+	}
+}
+
 func TestHandler_IdempotencyKey_ReplaysOriginalResultWithoutResend(t *testing.T) {
 	t.Parallel()
 

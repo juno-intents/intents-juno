@@ -996,7 +996,27 @@ dkg_admin_serve_script="/usr/local/bin/intents-juno-dkg-admin-serve.sh"
 spendauth_signer_script="/usr/local/bin/intents-juno-spendauth-signer.sh"
 deposit_relayer_script="/usr/local/bin/intents-juno-deposit-relayer.sh"
 withdraw_coordinator_script="/usr/local/bin/intents-juno-withdraw-coordinator.sh"
+withdraw_extend_signer_script="/usr/local/bin/intents-juno-multikey-extend-signer.sh"
 base_event_scanner_script="/usr/local/bin/intents-juno-base-event-scanner.sh"
+
+withdraw_extend_signer_tmp="$(mktemp)"
+cat >"$withdraw_extend_signer_tmp" <<'EOF_WITHDRAW_EXTEND_SIGNER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+set -a
+source /etc/intents-juno/operator-stack.env
+set +a
+extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
+[[ -n "$extend_signer_keys" ]] || {
+  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS or JUNO_TXSIGN_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
+exec /var/lib/intents-juno/operator-runtime/bin/juno-txsign "$@"
+EOF_WITHDRAW_EXTEND_SIGNER
+sudo install -m 0755 "$withdraw_extend_signer_tmp" "$withdraw_extend_signer_script"
+rm -f "$withdraw_extend_signer_tmp"
 
 signer_tmp="$(mktemp)"
 cat >"$signer_tmp" <<'EOF_SIGNER_WRAPPER'

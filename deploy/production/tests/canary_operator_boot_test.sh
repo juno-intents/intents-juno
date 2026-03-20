@@ -73,6 +73,9 @@ EOF
   "shared_services": {
     "artifacts": {}
   },
+  "checkpoint": {
+    "threshold": 2
+  },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
   }
@@ -125,7 +128,11 @@ fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign$'"* ]]; then
+if [[ "\$*" == *"awk -F= '/^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/"* ]]; then
+  printf '/var/lib/intents-juno/operator-runtime/bin/juno-txsign'
+  exit 0
+fi
+if [[ "\$*" == *"test -x"*"/var/lib/intents-juno/operator-runtime/bin/juno-txsign"* ]]; then
   exit 0
 fi
 if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; then
@@ -133,6 +140,10 @@ if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; t
 fi
 if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"* ]]; then
   printf 'Usage: juno-txsign sign-digest [flags]\n'
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json"* ]]; then
+  printf '%s\n' '{"version":"v1","status":"ok","data":{"signatures":["0x01","0x02"]}}'
   exit 0
 fi
 if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
@@ -162,8 +173,11 @@ EOF
   assert_contains "$(cat "$log_file")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "operator canary verifies the production kms signer mode"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h" "operator canary verifies remote expiry safety margin"
   assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h" "operator canary verifies remote max expiry extension"
-  assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "operator canary verifies remote juno-txsign path"
+  assert_contains "$(cat "$log_file")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=" "operator canary resolves remote extend signer path"
+  assert_contains "$(cat "$log_file")" "test -x" "operator canary verifies remote extend signer is executable"
+  assert_contains "$(cat "$log_file")" "/var/lib/intents-juno/operator-runtime/bin/juno-txsign" "operator canary checks the resolved extend signer path"
   assert_contains "$(cat "$log_file")" "/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help" "operator canary verifies juno-txsign runtime"
+  assert_contains "$(cat "$log_file")" "sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json" "operator canary probes extend signer quorum output"
   assert_contains "$(cat "$log_file")" "test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json" "operator canary verifies kms export receipt"
   assert_contains "$(cat "$log_file")" 'curl -fsS http://127.0.0.1:${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz' "operator canary verifies deposit-relayer readiness"
   assert_contains "$(cat "$tmp/cast.log")" "wallet address --private-key" "operator canary derives the base relayer address from the configured key"
@@ -200,6 +214,9 @@ EOF
   printf 'backup' >"$tmp/dkg-backup.zip"
   cat >"$shared_manifest" <<JSON
 {
+  "checkpoint": {
+    "threshold": 2
+  },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
   }
@@ -269,6 +286,9 @@ EOF
       "checkpoint_blob_bucket": "preview-op1-dkg-keypackages"
     }
   },
+  "checkpoint": {
+    "threshold": 2
+  },
   "contracts": {
     "base_rpc_url": "https://base-sepolia.example.invalid"
   }
@@ -319,7 +339,11 @@ fi
 if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign$'"* ]]; then
+if [[ "\$*" == *"awk -F= '/^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/"* ]]; then
+  printf '/var/lib/intents-juno/operator-runtime/bin/juno-txsign'
+  exit 0
+fi
+if [[ "\$*" == *"test -x"*"/var/lib/intents-juno/operator-runtime/bin/juno-txsign"* ]]; then
   exit 0
 fi
 if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; then
@@ -327,6 +351,10 @@ if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; t
 fi
 if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"* ]]; then
   printf 'Usage: juno-txsign sign-digest [flags]\n'
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json"* ]]; then
+  printf '%s\n' '{"version":"v1","status":"ok","data":{"signatures":["0x01","0x02"]}}'
   exit 0
 fi
 if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
@@ -352,10 +380,127 @@ EOF
   rm -rf "$tmp"
 }
 
+test_operator_boot_canary_rejects_extend_signer_below_threshold() {
+  local tmp fake_bin log_file manifest output_json shared_manifest
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/ssh.log"
+  manifest="$tmp/operator-deploy.json"
+  output_json="$tmp/output.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  mkdir -p "$fake_bin"
+
+  printf '203.0.113.11 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBundleHostKey\n' >"$tmp/known_hosts"
+  cat >"$tmp/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222222222222222222222222222
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  printf 'backup' >"$tmp/dkg-backup.zip"
+  cat >"$shared_manifest" <<JSON
+{
+  "shared_services": {
+    "artifacts": {}
+  },
+  "checkpoint": {
+    "threshold": 2
+  },
+  "contracts": {
+    "base_rpc_url": "https://base-sepolia.example.invalid"
+  }
+}
+JSON
+
+  cat >"$manifest" <<JSON
+{
+  "environment": "alpha",
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "operator_host": "203.0.113.11",
+  "operator_user": "intents-juno",
+  "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+  "shared_manifest_path": "$shared_manifest",
+  "checkpoint_blob_bucket": "alpha-op1-dkg-keypackages",
+  "checkpoint_blob_prefix": "operators/op1/checkpoint-packages",
+  "dkg_backup_zip": "$tmp/dkg-backup.zip",
+  "known_hosts_file": "$tmp/known_hosts",
+  "secret_contract_file": "$tmp/operator-secrets.env"
+}
+JSON
+
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+printf 'ssh %s\n' "\$*" >>"$log_file"
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY='"* ]]; then
+  exit 1
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"awk -F= '/^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/"* ]]; then
+  printf '/var/lib/intents-juno/operator-runtime/bin/juno-txsign'
+  exit 0
+fi
+if [[ "\$*" == *"test -x"*"/var/lib/intents-juno/operator-runtime/bin/juno-txsign"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"* ]]; then
+  printf 'Usage: juno-txsign sign-digest [flags]\n'
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json"* ]]; then
+  printf '%s\n' '{"version":"v1","status":"ok","data":{"signatures":["0x01"]}}'
+  exit 0
+fi
+if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+  exit 0
+fi
+exit 0
+EOF
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1300000000000000" "1400000000000000"
+  chmod 0755 "$fake_bin/ssh"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    bash deploy/production/canary-operator-boot.sh \
+      --operator-deploy "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "false" "insufficient extend signer quorum blocks ready flag"
+  assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "failed" "insufficient extend signer quorum fails txsign runtime check"
+  assert_contains "$(jq -r '.checks.txsign_runtime.detail' "$output_json")" "returned 1 signatures" "insufficient extend signer detail includes returned count"
+  assert_contains "$(jq -r '.checks.txsign_runtime.detail' "$output_json")" "need at least 2" "insufficient extend signer detail includes threshold"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_operator_boot_canary_checks_services_over_strict_ssh
   test_operator_boot_canary_rejects_underfunded_relayer
   test_operator_boot_canary_preserves_secure_preview_signer_configuration
+  test_operator_boot_canary_rejects_extend_signer_below_threshold
 }
 
 main "$@"

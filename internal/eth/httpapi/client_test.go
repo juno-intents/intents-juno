@@ -101,6 +101,30 @@ func TestClient_Send_ReturnsErrorOnNon200(t *testing.T) {
 	}
 }
 
+func TestClient_Send_ReturnsErrorDetailOnNon200(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":"internal","detail":"execution reverted: threshold not met"}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	c, err := NewClient(srv.URL, "secret", WithHTTPClient(srv.Client()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	_, err = c.Send(context.Background(), SendRequest{To: "0x0000000000000000000000000000000000000001"})
+	if err == nil {
+		t.Fatalf("expected error")
+	}
+	if !bytes.Contains([]byte(err.Error()), []byte("threshold not met")) {
+		t.Fatalf("error should contain detail: %v", err)
+	}
+}
+
 func TestClient_Ready_ReturnsNilOn200(t *testing.T) {
 	t.Parallel()
 

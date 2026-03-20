@@ -15,8 +15,8 @@ Usage:
 Checks:
   - Required handoff inputs exist locally
   - Base relayer funding clears the deploy minimum
-  - Remote withdraw env points at juno-txsign and includes signer keys
-  - Remote juno-txsign runtime supports sign-digest
+  - Remote withdraw env points at a configured extend signer and includes signer keys
+  - Remote extend signer supports sign-digest and returns enough signatures for checkpoint quorum
   - Remote KMS export receipt exists when checkpoint blob export is configured
   - Remote operator services are active over strict-host-key SSH
 
@@ -95,6 +95,8 @@ if production_environment_allows_local_secret_resolvers "$environment"; then
   allow_local_resolvers="true"
 fi
 base_rpc_url="$(production_json_required "$shared_manifest_path" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+checkpoint_threshold="$(jq -r '.checkpoint.threshold // empty' "$shared_manifest_path")"
+production_is_positive_integer "$checkpoint_threshold" || die "shared manifest is missing positive checkpoint.threshold: $shared_manifest_path"
 checkpoint_blob_bucket="$(production_json_optional "$operator_deploy" '.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
 if [[ -z "$checkpoint_blob_bucket" ]]; then
   checkpoint_blob_bucket="$(production_json_optional "$shared_manifest_path" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
@@ -203,6 +205,7 @@ else
     elif [[ "$relayer_funding_status" == "passed" ]]; then
       relayer_funding_detail="base relayer balances meet minimum $minimum_base_relayer_balance_wei wei: $relayer_summary"
       ssh_target="${operator_user}@${operator_host}"
+      extend_signer_bin=""
 
       if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
@@ -222,19 +225,50 @@ else
       elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h"
-      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -q '^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$runtime_dir/bin/juno-txsign$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
-        withdraw_config_status="failed"
-        withdraw_config_detail="remote operator env is not pointing withdraw coordinator at $runtime_dir/bin/juno-txsign"
-      elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
+      else
+        extend_signer_bin="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo awk -F= '/^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/{print substr(\$0, index(\$0, \"=\") + 1); exit}' /etc/intents-juno/operator-stack.env" 2>/dev/null || true)"
+        if [[ -z "$extend_signer_bin" ]]; then
+          withdraw_config_status="failed"
+          withdraw_config_detail="remote operator env is missing WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN"
+        elif ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo test -x '$extend_signer_bin'" 2>/dev/null; then
+          withdraw_config_status="failed"
+          withdraw_config_detail="remote withdraw extend signer is not executable: $extend_signer_bin"
+        fi
+      fi
+      if [[ "$withdraw_config_status" == "passed" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$' /etc/intents-juno/operator-stack.env" 2>/dev/null; then
         withdraw_config_status="failed"
         withdraw_config_detail="remote operator env must contain exactly one operator-scoped JUNO_TXSIGN_SIGNER_KEYS entry"
       fi
 
       if [[ "$withdraw_config_status" == "passed" ]]; then
-        txsign_help="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo $runtime_dir/bin/juno-txsign --help" 2>/dev/null || true)"
+        txsign_help="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'set -euo pipefail; set -a; source /etc/intents-juno/operator-stack.env; set +a; $extend_signer_bin --help'" 2>/dev/null || true)"
         if [[ "$txsign_help" != *"sign-digest"* ]]; then
           txsign_runtime_status="failed"
-          txsign_runtime_detail="remote juno-txsign is missing sign-digest support"
+          txsign_runtime_detail="remote extend signer is missing sign-digest support: $extend_signer_bin"
+        else
+          extend_signer_probe="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'set -euo pipefail; set -a; source /etc/intents-juno/operator-stack.env; set +a; $extend_signer_bin sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json'" 2>/dev/null || true)"
+          probe_status="$(jq -r '.status // empty' <<<"$extend_signer_probe" 2>/dev/null || true)"
+          probe_sig_count="$(jq -r '
+            if (.data.signatures // null) != null then
+              (.data.signatures | length)
+            elif ((.data.signature // "") | length) > 0 then
+              1
+            else
+              0
+            end
+          ' <<<"$extend_signer_probe" 2>/dev/null || true)"
+          if [[ "$probe_status" != "ok" ]]; then
+            txsign_runtime_status="failed"
+            txsign_runtime_detail="remote extend signer probe failed: ${probe_status:-invalid response}"
+          elif ! [[ "$probe_sig_count" =~ ^[0-9]+$ ]]; then
+            txsign_runtime_status="failed"
+            txsign_runtime_detail="remote extend signer probe returned invalid signature count"
+          elif (( probe_sig_count < checkpoint_threshold )); then
+            txsign_runtime_status="failed"
+            txsign_runtime_detail="remote extend signer returned $probe_sig_count signatures; need at least $checkpoint_threshold"
+          else
+            txsign_runtime_detail="remote extend signer returned $probe_sig_count signatures for checkpoint threshold $checkpoint_threshold"
+          fi
         fi
       else
         txsign_runtime_status="blocked"

@@ -623,6 +623,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=$tmp/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=$tmp/extend-signer
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=2
 RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=3
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=4
@@ -678,6 +679,31 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_REGION=us-east-1' "withdraw wrapper exports AWS region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw wrapper exports AWS default region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_PROFILE=alpha-testnet' "withdraw wrapper exports AWS profile"
+
+  local extend_output_file
+  extend_output_file="$tmp/extend.args"
+  cat >"$fake_bin/extend-signer" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >"$extend_output_file"
+env | sort >"$tmp/extend.env"
+printf '{"version":"v1","status":"ok","data":{"signatures":["0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111b"]}}\n'
+exit 0
+EOF
+  chmod 0755 "$fake_bin/extend-signer"
+
+  cat >"$tmp/intents-juno-multikey-extend-signer.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source "$1"
+shift
+extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
+export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
+exec "$1" "$@"
+EOF
+  chmod 0755 "$tmp/intents-juno-multikey-extend-signer.sh"
+  "$tmp/intents-juno-multikey-extend-signer.sh" "$env_file" "$fake_bin/extend-signer" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null
+  assert_contains "$(cat "$tmp/extend.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "withdraw extend signer wrapper exports the full signer roster"
 
   local finalizer_output_file
   finalizer_output_file="$tmp/finalizer.args"

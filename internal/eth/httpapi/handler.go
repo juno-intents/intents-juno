@@ -300,9 +300,9 @@ func NewHandler(sender Sender, cfg Config) http.Handler {
 				writeJSON(w, http.StatusConflict, map[string]any{"error": "fee_cap_reached"})
 			default:
 				cfg.Log.Error("send transaction failed", "to", req.To, "err", err)
-				completeReservation(reservation, http.StatusInternalServerError, mustJSON(map[string]any{"error": "internal"}), cfg.Now().UTC())
+				completeReservation(reservation, http.StatusInternalServerError, mustJSON(map[string]any{"error": "internal", "detail": err.Error()}), cfg.Now().UTC())
 				reservation = nil
-				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal"})
+				writeJSON(w, http.StatusInternalServerError, map[string]any{"error": "internal", "detail": err.Error()})
 			}
 			return
 		}

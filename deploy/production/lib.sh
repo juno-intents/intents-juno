@@ -920,6 +920,22 @@ production_normalize_ecdsa_private_key() {
   printf '0x%s\n' "$value"
 }
 
+production_normalize_ecdsa_private_key_csv() {
+  local csv="$1"
+  local IFS=,
+  local -a values=()
+  local -a normalized=()
+  local value
+
+  read -r -a values <<<"$csv"
+  (( ${#values[@]} > 0 )) || die "missing ECDSA private key CSV"
+  for value in "${values[@]}"; do
+    [[ -n "$value" ]] || die "invalid empty ECDSA private key entry"
+    normalized+=("$(production_normalize_ecdsa_private_key "$value")")
+  done
+  (IFS=,; printf '%s\n' "${normalized[*]}")
+}
+
 production_secret_contract_upsert_literal() {
   local file="$1"
   local key="$2"
@@ -2267,6 +2283,15 @@ production_render_operator_handoffs() {
         fi
       fi
       production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
+      withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "JUNO_TXSIGN_SIGNER_KEYS" || true)"
+      case "$withdraw_extend_signer_keys" in
+        literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
+          withdraw_extend_signer_keys="$(production_resolve_secret_value "$withdraw_extend_signer_keys" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")")"
+          ;;
+      esac
+      [[ -n "$withdraw_extend_signer_keys" ]] || die "operator $operator_id is missing withdraw extend signer keys"
+      withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$withdraw_extend_signer_keys")"
+      production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
       operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
       [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
       production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
@@ -2343,13 +2368,14 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
-  local juno_txsign_signer_keys owallet_ua withdraw_change_address
+  local juno_txsign_signer_keys withdraw_extend_signer_keys owallet_ua withdraw_change_address
   local juno_rpc_bind juno_rpc_allow_ips
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   local kafka_critical_key_id kafka_critical_hmac_secret_arn kafka_critical_hmac_key
   juno_txsign_signer_keys=""
+  withdraw_extend_signer_keys=""
   deposit_scan_wallet_id=""
   ipfs_api_bearer_token=""
   kafka_critical_key_id=""
@@ -2393,6 +2419,11 @@ production_render_operator_stack_env() {
   fi
   juno_txsign_signer_keys="$(production_env_first_value "$resolved_secret_env" JUNO_TXSIGN_SIGNER_KEYS || true)"
   [[ -n "$juno_txsign_signer_keys" ]] || die "resolved secret env is missing JUNO_TXSIGN_SIGNER_KEYS for juno-txsign sign-digest"
+  withdraw_extend_signer_keys="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS || true)"
+  if [[ -z "$withdraw_extend_signer_keys" ]]; then
+    withdraw_extend_signer_keys="$juno_txsign_signer_keys"
+  fi
+  withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$withdraw_extend_signer_keys")"
   juno_txsign_signer_keys="$(production_require_single_txsign_signer_key "$juno_txsign_signer_keys")"
   withdraw_change_address="$(production_env_first_value "$resolved_secret_env" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS || true)"
   if [[ -n "$withdraw_change_address" && "$withdraw_change_address" != "$owallet_ua" ]]; then
@@ -2447,7 +2478,7 @@ WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
-WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/juno-txsign
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh
 WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=$withdraw_juno_fee_add_zat
 WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h
@@ -2483,6 +2514,9 @@ EOF
   fi
   if [[ -n "$juno_txsign_signer_keys" ]]; then
     printf 'JUNO_TXSIGN_SIGNER_KEYS=%s\n' "$juno_txsign_signer_keys" >>"$output_file"
+  fi
+  if [[ -n "$withdraw_extend_signer_keys" ]]; then
+    printf 'WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=%s\n' "$withdraw_extend_signer_keys" >>"$output_file"
   fi
   if [[ -n "$juno_rpc_bind" ]]; then
     printf 'JUNO_RPC_BIND=%s\n' "$juno_rpc_bind" >>"$output_file"

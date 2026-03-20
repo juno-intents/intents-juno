@@ -558,7 +558,8 @@ WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
-WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/juno-txsign
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh
+WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=
 WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_FINALIZER_OWNER=
 WITHDRAW_FINALIZER_QUEUE_GROUP=withdraw-finalizer
@@ -825,6 +826,7 @@ checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env
 checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
 juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
+withdraw_extend_signer_keys="$(resolve_value "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" "$(read_env_value WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
 juno_rpc_bind="$(resolve_value "JUNO_RPC_BIND" "$(read_env_value JUNO_RPC_BIND || true)" || true)"
@@ -895,6 +897,10 @@ case "$checkpoint_signer_driver" in
     ;;
 esac
 [[ "$juno_txsign_signer_keys" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in production"
+if [[ -z "$withdraw_extend_signer_keys" ]]; then
+  withdraw_extend_signer_keys="$juno_txsign_signer_keys"
+fi
+[[ "$withdraw_extend_signer_keys" =~ ^0x[0-9a-fA-F]{64}(,0x[0-9a-fA-F]{64})*$ ]] || fail "requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS as comma-separated 32-byte hex keys"
 
 [[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
 
@@ -927,6 +933,7 @@ set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys"
+set_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
 set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
 set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "$kafka_tls"
@@ -1941,6 +1948,21 @@ exec /usr/local/bin/withdraw-coordinator \
   --health-port "${WITHDRAW_COORDINATOR_HEALTH_PORT:-18304}"
 EOF_WITHDRAW_COORDINATOR
   sudo install -m 0755 /tmp/intents-juno-withdraw-coordinator.sh /usr/local/bin/intents-juno-withdraw-coordinator.sh
+
+  cat > /tmp/intents-juno-multikey-extend-signer.sh <<'EOF_WITHDRAW_EXTEND_SIGNER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
+[[ -n "$extend_signer_keys" ]] || {
+  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS or JUNO_TXSIGN_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
+exec /usr/local/bin/juno-txsign "$@"
+EOF_WITHDRAW_EXTEND_SIGNER
+  sudo install -m 0755 /tmp/intents-juno-multikey-extend-signer.sh /usr/local/bin/intents-juno-multikey-extend-signer.sh
 
   cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'
 #!/usr/bin/env bash
