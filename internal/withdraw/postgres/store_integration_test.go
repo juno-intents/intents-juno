@@ -3,6 +3,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -428,6 +430,62 @@ func TestStore_UpsertRequested_RoundTripsBaseEventMetadata(t *testing.T) {
 	}
 	if !withdrawalEqual(got, w) {
 		t.Fatalf("round trip mismatch: got=%+v want=%+v", got, w)
+	}
+}
+
+func TestStore_UpdateProofWitnessItem_RoundTrips(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	w := withdraw.Withdrawal{
+		ID:               seq32(0x71),
+		Amount:           1000,
+		FeeBps:           25,
+		RecipientUA:      []byte{0x01, 0x02},
+		ProofWitnessItem: bytes.Repeat([]byte{0xaa}, proverinput.WithdrawWitnessItemLen),
+		Expiry:           now.Add(24 * time.Hour),
+	}
+	if _, created, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	} else if !created {
+		t.Fatalf("expected created=true")
+	}
+
+	wantWitness := bytes.Repeat([]byte{0x10}, proverinput.WithdrawWitnessItemLen)
+	if err := s.UpdateProofWitnessItem(ctx, w.ID, wantWitness); err != nil {
+		t.Fatalf("UpdateProofWitnessItem: %v", err)
+	}
+
+	got, err := s.GetWithdrawal(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal: %v", err)
+	}
+	if !bytes.Equal(got.ProofWitnessItem, wantWitness) {
+		t.Fatalf("proof witness item: got %x want %x", got.ProofWitnessItem, wantWitness)
 	}
 }
 

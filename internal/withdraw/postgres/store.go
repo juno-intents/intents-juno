@@ -341,6 +341,26 @@ func (s *Store) GetWithdrawal(ctx context.Context, id [32]byte) (withdraw.Withdr
 	return s.getWithdrawal(ctx, id)
 }
 
+func (s *Store) UpdateProofWitnessItem(ctx context.Context, id [32]byte, witnessItem []byte) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+
+	tag, err := s.pool.Exec(ctx, `
+		UPDATE withdrawal_requests
+		SET proof_witness_item = $2,
+			updated_at = now()
+		WHERE withdrawal_id = $1
+	`, id[:], witnessItem)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: update proof witness item: %w", err)
+	}
+	if tag.RowsAffected() == 1 {
+		return nil
+	}
+	return withdraw.ErrNotFound
+}
+
 func (s *Store) GetWithdrawalStatus(ctx context.Context, id [32]byte) (withdraw.WithdrawalStatus, error) {
 	if s == nil || s.pool == nil {
 		return withdraw.WithdrawalStatusUnknown, fmt.Errorf("%w: nil store", ErrInvalidConfig)

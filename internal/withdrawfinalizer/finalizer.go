@@ -367,6 +367,9 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 								cp.FinalOrchardRoot.Hex(),
 							))
 						}
+						if err := f.store.UpdateProofWitnessItem(workCtx, w.ID, refreshedWitness); err != nil {
+							return heartbeat.Wrap(fmt.Errorf("withdrawfinalizer: persist refreshed proof witness item: %w", err))
+						}
 						f.log.Info(
 							"refreshed stored withdraw witness after note lookup miss",
 							"batchID", hex.EncodeToString(batchID[:]),

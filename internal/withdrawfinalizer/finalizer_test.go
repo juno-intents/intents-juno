@@ -1397,6 +1397,11 @@ func TestFinalizer_FallsBackToRefreshedPayloadWitnessWhenExtractorNoteMissing(t 
 	if !bytes.Equal(extractor.lastRefreshItem, payloadWitness) {
 		t.Fatalf("refresh witness item mismatch")
 	}
+	if stored, err := store.GetWithdrawal(ctx, w.ID); err != nil {
+		t.Fatalf("GetWithdrawal after refresh: %v", err)
+	} else if !bytes.Equal(stored.ProofWitnessItem, refreshedWitness) {
+		t.Fatalf("stored proof witness item: got %x want %x", stored.ProofWitnessItem, refreshedWitness)
+	}
 
 	wantInput, err := proverinput.EncodeWithdrawGuestPrivateInput(cp, ovk, [][]byte{refreshedWitness})
 	if err != nil {

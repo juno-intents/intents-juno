@@ -1,6 +1,7 @@
 package withdraw
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -194,6 +195,49 @@ func TestMemoryStore_GetWithdrawal_DefensiveCopy(t *testing.T) {
 	}
 	if !withdrawalEqual(got2, w) {
 		t.Fatalf("expected store to be immutable to caller mutations")
+	}
+}
+
+func TestMemoryStore_UpdateProofWitnessItem_UpdatesAndDefensivelyCopies(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	s := NewMemoryStore(func() time.Time { return now })
+	ctx := context.Background()
+
+	w := Withdrawal{
+		ID:               seq32(0x31),
+		Amount:           1000,
+		FeeBps:           25,
+		RecipientUA:      []byte{0x01, 0x02},
+		ProofWitnessItem: []byte{0xaa, 0xbb},
+		Expiry:           now.Add(24 * time.Hour),
+	}
+	if _, _, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+
+	updatedWitness := []byte{0x10, 0x20, 0x30}
+	if err := s.UpdateProofWitnessItem(ctx, w.ID, updatedWitness); err != nil {
+		t.Fatalf("UpdateProofWitnessItem: %v", err)
+	}
+	updatedWitness[0] ^= 0xff
+
+	got, err := s.GetWithdrawal(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal: %v", err)
+	}
+	if want := []byte{0x10, 0x20, 0x30}; !bytes.Equal(got.ProofWitnessItem, want) {
+		t.Fatalf("proof witness item: got %x want %x", got.ProofWitnessItem, want)
+	}
+
+	got.ProofWitnessItem[0] ^= 0xff
+	gotAgain, err := s.GetWithdrawal(ctx, w.ID)
+	if err != nil {
+		t.Fatalf("GetWithdrawal #2: %v", err)
+	}
+	if want := []byte{0x10, 0x20, 0x30}; !bytes.Equal(gotAgain.ProofWitnessItem, want) {
+		t.Fatalf("proof witness item after caller mutation: got %x want %x", gotAgain.ProofWitnessItem, want)
 	}
 }
 

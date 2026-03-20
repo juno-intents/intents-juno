@@ -184,6 +184,19 @@ func (s *MemoryStore) GetWithdrawal(_ context.Context, id [32]byte) (Withdrawal,
 	return cloneWithdrawal(rec.w), nil
 }
 
+func (s *MemoryStore) UpdateProofWitnessItem(_ context.Context, id [32]byte, witnessItem []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	rec, ok := s.withdrawals[id]
+	if !ok {
+		return ErrNotFound
+	}
+	rec.w.ProofWitnessItem = append([]byte(nil), witnessItem...)
+	s.withdrawals[id] = rec
+	return nil
+}
+
 func (s *MemoryStore) GetWithdrawalStatus(_ context.Context, id [32]byte) (WithdrawalStatus, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

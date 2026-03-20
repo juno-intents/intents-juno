@@ -139,6 +139,7 @@ type Store interface {
 	CreatePlannedBatch(ctx context.Context, fence Fence, b Batch) error
 
 	GetWithdrawal(ctx context.Context, id [32]byte) (Withdrawal, error)
+	UpdateProofWitnessItem(ctx context.Context, id [32]byte, witnessItem []byte) error
 	GetWithdrawalStatus(ctx context.Context, id [32]byte) (WithdrawalStatus, error)
 	GetBatch(ctx context.Context, batchID [32]byte) (Batch, error)
 	ListBatchesByState(ctx context.Context, state BatchState) ([]Batch, error)
