@@ -17,6 +17,13 @@ func depositStateIsStuck(s int16) bool {
 	return s < 6
 }
 
+type stuckRows interface {
+	Next() bool
+	Scan(dest ...any) error
+	Close()
+	Err() error
+}
+
 // depositStateLabel maps deposit_jobs.state int16 to a human-readable label.
 func depositStateLabel(s int16) string {
 	switch s {
@@ -219,6 +226,14 @@ func (s *Server) handleStuckBatches(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	stuckSubmittedAttempts, err := s.fetchStuckSubmittedAttempts(ctx, threshold)
+	if err != nil {
+		s.log.Error("fetch stuck submitted attempts", "err", err)
+		writeError(w, http.StatusInternalServerError, "internal")
+		return
+	}
+	stuckDeposits = append(stuckDeposits, stuckSubmittedAttempts...)
+
 	// Stuck withdrawal batches: state NOT IN (8=finalized) and updated_at old.
 	stuckWithdrawals, err := s.fetchStuckWithdrawalBatches(ctx, threshold)
 	if err != nil {
@@ -247,6 +262,25 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 	}
 	defer rows.Close()
 
+	return collectStuckDepositRows(rows, threshold)
+}
+
+func (s *Server) fetchStuckSubmittedAttempts(ctx context.Context, threshold time.Time) ([]map[string]any, error) {
+	rows, err := s.cfg.Pool.Query(ctx, `
+		SELECT batch_id, owner, created_at, updated_at
+		FROM deposit_batch_attempts
+		WHERE updated_at < $1
+		ORDER BY updated_at ASC
+		LIMIT 100`, threshold)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return collectStuckSubmittedAttemptRows(rows, threshold)
+}
+
+func collectStuckDepositRows(rows stuckRows, threshold time.Time) ([]map[string]any, error) {
 	items := make([]map[string]any, 0)
 	for rows.Next() {
 		var depositID []byte
@@ -255,12 +289,39 @@ func (s *Server) fetchStuckDeposits(ctx context.Context, threshold time.Time) ([
 		if err := rows.Scan(&depositID, &state, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
-		if !depositStateIsStuck(state) {
+		if !depositStateIsStuck(state) || !updatedAt.Before(threshold) {
 			continue
 		}
 		items = append(items, map[string]any{
+			"kind":      "deposit",
 			"depositId": "0x" + hex.EncodeToString(depositID),
 			"state":     depositStateLabel(state),
+			"createdAt": createdAt.Format(time.RFC3339),
+			"updatedAt": updatedAt.Format(time.RFC3339),
+			"stuckFor":  fmt.Sprintf("%.0fm", time.Since(updatedAt).Minutes()),
+		})
+	}
+	return items, rows.Err()
+}
+
+func collectStuckSubmittedAttemptRows(rows stuckRows, threshold time.Time) ([]map[string]any, error) {
+	items := make([]map[string]any, 0)
+	for rows.Next() {
+		var batchID []byte
+		var owner string
+		var createdAt, updatedAt time.Time
+		if err := rows.Scan(&batchID, &owner, &createdAt, &updatedAt); err != nil {
+			return nil, err
+		}
+		if !updatedAt.Before(threshold) {
+			continue
+		}
+		items = append(items, map[string]any{
+			"kind":      "submitted_attempt",
+			"batchId":   "0x" + hex.EncodeToString(batchID),
+			"depositId": "0x" + hex.EncodeToString(batchID),
+			"owner":     owner,
+			"state":     "submitted_attempt",
 			"createdAt": createdAt.Format(time.RFC3339),
 			"updatedAt": updatedAt.Format(time.RFC3339),
 			"stuckFor":  fmt.Sprintf("%.0fm", time.Since(updatedAt).Minutes()),

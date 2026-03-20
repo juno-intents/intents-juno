@@ -1266,6 +1266,11 @@ func TestStore_RequeueSubmittedBatch(t *testing.T) {
 	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{id}, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
 		t.Fatalf("MarkBatchSubmitted: %v", err)
 	}
+	var txHash [32]byte
+	txHash[0] = 0x77
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
 
 	if err := s.RequeueSubmittedBatch(ctx, batchID); err != nil {
 		t.Fatalf("RequeueSubmittedBatch: %v", err)
@@ -1289,6 +1294,9 @@ func TestStore_RequeueSubmittedBatch(t *testing.T) {
 	if len(job.ProofSeal) != 0 {
 		t.Fatalf("proof seal should be cleared, got %x", job.ProofSeal)
 	}
+	if job.TxHash != ([32]byte{}) {
+		t.Fatalf("tx hash should be cleared, got %x", job.TxHash)
+	}
 
 	claimedConfirmed, err := s.ClaimConfirmed(ctx, "worker-b", 80*time.Millisecond, 10)
 	if err != nil {
@@ -1296,6 +1304,114 @@ func TestStore_RequeueSubmittedBatch(t *testing.T) {
 	}
 	if len(claimedConfirmed) != 1 || claimedConfirmed[0].Deposit.DepositID != id {
 		t.Fatalf("unexpected claimed confirmed jobs: %#v", claimedConfirmed)
+	}
+}
+
+func TestStore_ApplyBatchOutcome_RequeuesUnresolvedDeposits(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var finalizedID [32]byte
+	finalizedID[0] = 0x31
+	var unresolvedID [32]byte
+	unresolvedID[0] = 0x32
+	var cm [32]byte
+	cm[0] = 0x33
+	var recip [20]byte
+	recip[0] = 0x44
+
+	for _, id := range [][32]byte{finalizedID, unresolvedID} {
+		if _, _, err := s.UpsertConfirmed(ctx, deposit.Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     7,
+			Amount:        1000,
+			BaseRecipient: recip,
+		}); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", id[:1], err)
+		}
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x34}
+	if _, err := s.MarkBatchSubmitted(ctx, "owner-a", batchID, [][32]byte{finalizedID, unresolvedID}, cp, [][]byte{{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	var txHash [32]byte
+	txHash[0] = 0x55
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	if err := s.ApplyBatchOutcome(ctx, batchID, txHash, [][32]byte{finalizedID}, nil, "deposit skipped by bridge"); err != nil {
+		t.Fatalf("ApplyBatchOutcome: %v", err)
+	}
+
+	finalizedJob, err := s.Get(ctx, finalizedID)
+	if err != nil {
+		t.Fatalf("Get(finalized): %v", err)
+	}
+	if finalizedJob.State != deposit.StateFinalized {
+		t.Fatalf("finalized state: got %s want %s", finalizedJob.State, deposit.StateFinalized)
+	}
+
+	unresolvedJob, err := s.Get(ctx, unresolvedID)
+	if err != nil {
+		t.Fatalf("Get(unresolved): %v", err)
+	}
+	if unresolvedJob.State != deposit.StateConfirmed {
+		t.Fatalf("unresolved state: got %s want %s", unresolvedJob.State, deposit.StateConfirmed)
+	}
+	if unresolvedJob.TxHash != ([32]byte{}) {
+		t.Fatalf("unresolved tx hash should be cleared, got %x", unresolvedJob.TxHash)
+	}
+
+	attempts, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("expected submitted batch attempts to be cleared, got %d", len(attempts))
+	}
+
+	batch, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if batch.State != deposit.BatchStateClosed {
+		t.Fatalf("batch state: got %s want %s", batch.State, deposit.BatchStateClosed)
+	}
+	if batch.TxHash != ([32]byte{}) {
+		t.Fatalf("batch tx hash should be cleared, got %x", batch.TxHash)
 	}
 }
 
@@ -1387,6 +1503,9 @@ func TestStore_ClaimBatchesAndResetBatch(t *testing.T) {
 	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batch.BatchID, batch.DepositIDs, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
 		t.Fatalf("MarkBatchSubmitted: %v", err)
 	}
+	if err := s.SetBatchSubmissionTxHash(ctx, batch.BatchID, [32]byte{0xde, 0xad}); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
 
 	reset, err := s.ResetBatch(ctx, "repair-a", batchID)
 	if err != nil {
@@ -1400,6 +1519,9 @@ func TestStore_ClaimBatchesAndResetBatch(t *testing.T) {
 	}
 	if reset.ProofRequested {
 		t.Fatalf("expected proof_requested to be false after reset")
+	}
+	if reset.TxHash != ([32]byte{}) {
+		t.Fatalf("expected reset tx hash to be cleared")
 	}
 
 	attempts, err := s.ClaimSubmittedAttempts(ctx, "repair-a", 80*time.Millisecond, 10)

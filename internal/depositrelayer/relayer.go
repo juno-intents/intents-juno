@@ -538,15 +538,22 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 	}
 
 	for _, attempt := range attempts {
+		expired, expiredReason, err := r.submittedAttemptExpired(ctx, attempt)
+		if err != nil {
+			return err
+		}
 		if attempt.TxHash != ([32]byte{}) {
-			if err := r.reconcileSubmittedAttempt(ctx, attempt); err != nil {
+			if err := r.reconcileSubmittedAttempt(ctx, attempt, expired, expiredReason); err != nil {
 				return fmt.Errorf("depositrelayer: reconcile recovered batch: %w", err)
 			}
 			continue
 		}
 		if stale, reason, err := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint); err != nil {
 			return err
-		} else if stale {
+		} else if stale || expired {
+			if reason == "" {
+				reason = expiredReason
+			}
 			if err := r.resetBatch(ctx, attempt.BatchID, reason); err != nil {
 				return err
 			}
@@ -1344,7 +1351,7 @@ func (r *Relayer) MetricsSummary(ctx context.Context) (MetricsSummary, error) {
 	return summary, nil
 }
 
-func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {
+func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt, expired bool, expiredReason string) error {
 	if r.receiptReader == nil {
 		if err := r.store.FinalizeBatch(ctx, attempt.DepositIDs, attempt.Checkpoint, attempt.ProofSeal, attempt.TxHash); err != nil {
 			return fmt.Errorf("depositrelayer: finalize batch without receipt reader: %w", err)
@@ -1356,11 +1363,59 @@ func (r *Relayer) reconcileSubmittedAttempt(ctx context.Context, attempt deposit
 	receipt, err := r.receiptReader.TransactionReceipt(ctx, common.Hash(attempt.TxHash))
 	if err != nil {
 		if errors.Is(err, ethereum.NotFound) {
+			stale, staleReason, staleErr := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint)
+			if staleErr != nil {
+				return staleErr
+			}
+			if stale {
+				expired = true
+				expiredReason = staleReason
+			}
+			if !expired {
+				var stale bool
+				stale, expiredReason, err = r.submittedAttemptExpired(ctx, attempt)
+				if err != nil {
+					return err
+				}
+				expired = stale
+			}
+			if !expired {
+				return nil
+			}
+			if err := r.store.RequeueSubmittedBatch(ctx, attempt.BatchID); err != nil {
+				return fmt.Errorf("depositrelayer: requeue stale submitted batch %x: %w", attempt.BatchID[:8], err)
+			}
+			delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(attempt.DepositIDs)))
+			r.log.Info("requeued stale submitted batch",
+				"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
+				"reason", expiredReason,
+				"items", len(attempt.DepositIDs),
+			)
 			return nil
 		}
 		return fmt.Errorf("depositrelayer: fetch receipt for recovered batch: %w", err)
 	}
 	return r.applyBatchOutcome(ctx, attempt.BatchID, attempt.DepositIDs, attempt.TxHash, receipt)
+}
+
+func (r *Relayer) submittedAttemptExpired(ctx context.Context, attempt deposit.SubmittedBatchAttempt) (bool, string, error) {
+	batch, err := r.store.GetBatch(ctx, attempt.BatchID)
+	if err != nil {
+		return false, "", fmt.Errorf("depositrelayer: load submitted batch %x: %w", attempt.BatchID[:8], err)
+	}
+
+	now := r.cfg.Now().UTC()
+	if !batch.LeaseExpiresAt.IsZero() && !batch.LeaseExpiresAt.After(now) {
+		return true, "submitted_batch_lease_expired", nil
+	}
+	startedAt := batch.ClosedAt
+	if startedAt.IsZero() {
+		startedAt = batch.StartedAt
+	}
+	if !startedAt.IsZero() && now.Sub(startedAt) >= r.cfg.ClaimTTL {
+		return true, "submitted_batch_stale", nil
+	}
+	return false, "", nil
 }
 
 func (r *Relayer) applyBatchOutcomeFromHash(ctx context.Context, batchID [32]byte, depositIDs [][32]byte, cp checkpoint.Checkpoint, seal []byte, txHash [32]byte) error {
@@ -1411,6 +1466,9 @@ func (r *Relayer) applyBatchOutcome(ctx context.Context, batchID [32]byte, depos
 			"txHash", fmt.Sprintf("%x", txHash[:]),
 			"unresolved", len(unresolved),
 		)
+		if err := r.resetBatch(ctx, batchID, "partial_receipt_outcome"); err != nil {
+			return err
+		}
 	}
 	delete(r.proofAttempts, idempotency.DepositBatchIDV1(batchIDsToHashes(depositIDs)))
 	return nil

@@ -1472,9 +1472,6 @@ func (s *Store) RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) err
 	if !found {
 		return deposit.ErrNotFound
 	}
-	if attempt.TxHash != ([32]byte{}) {
-		return deposit.ErrInvalidTransition
-	}
 
 	rawIDs := make([][]byte, 0, len(attempt.DepositIDs))
 	for _, id := range attempt.DepositIDs {
@@ -1482,35 +1479,103 @@ func (s *Store) RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) err
 		copy(rawID, id[:])
 		rawIDs = append(rawIDs, rawID)
 	}
+	unresolvedIDs := make([][32]byte, 0, len(attempt.DepositIDs))
+	if len(rawIDs) > 0 {
+		rows, err := tx.Query(ctx, `
+			SELECT deposit_id, state
+			FROM deposit_jobs
+			WHERE deposit_id = ANY($1)
+			FOR UPDATE
+		`, rawIDs)
+		if err != nil {
+			return fmt.Errorf("deposit/postgres: lock requeue submitted batch rows: %w", err)
+		}
+		defer rows.Close()
+
+		statesByID := make(map[[32]byte]deposit.State, len(attempt.DepositIDs))
+		for rows.Next() {
+			var (
+				idRaw []byte
+				state int16
+			)
+			if err := rows.Scan(&idRaw, &state); err != nil {
+				return fmt.Errorf("deposit/postgres: scan requeue submitted batch row: %w", err)
+			}
+			id, err := to32(idRaw)
+			if err != nil {
+				return err
+			}
+			statesByID[id] = deposit.State(state)
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("deposit/postgres: iterate requeue submitted batch rows: %w", err)
+		}
+		for _, depositID := range attempt.DepositIDs {
+			state, ok := statesByID[depositID]
+			if !ok {
+				return deposit.ErrNotFound
+			}
+			if state != deposit.StateFinalized && state != deposit.StateRejected {
+				unresolvedIDs = append(unresolvedIDs, depositID)
+			}
+		}
+	}
 
 	if len(rawIDs) > 0 {
 		_, err = tx.Exec(ctx, `
 			UPDATE deposit_jobs
 			SET
 				state = CASE
-					WHEN state = $2 THEN $1
+					WHEN state NOT IN ($2, $3) THEN $1
 					ELSE state
 				END,
+				checkpoint_height = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE checkpoint_height
+				END,
+				checkpoint_block_hash = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE checkpoint_block_hash
+				END,
+				checkpoint_final_orchard_root = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE checkpoint_final_orchard_root
+				END,
+				checkpoint_base_chain_id = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE checkpoint_base_chain_id
+				END,
+				checkpoint_bridge_contract = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE checkpoint_bridge_contract
+				END,
 				proof_seal = CASE
-					WHEN state = $2 THEN NULL
+					WHEN state NOT IN ($2, $3) THEN NULL
 					ELSE proof_seal
 				END,
+				tx_hash = CASE
+					WHEN state NOT IN ($2, $3) THEN NULL
+					ELSE tx_hash
+				END,
 				submit_batch_id = CASE
-					WHEN submit_batch_id = $3 THEN NULL
+					WHEN state NOT IN ($2, $3) THEN NULL
 					ELSE submit_batch_id
 				END,
 				claimed_by = NULL,
 				claim_expires_at = NULL,
 				rejection_reason = CASE
-					WHEN state = $2 THEN NULL
+					WHEN state NOT IN ($2, $3) THEN NULL
 					ELSE rejection_reason
 				END,
 				updated_at = now()
 			WHERE deposit_id = ANY($4)
-		`, int16(deposit.StateConfirmed), int16(deposit.StateSubmitted), batchID[:], rawIDs)
+		`, int16(deposit.StateConfirmed), int16(deposit.StateFinalized), int16(deposit.StateRejected), rawIDs)
 		if err != nil {
 			return fmt.Errorf("deposit/postgres: requeue submitted batch rows: %w", err)
 		}
+	}
+	if err := replaceActiveBatchItemsTx(ctx, tx, batchID, unresolvedIDs); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(ctx, `DELETE FROM deposit_batch_attempts WHERE batch_id = $1`, batchID[:]); err != nil {
@@ -1523,11 +1588,13 @@ func (s *Store) RequeueSubmittedBatch(ctx context.Context, batchID [32]byte) err
 			state = $2,
 			lease_owner = NULL,
 			lease_expires_at = NULL,
+			failure_reason = NULL,
 			checkpoint_height = NULL,
 			checkpoint_block_hash = NULL,
 			checkpoint_final_orchard_root = NULL,
 			checkpoint_base_chain_id = NULL,
 			checkpoint_bridge_contract = NULL,
+			proof_requested = FALSE,
 			operator_signatures_json = '[]'::jsonb,
 			proof_seal = NULL,
 			tx_hash = NULL,
@@ -1570,16 +1637,52 @@ func (s *Store) ResetBatch(ctx context.Context, owner string, batchID [32]byte) 
 		batch.State != deposit.BatchStateSubmitted {
 		return deposit.Batch{}, deposit.ErrInvalidTransition
 	}
-	if batch.TxHash != ([32]byte{}) {
-		return deposit.Batch{}, deposit.ErrInvalidTransition
-	}
 
-	attempt, foundAttempt, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
+	_, foundAttempt, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
 	if err != nil {
 		return deposit.Batch{}, err
 	}
-	if foundAttempt && attempt.TxHash != ([32]byte{}) {
-		return deposit.Batch{}, deposit.ErrInvalidTransition
+
+	unresolvedIDs := make([][32]byte, 0, len(batch.DepositIDs))
+	if len(batch.DepositIDs) > 0 {
+		rows, err := tx.Query(ctx, `
+			SELECT deposit_id, state
+			FROM deposit_jobs
+			WHERE deposit_id = ANY($1)
+			FOR UPDATE
+		`, rawIDs(batch.DepositIDs))
+		if err != nil {
+			return deposit.Batch{}, fmt.Errorf("deposit/postgres: lock reset batch rows: %w", err)
+		}
+		defer rows.Close()
+
+		statesByID := make(map[[32]byte]deposit.State, len(batch.DepositIDs))
+		for rows.Next() {
+			var (
+				idRaw []byte
+				state int16
+			)
+			if err := rows.Scan(&idRaw, &state); err != nil {
+				return deposit.Batch{}, fmt.Errorf("deposit/postgres: scan reset batch row: %w", err)
+			}
+			id, err := to32(idRaw)
+			if err != nil {
+				return deposit.Batch{}, err
+			}
+			statesByID[id] = deposit.State(state)
+		}
+		if err := rows.Err(); err != nil {
+			return deposit.Batch{}, fmt.Errorf("deposit/postgres: iterate reset batch rows: %w", err)
+		}
+		for _, depositID := range batch.DepositIDs {
+			state, ok := statesByID[depositID]
+			if !ok {
+				return deposit.Batch{}, deposit.ErrNotFound
+			}
+			if state != deposit.StateFinalized && state != deposit.StateRejected {
+				unresolvedIDs = append(unresolvedIDs, depositID)
+			}
+		}
 	}
 
 	if len(batch.DepositIDs) > 0 {
@@ -1639,6 +1742,9 @@ func (s *Store) ResetBatch(ctx context.Context, owner string, batchID [32]byte) 
 		if _, err := tx.Exec(ctx, `DELETE FROM deposit_batch_attempts WHERE batch_id = $1`, batchID[:]); err != nil {
 			return deposit.Batch{}, fmt.Errorf("deposit/postgres: delete reset batch attempt: %w", err)
 		}
+	}
+	if err := replaceActiveBatchItemsTx(ctx, tx, batchID, unresolvedIDs); err != nil {
+		return deposit.Batch{}, err
 	}
 
 	if _, err := tx.Exec(ctx, `
@@ -1810,52 +1916,125 @@ func (s *Store) ApplyBatchOutcome(ctx context.Context, batchID [32]byte, txHash 
 
 	resolvedStateCount := len(finalizedSet) + len(rejectedSet)
 	allResolved := resolvedStateCount == len(attempt.DepositIDs)
+	unresolvedIDs := make([][32]byte, 0, len(attempt.DepositIDs))
 
 	_, err = tx.Exec(ctx, `
 		UPDATE deposit_jobs
 		SET
-			tx_hash = $2,
+			state = CASE
+				WHEN state NOT IN ($2, $3) THEN $4
+				ELSE state
+			END,
+			checkpoint_height = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE checkpoint_height
+			END,
+			checkpoint_block_hash = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE checkpoint_block_hash
+			END,
+			checkpoint_final_orchard_root = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE checkpoint_final_orchard_root
+			END,
+			checkpoint_base_chain_id = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE checkpoint_base_chain_id
+			END,
+			checkpoint_bridge_contract = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE checkpoint_bridge_contract
+			END,
+			proof_seal = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE proof_seal
+			END,
+			tx_hash = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE tx_hash
+			END,
+			submit_batch_id = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE submit_batch_id
+			END,
 			claimed_by = NULL,
 			claim_expires_at = NULL,
+			rejection_reason = CASE
+				WHEN state NOT IN ($2, $3) THEN NULL
+				ELSE rejection_reason
+			END,
 			updated_at = now()
 		WHERE deposit_id = ANY($1)
-			AND state NOT IN ($3, $4)
-	`, rawIDs, txHash[:], int16(deposit.StateFinalized), int16(deposit.StateRejected))
+	`, rawIDs, int16(deposit.StateFinalized), int16(deposit.StateRejected), int16(deposit.StateConfirmed))
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: update unresolved batch outcome rows: %w", err)
 	}
 
-	if allResolved {
-		_, err = tx.Exec(ctx, `
-			DELETE FROM deposit_batch_attempts
-			WHERE batch_id = $1
-		`, batchID[:])
-		if err != nil {
-			return fmt.Errorf("deposit/postgres: delete batch attempt after outcome: %w", err)
+	for _, id := range attempt.DepositIDs {
+		if _, ok := finalizedSet[id]; ok {
+			continue
+		}
+		if _, ok := rejectedSet[id]; ok {
+			continue
+		}
+		unresolvedIDs = append(unresolvedIDs, id)
+	}
+	if !allResolved {
+		if err := replaceActiveBatchItemsTx(ctx, tx, batchID, unresolvedIDs); err != nil {
+			return err
 		}
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE deposit_batches
-		SET
-			state = $2,
-			tx_hash = $3,
-			failure_reason = CASE
-				WHEN $4 <> '' AND $2 = $5 THEN $4
-				ELSE failure_reason
-			END,
-			updated_at = now()
+		DELETE FROM deposit_batch_attempts
 		WHERE batch_id = $1
-	`, batchID[:], int16(deposit.BatchStateSubmitted), txHash[:], rejectionReason, int16(deposit.BatchStateFailed)); err != nil {
-		return fmt.Errorf("deposit/postgres: update batch outcome metadata: %w", err)
+	`, batchID[:]); err != nil {
+		return fmt.Errorf("deposit/postgres: delete batch attempt after outcome: %w", err)
 	}
+
 	if allResolved {
 		if _, err := tx.Exec(ctx, `
 			UPDATE deposit_batches
-			SET state = $2, tx_hash = $3, updated_at = now()
+			SET
+				state = $2,
+				lease_owner = NULL,
+				lease_expires_at = NULL,
+				failure_reason = NULL,
+				checkpoint_height = NULL,
+				checkpoint_block_hash = NULL,
+				checkpoint_final_orchard_root = NULL,
+				checkpoint_base_chain_id = NULL,
+				checkpoint_bridge_contract = NULL,
+				proof_requested = FALSE,
+				operator_signatures_json = '[]'::jsonb,
+				proof_seal = NULL,
+				tx_hash = $3,
+				updated_at = now()
 			WHERE batch_id = $1
 		`, batchID[:], int16(deposit.BatchStateFinalized), txHash[:]); err != nil {
-			return fmt.Errorf("deposit/postgres: finalize batch metadata: %w", err)
+			return fmt.Errorf("deposit/postgres: finalize batch outcome metadata: %w", err)
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `
+			UPDATE deposit_batches
+			SET
+				state = $2,
+				lease_owner = NULL,
+				lease_expires_at = NULL,
+				failure_reason = NULL,
+				checkpoint_height = NULL,
+				checkpoint_block_hash = NULL,
+				checkpoint_final_orchard_root = NULL,
+				checkpoint_base_chain_id = NULL,
+				checkpoint_bridge_contract = NULL,
+				proof_requested = FALSE,
+				operator_signatures_json = '[]'::jsonb,
+				proof_seal = NULL,
+				tx_hash = NULL,
+				updated_at = now()
+			WHERE batch_id = $1
+		`, batchID[:], int16(deposit.BatchStateClosed)); err != nil {
+			return fmt.Errorf("deposit/postgres: close batch outcome metadata: %w", err)
 		}
 	}
 

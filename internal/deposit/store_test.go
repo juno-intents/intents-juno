@@ -1210,6 +1210,9 @@ func TestMemoryStore_ResetBatchClearsSubmittedMetadataAndRequeuesDeposits(t *tes
 	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batch.BatchID, batch.DepositIDs, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
 		t.Fatalf("MarkBatchSubmitted: %v", err)
 	}
+	if err := s.SetBatchSubmissionTxHash(ctx, batch.BatchID, [32]byte{0xde, 0xad}); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
 
 	reset, err := s.ResetBatch(ctx, "repair-a", batchID)
 	if err != nil {
@@ -1229,6 +1232,9 @@ func TestMemoryStore_ResetBatchClearsSubmittedMetadataAndRequeuesDeposits(t *tes
 	}
 	if len(reset.ProofSeal) != 0 {
 		t.Fatalf("expected proof seal to be cleared")
+	}
+	if reset.TxHash != ([32]byte{}) {
+		t.Fatalf("expected reset tx hash to be cleared")
 	}
 
 	attempts, err := s.ClaimSubmittedAttempts(ctx, "repair-a", 80*time.Millisecond, 10)
@@ -1264,6 +1270,163 @@ func TestMemoryStore_ResetBatchClearsSubmittedMetadataAndRequeuesDeposits(t *tes
 	}
 	if len(confirmed) != 2 {
 		t.Fatalf("expected two confirmed deposits after reset, got %d", len(confirmed))
+	}
+}
+
+func TestMemoryStore_RequeueSubmittedBatch_ClearsRecordedTxHash(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var id [32]byte
+	id[0] = 0x31
+
+	var cm [32]byte
+	cm[0] = 0x32
+
+	var recip [20]byte
+	recip[19] = 0x33
+
+	dep := Deposit{
+		DepositID:     id,
+		Commitment:    cm,
+		LeafIndex:     7,
+		Amount:        1000,
+		BaseRecipient: recip,
+	}
+	if _, _, err := s.UpsertConfirmed(ctx, dep); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x34}
+	if _, err := s.MarkBatchSubmitted(ctx, "worker-a", batchID, [][32]byte{id}, cp, [][]byte{{0xaa}}, []byte{0x99}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	var txHash [32]byte
+	txHash[0] = 0x77
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	if err := s.RequeueSubmittedBatch(ctx, batchID); err != nil {
+		t.Fatalf("RequeueSubmittedBatch: %v", err)
+	}
+
+	job, err := s.Get(ctx, id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != StateConfirmed {
+		t.Fatalf("job state: got %s want %s", job.State, StateConfirmed)
+	}
+	if job.TxHash != ([32]byte{}) {
+		t.Fatalf("expected tx hash to be cleared, got %x", job.TxHash)
+	}
+
+	claimed, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("expected submitted batch attempts to be cleared, got %d", len(claimed))
+	}
+}
+
+func TestMemoryStore_ApplyBatchOutcome_RequeuesUnresolvedDeposits(t *testing.T) {
+	t.Parallel()
+
+	s := NewMemoryStore()
+	ctx := context.Background()
+
+	var finalizedID [32]byte
+	finalizedID[0] = 0x41
+	var unresolvedID [32]byte
+	unresolvedID[0] = 0x42
+	var cm [32]byte
+	cm[0] = 0x43
+	var recip [20]byte
+	recip[19] = 0x44
+
+	for _, id := range [][32]byte{finalizedID, unresolvedID} {
+		if _, _, err := s.UpsertConfirmed(ctx, Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     7,
+			Amount:        1000,
+			BaseRecipient: recip,
+		}); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", id[:1], err)
+		}
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x45}
+	if _, err := s.MarkBatchSubmitted(ctx, "owner-a", batchID, [][32]byte{finalizedID, unresolvedID}, cp, [][]byte{{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	var txHash [32]byte
+	txHash[0] = 0x55
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	if err := s.ApplyBatchOutcome(ctx, batchID, txHash, [][32]byte{finalizedID}, nil, "deposit skipped by bridge"); err != nil {
+		t.Fatalf("ApplyBatchOutcome: %v", err)
+	}
+
+	finalizedJob, err := s.Get(ctx, finalizedID)
+	if err != nil {
+		t.Fatalf("Get(finalized): %v", err)
+	}
+	if finalizedJob.State != StateFinalized {
+		t.Fatalf("finalized state: got %s want %s", finalizedJob.State, StateFinalized)
+	}
+
+	unresolvedJob, err := s.Get(ctx, unresolvedID)
+	if err != nil {
+		t.Fatalf("Get(unresolved): %v", err)
+	}
+	if unresolvedJob.State != StateConfirmed {
+		t.Fatalf("unresolved state: got %s want %s", unresolvedJob.State, StateConfirmed)
+	}
+	if unresolvedJob.TxHash != ([32]byte{}) {
+		t.Fatalf("unresolved tx hash should be cleared, got %x", unresolvedJob.TxHash)
+	}
+	if unresolvedJob.RejectionReason != "" {
+		t.Fatalf("unresolved rejection reason should be cleared, got %q", unresolvedJob.RejectionReason)
+	}
+
+	batch, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if batch.State != BatchStateClosed {
+		t.Fatalf("batch state: got %s want %s", batch.State, BatchStateClosed)
+	}
+	if batch.TxHash != ([32]byte{}) {
+		t.Fatalf("batch tx hash should be cleared, got %x", batch.TxHash)
+	}
+
+	claimed, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(claimed) != 0 {
+		t.Fatalf("expected submitted batch attempts to be cleared, got %d", len(claimed))
 	}
 }
 

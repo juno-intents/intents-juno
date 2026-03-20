@@ -218,10 +218,22 @@ func (e *Engine) checkStuckDepositBatches(ctx context.Context) {
 		return
 	}
 
-	if count > 0 {
+	var submittedAttemptCount int
+	err = e.cfg.Pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM deposit_batch_attempts
+		WHERE updated_at < now() - make_interval(mins := $1)`,
+		minutes,
+	).Scan(&submittedAttemptCount)
+	if err != nil {
+		slog.Warn("alert check: stuck deposit attempt query failed", "error", err)
+		return
+	}
+
+	total := count + submittedAttemptCount
+	if total > 0 {
 		e.fireIfNew(ctx, ruleID, SeverityWarning,
 			"Stuck deposit jobs detected",
-			fmt.Sprintf("%d deposit jobs not finalized and idle for >%d minutes", count, minutes))
+			fmt.Sprintf("%d deposit jobs and %d submitted batch attempts not finalized and idle for >%d minutes", count, submittedAttemptCount, minutes))
 	} else {
 		e.autoResolve(ctx, ruleID)
 	}
