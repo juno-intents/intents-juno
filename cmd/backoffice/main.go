@@ -289,6 +289,22 @@ func main() {
 		log.Error("ensure alert schema", "err", err)
 		os.Exit(2)
 	}
+	alertEngine, err := alerts.NewEngine(backofficeAlertEngineConfig(
+		pool,
+		baseClient,
+		operatorAddresses,
+		sp1Requestor,
+		serviceEntries,
+		*alertCheckInterval,
+		operatorGasMinWei,
+		proverFundsMinWei,
+	))
+	if err != nil {
+		log.Error("init alert engine", "err", err)
+		os.Exit(2)
+	}
+	go alertEngine.Start(ctx)
+	defer alertEngine.Stop()
 
 	runtimeStore, err := runtimeconfig.New(pool)
 	if err != nil {
@@ -502,4 +518,39 @@ func chainReadinessCheck(reader chainIDReader) func(context.Context) error {
 		_, err := reader.ChainID(ctx)
 		return err
 	}
+}
+
+func backofficeAlertEngineConfig(
+	pool *pgxpool.Pool,
+	baseClient *ethclient.Client,
+	operatorAddresses []common.Address,
+	sp1Requestor common.Address,
+	serviceEntries []backoffice.ServiceEntry,
+	checkInterval time.Duration,
+	operatorGasMinWei *big.Int,
+	proverFundsMinWei *big.Int,
+) alerts.EngineConfig {
+	return alerts.EngineConfig{
+		CheckInterval:       checkInterval,
+		Pool:                pool,
+		EthClient:           baseClient,
+		OperatorAddresses:   append([]common.Address(nil), operatorAddresses...),
+		SP1RequestorAddress: sp1Requestor,
+		ServiceURLs:         serviceEntryURLs(serviceEntries),
+		OperatorGasMinWei:   operatorGasMinWei,
+		ProverFundsMinWei:   proverFundsMinWei,
+	}
+}
+
+func serviceEntryURLs(entries []backoffice.ServiceEntry) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	urls := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if url := strings.TrimSpace(entry.URL); url != "" {
+			urls = append(urls, url)
+		}
+	}
+	return urls
 }
