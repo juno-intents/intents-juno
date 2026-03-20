@@ -3,13 +3,16 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/hex"
 	"strings"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdrawfinalizer"
 	"github.com/juno-intents/intents-juno/internal/witnessextract"
+	"github.com/juno-intents/intents-juno/internal/witnessitem"
 )
 
 func TestValidateWithdrawProofInputConfig_RequiresOWalletOVK(t *testing.T) {
@@ -311,6 +314,76 @@ func TestWithdrawWitnessExtractor_ExtractFallbacksByExpectedValue(t *testing.T) 
 	}
 }
 
+func TestWithdrawWitnessExtractor_RefreshUsesAnchorAndStoredWitness(t *testing.T) {
+	t.Parallel()
+
+	originalAuth := testAuthPathHex()
+	refreshedAuth := testAuthPathHexWithSeed(0x44)
+	action := testRPCAction()
+
+	var withdrawalID [32]byte
+	withdrawalID[0] = 0xaa
+	recipientRaw := bytes.Repeat([]byte{0x7a}, 43)
+	var recipientRawFixed [43]byte
+	copy(recipientRawFixed[:], recipientRaw)
+
+	originalWitness, err := witnessitem.EncodeWithdrawItem(
+		withdrawalID,
+		recipientRawFixed,
+		7,
+		mustAuthPathFromHex(t, originalAuth),
+		witnessitem.OrchardAction{
+			Nullifier:     action.Nullifier,
+			RK:            action.RK,
+			CMX:           action.CMX,
+			EphemeralKey:  action.EphemeralKey,
+			EncCiphertext: action.EncCiphertext,
+			OutCiphertext: action.OutCiphertext,
+			CV:            action.CV,
+		},
+	)
+	if err != nil {
+		t.Fatalf("EncodeWithdrawItem: %v", err)
+	}
+
+	scan := &stubWitnessScanClient{
+		witness: witnessextract.WitnessResponse{
+			AnchorHeight: 654,
+			Root:         "0x" + strings.Repeat("ef", 32),
+			Paths: []witnessextract.WitnessPath{
+				{
+					Position: 7,
+					AuthPath: refreshedAuth,
+				},
+			},
+		},
+	}
+	extractor := &withdrawWitnessExtractor{
+		walletID: "wallet-1",
+		builder:  witnessextract.New(scan, &stubWitnessRPCClient{}),
+	}
+
+	root, refreshed, err := extractor.RefreshWithdrawWitness(context.Background(), 654, originalWitness)
+	if err != nil {
+		t.Fatalf("RefreshWithdrawWitness: %v", err)
+	}
+	if root != common.HexToHash(scan.witness.Root) {
+		t.Fatalf("root mismatch: got=%s want=%s", root.Hex(), common.HexToHash(scan.witness.Root).Hex())
+	}
+	if scan.gotAnchorHeight == nil || *scan.gotAnchorHeight != 654 {
+		t.Fatalf("anchor height: got %v want 654", scan.gotAnchorHeight)
+	}
+	if len(scan.gotPositions) != 1 || scan.gotPositions[0] != 7 {
+		t.Fatalf("positions mismatch: got=%v want=[7]", scan.gotPositions)
+	}
+	if len(refreshed) != proverinput.WithdrawWitnessItemLen {
+		t.Fatalf("refreshed witness len: got %d want %d", len(refreshed), proverinput.WithdrawWitnessItemLen)
+	}
+	if !bytes.Equal(refreshed[:32+43+4], originalWitness[:32+43+4]) {
+		t.Fatalf("identity prefix changed")
+	}
+}
+
 func TestWithdrawWitnessExtractor_ExtractDefersWhenAnchorBelowTxMinimumHeight(t *testing.T) {
 	t.Parallel()
 
@@ -379,6 +452,7 @@ type stubWitnessScanClient struct {
 	witness         witnessextract.WitnessResponse
 	gotWalletID     string
 	gotAnchorHeight *int64
+	gotPositions    []uint32
 }
 
 func (s *stubWitnessScanClient) ListWalletIDs(_ context.Context) ([]string, error) {
@@ -403,11 +477,12 @@ func (s *stubWitnessScanClient) ListWalletNotes(_ context.Context, walletID stri
 	return append([]witnessextract.WalletNote(nil), s.notes...), nil
 }
 
-func (s *stubWitnessScanClient) OrchardWitness(_ context.Context, anchorHeight *int64, _ []uint32) (witnessextract.WitnessResponse, error) {
+func (s *stubWitnessScanClient) OrchardWitness(_ context.Context, anchorHeight *int64, positions []uint32) (witnessextract.WitnessResponse, error) {
 	if anchorHeight != nil {
 		v := *anchorHeight
 		s.gotAnchorHeight = &v
 	}
+	s.gotPositions = append([]uint32(nil), positions...)
 	return s.witness, nil
 }
 
@@ -436,11 +511,37 @@ func testRPCAction() junorpc.OrchardAction {
 }
 
 func testAuthPathHex() []string {
+	return testAuthPathHexWithSeed(0x01)
+}
+
+func testAuthPathHexWithSeed(seed byte) []string {
 	out := make([]string, 32)
 	for i := 0; i < 32; i++ {
 		chunk := make([]byte, 32)
-		chunk[0] = byte(i + 1)
+		chunk[0] = seed + byte(i)
 		out[i] = "0x" + bytesToHex(chunk)
+	}
+	return out
+}
+
+func mustAuthPathFromHex(t *testing.T, pathHex []string) [][32]byte {
+	t.Helper()
+
+	if len(pathHex) != 32 {
+		t.Fatalf("auth path len: got=%d want=32", len(pathHex))
+	}
+	out := make([][32]byte, 0, len(pathHex))
+	for i, raw := range pathHex {
+		b, err := hex.DecodeString(strings.TrimPrefix(raw, "0x"))
+		if err != nil {
+			t.Fatalf("decode auth path[%d]: %v", i, err)
+		}
+		if len(b) != 32 {
+			t.Fatalf("auth path[%d] len: got=%d want=32", i, len(b))
+		}
+		var item [32]byte
+		copy(item[:], b)
+		out = append(out, item)
 	}
 	return out
 }

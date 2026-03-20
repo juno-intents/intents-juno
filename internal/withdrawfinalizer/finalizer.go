@@ -24,6 +24,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/proofclient"
 	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
+	"github.com/juno-intents/intents-juno/internal/witnessextract"
 )
 
 var (
@@ -50,6 +51,10 @@ type WithdrawWitnessExtractRequest struct {
 
 type WithdrawWitnessExtractor interface {
 	ExtractWithdrawWitness(ctx context.Context, req WithdrawWitnessExtractRequest) ([]byte, error)
+}
+
+type WithdrawWitnessRefresher interface {
+	RefreshWithdrawWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error)
 }
 
 type CheckpointPackage struct {
@@ -348,6 +353,31 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 				RecipientUA:      append([]byte(nil), w.RecipientUA...),
 			})
 			if err != nil {
+				if errors.Is(err, witnessextract.ErrNoteNotFound) && len(w.ProofWitnessItem) > 0 {
+					refresher, ok := f.witnessExtractor.(WithdrawWitnessRefresher)
+					if ok {
+						refreshedRoot, refreshedWitness, refreshErr := refresher.RefreshWithdrawWitness(workCtx, anchorHeight, w.ProofWitnessItem)
+						if refreshErr != nil {
+							return heartbeat.Wrap(fmt.Errorf("withdrawfinalizer: refresh proof witness item: %w", refreshErr))
+						}
+						if refreshedRoot != cp.FinalOrchardRoot {
+							return heartbeat.Wrap(fmt.Errorf(
+								"withdrawfinalizer: refreshed proof witness root mismatch: got %s want %s",
+								refreshedRoot.Hex(),
+								cp.FinalOrchardRoot.Hex(),
+							))
+						}
+						f.log.Info(
+							"refreshed stored withdraw witness after note lookup miss",
+							"batchID", hex.EncodeToString(batchID[:]),
+							"withdrawalID", hex.EncodeToString(w.ID[:]),
+							"checkpointHeight", cp.Height,
+						)
+						witnessItem = append([]byte(nil), refreshedWitness...)
+						witnessItems = append(witnessItems, witnessItem)
+						continue
+					}
+				}
 				return heartbeat.Wrap(fmt.Errorf("withdrawfinalizer: extract proof witness item: %w", err))
 			}
 			if len(extracted) == 0 {

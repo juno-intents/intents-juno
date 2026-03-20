@@ -12,6 +12,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
+	"github.com/juno-intents/intents-juno/internal/proverinput"
 	"github.com/juno-intents/intents-juno/internal/witnessitem"
 )
 
@@ -151,6 +152,42 @@ func (b *Builder) RefreshDepositWitness(ctx context.Context, anchorHeight int64,
 		return common.Hash{}, nil, err
 	}
 	refreshed, err := witnessitem.EncodeDepositItem(position, authPath, action)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	return root, refreshed, nil
+}
+
+func (b *Builder) RefreshWithdrawWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error) {
+	if b == nil || b.scan == nil {
+		return common.Hash{}, nil, fmt.Errorf("%w: nil scan client", ErrInvalidConfig)
+	}
+	if anchorHeight <= 0 {
+		return common.Hash{}, nil, fmt.Errorf("%w: anchor height must be > 0", ErrInvalidConfig)
+	}
+
+	withdrawalID, recipientRaw, position, action, err := parseWithdrawWitnessItem(witnessItem)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+
+	wit, err := b.scan.OrchardWitness(ctx, &anchorHeight, []uint32{position})
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: orchard witness: %w", err)
+	}
+	root, err := parseHash32Hex(wit.Root)
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: parse witness root: %w", err)
+	}
+	authPathHex, ok := findAuthPathForPosition(wit.Paths, position)
+	if !ok {
+		return common.Hash{}, nil, fmt.Errorf("witnessextract: witness path missing for position %d", position)
+	}
+	authPath, err := decodeAuthPathHex(authPathHex)
+	if err != nil {
+		return common.Hash{}, nil, err
+	}
+	refreshed, err := witnessitem.EncodeWithdrawItem(withdrawalID, recipientRaw, position, authPath, action)
 	if err != nil {
 		return common.Hash{}, nil, err
 	}
@@ -399,6 +436,40 @@ func parseDepositWitnessItem(item []byte) (uint32, witnessitem.OrchardAction, er
 }
 
 const witnessitemDepositLen = 4 + (32 * 32) + (32*5 + 580 + 80)
+
+func parseWithdrawWitnessItem(item []byte) ([32]byte, [43]byte, uint32, witnessitem.OrchardAction, error) {
+	if len(item) != proverinput.WithdrawWitnessItemLen {
+		return [32]byte{}, [43]byte{}, 0, witnessitem.OrchardAction{}, fmt.Errorf(
+			"witnessextract: invalid withdraw witness item length: got=%d want=%d",
+			len(item),
+			proverinput.WithdrawWitnessItemLen,
+		)
+	}
+
+	var withdrawalID [32]byte
+	copy(withdrawalID[:], item[:32])
+	var recipientRaw [43]byte
+	copy(recipientRaw[:], item[32:32+43])
+	leafIndex := binary.LittleEndian.Uint32(item[32+43 : 32+43+4])
+	offset := 32 + 43 + 4 + (32 * 32)
+
+	var action witnessitem.OrchardAction
+	copy(action.Nullifier[:], item[offset:offset+32])
+	offset += 32
+	copy(action.RK[:], item[offset:offset+32])
+	offset += 32
+	copy(action.CMX[:], item[offset:offset+32])
+	offset += 32
+	copy(action.EphemeralKey[:], item[offset:offset+32])
+	offset += 32
+	copy(action.EncCiphertext[:], item[offset:offset+580])
+	offset += 580
+	copy(action.OutCiphertext[:], item[offset:offset+80])
+	offset += 80
+	copy(action.CV[:], item[offset:offset+32])
+
+	return withdrawalID, recipientRaw, leafIndex, action, nil
+}
 
 func parseHash32Hex(raw string) (common.Hash, error) {
 	b, err := decodeHexFixed(raw, 32)

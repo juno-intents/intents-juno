@@ -302,6 +302,73 @@ func TestBuilder_BuildWithdraw_FallbackWalletIDByTxMatch(t *testing.T) {
 	}
 }
 
+func TestBuilder_RefreshWithdrawWitness_Success(t *testing.T) {
+	t.Parallel()
+
+	originalAuth := testAuthPathHex()
+	refreshedAuth := testAuthPathHexWithSeed(0x91)
+	action := testRPCAction()
+
+	var withdrawalID [32]byte
+	withdrawalID[0] = 0xaa
+	var recipientRaw [43]byte
+	recipientRaw[0] = 0xbb
+
+	originalWitness, err := witnessitem.EncodeWithdrawItem(
+		withdrawalID,
+		recipientRaw,
+		7,
+		mustAuthPathFromHex(t, originalAuth),
+		toWitnessAction(action),
+	)
+	if err != nil {
+		t.Fatalf("EncodeWithdrawItem: %v", err)
+	}
+
+	scan := &stubScan{
+		witness: WitnessResponse{
+			AnchorHeight: 654,
+			Root:         "0x" + strings.Repeat("ef", 32),
+			Paths: []WitnessPath{
+				{
+					Position: 7,
+					AuthPath: refreshedAuth,
+				},
+			},
+		},
+	}
+
+	b := New(scan, &stubRPC{})
+	root, refreshed, err := b.RefreshWithdrawWitness(context.Background(), 654, originalWitness)
+	if err != nil {
+		t.Fatalf("RefreshWithdrawWitness: %v", err)
+	}
+	if root != common.HexToHash(scan.witness.Root) {
+		t.Fatalf("root mismatch: got=%s want=%s", root.Hex(), common.HexToHash(scan.witness.Root).Hex())
+	}
+	if scan.gotAnchorHeight == nil || *scan.gotAnchorHeight != 654 {
+		t.Fatalf("anchor height mismatch: got=%v want=654", scan.gotAnchorHeight)
+	}
+	if len(scan.gotPositions) != 1 || scan.gotPositions[0] != 7 {
+		t.Fatalf("positions mismatch: got=%v want=[7]", scan.gotPositions)
+	}
+	if len(refreshed) != proverinput.WithdrawWitnessItemLen {
+		t.Fatalf("refreshed witness len mismatch: got=%d want=%d", len(refreshed), proverinput.WithdrawWitnessItemLen)
+	}
+	if !bytes.Equal(refreshed[:32+43+4], originalWitness[:32+43+4]) {
+		t.Fatalf("identity prefix changed")
+	}
+	if !bytes.Equal(refreshed[32+43+4+(32*32):], originalWitness[32+43+4+(32*32):]) {
+		t.Fatalf("action bytes changed")
+	}
+	if bytes.Equal(
+		refreshed[32+43+4:32+43+4+(32*32)],
+		originalWitness[32+43+4:32+43+4+(32*32)],
+	) {
+		t.Fatalf("auth path did not refresh")
+	}
+}
+
 type stubScan struct {
 	notes           []WalletNote
 	notesByWallet   map[string][]WalletNote

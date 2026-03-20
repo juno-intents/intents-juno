@@ -608,6 +608,20 @@ func (e *withdrawWitnessExtractor) ExtractWithdrawWitness(ctx context.Context, r
 	return append([]byte(nil), out.WitnessItem...), nil
 }
 
+func (e *withdrawWitnessExtractor) RefreshWithdrawWitness(ctx context.Context, anchorHeight int64, witnessItem []byte) (common.Hash, []byte, error) {
+	if e == nil || e.builder == nil {
+		return common.Hash{}, nil, fmt.Errorf("withdraw witness extractor: nil builder")
+	}
+	root, refreshed, err := e.builder.RefreshWithdrawWitness(ctx, anchorHeight, witnessItem)
+	if err != nil {
+		return common.Hash{}, nil, fmt.Errorf("withdraw witness extractor: refresh withdraw witness: %w", err)
+	}
+	if len(refreshed) == 0 {
+		return common.Hash{}, nil, fmt.Errorf("withdraw witness extractor: empty refreshed witness item")
+	}
+	return root, append([]byte(nil), refreshed...), nil
+}
+
 type scanHTTPClient struct {
 	baseURL string
 	bearer  string
