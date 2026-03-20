@@ -63,6 +63,7 @@ locals {
   shared_route_table_ids    = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
   shared_ipfs_ingress_cidrs = distinct(concat(local.shared_subnet_cidrs, var.shared_ipfs_client_cidr_blocks))
   ipfs_ami_id               = var.shared_ipfs_ami_id != "" ? var.shared_ipfs_ami_id : data.aws_ami.ubuntu.id
+  proof_role_ami_id         = trimspace(var.shared_proof_role_ami_id) != "" ? trimspace(var.shared_proof_role_ami_id) : data.aws_ami.ubuntu.id
 
   aurora_final_snapshot_identifier             = trimspace(var.shared_postgres_final_snapshot_identifier) != "" ? trimspace(var.shared_postgres_final_snapshot_identifier) : "${local.resource_slug}-shared-aurora-final"
   shared_proof_service_image_override          = trimspace(var.shared_proof_service_image)
@@ -212,12 +213,25 @@ locals {
   ipfs_lb_name                   = trim(substr("${local.resource_slug}-ipfs", 0, 32), "-")
   ipfs_target_group_name         = trim(substr("${local.resource_slug}-ipfs-api", 0, 32), "-")
   ipfs_launch_name_prefix        = trim(substr("${local.resource_slug}-ipfs-", 0, 32), "-")
+  proof_role_launch_name_prefix  = trim(substr("${local.resource_slug}-proof-", 0, 32), "-")
   wireguard_enabled              = var.shared_wireguard_enabled
   wireguard_network_prefix       = tonumber(split("/", var.shared_wireguard_network_cidr)[1])
   wireguard_gateway_tunnel_ip    = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 1) : ""
   wireguard_gateway_address_cidr = local.wireguard_enabled ? "${local.wireguard_gateway_tunnel_ip}/${local.wireguard_network_prefix}" : ""
   wireguard_client_tunnel_ip     = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 2) : ""
   wireguard_client_address_cidr  = local.wireguard_enabled ? "${local.wireguard_client_tunnel_ip}/32" : ""
+  shared_wireguard_public_subnet_ids = length(var.shared_wireguard_public_subnet_ids) > 0 ? sort(var.shared_wireguard_public_subnet_ids) : compact([
+    trimspace(var.shared_wireguard_public_subnet_id),
+  ])
+  shared_wireguard_backoffice_private_endpoint_ips = length(var.shared_wireguard_backoffice_private_endpoint_ips) > 0 ? var.shared_wireguard_backoffice_private_endpoint_ips : compact([
+    trimspace(var.shared_wireguard_backoffice_private_endpoint),
+  ])
+  shared_wireguard_named_peers = {
+    for peer in var.shared_wireguard_named_peers : peer.name => peer
+  }
+  wireguard_lb_name            = trim(substr("${local.resource_slug}-wg", 0, 32), "-")
+  wireguard_target_group_name  = trim(substr("${local.resource_slug}-wg-udp", 0, 32), "-")
+  wireguard_launch_name_prefix = trim(substr("${local.resource_slug}-wg-", 0, 32), "-")
 }
 
 check "distinct_proof_secret_arns" {
@@ -237,11 +251,39 @@ check "proof_service_image_ecr_scope" {
 check "shared_wireguard_inputs_when_enabled" {
   assert {
     condition = !local.wireguard_enabled || (
-      trimspace(var.shared_wireguard_public_subnet_id) != "" &&
+      length(local.shared_wireguard_public_subnet_ids) > 0 &&
       trimspace(var.shared_wireguard_backoffice_hostname) != "" &&
-      can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", trimspace(var.shared_wireguard_backoffice_private_endpoint)))
+      length(local.shared_wireguard_backoffice_private_endpoint_ips) > 0
     )
-    error_message = "shared wireguard requires shared_wireguard_public_subnet_id, shared_wireguard_backoffice_hostname, and an IPv4 shared_wireguard_backoffice_private_endpoint."
+    error_message = "shared wireguard requires public subnet IDs, shared_wireguard_backoffice_hostname, and at least one private backoffice endpoint IP."
+  }
+}
+
+check "shared_proof_role_capacity_bounds" {
+  assert {
+    condition     = var.shared_proof_role_min_size == 0 || var.shared_proof_role_desired_capacity >= var.shared_proof_role_min_size
+    error_message = "shared proof role desired capacity must be >= min size when the proof role is enabled."
+  }
+}
+
+check "shared_proof_role_max_capacity_bounds" {
+  assert {
+    condition     = var.shared_proof_role_max_size >= var.shared_proof_role_desired_capacity
+    error_message = "shared proof role max size must be >= desired capacity."
+  }
+}
+
+check "shared_wireguard_capacity_bounds" {
+  assert {
+    condition     = var.shared_wireguard_min_size == 0 || var.shared_wireguard_desired_capacity >= var.shared_wireguard_min_size
+    error_message = "shared wireguard desired capacity must be >= min size when the wireguard role is enabled."
+  }
+}
+
+check "shared_wireguard_max_capacity_bounds" {
+  assert {
+    condition     = var.shared_wireguard_max_size >= var.shared_wireguard_desired_capacity
+    error_message = "shared wireguard max size must be >= desired capacity."
   }
 }
 
@@ -1174,12 +1216,278 @@ resource "aws_ecs_service" "proof_funder" {
   tags       = local.common_tags
 }
 
+resource "aws_security_group" "proof_role" {
+  name        = "${local.resource_name}-proof-role-sg"
+  description = "Security group for shared proof-role instances"
+  vpc_id      = data.aws_vpc.selected.id
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-proof-role"
+  })
+}
+
+data "aws_iam_policy_document" "proof_role_assume_role" {
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "proof_role" {
+  name               = "${local.resource_name}-proof-role"
+  assume_role_policy = data.aws_iam_policy_document.proof_role_assume_role.json
+  tags               = local.common_tags
+}
+
+data "aws_iam_policy_document" "proof_role_access" {
+  statement {
+    sid = "AllowECRAuthorizationToken"
+    actions = [
+      "ecr:GetAuthorizationToken",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "AllowProofRoleImagePull"
+    actions = [
+      "ecr:BatchCheckLayerAvailability",
+      "ecr:BatchGetImage",
+      "ecr:GetDownloadUrlForLayer",
+    ]
+    resources = [local.shared_proof_service_ecr_repository_arn]
+  }
+
+  statement {
+    sid = "AllowProofRoleSecretRead"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = [
+      var.shared_sp1_requestor_secret_arn,
+      var.shared_sp1_funder_secret_arn,
+      aws_secretsmanager_secret.shared_postgres_dsn.arn,
+    ]
+  }
+
+  statement {
+    sid = "AllowProofRoleLogWrite"
+    actions = [
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+    ]
+    resources = [
+      "${trimsuffix(aws_cloudwatch_log_group.proof_requestor.arn, ":*")}:log-stream:*",
+      "${trimsuffix(aws_cloudwatch_log_group.proof_funder.arn, ":*")}:log-stream:*",
+    ]
+  }
+
+  statement {
+    sid = "AllowProofRoleKafkaAccess"
+    actions = [
+      "kafka-cluster:Connect",
+      "kafka-cluster:AlterGroup",
+      "kafka-cluster:DescribeCluster",
+      "kafka-cluster:DescribeGroup",
+      "kafka-cluster:DescribeTopic",
+      "kafka-cluster:ReadData",
+      "kafka-cluster:WriteData",
+    ]
+    resources = [
+      local.shared_kafka_cluster_arn,
+      "${local.shared_kafka_topic_arn_prefix}/*",
+      "${local.shared_kafka_group_arn_prefix}/*",
+    ]
+  }
+}
+
+resource "aws_iam_role_policy" "proof_role_access" {
+  name   = "${local.resource_name}-proof-role-access"
+  role   = aws_iam_role.proof_role.id
+  policy = data.aws_iam_policy_document.proof_role_access.json
+}
+
+resource "aws_iam_instance_profile" "proof_role" {
+  name = "${local.resource_name}-proof-role"
+  role = aws_iam_role.proof_role.name
+}
+
+resource "aws_launch_template" "proof_role" {
+  name_prefix            = local.proof_role_launch_name_prefix
+  image_id               = local.proof_role_ami_id
+  instance_type          = var.shared_proof_role_instance_type
+  update_default_version = true
+  vpc_security_group_ids = [aws_security_group.proof_role.id]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.proof_role.name
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_size           = var.shared_proof_role_root_volume_size_gb
+      volume_type           = "gp3"
+      delete_on_termination = true
+      encrypted             = true
+    }
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl jq unzip
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) awscli_arch="x86_64" ;;
+      aarch64|arm64) awscli_arch="aarch64" ;;
+      *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    rm -rf /tmp/aws
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+
+    install -d -m 0755 /etc/intents-juno /var/lib/intents-juno
+    requestor_secret_arn="${var.shared_sp1_requestor_secret_arn}"
+    funder_secret_arn="${var.shared_sp1_funder_secret_arn}"
+    postgres_dsn_secret_arn="${aws_secretsmanager_secret.shared_postgres_dsn.arn}"
+
+    cat >/usr/local/bin/render-proof-env.sh <<SCRIPT
+    #!/usr/bin/env bash
+    set -euo pipefail
+    service_name="$$1"
+    requestor_secret_arn="${var.shared_sp1_requestor_secret_arn}"
+    funder_secret_arn="${var.shared_sp1_funder_secret_arn}"
+    postgres_dsn_secret_arn="${aws_secretsmanager_secret.shared_postgres_dsn.arn}"
+    requestor_key="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$requestor_secret_arn" --query 'SecretString' --output text)"
+    funder_key="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$funder_secret_arn" --query 'SecretString' --output text)"
+    postgres_dsn="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$postgres_dsn_secret_arn" --query 'SecretString' --output text)"
+    case "$$service_name" in
+      requestor)
+        cat >/etc/intents-juno/proof-requestor.env <<ENVEOF
+    POSTGRES_DSN=$$postgres_dsn
+    PROOF_REQUESTOR_KEY=$$requestor_key
+    ENVEOF
+        ;;
+      funder)
+        cat >/etc/intents-juno/proof-funder.env <<ENVEOF
+    POSTGRES_DSN=$$postgres_dsn
+    PROOF_FUNDER_KEY=$$funder_key
+    ENVEOF
+        ;;
+      *)
+        echo "unknown proof env target: $$service_name" >&2
+        exit 1
+        ;;
+    esac
+    SCRIPT
+    chmod 0755 /usr/local/bin/render-proof-env.sh
+
+    cat >/etc/systemd/system/proof-requestor.service <<UNITEOF
+    [Unit]
+    Description=Shared proof requestor
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    ExecStartPre=/usr/local/bin/render-proof-env.sh requestor
+    EnvironmentFile=/etc/intents-juno/proof-requestor.env
+    ExecStart=/usr/local/bin/proof-requestor --postgres-dsn-env POSTGRES_DSN --store-driver postgres --owner ${local.resource_name}-proof-requestor --sp1-requestor-address ${local.shared_sp1_requestor_address} --sp1-requestor-key-env PROOF_REQUESTOR_KEY --secrets-driver env --chain-id ${var.shared_base_chain_id} --input-topic ${local.shared_proof_request_topic} --result-topic ${local.shared_proof_result_topic} --failure-topic ${local.shared_proof_failure_topic} --queue-driver kafka --queue-brokers ${local.shared_kafka_bootstrap_brokers} --queue-group ${local.shared_proof_requestor_group} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    UNITEOF
+
+    cat >/etc/systemd/system/proof-funder.service <<UNITEOF
+    [Unit]
+    Description=Shared proof funder
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    ExecStartPre=/usr/local/bin/render-proof-env.sh funder
+    EnvironmentFile=/etc/intents-juno/proof-funder.env
+    ExecStart=/usr/local/bin/proof-funder --postgres-dsn-env POSTGRES_DSN --lease-driver postgres --owner-id ${local.resource_name}-proof-funder --sp1-requestor-address ${local.shared_sp1_requestor_address} --min-balance-wei ${local.shared_sp1_required_credit_buffer} --critical-balance-wei ${local.shared_sp1_projected_with_overhead} --queue-driver kafka --queue-brokers ${local.shared_kafka_bootstrap_brokers} --sp1-bin /usr/local/bin/sp1-prover-adapter
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    UNITEOF
+
+    systemctl daemon-reload
+    if [[ -x /usr/local/bin/proof-requestor ]]; then
+      systemctl enable --now proof-requestor.service
+    fi
+    if [[ -x /usr/local/bin/proof-funder ]]; then
+      systemctl enable --now proof-funder.service
+    fi
+  EOF
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-proof-role"
+    })
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_autoscaling_group" "proof_role" {
+  name                      = "${local.resource_name}-proof-role"
+  min_size                  = var.shared_proof_role_min_size
+  max_size                  = var.shared_proof_role_max_size
+  desired_capacity          = var.shared_proof_role_desired_capacity
+  health_check_type         = "EC2"
+  health_check_grace_period = 300
+  vpc_zone_identifier       = local.shared_subnets
+
+  launch_template {
+    id      = aws_launch_template.proof_role.id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${local.resource_name}-proof-role"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
 resource "aws_lb" "ipfs" {
-  name               = local.ipfs_lb_name
-  internal           = true
-  load_balancer_type = "network"
+  name                             = local.ipfs_lb_name
+  internal                         = true
+  load_balancer_type               = "network"
   enable_cross_zone_load_balancing = true
-  subnets            = local.shared_subnets
+  subnets                          = local.shared_subnets
 
   lifecycle {
     precondition {
@@ -1420,6 +1728,306 @@ resource "aws_autoscaling_group" "ipfs" {
       condition     = var.shared_ipfs_desired_capacity >= var.shared_ipfs_min_size && var.shared_ipfs_desired_capacity <= var.shared_ipfs_max_size
       error_message = "shared_ipfs_desired_capacity must be between shared_ipfs_min_size and shared_ipfs_max_size."
     }
+  }
+}
+
+resource "aws_security_group" "wireguard_role" {
+  count       = local.wireguard_enabled ? 1 : 0
+  name        = "${local.resource_name}-wireguard-role-sg"
+  description = "Security group for active-active WireGuard gateway instances"
+  vpc_id      = data.aws_vpc.selected.id
+
+  ingress {
+    description = "WireGuard ingress"
+    from_port   = var.shared_wireguard_listen_port
+    to_port     = var.shared_wireguard_listen_port
+    protocol    = "udp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Health checks from the VPC"
+    from_port   = 8080
+    to_port     = 8080
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard-role"
+  })
+}
+
+data "aws_iam_policy_document" "wireguard_role_assume_role" {
+  count = local.wireguard_enabled ? 1 : 0
+
+  statement {
+    actions = ["sts:AssumeRole"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["ec2.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "wireguard_role" {
+  count              = local.wireguard_enabled ? 1 : 0
+  name               = "${local.resource_name}-wireguard-role-v2"
+  assume_role_policy = data.aws_iam_policy_document.wireguard_role_assume_role[0].json
+  tags               = local.common_tags
+}
+
+resource "aws_secretsmanager_secret" "shared_wireguard_server_key" {
+  count = local.wireguard_enabled ? 1 : 0
+  name  = "${local.resource_name}-wireguard-server-key"
+  tags  = local.common_tags
+}
+
+resource "aws_secretsmanager_secret" "shared_wireguard_peer_config" {
+  for_each = local.shared_wireguard_named_peers
+
+  name = "${local.resource_name}-wireguard-peer-${each.key}"
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard-peer-${each.key}"
+  })
+}
+
+data "aws_iam_policy_document" "wireguard_role_access" {
+  count = local.wireguard_enabled ? 1 : 0
+
+  statement {
+    sid = "AllowWireGuardSecretReads"
+    actions = [
+      "secretsmanager:DescribeSecret",
+      "secretsmanager:GetSecretValue",
+    ]
+    resources = concat(
+      [aws_secretsmanager_secret.shared_wireguard_server_key[0].arn],
+      [for peer in values(local.shared_wireguard_named_peers) : peer.public_key_secret_arn],
+    )
+  }
+}
+
+resource "aws_iam_role_policy" "wireguard_role_access" {
+  count  = local.wireguard_enabled ? 1 : 0
+  name   = "${local.resource_name}-wireguard-role-access"
+  role   = aws_iam_role.wireguard_role[0].id
+  policy = data.aws_iam_policy_document.wireguard_role_access[0].json
+}
+
+resource "aws_iam_instance_profile" "wireguard_role" {
+  count = local.wireguard_enabled ? 1 : 0
+  name  = "${local.resource_name}-wireguard-role"
+  role  = aws_iam_role.wireguard_role[0].name
+}
+
+resource "aws_lb" "wireguard" {
+  count                            = local.wireguard_enabled ? 1 : 0
+  name                             = local.wireguard_lb_name
+  internal                         = false
+  load_balancer_type               = "network"
+  enable_cross_zone_load_balancing = true
+  subnets                          = local.shared_wireguard_public_subnet_ids
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard-role"
+  })
+}
+
+resource "aws_lb_target_group" "wireguard_udp" {
+  count       = local.wireguard_enabled ? 1 : 0
+  name        = local.wireguard_target_group_name
+  port        = var.shared_wireguard_listen_port
+  protocol    = "UDP"
+  target_type = "instance"
+  vpc_id      = data.aws_vpc.selected.id
+
+  health_check {
+    protocol = "HTTP"
+    port     = "8080"
+    path     = "/healthz"
+  }
+
+  tags = merge(local.common_tags, {
+    Name = "${local.resource_name}-wireguard-role"
+  })
+}
+
+resource "aws_lb_listener" "wireguard_udp" {
+  count             = local.wireguard_enabled ? 1 : 0
+  load_balancer_arn = aws_lb.wireguard[0].arn
+  port              = var.shared_wireguard_listen_port
+  protocol          = "UDP"
+
+  default_action {
+    type             = "forward"
+    target_group_arn = aws_lb_target_group.wireguard_udp[0].arn
+  }
+}
+
+resource "aws_launch_template" "wireguard_role" {
+  count                  = local.wireguard_enabled ? 1 : 0
+  name_prefix            = local.wireguard_launch_name_prefix
+  image_id               = data.aws_ami.ubuntu.id
+  instance_type          = var.shared_wireguard_instance_type
+  update_default_version = true
+  vpc_security_group_ids = [aws_security_group.wireguard_role[0].id]
+
+  iam_instance_profile {
+    name = aws_iam_instance_profile.wireguard_role[0].name
+  }
+
+  block_device_mappings {
+    device_name = "/dev/sda1"
+
+    ebs {
+      volume_size           = 20
+      volume_type           = "gp3"
+      delete_on_termination = true
+      encrypted             = true
+    }
+  }
+
+  user_data = base64encode(<<-EOF
+    #!/usr/bin/env bash
+    set -euo pipefail
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -y
+    apt-get install -y ca-certificates curl dnsmasq iptables jq python3 unzip wireguard
+    arch="$(uname -m)"
+    case "$arch" in
+      x86_64) awscli_arch="x86_64" ;;
+      aarch64|arm64) awscli_arch="aarch64" ;;
+      *) echo "unsupported AWS CLI architecture: $arch" >&2; exit 1 ;;
+    esac
+    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-$${awscli_arch}.zip" -o /tmp/awscliv2.zip
+    rm -rf /tmp/aws
+    unzip -q /tmp/awscliv2.zip -d /tmp
+    /tmp/aws/install --bin-dir /usr/local/bin --install-dir /usr/local/aws-cli --update
+    rm -rf /tmp/aws /tmp/awscliv2.zip
+
+    wireguard_server_key_secret_arn="${aws_secretsmanager_secret.shared_wireguard_server_key[0].arn}"
+    wireguard_gateway_address_cidr="${local.wireguard_gateway_address_cidr}"
+    wireguard_gateway_tunnel_ip="${local.wireguard_gateway_tunnel_ip}"
+    wireguard_network_cidr="${var.shared_wireguard_network_cidr}"
+    wireguard_listen_port="${var.shared_wireguard_listen_port}"
+    wireguard_upstream_dns="169.254.169.253"
+    default_iface="$(ip route show default | awk '/default/ {print $5; exit}')"
+    server_private_key="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$wireguard_server_key_secret_arn" --query 'SecretString' --output text)"
+
+    install -d -m 0700 /etc/wireguard /etc/intents-juno
+    cat >/etc/intents-juno/wireguard-peer-roster.json <<'JSONEOF'
+    ${jsonencode(values(local.shared_wireguard_named_peers))}
+    JSONEOF
+
+    cat >/etc/wireguard/wg0.conf <<WGEOF
+    [Interface]
+    Address = $${wireguard_gateway_address_cidr}
+    ListenPort = $${wireguard_listen_port}
+    PrivateKey = $${server_private_key}
+    PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT; iptables -t nat -A POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+    PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT; iptables -t nat -D POSTROUTING -s $${wireguard_network_cidr} -o $${default_iface} -j MASQUERADE
+    WGEOF
+
+    jq -c '.[]' /etc/intents-juno/wireguard-peer-roster.json | while read -r peer; do
+      public_key_secret_arn="$(printf '%s' "$peer" | jq -r '.public_key_secret_arn')"
+      client_address_cidr="$(printf '%s' "$peer" | jq -r '.client_address_cidr')"
+      peer_public_key="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$public_key_secret_arn" --query 'SecretString' --output text)"
+      cat >>/etc/wireguard/wg0.conf <<PEEREOF
+
+    [Peer]
+    PublicKey = $${peer_public_key}
+    AllowedIPs = $${client_address_cidr}
+    PersistentKeepalive = 25
+    PEEREOF
+    done
+
+    cat >/etc/dnsmasq.d/intents-juno-wireguard.conf <<DNSEOF
+    interface=wg0
+    bind-interfaces
+    listen-address=$${wireguard_gateway_tunnel_ip}
+    DNSEOF
+    for endpoint_ip in ${join(" ", local.shared_wireguard_backoffice_private_endpoint_ips)}; do
+      echo "address=/${var.shared_wireguard_backoffice_hostname}/$${endpoint_ip}" >>/etc/dnsmasq.d/intents-juno-wireguard.conf
+    done
+    echo "server=$${wireguard_upstream_dns}" >>/etc/dnsmasq.d/intents-juno-wireguard.conf
+
+    cat >/etc/sysctl.d/99-intents-juno-wireguard-role.conf <<SYSEOF
+    net.ipv4.ip_forward=1
+    SYSEOF
+    sysctl --system >/dev/null
+
+    install -d -m 0755 /var/lib/intents-juno/wireguard-health
+    printf 'ok\n' >/var/lib/intents-juno/wireguard-health/healthz
+    cat >/etc/systemd/system/wireguard-health.service <<HEALTHEOF
+    [Unit]
+    Description=WireGuard HTTP health endpoint
+    After=network-online.target
+    Wants=network-online.target
+
+    [Service]
+    Type=simple
+    WorkingDirectory=/var/lib/intents-juno/wireguard-health
+    ExecStart=/usr/bin/python3 -m http.server 8080 --bind 0.0.0.0
+    Restart=always
+    RestartSec=5
+
+    [Install]
+    WantedBy=multi-user.target
+    HEALTHEOF
+
+    systemctl daemon-reload
+    systemctl enable wg-quick@wg0
+    systemctl restart wg-quick@wg0
+    systemctl enable dnsmasq
+    systemctl restart dnsmasq
+    systemctl enable --now wireguard-health.service
+  EOF
+  )
+
+  tag_specifications {
+    resource_type = "instance"
+    tags = merge(local.common_tags, {
+      Name = "${local.resource_name}-wireguard-role"
+    })
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_autoscaling_group" "wireguard_role" {
+  count                     = local.wireguard_enabled ? 1 : 0
+  name                      = "${local.resource_name}-wireguard-role"
+  min_size                  = var.shared_wireguard_min_size
+  max_size                  = var.shared_wireguard_max_size
+  desired_capacity          = var.shared_wireguard_desired_capacity
+  vpc_zone_identifier       = local.shared_wireguard_public_subnet_ids
+  target_group_arns         = [aws_lb_target_group.wireguard_udp[0].arn]
+  health_check_type         = "ELB"
+  health_check_grace_period = 180
+
+  launch_template {
+    id      = aws_launch_template.wireguard_role[0].id
+    version = "$Latest"
+  }
+
+  tag {
+    key                 = "Name"
+    value               = "${local.resource_name}-wireguard-role"
+    propagate_at_launch = true
+  }
+
+  lifecycle {
+    create_before_destroy = true
   }
 }
 

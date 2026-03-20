@@ -68,6 +68,16 @@ output "shared_proof_services_ecr_repository_url" {
   value       = aws_ecr_repository.proof_services.repository_url
 }
 
+output "shared_proof_role_asg_name" {
+  description = "Autoscaling group name for the shared proof-role foundation."
+  value       = aws_autoscaling_group.proof_role.name
+}
+
+output "shared_proof_role_launch_template_id" {
+  description = "Launch template ID for the shared proof-role foundation."
+  value       = aws_launch_template.proof_role.id
+}
+
 output "shared_proof_requestor_secret_arn" {
   description = "Secrets Manager ARN bound to proof-requestor."
   value       = var.shared_sp1_requestor_secret_arn
@@ -123,6 +133,21 @@ output "shared_wireguard_gateway_private_ip" {
   value       = var.shared_wireguard_enabled ? aws_instance.wireguard_gateway[0].private_ip : null
 }
 
+output "shared_wireguard_role_asg_name" {
+  description = "Autoscaling group name for the WireGuard gateway role foundation."
+  value       = var.shared_wireguard_enabled ? aws_autoscaling_group.wireguard_role[0].name : null
+}
+
+output "shared_wireguard_role_launch_template_id" {
+  description = "Launch template ID for the WireGuard gateway role foundation."
+  value       = var.shared_wireguard_enabled ? aws_launch_template.wireguard_role[0].id : null
+}
+
+output "shared_wireguard_nlb_dns_name" {
+  description = "Public DNS name for the WireGuard UDP network load balancer."
+  value       = var.shared_wireguard_enabled ? aws_lb.wireguard[0].dns_name : null
+}
+
 output "shared_wireguard_endpoint_host" {
   description = "Public endpoint host used by the generated WireGuard client config."
   value       = var.shared_wireguard_enabled ? aws_eip.wireguard_gateway[0].public_ip : null
@@ -147,4 +172,21 @@ output "shared_wireguard_client_config_secret_arn" {
   description = "Secrets Manager ARN containing the generated backoffice WireGuard client config."
   value       = var.shared_wireguard_enabled ? aws_secretsmanager_secret.shared_wireguard_client_config[0].arn : null
   sensitive   = true
+}
+
+output "shared_wireguard_server_key_secret_arn" {
+  description = "Secrets Manager ARN containing the shared WireGuard server private key."
+  value       = var.shared_wireguard_enabled ? aws_secretsmanager_secret.shared_wireguard_server_key[0].arn : null
+  sensitive   = true
+}
+
+output "shared_wireguard_peer_config_secret_arns" {
+  description = "Secrets Manager ARNs reserved for named WireGuard peer configs."
+  value       = { for name, secret in aws_secretsmanager_secret.shared_wireguard_peer_config : name => secret.arn }
+  sensitive   = true
+}
+
+output "shared_wireguard_backoffice_private_endpoint_ips" {
+  description = "Private IPv4 addresses for the internal backoffice load balancer routed over WireGuard."
+  value       = local.shared_wireguard_backoffice_private_endpoint_ips
 }

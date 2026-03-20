@@ -296,6 +296,47 @@ variable "shared_log_retention_days" {
   default     = 30
 }
 
+variable "shared_proof_role_ami_id" {
+  description = "Optional custom AMI ID for the shared proof-role instances."
+  type        = string
+  default     = ""
+}
+
+variable "shared_proof_role_instance_type" {
+  description = "EC2 instance type for the shared proof-role instances."
+  type        = string
+  default     = "c7i.xlarge"
+}
+
+variable "shared_proof_role_root_volume_size_gb" {
+  description = "Root EBS volume size for the shared proof-role instances."
+  type        = number
+  default     = 40
+
+  validation {
+    condition     = var.shared_proof_role_root_volume_size_gb >= 20
+    error_message = "shared_proof_role_root_volume_size_gb must be at least 20 GiB."
+  }
+}
+
+variable "shared_proof_role_min_size" {
+  description = "Minimum size of the shared proof-role autoscaling group. Defaults to 0 during the compatibility release."
+  type        = number
+  default     = 0
+}
+
+variable "shared_proof_role_max_size" {
+  description = "Maximum size of the shared proof-role autoscaling group."
+  type        = number
+  default     = 4
+}
+
+variable "shared_proof_role_desired_capacity" {
+  description = "Desired size of the shared proof-role autoscaling group. Defaults to 0 during the compatibility release."
+  type        = number
+  default     = 0
+}
+
 variable "shared_ipfs_instance_type" {
   description = "EC2 instance type for the shared IPFS pinning nodes."
   type        = string
@@ -377,10 +418,34 @@ variable "shared_wireguard_public_subnet_id" {
   default     = ""
 }
 
+variable "shared_wireguard_public_subnet_ids" {
+  description = "Public subnet IDs used by the WireGuard gateway autoscaling group when shared_wireguard_enabled=true."
+  type        = list(string)
+  default     = []
+}
+
 variable "shared_wireguard_instance_type" {
   description = "EC2 instance type for the dedicated WireGuard gateway."
   type        = string
   default     = "t3.small"
+}
+
+variable "shared_wireguard_min_size" {
+  description = "Minimum size of the WireGuard gateway autoscaling group. Defaults to 0 during the compatibility release."
+  type        = number
+  default     = 0
+}
+
+variable "shared_wireguard_max_size" {
+  description = "Maximum size of the WireGuard gateway autoscaling group."
+  type        = number
+  default     = 4
+}
+
+variable "shared_wireguard_desired_capacity" {
+  description = "Desired size of the WireGuard gateway autoscaling group. Defaults to 0 during the compatibility release."
+  type        = number
+  default     = 0
 }
 
 variable "shared_wireguard_listen_port" {
@@ -410,6 +475,22 @@ variable "shared_wireguard_backoffice_private_endpoint" {
   description = "Private IPv4 address of the app host reached through the dedicated WireGuard gateway when shared_wireguard_enabled=true."
   type        = string
   default     = ""
+}
+
+variable "shared_wireguard_backoffice_private_endpoint_ips" {
+  description = "Private IPv4 addresses of the internal backoffice load balancer reached through the WireGuard gateways when shared_wireguard_enabled=true."
+  type        = list(string)
+  default     = []
+}
+
+variable "shared_wireguard_named_peers" {
+  description = "Named WireGuard peers, one per human or device, with unique client address CIDRs and public-key secret ARNs."
+  type = list(object({
+    name                  = string
+    client_address_cidr   = string
+    public_key_secret_arn = string
+  }))
+  default = []
 }
 
 variable "shared_ipfs_container_image" {
