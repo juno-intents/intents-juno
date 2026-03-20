@@ -1882,7 +1882,7 @@ resource "aws_lb_listener" "wireguard_udp" {
 resource "aws_launch_template" "wireguard_role" {
   count                  = local.wireguard_enabled ? 1 : 0
   name_prefix            = local.wireguard_launch_name_prefix
-  image_id               = data.aws_ami.ubuntu.id
+  image_id               = trimspace(var.shared_wireguard_role_ami_id) != "" ? trimspace(var.shared_wireguard_role_ami_id) : data.aws_ami.ubuntu.id
   instance_type          = var.shared_wireguard_instance_type
   update_default_version = true
   vpc_security_group_ids = [aws_security_group.wireguard_role[0].id]

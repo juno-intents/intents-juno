@@ -430,6 +430,12 @@ variable "shared_wireguard_instance_type" {
   default     = "t3.small"
 }
 
+variable "shared_wireguard_role_ami_id" {
+  description = "Optional custom AMI ID for the dedicated WireGuard gateway autoscaling group."
+  type        = string
+  default     = ""
+}
+
 variable "shared_wireguard_min_size" {
   description = "Minimum size of the WireGuard gateway autoscaling group. Defaults to 0 during the compatibility release."
   type        = number

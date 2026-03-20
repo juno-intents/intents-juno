@@ -278,7 +278,9 @@ write_inventory_fixture() {
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
           rpc_url: "https://rpc.mainnet.succinct.xyz",
-          image_release_tag: "shared-proof-services-image-v1.2.3-testnet"
+          image_release_tag: "shared-proof-services-image-v1.2.3-testnet",
+          image_uri: "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
+          image_ecr_repository_arn: "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services"
         }
       | .shared_roles.wireguard = {
           public_subnet_id: $wireguard_public_subnet_id,
@@ -290,6 +292,7 @@ write_inventory_fixture() {
           source_cidrs: ["10.0.2.50/32"],
           client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
           endpoint_host: "198.51.100.25",
+          ami_id: "ami-0wireguard1234567",
           publish_public_dns: false
         }
       | .wireguard_role = .shared_roles.wireguard

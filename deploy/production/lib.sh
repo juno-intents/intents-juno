@@ -380,24 +380,44 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
-  local public_subdomain backoffice_hostname app_role_json wireguard_role_json
+  local public_subdomain backoffice_hostname app_role_json wireguard_role_json proof_role_json
   local wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json
+  local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
 
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   app_role_json="$(production_inventory_app_role_json "$inventory")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
+  proof_role_json="$(production_json_optional "$inventory" '.shared_roles.proof // {}')"
   backoffice_hostname="$(jq -r '(.backoffice_hostname // empty)' <<<"$wireguard_role_json")"
   wireguard_public_subnet_ids_json="$(jq -c '(.public_subnet_ids // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
   backoffice_private_endpoint_ips_json="$(jq -c '(.backoffice_private_endpoint_ips // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  shared_proof_service_image="$(jq -r '.image_uri // empty' <<<"$proof_role_json")"
+  shared_proof_service_image_ecr_repository_arn="$(jq -r '.image_ecr_repository_arn // empty' <<<"$proof_role_json")"
+  shared_wireguard_role_ami_id="$(jq -r '.ami_id // empty' <<<"$wireguard_role_json")"
   [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
+  [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
+  [[ -n "$shared_proof_service_image_ecr_repository_arn" ]] || die "shared_roles.proof.image_ecr_repository_arn is required for shared terraform role runtime"
+  [[ -n "$shared_wireguard_role_ami_id" ]] || die "wireguard_role.ami_id is required for shared terraform role runtime"
 
   jq -n \
     --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
     --arg backoffice_hostname "$backoffice_hostname" \
     --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
+    --arg shared_proof_service_image "$shared_proof_service_image" \
+    --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
+    --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
     '{
       shared_wireguard_enabled: true,
-      shared_wireguard_backoffice_hostname: $backoffice_hostname
+      shared_wireguard_backoffice_hostname: $backoffice_hostname,
+      shared_proof_service_image: $shared_proof_service_image,
+      shared_proof_service_image_ecr_repository_arn: $shared_proof_service_image_ecr_repository_arn,
+      shared_proof_role_min_size: 2,
+      shared_proof_role_desired_capacity: 2,
+      shared_proof_role_max_size: 4,
+      shared_wireguard_min_size: 2,
+      shared_wireguard_desired_capacity: 2,
+      shared_wireguard_max_size: 4,
+      shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id
     }
     + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
       shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
