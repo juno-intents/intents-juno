@@ -1261,6 +1261,7 @@ EOF
     --output-dir "$output_dir" >/dev/null
 
   combined_log="$(printf '%s\n%s\n' "$(cat "$aws_log")" "$(cat "$terraform_log")")"
+  assert_not_contains "$combined_log" "sts get-caller-identity" "deploy-coordinator derives the terraform backend account id from inventory when available"
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 s3api create-bucket --bucket intents-juno-tfstate-021490342184-us-east-1" "deploy-coordinator creates the terraform state bucket"
   assert_contains "$combined_log" "aws --profile juno --region us-east-1 dynamodb create-table --table-name intents-juno-tfstate-locks-021490342184-us-east-1" "deploy-coordinator creates the terraform lock table"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=production-shared/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes terraform against the bootstrapped backend"

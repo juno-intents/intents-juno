@@ -264,16 +264,20 @@ production_bootstrap_terraform_backend() {
   local aws_region="$2"
   local environment="$3"
   local terraform_dir="$4"
+  local account_id_override="${5:-}"
   local account_id bucket_name table_name state_key
 
   have_cmd aws || die "required command not found: aws"
   [[ -n "$aws_profile" ]] || die "aws profile is required for terraform backend bootstrap"
   [[ -n "$aws_region" ]] || die "aws region is required for terraform backend bootstrap"
 
-  account_id="$(
-    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" sts get-caller-identity \
-      --query 'Account' --output text
-  )"
+  account_id="$account_id_override"
+  if [[ -z "$account_id" ]]; then
+    account_id="$(
+      AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" sts get-caller-identity \
+        --query 'Account' --output text
+    )"
+  fi
   [[ "$account_id" =~ ^[0-9]{12}$ ]] || die "failed to resolve a valid aws account id for terraform backend bootstrap"
 
   bucket_name="$(production_terraform_backend_bucket_name "$account_id" "$aws_region")"

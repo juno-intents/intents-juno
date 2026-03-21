@@ -49,6 +49,10 @@ app_terraform_dir_rel="$(production_json_required "$inventory" '.app_role.terraf
 app_terraform_dir="$(production_abs_path "$REPO_ROOT" "$app_terraform_dir_rel")"
 aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
 aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
+backend_account_id="$(production_json_optional "$inventory" '.shared_services.account_id')"
+if [[ -z "$backend_account_id" ]]; then
+  backend_account_id="$(production_json_optional "$inventory" '.app_role.account_id')"
+fi
 
 if [[ -z "$current_output_root" ]]; then
   current_output_root="$inventory_dir/production-output"
@@ -62,11 +66,11 @@ app_var_file="$destroy_work_dir/app-terraform.auto.tfvars.json"
 production_write_shared_terraform_override_tfvars "$inventory" "$shared_var_file"
 production_write_app_terraform_override_tfvars "$inventory" "$app_var_file"
 
-mapfile -t shared_backend_lines < <(production_bootstrap_terraform_backend "$aws_profile" "$aws_region" "$env_slug" "$shared_terraform_dir")
+mapfile -t shared_backend_lines < <(production_bootstrap_terraform_backend "$aws_profile" "$aws_region" "$env_slug" "$shared_terraform_dir" "$backend_account_id")
 shared_bucket="${shared_backend_lines[0]}"
 shared_table="${shared_backend_lines[1]}"
 shared_key="${shared_backend_lines[2]}"
-mapfile -t app_backend_lines < <(production_bootstrap_terraform_backend "$aws_profile" "$aws_region" "$env_slug" "$app_terraform_dir")
+mapfile -t app_backend_lines < <(production_bootstrap_terraform_backend "$aws_profile" "$aws_region" "$env_slug" "$app_terraform_dir" "$backend_account_id")
 app_bucket="${app_backend_lines[0]}"
 app_table="${app_backend_lines[1]}"
 app_key="${app_backend_lines[2]}"

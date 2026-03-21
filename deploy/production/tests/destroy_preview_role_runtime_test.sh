@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 assert_line_order() {
   local haystack="$1"
   local first="$2"
@@ -209,6 +219,9 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$tf_log")" "terraform-state $edge_state" "preview destroy uses the discovered edge state file"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy writes shared terraform destroy vars"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/app-terraform.auto.tfvars.json" "preview destroy writes app terraform destroy vars"
+  if [[ -f "$aws_log" ]]; then
+    assert_not_contains "$(cat "$aws_log")" "sts get-caller-identity" "preview destroy derives the terraform backend account id from inventory when available"
+  fi
 
   rm -rf "$tmp"
 }

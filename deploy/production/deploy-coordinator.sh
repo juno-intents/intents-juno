@@ -156,6 +156,13 @@ if production_environment_allows_local_secret_resolvers "$env_slug"; then
 fi
 inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
 inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
+terraform_backend_account_id="$(production_json_optional "$inventory" '.shared_services.account_id')"
+if [[ -z "$terraform_backend_account_id" ]]; then
+  terraform_backend_account_id="$(production_json_optional "$inventory" '.app_role.account_id')"
+fi
+if [[ -z "$terraform_backend_account_id" ]]; then
+  terraform_backend_account_id="$(production_json_optional "$inventory" '.operators[0].account_id')"
+fi
 shared_terraform_dir_rel="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
 shared_terraform_dir="$(production_abs_path "$REPO_ROOT" "$shared_terraform_dir_rel")"
 [[ -d "$shared_terraform_dir" ]] || die "terraform dir not found: $shared_terraform_dir"
@@ -279,7 +286,7 @@ if [[ "$skip_terraform_apply" != "true" || -z "$shared_terraform_output_json" ]]
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
   terraform_backend_output="$(
-    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$shared_terraform_dir"
+    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$shared_terraform_dir" "$terraform_backend_account_id"
   )" || die "failed to bootstrap terraform backend"
   mapfile -t terraform_backend_config <<<"$terraform_backend_output"
   (( ${#terraform_backend_config[@]} == 3 )) || die "terraform backend bootstrap returned incomplete configuration"
@@ -300,7 +307,7 @@ if [[ -n "$app_terraform_dir" && "$skip_terraform_apply" != "true" ]]; then
     have_cmd "$cmd" || die "required command not found: $cmd"
   done
   app_terraform_backend_output="$(
-    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$app_terraform_dir"
+    production_bootstrap_terraform_backend "$inventory_aws_profile" "$inventory_aws_region" "$env_slug" "$app_terraform_dir" "$terraform_backend_account_id"
   )" || die "failed to bootstrap app terraform backend"
   mapfile -t app_terraform_backend_config <<<"$app_terraform_backend_output"
   (( ${#app_terraform_backend_config[@]} == 3 )) || die "app terraform backend bootstrap returned incomplete configuration"
