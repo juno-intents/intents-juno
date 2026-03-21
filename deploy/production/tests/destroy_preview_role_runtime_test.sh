@@ -103,6 +103,7 @@ write_fake_destroy_aws() {
   local target="$1"
   local log_file="$2"
   local state_dir="${3:-}"
+  local bucket_object_count="${4:-2}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -116,6 +117,7 @@ if [[ "\${args[0]:-}" == "--region" ]]; then
 fi
 backup_vault_name=""
 bucket_name=""
+delete_file=""
 for ((i = 0; i < \${#args[@]}; i++)); do
   case "\${args[\$i]}" in
     --backup-vault-name)
@@ -126,6 +128,11 @@ for ((i = 0; i < \${#args[@]}; i++)); do
     --bucket)
       if (( i + 1 < \${#args[@]} )); then
         bucket_name="\${args[\$((i + 1))]}"
+      fi
+      ;;
+    --delete)
+      if (( i + 1 < \${#args[@]} )); then
+        delete_file="\${args[\$((i + 1))]#file://}"
       fi
       ;;
   esac
@@ -257,10 +264,24 @@ case "\${args[0]:-} \${args[1]:-}" in
     if [[ -n "$state_dir" && -f "$state_dir/bucket.\$bucket_name.cleared" ]]; then
       printf '{"Versions":[],"DeleteMarkers":[]}\n'
     else
-      printf '{"Versions":[{"Key":"AWSLogs/021490342184/CloudTrail/us-east-1/2026/03/21/log-1.json.gz","VersionId":"version-1"}],"DeleteMarkers":[{"Key":"AWSLogs/021490342184/CloudTrail/us-east-1/2026/03/20/log-old.json.gz","VersionId":"delete-marker-1"}]}\n'
+      jq -cn --argjson count "$bucket_object_count" '
+        {
+          Versions: [
+            range(0; \$count) as \$index
+            | {
+                Key: ("AWSLogs/021490342184/CloudTrail/us-east-1/2026/03/21/log-" + ((\$index + 1) | tostring) + ".json.gz"),
+                VersionId: ("version-" + ((\$index + 1) | tostring))
+              }
+          ],
+          DeleteMarkers: []
+        }
+      '
     fi
     ;;
   "s3api delete-objects")
+    if [[ -n "\$delete_file" ]]; then
+      printf 'aws-delete-objects-count %s\n' "\$(jq -r '.Objects | length' "\$delete_file")" >>"$log_file"
+    fi
     if [[ -n "$state_dir" ]]; then
       mkdir -p "$state_dir"
       : >"$state_dir/bucket.\$bucket_name.cleared"
@@ -472,9 +493,46 @@ test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_mi
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes() {
+  local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  app_deploy="$tmp/production-output/preview/app/app-deploy.json"
+  edge_state="$tmp/edge-state/preview.tfstate"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+  cloudfront_state_dir="$tmp/cloudfront"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$edge_state"
+  write_destroy_inventory_fixture "$inventory"
+  write_app_deploy_fixture "$app_deploy"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log" "ENKATN26PZLPX"
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log" "$cloudfront_state_dir" "1201"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output"
+  )
+
+  assert_contains "$(cat "$combined_log")" "aws-delete-objects-count 1000" "preview destroy batches cloudtrail deletes at the S3 1000-object limit"
+  assert_contains "$(cat "$combined_log")" "aws-delete-objects-count 201" "preview destroy deletes the remaining cloudtrail objects in a final partial batch"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
   test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
+  test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes
 }
 
 main "$@"

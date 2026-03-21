@@ -546,7 +546,7 @@ stop_shared_cloudtrail_logging() {
 }
 
 empty_shared_cloudtrail_bucket() {
-  local versions_json delete_file objects_json
+  local versions_json delete_file objects_json batch_json object_count offset
 
   while true; do
     versions_json="$(aws s3api list-object-versions \
@@ -556,19 +556,23 @@ empty_shared_cloudtrail_bucket() {
       --output json 2>/dev/null || true)"
     [[ -n "$versions_json" ]] || return 0
 
-    objects_json="$(jq -c '{Objects: ([.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId})), Quiet: true}' <<<"$versions_json")"
-    if [[ "$(jq -r '.Objects | length' <<<"$objects_json")" == "0" ]]; then
+    objects_json="$(jq -c '[.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId})' <<<"$versions_json")"
+    object_count="$(jq -r 'length' <<<"$objects_json")"
+    if [[ "$object_count" == "0" ]]; then
       return 0
     fi
 
-    delete_file="$(mktemp)"
-    printf '%s\n' "$objects_json" >"$delete_file"
-    aws s3api delete-objects \
-      --profile "$aws_profile" \
-      --region "$aws_region" \
-      --bucket "$shared_cloudtrail_bucket_name" \
-      --delete "file://$delete_file" >/dev/null
-    rm -f "$delete_file"
+    for ((offset = 0; offset < object_count; offset += 1000)); do
+      batch_json="$(jq -c --argjson offset "$offset" --argjson limit 1000 '{Objects: (.[ $offset : ($offset + $limit) ]), Quiet: true}' <<<"$objects_json")"
+      delete_file="$(mktemp)"
+      printf '%s\n' "$batch_json" >"$delete_file"
+      aws s3api delete-objects \
+        --profile "$aws_profile" \
+        --region "$aws_region" \
+        --bucket "$shared_cloudtrail_bucket_name" \
+        --delete "file://$delete_file" >/dev/null
+      rm -f "$delete_file"
+    done
   done
 }
 
