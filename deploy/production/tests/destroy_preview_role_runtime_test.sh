@@ -104,10 +104,12 @@ write_fake_destroy_aws() {
   local log_file="$2"
   local state_dir="${3:-}"
   local bucket_object_count="${4:-2}"
+  local scheduled_secret_names_json="${5:-[]}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'aws %s\n' "\$*" >>"$log_file"
+scheduled_secret_names_json='${scheduled_secret_names_json//\'/\'\"\'\"\'}'
 args=( "\$@" )
 if [[ "\${args[0]:-}" == "--profile" ]]; then
   args=( "\${args[@]:2}" )
@@ -287,6 +289,11 @@ case "\${args[0]:-} \${args[1]:-}" in
       : >"$state_dir/bucket.\$bucket_name.cleared"
     fi
     printf '{"Deleted":[]}\n'
+    ;;
+  "secretsmanager list-secrets")
+    jq -cn --argjson names "\$scheduled_secret_names_json" '{SecretList: (\$names | map({Name: .}))}'
+    ;;
+  "secretsmanager delete-secret")
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -529,10 +536,54 @@ test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes() {
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_force_deletes_scheduled_shared_secrets() {
+  local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir scheduled_secrets_json
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  app_deploy="$tmp/production-output/preview/app/app-deploy.json"
+  edge_state="$tmp/edge-state/preview.tfstate"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+  cloudfront_state_dir="$tmp/cloudfront"
+  scheduled_secrets_json='["intents-juno-shared-preview-shared-postgres-dsn","intents-juno-shared-preview-shared-ipfs-api-bearer-token","intents-juno-shared-preview-shared-kafka-critical-hmac-key","intents-juno-shared-preview-wireguard-server-key","intents-juno-shared-preview-wireguard-peer-ops-laptop","intents-juno-shared-preview-wireguard-client-config"]'
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$edge_state"
+  write_destroy_inventory_fixture "$inventory"
+  write_app_deploy_fixture "$app_deploy"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log" "ENKATN26PZLPX"
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log" "$cloudfront_state_dir" "2" "$scheduled_secrets_json"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output"
+  )
+
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager list-secrets --profile juno --region us-east-1 --include-planned-deletion --filters Key=name,Values=intents-juno-shared-preview- --output json" "preview destroy enumerates preview shared secrets scheduled for deletion"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-shared-postgres-dsn --force-delete-without-recovery" "preview destroy force deletes the shared postgres secret after terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-shared-ipfs-api-bearer-token --force-delete-without-recovery" "preview destroy force deletes the ipfs bearer secret after terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-shared-kafka-critical-hmac-key --force-delete-without-recovery" "preview destroy force deletes the kafka hmac secret after terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-wireguard-server-key --force-delete-without-recovery" "preview destroy force deletes the wireguard server key secret after terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-wireguard-peer-ops-laptop --force-delete-without-recovery" "preview destroy force deletes named peer secrets after terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws secretsmanager delete-secret --profile juno --region us-east-1 --secret-id intents-juno-shared-preview-wireguard-client-config --force-delete-without-recovery" "preview destroy force deletes the legacy wireguard client config secret after terraform destroy"
+  assert_line_order "$(cat "$combined_log")" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/shared-terraform.auto.tfvars.json" "aws secretsmanager list-secrets --profile juno --region us-east-1 --include-planned-deletion --filters Key=name,Values=intents-juno-shared-preview- --output json" "preview destroy force deletes scheduled secrets after shared terraform destroy"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
   test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
   test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes
+  test_destroy_preview_role_runtime_force_deletes_scheduled_shared_secrets
 }
 
 main "$@"

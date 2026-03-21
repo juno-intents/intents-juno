@@ -86,6 +86,7 @@ fi
 shared_postgres_backup_vault_dr_name="${shared_resource_name}-shared-postgres-dr"
 shared_cloudtrail_bucket_name="${shared_resource_slug}-trail"
 shared_cloudtrail_trail_name="${shared_resource_slug}-trail"
+shared_secret_name_prefix="${shared_resource_name}-"
 
 shared_var_file="$destroy_work_dir/shared-terraform.auto.tfvars.json"
 app_var_file="$destroy_work_dir/app-terraform.auto.tfvars.json"
@@ -576,6 +577,33 @@ empty_shared_cloudtrail_bucket() {
   done
 }
 
+purge_shared_runtime_secrets() {
+  local secrets_json secret_name
+  local -a secret_names=()
+
+  secrets_json="$(aws secretsmanager list-secrets \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --include-planned-deletion \
+    --filters "Key=name,Values=${shared_secret_name_prefix}" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$secrets_json" ]] || return 0
+
+  mapfile -t secret_names < <(jq -r '.SecretList[]?.Name // empty' <<<"$secrets_json")
+  if [[ ${#secret_names[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  for secret_name in "${secret_names[@]}"; do
+    [[ -n "$secret_name" ]] || continue
+    aws secretsmanager delete-secret \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --secret-id "$secret_name" \
+      --force-delete-without-recovery >/dev/null 2>&1 || true
+  done
+}
+
 prepare_shared_runtime_destroy() {
   disable_shared_postgres_deletion_protection
   purge_backup_vault_recovery_points "$aws_region" "$shared_postgres_backup_vault_name"
@@ -612,4 +640,5 @@ fi
     -backend-config="key=$shared_key" \
     -backend-config="region=$aws_region" >/dev/null
   terraform destroy -auto-approve -input=false -var-file="$shared_var_file"
+  purge_shared_runtime_secrets
 )
