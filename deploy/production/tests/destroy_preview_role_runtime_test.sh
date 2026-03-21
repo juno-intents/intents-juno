@@ -35,6 +35,7 @@ write_fake_destroy_terraform() {
   local target="$1"
   local log_file="$2"
   local cloudfront_distribution_id="${3:-}"
+  local app_security_group_id="${4-sg-049874c1a0e9a1c9d}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -67,10 +68,14 @@ case "\${1:-}" in
         "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/juno-app-runtime-preview-bridge/bf53abd559495064"
       }
     }
-  },
-  "app_security_group_id": {
-    "value": "sg-049874c1a0e9a1c9d"
   }
+$(if [[ -n "$app_security_group_id" ]]; then cat <<JSON
+,
+  "app_security_group_id": {
+    "value": "$app_security_group_id"
+  }
+JSON
+fi)
 }
 JSON
       exit 0
@@ -186,6 +191,8 @@ case "\${args[0]:-} \${args[1]:-}" in
   "ec2 describe-security-groups")
     if [[ " \$* " == *" Name=ip-permission.group-id,Values=sg-049874c1a0e9a1c9d "* ]]; then
       printf 'sg-09af876efa8c830fb\tsg-004e0c14829a3228a\n'
+    elif [[ " \$* " == *" Name=group-name,Values=juno-app-runtime-preview-app "* ]]; then
+      printf 'sg-049874c1a0e9a1c9d\n'
     else
       printf '\n'
     fi
@@ -350,8 +357,45 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing() {
+  local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  app_deploy="$tmp/production-output/preview/app/app-deploy.json"
+  edge_state="$tmp/edge-state/preview.tfstate"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+  cloudfront_state_dir="$tmp/cloudfront"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$edge_state"
+  write_destroy_inventory_fixture "$inventory"
+  write_app_deploy_fixture "$app_deploy"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log" "ENKATN26PZLPX" ""
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log" "$cloudfront_state_dir"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output"
+  )
+
+  assert_contains "$(cat "$combined_log")" "aws ec2 describe-security-groups --profile juno --region us-east-1 --filters Name=group-name,Values=juno-app-runtime-preview-app --query SecurityGroups[].GroupId --output text" "preview destroy falls back to live app security group discovery when terraform output omits the app sg id"
+  assert_contains "$(cat "$combined_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-09af876efa8c830fb --security-group-rule-ids sgr-operator-preview-app" "preview destroy still revokes operator ingress rules after app security group fallback discovery"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
+  test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
 }
 
 main "$@"

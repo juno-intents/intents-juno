@@ -282,9 +282,29 @@ app_runtime_asg_name_from_outputs() {
   jq -r '.app_role.value.asg // .app_role_asg_name.value // empty' <<<"$output_json"
 }
 
+discover_app_runtime_security_group_id() {
+  local security_group_id
+
+  security_group_id="$(aws ec2 describe-security-groups \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --filters "Name=group-name,Values=juno-app-runtime-${env_slug}-app" \
+    --query 'SecurityGroups[].GroupId' \
+    --output text 2>/dev/null || true)"
+  security_group_id="${security_group_id//$'\r'/}"
+  security_group_id="${security_group_id//None/}"
+  printf '%s\n' "$security_group_id"
+}
+
 app_runtime_security_group_id_from_outputs() {
   local output_json="$1"
-  jq -r '.app_security_group_id.value // empty' <<<"$output_json"
+  local security_group_id
+
+  security_group_id="$(jq -r '.app_security_group_id.value // empty' <<<"$output_json")"
+  if [[ -z "$security_group_id" ]]; then
+    security_group_id="$(discover_app_runtime_security_group_id)"
+  fi
+  printf '%s\n' "$security_group_id"
 }
 
 app_runtime_asg_instance_ids() {
