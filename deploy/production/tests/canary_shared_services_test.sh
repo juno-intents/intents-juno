@@ -520,12 +520,158 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_retries_role_and_target_group_convergence() {
+  local tmp manifest fake_bin log_file output_json ipfs_counter wireguard_counter
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  log_file="$tmp/calls.log"
+  output_json="$tmp/output.json"
+  ipfs_counter="$tmp/ipfs-count"
+  wireguard_counter="$tmp/wireguard-count"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "version": "2",
+  "environment": "preview",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "postgres": {
+      "endpoint": "postgres.preview.internal",
+      "port": 5432,
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:preview-shared"
+    },
+    "kafka": {
+      "bootstrap_brokers": "broker-1.preview.internal:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      },
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/preview-shared/11111111-2222-3333-4444-555555555555-1"
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.preview.internal",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/preview-ipfs-api/1111111111111111"
+    }
+  },
+  "shared_roles": {
+    "proof": {
+      "asg": "preview-proof-role"
+    }
+  },
+  "wireguard_role": {
+    "asg": "preview-wireguard-role",
+    "peer_roster_secret_arns": [
+      "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-peer-ops-laptop"
+    ],
+    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-server-key"
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/nc" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  cat >"$fake_bin/sleep" <<EOF
+#!/usr/bin/env bash
+printf 'sleep %s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "$*" >>"$LOG_FILE"
+case "$*" in
+  *"sts get-caller-identity"*)
+    printf '{"Account":"021490342184"}\n'
+    ;;
+  *"rds describe-db-clusters"*)
+    printf '{"DBClusters":[{"Status":"available","AvailabilityZones":["us-east-1a","us-east-1b"]}]}\n'
+    ;;
+  *"kafka describe-cluster-v2"*)
+    printf '{"ClusterInfo":{"State":"ACTIVE","Provisioned":{"BrokerNodeGroupInfo":{"ClientSubnets":["subnet-a","subnet-b"]}}}}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"preview-proof-role"*)
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  *"autoscaling describe-auto-scaling-groups"*"preview-wireguard-role"*)
+    count=0
+    if [[ -f "$WIREGUARD_COUNTER" ]]; then
+      count="$(cat "$WIREGUARD_COUNTER")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$WIREGUARD_COUNTER"
+    if [[ "$count" -lt 2 ]]; then
+      printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Unhealthy"}]}]}\n'
+    else
+      printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"LifecycleState":"InService","HealthStatus":"Healthy"},{"LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    fi
+    ;;
+  *"elbv2 describe-target-health"*)
+    count=0
+    if [[ -f "$IPFS_COUNTER" ]]; then
+      count="$(cat "$IPFS_COUNTER")"
+    fi
+    count=$((count + 1))
+    printf '%s\n' "$count" >"$IPFS_COUNTER"
+    if [[ "$count" -lt 2 ]]; then
+      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"initial"}}]}\n'
+    else
+      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"healthy"}}]}\n'
+    fi
+    ;;
+  *"secretsmanager describe-secret"*"preview-wireguard-server-key"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-server-key"}\n'
+    ;;
+  *"secretsmanager describe-secret"*"preview-wireguard-peer-ops-laptop"*)
+    printf '{"ARN":"arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-peer-ops-laptop"}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/sleep" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    LOG_FILE="$log_file" \
+    WIREGUARD_COUNTER="$wireguard_counter" \
+    IPFS_COUNTER="$ipfs_counter" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=3 \
+    PRODUCTION_CANARY_RETRY_SLEEP_SECONDS=0 \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "shared canary becomes deployable after convergence retries"
+  assert_eq "$(grep -c 'autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-wireguard-role' "$log_file")" "2" "shared canary retries wireguard role asg health"
+  assert_eq "$(grep -c 'elbv2 describe-target-health --target-group-arn arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/preview-ipfs-api/1111111111111111 --output json' "$log_file")" "2" "shared canary retries ipfs target health"
+  assert_contains "$(cat "$log_file")" "sleep 0" "shared canary waits between convergence retries"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_shared_services_canary_checks_postgres_kafka_and_ipfs
   test_shared_services_canary_rejects_non_iam_kafka_auth
   test_shared_services_canary_requires_preview_iam_kafka_auth
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
   test_shared_services_canary_uses_aws_health_for_preview_private_services
+  test_shared_services_canary_retries_role_and_target_group_convergence
 }
 
 main "$@"

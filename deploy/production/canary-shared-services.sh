@@ -40,6 +40,62 @@ check_asg_capacity() {
   (( desired >= min_healthy && healthy >= min_healthy ))
 }
 
+wait_for_asg_capacity() {
+  local aws_args_name="$1"
+  local asg_name="$2"
+  local min_healthy="$3"
+  local attempts="$4"
+  local sleep_seconds="$5"
+  local attempt
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if check_asg_capacity "$aws_args_name" "$asg_name" "$min_healthy"; then
+      return 0
+    fi
+    if (( attempt == attempts )); then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  return 1
+}
+
+check_target_group_healthy_targets() {
+  local aws_args_name="$1"
+  local target_group_arn="$2"
+  local min_healthy="$3"
+  local target_json healthy_targets
+
+  declare -n aws_args_ref="$aws_args_name"
+  target_json="$(AWS_PAGER="" "${aws_args_ref[@]}" elbv2 describe-target-health --target-group-arn "$target_group_arn" --output json 2>/dev/null || true)"
+  healthy_targets="$(jq -r '[.TargetHealthDescriptions[]? | select(.TargetHealth.State == "healthy")] | length' <<<"$target_json")"
+  [[ -n "$target_json" ]] || return 1
+  [[ "$healthy_targets" =~ ^[0-9]+$ ]] || return 1
+  (( healthy_targets >= min_healthy ))
+}
+
+wait_for_target_group_healthy_targets() {
+  local aws_args_name="$1"
+  local target_group_arn="$2"
+  local min_healthy="$3"
+  local attempts="$4"
+  local sleep_seconds="$5"
+  local attempt
+
+  for ((attempt = 1; attempt <= attempts; attempt++)); do
+    if check_target_group_healthy_targets "$aws_args_name" "$target_group_arn" "$min_healthy"; then
+      return 0
+    fi
+    if (( attempt == attempts )); then
+      return 1
+    fi
+    sleep "$sleep_seconds"
+  done
+
+  return 1
+}
+
 shared_manifest=""
 dry_run="false"
 
@@ -93,10 +149,15 @@ shared_wireguard_role_asg="$(production_json_optional "$shared_manifest" '.wireg
 wireguard_server_key_secret_arn="$(production_json_optional "$shared_manifest" '.wireguard_role.server_key_secret_arn | select(type == "string" and length > 0)')"
 wireguard_peer_roster_secret_arns_json="$(jq -c '(.wireguard_role.peer_roster_secret_arns // []) | if type == "array" then . else [] end' "$shared_manifest")"
 environment="$(production_json_required "$shared_manifest" '.environment | select(type == "string" and length > 0)')"
+canary_retry_attempts="${PRODUCTION_CANARY_RETRY_ATTEMPTS:-12}"
+canary_retry_sleep_seconds="${PRODUCTION_CANARY_RETRY_SLEEP_SECONDS:-15}"
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
   artifacts_object_lock_required="false"
 fi
+[[ "$canary_retry_attempts" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be numeric"
+[[ "$canary_retry_sleep_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_RETRY_SLEEP_SECONDS must be numeric"
+(( canary_retry_attempts >= 1 )) || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be at least 1"
 skip_postgres_local_check="false"
 skip_kafka_local_check="false"
 skip_ipfs_local_check="false"
@@ -236,10 +297,8 @@ else
     fi
   fi
 
-  if [[ "$aws_auth_status" == "passed" && -n "$ipfs_target_group_arn" ]]; then
-    ipfs_target_json="$(AWS_PAGER="" "${aws_args[@]}" elbv2 describe-target-health --target-group-arn "$ipfs_target_group_arn" --output json 2>/dev/null || true)"
-    ipfs_healthy_targets="$(jq -r '[.TargetHealthDescriptions[]? | select(.TargetHealth.State == "healthy")] | length' <<<"$ipfs_target_json")"
-    if [[ "$ipfs_healthy_targets" -lt 2 ]]; then
+  if [[ "$aws_auth_status" == "passed" && "$ipfs_status" == "passed" && -n "$ipfs_target_group_arn" ]]; then
+    if ! wait_for_target_group_healthy_targets aws_args "$ipfs_target_group_arn" 2 "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
       ipfs_status="failed"
       ipfs_detail="ipfs target group has fewer than two healthy targets"
     elif [[ "$skip_ipfs_local_check" == "true" ]]; then
@@ -277,7 +336,7 @@ else
     if [[ "$aws_auth_status" != "passed" ]]; then
       shared_proof_role_status="failed"
       shared_proof_role_detail="proof role could not be verified because aws auth failed"
-    elif check_asg_capacity aws_args "$shared_proof_role_asg" 2; then
+    elif wait_for_asg_capacity aws_args "$shared_proof_role_asg" 2 "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
       shared_proof_role_status="passed"
       shared_proof_role_detail="proof role asg has at least two healthy instances"
     else
@@ -290,7 +349,7 @@ else
     if [[ "$aws_auth_status" != "passed" ]]; then
       wireguard_role_status="failed"
       wireguard_role_detail="wireguard role could not be verified because aws auth failed"
-    elif ! check_asg_capacity aws_args "$shared_wireguard_role_asg" 2; then
+    elif ! wait_for_asg_capacity aws_args "$shared_wireguard_role_asg" 2 "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
       wireguard_role_status="failed"
       wireguard_role_detail="wireguard role asg does not have two healthy in-service instances"
     elif [[ -z "$wireguard_server_key_secret_arn" ]]; then
