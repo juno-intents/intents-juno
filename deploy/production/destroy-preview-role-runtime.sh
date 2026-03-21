@@ -75,6 +75,7 @@ fi
 shared_resource_name="${shared_name_prefix}-${env_slug}"
 shared_resource_slug="$(production_safe_slug "$shared_resource_name")"
 shared_postgres_cluster_id="${shared_resource_name}-shared-aurora"
+shared_postgres_final_snapshot_identifier="${shared_resource_slug}-shared-aurora-final"
 shared_postgres_backup_vault_name="${shared_resource_name}-shared-postgres"
 shared_postgres_dr_region="$(production_json_optional "$inventory" '.shared_services.postgres_dr_region')"
 if [[ -z "$shared_postgres_dr_region" ]]; then
@@ -461,6 +462,14 @@ shared_postgres_cluster_json() {
     --output json 2>/dev/null || true
 }
 
+shared_postgres_final_snapshot_json() {
+  aws rds describe-db-cluster-snapshots \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --db-cluster-snapshot-identifier "$shared_postgres_final_snapshot_identifier" \
+    --output json 2>/dev/null || true
+}
+
 disable_shared_postgres_deletion_protection() {
   local cluster_json deletion_protection status attempt
 
@@ -491,6 +500,34 @@ disable_shared_postgres_deletion_protection() {
   done
 
   die "timed out waiting for shared aurora deletion protection to disable"
+}
+
+purge_shared_postgres_final_snapshot() {
+  local snapshot_json status attempt
+
+  snapshot_json="$(shared_postgres_final_snapshot_json)"
+  [[ -n "$snapshot_json" ]] || return 0
+  status="$(jq -r '.DBClusterSnapshots[0].Status // empty' <<<"$snapshot_json")"
+  [[ -n "$status" ]] || return 0
+
+  if [[ "$status" != "deleting" ]]; then
+    aws rds delete-db-cluster-snapshot \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --db-cluster-snapshot-identifier "$shared_postgres_final_snapshot_identifier" >/dev/null 2>&1 || true
+  fi
+
+  for ((attempt = 1; attempt <= shared_cleanup_poll_attempts; attempt++)); do
+    snapshot_json="$(shared_postgres_final_snapshot_json)"
+    [[ -n "$snapshot_json" ]] || return 0
+    status="$(jq -r '.DBClusterSnapshots[0].Status // empty' <<<"$snapshot_json")"
+    if [[ -z "$status" ]]; then
+      return 0
+    fi
+    shared_cleanup_sleep
+  done
+
+  die "timed out waiting for shared aurora final snapshot $shared_postgres_final_snapshot_identifier to delete"
 }
 
 backup_vault_recovery_points_json() {
@@ -606,6 +643,7 @@ purge_shared_runtime_secrets() {
 
 prepare_shared_runtime_destroy() {
   disable_shared_postgres_deletion_protection
+  purge_shared_postgres_final_snapshot
   purge_backup_vault_recovery_points "$aws_region" "$shared_postgres_backup_vault_name"
   purge_backup_vault_recovery_points "$shared_postgres_dr_region" "$shared_postgres_backup_vault_dr_name"
   stop_shared_cloudtrail_logging

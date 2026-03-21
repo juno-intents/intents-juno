@@ -105,11 +105,13 @@ write_fake_destroy_aws() {
   local state_dir="${3:-}"
   local bucket_object_count="${4:-2}"
   local scheduled_secret_names_json="${5:-[]}"
+  local stale_cluster_snapshot_identifier="${6:-}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'aws %s\n' "\$*" >>"$log_file"
 scheduled_secret_names_json='${scheduled_secret_names_json//\'/\'\"\'\"\'}'
+stale_cluster_snapshot_identifier='${stale_cluster_snapshot_identifier//\'/\'\"\'\"\'}'
 args=( "\$@" )
 if [[ "\${args[0]:-}" == "--profile" ]]; then
   args=( "\${args[@]:2}" )
@@ -248,6 +250,19 @@ case "\${args[0]:-} \${args[1]:-}" in
       : >"$state_dir/shared.cluster.deletion_protection.disabled"
     fi
     printf '{"DBCluster":{"DBClusterIdentifier":"intents-juno-shared-preview-shared-aurora","DeletionProtection":false}}\n'
+    ;;
+  "rds describe-db-cluster-snapshots")
+    if [[ -n "\$stale_cluster_snapshot_identifier" && " \$* " == *" --db-cluster-snapshot-identifier \$stale_cluster_snapshot_identifier "* && ! -f "$state_dir/snapshot.\$stale_cluster_snapshot_identifier.cleared" ]]; then
+      printf '{"DBClusterSnapshots":[{"DBClusterSnapshotIdentifier":"%s","Status":"available"}]}\n' "\$stale_cluster_snapshot_identifier"
+    else
+      printf '{"DBClusterSnapshots":[]}\n'
+    fi
+    ;;
+  "rds delete-db-cluster-snapshot")
+    if [[ -n "$state_dir" && -n "\$stale_cluster_snapshot_identifier" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/snapshot.\$stale_cluster_snapshot_identifier.cleared"
+    fi
     ;;
   "backup list-recovery-points-by-backup-vault")
     if [[ -n "$state_dir" && -f "$state_dir/backup-vault.\$backup_vault_name.cleared" ]]; then
@@ -579,11 +594,49 @@ test_destroy_preview_role_runtime_force_deletes_scheduled_shared_secrets() {
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_deletes_stale_shared_final_snapshot() {
+  local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  app_deploy="$tmp/production-output/preview/app/app-deploy.json"
+  edge_state="$tmp/edge-state/preview.tfstate"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+  cloudfront_state_dir="$tmp/cloudfront"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state" "$cloudfront_state_dir"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$edge_state"
+  write_destroy_inventory_fixture "$inventory"
+  write_app_deploy_fixture "$app_deploy"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log" "ENKATN26PZLPX"
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log" "$cloudfront_state_dir" "2" "[]" "intents-juno-shared-preview-shared-aurora-final"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output"
+  )
+
+  assert_contains "$(cat "$combined_log")" "aws rds describe-db-cluster-snapshots --profile juno --region us-east-1 --db-cluster-snapshot-identifier intents-juno-shared-preview-shared-aurora-final --output json" "preview destroy checks for a stale shared aurora final snapshot before shared terraform destroy"
+  assert_contains "$(cat "$combined_log")" "aws rds delete-db-cluster-snapshot --profile juno --region us-east-1 --db-cluster-snapshot-identifier intents-juno-shared-preview-shared-aurora-final" "preview destroy deletes the stale shared aurora final snapshot before shared terraform destroy"
+  assert_line_order "$(cat "$combined_log")" "aws rds delete-db-cluster-snapshot --profile juno --region us-east-1 --db-cluster-snapshot-identifier intents-juno-shared-preview-shared-aurora-final" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy clears the stale aurora final snapshot before shared terraform destroy"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
   test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
   test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes
   test_destroy_preview_role_runtime_force_deletes_scheduled_shared_secrets
+  test_destroy_preview_role_runtime_deletes_stale_shared_final_snapshot
 }
 
 main "$@"
