@@ -555,22 +555,60 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
-  local public_subdomain backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
-  local wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json
+  local env_slug aws_region vpc_id shared_postgres_password base_chain_id deposit_image_id withdraw_image_id
+  local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
+  local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
+  local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
+  local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
   local app_security_group_id operator_client_security_group_ids_json
 
-  public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
+  env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+  aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
   shared_terraform_dir="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
   app_role_json="$(production_inventory_app_role_json "$inventory")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   proof_role_json="$(production_json_optional "$inventory" '.shared_roles.proof // {}')"
+  vpc_id="$(jq -r '.vpc_id // empty' <<<"$app_role_json")"
+  private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
+  shared_postgres_password="$(production_json_optional "$inventory" '.shared_postgres_password')"
+  base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
+  deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
+  withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
   backoffice_hostname="$(jq -r '(.backoffice_hostname // empty)' <<<"$wireguard_role_json")"
-  wireguard_public_subnet_ids_json="$(jq -c '(.public_subnet_ids // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
-  backoffice_private_endpoint_ips_json="$(jq -c '(.backoffice_private_endpoint_ips // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  wireguard_public_subnet_ids_json="$(
+    jq -c '
+      if (.public_subnet_ids // [] | type) == "array" and ((.public_subnet_ids // []) | length) > 0 then
+        .public_subnet_ids
+      elif (.public_subnet_id // "" | type) == "string" and (.public_subnet_id // "") != "" then
+        [.public_subnet_id]
+      else
+        []
+      end
+    ' <<<"$wireguard_role_json"
+  )"
+  backoffice_private_endpoint_ips_json="$(
+    jq -c '
+      if (.backoffice_private_endpoint_ips // [] | type) == "array" and ((.backoffice_private_endpoint_ips // []) | length) > 0 then
+        .backoffice_private_endpoint_ips
+      elif (.backoffice_private_endpoint // "" | type) == "string" and (.backoffice_private_endpoint // "") != "" then
+        [.backoffice_private_endpoint]
+      else
+        []
+      end
+    ' <<<"$wireguard_role_json"
+  )"
+  wireguard_source_cidrs_json="$(jq -c '(.source_cidrs // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
+  proof_requestor_address="$(jq -r '.requestor_address // empty' <<<"$proof_role_json")"
+  proof_requestor_secret_arn="$(jq -r '.requestor_secret_arn // empty' <<<"$proof_role_json")"
+  proof_funder_secret_arn="$(jq -r '.funder_secret_arn // empty' <<<"$proof_role_json")"
+  proof_rpc_url="$(jq -r '.rpc_url // empty' <<<"$proof_role_json")"
   shared_proof_service_image="$(jq -r '.image_uri // empty' <<<"$proof_role_json")"
   shared_proof_service_image_ecr_repository_arn="$(jq -r '.image_ecr_repository_arn // empty' <<<"$proof_role_json")"
   shared_wireguard_role_ami_id="$(jq -r '.ami_id // empty' <<<"$wireguard_role_json")"
+  shared_wireguard_listen_port="$(jq -r '.listen_port // empty' <<<"$wireguard_role_json")"
+  shared_wireguard_network_cidr="$(jq -r '.network_cidr // empty' <<<"$wireguard_role_json")"
+  alarm_actions_json="$(jq -c '.shared_services.alarm_actions // []' "$inventory")"
   app_security_group_id="$(jq -r '.app_security_group_id // empty' <<<"$app_role_json")"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" && -n "$app_security_group_id" ]]; then
     operator_client_security_group_ids_json="$(jq -cn --arg sg "$app_security_group_id" '[$sg]')"
@@ -579,18 +617,92 @@ production_write_shared_terraform_override_tfvars() {
   fi
   [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
+  if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
+    [[ -n "$shared_wireguard_role_ami_id" ]] || die "wireguard_role.ami_id is required for shared terraform role runtime"
+
+    jq -n \
+      --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
+      --arg backoffice_hostname "$backoffice_hostname" \
+      --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
+      --arg shared_proof_service_image "$shared_proof_service_image" \
+      --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
+      --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
+      '{
+        shared_wireguard_enabled: true,
+        shared_wireguard_backoffice_hostname: $backoffice_hostname,
+        shared_proof_service_image: $shared_proof_service_image,
+        shared_proof_role_min_size: 2,
+        shared_proof_role_desired_capacity: 2,
+        shared_proof_role_max_size: 4,
+        shared_wireguard_min_size: 2,
+        shared_wireguard_desired_capacity: 2,
+        shared_wireguard_max_size: 4,
+        shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id
+      }
+      + (if ($operator_client_security_group_ids | length) == 0 then {} else {
+        operator_client_security_group_ids: $operator_client_security_group_ids
+      } end)
+      + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
+        shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
+      } end)
+      + (if ($backoffice_private_endpoint_ips | length) == 0 then {} else {
+        shared_wireguard_backoffice_private_endpoint_ips: $backoffice_private_endpoint_ips
+      } end)' >"$output_file"
+    return 0
+  fi
+
+  [[ -n "$vpc_id" ]] || die "app_role.vpc_id is required for production shared terraform"
+  [[ "$(jq -r 'length' <<<"$private_subnet_ids_json")" -ge 2 ]] || die "app_role.private_subnet_ids must include at least two subnet ids for production shared terraform"
+  [[ -n "$shared_postgres_password" ]] || die "shared_postgres_password is required for production shared terraform"
+  [[ -n "$proof_requestor_address" ]] || die "shared_roles.proof.requestor_address is required for production shared terraform"
+  [[ -n "$proof_requestor_secret_arn" ]] || die "shared_roles.proof.requestor_secret_arn is required for production shared terraform"
+  [[ -n "$proof_funder_secret_arn" ]] || die "shared_roles.proof.funder_secret_arn is required for production shared terraform"
+  [[ -n "$proof_rpc_url" ]] || die "shared_roles.proof.rpc_url is required for production shared terraform"
   [[ -n "$shared_proof_service_image_ecr_repository_arn" ]] || die "shared_roles.proof.image_ecr_repository_arn is required for shared terraform role runtime"
   [[ -n "$shared_wireguard_role_ami_id" ]] || die "wireguard_role.ami_id is required for shared terraform role runtime"
+  [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for production shared terraform"
+  [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for production shared terraform"
+  [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty for production shared terraform"
+  jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alarm_actions_json" >/dev/null 2>&1 \
+    || die "shared_services.alarm_actions must be a non-empty array for production shared terraform"
 
   jq -n \
+    --arg aws_region "$aws_region" \
+    --arg deployment_id "$env_slug" \
+    --arg vpc_id "$vpc_id" \
+    --argjson shared_subnet_ids "$private_subnet_ids_json" \
+    --arg shared_postgres_password "$shared_postgres_password" \
+    --arg shared_sp1_requestor_secret_arn "$proof_requestor_secret_arn" \
+    --arg shared_sp1_funder_secret_arn "$proof_funder_secret_arn" \
+    --arg shared_sp1_requestor_address "$proof_requestor_address" \
+    --arg shared_sp1_rpc_url "$proof_rpc_url" \
+    --argjson shared_base_chain_id "$base_chain_id" \
+    --arg shared_deposit_image_id "$deposit_image_id" \
+    --arg shared_withdraw_image_id "$withdraw_image_id" \
+    --argjson alarm_actions "$alarm_actions_json" \
     --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
     --arg backoffice_hostname "$backoffice_hostname" \
     --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
+    --argjson wireguard_source_cidrs "$wireguard_source_cidrs_json" \
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
     --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
-    --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
+    --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
+    --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
     '{
+      aws_region: $aws_region,
+      deployment_id: $deployment_id,
+      vpc_id: $vpc_id,
+      shared_subnet_ids: $shared_subnet_ids,
+      shared_postgres_password: $shared_postgres_password,
+      shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+      shared_sp1_funder_secret_arn: $shared_sp1_funder_secret_arn,
+      shared_sp1_requestor_address: $shared_sp1_requestor_address,
+      shared_sp1_rpc_url: $shared_sp1_rpc_url,
+      shared_base_chain_id: $shared_base_chain_id,
+      shared_deposit_image_id: $shared_deposit_image_id,
+      shared_withdraw_image_id: $shared_withdraw_image_id,
+      alarm_actions: $alarm_actions,
       shared_wireguard_enabled: true,
       shared_wireguard_backoffice_hostname: $backoffice_hostname,
       shared_proof_service_image: $shared_proof_service_image,
@@ -601,11 +713,11 @@ production_write_shared_terraform_override_tfvars() {
       shared_wireguard_min_size: 2,
       shared_wireguard_desired_capacity: 2,
       shared_wireguard_max_size: 4,
-      shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id
+      shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id,
+      shared_wireguard_listen_port: $shared_wireguard_listen_port,
+      shared_wireguard_network_cidr: $shared_wireguard_network_cidr,
+      shared_wireguard_source_cidrs: $wireguard_source_cidrs
     }
-    + (if ($operator_client_security_group_ids | length) == 0 then {} else {
-      operator_client_security_group_ids: $operator_client_security_group_ids
-    } end)
     + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
       shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
     } end)

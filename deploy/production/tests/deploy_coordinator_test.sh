@@ -362,6 +362,7 @@ write_inventory_fixture() {
       | .operators[0].secret_contract_file = $secrets
       | .operators[0].asg = "juno-op1"
       | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
+      | .shared_postgres_password = "postgres"
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.private_endpoint = $app_private_endpoint
@@ -400,6 +401,8 @@ write_inventory_fixture() {
         }
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          requestor_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor",
+          funder_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-funder",
           rpc_url: "https://rpc.mainnet.succinct.xyz",
           image_release_tag: "shared-proof-services-image-v1.2.3-testnet",
           image_uri: "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
@@ -1274,6 +1277,9 @@ EOF
   assert_contains "$combined_log" "terraform-env AWS_ENDPOINT_URL_STS=https://sts.amazonaws.com" "deploy-coordinator forces public sts when regional sts resolves private"
   assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the wireguard override file"
   assert_file_exists "$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator writes the app runtime override file"
+  assert_eq "$(jq -r '.aws_region' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "us-east-1" "deploy-coordinator writes the shared aws region into terraform vars"
+  assert_eq "$(jq -r '.deployment_id' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "alpha" "deploy-coordinator writes the shared deployment id"
+  assert_eq "$(jq -r '.shared_sp1_requestor_secret_arn' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor" "deploy-coordinator writes the proof requestor secret arn into shared terraform vars"
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "true" "deploy-coordinator writes a wireguard-enabled override file"
   assert_eq "$(jq -r '.shared_wireguard_public_subnet_ids[0]' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "subnet-0abc1234def567890" "deploy-coordinator forwards the wireguard public subnet into terraform"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "ops.alpha.intents-testing.thejunowallet.com" "deploy-coordinator forwards the backoffice hostname into terraform"

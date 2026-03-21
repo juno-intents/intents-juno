@@ -278,8 +278,82 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   rm -rf "$tmp"
 }
 
+test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets() {
+  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir current_output_root
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+  current_output_root="$tmp/production-output/preview"
+
+  mkdir -p "$fake_bin" "$current_output_root"
+  write_rebuild_inventory_fixture "$inventory"
+  printf '{}' >"$dkg_summary"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  cat >"$current_output_root/shared-terraform-output.json" <<'JSON'
+{
+  "shared_proof_requestor_secret_arn": {
+    "value": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-requestor"
+  },
+  "shared_proof_funder_secret_arn": {
+    "value": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-funder"
+  },
+  "shared_sp1_requestor_address": {
+    "value": "0x4444444444444444444444444444444444444444"
+  },
+  "shared_sp1_rpc_url": {
+    "value": "https://rpc.mainnet.succinct.xyz"
+  }
+}
+JSON
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
+
+  (
+    cd "$REPO_ROOT"
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_eq "$(jq -r '.shared_roles.proof.requestor_secret_arn' "$output_root/preview/inventory.resolved.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-requestor" "rebuild carries forward the current proof requestor secret arn before destroy"
+  assert_eq "$(jq -r '.shared_roles.proof.funder_secret_arn' "$output_root/preview/inventory.resolved.json")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-funder" "rebuild carries forward the current proof funder secret arn before destroy"
+  assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$output_root/preview/inventory.resolved.json")" "0x4444444444444444444444444444444444444444" "rebuild carries forward the current proof requestor address before destroy"
+  rm -rf "$tmp"
+}
+
 main() {
   test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout
+  test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets
 }
 
 main "$@"

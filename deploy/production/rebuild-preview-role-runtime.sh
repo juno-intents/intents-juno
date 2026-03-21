@@ -114,6 +114,7 @@ mkdir -p "$output_dir/canaries" "$output_dir/e2e"
 upgraded_inventory="$output_dir/inventory.preview-runtime.json"
 resolved_inventory="$output_dir/inventory.resolved.json"
 current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/production-output"
+current_shared_tf_output="$current_output_root/$env_slug/shared-terraform-output.json"
 
 "$upgrade_preview_inventory_bin" \
   --inventory "$inventory" \
@@ -126,6 +127,36 @@ current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/p
   --inventory "$upgraded_inventory" \
   --output "$resolved_inventory" \
   --github-repo "$github_repo"
+
+if [[ -f "$current_shared_tf_output" ]]; then
+  tmp_inventory="$(mktemp)"
+  jq \
+    --arg requestor_secret_arn "$(jq -r '.shared_proof_requestor_secret_arn.value // empty' "$current_shared_tf_output")" \
+    --arg funder_secret_arn "$(jq -r '.shared_proof_funder_secret_arn.value // empty' "$current_shared_tf_output")" \
+    --arg requestor_address "$(jq -r '.shared_sp1_requestor_address.value // empty' "$current_shared_tf_output")" \
+    --arg rpc_url "$(jq -r '.shared_sp1_rpc_url.value // empty' "$current_shared_tf_output")" \
+    '
+      .shared_roles = (.shared_roles // {})
+      | .shared_roles.proof = (.shared_roles.proof // {})
+      | if (.shared_roles.proof.requestor_secret_arn // "") == "" and $requestor_secret_arn != "" then
+          .shared_roles.proof.requestor_secret_arn = $requestor_secret_arn
+        else .
+        end
+      | if (.shared_roles.proof.funder_secret_arn // "") == "" and $funder_secret_arn != "" then
+          .shared_roles.proof.funder_secret_arn = $funder_secret_arn
+        else .
+        end
+      | if (.shared_roles.proof.requestor_address // "") == "" and $requestor_address != "" then
+          .shared_roles.proof.requestor_address = $requestor_address
+        else .
+        end
+      | if (.shared_roles.proof.rpc_url // "") == "" and $rpc_url != "" then
+          .shared_roles.proof.rpc_url = $rpc_url
+        else .
+        end
+    ' "$resolved_inventory" >"$tmp_inventory"
+  mv "$tmp_inventory" "$resolved_inventory"
+fi
 
 "$destroy_preview_role_runtime_bin" \
   --inventory "$resolved_inventory" \

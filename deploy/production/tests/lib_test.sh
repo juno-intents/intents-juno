@@ -40,6 +40,7 @@ write_inventory_fixture() {
       | .operators[0].operator_address = $operator_address
       | .operators[0].asg = "juno-op1"
       | .operators[0].launch_template = {"id":"lt-0123456789abcdef0","version":"1"}
+      | .shared_postgres_password = "postgres"
       | .app_host.known_hosts_file = $app_kh
       | .app_host.secret_contract_file = $app_secrets
       | .app_host.host = $app_host
@@ -53,6 +54,9 @@ write_inventory_fixture() {
           terraform_dir: "deploy/shared/terraform/app-runtime",
           public_endpoint: $app_public_endpoint,
           private_endpoint: $app_private_endpoint,
+          vpc_id: "vpc-0123456789abcdef0",
+          public_subnet_ids: ["subnet-0apppublica", "subnet-0apppublicb"],
+          private_subnet_ids: ["subnet-0appprivatea", "subnet-0appprivateb"],
           asg: "juno-app",
           launch_template: { id: "lt-0appcafebabefeed0", version: "3" },
           app_ami_id: "ami-0123456789abcdef0",
@@ -86,6 +90,8 @@ write_inventory_fixture() {
       | .shared_services.wireguard.public_subnet_id = $wireguard_public_subnet_id
       | .shared_roles.proof = {
           requestor_address: "0x1234567890abcdef1234567890abcdef12345678",
+          requestor_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor",
+          funder_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-funder",
           rpc_url: "https://rpc.mainnet.succinct.xyz",
           image_uri: "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
           image_ecr_repository_arn: "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
@@ -118,6 +124,37 @@ write_inventory_fixture() {
           publish_public_dns: false
         }
     ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
+}
+
+test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .wireguard_role.public_subnet_ids = ["subnet-0cecac94dde54efca", "subnet-03d50beebb2734da8"]
+    | .wireguard_role.source_cidrs = ["10.0.0.0/24", "10.0.1.0/24"]
+    | .wireguard_role.backoffice_private_endpoint_ips = ["10.0.10.21", "10.0.11.21"]
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.aws_region' "$override_file")" "us-east-1" "production shared tfvars include aws region"
+  assert_eq "$(jq -r '.deployment_id' "$override_file")" "preview" "production shared tfvars include deployment id"
+  assert_eq "$(jq -r '.vpc_id' "$override_file")" "vpc-0123456789abcdef0" "production shared tfvars include vpc id"
+  assert_eq "$(jq -r '.shared_subnet_ids[0]' "$override_file")" "subnet-0afebf35409cafe82" "production shared tfvars include private shared subnet ids"
+  assert_eq "$(jq -r '.shared_postgres_password' "$override_file")" "preview-postgres-password" "production shared tfvars include postgres password"
+  assert_eq "$(jq -r '.shared_sp1_requestor_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor" "production shared tfvars include proof requestor secret arn"
+  assert_eq "$(jq -r '.shared_sp1_funder_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-funder" "production shared tfvars include proof funder secret arn"
+  assert_eq "$(jq -r '.shared_base_chain_id' "$override_file")" "84532" "production shared tfvars include base chain id"
+  assert_eq "$(jq -r '.shared_deposit_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa01" "production shared tfvars include deposit guest id"
+  assert_eq "$(jq -r '.shared_withdraw_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa02" "production shared tfvars include withdraw guest id"
+  assert_eq "$(jq -r '.shared_wireguard_backoffice_private_endpoint_ips[1]' "$override_file")" "10.0.11.21" "production shared tfvars include wireguard private backoffice ips"
+  rm -rf "$workdir"
 }
 
 write_terraform_tfvars_fixture() {
@@ -3038,6 +3075,7 @@ main() {
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
+  test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
   test_production_run_release_binary_executes_directly_on_host_when_runner_not_required

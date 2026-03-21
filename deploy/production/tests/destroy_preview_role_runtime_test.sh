@@ -261,8 +261,18 @@ write_destroy_inventory_fixture() {
     "operator_endpoints": [],
     "publish_public_dns": false
   },
+  "shared_postgres_password": "preview-postgres-password",
+  "contracts": {
+    "base_chain_id": 84532,
+    "deposit_image_id": "0x1111111111111111111111111111111111111111111111111111111111111111",
+    "withdraw_image_id": "0x2222222222222222222222222222222222222222222222222222222222222222"
+  },
   "shared_roles": {
     "proof": {
+      "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
+      "requestor_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-requestor",
+      "funder_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-proof-funder",
+      "rpc_url": "https://rpc.mainnet.succinct.xyz",
       "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
       "image_ecr_repository_arn": "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services"
     }
@@ -270,6 +280,8 @@ write_destroy_inventory_fixture() {
   "wireguard_role": {
     "ami_id": "ami-0wireguardcafebeef0",
     "public_subnet_ids": ["subnet-0cecac94dde54efca", "subnet-03d50beebb2734da8"],
+    "listen_port": 51820,
+    "network_cidr": "10.66.0.0/24",
     "source_cidrs": ["10.0.0.0/24", "10.0.1.0/24"],
     "backoffice_hostname": "ops.preview.intents-testing.thejunowallet.com",
     "backoffice_private_endpoint_ips": ["10.0.10.10", "10.0.11.10"]
