@@ -139,6 +139,20 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_refresh_app_runtime_binary() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'refresh-app-runtime %s\n' "\$*" >>"$log_file"
+cat <<'JSON'
+{"ready_for_deploy":true}
+JSON
+EOF
+  chmod +x "$target"
+}
+
 write_fake_ready_canary_binary() {
   local target="$1"
   local log_file="$2"
@@ -605,6 +619,7 @@ EOF
   mv "$workdir/inventory.next" "$workdir/inventory.json"
   write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
   write_fake_role_runtime_release_resolver "$fake_bin/resolve-role-runtime-release-inputs.sh" "$resolver_log"
+  write_fake_refresh_app_runtime_binary "$fake_bin/refresh-app-runtime.sh" "$provision_log"
   write_fake_provision_app_edge_binary "$fake_bin/provision-app-edge.sh" "$provision_log"
   write_fake_ready_canary_binary "$fake_bin/canary-shared-services.sh" "$shared_canary_log" "canary-shared-services"
   write_fake_ready_canary_binary "$fake_bin/canary-app-host.sh" "$app_canary_log" "canary-app-host"
@@ -658,6 +673,7 @@ EOF
 
   PATH="$fake_bin:$PATH" \
   PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+  PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
   PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
   PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
   PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
@@ -675,9 +691,11 @@ EOF
   assert_eq "$(jq -r '.app_role.app_ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedapp1234567" "deploy coordinator resolves app ami id before tfvars"
   assert_eq "$(jq -r '.wireguard_role.ami_id' "$output_dir/alpha/inventory.release-resolved.json")" "ami-0resolvedwireguard1" "deploy coordinator resolves wireguard ami id before tfvars"
   assert_contains "$(cat "$resolver_log")" "--github-repo juno-intents/intents-juno" "deploy coordinator forwards the default github repo to the release resolver"
+  assert_contains "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "deploy coordinator refreshes the app runtime from the rendered handoffs before post-deploy checks"
   assert_contains "$(cat "$provision_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator provisions the app edge from the rendered handoff"
   assert_contains "$(cat "$shared_canary_log")" "--shared-manifest $output_dir/alpha/shared-manifest.json" "deploy coordinator runs the shared canary after rendering the manifest"
   assert_contains "$(cat "$app_canary_log")" "--app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator runs the app canary after rendering the handoff"
+  assert_line_order "$(cat "$provision_log")" "refresh-app-runtime --shared-manifest $output_dir/alpha/shared-manifest.json --app-deploy $output_dir/alpha/app/app-deploy.json --output-dir $output_dir/alpha/app-runtime" "provision-app-edge --app-deploy $output_dir/alpha/app/app-deploy.json" "deploy coordinator refreshes app runtime before provisioning edge"
   assert_file_exists "$output_dir/alpha/canaries/shared-services.json" "deploy coordinator stores the shared canary output"
   assert_file_exists "$output_dir/alpha/canaries/app.json" "deploy coordinator stores the app canary output"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_dir/alpha/canaries/shared-services.json")" "true" "deploy coordinator requires a passing shared canary"

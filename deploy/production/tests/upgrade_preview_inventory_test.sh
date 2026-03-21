@@ -202,6 +202,7 @@ JSON
     cat <<'JSON'
 {"CertificateSummaryList":[
   {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview","DomainName":"bridge.preview.intents-testing.thejunowallet.com"},
+  {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/origin-preview","DomainName":"origin.preview.intents-testing.thejunowallet.com"},
   {"CertificateArn":"arn:aws:acm:us-east-1:021490342184:certificate/ops-preview","DomainName":"ops.preview.intents-testing.thejunowallet.com"}
 ]}
 JSON
@@ -257,7 +258,8 @@ test_upgrade_preview_inventory_translates_legacy_preview_inputs() {
   assert_eq "$(jq -r '.app_role.public_subnet_ids[1]' "$output")" "subnet-03d50beebb2734da8" "legacy preview upgrade copies public subnet ids"
   assert_eq "$(jq -r '.app_role.private_subnet_ids[1]' "$output")" "subnet-0dfe9dd62ddea943b" "legacy preview upgrade copies private subnet ids"
   assert_eq "$(jq -r '.app_role.app_instance_profile_name' "$output")" "juno-live-e2e-preview0316d-instance-profile" "legacy preview upgrade sets app instance profile"
-  assert_eq "$(jq -r '.app_role.public_bridge_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview" "legacy preview upgrade resolves public bridge cert"
+  assert_eq "$(jq -r '.app_role.public_bridge_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/origin-preview" "legacy preview upgrade resolves the CloudFront origin cert for the public bridge listener"
+  assert_eq "$(jq -r '.app_role.public_bridge_additional_certificate_arns[0]' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview" "legacy preview upgrade preserves the bridge hostname cert as an additional listener certificate"
   assert_eq "$(jq -r '.app_role.internal_backoffice_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/ops-preview" "legacy preview upgrade resolves internal backoffice cert"
   assert_eq "$(jq -r '.shared_roles.proof.image_release_tag' "$output")" "shared-proof-services-image-v2026.03.20-testnet" "legacy preview upgrade patches proof image release tag"
   assert_eq "$(jq -r '.wireguard_role.ami_release_tag' "$output")" "wireguard-role-ami-v2026.03.20-testnet" "legacy preview upgrade patches wireguard ami release tag"

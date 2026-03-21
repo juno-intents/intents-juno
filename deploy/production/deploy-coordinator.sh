@@ -58,6 +58,7 @@ output_root="./production-output"
 run_label=""
 dry_run="false"
 resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN:-$SCRIPT_DIR/resolve-role-runtime-release-inputs.sh}"
+refresh_app_runtime_bin="${PRODUCTION_REFRESH_APP_RUNTIME_BIN:-$SCRIPT_DIR/refresh-app-runtime.sh}"
 provision_app_edge_bin="${PRODUCTION_PROVISION_APP_EDGE_BIN:-$SCRIPT_DIR/provision-app-edge.sh}"
 canary_shared_bin="${PRODUCTION_CANARY_SHARED_BIN:-$SCRIPT_DIR/canary-shared-services.sh}"
 canary_app_bin="${PRODUCTION_CANARY_APP_BIN:-$SCRIPT_DIR/canary-app-host.sh}"
@@ -112,7 +113,7 @@ for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 if [[ "$run_post_deploy_checks" == "true" ]]; then
-  for cmd in "$provision_app_edge_bin" "$canary_shared_bin" "$canary_app_bin"; do
+  for cmd in "$refresh_app_runtime_bin" "$provision_app_edge_bin" "$canary_shared_bin" "$canary_app_bin"; do
     have_cmd "$cmd" || [[ -x "$cmd" ]] || die "required command not found: $cmd"
   done
 fi
@@ -450,6 +451,20 @@ if [[ "$run_post_deploy_checks" == "true" ]]; then
   mkdir -p "$canary_output_dir"
 
   if [[ -f "$output_dir/app/app-deploy.json" ]]; then
+    mkdir -p "$output_dir/app-runtime"
+    post_deploy_refresh_app_args=(
+      "$refresh_app_runtime_bin"
+      --shared-manifest "$shared_manifest"
+      --app-deploy "$output_dir/app/app-deploy.json"
+      --output-dir "$output_dir/app-runtime"
+    )
+    if [[ "$dry_run" == "true" ]]; then
+      post_deploy_refresh_app_args+=(--dry-run)
+    fi
+    "${post_deploy_refresh_app_args[@]}" >"$output_dir/app-runtime/refresh.json"
+    [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-runtime/refresh.json")" == "true" ]] || \
+      die "app runtime refresh failed: $output_dir/app-runtime/refresh.json"
+
     post_deploy_app_args=("$provision_app_edge_bin" --app-deploy "$output_dir/app/app-deploy.json")
     if [[ "$dry_run" == "true" ]]; then
       post_deploy_app_args+=(--dry-run)

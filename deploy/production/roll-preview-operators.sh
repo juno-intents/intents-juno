@@ -182,17 +182,19 @@ ensure_preview_shared_kafka_role_policy() {
 update_inventory_operator() {
   local inventory_file="$1"
   local operator_id="$2"
-  local operator_host="$3"
-  local public_endpoint="$4"
-  local private_endpoint="$5"
-  local launch_template_id="$6"
-  local launch_template_version="$7"
-  local known_hosts_file="$8"
+  local operator_asg="$3"
+  local operator_host="$4"
+  local public_endpoint="$5"
+  local private_endpoint="$6"
+  local launch_template_id="$7"
+  local launch_template_version="$8"
+  local known_hosts_file="$9"
   local tmp
 
   tmp="$(mktemp)"
   jq \
     --arg operator_id "$operator_id" \
+    --arg operator_asg "$operator_asg" \
     --arg operator_host "$operator_host" \
     --arg public_endpoint "$public_endpoint" \
     --arg private_endpoint "$private_endpoint" \
@@ -202,7 +204,8 @@ update_inventory_operator() {
       .operators = [
         .operators[]
         | if .operator_id == $operator_id then
-            .operator_host = $operator_host
+            .asg = $operator_asg
+            | .operator_host = $operator_host
             | .public_endpoint = $public_endpoint
             | .private_endpoint = (if $private_endpoint == "" then null else $private_endpoint end)
             | .known_hosts_file = $known_hosts_file
@@ -224,9 +227,29 @@ update_inventory_operator() {
 operator_results_json='[]'
 while IFS= read -r operator_json; do
   operator_id="$(jq -r '.operator_id | select(type == "string" and length > 0)' <<<"$operator_json")"
-  operator_asg="$(jq -r '.asg | select(type == "string" and length > 0)' <<<"$operator_json")"
-  launch_template_id="$(jq -r '.launch_template.id | select(type == "string" and length > 0)' <<<"$operator_json")"
-  launch_template_version="$(jq -r '.launch_template.version | select(type == "string" and length > 0)' <<<"$operator_json")"
+  operator_asg="$(jq -r '.asg // empty' <<<"$operator_json")"
+  launch_template_id="$(jq -r '.launch_template.id // empty' <<<"$operator_json")"
+  launch_template_version="$(jq -r '.launch_template.version // empty' <<<"$operator_json")"
+  operator_public_ip="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
+
+  if [[ -z "$operator_asg" || -z "$launch_template_id" || -z "$launch_template_version" ]]; then
+    [[ -n "$operator_public_ip" ]] || die "operator $operator_id is missing public_endpoint/operator_host required for rollout metadata discovery"
+    operator_instance_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 describe-instances \
+      --filters "Name=ip-address,Values=$operator_public_ip" \
+      --output json)"
+    if [[ -z "$operator_asg" ]]; then
+      operator_asg="$(jq -r '.Reservations[0].Instances[0].Tags[]? | select(.Key == "aws:autoscaling:groupName") | .Value' <<<"$operator_instance_json" | head -n 1)"
+    fi
+    if [[ -z "$launch_template_id" ]]; then
+      launch_template_id="$(jq -r '.Reservations[0].Instances[0].LaunchTemplate.LaunchTemplateId // empty' <<<"$operator_instance_json")"
+    fi
+    if [[ -z "$launch_template_version" ]]; then
+      launch_template_version="$(jq -r '.Reservations[0].Instances[0].LaunchTemplate.Version // empty' <<<"$operator_instance_json")"
+    fi
+  fi
+  [[ -n "$operator_asg" ]] || die "operator $operator_id is missing an autoscaling group name"
+  [[ -n "$launch_template_id" ]] || die "operator $operator_id is missing a launch template id"
+  [[ -n "$launch_template_version" ]] || die "operator $operator_id is missing a launch template version"
 
   lt_response="$(
     AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 create-launch-template-version \
@@ -286,11 +309,12 @@ while IFS= read -r operator_json; do
   operator_handoff_dir="$output_dir/operators/$operator_id"
   mkdir -p "$operator_handoff_dir"
   known_hosts_file="$operator_handoff_dir/known_hosts"
-  ssh-keyscan -H "$operator_host" >"$known_hosts_file"
+  ssh-keyscan -T 10 -H "$operator_host" >"$known_hosts_file"
 
   update_inventory_operator \
     "$working_inventory" \
     "$operator_id" \
+    "$operator_asg" \
     "$operator_host" \
     "$operator_host" \
     "$operator_private_ip" \

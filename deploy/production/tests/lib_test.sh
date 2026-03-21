@@ -60,7 +60,11 @@ write_inventory_fixture() {
           asg: "juno-app",
           launch_template: { id: "lt-0appcafebabefeed0", version: "3" },
           app_ami_id: "ami-0123456789abcdef0",
+          app_instance_profile_name: "juno-app-instance-profile",
           ami_release_tag: "app-runtime-ami-v1.2.3-testnet",
+          public_bridge_certificate_arn: "arn:aws:acm:us-east-1:021490342184:certificate/origin-preview",
+          public_bridge_additional_certificate_arns: ["arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview"],
+          internal_backoffice_certificate_arn: "arn:aws:acm:us-east-1:021490342184:certificate/ops-preview",
           public_lb: {
             dns_name: "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
             zone_id: "Z35SXDOTRQ7X7K",
@@ -74,6 +78,7 @@ write_inventory_fixture() {
           aws_profile: "juno",
           aws_region: "us-east-1",
           account_id: "021490342184",
+          app_security_group_id: "sg-0123456789abcdef0",
           security_group_id: "sg-0123456789abcdef0",
           known_hosts_file: $app_kh,
           secret_contract_file: $app_secrets,
@@ -154,6 +159,8 @@ test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   assert_eq "$(jq -r '.shared_deposit_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa01" "production shared tfvars include deposit guest id"
   assert_eq "$(jq -r '.shared_withdraw_image_id' "$override_file")" "0x000000000000000000000000000000000000000000000000000000000000aa02" "production shared tfvars include withdraw guest id"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_private_endpoint_ips[1]' "$override_file")" "10.0.11.21" "production shared tfvars include wireguard private backoffice ips"
+  assert_eq "$(jq -r '.shared_service_client_security_group_ids[0]' "$override_file")" "sg-0123456789abcdef0" "production shared tfvars allow the app runtime sg into shared postgres and msk"
+  assert_eq "$(jq -r '.shared_ipfs_client_security_group_ids[0]' "$override_file")" "sg-0123456789abcdef0" "production shared tfvars allow the app runtime sg into shared ipfs"
   rm -rf "$workdir"
 }
 
@@ -2964,6 +2971,25 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   rm -rf "$workdir"
 }
 
+test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .app_role.public_bridge_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/origin-preview"
+    | .app_role.public_bridge_additional_certificate_arns = ["arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview"]
+    | .app_role.internal_backoffice_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/ops-preview"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/app-terraform.auto.tfvars.json"
+  production_write_app_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.public_bridge_certificate_arn' "$override_file")" "arn:aws:acm:us-east-1:021490342184:certificate/origin-preview" "app runtime tfvars use the origin certificate as the default public bridge listener cert"
+  assert_eq "$(jq -r '.public_bridge_additional_certificate_arns[0]' "$override_file")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview" "app runtime tfvars preserve the bridge hostname cert as an additional listener certificate"
+  rm -rf "$workdir"
+}
+
 test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root() {
   local workdir fakebin log_file output_file expected_repo_root
   workdir="$(mktemp -d)"
@@ -3122,6 +3148,7 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
+  test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
   test_production_run_release_binary_executes_directly_on_host_when_runner_not_required
   test_production_run_release_binary_uses_docker_runner_when_forced

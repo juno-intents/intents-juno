@@ -188,7 +188,6 @@ resource "aws_cloudfront_distribution" "bridge" {
   origin {
     domain_name = var.origin_record_name
     origin_id   = "app-origin"
-    origin_path = "/bridge"
 
     custom_origin_config {
       http_port              = 80

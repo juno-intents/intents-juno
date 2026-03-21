@@ -428,6 +428,17 @@ resource "aws_security_group" "ipfs" {
     }
   }
 
+  dynamic "ingress" {
+    for_each = toset(var.shared_ipfs_client_security_group_ids)
+    content {
+      description     = "IPFS API from approved client security groups"
+      from_port       = var.shared_ipfs_api_port
+      to_port         = var.shared_ipfs_api_port
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
   egress {
     description = "All outbound"
     from_port   = 0

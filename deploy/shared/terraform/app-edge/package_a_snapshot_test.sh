@@ -58,6 +58,7 @@ main() {
   assert_contains "$bridge_a" 'allow_overwrite = true' "bridge A record allows overwrite for replay-safe preview deploys"
   assert_contains "$bridge_aaaa" 'allow_overwrite = true' "bridge AAAA record allows overwrite for replay-safe preview deploys"
   assert_contains "$main_tf" 'origin_protocol_policy = "https-only"' "CloudFront uses TLS on the origin leg"
+  assert_not_contains "$main_tf" 'origin_path = "/bridge"' "CloudFront does not prefix origin requests with /bridge"
   assert_contains "$main_tf" 'http_port              = 80' "CloudFront keeps the origin HTTP port pinned away from app TLS"
   assert_contains "$main_tf" 'https_port             = var.origin_http_port' "CloudFront origin HTTPS port stays configurable"
   assert_contains "$main_tf" 'description       = "CloudFront origin HTTPS"' "origin ingress rule is scoped to HTTPS"

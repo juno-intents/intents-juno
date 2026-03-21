@@ -197,6 +197,17 @@ resource "aws_lb_listener" "public_bridge_https" {
   }
 }
 
+resource "aws_lb_listener_certificate" "public_bridge_additional" {
+  for_each = toset([
+    for certificate_arn in var.public_bridge_additional_certificate_arns :
+    certificate_arn
+    if certificate_arn != var.public_bridge_certificate_arn
+  ])
+
+  listener_arn    = aws_lb_listener.public_bridge_https.arn
+  certificate_arn = each.value
+}
+
 resource "aws_lb_listener" "internal_backoffice_https" {
   load_balancer_arn = aws_lb.internal_backoffice.arn
   port              = 443

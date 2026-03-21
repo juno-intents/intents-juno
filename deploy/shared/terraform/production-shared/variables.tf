@@ -47,6 +47,12 @@ variable "shared_ipfs_client_cidr_blocks" {
   default     = []
 }
 
+variable "shared_ipfs_client_security_group_ids" {
+  description = "Additional client security groups that may reach the internal IPFS API."
+  type        = list(string)
+  default     = []
+}
+
 variable "shared_postgres_user" {
   description = "Aurora Postgres username for shared services."
   type        = string

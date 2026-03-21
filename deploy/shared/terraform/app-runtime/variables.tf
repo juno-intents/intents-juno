@@ -100,6 +100,12 @@ variable "public_bridge_certificate_arn" {
   type        = string
 }
 
+variable "public_bridge_additional_certificate_arns" {
+  description = "Additional ACM certificate ARNs attached to the public bridge load balancer listener."
+  type        = list(string)
+  default     = []
+}
+
 variable "internal_backoffice_certificate_arn" {
   description = "ACM certificate ARN for the internal backoffice load balancer listener."
   type        = string

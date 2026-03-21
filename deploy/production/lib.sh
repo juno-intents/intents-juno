@@ -561,7 +561,7 @@ production_write_shared_terraform_override_tfvars() {
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
   local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
-  local app_security_group_id operator_client_security_group_ids_json
+  local app_security_group_id operator_client_security_group_ids_json shared_service_client_security_group_ids_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -610,6 +610,11 @@ production_write_shared_terraform_override_tfvars() {
   shared_wireguard_network_cidr="$(jq -r '.network_cidr // empty' <<<"$wireguard_role_json")"
   alarm_actions_json="$(jq -c '.shared_services.alarm_actions // []' "$inventory")"
   app_security_group_id="$(jq -r '.app_security_group_id // empty' <<<"$app_role_json")"
+  if [[ -n "$app_security_group_id" ]]; then
+    shared_service_client_security_group_ids_json="$(jq -cn --arg sg "$app_security_group_id" '[$sg]')"
+  else
+    shared_service_client_security_group_ids_json='[]'
+  fi
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" && -n "$app_security_group_id" ]]; then
     operator_client_security_group_ids_json="$(jq -cn --arg sg "$app_security_group_id" '[$sg]')"
   else
@@ -689,6 +694,7 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
     --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
     --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
+    --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -718,6 +724,10 @@ production_write_shared_terraform_override_tfvars() {
       shared_wireguard_network_cidr: $shared_wireguard_network_cidr,
       shared_wireguard_source_cidrs: $wireguard_source_cidrs
     }
+    + (if ($shared_service_client_security_group_ids | length) == 0 then {} else {
+      shared_service_client_security_group_ids: $shared_service_client_security_group_ids,
+      shared_ipfs_client_security_group_ids: $shared_service_client_security_group_ids
+    } end)
     + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
       shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
     } end)
@@ -737,6 +747,7 @@ production_write_app_terraform_override_tfvars() {
   local env_slug app_role_json wireguard_role_json wireguard_cidr_blocks_json
   local aws_region vpc_id public_subnet_ids_json private_subnet_ids_json
   local app_ami_id app_instance_profile_name public_bridge_certificate_arn internal_backoffice_certificate_arn
+  local public_bridge_additional_certificate_arns_json
   local alarm_actions_json
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -760,6 +771,14 @@ production_write_app_terraform_override_tfvars() {
   [[ -n "$app_instance_profile_name" ]] || die "app_role.app_instance_profile_name is required for app runtime terraform"
   public_bridge_certificate_arn="$(jq -r '.public_bridge_certificate_arn // empty' <<<"$app_role_json")"
   [[ -n "$public_bridge_certificate_arn" ]] || die "app_role.public_bridge_certificate_arn is required for app runtime terraform"
+  public_bridge_additional_certificate_arns_json="$(jq -c '
+    (.public_bridge_additional_certificate_arns // [])
+    | if type == "array" then
+        [ .[] | select(type == "string" and length > 0) ]
+      else
+        []
+      end
+  ' <<<"$app_role_json")"
   internal_backoffice_certificate_arn="$(jq -r '.internal_backoffice_certificate_arn // empty' <<<"$app_role_json")"
   [[ -n "$internal_backoffice_certificate_arn" ]] || die "app_role.internal_backoffice_certificate_arn is required for app runtime terraform"
   if ! jq -e '.shared_services.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$inventory" >/dev/null 2>&1; then
@@ -777,6 +796,7 @@ production_write_app_terraform_override_tfvars() {
     --arg app_ami_id "$app_ami_id" \
     --arg app_instance_profile_name "$app_instance_profile_name" \
     --arg public_bridge_certificate_arn "$public_bridge_certificate_arn" \
+    --argjson public_bridge_additional_certificate_arns "$public_bridge_additional_certificate_arns_json" \
     --arg internal_backoffice_certificate_arn "$internal_backoffice_certificate_arn" \
     --argjson alarm_actions "$alarm_actions_json" \
     '{
@@ -789,6 +809,7 @@ production_write_app_terraform_override_tfvars() {
       app_ami_id: $app_ami_id,
       app_instance_profile_name: $app_instance_profile_name,
       public_bridge_certificate_arn: $public_bridge_certificate_arn,
+      public_bridge_additional_certificate_arns: $public_bridge_additional_certificate_arns,
       internal_backoffice_certificate_arn: $internal_backoffice_certificate_arn,
       alarm_actions: $alarm_actions
     }' >"$output_file"

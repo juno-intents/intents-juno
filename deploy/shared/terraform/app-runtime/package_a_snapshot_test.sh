@@ -42,6 +42,7 @@ main() {
   assert_contains "$main_tf" 'resource "aws_lb_target_group" "bridge"' "app-runtime provisions a public bridge target group"
   assert_contains "$main_tf" 'resource "aws_lb_target_group" "backoffice"' "app-runtime provisions an internal backoffice target group"
   assert_contains "$main_tf" 'resource "aws_lb_listener" "public_bridge_https"' "app-runtime provisions a public bridge HTTPS listener"
+  assert_contains "$main_tf" 'resource "aws_lb_listener_certificate" "public_bridge_additional"' "app-runtime can attach additional TLS certificates to the public bridge listener"
   assert_contains "$main_tf" 'resource "aws_lb_listener" "internal_backoffice_https"' "app-runtime provisions an internal backoffice HTTPS listener"
   assert_contains "$main_tf" 'resource "aws_security_group" "app"' "app-runtime provisions an app instance security group"
   assert_contains "$main_tf" 'resource "aws_security_group" "public_bridge_lb"' "app-runtime provisions a public bridge load balancer security group"
@@ -75,6 +76,7 @@ main() {
   assert_contains "$main_tf" 'security_groups = [aws_security_group.internal_backoffice_lb.id]' "app backoffice ingress only trusts the internal load balancer security group"
 
   assert_contains "$variables_tf" 'variable "app_ami_id"' "app-runtime requires an app AMI input"
+  assert_contains "$variables_tf" 'variable "public_bridge_additional_certificate_arns"' "app-runtime accepts additional public bridge listener certificates"
   assert_contains "$variables_tf" 'variable "private_subnet_ids"' "app-runtime requires private app subnets"
   assert_contains "$variables_tf" 'variable "public_subnet_ids"' "app-runtime requires public bridge load balancer subnets"
   assert_contains "$variables_tf" 'variable "wireguard_cidr_blocks"' "app-runtime requires explicit WireGuard CIDR allowlisting"

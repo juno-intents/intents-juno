@@ -229,6 +229,8 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
   public_subdomain="$(production_json_required "$inventory_abs" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   bridge_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "${bridge_public_dns_label}.${public_subdomain}")"
   [[ -n "$bridge_cert_arn" ]] || die "failed to resolve bridge ACM certificate for ${bridge_public_dns_label}.${public_subdomain}"
+  origin_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "origin.${public_subdomain}")"
+  [[ -n "$origin_cert_arn" ]] || die "failed to resolve CloudFront origin ACM certificate for origin.${public_subdomain}"
   backoffice_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "${backoffice_dns_label}.${public_subdomain}")"
   [[ -n "$backoffice_cert_arn" ]] || die "failed to resolve backoffice ACM certificate for ${backoffice_dns_label}.${public_subdomain}"
 
@@ -282,6 +284,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
     --arg vpc_id "$vpc_id" \
     --arg app_instance_profile_name "$app_instance_profile_name" \
     --arg bridge_cert_arn "$bridge_cert_arn" \
+    --arg origin_cert_arn "$origin_cert_arn" \
     --arg backoffice_cert_arn "$backoffice_cert_arn" \
     --arg bridge_public_dns_label "$bridge_public_dns_label" \
     --arg backoffice_dns_label "$backoffice_dns_label" \
@@ -321,7 +324,8 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
       | .app_role.bridge_public_dns_label = (.app_host.bridge_public_dns_label // $bridge_public_dns_label)
       | .app_role.backoffice_dns_label = (.app_host.backoffice_dns_label // .app_host.ops_public_dns_label // $backoffice_dns_label)
       | .app_role.public_scheme = (.app_host.public_scheme // "https")
-      | .app_role.public_bridge_certificate_arn = $bridge_cert_arn
+      | .app_role.public_bridge_certificate_arn = $origin_cert_arn
+      | .app_role.public_bridge_additional_certificate_arns = [$bridge_cert_arn]
       | .app_role.internal_backoffice_certificate_arn = $backoffice_cert_arn
       | .app_role.bridge_api_listen = (.app_host.bridge_api_listen // "127.0.0.1:8082")
       | .app_role.backoffice_listen = (.app_host.backoffice_listen // "127.0.0.1:8090")
