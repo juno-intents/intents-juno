@@ -1643,7 +1643,7 @@ resource "aws_launch_template" "ipfs" {
           return 0
         fi
         if (( attempt >= max_attempts )); then
-          echo "ipfs bootstrap apt command failed after ${max_attempts} attempts: $*" >&2
+          echo "ipfs bootstrap apt command failed after $${max_attempts} attempts: $*" >&2
           return 1
         fi
         rm -rf /var/lib/apt/lists/*
