@@ -114,6 +114,22 @@ fi
 if [[ "\${args[0]:-}" == "--region" ]]; then
   args=( "\${args[@]:2}" )
 fi
+backup_vault_name=""
+bucket_name=""
+for ((i = 0; i < \${#args[@]}; i++)); do
+  case "\${args[\$i]}" in
+    --backup-vault-name)
+      if (( i + 1 < \${#args[@]} )); then
+        backup_vault_name="\${args[\$((i + 1))]}"
+      fi
+      ;;
+    --bucket)
+      if (( i + 1 < \${#args[@]} )); then
+        bucket_name="\${args[\$((i + 1))]}"
+      fi
+      ;;
+  esac
+done
 case "\${args[0]:-} \${args[1]:-}" in
   "sts get-caller-identity")
     if [[ " \$* " == *" --query Account "* && " \$* " == *" --output text "* ]]; then
@@ -167,6 +183,8 @@ case "\${args[0]:-} \${args[1]:-}" in
       : >"$state_dir/distribution.deleted"
     fi
     ;;
+  "cloudtrail stop-logging")
+    ;;
   "autoscaling update-auto-scaling-group")
     ;;
   "autoscaling describe-auto-scaling-groups")
@@ -207,6 +225,47 @@ case "\${args[0]:-} \${args[1]:-}" in
     fi
     ;;
   "ec2 revoke-security-group-ingress")
+    ;;
+  "rds describe-db-clusters")
+    if [[ -n "$state_dir" && -f "$state_dir/shared.cluster.deletion_protection.disabled" ]]; then
+      printf '{"DBClusters":[{"DBClusterIdentifier":"intents-juno-shared-preview-shared-aurora","Status":"available","DeletionProtection":false}]}\n'
+    else
+      printf '{"DBClusters":[{"DBClusterIdentifier":"intents-juno-shared-preview-shared-aurora","Status":"available","DeletionProtection":true}]}\n'
+    fi
+    ;;
+  "rds modify-db-cluster")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/shared.cluster.deletion_protection.disabled"
+    fi
+    printf '{"DBCluster":{"DBClusterIdentifier":"intents-juno-shared-preview-shared-aurora","DeletionProtection":false}}\n'
+    ;;
+  "backup list-recovery-points-by-backup-vault")
+    if [[ -n "$state_dir" && -f "$state_dir/backup-vault.\$backup_vault_name.cleared" ]]; then
+      printf '{"RecoveryPoints":[]}\n'
+    else
+      printf '{"RecoveryPoints":[{"RecoveryPointArn":"arn:aws:backup:us-east-1:021490342184:recovery-point:%s-rp-1"}]}\n' "\$backup_vault_name"
+    fi
+    ;;
+  "backup delete-recovery-point")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/backup-vault.\$backup_vault_name.cleared"
+    fi
+    ;;
+  "s3api list-object-versions")
+    if [[ -n "$state_dir" && -f "$state_dir/bucket.\$bucket_name.cleared" ]]; then
+      printf '{"Versions":[],"DeleteMarkers":[]}\n'
+    else
+      printf '{"Versions":[{"Key":"AWSLogs/021490342184/CloudTrail/us-east-1/2026/03/21/log-1.json.gz","VersionId":"version-1"}],"DeleteMarkers":[{"Key":"AWSLogs/021490342184/CloudTrail/us-east-1/2026/03/20/log-old.json.gz","VersionId":"delete-marker-1"}]}\n'
+    fi
+    ;;
+  "s3api delete-objects")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/bucket.\$bucket_name.cleared"
+    fi
+    printf '{"Deleted":[]}\n'
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -358,8 +417,16 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$aws_log")" "aws ec2 wait instance-terminated --profile juno --region us-east-1 --instance-ids i-app-a i-app-b" "preview destroy waits for app runtime instances to terminate before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-09af876efa8c830fb --security-group-rule-ids sgr-operator-preview-app" "preview destroy removes operator ingress rules that still reference the app runtime security group"
   assert_contains "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-004e0c14829a3228a --security-group-rule-ids sgr-shared-preview-app" "preview destroy removes shared ingress rules that still reference the app runtime security group"
+  assert_contains "$(cat "$aws_log")" "aws rds modify-db-cluster --profile juno --region us-east-1 --db-cluster-identifier intents-juno-shared-preview-shared-aurora --no-deletion-protection --apply-immediately" "preview destroy disables shared aurora deletion protection before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws backup delete-recovery-point --profile juno --region us-east-1 --backup-vault-name intents-juno-shared-preview-shared-postgres" "preview destroy deletes recovery points from the primary backup vault before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws backup delete-recovery-point --profile juno --region us-west-2 --backup-vault-name intents-juno-shared-preview-shared-postgres-dr" "preview destroy deletes recovery points from the dr backup vault before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws s3api list-object-versions --profile juno --region us-east-1 --bucket intents-juno-shared-preview-trail --output json" "preview destroy inspects the cloudtrail bucket for versioned objects before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws s3api delete-objects --profile juno --region us-east-1 --bucket intents-juno-shared-preview-trail --delete file://" "preview destroy deletes versioned cloudtrail objects before terraform destroy"
   assert_line_order "$(cat "$aws_log")" "aws autoscaling update-auto-scaling-group --profile juno --region us-east-1 --auto-scaling-group-name juno-app-runtime-preview-asg --min-size 0 --max-size 0 --desired-capacity 0" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/app-terraform.auto.tfvars.json" "preview destroy drains the app runtime asg before terraform destroy"
   assert_line_order "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-09af876efa8c830fb --security-group-rule-ids sgr-operator-preview-app" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/app-terraform.auto.tfvars.json" "preview destroy removes operator references to the app runtime security group before terraform destroy"
+  assert_line_order "$(cat "$aws_log")" "aws rds modify-db-cluster --profile juno --region us-east-1 --db-cluster-identifier intents-juno-shared-preview-shared-aurora --no-deletion-protection --apply-immediately" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy disables aurora deletion protection before shared terraform destroy"
+  assert_line_order "$(cat "$aws_log")" "aws backup delete-recovery-point --profile juno --region us-east-1 --backup-vault-name intents-juno-shared-preview-shared-postgres" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy clears backup recovery points before shared terraform destroy"
+  assert_line_order "$(cat "$aws_log")" "aws s3api delete-objects --profile juno --region us-east-1 --bucket intents-juno-shared-preview-trail --delete file://" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy empties the cloudtrail bucket before shared terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront update-distribution --profile juno --id ENKATN26PZLPX" "preview destroy disables the edge cloudfront distribution before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront delete-distribution --profile juno --id ENKATN26PZLPX" "preview destroy deletes the edge cloudfront distribution before terraform destroy"
   if [[ -f "$aws_log" ]]; then

@@ -28,6 +28,8 @@ cloudfront_poll_interval_seconds="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTE
 cloudfront_poll_attempts="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS:-120}"
 app_asg_poll_interval_seconds="${PRODUCTION_PREVIEW_APP_ASG_POLL_INTERVAL_SECONDS:-5}"
 app_asg_poll_attempts="${PRODUCTION_PREVIEW_APP_ASG_POLL_ATTEMPTS:-120}"
+shared_cleanup_poll_interval_seconds="${PRODUCTION_PREVIEW_SHARED_CLEANUP_POLL_INTERVAL_SECONDS:-5}"
+shared_cleanup_poll_attempts="${PRODUCTION_PREVIEW_SHARED_CLEANUP_POLL_ATTEMPTS:-60}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -65,6 +67,25 @@ fi
 current_output_root="$(production_abs_path "$(pwd)" "$current_output_root")"
 destroy_work_dir="$(dirname "$current_output_root")/$env_slug"
 mkdir -p "$destroy_work_dir"
+
+shared_name_prefix="$(production_json_optional "$inventory" '.shared_services.name_prefix')"
+if [[ -z "$shared_name_prefix" ]]; then
+  shared_name_prefix="intents-juno-shared"
+fi
+shared_resource_name="${shared_name_prefix}-${env_slug}"
+shared_resource_slug="$(production_safe_slug "$shared_resource_name")"
+shared_postgres_cluster_id="${shared_resource_name}-shared-aurora"
+shared_postgres_backup_vault_name="${shared_resource_name}-shared-postgres"
+shared_postgres_dr_region="$(production_json_optional "$inventory" '.shared_services.postgres_dr_region')"
+if [[ -z "$shared_postgres_dr_region" ]]; then
+  shared_postgres_dr_region="$(production_json_optional "$inventory" '.shared_postgres_dr_region')"
+fi
+if [[ -z "$shared_postgres_dr_region" ]]; then
+  shared_postgres_dr_region="us-west-2"
+fi
+shared_postgres_backup_vault_dr_name="${shared_resource_name}-shared-postgres-dr"
+shared_cloudtrail_bucket_name="${shared_resource_slug}-trail"
+shared_cloudtrail_trail_name="${shared_resource_slug}-trail"
 
 shared_var_file="$destroy_work_dir/shared-terraform.auto.tfvars.json"
 app_var_file="$destroy_work_dir/app-terraform.auto.tfvars.json"
@@ -273,6 +294,12 @@ app_asg_sleep() {
   fi
 }
 
+shared_cleanup_sleep() {
+  if [[ "$shared_cleanup_poll_interval_seconds" =~ ^[0-9]+$ ]] && [[ "$shared_cleanup_poll_interval_seconds" -gt 0 ]]; then
+    sleep "$shared_cleanup_poll_interval_seconds"
+  fi
+}
+
 app_runtime_output_json() {
   terraform output -json
 }
@@ -425,6 +452,134 @@ drain_app_runtime_asg() {
   wait_for_app_runtime_asg_empty "$asg_name"
 }
 
+shared_postgres_cluster_json() {
+  aws rds describe-db-clusters \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --db-cluster-identifier "$shared_postgres_cluster_id" \
+    --output json 2>/dev/null || true
+}
+
+disable_shared_postgres_deletion_protection() {
+  local cluster_json deletion_protection status attempt
+
+  cluster_json="$(shared_postgres_cluster_json)"
+  [[ -n "$cluster_json" ]] || return 0
+  status="$(jq -r '.DBClusters[0].Status // empty' <<<"$cluster_json")"
+  [[ -n "$status" ]] || return 0
+  [[ "$status" == "deleting" ]] && return 0
+  deletion_protection="$(jq -r '.DBClusters[0].DeletionProtection // false' <<<"$cluster_json")"
+  [[ "$deletion_protection" == "true" ]] || return 0
+
+  aws rds modify-db-cluster \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --db-cluster-identifier "$shared_postgres_cluster_id" \
+    --no-deletion-protection \
+    --apply-immediately >/dev/null
+
+  for ((attempt = 1; attempt <= shared_cleanup_poll_attempts; attempt++)); do
+    cluster_json="$(shared_postgres_cluster_json)"
+    [[ -n "$cluster_json" ]] || return 0
+    status="$(jq -r '.DBClusters[0].Status // empty' <<<"$cluster_json")"
+    deletion_protection="$(jq -r '.DBClusters[0].DeletionProtection // false' <<<"$cluster_json")"
+    if [[ -z "$status" || "$status" == "deleting" || "$deletion_protection" != "true" ]]; then
+      return 0
+    fi
+    shared_cleanup_sleep
+  done
+
+  die "timed out waiting for shared aurora deletion protection to disable"
+}
+
+backup_vault_recovery_points_json() {
+  local aws_region_override="$1"
+  local backup_vault_name="$2"
+
+  aws backup list-recovery-points-by-backup-vault \
+    --profile "$aws_profile" \
+    --region "$aws_region_override" \
+    --backup-vault-name "$backup_vault_name" \
+    --output json 2>/dev/null || true
+}
+
+purge_backup_vault_recovery_points() {
+  local aws_region_override="$1"
+  local backup_vault_name="$2"
+  local recovery_points_json delete_json delete_file attempt
+  local -a recovery_point_arns=()
+
+  recovery_points_json="$(backup_vault_recovery_points_json "$aws_region_override" "$backup_vault_name")"
+  [[ -n "$recovery_points_json" ]] || return 0
+  mapfile -t recovery_point_arns < <(jq -r '.RecoveryPoints[]?.RecoveryPointArn // empty' <<<"$recovery_points_json")
+  if [[ ${#recovery_point_arns[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  for recovery_point_arn in "${recovery_point_arns[@]}"; do
+    [[ -n "$recovery_point_arn" ]] || continue
+    aws backup delete-recovery-point \
+      --profile "$aws_profile" \
+      --region "$aws_region_override" \
+      --backup-vault-name "$backup_vault_name" \
+      --recovery-point-arn "$recovery_point_arn" >/dev/null
+  done
+
+  for ((attempt = 1; attempt <= shared_cleanup_poll_attempts; attempt++)); do
+    recovery_points_json="$(backup_vault_recovery_points_json "$aws_region_override" "$backup_vault_name")"
+    [[ -n "$recovery_points_json" ]] || return 0
+    delete_json="$(jq -c '[.RecoveryPoints[]?.RecoveryPointArn // empty] | map(select(length > 0))' <<<"$recovery_points_json")"
+    if [[ "$delete_json" == "[]" ]]; then
+      return 0
+    fi
+    shared_cleanup_sleep
+  done
+
+  die "timed out waiting for backup vault $backup_vault_name recovery points to delete"
+}
+
+stop_shared_cloudtrail_logging() {
+  aws cloudtrail stop-logging \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --name "$shared_cloudtrail_trail_name" >/dev/null 2>&1 || true
+}
+
+empty_shared_cloudtrail_bucket() {
+  local versions_json delete_file objects_json
+
+  while true; do
+    versions_json="$(aws s3api list-object-versions \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --bucket "$shared_cloudtrail_bucket_name" \
+      --output json 2>/dev/null || true)"
+    [[ -n "$versions_json" ]] || return 0
+
+    objects_json="$(jq -c '{Objects: ([.Versions[]?, .DeleteMarkers[]?] | map({Key, VersionId})), Quiet: true}' <<<"$versions_json")"
+    if [[ "$(jq -r '.Objects | length' <<<"$objects_json")" == "0" ]]; then
+      return 0
+    fi
+
+    delete_file="$(mktemp)"
+    printf '%s\n' "$objects_json" >"$delete_file"
+    aws s3api delete-objects \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --bucket "$shared_cloudtrail_bucket_name" \
+      --delete "file://$delete_file" >/dev/null
+    rm -f "$delete_file"
+  done
+}
+
+prepare_shared_runtime_destroy() {
+  disable_shared_postgres_deletion_protection
+  purge_backup_vault_recovery_points "$aws_region" "$shared_postgres_backup_vault_name"
+  purge_backup_vault_recovery_points "$shared_postgres_dr_region" "$shared_postgres_backup_vault_dr_name"
+  stop_shared_cloudtrail_logging
+  empty_shared_cloudtrail_bucket
+}
+
 if [[ -n "$app_deploy_path" ]]; then
   destroy_app_edge "$app_deploy_path"
 elif [[ "$skip_missing_edge_state" != "true" ]]; then
@@ -446,6 +601,7 @@ fi
 
 (
   cd "$shared_terraform_dir"
+  prepare_shared_runtime_destroy
   terraform init -input=false -reconfigure \
     -backend-config="bucket=$shared_bucket" \
     -backend-config="dynamodb_table=$shared_table" \
