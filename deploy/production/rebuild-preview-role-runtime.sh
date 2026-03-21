@@ -71,6 +71,42 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+normalize_preview_inventory_local_paths() {
+  local source_inventory="$1"
+  local target_inventory="$2"
+  local source_inventory_dir tmp_inventory
+
+  source_inventory_dir="$(dirname "$(production_abs_path "$(pwd)" "$source_inventory")")"
+  tmp_inventory="$(mktemp)"
+  jq --arg source_inventory_dir "$source_inventory_dir" '
+    def abs_source_path:
+      if type == "string" and length > 0 then
+        if startswith("/") then . else ($source_inventory_dir + "/" + .) end
+      else .
+      end;
+    .dkg_tls_dir |= (if . == null then . else abs_source_path end)
+    | if .app_role != null then
+        .app_role.known_hosts_file |= (if . == null then . else abs_source_path end)
+        | .app_role.secret_contract_file |= (if . == null then . else abs_source_path end)
+      else .
+      end
+    | if .app_host != null then
+        .app_host.known_hosts_file |= (if . == null then . else abs_source_path end)
+        | .app_host.secret_contract_file |= (if . == null then . else abs_source_path end)
+      else .
+      end
+    | .operators = (
+        (.operators // [])
+        | map(
+            .known_hosts_file |= (if . == null then . else abs_source_path end)
+            | .secret_contract_file |= (if . == null then . else abs_source_path end)
+            | .dkg_backup_zip |= (if . == null then . else abs_source_path end)
+          )
+      )
+  ' "$target_inventory" >"$tmp_inventory"
+  mv "$tmp_inventory" "$target_inventory"
+}
+
 [[ -n "$inventory" ]] || die "--inventory is required"
 [[ -f "$inventory" ]] || die "inventory not found: $inventory"
 [[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
@@ -157,6 +193,8 @@ if [[ -f "$current_shared_tf_output" ]]; then
     ' "$resolved_inventory" >"$tmp_inventory"
   mv "$tmp_inventory" "$resolved_inventory"
 fi
+
+normalize_preview_inventory_local_paths "$inventory" "$resolved_inventory"
 
 "$destroy_preview_role_runtime_bin" \
   --inventory "$resolved_inventory" \

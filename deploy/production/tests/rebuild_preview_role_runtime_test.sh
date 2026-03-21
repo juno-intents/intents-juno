@@ -351,9 +351,96 @@ JSON
   rm -rf "$tmp"
 }
 
+test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
+  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir updated_inventory
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  inventory="$tmp/inventory.json"
+  updated_inventory="$tmp/inventory.updated.json"
+  dkg_summary="$tmp/dkg-summary.json"
+  log_file="$tmp/rebuild.log"
+  output_root="$tmp/output"
+  fixture_dir="$tmp/fixtures"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/operators/op1" "$tmp/dkg-tls"
+  write_rebuild_inventory_fixture "$inventory"
+  jq '
+    .dkg_tls_dir = "dkg-tls"
+    | .app_role = {
+        known_hosts_file: "app/known_hosts",
+        secret_contract_file: "app/app-secrets.env"
+      }
+    | .app_host = {
+        known_hosts_file: "app/known_hosts",
+        secret_contract_file: "app/app-secrets.env"
+      }
+    | .operators = [
+        {
+          operator_id: "0x1111111111111111111111111111111111111111",
+          known_hosts_file: "operators/op1/known_hosts",
+          dkg_backup_zip: "operators/op1/dkg-backup.zip",
+          secret_contract_file: "operators/op1/operator-secrets.env"
+        }
+      ]
+  ' "$inventory" >"$updated_inventory"
+  mv "$updated_inventory" "$inventory"
+  printf '{}' >"$dkg_summary"
+  ensure_rebuild_fixture_files "$fixture_dir"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op1/operator-secrets.env"
+  : >"$tmp/operators/op1/dkg-backup.zip"
+  write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
+  write_fake_rebuild_passthrough "$fake_bin/resolve-role-runtime-release-inputs.sh" "$log_file"
+  write_fake_rebuild_deploy_coordinator "$fake_bin/deploy-coordinator.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
+  write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
+  write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
+  write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
+  write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
+
+  (
+    cd "$REPO_ROOT"
+    PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
+      PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
+      PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
+      PRODUCTION_DEPLOY_COORDINATOR_BIN="$fake_bin/deploy-coordinator.sh" \
+      PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
+      PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
+      PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
+      PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
+      PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
+      bash "$REPO_ROOT/deploy/production/rebuild-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --dkg-summary "$dkg_summary" \
+        --bridge-deploy-binary /bin/true \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --shared-infra-e2e-binary "$fake_bin/shared-infra-e2e" \
+        --output-dir "$output_root"
+  )
+
+  assert_eq "$(jq -r '.dkg_tls_dir' "$output_root/preview/inventory.resolved.json")" "$tmp/dkg-tls" "rebuild anchors dkg tls paths to the source inventory bundle"
+  assert_eq "$(jq -r '.app_role.known_hosts_file' "$output_root/preview/inventory.resolved.json")" "$tmp/app/known_hosts" "rebuild anchors app known_hosts to the source inventory bundle"
+  assert_eq "$(jq -r '.app_role.secret_contract_file' "$output_root/preview/inventory.resolved.json")" "$tmp/app/app-secrets.env" "rebuild anchors app secrets to the source inventory bundle"
+  assert_eq "$(jq -r '.operators[0].known_hosts_file' "$output_root/preview/inventory.resolved.json")" "$tmp/operators/op1/known_hosts" "rebuild anchors operator known_hosts to the source inventory bundle"
+  assert_eq "$(jq -r '.operators[0].secret_contract_file' "$output_root/preview/inventory.resolved.json")" "$tmp/operators/op1/operator-secrets.env" "rebuild anchors operator secrets to the source inventory bundle"
+  assert_eq "$(jq -r '.operators[0].dkg_backup_zip' "$output_root/preview/inventory.resolved.json")" "$tmp/operators/op1/dkg-backup.zip" "rebuild anchors operator dkg backups to the source inventory bundle"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout
   test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets
+  test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths
 }
 
 main "$@"
