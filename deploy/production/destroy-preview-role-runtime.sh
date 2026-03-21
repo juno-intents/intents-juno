@@ -24,6 +24,8 @@ EOF
 inventory=""
 current_output_root=""
 skip_missing_edge_state="false"
+cloudfront_poll_interval_seconds="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS:-10}"
+cloudfront_poll_attempts="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS:-120}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +104,108 @@ resolve_edge_state_path() {
   return 1
 }
 
+cloudfront_distribution_id_from_state() {
+  local edge_state_path="$1"
+  terraform state show -no-color -state="$edge_state_path" aws_cloudfront_distribution.bridge 2>/dev/null \
+    | awk -F' = ' '/^[[:space:]]*id[[:space:]]*=/ { gsub(/"/, "", $2); print $2; exit }'
+}
+
+cloudfront_sleep() {
+  if [[ "$cloudfront_poll_interval_seconds" =~ ^[0-9]+$ ]] && [[ "$cloudfront_poll_interval_seconds" -gt 0 ]]; then
+    sleep "$cloudfront_poll_interval_seconds"
+  fi
+}
+
+cloudfront_wait_disabled() {
+  local distribution_id="$1"
+  local attempt output status enabled
+
+  for ((attempt = 1; attempt <= cloudfront_poll_attempts; attempt++)); do
+    output="$(aws cloudfront get-distribution \
+      --profile "$aws_profile" \
+      --id "$distribution_id" \
+      --output json)"
+    status="$(jq -r '.Distribution.Status' <<<"$output")"
+    enabled="$(jq -r '.Distribution.DistributionConfig.Enabled' <<<"$output")"
+    if [[ "$status" == "Deployed" && "$enabled" == "false" ]]; then
+      return 0
+    fi
+    cloudfront_sleep
+  done
+
+  die "timed out waiting for cloudfront distribution $distribution_id to disable"
+}
+
+cloudfront_wait_deleted() {
+  local distribution_id="$1"
+  local attempt output
+
+  for ((attempt = 1; attempt <= cloudfront_poll_attempts; attempt++)); do
+    if output="$(aws cloudfront get-distribution \
+      --profile "$aws_profile" \
+      --id "$distribution_id" \
+      --output json 2>&1)"; then
+      cloudfront_sleep
+      continue
+    fi
+
+    if [[ "$output" == *"NoSuchDistribution"* ]]; then
+      return 0
+    fi
+
+    die "failed to query cloudfront distribution $distribution_id deletion status: $output"
+  done
+
+  die "timed out waiting for cloudfront distribution $distribution_id to delete"
+}
+
+destroy_edge_cloudfront_distribution() {
+  local edge_state_path="$1"
+  local distribution_id config_json enabled etag config_file
+
+  distribution_id="$(cloudfront_distribution_id_from_state "$edge_state_path" || true)"
+  [[ -n "$distribution_id" ]] || return 0
+
+  if ! config_json="$(aws cloudfront get-distribution-config \
+    --profile "$aws_profile" \
+    --id "$distribution_id" \
+    --output json 2>&1)"; then
+    [[ "$config_json" == *"NoSuchDistribution"* ]] && return 0
+    die "failed to read cloudfront distribution $distribution_id config: $config_json"
+  fi
+
+  enabled="$(jq -r '.DistributionConfig.Enabled' <<<"$config_json")"
+  if [[ "$enabled" == "true" ]]; then
+    etag="$(jq -r '.ETag' <<<"$config_json")"
+    config_file="$(mktemp)"
+    jq '.DistributionConfig.Enabled = false | .DistributionConfig' <<<"$config_json" >"$config_file"
+    aws cloudfront update-distribution \
+      --profile "$aws_profile" \
+      --id "$distribution_id" \
+      --if-match "$etag" \
+      --distribution-config "file://$config_file" \
+      >/dev/null
+    rm -f "$config_file"
+    cloudfront_wait_disabled "$distribution_id"
+  fi
+
+  if ! config_json="$(aws cloudfront get-distribution-config \
+    --profile "$aws_profile" \
+    --id "$distribution_id" \
+    --output json 2>&1)"; then
+    [[ "$config_json" == *"NoSuchDistribution"* ]] && return 0
+    die "failed to reload cloudfront distribution $distribution_id config before delete: $config_json"
+  fi
+
+  etag="$(jq -r '.ETag' <<<"$config_json")"
+  aws cloudfront delete-distribution \
+    --profile "$aws_profile" \
+    --id "$distribution_id" \
+    --if-match "$etag" \
+    >/dev/null
+  cloudfront_wait_deleted "$distribution_id"
+}
+
 destroy_app_edge() {
   local app_deploy="$1"
   local edge_state_path edge_public_lb_dns_name edge_var_file bridge_record_name origin_record_name zone_id
@@ -155,6 +259,7 @@ destroy_app_edge() {
   (
     cd "$REPO_ROOT/deploy/shared/terraform/app-edge"
     terraform init -input=false >/dev/null
+    destroy_edge_cloudfront_distribution "$edge_state_path"
     terraform destroy -auto-approve -input=false -state="$edge_state_path" -var-file="$edge_var_file"
   )
 }

@@ -34,6 +34,7 @@ assert_line_order() {
 write_fake_destroy_terraform() {
   local target="$1"
   local log_file="$2"
+  local cloudfront_distribution_id="${3:-}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -51,6 +52,17 @@ case "\${1:-}" in
     done
     exit 0
     ;;
+  state)
+    if [[ "\${2:-}" == show && -n "$cloudfront_distribution_id" && " \$* " == *" aws_cloudfront_distribution.bridge "* ]]; then
+      cat <<STATE
+# aws_cloudfront_distribution.bridge:
+resource "aws_cloudfront_distribution" "bridge" {
+    id = "$cloudfront_distribution_id"
+}
+STATE
+      exit 0
+    fi
+    ;;
 esac
 printf 'unexpected terraform invocation: %s\n' "\$*" >&2
 exit 1
@@ -61,6 +73,7 @@ EOF
 write_fake_destroy_aws() {
   local target="$1"
   local log_file="$2"
+  local state_dir="${3:-}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -90,6 +103,40 @@ case "\${args[0]:-} \${args[1]:-}" in
     ;;
   "dynamodb create-table")
     printf '{"TableDescription":{"TableStatus":"ACTIVE"}}\n'
+    ;;
+  "cloudfront get-distribution-config")
+    if [[ -n "$state_dir" && -f "$state_dir/distribution.deleted" ]]; then
+      printf 'NoSuchDistribution\n' >&2
+      exit 255
+    fi
+    if [[ -n "$state_dir" && -f "$state_dir/distribution.disabled" ]]; then
+      printf '{"ETag":"E2","DistributionConfig":{"Enabled":false}}\n'
+    else
+      printf '{"ETag":"E1","DistributionConfig":{"Enabled":true}}\n'
+    fi
+    ;;
+  "cloudfront update-distribution")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/distribution.disabled"
+    fi
+    ;;
+  "cloudfront get-distribution")
+    if [[ -n "$state_dir" && -f "$state_dir/distribution.deleted" ]]; then
+      printf 'NoSuchDistribution\n' >&2
+      exit 255
+    fi
+    if [[ -n "$state_dir" && -f "$state_dir/distribution.disabled" ]]; then
+      printf '{"Distribution":{"Status":"Deployed","DistributionConfig":{"Enabled":false}}}\n'
+    else
+      printf '{"Distribution":{"Status":"Deployed","DistributionConfig":{"Enabled":true}}}\n'
+    fi
+    ;;
+  "cloudfront delete-distribution")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/distribution.deleted"
+    fi
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -188,7 +235,7 @@ JSON
 }
 
 test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
-  local tmp inventory app_deploy fake_bin tf_log aws_log edge_state
+  local tmp inventory app_deploy fake_bin tf_log aws_log edge_state cloudfront_state_dir
   tmp="$(mktemp -d)"
   inventory="$tmp/inventory.json"
   app_deploy="$tmp/production-output/preview/app/app-deploy.json"
@@ -196,6 +243,7 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   fake_bin="$tmp/bin"
   tf_log="$tmp/terraform.log"
   aws_log="$tmp/aws.log"
+  cloudfront_state_dir="$tmp/cloudfront"
 
   mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
   : >"$tmp/app/known_hosts"
@@ -203,12 +251,14 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   : >"$edge_state"
   write_destroy_inventory_fixture "$inventory"
   write_app_deploy_fixture "$app_deploy"
-  write_fake_destroy_terraform "$fake_bin/terraform" "$tf_log"
-  write_fake_destroy_aws "$fake_bin/aws" "$aws_log"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$tf_log" "ENKATN26PZLPX"
+  write_fake_destroy_aws "$fake_bin/aws" "$aws_log" "$cloudfront_state_dir"
 
   (
     cd "$REPO_ROOT"
     PATH="$fake_bin:$PATH" \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
       bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
         --inventory "$inventory" \
         --current-output-root "$tmp/production-output"
@@ -219,6 +269,8 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$tf_log")" "terraform-state $edge_state" "preview destroy uses the discovered edge state file"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy writes shared terraform destroy vars"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/app-terraform.auto.tfvars.json" "preview destroy writes app terraform destroy vars"
+  assert_contains "$(cat "$aws_log")" "aws cloudfront update-distribution --profile juno --id ENKATN26PZLPX" "preview destroy disables the edge cloudfront distribution before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws cloudfront delete-distribution --profile juno --id ENKATN26PZLPX" "preview destroy deletes the edge cloudfront distribution before terraform destroy"
   if [[ -f "$aws_log" ]]; then
     assert_not_contains "$(cat "$aws_log")" "sts get-caller-identity" "preview destroy derives the terraform backend account id from inventory when available"
   fi
