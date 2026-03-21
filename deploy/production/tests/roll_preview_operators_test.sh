@@ -161,6 +161,9 @@ case "${args[*]}" in
   "ec2 describe-instances --instance-ids i-op2 --output json")
     printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op2","PublicIpAddress":"34.207.20.20","PrivateIpAddress":"10.0.11.11"}]}]}\n'
     ;;
+  "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json")
+    printf '{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs"}}]}}\n'
+    ;;
   *)
     printf 'unexpected aws invocation: %s\n' "$*" >&2
     exit 1
@@ -268,17 +271,11 @@ EOF
   }
 }
 JSON
-  if command -v sha256sum >/dev/null 2>&1; then
-    (
-      cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
-      sha256sum operator-ami-manifest.json > operator-ami-manifest.json.sha256
-    )
-  else
-    (
-      cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
-      shasum -a 256 operator-ami-manifest.json | awk '{print $1 "  operator-ami-manifest.json"}' > operator-ami-manifest.json.sha256
-    )
-  fi
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
 
   write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
   write_fake_roll_preview_aws "$tmp/bin/aws" "$aws_log"
@@ -307,10 +304,13 @@ EOF
   assert_contains "$(cat "$gh_log")" "release download operator-stack-ami-v2026.03.20-testnet" "preview operator roll downloads the operator ami manifest"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-op1 --source-version 3" "preview operator roll creates a fresh launch template version"
   assert_contains "$(cat "$aws_log")" "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2" "preview operator roll refreshes the second operator asg"
+  assert_contains "$(cat "$aws_log")" "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json" "preview operator roll resolves the checkpoint bucket kms key"
   assert_contains "$(cat "$deploy_log")" "--operator-deploy $output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "preview operator roll redeploys the first operator"
   assert_contains "$(cat "$canary_log")" "--operator-deploy $output_dir/operators/0x6666666666666666666666666666666666666666/operator-deploy.json" "preview operator roll runs the second operator canary"
   assert_eq "$(jq -r '.operators[0].operator_host' "$output_dir/inventory.operators-rolled.json")" "44.201.10.10" "preview operator roll updates first operator host"
   assert_eq "$(jq -r '.operators[1].launch_template.version' "$output_dir/inventory.operators-rolled.json")" "8" "preview operator roll updates second launch template version"
+  assert_eq "$(jq -r '.checkpoint_blob_bucket' "$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json")" "preview-checkpoint-blobs" "preview operator handoff falls back to the shared checkpoint bucket"
+  assert_eq "$(jq -r '.checkpoint_blob_sse_kms_key_id' "$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs" "preview operator handoff resolves the checkpoint bucket kms key"
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "true" "preview operator roll reports success"
 
   rm -rf "$tmp"

@@ -123,6 +123,46 @@ production_tf_output_json() {
   printf '%s\n' "$value"
 }
 
+production_resolve_s3_bucket_sse_kms_key_id() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local bucket="$3"
+  local encryption_json kms_key_id
+
+  [[ -n "$bucket" ]] || {
+    printf '\n'
+    return 0
+  }
+  [[ -n "$aws_profile" && -n "$aws_region" ]] || {
+    printf '\n'
+    return 0
+  }
+  have_cmd aws || {
+    printf '\n'
+    return 0
+  }
+
+  encryption_json="$(
+    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" s3api get-bucket-encryption \
+      --bucket "$bucket" --output json 2>/dev/null || true
+  )"
+  [[ -n "$encryption_json" ]] || {
+    printf '\n'
+    return 0
+  }
+
+  kms_key_id="$(
+    jq -r '
+      [
+        .ServerSideEncryptionConfiguration.Rules[]?.ApplyServerSideEncryptionByDefault
+        | select(.SSEAlgorithm == "aws:kms")
+        | .KMSMasterKeyID
+      ][0] // empty
+    ' <<<"$encryption_json" 2>/dev/null || true
+  )"
+  printf '%s\n' "$kms_key_id"
+}
+
 production_host_os() {
   if [[ -n "${PRODUCTION_HOST_OS_OVERRIDE:-}" ]]; then
     printf '%s\n' "$PRODUCTION_HOST_OS_OVERRIDE"
@@ -2567,6 +2607,7 @@ production_render_operator_handoffs() {
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
+  local shared_aws_profile shared_aws_region
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
   local manifest_version
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
@@ -2574,6 +2615,8 @@ production_render_operator_handoffs() {
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
+  shared_aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
+  shared_aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
   dkg_tls_dir="$(jq -r '.dkg_tls_dir // empty' "$inventory")"
   if [[ -n "$dkg_tls_dir" ]]; then
     dkg_tls_dir="$(production_abs_path "$inventory_dir" "$dkg_tls_dir")"
@@ -2598,6 +2641,7 @@ production_render_operator_handoffs() {
     local known_hosts_dst secrets_dst backup_zip_dst manifest_path public_dns_name public_endpoint
     local checkpoint_signer_driver checkpoint_signer_kms_key_id operator_address operator_index operator_txsign_signer_key
     local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id
+    local operator_aws_profile operator_aws_region
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     operator_index="$(jq -r '.index' <<<"$operator_json")"
@@ -2625,6 +2669,8 @@ production_render_operator_handoffs() {
     checkpoint_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' <<<"$operator_json")"
     checkpoint_blob_prefix="$(jq -r '.checkpoint_blob_prefix // empty' <<<"$operator_json")"
     checkpoint_blob_sse_kms_key_id="$(jq -r '.checkpoint_blob_sse_kms_key_id // empty' <<<"$operator_json")"
+    operator_aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
+    operator_aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
     operator_address="$(jq -r '.operator_address // empty' <<<"$operator_json")"
     manifest_path="$handoff_dir/operator-deploy.json"
 
@@ -2636,6 +2682,24 @@ production_render_operator_handoffs() {
         die "operator $operator_id must use checkpoint_signer_driver=aws-kms (got: $checkpoint_signer_driver)"
         ;;
     esac
+
+    if [[ -z "$checkpoint_blob_bucket" ]]; then
+      checkpoint_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$shared_manifest")"
+    fi
+    if [[ -z "$checkpoint_blob_prefix" ]]; then
+      checkpoint_blob_prefix="$(jq -r '.shared_services.artifacts.checkpoint_blob_prefix // empty' "$shared_manifest")"
+    fi
+    if [[ -z "$checkpoint_blob_sse_kms_key_id" ]]; then
+      checkpoint_blob_sse_kms_key_id="$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id // empty' "$shared_manifest")"
+    fi
+    if [[ -z "$checkpoint_blob_sse_kms_key_id" && -n "$checkpoint_blob_bucket" ]]; then
+      checkpoint_blob_sse_kms_key_id="$(
+        production_resolve_s3_bucket_sse_kms_key_id \
+          "${operator_aws_profile:-$shared_aws_profile}" \
+          "${operator_aws_region:-$shared_aws_region}" \
+          "$checkpoint_blob_bucket"
+      )"
+    fi
 
     known_hosts_dst=""
     if [[ -n "$known_hosts_src" ]]; then

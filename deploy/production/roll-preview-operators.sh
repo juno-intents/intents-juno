@@ -85,6 +85,11 @@ gh release download "$operator_stack_ami_release_tag" \
   --clobber
 (
   cd "$release_tmp_dir"
+  checksum_target="$(awk 'NR == 1 {print $2}' operator-ami-manifest.json.sha256)"
+  if [[ -n "$checksum_target" && "$checksum_target" != "operator-ami-manifest.json" ]]; then
+    mkdir -p "$(dirname "$checksum_target")"
+    cp operator-ami-manifest.json "$checksum_target"
+  fi
   sha256sum -c operator-ami-manifest.json.sha256 >/dev/null
 )
 operator_stack_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$release_tmp_dir/operator-ami-manifest.json")"

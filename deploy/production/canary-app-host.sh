@@ -770,6 +770,7 @@ jq -n \
   --arg shared_proof_services_status "$shared_proof_services_status" \
   --arg shared_proof_services_detail "$shared_proof_services_detail" \
   --argjson ready_for_test "$ready_for_test" \
+  --argjson ready_for_deploy "$ready_for_test" \
   '{
     version: $version,
     generated_at: $generated_at,
@@ -778,6 +779,7 @@ jq -n \
     bridge_probe_url: $bridge_probe_url,
     backoffice_probe_url: $backoffice_probe_url,
     ready_for_test: $ready_for_test,
+    ready_for_deploy: $ready_for_deploy,
     checks: {
       inputs: {
         status: $input_status,

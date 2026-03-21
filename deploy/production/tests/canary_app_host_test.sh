@@ -1434,6 +1434,7 @@ EOF
   assert_eq "$(jq -r '.checks.internal_backoffice_lb.status' "$output_json")" "passed" "role-mode app canary validates backoffice target health"
   assert_eq "$(jq -r '.checks.backoffice_ready.status' "$output_json")" "passed" "role-mode app canary validates backoffice via ssm-local transport"
   assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "role-mode app canary is ready for test"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "role-mode app canary is ready for deploy"
   rm -rf "$workdir"
 }
 
