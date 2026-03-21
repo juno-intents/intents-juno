@@ -1836,6 +1836,17 @@ resource "aws_secretsmanager_secret" "shared_wireguard_server_key" {
   tags  = local.common_tags
 }
 
+resource "random_id" "shared_wireguard_server_key_material" {
+  count       = local.wireguard_enabled ? 1 : 0
+  byte_length = 32
+}
+
+resource "aws_secretsmanager_secret_version" "shared_wireguard_server_key" {
+  count         = local.wireguard_enabled ? 1 : 0
+  secret_id     = aws_secretsmanager_secret.shared_wireguard_server_key[0].id
+  secret_string = random_id.shared_wireguard_server_key_material[0].b64_std
+}
+
 resource "aws_secretsmanager_secret" "shared_wireguard_peer_config" {
   for_each = local.shared_wireguard_named_peers
 

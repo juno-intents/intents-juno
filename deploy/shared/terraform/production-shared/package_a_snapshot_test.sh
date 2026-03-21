@@ -91,6 +91,8 @@ main() {
   assert_contains "$main_tf" 'resource "aws_lb_target_group" "wireguard_udp"' "production-shared provisions a wireguard UDP target group"
   assert_contains "$main_tf" 'resource "aws_lb_listener" "wireguard_udp"' "production-shared provisions a wireguard UDP listener"
   assert_contains "$main_tf" 'resource "aws_secretsmanager_secret" "shared_wireguard_server_key"' "production-shared provisions a dedicated wireguard server-key secret"
+  assert_contains "$main_tf" 'resource "random_id" "shared_wireguard_server_key_material"' "production-shared generates durable wireguard server-key material"
+  assert_contains "$main_tf" 'resource "aws_secretsmanager_secret_version" "shared_wireguard_server_key"' "production-shared seeds the shared wireguard server-key secret value"
   assert_contains "$main_tf" 'resource "aws_secretsmanager_secret" "shared_wireguard_peer_config"' "production-shared provisions per-peer wireguard config secrets"
   assert_contains "$main_tf" 'wireguard_legacy_enabled       = local.wireguard_enabled && length(var.shared_wireguard_public_subnet_ids) == 0' "production-shared disables the legacy singleton wireguard path when role subnets are supplied"
   assert_contains "$main_tf" 'resource "aws_instance" "wireguard_gateway"' "production-shared keeps the legacy wireguard gateway resource behind an explicit compatibility gate"
