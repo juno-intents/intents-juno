@@ -73,6 +73,12 @@ cleanup() {
 trap cleanup EXIT
 
 resolved_network="$(production_json_required "$inventory" '.contracts.juno_network | select(type == "string" and length > 0)')"
+if [[ -z "$aws_profile" ]]; then
+  aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
+fi
+if [[ -z "$aws_profile" ]]; then
+  aws_profile="$(production_json_optional "$inventory" '.app_role.aws_profile')"
+fi
 if [[ -z "$aws_region" ]]; then
   aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
 fi

@@ -214,9 +214,91 @@ EOF
   rm -rf "$workdir"
 }
 
+test_resolve_role_runtime_release_inputs_uses_inventory_aws_profile_for_ecr_fallback() {
+  local workdir fake_bin releases_dir output_inventory inventory aws_log
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  releases_dir="$workdir/releases"
+  aws_log="$workdir/aws.log"
+  mkdir -p "$fake_bin" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet"
+
+  inventory="$workdir/inventory.json"
+  output_inventory="$workdir/inventory.resolved.json"
+  write_inventory_fixture "$inventory"
+
+  cat >"$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" <<'EOF'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0app123456789abcd"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json.sha256"
+
+  cat >"$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" <<'EOF'
+{
+  "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
+  "regions": {
+    "us-east-1": {
+      "repository_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services",
+      "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json.sha256"
+
+  cat >"$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" <<'EOF'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0wireguard1234567"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json.sha256"
+
+  write_fake_gh "$fake_bin/gh" "$releases_dir" "$workdir/gh.log"
+
+  cat >"$fake_bin/aws" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "\$*" >>"$aws_log"
+if [[ "\$1" == "--profile" && "\$2" == "juno" && "\$3" == "--region" && "\$4" == "us-east-1" && "\$5" == "ecr" && "\$6" == "describe-repositories" ]]; then
+  printf 'arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services\n'
+  exit 0
+fi
+echo "unexpected aws invocation: \$*" >&2
+exit 1
+EOF
+  chmod +x "$fake_bin/aws"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/resolve-role-runtime-release-inputs.sh" \
+    --inventory "$inventory" \
+    --output "$output_inventory" \
+    --github-repo juno-intents/intents-juno
+
+  assert_contains "$(cat "$aws_log")" "--profile juno --region us-east-1 ecr describe-repositories --repository-names intents-juno-proof-services" "release resolver uses inventory aws profile for ECR fallback"
+  assert_eq "$(jq -r '.shared_roles.proof.image_ecr_repository_arn' "$output_inventory")" "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services" "release resolver patches proof repository arn from ECR fallback"
+  rm -rf "$workdir"
+}
+
 main() {
   test_resolve_role_runtime_release_inputs_patches_inventory
   test_resolve_role_runtime_release_inputs_rejects_latest_tags
+  test_resolve_role_runtime_release_inputs_uses_inventory_aws_profile_for_ecr_fallback
 }
 
 main "$@"
