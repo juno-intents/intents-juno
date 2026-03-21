@@ -2,6 +2,7 @@ output "app_role" {
   description = "Structured app role contract for deployment handoffs."
   value = {
     asg = aws_autoscaling_group.app.name
+    app_security_group_id = aws_security_group.app.id
     launch_template = {
       id      = aws_launch_template.app.id
       version = tostring(aws_launch_template.app.latest_version)
@@ -24,6 +25,11 @@ output "app_role" {
 output "app_role_asg_name" {
   description = "App autoscaling group name."
   value       = aws_autoscaling_group.app.name
+}
+
+output "app_security_group_id" {
+  description = "Security group id attached to app instances."
+  value       = aws_security_group.app.id
 }
 
 output "app_role_launch_template_id" {

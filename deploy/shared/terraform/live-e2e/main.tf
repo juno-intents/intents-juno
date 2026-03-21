@@ -671,7 +671,7 @@ resource "aws_security_group" "operator" {
     from_port       = var.operator_base_port
     to_port         = var.operator_base_port + var.operator_instance_count - 1
     protocol        = "tcp"
-    security_groups = [aws_security_group.runner.id]
+    security_groups = concat([aws_security_group.runner.id], var.operator_client_security_group_ids)
   }
 
   ingress {
@@ -679,7 +679,7 @@ resource "aws_security_group" "operator" {
     from_port       = 18301
     to_port         = 18310
     protocol        = "tcp"
-    security_groups = [aws_security_group.runner.id]
+    security_groups = concat([aws_security_group.runner.id], var.operator_client_security_group_ids)
   }
 
   ingress {
@@ -687,7 +687,7 @@ resource "aws_security_group" "operator" {
     from_port       = var.operator_base_port + 1200
     to_port         = var.operator_base_port + 1200
     protocol        = "tcp"
-    security_groups = [aws_security_group.runner.id]
+    security_groups = concat([aws_security_group.runner.id], var.operator_client_security_group_ids)
   }
 
   ingress {
@@ -695,7 +695,7 @@ resource "aws_security_group" "operator" {
     from_port       = 18232
     to_port         = 18232
     protocol        = "tcp"
-    security_groups = [aws_security_group.runner.id]
+    security_groups = concat([aws_security_group.runner.id], var.operator_client_security_group_ids)
   }
 
   egress {

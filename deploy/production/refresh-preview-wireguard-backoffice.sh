@@ -87,6 +87,7 @@ shared_terraform_dir="$(production_abs_path "$REPO_ROOT" "$shared_terraform_dir_
 [[ -d "$shared_terraform_dir" ]] || die "shared terraform dir not found: $shared_terraform_dir"
 
 internal_lb_dns_name="$(production_json_required "$app_deploy" '.app_role.internal_lb.dns_name | select(type == "string" and length > 0)')"
+app_security_group_id="$(production_json_optional "$app_deploy" '.app_role.app_security_group_id')"
 operator_host="$(production_json_required "$operator_deploy" '.operator_host | select(type == "string" and length > 0)')"
 known_hosts_file="$(production_abs_path "$(dirname "$operator_deploy")" "$(production_json_required "$operator_deploy" '.known_hosts_file | select(type == "string" and length > 0)')")"
 [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
@@ -123,6 +124,10 @@ jq \
         .
       end
   ' "$inventory" >"$tmp_inventory"
+if [[ -n "$app_security_group_id" ]]; then
+  jq --arg app_security_group_id "$app_security_group_id" '.app_role.app_security_group_id = $app_security_group_id' "$tmp_inventory" >"${tmp_inventory}.next"
+  mv "${tmp_inventory}.next" "$tmp_inventory"
+fi
   mv "$tmp_inventory" "$refreshed_inventory"
 
   if [[ -n "$backend_account_id" ]]; then

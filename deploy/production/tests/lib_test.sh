@@ -2859,6 +2859,7 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
     .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
     | .app_host.backoffice_dns_label = ""
     | .app_host.ops_public_dns_label = "ops"
+    | .app_role.app_security_group_id = "sg-approle012345678"
     | del(.shared_services.wireguard.public_subnet_id)
     | del(.shared_roles.wireguard.public_subnet_id)
     | del(.shared_roles.wireguard.public_subnet_ids)
@@ -2876,6 +2877,7 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
 
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$override_file")" "true" "preview override enables wireguard"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$override_file")" "ops.alpha.intents-testing.thejunowallet.com" "preview override falls back to legacy ops dns label"
+  assert_eq "$(jq -r '.operator_client_security_group_ids[0]' "$override_file")" "sg-approle012345678" "preview override forwards the app runtime sg to live-e2e operator ingress"
   assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_id")' "$override_file")" "false" "preview override omits public subnet when inventory relies on live-e2e defaults"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
   rm -rf "$workdir"

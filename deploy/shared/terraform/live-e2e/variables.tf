@@ -117,6 +117,12 @@ variable "operator_associate_public_ip_address" {
   default     = true
 }
 
+variable "operator_client_security_group_ids" {
+  description = "Additional security group IDs allowed to reach operator gRPC, health, base-relayer, and Juno RPC ports."
+  type        = list(string)
+  default     = []
+}
+
 variable "iam_instance_profile" {
   description = "Optional IAM instance profile name attached to runner/operator/shared hosts."
   type        = string
