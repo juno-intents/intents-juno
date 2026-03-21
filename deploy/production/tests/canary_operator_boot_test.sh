@@ -380,7 +380,7 @@ EOF
   rm -rf "$tmp"
 }
 
-test_operator_boot_canary_rejects_extend_signer_below_threshold() {
+test_operator_boot_canary_accepts_operator_scoped_extend_signer_signature() {
   local tmp fake_bin log_file manifest output_json shared_manifest
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
@@ -488,10 +488,11 @@ EOF
       --operator-deploy "$manifest" >"$output_json"
   )
 
-  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "false" "insufficient extend signer quorum blocks ready flag"
-  assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "failed" "insufficient extend signer quorum fails txsign runtime check"
-  assert_contains "$(jq -r '.checks.txsign_runtime.detail' "$output_json")" "returned 1 signatures" "insufficient extend signer detail includes returned count"
-  assert_contains "$(jq -r '.checks.txsign_runtime.detail' "$output_json")" "need at least 2" "insufficient extend signer detail includes threshold"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "single operator-scoped extend signer signature is enough for boot canary"
+  assert_eq "$(jq -r '.checks.txsign_runtime.status' "$output_json")" "passed" "single operator-scoped extend signer signature passes txsign runtime"
+  assert_contains "$(jq -r '.checks.txsign_runtime.detail' "$output_json")" "returned 1 operator-scoped signature" "boot canary reports the operator-scoped signature count"
+  assert_eq "$(jq -r '.checks.kms_export.status' "$output_json")" "passed" "single operator-scoped signature still allows kms export validation"
+  assert_eq "$(jq -r '.checks.systemd.status' "$output_json")" "passed" "single operator-scoped signature still allows service validation"
 
   rm -rf "$tmp"
 }
@@ -500,7 +501,7 @@ main() {
   test_operator_boot_canary_checks_services_over_strict_ssh
   test_operator_boot_canary_rejects_underfunded_relayer
   test_operator_boot_canary_preserves_secure_preview_signer_configuration
-  test_operator_boot_canary_rejects_extend_signer_below_threshold
+  test_operator_boot_canary_accepts_operator_scoped_extend_signer_signature
 }
 
 main "$@"

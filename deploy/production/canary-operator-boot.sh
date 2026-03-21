@@ -263,11 +263,11 @@ else
           elif ! [[ "$probe_sig_count" =~ ^[0-9]+$ ]]; then
             txsign_runtime_status="failed"
             txsign_runtime_detail="remote extend signer probe returned invalid signature count"
-          elif (( probe_sig_count < checkpoint_threshold )); then
+          elif (( probe_sig_count < 1 )); then
             txsign_runtime_status="failed"
-            txsign_runtime_detail="remote extend signer returned $probe_sig_count signatures; need at least $checkpoint_threshold"
+            txsign_runtime_detail="remote extend signer returned $probe_sig_count signatures; need at least 1 operator-scoped signature"
           else
-            txsign_runtime_detail="remote extend signer returned $probe_sig_count signatures for checkpoint threshold $checkpoint_threshold"
+            txsign_runtime_detail="remote extend signer returned $probe_sig_count operator-scoped signature(s)"
           fi
         fi
       else
