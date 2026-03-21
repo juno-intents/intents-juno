@@ -2962,6 +2962,42 @@ EOF
   rm -rf "$workdir"
 }
 
+test_production_maybe_use_public_sts_endpoint_sets_global_override_for_private_regional_resolution() {
+  unset AWS_ENDPOINT_URL_STS
+  export PRODUCTION_TEST_STS_REGIONAL_IPS="10.0.11.214
+10.0.10.99"
+
+  production_maybe_use_public_sts_endpoint "us-east-1"
+
+  assert_eq "${AWS_ENDPOINT_URL_STS:-}" "https://sts.amazonaws.com" "private regional sts resolution forces the public global sts endpoint"
+
+  unset PRODUCTION_TEST_STS_REGIONAL_IPS
+  unset AWS_ENDPOINT_URL_STS
+}
+
+test_production_maybe_use_public_sts_endpoint_preserves_existing_override() {
+  export AWS_ENDPOINT_URL_STS="https://custom.example.internal"
+  export PRODUCTION_TEST_STS_REGIONAL_IPS="10.0.11.214"
+
+  production_maybe_use_public_sts_endpoint "us-east-1"
+
+  assert_eq "$AWS_ENDPOINT_URL_STS" "https://custom.example.internal" "existing sts endpoint override wins"
+
+  unset PRODUCTION_TEST_STS_REGIONAL_IPS
+  unset AWS_ENDPOINT_URL_STS
+}
+
+test_production_maybe_use_public_sts_endpoint_skips_public_regional_resolution() {
+  unset AWS_ENDPOINT_URL_STS
+  export PRODUCTION_TEST_STS_REGIONAL_IPS="54.239.29.1"
+
+  production_maybe_use_public_sts_endpoint "us-east-1"
+
+  assert_eq "${AWS_ENDPOINT_URL_STS:-}" "" "public regional sts resolution does not force the global sts endpoint"
+
+  unset PRODUCTION_TEST_STS_REGIONAL_IPS
+}
+
 main() {
   setup_default_checkpoint_signer_kms_provisioner
   trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
@@ -3006,6 +3042,9 @@ main() {
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
   test_production_run_release_binary_executes_directly_on_host_when_runner_not_required
   test_production_run_release_binary_uses_docker_runner_when_forced
+  test_production_maybe_use_public_sts_endpoint_sets_global_override_for_private_regional_resolution
+  test_production_maybe_use_public_sts_endpoint_preserves_existing_override
+  test_production_maybe_use_public_sts_endpoint_skips_public_regional_resolution
 }
 
 main "$@"

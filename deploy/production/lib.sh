@@ -259,6 +259,76 @@ production_terraform_backend_state_key() {
   printf '%s/%s.tfstate\n' "$resource_slug" "$(production_safe_slug "$environment")"
 }
 
+production_sts_regional_endpoint_ips() {
+  local aws_region="$1"
+
+  if [[ -n "${PRODUCTION_TEST_STS_REGIONAL_IPS:-}" ]]; then
+    printf '%s\n' "$PRODUCTION_TEST_STS_REGIONAL_IPS"
+    return 0
+  fi
+
+  have_cmd python3 || return 0
+  python3 - "$aws_region" <<'PY'
+import socket
+import sys
+
+region = sys.argv[1]
+host = f"sts.{region}.amazonaws.com"
+ips = []
+try:
+    infos = socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+except OSError:
+    infos = []
+for info in infos:
+    ip = info[4][0]
+    if ip not in ips:
+        ips.append(ip)
+for ip in ips:
+    print(ip)
+PY
+}
+
+production_is_private_ipv4() {
+  local ip="$1"
+  [[ "$ip" =~ ^10\. ]] && return 0
+  [[ "$ip" =~ ^192\.168\. ]] && return 0
+  if [[ "$ip" =~ ^172\.([0-9]+)\. ]]; then
+    local second_octet="${BASH_REMATCH[1]}"
+    if [[ "$second_octet" =~ ^[0-9]+$ ]] && [[ "$second_octet" -ge 16 && "$second_octet" -le 31 ]]; then
+      return 0
+    fi
+  fi
+  return 1
+}
+
+production_maybe_use_public_sts_endpoint() {
+  local aws_region="$1"
+  local regional_ips=""
+  local ip
+
+  [[ -n "$aws_region" ]] || return 0
+  [[ -n "${AWS_ENDPOINT_URL_STS:-}" ]] && return 0
+
+  case "${PRODUCTION_FORCE_PUBLIC_STS_ENDPOINT:-auto}" in
+    true)
+      export AWS_ENDPOINT_URL_STS="https://sts.amazonaws.com"
+      return 0
+      ;;
+    false)
+      return 0
+      ;;
+  esac
+
+  regional_ips="$(production_sts_regional_endpoint_ips "$aws_region" || true)"
+  while IFS= read -r ip; do
+    [[ -n "$ip" ]] || continue
+    if production_is_private_ipv4 "$ip"; then
+      export AWS_ENDPOINT_URL_STS="https://sts.amazonaws.com"
+      return 0
+    fi
+  done <<<"$regional_ips"
+}
+
 production_bootstrap_terraform_backend() {
   local aws_profile="$1"
   local aws_region="$2"
@@ -270,6 +340,7 @@ production_bootstrap_terraform_backend() {
   have_cmd aws || die "required command not found: aws"
   [[ -n "$aws_profile" ]] || die "aws profile is required for terraform backend bootstrap"
   [[ -n "$aws_region" ]] || die "aws region is required for terraform backend bootstrap"
+  production_maybe_use_public_sts_endpoint "$aws_region"
 
   account_id="$account_id_override"
   if [[ -z "$account_id" ]]; then

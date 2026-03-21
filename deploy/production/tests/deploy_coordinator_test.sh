@@ -62,6 +62,7 @@ write_fake_terraform_binary() {
 set -euo pipefail
 printf 'terraform %s\n' "\$*" >>"$log_file"
 printf 'terraform-cwd %s\n' "\$PWD" >>"$log_file"
+printf 'terraform-env AWS_ENDPOINT_URL_STS=%s\n' "\${AWS_ENDPOINT_URL_STS:-}" >>"$log_file"
 case "\${1:-}" in
   init|apply)
     for arg in "\$@"; do
@@ -1254,7 +1255,9 @@ EOF
   ' >"$app_tf_fixture"
   write_fake_terraform_binary "$fake_bin/terraform" "$terraform_log" "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" "$app_tf_fixture"
 
-  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+  PATH="$fake_bin:$PATH" \
+    PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+    bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
     --inventory "$workdir/inventory.json" \
     --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
     --existing-bridge-summary "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
@@ -1268,6 +1271,7 @@ EOF
   assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator applies terraform with the generated wireguard override file"
   assert_contains "$combined_log" "terraform init -input=false -reconfigure -backend-config=bucket=intents-juno-tfstate-021490342184-us-east-1 -backend-config=dynamodb_table=intents-juno-tfstate-locks-021490342184-us-east-1 -backend-config=key=app-runtime/alpha.tfstate -backend-config=region=us-east-1" "deploy-coordinator initializes app runtime terraform against the bootstrapped backend"
   assert_contains "$combined_log" "terraform apply -auto-approve -input=false -var-file=$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator applies app runtime terraform with the generated role override file"
+  assert_contains "$combined_log" "terraform-env AWS_ENDPOINT_URL_STS=https://sts.amazonaws.com" "deploy-coordinator forces public sts when regional sts resolves private"
   assert_file_exists "$output_dir/alpha/shared-terraform.auto.tfvars.json" "deploy-coordinator writes the wireguard override file"
   assert_file_exists "$output_dir/alpha/app-terraform.auto.tfvars.json" "deploy-coordinator writes the app runtime override file"
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$output_dir/alpha/shared-terraform.auto.tfvars.json")" "true" "deploy-coordinator writes a wireguard-enabled override file"

@@ -51,6 +51,7 @@ app_terraform_dir_rel="$(production_json_required "$inventory" '.app_role.terraf
 app_terraform_dir="$(production_abs_path "$REPO_ROOT" "$app_terraform_dir_rel")"
 aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
 aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
+production_maybe_use_public_sts_endpoint "$aws_region"
 backend_account_id="$(production_json_optional "$inventory" '.shared_services.account_id')"
 if [[ -z "$backend_account_id" ]]; then
   backend_account_id="$(production_json_optional "$inventory" '.app_role.account_id')"

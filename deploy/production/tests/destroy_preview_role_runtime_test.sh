@@ -40,6 +40,7 @@ write_fake_destroy_terraform() {
 set -euo pipefail
 printf 'terraform %s\n' "\$*" >>"$log_file"
 printf 'terraform-cwd %s\n' "\$PWD" >>"$log_file"
+printf 'terraform-env AWS_ENDPOINT_URL_STS=%s\n' "\${AWS_ENDPOINT_URL_STS:-}" >>"$log_file"
 case "\${1:-}" in
   init|destroy)
     for arg in "\$@"; do
@@ -257,6 +258,7 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   (
     cd "$REPO_ROOT"
     PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
       PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
       PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
       bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
@@ -269,6 +271,7 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$tf_log")" "terraform-state $edge_state" "preview destroy uses the discovered edge state file"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy writes shared terraform destroy vars"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/app-terraform.auto.tfvars.json" "preview destroy writes app terraform destroy vars"
+  assert_contains "$(cat "$tf_log")" "terraform-env AWS_ENDPOINT_URL_STS=https://sts.amazonaws.com" "preview destroy forces public sts when regional sts resolves private"
   assert_contains "$(cat "$aws_log")" "aws cloudfront update-distribution --profile juno --id ENKATN26PZLPX" "preview destroy disables the edge cloudfront distribution before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront delete-distribution --profile juno --id ENKATN26PZLPX" "preview destroy deletes the edge cloudfront distribution before terraform destroy"
   if [[ -f "$aws_log" ]]; then

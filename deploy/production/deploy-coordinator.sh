@@ -119,6 +119,8 @@ fi
 
 inventory_dir="$(cd "$(dirname "$inventory")" && pwd)"
 env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+shared_aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
+production_maybe_use_public_sts_endpoint "$shared_aws_region"
 coordinator_inventory="$inventory"
 generated_dkg_tls_dir=""
 if [[ -z "$existing_bridge_summary" ]]; then
