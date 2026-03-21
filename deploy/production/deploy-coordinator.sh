@@ -396,6 +396,7 @@ if [[ -n "$existing_bridge_summary" ]]; then
 else
   log "Deploying bridge contracts"
   bridge_deploy_name="$(basename "$bridge_deploy_binary")"
+  bridge_deploy_name="$(sed -E 's/_(linux|darwin)_(amd64|arm64)$//' <<<"$bridge_deploy_name")"
   [[ "$bridge_deploy_name" == "bridge-deploy" ]] || die "production bridge deployment requires a bridge-deploy binary, got: $bridge_deploy_name"
   bridge_deploy_cmd=(
     "$bridge_deploy_binary"

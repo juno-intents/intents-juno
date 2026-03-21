@@ -1209,6 +1209,45 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_accepts_released_bridge_deploy_binary_name() {
+  local workdir output_dir fake_bin log_dir bridge_log
+  workdir="$(mktemp -d)"
+  output_dir="$workdir/output"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  bridge_log="$log_dir/bridge.log"
+  mkdir -p "$fake_bin" "$log_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+  write_fake_production_bridge_deploy_binary "$fake_bin/bridge-deploy_linux_amd64" "$bridge_log" "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --bridge-deploy-binary "$fake_bin/bridge-deploy_linux_amd64" \
+    --deployer-key-file "$workdir/dkg-backup.zip" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_dir" >/dev/null
+
+  assert_contains "$(cat "$bridge_log")" "--output $output_dir/alpha/bridge-summary.json" "release-named bridge-deploy binary is accepted and invoked"
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_bootstraps_terraform_backend_before_init() {
   local workdir output_dir fake_bin log_dir aws_log terraform_log combined_log app_tf_fixture
   workdir="$(mktemp -d)"
@@ -1437,6 +1476,7 @@ main() {
   test_deploy_coordinator_forwards_ephemeral_funder_mode
   test_deploy_coordinator_rejects_direct_deployer_outside_alpha
   test_deploy_coordinator_invokes_production_bridge_deploy_binary
+  test_deploy_coordinator_accepts_released_bridge_deploy_binary_name
   test_deploy_coordinator_bootstraps_terraform_backend_before_init
   test_deploy_coordinator_resolves_role_runtime_release_inputs_when_inventory_is_unresolved
 }
