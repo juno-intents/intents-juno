@@ -214,7 +214,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_resolve_role_runtime_release_inputs_uses_inventory_aws_profile_for_ecr_fallback() {
+test_resolve_role_runtime_release_inputs_derives_ecr_repository_arn_from_manifest_uri() {
   local workdir fake_bin releases_dir output_inventory inventory aws_log
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
@@ -276,10 +276,6 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 printf 'aws %s\n' "\$*" >>"$aws_log"
-if [[ "\$1" == "--profile" && "\$2" == "juno" && "\$3" == "--region" && "\$4" == "us-east-1" && "\$5" == "ecr" && "\$6" == "describe-repositories" ]]; then
-  printf 'arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services\n'
-  exit 0
-fi
 echo "unexpected aws invocation: \$*" >&2
 exit 1
 EOF
@@ -290,15 +286,17 @@ EOF
     --output "$output_inventory" \
     --github-repo juno-intents/intents-juno
 
-  assert_contains "$(cat "$aws_log")" "--profile juno --region us-east-1 ecr describe-repositories --repository-names intents-juno-proof-services" "release resolver uses inventory aws profile for ECR fallback"
-  assert_eq "$(jq -r '.shared_roles.proof.image_ecr_repository_arn' "$output_inventory")" "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services" "release resolver patches proof repository arn from ECR fallback"
+  assert_eq "$(jq -r '.shared_roles.proof.image_ecr_repository_arn' "$output_inventory")" "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services" "release resolver derives proof repository arn from repository uri"
+  if [[ -f "$aws_log" ]]; then
+    assert_not_contains "$(cat "$aws_log")" "ecr describe-repositories" "release resolver does not call AWS when repository uri is present"
+  fi
   rm -rf "$workdir"
 }
 
 main() {
   test_resolve_role_runtime_release_inputs_patches_inventory
   test_resolve_role_runtime_release_inputs_rejects_latest_tags
-  test_resolve_role_runtime_release_inputs_uses_inventory_aws_profile_for_ecr_fallback
+  test_resolve_role_runtime_release_inputs_derives_ecr_repository_arn_from_manifest_uri
 }
 
 main "$@"

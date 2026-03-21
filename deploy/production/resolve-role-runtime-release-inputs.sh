@@ -148,7 +148,7 @@ download_release_asset_with_checksum() {
 
 resolve_proof_repository_arn() {
   local manifest_json="$1"
-  local repository_arn repository_uri repository_name aws_args=()
+  local repository_arn repository_uri repository_name repository_host account_id derived_region aws_args=()
 
   repository_arn="$(jq -r --arg region "$aws_region" '.regions[$region].repository_arn // empty' "$manifest_json")"
   if [[ -n "$repository_arn" ]]; then
@@ -158,8 +158,15 @@ resolve_proof_repository_arn() {
 
   repository_uri="$(jq -r --arg region "$aws_region" '.regions[$region].repository_uri // empty' "$manifest_json")"
   [[ -n "$repository_uri" ]] || die "shared proof release manifest is missing repository_uri for region=$aws_region"
+  repository_host="${repository_uri%%/*}"
   repository_name="${repository_uri#*/}"
   [[ -n "$repository_name" && "$repository_name" != "$repository_uri" ]] || die "failed to derive ECR repository name from repository_uri=$repository_uri"
+  if [[ "$repository_host" =~ ^([0-9]{12})\.dkr\.ecr\.([a-z0-9-]+)\.amazonaws\.com(\.cn)?$ ]]; then
+    account_id="${BASH_REMATCH[1]}"
+    derived_region="${BASH_REMATCH[2]}"
+    printf 'arn:aws:ecr:%s:%s:repository/%s\n' "$derived_region" "$account_id" "$repository_name"
+    return 0
+  fi
   have_cmd aws || die "required command not found: aws for ECR repository ARN fallback"
   [[ -n "$aws_profile" ]] && aws_args+=(--profile "$aws_profile")
   aws_args+=(--region "$aws_region")
