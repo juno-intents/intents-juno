@@ -26,6 +26,8 @@ current_output_root=""
 skip_missing_edge_state="false"
 cloudfront_poll_interval_seconds="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS:-10}"
 cloudfront_poll_attempts="${PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS:-120}"
+app_asg_poll_interval_seconds="${PRODUCTION_PREVIEW_APP_ASG_POLL_INTERVAL_SECONDS:-5}"
+app_asg_poll_attempts="${PRODUCTION_PREVIEW_APP_ASG_POLL_ATTEMPTS:-120}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -265,6 +267,89 @@ destroy_app_edge() {
   )
 }
 
+app_asg_sleep() {
+  if [[ "$app_asg_poll_interval_seconds" =~ ^[0-9]+$ ]] && [[ "$app_asg_poll_interval_seconds" -gt 0 ]]; then
+    sleep "$app_asg_poll_interval_seconds"
+  fi
+}
+
+app_runtime_output_json() {
+  terraform output -json
+}
+
+app_runtime_asg_name_from_outputs() {
+  local output_json="$1"
+  jq -r '.app_role.value.asg // .app_role_asg_name.value // empty' <<<"$output_json"
+}
+
+app_runtime_asg_instance_ids() {
+  local asg_name="$1"
+  local ids
+
+  ids="$(aws autoscaling describe-auto-scaling-groups \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --auto-scaling-group-names "$asg_name" \
+    --query 'AutoScalingGroups[0].Instances[].InstanceId' \
+    --output text 2>/dev/null || true)"
+  ids="${ids//$'\r'/}"
+  ids="${ids//None/}"
+  printf '%s\n' "$ids"
+}
+
+wait_for_app_runtime_asg_empty() {
+  local asg_name="$1"
+  local attempt ids
+
+  for ((attempt = 1; attempt <= app_asg_poll_attempts; attempt++)); do
+    ids="$(app_runtime_asg_instance_ids "$asg_name")"
+    if [[ -z "${ids//[[:space:]]/}" ]]; then
+      return 0
+    fi
+    app_asg_sleep
+  done
+
+  die "timed out waiting for app runtime asg $asg_name instances to terminate"
+}
+
+drain_app_runtime_asg() {
+  local output_json="$1"
+  local asg_name ids_text
+  local -a instance_ids=()
+
+  asg_name="$(app_runtime_asg_name_from_outputs "$output_json")"
+  [[ -n "$asg_name" ]] || return 0
+
+  aws autoscaling update-auto-scaling-group \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --auto-scaling-group-name "$asg_name" \
+    --min-size 0 \
+    --max-size 0 \
+    --desired-capacity 0 >/dev/null
+
+  ids_text="$(app_runtime_asg_instance_ids "$asg_name")"
+  if [[ -z "${ids_text//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC2206
+  instance_ids=( $ids_text )
+  if [[ ${#instance_ids[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  aws ec2 terminate-instances \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --instance-ids "${instance_ids[@]}" >/dev/null
+  aws ec2 wait instance-terminated \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --instance-ids "${instance_ids[@]}"
+  wait_for_app_runtime_asg_empty "$asg_name"
+}
+
 if [[ -n "$app_deploy_path" ]]; then
   destroy_app_edge "$app_deploy_path"
 elif [[ "$skip_missing_edge_state" != "true" ]]; then
@@ -278,6 +363,8 @@ fi
     -backend-config="dynamodb_table=$app_table" \
     -backend-config="key=$app_key" \
     -backend-config="region=$aws_region" >/dev/null
+  app_runtime_outputs="$(app_runtime_output_json)"
+  drain_app_runtime_asg "$app_runtime_outputs"
   terraform destroy -auto-approve -input=false -var-file="$app_var_file"
 )
 

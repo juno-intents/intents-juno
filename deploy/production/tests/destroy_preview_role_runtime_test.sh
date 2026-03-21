@@ -53,6 +53,26 @@ case "\${1:-}" in
     done
     exit 0
     ;;
+  output)
+    if [[ "\${2:-}" == "-json" && "\$PWD" == *"/deploy/shared/terraform/app-runtime" ]]; then
+      cat <<'JSON'
+{
+  "app_role": {
+    "value": {
+      "asg": "juno-app-runtime-preview-asg",
+      "internal_lb": {
+        "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/juno-app-runtime-preview-backoff/861c0d2977e0ad7b"
+      },
+      "public_lb": {
+        "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/juno-app-runtime-preview-bridge/bf53abd559495064"
+      }
+    }
+  }
+}
+JSON
+      exit 0
+    fi
+    ;;
   state)
     if [[ "\${2:-}" == show && -n "$cloudfront_distribution_id" && " \$* " == *" aws_cloudfront_distribution.bridge "* ]]; then
       cat <<STATE
@@ -137,6 +157,27 @@ case "\${args[0]:-} \${args[1]:-}" in
     if [[ -n "$state_dir" ]]; then
       mkdir -p "$state_dir"
       : >"$state_dir/distribution.deleted"
+    fi
+    ;;
+  "autoscaling update-auto-scaling-group")
+    ;;
+  "autoscaling describe-auto-scaling-groups")
+    if [[ -n "$state_dir" && -f "$state_dir/app.instances.cleared" ]]; then
+      printf '\n'
+    else
+      printf 'i-app-a\ti-app-b\n'
+    fi
+    ;;
+  "ec2 terminate-instances")
+    if [[ -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/app.instances.terminating"
+    fi
+    ;;
+  "ec2 wait")
+    if [[ "\${args[2]:-}" == "instance-terminated" && -n "$state_dir" ]]; then
+      mkdir -p "$state_dir"
+      : >"$state_dir/app.instances.cleared"
     fi
     ;;
   *)
@@ -242,8 +283,8 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   app_deploy="$tmp/production-output/preview/app/app-deploy.json"
   edge_state="$tmp/edge-state/preview.tfstate"
   fake_bin="$tmp/bin"
-  tf_log="$tmp/terraform.log"
-  aws_log="$tmp/aws.log"
+  tf_log="$tmp/combined.log"
+  aws_log="$tmp/combined.log"
   cloudfront_state_dir="$tmp/cloudfront"
 
   mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
@@ -272,6 +313,10 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/shared-terraform.auto.tfvars.json" "preview destroy writes shared terraform destroy vars"
   assert_contains "$(cat "$tf_log")" "terraform-var-file $tmp/preview/app-terraform.auto.tfvars.json" "preview destroy writes app terraform destroy vars"
   assert_contains "$(cat "$tf_log")" "terraform-env AWS_ENDPOINT_URL_STS=https://sts.amazonaws.com" "preview destroy forces public sts when regional sts resolves private"
+  assert_contains "$(cat "$aws_log")" "aws autoscaling update-auto-scaling-group --profile juno --region us-east-1 --auto-scaling-group-name juno-app-runtime-preview-asg --min-size 0 --max-size 0 --desired-capacity 0" "preview destroy scales app runtime asg to zero before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws ec2 terminate-instances --profile juno --region us-east-1 --instance-ids i-app-a i-app-b" "preview destroy terminates app runtime instances before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws ec2 wait instance-terminated --profile juno --region us-east-1 --instance-ids i-app-a i-app-b" "preview destroy waits for app runtime instances to terminate before terraform destroy"
+  assert_line_order "$(cat "$aws_log")" "aws autoscaling update-auto-scaling-group --profile juno --region us-east-1 --auto-scaling-group-name juno-app-runtime-preview-asg --min-size 0 --max-size 0 --desired-capacity 0" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/app-terraform.auto.tfvars.json" "preview destroy drains the app runtime asg before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront update-distribution --profile juno --id ENKATN26PZLPX" "preview destroy disables the edge cloudfront distribution before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront delete-distribution --profile juno --id ENKATN26PZLPX" "preview destroy deletes the edge cloudfront distribution before terraform destroy"
   if [[ -f "$aws_log" ]]; then
