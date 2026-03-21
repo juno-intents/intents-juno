@@ -861,6 +861,50 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_shared_manifest_synthesizes_legacy_wireguard_peer_roster_from_client_config_secret() {
+  local workdir shared_manifest tf_json
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .shared_proof_role = {
+        value: {
+          asg: "alpha-proof-role",
+          launch_template: { id: "lt-proof0123456789abcdef", version: "7" },
+          requestor_address: "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd",
+          rpc_url: "https://rpc.role.mainnet.succinct.xyz"
+        }
+      }
+    | .shared_wireguard_role = {
+        value: {
+          asg: "alpha-wireguard-role",
+          launch_template: { id: "lt-wireguard0123456789ab", version: "11" },
+          endpoint_host: "nlb-alpha-wireguard.example.internal",
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.20.0/24", "10.0.21.0/24"],
+          server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key"
+        }
+      }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+
+  assert_eq "$(jq -r '.wireguard_role.client_config_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "shared manifest preserves legacy wireguard client config secret"
+  assert_eq "$(jq -r '.wireguard_role.peer_roster_secret_arns[0]' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "shared manifest synthesizes a legacy wireguard peer roster entry"
+  assert_eq "$(jq -r '.wireguard_role.peer_config_secret_arns.preview_legacy' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "shared manifest synthesizes a named legacy wireguard peer mapping"
+  assert_eq "$(jq -r '.shared_roles.wireguard.peer_roster_secret_arns[0]' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config" "shared roles wireguard keeps the synthesized legacy peer roster entry"
+
+  rm -rf "$workdir"
+}
+
 test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions() {
   local workdir shared_manifest bridge_summary old_path
   workdir="$(mktemp -d)"
@@ -3042,6 +3086,7 @@ main() {
   test_resolve_secret_contract_rejects_literals_outside_alpha
   test_render_shared_manifest_and_handoffs
   test_render_shared_manifest_prefers_role_outputs_for_shared_proof_and_wireguard
+  test_render_shared_manifest_synthesizes_legacy_wireguard_peer_roster_from_client_config_secret
   test_render_shared_manifest_derives_base_event_scanner_start_block_from_transactions
   test_render_shared_manifest_prefers_inventory_owallet_ua
   test_render_shared_manifest_rejects_mismatched_juno_network

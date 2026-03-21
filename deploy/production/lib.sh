@@ -2255,6 +2255,24 @@ production_render_shared_manifest() {
       --argjson inventory_role "$(production_inventory_wireguard_role_json "$inventory")" \
       --argjson tf_role "$tf_wireguard_role_json" '
         ($inventory_role + $tf_role)
+        | .peer_roster_secret_arns = (
+            if ((.peer_roster_secret_arns // []) | type) == "array" and ((.peer_roster_secret_arns // []) | length) > 0 then
+              .peer_roster_secret_arns
+            elif (.client_config_secret_arn // "") != "" then
+              [.client_config_secret_arn]
+            else
+              []
+            end
+          )
+        | .peer_config_secret_arns = (
+            if ((.peer_config_secret_arns // {}) | type) == "object" and ((.peer_config_secret_arns // {}) | length) > 0 then
+              .peer_config_secret_arns
+            elif (.client_config_secret_arn // "") != "" then
+              { preview_legacy: .client_config_secret_arn }
+            else
+              {}
+            end
+          )
       '
   )"
   proof_role_runtime_enabled="false"

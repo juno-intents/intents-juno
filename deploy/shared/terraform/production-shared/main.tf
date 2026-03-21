@@ -1635,8 +1635,24 @@ resource "aws_launch_template" "ipfs" {
     #!/usr/bin/env bash
     set -euo pipefail
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -y
-    apt-get install -y ca-certificates curl docker.io nginx unzip
+    retry_apt() {
+      local attempt=1
+      local max_attempts=5
+      while true; do
+        if "$@"; then
+          return 0
+        fi
+        if (( attempt >= max_attempts )); then
+          echo "ipfs bootstrap apt command failed after ${max_attempts} attempts: $*" >&2
+          return 1
+        fi
+        rm -rf /var/lib/apt/lists/*
+        sleep $((attempt * 5))
+        attempt=$((attempt + 1))
+      done
+    }
+    retry_apt apt-get update -y
+    retry_apt apt-get install -y ca-certificates curl docker.io nginx unzip
     arch="$(uname -m)"
     case "$arch" in
       x86_64) awscli_arch="x86_64" ;;
