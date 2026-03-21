@@ -282,6 +282,11 @@ app_runtime_asg_name_from_outputs() {
   jq -r '.app_role.value.asg // .app_role_asg_name.value // empty' <<<"$output_json"
 }
 
+app_runtime_security_group_id_from_outputs() {
+  local output_json="$1"
+  jq -r '.app_security_group_id.value // empty' <<<"$output_json"
+}
+
 app_runtime_asg_instance_ids() {
   local asg_name="$1"
   local ids
@@ -310,6 +315,56 @@ wait_for_app_runtime_asg_empty() {
   done
 
   die "timed out waiting for app runtime asg $asg_name instances to terminate"
+}
+
+revoke_app_runtime_security_group_references() {
+  local output_json="$1"
+  local app_security_group_id group_ids_text rule_ids_text group_id
+  local -a group_ids=()
+  local -a rule_ids=()
+
+  app_security_group_id="$(app_runtime_security_group_id_from_outputs "$output_json")"
+  [[ -n "$app_security_group_id" ]] || return 0
+
+  group_ids_text="$(aws ec2 describe-security-groups \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --filters "Name=ip-permission.group-id,Values=$app_security_group_id" \
+    --query 'SecurityGroups[].GroupId' \
+    --output text 2>/dev/null || true)"
+  group_ids_text="${group_ids_text//$'\r'/}"
+  group_ids_text="${group_ids_text//None/}"
+  if [[ -z "${group_ids_text//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC2206
+  group_ids=( $group_ids_text )
+  for group_id in "${group_ids[@]}"; do
+    rule_ids_text="$(aws ec2 describe-security-group-rules \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --filters "Name=group-id,Values=$group_id" \
+      --query "SecurityGroupRules[?IsEgress==\`false\` && ReferencedGroupInfo.GroupId==\`$app_security_group_id\`].SecurityGroupRuleId" \
+      --output text 2>/dev/null || true)"
+    rule_ids_text="${rule_ids_text//$'\r'/}"
+    rule_ids_text="${rule_ids_text//None/}"
+    if [[ -z "${rule_ids_text//[[:space:]]/}" ]]; then
+      continue
+    fi
+
+    # shellcheck disable=SC2206
+    rule_ids=( $rule_ids_text )
+    if [[ ${#rule_ids[@]} -eq 0 ]]; then
+      continue
+    fi
+
+    aws ec2 revoke-security-group-ingress \
+      --profile "$aws_profile" \
+      --region "$aws_region" \
+      --group-id "$group_id" \
+      --security-group-rule-ids "${rule_ids[@]}" >/dev/null
+  done
 }
 
 drain_app_runtime_asg() {
@@ -365,6 +420,7 @@ fi
     -backend-config="region=$aws_region" >/dev/null
   app_runtime_outputs="$(app_runtime_output_json)"
   drain_app_runtime_asg "$app_runtime_outputs"
+  revoke_app_runtime_security_group_references "$app_runtime_outputs"
   terraform destroy -auto-approve -input=false -var-file="$app_var_file"
 )
 

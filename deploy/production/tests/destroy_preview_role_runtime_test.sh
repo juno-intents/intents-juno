@@ -67,6 +67,9 @@ case "\${1:-}" in
         "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/juno-app-runtime-preview-bridge/bf53abd559495064"
       }
     }
+  },
+  "app_security_group_id": {
+    "value": "sg-049874c1a0e9a1c9d"
   }
 }
 JSON
@@ -179,6 +182,24 @@ case "\${args[0]:-} \${args[1]:-}" in
       mkdir -p "$state_dir"
       : >"$state_dir/app.instances.cleared"
     fi
+    ;;
+  "ec2 describe-security-groups")
+    if [[ " \$* " == *" Name=ip-permission.group-id,Values=sg-049874c1a0e9a1c9d "* ]]; then
+      printf 'sg-09af876efa8c830fb\tsg-004e0c14829a3228a\n'
+    else
+      printf '\n'
+    fi
+    ;;
+  "ec2 describe-security-group-rules")
+    if [[ " \$* " == *" Name=group-id,Values=sg-09af876efa8c830fb "* ]]; then
+      printf 'sgr-operator-preview-app\n'
+    elif [[ " \$* " == *" Name=group-id,Values=sg-004e0c14829a3228a "* ]]; then
+      printf 'sgr-shared-preview-app\n'
+    else
+      printf '\n'
+    fi
+    ;;
+  "ec2 revoke-security-group-ingress")
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -316,7 +337,10 @@ test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared() {
   assert_contains "$(cat "$aws_log")" "aws autoscaling update-auto-scaling-group --profile juno --region us-east-1 --auto-scaling-group-name juno-app-runtime-preview-asg --min-size 0 --max-size 0 --desired-capacity 0" "preview destroy scales app runtime asg to zero before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws ec2 terminate-instances --profile juno --region us-east-1 --instance-ids i-app-a i-app-b" "preview destroy terminates app runtime instances before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws ec2 wait instance-terminated --profile juno --region us-east-1 --instance-ids i-app-a i-app-b" "preview destroy waits for app runtime instances to terminate before terraform destroy"
+  assert_contains "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-09af876efa8c830fb --security-group-rule-ids sgr-operator-preview-app" "preview destroy removes operator ingress rules that still reference the app runtime security group"
+  assert_contains "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-004e0c14829a3228a --security-group-rule-ids sgr-shared-preview-app" "preview destroy removes shared ingress rules that still reference the app runtime security group"
   assert_line_order "$(cat "$aws_log")" "aws autoscaling update-auto-scaling-group --profile juno --region us-east-1 --auto-scaling-group-name juno-app-runtime-preview-asg --min-size 0 --max-size 0 --desired-capacity 0" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/app-terraform.auto.tfvars.json" "preview destroy drains the app runtime asg before terraform destroy"
+  assert_line_order "$(cat "$aws_log")" "aws ec2 revoke-security-group-ingress --profile juno --region us-east-1 --group-id sg-09af876efa8c830fb --security-group-rule-ids sgr-operator-preview-app" "terraform destroy -auto-approve -input=false -var-file=$tmp/preview/app-terraform.auto.tfvars.json" "preview destroy removes operator references to the app runtime security group before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront update-distribution --profile juno --id ENKATN26PZLPX" "preview destroy disables the edge cloudfront distribution before terraform destroy"
   assert_contains "$(cat "$aws_log")" "aws cloudfront delete-distribution --profile juno --id ENKATN26PZLPX" "preview destroy deletes the edge cloudfront distribution before terraform destroy"
   if [[ -f "$aws_log" ]]; then
