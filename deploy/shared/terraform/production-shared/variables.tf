@@ -35,6 +35,12 @@ variable "shared_service_client_cidr_blocks" {
   default     = []
 }
 
+variable "shared_service_client_security_group_ids" {
+  description = "Additional client security groups that may reach Aurora and MSK from operator environments."
+  type        = list(string)
+  default     = []
+}
+
 variable "shared_ipfs_client_cidr_blocks" {
   description = "Additional client CIDR blocks that may reach the internal IPFS API."
   type        = list(string)

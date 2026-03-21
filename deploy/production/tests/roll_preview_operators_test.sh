@@ -156,13 +156,18 @@ case "${args[*]}" in
     printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op1 --output json")
-    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op1","PublicIpAddress":"44.201.10.10","PrivateIpAddress":"10.0.10.10"}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op1","PublicIpAddress":"44.201.10.10","PrivateIpAddress":"10.0.10.10","IamInstanceProfile":{"Arn":"arn:aws:iam::021490342184:instance-profile/juno-live-e2e-preview0316d-instance-profile"}}]}]}\n'
     ;;
   "ec2 describe-instances --instance-ids i-op2 --output json")
-    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op2","PublicIpAddress":"34.207.20.20","PrivateIpAddress":"10.0.11.11"}]}]}\n'
+    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op2","PublicIpAddress":"34.207.20.20","PrivateIpAddress":"10.0.11.11","IamInstanceProfile":{"Arn":"arn:aws:iam::021490342184:instance-profile/juno-live-e2e-preview0316d-instance-profile"}}]}]}\n'
+    ;;
+  "iam get-instance-profile --instance-profile-name juno-live-e2e-preview0316d-instance-profile --output json")
+    printf '{"InstanceProfile":{"Roles":[{"RoleName":"juno-live-e2e-preview0316d-instance-role"}]}}\n'
     ;;
   "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json")
     printf '{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs"}}]}}\n'
+    ;;
+  iam\ put-role-policy\ --role-name\ juno-live-e2e-preview0316d-instance-role\ --policy-name\ preview-shared-kafka-access\ --policy-document\ *)
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "$*" >&2
@@ -224,6 +229,9 @@ write_shared_manifest_fixture() {
   "shared_services": {
     "aws_profile": "juno",
     "aws_region": "us-east-1",
+    "kafka": {
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/intents-juno-shared-preview-shared-msk/0d36d42f-e2ef-487d-88c9-8afe649ed844-13"
+    },
     "artifacts": {
       "checkpoint_blob_bucket": "preview-checkpoint-blobs"
     }
@@ -304,10 +312,12 @@ EOF
   assert_contains "$(cat "$gh_log")" "release download operator-stack-ami-v2026.03.20-testnet" "preview operator roll downloads the operator ami manifest"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-op1 --source-version 3" "preview operator roll creates a fresh launch template version"
   assert_contains "$(cat "$aws_log")" "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2" "preview operator roll refreshes the second operator asg"
+  assert_contains "$(cat "$aws_log")" "iam put-role-policy --role-name juno-live-e2e-preview0316d-instance-role --policy-name preview-shared-kafka-access" "preview operator roll adds kafka access for the rebuilt shared cluster"
   assert_contains "$(cat "$aws_log")" "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json" "preview operator roll resolves the checkpoint bucket kms key"
   assert_contains "$(cat "$deploy_log")" "--operator-deploy $output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "preview operator roll redeploys the first operator"
   assert_contains "$(cat "$canary_log")" "--operator-deploy $output_dir/operators/0x6666666666666666666666666666666666666666/operator-deploy.json" "preview operator roll runs the second operator canary"
   assert_eq "$(jq -r '.operators[0].operator_host' "$output_dir/inventory.operators-rolled.json")" "44.201.10.10" "preview operator roll updates first operator host"
+  assert_eq "$(jq -r '.operators[0].private_endpoint' "$output_dir/inventory.operators-rolled.json")" "10.0.10.10" "preview operator roll records first operator private endpoint"
   assert_eq "$(jq -r '.operators[1].launch_template.version' "$output_dir/inventory.operators-rolled.json")" "8" "preview operator roll updates second launch template version"
   assert_eq "$(jq -r '.checkpoint_blob_bucket' "$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json")" "preview-checkpoint-blobs" "preview operator handoff falls back to the shared checkpoint bucket"
   assert_eq "$(jq -r '.checkpoint_blob_sse_kms_key_id' "$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs" "preview operator handoff resolves the checkpoint bucket kms key"

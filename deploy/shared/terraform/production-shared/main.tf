@@ -352,6 +352,17 @@ resource "aws_security_group" "shared" {
     }
   }
 
+  dynamic "ingress" {
+    for_each = toset(var.shared_service_client_security_group_ids)
+    content {
+      description     = "Postgres from shared-service client security groups"
+      from_port       = var.shared_postgres_port
+      to_port         = var.shared_postgres_port
+      protocol        = "tcp"
+      security_groups = [ingress.value]
+    }
+  }
+
   ingress {
     description     = "MSK IAM bootstrap from shared ECS tasks"
     from_port       = var.shared_kafka_port
@@ -368,6 +379,17 @@ resource "aws_security_group" "shared" {
       to_port     = var.shared_kafka_port
       protocol    = "tcp"
       cidr_blocks = [ingress.value]
+    }
+  }
+
+  dynamic "ingress" {
+    for_each = toset(var.shared_service_client_security_group_ids)
+    content {
+      description     = "MSK IAM bootstrap from shared-service client security groups"
+      from_port       = var.shared_kafka_port
+      to_port         = var.shared_kafka_port
+      protocol        = "tcp"
+      security_groups = [ingress.value]
     }
   }
 

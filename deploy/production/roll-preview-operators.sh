@@ -94,15 +94,100 @@ gh release download "$operator_stack_ami_release_tag" \
 )
 operator_stack_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$release_tmp_dir/operator-ami-manifest.json")"
 [[ -n "$operator_stack_ami_id" ]] || die "operator ami manifest is missing a region entry for $aws_region"
+shared_kafka_cluster_arn="$(jq -r '.shared_services.kafka.cluster_arn // empty' "$shared_manifest")"
+shared_kafka_topic_arn_prefix=""
+shared_kafka_group_arn_prefix=""
+if [[ -n "$shared_kafka_cluster_arn" ]]; then
+  shared_kafka_topic_arn_prefix="${shared_kafka_cluster_arn/:cluster\//:topic/}"
+  shared_kafka_group_arn_prefix="${shared_kafka_cluster_arn/:cluster\//:group/}"
+fi
+
+declare -A shared_kafka_policy_roles=()
+
+ensure_preview_shared_kafka_role_policy() {
+  local instance_profile_arn="$1"
+  local instance_profile_name role_name policy_document
+
+  [[ -n "$shared_kafka_cluster_arn" ]] || return 0
+  [[ -n "$instance_profile_arn" ]] || die "operator instance profile arn is required to update kafka access"
+
+  instance_profile_name="${instance_profile_arn##*/}"
+  [[ -n "$instance_profile_name" ]] || die "failed to derive instance profile name from arn: $instance_profile_arn"
+  if [[ -n "${shared_kafka_policy_roles[$instance_profile_name]:-}" ]]; then
+    return 0
+  fi
+
+  role_name="$(
+    AWS_PAGER="" aws --profile "$aws_profile" iam get-instance-profile \
+      --instance-profile-name "$instance_profile_name" \
+      --output json \
+      | jq -r '.InstanceProfile.Roles[0].RoleName // empty'
+  )"
+  [[ -n "$role_name" ]] || die "instance profile $instance_profile_name is missing a role binding"
+
+  policy_document="$(
+    jq -cn \
+      --arg cluster_arn "$shared_kafka_cluster_arn" \
+      --arg topic_arn "${shared_kafka_topic_arn_prefix}/*" \
+      --arg group_arn "${shared_kafka_group_arn_prefix}/*" '
+        {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Sid: "AllowSharedMSKConnect",
+              Effect: "Allow",
+              Action: [
+                "kafka-cluster:Connect",
+                "kafka-cluster:DescribeCluster",
+                "kafka-cluster:DescribeClusterDynamicConfiguration"
+              ],
+              Resource: [$cluster_arn]
+            },
+            {
+              Sid: "AllowSharedMSKTopicAccess",
+              Effect: "Allow",
+              Action: [
+                "kafka-cluster:CreateTopic",
+                "kafka-cluster:DescribeTopic",
+                "kafka-cluster:DescribeTopicDynamicConfiguration",
+                "kafka-cluster:AlterTopic",
+                "kafka-cluster:ReadData",
+                "kafka-cluster:WriteData",
+                "kafka-cluster:WriteDataIdempotently"
+              ],
+              Resource: [$topic_arn]
+            },
+            {
+              Sid: "AllowSharedMSKGroupAccess",
+              Effect: "Allow",
+              Action: [
+                "kafka-cluster:AlterGroup",
+                "kafka-cluster:DescribeGroup"
+              ],
+              Resource: [$group_arn]
+            }
+          ]
+        }
+      '
+  )"
+
+  AWS_PAGER="" aws --profile "$aws_profile" iam put-role-policy \
+    --role-name "$role_name" \
+    --policy-name "preview-shared-kafka-access" \
+    --policy-document "$policy_document" >/dev/null
+
+  shared_kafka_policy_roles[$instance_profile_name]="$role_name"
+}
 
 update_inventory_operator() {
   local inventory_file="$1"
   local operator_id="$2"
   local operator_host="$3"
   local public_endpoint="$4"
-  local launch_template_id="$5"
-  local launch_template_version="$6"
-  local known_hosts_file="$7"
+  local private_endpoint="$5"
+  local launch_template_id="$6"
+  local launch_template_version="$7"
+  local known_hosts_file="$8"
   local tmp
 
   tmp="$(mktemp)"
@@ -110,6 +195,7 @@ update_inventory_operator() {
     --arg operator_id "$operator_id" \
     --arg operator_host "$operator_host" \
     --arg public_endpoint "$public_endpoint" \
+    --arg private_endpoint "$private_endpoint" \
     --arg launch_template_id "$launch_template_id" \
     --arg launch_template_version "$launch_template_version" \
     --arg known_hosts_file "$known_hosts_file" '
@@ -118,6 +204,7 @@ update_inventory_operator() {
         | if .operator_id == $operator_id then
             .operator_host = $operator_host
             | .public_endpoint = $public_endpoint
+            | .private_endpoint = (if $private_endpoint == "" then null else $private_endpoint end)
             | .known_hosts_file = $known_hosts_file
             | .launch_template = (
                 (.launch_template // {})
@@ -192,7 +279,9 @@ while IFS= read -r operator_json; do
     --output json)"
   operator_host="$(jq -r '.Reservations[0].Instances[0].PublicIpAddress // empty' <<<"$instance_json")"
   operator_private_ip="$(jq -r '.Reservations[0].Instances[0].PrivateIpAddress // empty' <<<"$instance_json")"
+  instance_profile_arn="$(jq -r '.Reservations[0].Instances[0].IamInstanceProfile.Arn // empty' <<<"$instance_json")"
   [[ -n "$operator_host" ]] || die "failed to resolve operator $operator_id public ip after the instance refresh"
+  ensure_preview_shared_kafka_role_policy "$instance_profile_arn"
 
   operator_handoff_dir="$output_dir/operators/$operator_id"
   mkdir -p "$operator_handoff_dir"
@@ -204,6 +293,7 @@ while IFS= read -r operator_json; do
     "$operator_id" \
     "$operator_host" \
     "$operator_host" \
+    "$operator_private_ip" \
     "$launch_template_id" \
     "$new_launch_template_version" \
     "$known_hosts_file"

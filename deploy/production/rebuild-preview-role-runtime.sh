@@ -90,6 +90,8 @@ provision_app_edge_bin="${PRODUCTION_PROVISION_APP_EDGE_BIN:-$SCRIPT_DIR/provisi
 canary_shared_bin="${PRODUCTION_CANARY_SHARED_BIN:-$SCRIPT_DIR/canary-shared-services.sh}"
 canary_app_bin="${PRODUCTION_CANARY_APP_BIN:-$SCRIPT_DIR/canary-app-host.sh}"
 roll_preview_operators_bin="${PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN:-$SCRIPT_DIR/roll-preview-operators.sh}"
+refresh_preview_app_backoffice_bin="${PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN:-$SCRIPT_DIR/refresh-preview-app-backoffice.sh}"
+refresh_preview_wireguard_backoffice_bin="${PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN:-$SCRIPT_DIR/refresh-preview-wireguard-backoffice.sh}"
 
 for cmd in \
   "$upgrade_preview_inventory_bin" \
@@ -99,7 +101,9 @@ for cmd in \
   "$provision_app_edge_bin" \
   "$canary_shared_bin" \
   "$canary_app_bin" \
-  "$roll_preview_operators_bin"; do
+  "$roll_preview_operators_bin" \
+  "$refresh_preview_app_backoffice_bin" \
+  "$refresh_preview_wireguard_backoffice_bin"; do
   [[ -x "$cmd" ]] || have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
@@ -155,8 +159,10 @@ fi
 
 app_deploy="$output_root/$env_slug/app/app-deploy.json"
 shared_manifest="$output_root/$env_slug/shared-manifest.json"
+bridge_summary_path="$output_root/$env_slug/bridge-summary.json"
 [[ -f "$app_deploy" ]] || die "rebuilt preview app deploy manifest not found: $app_deploy"
 [[ -f "$shared_manifest" ]] || die "rebuilt preview shared manifest not found: $shared_manifest"
+[[ -f "$bridge_summary_path" ]] || die "rebuilt preview bridge summary not found: $bridge_summary_path"
 
 "$provision_app_edge_bin" --app-deploy "$app_deploy"
 "$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
@@ -179,7 +185,8 @@ ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
 checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
 checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
 checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
-required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics}"
+operator_topics="deposits.event.v2,withdrawals.requested.v2"
+required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics},${operator_topics}"
 production_run_release_binary "$shared_infra_e2e_binary" \
   --postgres-dsn "$checkpoint_postgres_dsn" \
   --kafka-brokers "$kafka_brokers" \
@@ -198,7 +205,35 @@ production_run_release_binary "$shared_infra_e2e_binary" \
   --github-repo "$github_repo" >"$output_dir/operator-rollout.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/operator-rollout.json")" == "true" ]] || die "operator rollout failed"
 
-bridge_summary_path="$output_root/$env_slug/bridge-summary.json"
+first_operator_deploy="$(find "$output_dir/operator-rollout/operators" -name operator-deploy.json | sort | head -n1)"
+[[ -n "$first_operator_deploy" ]] || die "operator rollout did not render any operator deploy handoffs"
+
+wireguard_backoffice_refresh_path="$output_dir/wireguard-backoffice.json"
+wireguard_backoffice_args=(
+  "$refresh_preview_wireguard_backoffice_bin"
+  --inventory "$resolved_inventory" \
+  --bridge-summary "$bridge_summary_path" \
+  --dkg-summary "$dkg_summary" \
+  --app-deploy "$app_deploy" \
+  --shared-manifest "$shared_manifest" \
+  --operator-deploy "$first_operator_deploy" \
+  --output-dir "$output_dir/wireguard-backoffice"
+)
+if [[ -n "$dkg_completion" ]]; then
+  wireguard_backoffice_args+=(--dkg-completion "$dkg_completion")
+fi
+"${wireguard_backoffice_args[@]}" >"$wireguard_backoffice_refresh_path"
+[[ "$(jq -r '.ready_for_deploy' "$wireguard_backoffice_refresh_path")" == "true" ]] || die "wireguard backoffice refresh failed"
+"$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/shared-services.json")" == "true" ]] || die "shared services canary failed after wireguard backoffice refresh"
+
+"$refresh_preview_app_backoffice_bin" \
+  --rolled-inventory "$output_dir/operator-rollout/inventory.operators-rolled.json" \
+  --shared-manifest "$shared_manifest" \
+  --app-deploy "$app_deploy" \
+  --output-dir "$output_dir/operator-rollout" >"$output_dir/app-backoffice-refresh.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/app-backoffice-refresh.json")" == "true" ]] || die "preview app backoffice refresh failed"
+
 release_lock="$output_dir/role-runtime-release-lock.json"
 jq -n \
   --arg workflow "reset-preview-role-runtime" \
@@ -211,6 +246,8 @@ jq -n \
   --arg app_deploy "$app_deploy" \
   --arg bridge_summary_path "$bridge_summary_path" \
   --arg operator_rollout_path "$output_dir/operator-rollout.json" \
+  --arg wireguard_backoffice_refresh_path "$wireguard_backoffice_refresh_path" \
+  --arg app_backoffice_refresh_path "$output_dir/app-backoffice-refresh.json" \
   --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
     {
       workflow: $workflow,
@@ -223,6 +260,8 @@ jq -n \
       app_deploy: $app_deploy,
       bridge_summary_path: $bridge_summary_path,
       operator_rollout_path: $operator_rollout_path,
+      wireguard_backoffice_refresh_path: $wireguard_backoffice_refresh_path,
+      app_backoffice_refresh_path: $app_backoffice_refresh_path,
       preview_completed_at: $preview_completed_at
     }
   ' >"$release_lock"
