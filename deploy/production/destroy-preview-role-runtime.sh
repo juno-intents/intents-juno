@@ -576,6 +576,12 @@ purge_backup_vault_recovery_points() {
   die "timed out waiting for backup vault $backup_vault_name recovery points to delete"
 }
 
+disable_shared_backup_schedule() {
+  terraform destroy -auto-approve -input=false -var-file="$shared_var_file" \
+    -target=aws_backup_selection.shared_postgres[0] \
+    -target=aws_backup_plan.shared_postgres[0]
+}
+
 stop_shared_cloudtrail_logging() {
   aws cloudtrail stop-logging \
     --profile "$aws_profile" \
@@ -671,12 +677,13 @@ fi
 
 (
   cd "$shared_terraform_dir"
-  prepare_shared_runtime_destroy
   terraform init -input=false -reconfigure \
     -backend-config="bucket=$shared_bucket" \
     -backend-config="dynamodb_table=$shared_table" \
     -backend-config="key=$shared_key" \
     -backend-config="region=$aws_region" >/dev/null
+  disable_shared_backup_schedule
+  prepare_shared_runtime_destroy
   terraform destroy -auto-approve -input=false -var-file="$shared_var_file"
   purge_shared_runtime_secrets
 )
