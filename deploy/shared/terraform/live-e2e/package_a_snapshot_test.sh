@@ -18,15 +18,17 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf restore_runbook
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf restore_runbook
   local operator_launch_template_block
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
   outputs_tf="$(cat "$SCRIPT_DIR/outputs.tf")"
+  versions_tf="$(cat "$SCRIPT_DIR/versions.tf")"
   restore_runbook="$(cat "$REPO_ROOT/deploy/shared/runbooks/aurora-dr-restore.md")"
   operator_launch_template_block="$(awk '/resource "aws_launch_template" "operator" {/,/^}/' "$SCRIPT_DIR/main.tf")"
 
+  assert_contains "$versions_tf" 'backend "s3" {}' "live-e2e declares an s3 backend block for coordinator bootstrap"
   assert_contains "$variables_tf" 'variable "shared_sp1_funder_secret_arn"' "live-e2e exposes distinct proof funder secret input"
   assert_contains "$variables_tf" 'variable "shared_sp1_requestor_address"' "live-e2e exposes shared proof requestor address input"
   assert_contains "$variables_tf" 'variable "shared_base_chain_id"' "live-e2e exposes base chain id input for proof request IDs"
