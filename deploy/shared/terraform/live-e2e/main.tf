@@ -129,8 +129,8 @@ check "shared_wireguard_inputs_when_enabled" {
 }
 
 locals {
-  shared_subnet_cidrs            = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
-  shared_route_table_ids         = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
+  shared_subnet_cidrs    = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
+  shared_route_table_ids = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
   existing_vpc_endpoint_services = sort(distinct([
     for service in var.shared_existing_vpc_endpoint_services : trimspace(service)
     if trimspace(service) != ""
@@ -618,10 +618,10 @@ resource "aws_security_group" "ipfs" {
   vpc_id      = local.selected_vpc_id
 
   ingress {
-    description = "IPFS API from runner"
-    from_port   = var.shared_ipfs_api_port
-    to_port     = var.shared_ipfs_api_port
-    protocol    = "tcp"
+    description     = "IPFS API from runner"
+    from_port       = var.shared_ipfs_api_port
+    to_port         = var.shared_ipfs_api_port
+    protocol        = "tcp"
     security_groups = concat([aws_security_group.runner.id, aws_security_group.operator.id], var.shared_ipfs_client_security_group_ids)
   }
 
@@ -1707,6 +1707,10 @@ resource "aws_launch_template" "ipfs" {
     rm -rf /tmp/aws /tmp/awscliv2.zip
     systemctl enable --now docker nginx
 
+    cat >/usr/local/bin/bootstrap-shared-ipfs.sh <<'BOOTSTRAP'
+    #!/usr/bin/env bash
+    set -euo pipefail
+
     ipfs_api_secret_arn="${aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn}"
     ipfs_api_bearer_token=""
     for attempt in $(seq 1 30); do
@@ -1761,6 +1765,29 @@ resource "aws_launch_template" "ipfs" {
       -e IPFS_PATH=/data/ipfs \
       -v /var/lib/intents-juno/ipfs:/data/ipfs \
       ipfs/kubo:v0.32.1 daemon --migrate=true --api /ip4/127.0.0.1/tcp/5001 --routing=dhtclient
+    BOOTSTRAP
+    chmod 0755 /usr/local/bin/bootstrap-shared-ipfs.sh
+
+    cat >/etc/systemd/system/intents-shared-ipfs-bootstrap.service <<'UNIT'
+    [Unit]
+    Description=Bootstrap intents shared IPFS
+    Wants=network-online.target docker.service
+    After=network-online.target docker.service
+    StartLimitIntervalSec=0
+
+    [Service]
+    Type=oneshot
+    ExecStart=/usr/local/bin/bootstrap-shared-ipfs.sh
+    RemainAfterExit=yes
+    Restart=on-failure
+    RestartSec=10
+
+    [Install]
+    WantedBy=multi-user.target
+    UNIT
+
+    systemctl daemon-reload
+    systemctl enable --now intents-shared-ipfs-bootstrap.service
   EOF
   )
 
