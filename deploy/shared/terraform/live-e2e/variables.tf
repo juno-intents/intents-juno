@@ -113,17 +113,9 @@ variable "shared_existing_vpc_endpoint_services" {
   validation {
     condition = alltrue([
       for service in var.shared_existing_vpc_endpoint_services :
-      contains([
-        "com.amazonaws.${var.aws_region}.secretsmanager",
-        "com.amazonaws.${var.aws_region}.ecr.api",
-        "com.amazonaws.${var.aws_region}.ecr.dkr",
-        "com.amazonaws.${var.aws_region}.sts",
-        "com.amazonaws.${var.aws_region}.kms",
-        "com.amazonaws.${var.aws_region}.logs",
-        "com.amazonaws.${var.aws_region}.s3",
-      ], trimspace(service))
+      can(regex("^com\\.amazonaws\\.[^.]+\\.(secretsmanager|ecr\\.api|ecr\\.dkr|sts|kms|logs|s3)$", trimspace(service)))
     ])
-    error_message = "shared_existing_vpc_endpoint_services may contain only the supported shared endpoint service names for aws_region."
+    error_message = "shared_existing_vpc_endpoint_services may contain only supported AWS shared endpoint service names."
   }
 }
 
