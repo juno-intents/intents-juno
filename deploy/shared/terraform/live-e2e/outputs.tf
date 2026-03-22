@@ -33,6 +33,11 @@ output "shared_postgres_endpoint" {
   value       = try(aws_rds_cluster.shared[0].endpoint, null)
 }
 
+output "shared_postgres_cluster_arn" {
+  description = "Aurora Postgres cluster ARN."
+  value       = try(aws_rds_cluster.shared[0].arn, null)
+}
+
 output "shared_postgres_reader_endpoint" {
   description = "Aurora Postgres reader endpoint hostname."
   value       = try(aws_rds_cluster.shared[0].reader_endpoint, null)
@@ -51,6 +56,11 @@ output "shared_kafka_port" {
 output "shared_kafka_bootstrap_brokers" {
   description = "MSK bootstrap brokers for SASL/IAM clients."
   value       = try(aws_msk_cluster.shared[0].bootstrap_brokers_sasl_iam, null)
+}
+
+output "shared_kafka_cluster_arn" {
+  description = "MSK cluster ARN."
+  value       = try(aws_msk_cluster.shared[0].arn, null)
 }
 
 output "shared_ecs_cluster_arn" {
@@ -97,6 +107,11 @@ output "shared_ipfs_api_auth_secret_arn" {
   description = "Secrets Manager ARN containing the shared IPFS API bearer token."
   value       = try(aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn, null)
   sensitive   = true
+}
+
+output "shared_ipfs_target_group_arn" {
+  description = "Target group ARN fronting the IPFS API service."
+  value       = try(aws_lb_target_group.ipfs_api[0].arn, null)
 }
 
 output "shared_kafka_critical_hmac_secret_arn" {

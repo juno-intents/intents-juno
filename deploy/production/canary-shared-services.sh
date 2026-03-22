@@ -151,13 +151,16 @@ wireguard_peer_roster_secret_arns_json="$(jq -c '(.wireguard_role.peer_roster_se
 environment="$(production_json_required "$shared_manifest" '.environment | select(type == "string" and length > 0)')"
 canary_retry_attempts="${PRODUCTION_CANARY_RETRY_ATTEMPTS:-12}"
 canary_retry_sleep_seconds="${PRODUCTION_CANARY_RETRY_SLEEP_SECONDS:-15}"
+canary_curl_max_time_seconds="${PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS:-10}"
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
   artifacts_object_lock_required="false"
 fi
 [[ "$canary_retry_attempts" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be numeric"
 [[ "$canary_retry_sleep_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_RETRY_SLEEP_SECONDS must be numeric"
+[[ "$canary_curl_max_time_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be numeric"
 (( canary_retry_attempts >= 1 )) || die "PRODUCTION_CANARY_RETRY_ATTEMPTS must be at least 1"
+(( canary_curl_max_time_seconds >= 1 )) || die "PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS must be at least 1"
 skip_postgres_local_check="false"
 skip_kafka_local_check="false"
 skip_ipfs_local_check="false"
@@ -262,7 +265,7 @@ else
     fi
   fi
 
-  if [[ "$skip_ipfs_local_check" != "true" ]] && ! curl -fsS "${ipfs_auth_header[@]}" -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
+  if [[ "$skip_ipfs_local_check" != "true" ]] && ! curl --max-time "$canary_curl_max_time_seconds" -fsS "${ipfs_auth_header[@]}" -X POST "${ipfs_api_url}/api/v0/version" >/dev/null 2>&1; then
     ipfs_status="failed"
     ipfs_detail="ipfs api unreachable"
   fi

@@ -116,7 +116,7 @@ EOF
   assert_contains "$(cat "$log_file")" "pg_isready -h postgres.alpha.internal -p 5432" "postgres canary check"
   assert_contains "$(cat "$log_file")" "nc -z broker-1.alpha.internal 9098" "first kafka broker canary check"
   assert_contains "$(cat "$log_file")" "nc -z broker-2.alpha.internal 9098" "second kafka broker canary check"
-  assert_contains "$(cat "$log_file")" "curl -fsS -X POST https://ipfs.alpha.internal/api/v0/version" "ipfs canary check"
+  assert_contains "$(cat "$log_file")" "curl --max-time 10 -fsS -X POST https://ipfs.alpha.internal/api/v0/version" "ipfs canary check uses a bounded timeout"
   assert_contains "$(cat "$log_file")" "aws --profile juno --region us-east-1 sts get-caller-identity" "aws auth check"
   assert_contains "$(cat "$log_file")" "aws --profile juno --region us-east-1 rds describe-db-clusters --db-cluster-identifier arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared --output json" "postgres cluster health check"
   assert_contains "$(cat "$log_file")" "aws --profile juno --region us-east-1 kafka describe-cluster-v2 --cluster-arn arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1 --output json" "kafka cluster health check"

@@ -1704,7 +1704,14 @@ resource "aws_launch_template" "ipfs" {
     systemctl enable --now docker nginx
 
     ipfs_api_secret_arn="${aws_secretsmanager_secret.shared_ipfs_api_bearer_token[0].arn}"
-    ipfs_api_bearer_token="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$ipfs_api_secret_arn" --query SecretString --output text)"
+    ipfs_api_bearer_token=""
+    for attempt in $(seq 1 30); do
+      if ipfs_api_bearer_token="$(AWS_PAGER="" aws --region ${var.aws_region} secretsmanager get-secret-value --secret-id "$ipfs_api_secret_arn" --query SecretString --output text 2>/dev/null)"; then
+        break
+      fi
+      sleep 5
+    done
+    [[ -n "$ipfs_api_bearer_token" ]] || { echo "shared ipfs api bearer token unavailable" >&2; exit 1; }
     imds_token="$(curl -fsS -X PUT http://169.254.169.254/latest/api/token -H 'X-aws-ec2-metadata-token-ttl-seconds: 21600')"
     private_ip="$(curl -fsS -H "X-aws-ec2-metadata-token: $imds_token" http://169.254.169.254/latest/meta-data/local-ipv4)"
     root_source="$(findmnt -n -o SOURCE /)"
