@@ -18,6 +18,64 @@ Creates or updates the CloudFront/WAF front door for a role-backed app handoff.
 EOF
 }
 
+app_edge_resource_slug() {
+  local deployment_id="$1"
+  local resource_slug
+
+  resource_slug="juno-app-edge-${deployment_id}"
+  resource_slug="${resource_slug//_/-}"
+  resource_slug="$(printf '%s' "$resource_slug" | tr '[:upper:]' '[:lower:]')"
+  resource_slug="${resource_slug#-}"
+  resource_slug="${resource_slug%-}"
+  printf '%s\n' "$resource_slug"
+}
+
+app_edge_state_has_resource() {
+  local work_dir="$1"
+  local state_path="$2"
+  local aws_profile="$3"
+  local resource_address="$4"
+
+  TF_IN_AUTOMATION=1 \
+  AWS_PROFILE="${aws_profile:-}" \
+  terraform -chdir="$work_dir" state list -state="$state_path" 2>/dev/null \
+    | grep -Fxq "$resource_address"
+}
+
+app_edge_import_existing_waf() {
+  local work_dir="$1"
+  local state_path="$2"
+  local aws_profile="$3"
+  local deployment_id="$4"
+  local waf_name existing_waf id name
+
+  app_edge_state_has_resource "$work_dir" "$state_path" "$aws_profile" "aws_wafv2_web_acl.app" && return 0
+  have_cmd aws || return 0
+
+  waf_name="$(app_edge_resource_slug "$deployment_id")-waf"
+  existing_waf="$(
+    AWS_PAGER="" \
+    AWS_PROFILE="${aws_profile:-}" \
+    aws --region us-east-1 wafv2 list-web-acls --scope CLOUDFRONT --output json \
+      | jq -r --arg name "$waf_name" '
+          .WebACLs[]?
+          | select(.Name == $name)
+          | [.Id, .Name]
+          | @tsv
+        ' \
+      | head -n1
+  )"
+  [[ -n "$existing_waf" ]] || return 0
+
+  id="${existing_waf%%$'\t'*}"
+  name="${existing_waf#*$'\t'}"
+  log "importing existing app edge WAF into state: $name"
+  TF_IN_AUTOMATION=1 \
+  AWS_PROFILE="${aws_profile:-}" \
+  terraform -chdir="$work_dir" import -input=false -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" \
+    aws_wafv2_web_acl.app "$id/$name/CLOUDFRONT" >/dev/null
+}
+
 app_deploy=""
 dry_run="false"
 
@@ -107,6 +165,7 @@ fi
 TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" init -input=false >/dev/null
+app_edge_import_existing_waf "$work_dir" "$state_path" "${aws_profile:-}" "$environment"
 TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" apply -input=false -auto-approve -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" >/dev/null

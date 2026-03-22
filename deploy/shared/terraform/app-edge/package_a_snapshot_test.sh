@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf bridge_a bridge_aaaa origin_cname origin_port_block
+  local main_tf variables_tf bridge_a bridge_aaaa origin_cname viewer_validation origin_port_block
 
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
@@ -34,6 +34,11 @@ main() {
   ' "$SCRIPT_DIR/main.tf")"
   origin_cname="$(awk '
     /resource "aws_route53_record" "origin_cname" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  viewer_validation="$(awk '
+    /resource "aws_route53_record" "viewer_validation" \{/ { in_block = 1 }
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/main.tf")"
@@ -54,6 +59,8 @@ main() {
   assert_not_contains "$variables_tf" 'variable "origin_endpoint"' "app-edge no longer accepts a mutable instance endpoint"
   assert_contains "$variables_tf" 'variable "public_lb_dns_name"' "app-edge accepts the public app load balancer DNS name"
   assert_contains "$origin_cname" 'records = [var.public_lb_dns_name]' "origin CNAME points at the public app load balancer"
+  assert_contains "$origin_cname" 'allow_overwrite = true' "origin CNAME allows overwrite for replay-safe preview deploys"
+  assert_contains "$viewer_validation" 'allow_overwrite = true' "viewer certificate validation CNAMEs allow overwrite for replay-safe preview deploys"
 
   assert_contains "$bridge_a" 'allow_overwrite = true' "bridge A record allows overwrite for replay-safe preview deploys"
   assert_contains "$bridge_aaaa" 'allow_overwrite = true' "bridge AAAA record allows overwrite for replay-safe preview deploys"

@@ -25,6 +25,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
 }
 
 resource "aws_route53_record" "origin_cname" {
+  allow_overwrite = true
   zone_id = var.zone_id
   name    = var.origin_record_name
   type    = "CNAME"
@@ -56,6 +57,7 @@ resource "aws_route53_record" "viewer_validation" {
     }
   }
 
+  allow_overwrite = true
   zone_id = var.zone_id
   name    = each.value.name
   type    = each.value.type
