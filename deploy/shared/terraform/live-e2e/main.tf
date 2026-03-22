@@ -44,6 +44,104 @@ data "aws_vpc" "selected" {
   id = local.selected_vpc_id
 }
 
+data "aws_vpc_endpoints" "existing_secretsmanager" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.secretsmanager"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_ecr_api" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.ecr.api"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_ecr_dkr" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.ecr.dkr"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_sts" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.sts"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_kms" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.kms"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_logs" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.logs"]
+  }
+}
+
+data "aws_vpc_endpoints" "existing_s3" {
+  count = var.provision_shared_services ? 1 : 0
+
+  filter {
+    name   = "vpc-id"
+    values = [local.selected_vpc_id]
+  }
+
+  filter {
+    name   = "service-name"
+    values = ["com.amazonaws.${var.aws_region}.s3"]
+  }
+}
+
 data "aws_subnets" "shared_vpc" {
   filter {
     name   = "vpc-id"
@@ -129,8 +227,15 @@ check "shared_wireguard_inputs_when_enabled" {
 }
 
 locals {
-  shared_subnet_cidrs    = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
-  shared_route_table_ids = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
+  shared_subnet_cidrs                      = [for subnet in data.aws_subnet.shared : subnet.cidr_block]
+  shared_route_table_ids                   = sort(distinct([for route_table in data.aws_route_table.shared : route_table.id]))
+  existing_secretsmanager_vpc_endpoint_ids = var.provision_shared_services ? data.aws_vpc_endpoints.existing_secretsmanager[0].ids : []
+  existing_ecr_api_vpc_endpoint_ids        = var.provision_shared_services ? data.aws_vpc_endpoints.existing_ecr_api[0].ids : []
+  existing_ecr_dkr_vpc_endpoint_ids        = var.provision_shared_services ? data.aws_vpc_endpoints.existing_ecr_dkr[0].ids : []
+  existing_sts_vpc_endpoint_ids            = var.provision_shared_services ? data.aws_vpc_endpoints.existing_sts[0].ids : []
+  existing_kms_vpc_endpoint_ids            = var.provision_shared_services ? data.aws_vpc_endpoints.existing_kms[0].ids : []
+  existing_logs_vpc_endpoint_ids           = var.provision_shared_services ? data.aws_vpc_endpoints.existing_logs[0].ids : []
+  existing_s3_vpc_endpoint_ids             = var.provision_shared_services ? data.aws_vpc_endpoints.existing_s3[0].ids : []
 }
 
 data "aws_ami" "ubuntu" {
@@ -178,7 +283,6 @@ locals {
   wireguard_gateway_address_cidr = local.wireguard_enabled ? "${local.wireguard_gateway_tunnel_ip}/${local.wireguard_network_prefix}" : ""
   wireguard_client_tunnel_ip     = local.wireguard_enabled ? cidrhost(var.shared_wireguard_network_cidr, 2) : ""
   wireguard_client_address_cidr  = local.wireguard_enabled ? "${local.wireguard_client_tunnel_ip}/32" : ""
-  wireguard_gateway_private_ip = local.wireguard_enabled ? cidrhost(data.aws_subnet.wireguard_public[0].cidr_block, 11) : ""
   wireguard_backoffice_private_endpoint = local.wireguard_enabled ? (
     trimspace(var.shared_wireguard_backoffice_private_endpoint) != "" ? trimspace(var.shared_wireguard_backoffice_private_endpoint) : aws_instance.runner.private_ip
   ) : ""
@@ -1312,7 +1416,7 @@ resource "aws_ecs_cluster" "shared" {
 }
 
 resource "aws_vpc_endpoint" "secretsmanager" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_secretsmanager_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.secretsmanager"
@@ -1327,7 +1431,7 @@ resource "aws_vpc_endpoint" "secretsmanager" {
 }
 
 resource "aws_vpc_endpoint" "ecr_api" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_ecr_api_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.api"
@@ -1342,7 +1446,7 @@ resource "aws_vpc_endpoint" "ecr_api" {
 }
 
 resource "aws_vpc_endpoint" "ecr_dkr" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_ecr_dkr_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.ecr.dkr"
@@ -1357,7 +1461,7 @@ resource "aws_vpc_endpoint" "ecr_dkr" {
 }
 
 resource "aws_vpc_endpoint" "sts" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_sts_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.sts"
@@ -1372,7 +1476,7 @@ resource "aws_vpc_endpoint" "sts" {
 }
 
 resource "aws_vpc_endpoint" "kms" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_kms_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.kms"
@@ -1387,7 +1491,7 @@ resource "aws_vpc_endpoint" "kms" {
 }
 
 resource "aws_vpc_endpoint" "logs" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_logs_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id              = local.selected_vpc_id
   service_name        = "com.amazonaws.${var.aws_region}.logs"
@@ -1402,7 +1506,7 @@ resource "aws_vpc_endpoint" "logs" {
 }
 
 resource "aws_vpc_endpoint" "s3" {
-  count = var.provision_shared_services ? 1 : 0
+  count = var.provision_shared_services && length(local.existing_s3_vpc_endpoint_ids) == 0 ? 1 : 0
 
   vpc_id            = local.selected_vpc_id
   service_name      = "com.amazonaws.${var.aws_region}.s3"
@@ -1593,11 +1697,11 @@ resource "aws_ecs_service" "proof_funder" {
 resource "aws_lb" "ipfs" {
   count = var.provision_shared_services ? 1 : 0
 
-  name               = local.ipfs_lb_name
-  internal           = true
-  load_balancer_type = "network"
+  name                             = local.ipfs_lb_name
+  internal                         = true
+  load_balancer_type               = "network"
   enable_cross_zone_load_balancing = true
-  subnets            = local.shared_subnets
+  subnets                          = local.shared_subnets
 
   lifecycle {
     precondition {
@@ -1893,7 +1997,6 @@ resource "aws_instance" "wireguard_gateway" {
   ami                         = data.aws_ami.ubuntu.id
   instance_type               = var.shared_wireguard_instance_type
   subnet_id                   = local.wireguard_public_subnet_id
-  private_ip                  = local.wireguard_gateway_private_ip
   vpc_security_group_ids      = [aws_security_group.wireguard[0].id]
   iam_instance_profile        = aws_iam_instance_profile.wireguard_gateway[0].name
   source_dest_check           = false
