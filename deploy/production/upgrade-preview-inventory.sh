@@ -170,6 +170,64 @@ inventory_aws_region() {
   production_json_optional "$inventory_file" '.shared_services.aws_region | select(type == "string" and length > 0)'
 }
 
+resolve_preview_app_instance_profile_name() {
+  local inventory_file="$1"
+  local aws_profile="$2"
+  local aws_region="$3"
+  local instance_profile_name app_host app_instance_json
+
+  instance_profile_name="$(production_json_optional "$inventory_file" '.app_role.app_instance_profile_name | select(type == "string" and length > 0)')"
+  if [[ -n "$instance_profile_name" ]]; then
+    printf '%s\n' "$instance_profile_name"
+    return 0
+  fi
+
+  app_host="$(production_json_optional "$inventory_file" '.app_role.host // .app_host.host | select(type == "string" and length > 0)')"
+  if [[ -z "$app_host" || -z "$aws_profile" || -z "$aws_region" ]]; then
+    return 1
+  fi
+  if ! have_cmd aws; then
+    return 1
+  fi
+
+  app_instance_json="$(legacy_instance_json_for_ip "$aws_profile" "$aws_region" "$app_host")"
+  instance_profile_name="$(
+    jq -r '
+      .Reservations[0].Instances[0].IamInstanceProfile.Arn // empty
+      | if type == "string" and length > 0 then split("/")[-1] else "" end
+    ' <<<"$app_instance_json"
+  )"
+  [[ -n "$instance_profile_name" ]] || return 1
+  printf '%s\n' "$instance_profile_name"
+}
+
+resolve_preview_shared_terraform_dir() {
+  local configured_dir="$1"
+  local app_instance_profile_name="${2:-}"
+
+  if [[ "$app_instance_profile_name" == *"live-e2e"* ]]; then
+    printf 'deploy/shared/terraform/live-e2e\n'
+    return 0
+  fi
+
+  if [[ "$configured_dir" == *"live-e2e"* ]]; then
+    printf 'deploy/shared/terraform/live-e2e\n'
+    return 0
+  fi
+
+  if [[ "$configured_dir" == *"production-shared"* ]]; then
+    printf 'deploy/shared/terraform/production-shared\n'
+    return 0
+  fi
+
+  if [[ "$configured_dir" == deploy/shared/terraform/* ]]; then
+    printf '%s\n' "$configured_dir"
+    return 0
+  fi
+
+  printf 'deploy/shared/terraform/production-shared\n'
+}
+
 normalize_preview_app_role_certificates() {
   local inventory_file="$1"
   local output_file="$2"
@@ -231,15 +289,18 @@ normalize_preview_app_role_certificates() {
 }
 
 state_file="$(find_legacy_state "$inventory_abs" "$inventory_dir" "$legacy_state" || true)"
+aws_profile="$(inventory_aws_profile "$inventory_abs")"
+aws_region="$(inventory_aws_region "$inventory_abs")"
+configured_shared_terraform_dir="$(production_json_optional "$inventory_abs" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+app_instance_profile_name="$(resolve_preview_app_instance_profile_name "$inventory_abs" "$aws_profile" "$aws_region" || true)"
+shared_terraform_dir_rel="$(resolve_preview_shared_terraform_dir "$configured_shared_terraform_dir" "$app_instance_profile_name")"
 
 upgraded_inventory="$inventory_abs"
 if ! production_inventory_has_v2_roles "$inventory_abs"; then
   [[ -n "$state_file" ]] || die "legacy preview inventory requires a discoverable terraform state"
   have_cmd aws || die "required command not found: aws"
 
-  aws_profile="$(inventory_aws_profile "$inventory_abs")"
   [[ -n "$aws_profile" ]] || die "preview inventory is missing shared_services.aws_profile"
-  aws_region="$(inventory_aws_region "$inventory_abs")"
   [[ -n "$aws_region" ]] || die "preview inventory is missing shared_services.aws_region"
 
   state_json="$(cat "$state_file")"
@@ -292,6 +353,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
     app_instance_profile_name="$(jq -r '.outputs.effective_instance_profile.value // empty' <<<"$state_json")"
   fi
   [[ -n "$app_instance_profile_name" ]] || die "failed to resolve the app instance profile name"
+  shared_terraform_dir_rel="$(resolve_preview_shared_terraform_dir "$configured_shared_terraform_dir" "$app_instance_profile_name")"
 
   public_subnet_ids_json="$(jq -c '[.[].id]' <<<"$public_subnets_json")"
   private_subnet_ids_json="$(jq -c '[.[].id]' <<<"$private_subnets_json")"
@@ -364,6 +426,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
     --arg backoffice_cert_arn "$backoffice_cert_arn" \
     --arg bridge_public_dns_label "$bridge_public_dns_label" \
     --arg backoffice_dns_label "$backoffice_dns_label" \
+    --arg shared_terraform_dir_rel "$shared_terraform_dir_rel" \
     --arg aws_profile "$aws_profile" \
     --arg aws_region "$aws_region" \
     --argjson public_subnet_ids "$public_subnet_ids_json" \
@@ -379,7 +442,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
     --argjson operator_roles "$operator_roles_json" \
     '
       .version = "2"
-      | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+      | .shared_services.terraform_dir = $shared_terraform_dir_rel
       | .app_role = (.app_role // {})
       | .app_role.host = (.app_host.host // "")
       | .app_role.user = (.app_host.user // "ubuntu")
@@ -448,6 +511,15 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
         ]
     ' "$inventory_abs" >"$upgraded_inventory"
 fi
+
+normalized_shared_terraform_inventory="$tmp_dir/inventory.shared-terraform-dir.json"
+jq \
+  --arg shared_terraform_dir_rel "$shared_terraform_dir_rel" \
+  '
+    .shared_services = (.shared_services // {})
+    | .shared_services.terraform_dir = $shared_terraform_dir_rel
+  ' "$upgraded_inventory" >"$normalized_shared_terraform_inventory"
+upgraded_inventory="$normalized_shared_terraform_inventory"
 
 normalized_inventory="$tmp_dir/inventory.normalized.json"
 normalize_preview_app_role_certificates "$upgraded_inventory" "$normalized_inventory"
