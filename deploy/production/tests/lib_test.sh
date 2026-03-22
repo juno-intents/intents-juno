@@ -3273,6 +3273,34 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mkdir -p "$workdir/terraform/live-e2e"
+  write_live_e2e_tfvars_fixture "$workdir/terraform/live-e2e/terraform.tfvars"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .shared_postgres_db = "preview-intents-db"
+    | .shared_services.live_e2e = {
+        deployment_id: "preview0316d",
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10",
+        operator_ami_id: "ami-0feedfacecafebeef"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
+    | .app_role.app_security_group_id = "sg-approle012345678"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.operator_ami_id' "$override_file")" "ami-0feedfacecafebeef" "preview override prefers persisted live-e2e operator ami"
+  rm -rf "$workdir"
+}
+
 test_write_shared_terraform_override_tfvars_resolves_checkpoint_signer_kms_arns_from_aliases() {
   local workdir override_file fake_bin old_path alias_name
   workdir="$(mktemp -d)"
@@ -3532,6 +3560,7 @@ main() {
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
+  test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
   test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates
   test_provision_checkpoint_signer_kms_wrapper_runs_from_repo_root
   test_production_run_release_binary_executes_directly_on_host_when_runner_not_required

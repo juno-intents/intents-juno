@@ -334,6 +334,26 @@ resolve_operator_launch_template_json_for_asg() {
   fi
 }
 
+resolve_launch_template_image_id() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local launch_template_id="$3"
+  local launch_template_version="$4"
+  local lt_json
+
+  [[ -n "$launch_template_id" ]] || return 0
+  if [[ -z "$launch_template_version" ]]; then
+    launch_template_version='$Latest'
+  fi
+
+  lt_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 describe-launch-template-versions \
+    --launch-template-id "$launch_template_id" \
+    --versions "$launch_template_version" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$lt_json" ]] || return 0
+  jq -r '.LaunchTemplateVersions[0].LaunchTemplateData.ImageId // empty' <<<"$lt_json"
+}
+
 live_e2e_allowed_ssh_cidr_from_state() {
   local state_file="$1"
   jq -r '
@@ -428,6 +448,7 @@ app_instance_profile_name="$(resolve_preview_app_instance_profile_name "$invento
 shared_terraform_dir_rel="$(resolve_preview_shared_terraform_dir "$configured_shared_terraform_dir" "$app_instance_profile_name")"
 
 upgraded_inventory="$inventory_abs"
+operator_ami_id=""
 if ! production_inventory_has_v2_roles "$inventory_abs"; then
   [[ -n "$state_file" ]] || die "legacy preview inventory requires a discoverable terraform state"
   have_cmd aws || die "required command not found: aws"
@@ -509,6 +530,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
   operator_roles_json="$(
     jq -cn '{}'
   )"
+  operator_ami_id=""
   while IFS=$'\t' read -r operator_host operator_index; do
     [[ -n "$operator_host" ]] || continue
     operator_instance_json="$(legacy_instance_json_for_ip "$aws_profile" "$aws_region" "$operator_host")"
@@ -530,6 +552,12 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
       operator_lt_json="$(resolve_operator_launch_template_json_for_asg "$aws_profile" "$aws_region" "$operator_asg")"
       operator_lt_id="$(jq -r '.id // empty' <<<"$operator_lt_json")"
       operator_lt_version="$(jq -r '.version // empty' <<<"$operator_lt_json")"
+    fi
+    if [[ -z "$operator_ami_id" && -n "$operator_lt_id" ]]; then
+      candidate_operator_ami_id="$(resolve_launch_template_image_id "$aws_profile" "$aws_region" "$operator_lt_id" "$operator_lt_version")"
+      if [[ -n "$candidate_operator_ami_id" ]]; then
+        operator_ami_id="$candidate_operator_ami_id"
+      fi
     fi
     operator_roles_json="$(
       jq -cn \
@@ -675,6 +703,7 @@ jq \
   --arg live_e2e_deployment_id "$live_e2e_deployment_id" \
   --arg live_e2e_allowed_ssh_cidr "$live_e2e_allowed_ssh_cidr" \
   --arg live_e2e_ssh_public_key "$live_e2e_ssh_public_key" \
+  --arg operator_ami_id "$operator_ami_id" \
   '
     .shared_services = (.shared_services // {})
     | .shared_services.terraform_dir = $shared_terraform_dir_rel
@@ -684,6 +713,7 @@ jq \
           + (if $live_e2e_deployment_id == "" then {} else {deployment_id: $live_e2e_deployment_id} end)
           + (if $live_e2e_allowed_ssh_cidr == "" then {} else {allowed_ssh_cidr: $live_e2e_allowed_ssh_cidr} end)
           + (if $live_e2e_ssh_public_key == "" then {} else {ssh_public_key: $live_e2e_ssh_public_key} end)
+          + (if $operator_ami_id == "" then {} else {operator_ami_id: $operator_ami_id} end)
         )
       else .
       end

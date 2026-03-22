@@ -255,6 +255,26 @@ JSON
 {"AutoScalingGroups":[{"AutoScalingGroupName":"juno-live-e2e-preview0316d-operator-2","LaunchTemplate":{"LaunchTemplateId":"lt-derived-op2","Version":"13"}}]}
 JSON
     ;;
+  "ec2 describe-launch-template-versions --launch-template-id lt-op1 --versions 3 --output json")
+    cat <<'JSON'
+{"LaunchTemplateVersions":[{"LaunchTemplateData":{"ImageId":"ami-op1preview"}}]}
+JSON
+    ;;
+  "ec2 describe-launch-template-versions --launch-template-id lt-op2 --versions 7 --output json")
+    cat <<'JSON'
+{"LaunchTemplateVersions":[{"LaunchTemplateData":{"ImageId":"ami-op2preview"}}]}
+JSON
+    ;;
+  "ec2 describe-launch-template-versions --launch-template-id lt-derived-op1 --versions 11 --output json")
+    cat <<'JSON'
+{"LaunchTemplateVersions":[{"LaunchTemplateData":{"ImageId":"ami-derived-op1"}}]}
+JSON
+    ;;
+  "ec2 describe-launch-template-versions --launch-template-id lt-derived-op2 --versions 13 --output json")
+    cat <<'JSON'
+{"LaunchTemplateVersions":[{"LaunchTemplateData":{"ImageId":"ami-derived-op2"}}]}
+JSON
+    ;;
   "acm list-certificates --certificate-statuses ISSUED --includes keyTypes=RSA_2048,EC_prime256v1 --output json")
     cat <<'JSON'
 {"CertificateSummaryList":[
@@ -314,6 +334,7 @@ test_upgrade_preview_inventory_translates_legacy_preview_inputs() {
   assert_eq "$(jq -r '.shared_services.live_e2e.deployment_id' "$output")" "preview0316d" "legacy preview upgrade preserves live-e2e deployment id"
   assert_eq "$(jq -r '.shared_services.live_e2e.allowed_ssh_cidr' "$output")" "92.98.132.70/32" "legacy preview upgrade preserves live-e2e ssh cidr"
   assert_eq "$(jq -r '.shared_services.live_e2e.ssh_public_key' "$output")" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10" "legacy preview upgrade preserves live-e2e ssh key"
+  assert_eq "$(jq -r '.shared_services.live_e2e.operator_ami_id' "$output")" "ami-op1preview" "legacy preview upgrade persists the live-e2e operator ami"
   assert_eq "$(jq -r '.app_role.vpc_id' "$output")" "vpc-0e9830a2e4abe7118" "legacy preview upgrade copies vpc id"
   assert_eq "$(jq -r '.app_role.public_subnet_ids[1]' "$output")" "subnet-03d50beebb2734da8" "legacy preview upgrade copies public subnet ids"
   assert_eq "$(jq -r '.app_role.private_subnet_ids[1]' "$output")" "subnet-0dfe9dd62ddea943b" "legacy preview upgrade copies private subnet ids"
@@ -472,6 +493,7 @@ test_upgrade_preview_inventory_derives_live_e2e_operator_rollout_metadata_when_i
   assert_eq "$(jq -r '.operators[0].launch_template.id' "$output")" "lt-derived-op1" "legacy preview upgrade resolves the first operator launch template from the derived asg"
   assert_eq "$(jq -r '.operators[1].asg' "$output")" "juno-live-e2e-preview0316d-operator-2" "legacy preview upgrade derives the second operator asg from live-e2e lineage when tags are missing"
   assert_eq "$(jq -r '.operators[1].launch_template.id' "$output")" "lt-derived-op2" "legacy preview upgrade resolves the second operator launch template from the derived asg"
+  assert_eq "$(jq -r '.shared_services.live_e2e.operator_ami_id' "$output")" "ami-derived-op1" "legacy preview upgrade persists the derived live-e2e operator ami"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names juno-live-e2e-preview0316d-operator-1" "legacy preview upgrade queries autoscaling when operator instance tags are missing"
 
   rm -rf "$tmp"

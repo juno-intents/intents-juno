@@ -609,7 +609,19 @@ production_inventory_live_e2e_operator_ami_id() {
   local inventory="$1"
   local aws_profile="$2"
   local aws_region="$3"
-  local launch_template_id launch_template_version lt_json
+  local persisted_operator_ami_id launch_template_id launch_template_version lt_json
+
+  persisted_operator_ami_id="$(jq -r '
+    .shared_services.live_e2e.operator_ami_id
+    // [
+      (.operators // [])[].ami_id? // empty
+    ][0]
+    // empty
+  ' "$inventory")"
+  if [[ -n "$persisted_operator_ami_id" ]]; then
+    printf '%s\n' "$persisted_operator_ami_id"
+    return 0
+  fi
 
   launch_template_id="$(jq -r '
     (.operators // [])
