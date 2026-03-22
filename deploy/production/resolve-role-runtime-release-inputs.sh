@@ -16,6 +16,9 @@ Usage:
 Options:
   --inventory PATH    Deployment inventory JSON (required)
   --output PATH       Resolved inventory JSON output path (required)
+  --operator-stack-ami-release-tag TAG
+                     Optional pinned operator stack AMI release tag used to seed
+                     shared_services.live_e2e.operator_ami_id when absent
   --github-repo REPO  GitHub repo in owner/name form (default: juno-intents/intents-juno)
   --aws-profile NAME  Optional AWS profile for ECR repository ARN fallback
   --aws-region NAME   Optional AWS region override (defaults from inventory)
@@ -24,6 +27,7 @@ EOF
 
 inventory=""
 output=""
+operator_stack_ami_release_tag=""
 github_repo="juno-intents/intents-juno"
 aws_profile=""
 aws_region=""
@@ -36,6 +40,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --output)
       output="$2"
+      shift 2
+      ;;
+    --operator-stack-ami-release-tag)
+      operator_stack_ami_release_tag="$2"
       shift 2
       ;;
     --github-repo)
@@ -188,10 +196,12 @@ fi
 validate_release_tag "$app_runtime_release_tag" "app_role.ami_release_tag"
 validate_release_tag "$shared_proof_release_tag" "shared_roles.proof.image_release_tag"
 validate_release_tag "$wireguard_release_tag" "wireguard_role.ami_release_tag"
+validate_release_tag "$operator_stack_ami_release_tag" "operator_stack_ami_release_tag"
 
 app_runtime_manifest="$release_tmp_dir/app-runtime-ami-manifest.json"
 shared_proof_manifest="$release_tmp_dir/shared-proof-services-image-manifest.json"
 wireguard_manifest="$release_tmp_dir/wireguard-role-ami-manifest.json"
+operator_stack_manifest="$release_tmp_dir/operator-ami-manifest.json"
 
 [[ -n "$app_runtime_release_tag" ]] || die "inventory is missing app_role.ami_release_tag"
 [[ -n "$shared_proof_release_tag" ]] || die "inventory is missing shared_roles.proof.image_release_tag"
@@ -200,6 +210,9 @@ wireguard_manifest="$release_tmp_dir/wireguard-role-ami-manifest.json"
 download_release_asset_with_checksum "$app_runtime_release_tag" "app-runtime-ami-manifest.json" "$app_runtime_manifest"
 download_release_asset_with_checksum "$shared_proof_release_tag" "shared-proof-services-image-manifest.json" "$shared_proof_manifest"
 download_release_asset_with_checksum "$wireguard_release_tag" "wireguard-role-ami-manifest.json" "$wireguard_manifest"
+if [[ -n "$operator_stack_ami_release_tag" ]]; then
+  download_release_asset_with_checksum "$operator_stack_ami_release_tag" "operator-ami-manifest.json" "$operator_stack_manifest"
+fi
 
 app_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$app_runtime_manifest")"
 [[ -n "$app_ami_id" ]] || die "app runtime release manifest is missing regions[$aws_region].ami_id"
@@ -208,6 +221,11 @@ shared_proof_image_uri="$(jq -r --arg region "$aws_region" '.regions[$region].im
 shared_proof_repository_arn="$(resolve_proof_repository_arn "$shared_proof_manifest")"
 wireguard_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$wireguard_manifest")"
 [[ -n "$wireguard_ami_id" ]] || die "wireguard release manifest is missing regions[$aws_region].ami_id"
+operator_stack_ami_id=""
+if [[ -n "$operator_stack_ami_release_tag" ]]; then
+  operator_stack_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$operator_stack_manifest")"
+  [[ -n "$operator_stack_ami_id" ]] || die "operator stack release manifest is missing regions[$aws_region].ami_id"
+fi
 
 jq \
   --arg app_ami_id "$app_ami_id" \
@@ -217,6 +235,7 @@ jq \
   --arg proof_image_ecr_repository_arn "$shared_proof_repository_arn" \
   --arg wireguard_ami_id "$wireguard_ami_id" \
   --arg wireguard_release_tag "$wireguard_release_tag" \
+  --arg operator_stack_ami_id "$operator_stack_ami_id" \
   '
     .app_role.app_ami_id = $app_ami_id
     | .app_role.ami_release_tag = $app_release_tag
@@ -227,4 +246,11 @@ jq \
     | .shared_roles.wireguard.ami_release_tag = $wireguard_release_tag
     | .wireguard_role.ami_id = $wireguard_ami_id
     | .wireguard_role.ami_release_tag = $wireguard_release_tag
+    | if $operator_stack_ami_id != ""
+         and (.shared_services.terraform_dir // "") == "deploy/shared/terraform/live-e2e"
+         and (.shared_services.live_e2e.operator_ami_id // "") == "" then
+        .shared_services.live_e2e = (.shared_services.live_e2e // {})
+        | .shared_services.live_e2e.operator_ami_id = $operator_stack_ami_id
+      else .
+      end
   ' "$inventory" >"$output"

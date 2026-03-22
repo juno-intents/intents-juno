@@ -293,10 +293,103 @@ EOF
   rm -rf "$workdir"
 }
 
+test_resolve_role_runtime_release_inputs_seeds_live_e2e_operator_ami_from_release_tag() {
+  local workdir fake_bin releases_dir output_inventory inventory
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  releases_dir="$workdir/releases"
+  mkdir -p "$fake_bin" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet" \
+    "$releases_dir/operator-stack-ami-v1.2.3-testnet"
+
+  inventory="$workdir/inventory.json"
+  output_inventory="$workdir/inventory.resolved.json"
+  write_inventory_fixture "$inventory"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_services.live_e2e = {
+        deployment_id: "preview0316d",
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+  ' "$inventory" >"$inventory.tmp"
+  mv "$inventory.tmp" "$inventory"
+
+  cat >"$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" <<'EOF'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0app123456789abcd"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json" \
+    "$releases_dir/app-runtime-ami-v1.2.3-testnet/app-runtime-ami-manifest.json.sha256"
+
+  cat >"$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" <<'EOF'
+{
+  "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef",
+  "regions": {
+    "us-east-1": {
+      "repository_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services",
+      "repository_arn": "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
+      "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:abcdef"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json" \
+    "$releases_dir/shared-proof-services-image-v1.2.3-testnet/shared-proof-services-image-manifest.json.sha256"
+
+  cat >"$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" <<'EOF'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0wireguard1234567"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json" \
+    "$releases_dir/wireguard-role-ami-v1.2.3-testnet/wireguard-role-ami-manifest.json.sha256"
+
+  cat >"$releases_dir/operator-stack-ami-v1.2.3-testnet/operator-ami-manifest.json" <<'EOF'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operator1234567"
+    }
+  }
+}
+EOF
+  write_local_sha256_file \
+    "$releases_dir/operator-stack-ami-v1.2.3-testnet/operator-ami-manifest.json" \
+    "$releases_dir/operator-stack-ami-v1.2.3-testnet/operator-ami-manifest.json.sha256"
+
+  write_fake_gh "$fake_bin/gh" "$releases_dir" "$workdir/gh.log"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/resolve-role-runtime-release-inputs.sh" \
+    --inventory "$inventory" \
+    --output "$output_inventory" \
+    --operator-stack-ami-release-tag operator-stack-ami-v1.2.3-testnet \
+    --github-repo juno-intents/intents-juno
+
+  assert_eq "$(jq -r '.shared_services.live_e2e.operator_ami_id' "$output_inventory")" "ami-0operator1234567" "release resolver seeds live-e2e operator ami from the operator stack release"
+  assert_contains "$(cat "$workdir/gh.log")" "release download operator-stack-ami-v1.2.3-testnet" "release resolver downloads the operator stack ami manifest"
+  rm -rf "$workdir"
+}
+
 main() {
   test_resolve_role_runtime_release_inputs_patches_inventory
   test_resolve_role_runtime_release_inputs_rejects_latest_tags
   test_resolve_role_runtime_release_inputs_derives_ecr_repository_arn_from_manifest_uri
+  test_resolve_role_runtime_release_inputs_seeds_live_e2e_operator_ami_from_release_tag
 }
 
 main "$@"

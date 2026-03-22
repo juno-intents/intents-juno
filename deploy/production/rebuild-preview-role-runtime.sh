@@ -322,6 +322,7 @@ current_shared_tf_output="$current_output_root/$env_slug/shared-terraform-output
 "$resolve_role_runtime_release_inputs_bin" \
   --inventory "$upgraded_inventory" \
   --output "$resolved_inventory" \
+  --operator-stack-ami-release-tag "$operator_stack_ami_release_tag" \
   --github-repo "$github_repo"
 
 if [[ -f "$current_shared_tf_output" ]]; then
