@@ -150,6 +150,86 @@ resolve_cert_arn() {
   ' <<<"$certificates_json" | head -n 1
 }
 
+inventory_aws_profile() {
+  local inventory_file="$1"
+  if [[ -n "$aws_profile_override" ]]; then
+    printf '%s\n' "$aws_profile_override"
+    return 0
+  fi
+
+  production_json_optional "$inventory_file" '.shared_services.aws_profile | select(type == "string" and length > 0)'
+}
+
+inventory_aws_region() {
+  local inventory_file="$1"
+  if [[ -n "$aws_region_override" ]]; then
+    printf '%s\n' "$aws_region_override"
+    return 0
+  fi
+
+  production_json_optional "$inventory_file" '.shared_services.aws_region | select(type == "string" and length > 0)'
+}
+
+normalize_preview_app_role_certificates() {
+  local inventory_file="$1"
+  local output_file="$2"
+  local aws_profile aws_region public_subdomain bridge_public_dns_label backoffice_dns_label
+  local bridge_cert_arn origin_cert_arn backoffice_cert_arn
+
+  if ! jq -e '
+    ((.app_host? | type == "object") or (.app_role? | type == "object"))
+    and (.shared_services.public_subdomain? | type == "string" and length > 0)
+  ' "$inventory_file" >/dev/null 2>&1; then
+    cp "$inventory_file" "$output_file"
+    return 0
+  fi
+
+  have_cmd aws || die "required command not found: aws"
+
+  aws_profile="$(inventory_aws_profile "$inventory_file")"
+  [[ -n "$aws_profile" ]] || die "preview inventory is missing shared_services.aws_profile"
+  aws_region="$(inventory_aws_region "$inventory_file")"
+  [[ -n "$aws_region" ]] || die "preview inventory is missing shared_services.aws_region"
+
+  public_subdomain="$(production_json_required "$inventory_file" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
+  bridge_public_dns_label="$(
+    production_json_optional "$inventory_file" '
+      .app_role.bridge_public_dns_label // .app_host.bridge_public_dns_label
+      | select(type == "string" and length > 0)
+    '
+  )"
+  [[ -n "$bridge_public_dns_label" ]] || die "preview inventory is missing app_role.bridge_public_dns_label"
+  backoffice_dns_label="$(
+    production_json_optional "$inventory_file" '
+      .app_role.backoffice_dns_label // .app_host.backoffice_dns_label // .app_host.ops_public_dns_label
+      | select(type == "string" and length > 0)
+    '
+  )"
+  [[ -n "$backoffice_dns_label" ]] || die "preview inventory is missing app_role.backoffice_dns_label"
+
+  bridge_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "${bridge_public_dns_label}.${public_subdomain}")"
+  [[ -n "$bridge_cert_arn" ]] || die "failed to resolve bridge ACM certificate for ${bridge_public_dns_label}.${public_subdomain}"
+  origin_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "origin.${public_subdomain}")"
+  [[ -n "$origin_cert_arn" ]] || die "failed to resolve CloudFront origin ACM certificate for origin.${public_subdomain}"
+  backoffice_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "${backoffice_dns_label}.${public_subdomain}")"
+  [[ -n "$backoffice_cert_arn" ]] || die "failed to resolve backoffice ACM certificate for ${backoffice_dns_label}.${public_subdomain}"
+
+  jq \
+    --arg bridge_public_dns_label "$bridge_public_dns_label" \
+    --arg backoffice_dns_label "$backoffice_dns_label" \
+    --arg bridge_cert_arn "$bridge_cert_arn" \
+    --arg origin_cert_arn "$origin_cert_arn" \
+    --arg backoffice_cert_arn "$backoffice_cert_arn" \
+    '
+      .app_role = (.app_role // {})
+      | .app_role.bridge_public_dns_label = $bridge_public_dns_label
+      | .app_role.backoffice_dns_label = $backoffice_dns_label
+      | .app_role.public_bridge_certificate_arn = $origin_cert_arn
+      | .app_role.public_bridge_additional_certificate_arns = [$bridge_cert_arn]
+      | .app_role.internal_backoffice_certificate_arn = $backoffice_cert_arn
+    ' "$inventory_file" >"$output_file"
+}
+
 state_file="$(find_legacy_state "$inventory_abs" "$inventory_dir" "$legacy_state" || true)"
 
 upgraded_inventory="$inventory_abs"
@@ -157,14 +237,10 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
   [[ -n "$state_file" ]] || die "legacy preview inventory requires a discoverable terraform state"
   have_cmd aws || die "required command not found: aws"
 
-  aws_profile="$aws_profile_override"
-  if [[ -z "$aws_profile" ]]; then
-    aws_profile="$(production_json_required "$inventory_abs" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
-  fi
-  aws_region="$aws_region_override"
-  if [[ -z "$aws_region" ]]; then
-    aws_region="$(production_json_required "$inventory_abs" '.shared_services.aws_region | select(type == "string" and length > 0)')"
-  fi
+  aws_profile="$(inventory_aws_profile "$inventory_abs")"
+  [[ -n "$aws_profile" ]] || die "preview inventory is missing shared_services.aws_profile"
+  aws_region="$(inventory_aws_region "$inventory_abs")"
+  [[ -n "$aws_region" ]] || die "preview inventory is missing shared_services.aws_region"
 
   state_json="$(cat "$state_file")"
   vpc_id="$(jq -r '
@@ -372,6 +448,10 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
         ]
     ' "$inventory_abs" >"$upgraded_inventory"
 fi
+
+normalized_inventory="$tmp_dir/inventory.normalized.json"
+normalize_preview_app_role_certificates "$upgraded_inventory" "$normalized_inventory"
+upgraded_inventory="$normalized_inventory"
 
 jq \
   --arg app_runtime_ami_release_tag "$app_runtime_ami_release_tag" \

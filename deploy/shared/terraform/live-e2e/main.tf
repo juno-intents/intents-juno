@@ -562,11 +562,11 @@ resource "aws_security_group" "shared" {
     from_port   = var.shared_postgres_port
     to_port     = var.shared_postgres_port
     protocol    = "tcp"
-    security_groups = compact([
-      aws_security_group.runner.id,
-      aws_security_group.operator.id,
-      try(aws_security_group.ecs[0].id, "")
-    ])
+    security_groups = concat(
+      [aws_security_group.runner.id, aws_security_group.operator.id],
+      compact([try(aws_security_group.ecs[0].id, "")]),
+      var.operator_client_security_group_ids
+    )
   }
 
   ingress {
@@ -574,11 +574,11 @@ resource "aws_security_group" "shared" {
     from_port   = var.shared_kafka_port
     to_port     = var.shared_kafka_port
     protocol    = "tcp"
-    security_groups = compact([
-      aws_security_group.runner.id,
-      aws_security_group.operator.id,
-      try(aws_security_group.ecs[0].id, "")
-    ])
+    security_groups = concat(
+      [aws_security_group.runner.id, aws_security_group.operator.id],
+      compact([try(aws_security_group.ecs[0].id, "")]),
+      var.operator_client_security_group_ids
+    )
   }
 
   ingress {

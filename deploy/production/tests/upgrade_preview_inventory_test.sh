@@ -272,8 +272,104 @@ test_upgrade_preview_inventory_translates_legacy_preview_inputs() {
   rm -rf "$tmp"
 }
 
+test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs() {
+  local tmp inventory output fake_bin aws_log
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.v2.json"
+  output="$tmp/inventory.upgraded.json"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op1/dkg-backup.zip"
+  : >"$tmp/operators/op1/operator-secrets.env"
+  : >"$tmp/operators/op2/known_hosts"
+  : >"$tmp/operators/op2/dkg-backup.zip"
+  : >"$tmp/operators/op2/operator-secrets.env"
+
+  write_legacy_preview_inventory "$inventory"
+  jq '
+    .version = "2"
+    | .shared_services.terraform_dir = "deploy/shared/terraform/production-shared"
+    | .app_role = {
+        host: .app_host.host,
+        user: .app_host.user,
+        runtime_dir: .app_host.runtime_dir,
+        public_endpoint: .app_host.public_endpoint,
+        private_endpoint: .app_host.private_endpoint,
+        aws_profile: .app_host.aws_profile,
+        aws_region: .app_host.aws_region,
+        account_id: .app_host.account_id,
+        security_group_id: .app_host.security_group_id,
+        known_hosts_file: .app_host.known_hosts_file,
+        secret_contract_file: .app_host.secret_contract_file,
+        bridge_public_dns_label: .app_host.bridge_public_dns_label,
+        backoffice_dns_label: .app_host.ops_public_dns_label,
+        public_scheme: .app_host.public_scheme,
+        public_bridge_certificate_arn: "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview",
+        public_bridge_additional_certificate_arns: [],
+        internal_backoffice_certificate_arn: "",
+        bridge_api_listen: .app_host.bridge_api_listen,
+        backoffice_listen: .app_host.backoffice_listen,
+        juno_rpc_url: .app_host.juno_rpc_url,
+        service_urls: .app_host.service_urls,
+        operator_endpoints: .app_host.operator_endpoints,
+        publish_public_dns: false,
+        app_instance_profile_name: "juno-live-e2e-preview0316d-instance-profile"
+      }
+    | .shared_roles = {
+        proof: {
+          rpc_url: "https://rpc.mainnet.succinct.xyz",
+          image_release_tag: "shared-proof-services-image-v2026.03.20-testnet"
+        },
+        wireguard: {
+          public_subnet_id: "subnet-0cecac94dde54efca",
+          public_subnet_ids: ["subnet-0cecac94dde54efca", "subnet-03d50beebb2734da8"],
+          listen_port: 51820,
+          network_cidr: "10.66.0.0/24",
+          source_cidrs: ["10.0.0.0/24", "10.0.1.0/24"],
+          backoffice_hostname: "ops.preview.intents-testing.thejunowallet.com",
+          backoffice_private_endpoint: .app_host.private_endpoint,
+          backoffice_private_endpoint_ips: [.app_host.private_endpoint],
+          client_config_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-client-config",
+          endpoint_host: "preview-wireguard.example.internal",
+          peer_roster_secret_arns: [],
+          server_key_secret_arn: "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-wireguard-server-key",
+          publish_public_dns: false,
+          ami_release_tag: "wireguard-role-ami-v2026.03.20-testnet"
+        }
+      }
+    | .wireguard_role = .shared_roles.wireguard
+    | del(.app_host)
+  ' "$inventory" >"$tmp/inventory.next"
+  mv "$tmp/inventory.next" "$inventory"
+  write_fake_upgrade_preview_aws "$fake_bin/aws" "$aws_log"
+
+  (
+    cd "$tmp"
+    TEST_AWS_LOG="$aws_log" PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/upgrade-preview-inventory.sh" \
+        --inventory "$inventory" \
+        --output "$output" \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet
+  )
+
+  assert_eq "$(jq -r '.app_role.public_bridge_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/origin-preview" "partial v2 preview upgrade restores the origin listener certificate"
+  assert_eq "$(jq -r '.app_role.public_bridge_additional_certificate_arns[0]' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview" "partial v2 preview upgrade preserves the bridge hostname certificate"
+  assert_eq "$(jq -r '.app_role.internal_backoffice_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/ops-preview" "partial v2 preview upgrade restores the backoffice certificate"
+  assert_contains "$(cat "$aws_log")" "acm list-certificates" "partial v2 preview upgrade queries ACM certificates"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_upgrade_preview_inventory_translates_legacy_preview_inputs
+  test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs
 }
 
 main "$@"
