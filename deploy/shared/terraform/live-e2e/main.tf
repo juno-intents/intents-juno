@@ -575,7 +575,7 @@ resource "aws_security_group" "shared" {
     security_groups = concat(
       [aws_security_group.runner.id, aws_security_group.operator.id],
       compact([try(aws_security_group.ecs[0].id, "")]),
-      var.operator_client_security_group_ids
+      var.shared_service_client_security_group_ids
     )
   }
 
@@ -587,7 +587,7 @@ resource "aws_security_group" "shared" {
     security_groups = concat(
       [aws_security_group.runner.id, aws_security_group.operator.id],
       compact([try(aws_security_group.ecs[0].id, "")]),
-      var.operator_client_security_group_ids
+      var.shared_service_client_security_group_ids
     )
   }
 
@@ -622,10 +622,7 @@ resource "aws_security_group" "ipfs" {
     from_port   = var.shared_ipfs_api_port
     to_port     = var.shared_ipfs_api_port
     protocol    = "tcp"
-    security_groups = [
-      aws_security_group.runner.id,
-      aws_security_group.operator.id
-    ]
+    security_groups = concat([aws_security_group.runner.id, aws_security_group.operator.id], var.shared_ipfs_client_security_group_ids)
   }
 
   ingress {

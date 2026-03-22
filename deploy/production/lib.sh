@@ -605,6 +605,37 @@ production_aws_existing_shared_vpc_endpoint_services_json() {
     '
 }
 
+production_inventory_live_e2e_operator_ami_id() {
+  local inventory="$1"
+  local aws_profile="$2"
+  local aws_region="$3"
+  local launch_template_id launch_template_version lt_json
+
+  launch_template_id="$(jq -r '
+    (.operators // [])
+    | map(select((.launch_template.id // "") != ""))
+    | .[0].launch_template.id // empty
+  ' "$inventory")"
+  [[ -n "$launch_template_id" ]] || return 0
+
+  launch_template_version="$(jq -r '
+    (.operators // [])
+    | map(select((.launch_template.id // "") != ""))
+    | .[0].launch_template.version // empty
+  ' "$inventory")"
+  if [[ -z "$launch_template_version" ]]; then
+    launch_template_version='$Latest'
+  fi
+
+  lt_json="$(
+    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 describe-launch-template-versions \
+      --launch-template-id "$launch_template_id" \
+      --versions "$launch_template_version" \
+      --output json
+  )"
+  jq -r '.LaunchTemplateVersions[0].LaunchTemplateData.ImageId // empty' <<<"$lt_json"
+}
+
 production_write_shared_terraform_override_tfvars() {
   local inventory="$1"
   local output_file="$2"
@@ -613,7 +644,7 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
-  local env_slug aws_region vpc_id shared_postgres_password base_chain_id deposit_image_id withdraw_image_id
+  local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id
   local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
@@ -623,6 +654,7 @@ production_write_shared_terraform_override_tfvars() {
   local aws_profile shared_existing_vpc_endpoint_services_json
   local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
   local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
+  local allowed_checkpoint_signer_kms_key_arns_json operator_ami_id
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -634,6 +666,7 @@ production_write_shared_terraform_override_tfvars() {
   vpc_id="$(jq -r '.vpc_id // empty' <<<"$app_role_json")"
   private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
   shared_postgres_password="$(production_json_optional "$inventory" '.shared_postgres_password')"
+  shared_postgres_db="$(production_json_optional "$inventory" '.shared_postgres_db')"
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
   deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
   withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
@@ -692,6 +725,7 @@ production_write_shared_terraform_override_tfvars() {
   live_e2e_allowed_ssh_cidr="$(jq -r '.allowed_ssh_cidr // empty' <<<"$live_e2e_json")"
   live_e2e_ssh_public_key="$(jq -r '.ssh_public_key // empty' <<<"$live_e2e_json")"
   operator_instance_count="$(jq -r '(.operators // []) | length' "$inventory")"
+  operator_ami_id=""
   if [[ -n "$app_security_group_id" ]]; then
     shared_service_client_security_group_ids_json="$(jq -cn --arg sg "$app_security_group_id" '[$sg]')"
   else
@@ -702,6 +736,7 @@ production_write_shared_terraform_override_tfvars() {
   else
     operator_client_security_group_ids_json='[]'
   fi
+  allowed_checkpoint_signer_kms_key_arns_json="$(production_inventory_checkpoint_signer_kms_key_arns_json "$inventory")"
   [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
@@ -712,8 +747,12 @@ production_write_shared_terraform_override_tfvars() {
     [[ -n "$proof_funder_secret_arn" ]] || die "shared_roles.proof.funder_secret_arn is required for live-e2e shared terraform"
     [[ -n "$proof_requestor_address" ]] || die "shared_roles.proof.requestor_address is required for live-e2e shared terraform"
     [[ -n "$proof_rpc_url" ]] || die "shared_roles.proof.rpc_url is required for live-e2e shared terraform"
+    [[ -n "$shared_postgres_password" ]] || die "shared_postgres_password is required for live-e2e shared terraform"
+    [[ -n "$shared_postgres_db" ]] || die "shared_postgres_db is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for live-e2e shared terraform"
+    operator_ami_id="$(production_inventory_live_e2e_operator_ami_id "$inventory" "$aws_profile" "$aws_region")"
+    [[ -n "$operator_ami_id" ]] || die "operators[].launch_template.id is required to preserve the live-e2e operator ami during shared terraform refresh"
     shared_existing_vpc_endpoint_services_json="$(production_aws_existing_shared_vpc_endpoint_services_json "$aws_profile" "$aws_region" "$vpc_id")"
 
     jq -n \
@@ -721,7 +760,10 @@ production_write_shared_terraform_override_tfvars() {
       --arg deployment_id "$live_e2e_deployment_id" \
       --arg allowed_ssh_cidr "$live_e2e_allowed_ssh_cidr" \
       --arg ssh_public_key "$live_e2e_ssh_public_key" \
+      --arg operator_ami_id "$operator_ami_id" \
       --argjson operator_instance_count "$operator_instance_count" \
+      --arg shared_postgres_password "$shared_postgres_password" \
+      --arg shared_postgres_db "$shared_postgres_db" \
       --arg shared_sp1_requestor_secret_arn "$proof_requestor_secret_arn" \
       --arg shared_sp1_funder_secret_arn "$proof_funder_secret_arn" \
       --arg shared_sp1_requestor_address "$proof_requestor_address" \
@@ -738,13 +780,19 @@ production_write_shared_terraform_override_tfvars() {
       --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
       --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
       --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
+      --argjson allowed_checkpoint_signer_kms_key_arns "$allowed_checkpoint_signer_kms_key_arns_json" \
+      --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
+      --argjson shared_ipfs_client_security_group_ids "$shared_service_client_security_group_ids_json" \
       --argjson shared_existing_vpc_endpoint_services "$shared_existing_vpc_endpoint_services_json" \
       '{
         aws_region: $aws_region,
         deployment_id: $deployment_id,
         allowed_ssh_cidr: $allowed_ssh_cidr,
         ssh_public_key: $ssh_public_key,
+        operator_ami_id: $operator_ami_id,
         operator_instance_count: $operator_instance_count,
+        shared_postgres_password: $shared_postgres_password,
+        shared_postgres_db: $shared_postgres_db,
         shared_wireguard_enabled: true,
         shared_wireguard_backoffice_hostname: $backoffice_hostname,
         shared_proof_service_image: $shared_proof_service_image,
@@ -761,6 +809,15 @@ production_write_shared_terraform_override_tfvars() {
       }
       + (if ($operator_client_security_group_ids | length) == 0 then {} else {
         operator_client_security_group_ids: $operator_client_security_group_ids
+      } end)
+      + (if ($allowed_checkpoint_signer_kms_key_arns | length) == 0 then {} else {
+        allowed_checkpoint_signer_kms_key_arns: $allowed_checkpoint_signer_kms_key_arns
+      } end)
+      + (if ($shared_service_client_security_group_ids | length) == 0 then {} else {
+        shared_service_client_security_group_ids: $shared_service_client_security_group_ids
+      } end)
+      + (if ($shared_ipfs_client_security_group_ids | length) == 0 then {} else {
+        shared_ipfs_client_security_group_ids: $shared_ipfs_client_security_group_ids
       } end)
       + (if $wireguard_public_subnet_id == "" then {} else {
         shared_wireguard_public_subnet_id: $wireguard_public_subnet_id
@@ -1752,6 +1809,59 @@ production_operator_checkpoint_signer_kms_alias() {
     "$(production_safe_slug "${operator_id,,}")"
 }
 
+production_try_describe_kms_key_arn() {
+  local key_id="$1"
+  local aws_profile="$2"
+  local aws_region="$3"
+  local key_arn=""
+
+  [[ -n "$key_id" ]] || return 1
+  if [[ "$key_id" =~ ^arn:aws:kms:[^:]+:[0-9]{12}:key/.+$ ]]; then
+    printf '%s\n' "$key_id"
+    return 0
+  fi
+  have_cmd aws || return 1
+
+  key_arn="$(
+    AWS_PAGER="" aws ${aws_profile:+--profile "$aws_profile"} ${aws_region:+--region "$aws_region"} \
+      kms describe-key \
+      --key-id "$key_id" \
+      --query 'KeyMetadata.Arn' \
+      --output text 2>/dev/null || true
+  )"
+  [[ "$key_arn" =~ ^arn:aws:kms:[^:]+:[0-9]{12}:key/.+$ ]] || return 1
+  printf '%s\n' "$key_arn"
+}
+
+production_inventory_checkpoint_signer_kms_key_arns_json() {
+  local inventory="$1"
+  local environment operator_count index
+  local operator_json operator_id aws_profile aws_region explicit_key_id alias_name key_arn
+  local tmp
+
+  environment="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
+  operator_count="$(jq -r '(.operators // []) | length' "$inventory")"
+  tmp="$(mktemp)"
+  for ((index = 0; index < operator_count; index++)); do
+    operator_json="$(jq -c ".operators[$index]" "$inventory")"
+    explicit_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
+    aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
+    aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
+    if [[ -n "$explicit_key_id" ]]; then
+      key_arn="$(production_try_describe_kms_key_arn "$explicit_key_id" "$aws_profile" "$aws_region" || true)"
+    else
+      operator_id="$(jq -r '.operator_id // empty' <<<"$operator_json")"
+      [[ -n "$operator_id" ]] || continue
+      alias_name="$(production_operator_checkpoint_signer_kms_alias "$environment" "$operator_id")"
+      key_arn="$(production_try_describe_kms_key_arn "$alias_name" "$aws_profile" "$aws_region" || true)"
+    fi
+    [[ -n "$key_arn" ]] || continue
+    printf '%s\n' "$key_arn" >>"$tmp"
+  done
+  jq -Rcs 'split("\n") | map(select(length > 0)) | unique' "$tmp"
+  rm -f "$tmp"
+}
+
 production_resolve_checkpoint_signer_kms_key_id() {
   local environment="$1"
   local dkg_summary="$2"
@@ -2296,6 +2406,7 @@ production_render_shared_manifest() {
   local env_slug juno_network dkg_network base_rpc_url base_chain_id deposit_image_id withdraw_image_id
   local aws_profile aws_region terraform_dir zone_id zone_name public_subdomain ttl_seconds dns_mode
   local postgres_endpoint postgres_port kafka_brokers ipfs_api_url ipfs_api_auth_secret_arn kafka_critical_hmac_secret_arn dkg_bucket dkg_prefix
+  local shared_ecs_cluster_arn shared_proof_requestor_service_name shared_proof_funder_service_name
   local shared_sp1_requestor_address shared_sp1_rpc_url
   local bridge_fee_bps bridge_relayer_tip_bps bridge_withdrawal_expiry_window_seconds
   local bridge_max_expiry_extension_seconds bridge_min_deposit_amount bridge_min_withdraw_amount
@@ -2338,6 +2449,9 @@ production_render_shared_manifest() {
   postgres_port="$(production_tf_output_value "$tf_json" "shared_postgres_port" true)"
   kafka_cluster_arn="$(production_tf_output_value "$tf_json" "shared_kafka_cluster_arn" false)"
   kafka_brokers="$(production_tf_output_value "$tf_json" "shared_kafka_bootstrap_brokers" true)"
+  shared_ecs_cluster_arn="$(production_tf_output_value "$tf_json" "shared_ecs_cluster_arn" false)"
+  shared_proof_requestor_service_name="$(production_tf_output_value "$tf_json" "shared_proof_requestor_service_name" false)"
+  shared_proof_funder_service_name="$(production_tf_output_value "$tf_json" "shared_proof_funder_service_name" false)"
   shared_sp1_requestor_address="$(production_tf_output_value "$tf_json" "shared_sp1_requestor_address" false)"
   shared_sp1_rpc_url="$(production_tf_output_value "$tf_json" "shared_sp1_rpc_url" false)"
   ipfs_api_url="$(production_tf_output_value "$tf_json" "shared_ipfs_api_url" true)"
@@ -2514,6 +2628,9 @@ production_render_shared_manifest() {
     --arg postgres_port "$postgres_port" \
     --arg kafka_cluster_arn "$kafka_cluster_arn" \
     --arg kafka_brokers "$kafka_brokers" \
+    --arg shared_ecs_cluster_arn "$shared_ecs_cluster_arn" \
+    --arg shared_proof_requestor_service_name "$shared_proof_requestor_service_name" \
+    --arg shared_proof_funder_service_name "$shared_proof_funder_service_name" \
     --arg kafka_auth_mode "$(production_kafka_auth_mode_for_environment "$env_slug")" \
     --arg kafka_auth_aws_region "$aws_region" \
     --arg kafka_critical_key_id "default" \
@@ -2585,6 +2702,17 @@ production_render_shared_manifest() {
           critical_hmac_secret_arn: (if $kafka_critical_hmac_secret_arn == "" then null else $kafka_critical_hmac_secret_arn end),
           min_insync_replicas: 2
         },
+        ecs: (
+          if $shared_ecs_cluster_arn == "" and $shared_proof_requestor_service_name == "" and $shared_proof_funder_service_name == "" then
+            null
+          else
+            {
+              cluster_arn: (if $shared_ecs_cluster_arn == "" then null else $shared_ecs_cluster_arn end),
+              proof_requestor_service_name: (if $shared_proof_requestor_service_name == "" then null else $shared_proof_requestor_service_name end),
+              proof_funder_service_name: (if $shared_proof_funder_service_name == "" then null else $shared_proof_funder_service_name end)
+            }
+          end
+        ),
         proof: {
           requestor_address: (if $shared_sp1_requestor_address == "" then null else $shared_sp1_requestor_address end),
           rpc_url: (if $shared_sp1_rpc_url == "" then null else $shared_sp1_rpc_url end)

@@ -79,11 +79,18 @@ cat >"\$env_dir/app/app-deploy.json" <<JSON
   "environment": "preview",
   "app_host": "203.0.113.50",
   "app_user": "ubuntu",
+  "aws_profile": "juno",
+  "aws_region": "us-east-1",
   "known_hosts_file": "$fixture_dir/known_hosts",
   "secret_contract_file": "$fixture_dir/app-secrets.env",
   "operator_addresses": ["0x1111111111111111111111111111111111111111"],
   "operator_endpoints": ["0x1111111111111111111111111111111111111111=203.0.113.11:18443"],
   "service_urls": ["bridge-api=http://127.0.0.1:8082/readyz"],
+  "app_role": {
+    "asg": "juno-app-runtime-preview-asg",
+    "aws_profile": "juno",
+    "aws_region": "us-east-1"
+  },
   "services": {
     "backoffice": {
       "listen_addr": "127.0.0.1:8090"
@@ -95,10 +102,18 @@ cat >"\$env_dir/shared-manifest.json" <<JSON
 {
   "shared_services": {
     "kafka": {
-      "bootstrap_brokers": "b-1.preview.kafka:9098"
+      "bootstrap_brokers": "b-1.preview.kafka:9098",
+      "tls": true,
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      }
     },
     "ipfs": {
       "api_url": "http://preview-ipfs:5001"
+    },
+    "artifacts": {
+      "checkpoint_blob_bucket": "preview-checkpoint-blobs"
     },
     "proof": {
       "requestor_address": "0x4444444444444444444444444444444444444444",
@@ -143,6 +158,7 @@ write_fake_rebuild_roll() {
   local target="$1"
   local log_file="$2"
   local fixture_dir="$3"
+  local ready_file="${4:-}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -159,6 +175,9 @@ done
 mkdir -p "\$output_dir/operators/0x1111111111111111111111111111111111111111"
 cp "\$inventory" "\$output_dir/inventory.operators-rolled.json"
 printf '{"environment":"preview","secret_contract_file":"$fixture_dir/operator-secrets.env"}' >"\$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+if [[ -n "$ready_file" ]]; then
+  : >"$ready_file"
+fi
 printf '{"ready_for_deploy":true}\n'
 EOF
   chmod +x "$target"
@@ -197,6 +216,109 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_rebuild_aws() {
+  local target="$1"
+  local log_file="$2"
+  local commands_file="$3"
+  local remote_stdout_file="$4"
+  local ready_file="${5:-}"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "\$*" >>"$log_file"
+
+while [[ \$# -gt 0 ]]; do
+  case "\$1" in
+    autoscaling|s3|ssm)
+      service="\$1"
+      shift
+      break
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+case "\${service:-}" in
+  autoscaling)
+    subcommand="\$1"
+    shift
+    case "\$subcommand" in
+      describe-auto-scaling-groups)
+        cat <<'JSON'
+{"AutoScalingGroups":[{"Instances":[{"InstanceId":"i-preview-app","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}
+JSON
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  s3)
+    subcommand="\$1"
+    shift
+    case "\$subcommand" in
+      cp)
+        printf 's3 cp %s %s\n' "\$1" "\$2" >>"$log_file"
+        ;;
+      presign)
+        printf 'https://example.invalid/shared-infra-e2e?token=abc&x=1\n'
+        ;;
+      rm)
+        printf 's3 rm %s\n' "\$1" >>"$log_file"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  ssm)
+    subcommand="\$1"
+    shift
+    case "\$subcommand" in
+      send-command)
+        if [[ -n "$ready_file" && ! -f "$ready_file" ]]; then
+          printf 'shared-infra-e2e remote command ran before operator rollout\n' >&2
+          exit 1
+        fi
+        parameters_json=""
+        while [[ \$# -gt 0 ]]; do
+          case "\$1" in
+            --parameters)
+              parameters_json="\$2"
+              shift 2
+              ;;
+            *)
+              shift
+              ;;
+          esac
+        done
+        printf '%s\n' "\$parameters_json" >"$commands_file"
+        cat <<'JSON'
+{"Command":{"CommandId":"cmd-preview-ssm"}}
+JSON
+        ;;
+      get-command-invocation)
+        jq -n --arg stdout "\$(cat "$remote_stdout_file")" '{
+          Status: "Success",
+          StandardOutputContent: \$stdout,
+          StandardErrorContent: ""
+        }'
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
 ensure_rebuild_fixture_files() {
   local fixture_dir="$1"
   mkdir -p "$fixture_dir"
@@ -214,7 +336,7 @@ EOF
 }
 
 test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() {
-  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir
+  local tmp fake_bin inventory dkg_summary log_file refresh_log e2e_log output_root fixture_dir aws_log ssm_commands remote_stdout rollout_ready
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
   inventory="$tmp/inventory.json"
@@ -224,10 +346,15 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   e2e_log="$tmp/e2e.log"
   output_root="$tmp/output"
   fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
 
   mkdir -p "$fake_bin"
   write_rebuild_inventory_fixture "$inventory"
   printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
   ensure_rebuild_fixture_files "$fixture_dir"
   write_fake_rebuild_passthrough "$fake_bin/upgrade-preview-inventory.sh" "$log_file"
   write_fake_rebuild_passthrough "$fake_bin/destroy-preview-role-runtime.sh" "$log_file"
@@ -236,14 +363,16 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
-  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
   write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
 
   (
     cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
     PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
       PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
       PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
@@ -279,14 +408,40 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
     printf 'app runtime refresh must run before app canary\n' >&2
     exit 1
   fi
-  assert_contains "$(cat "$refresh_log")" "--rolled-inventory $output_root/preview/operator-rollout/inventory.operators-rolled.json" "rebuild refreshes backoffice from the rolled inventory"
+  local roll_count first_roll_line wireguard_refresh_line final_roll_line
+  roll_count="$(grep -c '^roll-preview-operators ' "$log_file")"
+  assert_eq "$roll_count" "2" "rebuild rolls operators before and after the wireguard backoffice refresh"
+  first_roll_line="$(grep -nF -- "--output-dir $output_root/preview/operator-rollout --github-repo" "$log_file" | head -n1 | cut -d: -f1)"
+  wireguard_refresh_line="$(grep -n 'refresh-preview-wireguard-backoffice' "$log_file" | head -n1 | cut -d: -f1)"
+  final_roll_line="$(grep -nF -- "--output-dir $output_root/preview/operator-rollout-final --github-repo" "$log_file" | head -n1 | cut -d: -f1)"
+  assert_eq "${first_roll_line:+present}" "present" "rebuild performs the initial operator rollout"
+  assert_eq "${wireguard_refresh_line:+present}" "present" "rebuild refreshes wireguard backoffice routing"
+  assert_eq "${final_roll_line:+present}" "present" "rebuild performs the final operator rollout"
+  if (( first_roll_line >= wireguard_refresh_line )); then
+    printf 'initial operator rollout must run before wireguard backoffice refresh\n' >&2
+    exit 1
+  fi
+  if (( wireguard_refresh_line >= final_roll_line )); then
+    printf 'final operator rollout must run after wireguard backoffice refresh\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$refresh_log")" "--rolled-inventory $output_root/preview/operator-rollout-final/inventory.operators-rolled.json" "rebuild refreshes backoffice from the final rolled inventory"
   assert_contains "$(cat "$refresh_log")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes the live app handoff in place"
-  assert_contains "$(cat "$refresh_log")" "--output-dir $output_root/preview/operator-rollout" "rebuild refresh stores app refresh evidence beside operator rollout evidence"
+  assert_contains "$(cat "$refresh_log")" "--output-dir $output_root/preview/operator-rollout-final" "rebuild refresh stores app refresh evidence beside the final operator rollout evidence"
   assert_contains "$(cat "$log_file")" "refresh-preview-wireguard-backoffice --inventory $output_root/preview/inventory.resolved.json" "rebuild refreshes wireguard backoffice routing after operator rollout"
   assert_contains "$(cat "$log_file")" "--operator-deploy $output_root/preview/operator-rollout/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "rebuild uses a rendered operator handoff to resolve internal backoffice endpoints"
   assert_eq "$(jq -r '.wireguard_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/wireguard-backoffice.json" "release lock records the wireguard backoffice refresh evidence"
-  assert_contains "$(cat "$e2e_log")" "deposits.event.v2" "rebuild ensures the deposit event topic exists before preview validation"
-  assert_contains "$(cat "$e2e_log")" "withdrawals.requested.v2" "rebuild ensures the withdraw request topic exists before preview validation"
+  if [[ -s "$e2e_log" ]]; then
+    printf 'shared-infra-e2e must execute remotely for preview app role rebuilds\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$aws_log")" "s3 cp $fake_bin/shared-infra-e2e s3://preview-checkpoint-blobs/tmp/shared-infra-e2e/" "rebuild stages the released shared-infra-e2e binary in the shared artifact bucket"
+  assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_TLS='true'" "rebuild enables kafka tls for remote shared infra validation"
+  assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_AUTH_MODE='aws-msk-iam'" "rebuild enables aws msk iam auth for remote shared infra validation"
+  assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_AWS_REGION='us-east-1'" "rebuild forwards the kafka auth region for remote shared infra validation"
+  assert_contains "$(cat "$ssm_commands")" "deposits.event.v2" "rebuild ensures the deposit event topic exists before preview validation"
+  assert_contains "$(cat "$ssm_commands")" "withdrawals.requested.v2" "rebuild ensures the withdraw request topic exists before preview validation"
+  assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the remote shared infra validation output"
   assert_eq "$(jq -r '.app_runtime_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-runtime-refresh.json" "release lock records the app runtime refresh evidence"
   assert_eq "$(jq -r '.app_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-backoffice-refresh.json" "release lock records the app backoffice refresh evidence"
 
@@ -294,7 +449,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
 }
 
 test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets() {
-  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir current_output_root
+  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir current_output_root aws_log ssm_commands remote_stdout rollout_ready
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
   inventory="$tmp/inventory.json"
@@ -303,10 +458,15 @@ test_rebuild_preview_role_runtime_carries_forward_current_shared_proof_secrets()
   output_root="$tmp/output"
   fixture_dir="$tmp/fixtures"
   current_output_root="$tmp/production-output/preview"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
 
   mkdir -p "$fake_bin" "$current_output_root"
   write_rebuild_inventory_fixture "$inventory"
   printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
   ensure_rebuild_fixture_files "$fixture_dir"
   cat >"$current_output_root/shared-terraform-output.json" <<'JSON'
 {
@@ -331,14 +491,16 @@ JSON
   write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
-  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
   write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
 
   (
     cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
     PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
       PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
       PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \
@@ -369,7 +531,7 @@ JSON
 }
 
 test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
-  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir updated_inventory
+  local tmp fake_bin inventory dkg_summary log_file output_root fixture_dir updated_inventory aws_log ssm_commands remote_stdout rollout_ready
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
   inventory="$tmp/inventory.json"
@@ -378,6 +540,10 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
   log_file="$tmp/rebuild.log"
   output_root="$tmp/output"
   fixture_dir="$tmp/fixtures"
+  aws_log="$tmp/aws.log"
+  ssm_commands="$tmp/ssm-commands.json"
+  remote_stdout="$tmp/remote-stdout.json"
+  rollout_ready="$tmp/operator-rollout.ready"
 
   mkdir -p "$fake_bin" "$tmp/app" "$tmp/operators/op1" "$tmp/dkg-tls"
   write_rebuild_inventory_fixture "$inventory"
@@ -402,6 +568,7 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
   ' "$inventory" >"$updated_inventory"
   mv "$updated_inventory" "$inventory"
   printf '{}' >"$dkg_summary"
+  printf '{"ok":true}\n' >"$remote_stdout"
   ensure_rebuild_fixture_files "$fixture_dir"
   : >"$tmp/app/known_hosts"
   : >"$tmp/app/app-secrets.env"
@@ -415,14 +582,16 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
   write_fake_rebuild_canary "$fake_bin/provision-app-edge.sh" "$log_file" "provision-app-edge"
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
-  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir" "$rollout_ready"
   write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
+  write_fake_rebuild_aws "$fake_bin/aws" "$aws_log" "$ssm_commands" "$remote_stdout" "$rollout_ready"
 
   (
     cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
     PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN="$fake_bin/upgrade-preview-inventory.sh" \
       PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN="$fake_bin/destroy-preview-role-runtime.sh" \
       PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN="$fake_bin/resolve-role-runtime-release-inputs.sh" \

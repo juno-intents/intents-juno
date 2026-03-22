@@ -107,6 +107,164 @@ normalize_preview_inventory_local_paths() {
   mv "$tmp_inventory" "$target_inventory"
 }
 
+ssm_run_shell_command() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local instance_id="$3"
+  local command="$4"
+  local send_json command_id invocation_json invocation_status stderr stdout parameters_json
+
+  parameters_json="$(jq -cn --arg command "$command" '{commands: [$command]}')"
+
+  send_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm send-command \
+    --instance-ids "$instance_id" \
+    --document-name "AWS-RunShellScript" \
+    --parameters "$parameters_json" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$send_json" ]] || return 1
+  command_id="$(jq -r '.Command.CommandId // empty' <<<"$send_json")"
+  [[ -n "$command_id" ]] || return 1
+
+  for _ in $(seq 1 120); do
+    invocation_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm get-command-invocation \
+      --command-id "$command_id" \
+      --instance-id "$instance_id" \
+      --output json 2>/dev/null || true)"
+    [[ -n "$invocation_json" ]] || {
+      sleep 2
+      continue
+    }
+
+    invocation_status="$(jq -r '.Status // empty' <<<"$invocation_json")"
+    case "$invocation_status" in
+      Success)
+        stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
+        printf '%s' "$stdout"
+        return 0
+        ;;
+      Failed|Cancelled|TimedOut|Cancelling)
+        stderr="$(jq -r '.StandardErrorContent // ""' <<<"$invocation_json")"
+        stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
+        [[ -n "$stderr" ]] && printf '%s\n' "$stderr" >&2
+        [[ -n "$stdout" ]] && printf '%s\n' "$stdout" >&2
+        return 1
+        ;;
+      Pending|InProgress|Delayed|"")
+        sleep 2
+        ;;
+      *)
+        sleep 2
+        ;;
+    esac
+  done
+
+  return 1
+}
+
+production_shell_quote() {
+  local value="$1"
+  jq -rn --arg value "$value" '$value | @sh'
+}
+
+run_shared_infra_e2e() {
+  local app_deploy="$1"
+  local shared_manifest="$2"
+  local binary="$3"
+  local postgres_dsn="$4"
+  local required_topics="$5"
+  local output_path="$6"
+  local kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
+  local kafka_tls kafka_auth_mode kafka_auth_region
+  local app_role_asg app_aws_profile app_aws_region asg_json instance_id
+  local checkpoint_blob_bucket stage_key stage_uri presigned_url stdout_json
+  local url_q pg_q kb_q topics_q ipfs_q operators_q threshold_q output_q remote_env_prefix remote_cmd
+
+  kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
+  ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
+  checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
+  checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
+  kafka_tls="$(jq -r 'if (.shared_services.kafka.tls // false) then "true" else "false" end' "$shared_manifest")"
+  kafka_auth_mode="$(jq -r '.shared_services.kafka.auth.mode // empty' "$shared_manifest")"
+  kafka_auth_region="$(jq -r '.shared_services.kafka.auth.aws_region // empty' "$shared_manifest")"
+
+  app_role_asg="$(jq -r '.app_role.asg // empty' "$app_deploy")"
+  if [[ -n "$app_role_asg" ]]; then
+    have_cmd aws || die "required command not found: aws"
+    app_aws_profile="$(production_json_required "$app_deploy" '(.app_role.aws_profile // .aws_profile) | select(type == "string" and length > 0)')"
+    app_aws_region="$(production_json_required "$app_deploy" '(.app_role.aws_region // .aws_region) | select(type == "string" and length > 0)')"
+    if [[ -z "$kafka_auth_region" ]]; then
+      kafka_auth_region="$app_aws_region"
+    fi
+    checkpoint_blob_bucket="$(production_json_required "$shared_manifest" '.shared_services.artifacts.checkpoint_blob_bucket | select(type == "string" and length > 0)')"
+    asg_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling describe-auto-scaling-groups \
+      --auto-scaling-group-names "$app_role_asg" \
+      --output json)"
+    instance_id="$(jq -r '.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy") | .InstanceId' <<<"$asg_json" | head -n1)"
+    if [[ -z "$instance_id" ]]; then
+      instance_id="$(jq -r '.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService") | .InstanceId' <<<"$asg_json" | head -n1)"
+    fi
+    [[ -n "$instance_id" ]] || die "app role asg $app_role_asg does not have any in-service instances for shared-infra-e2e"
+
+    stage_key="tmp/shared-infra-e2e/$(date +%s)-$(basename "$binary")"
+    stage_uri="s3://$checkpoint_blob_bucket/$stage_key"
+    AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 cp "$binary" "$stage_uri" >/dev/null
+    presigned_url="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 presign "$stage_uri" --expires-in 900)"
+    [[ -n "$presigned_url" ]] || {
+      AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
+      die "failed to stage shared-infra-e2e binary for remote execution"
+    }
+
+    url_q="$(production_shell_quote "$presigned_url")"
+    pg_q="$(production_shell_quote "$postgres_dsn")"
+    kb_q="$(production_shell_quote "$kafka_brokers")"
+    topics_q="$(production_shell_quote "$required_topics")"
+    ipfs_q="$(production_shell_quote "$ipfs_api_url")"
+    operators_q="$(production_shell_quote "$checkpoint_operators")"
+    threshold_q="$(production_shell_quote "$checkpoint_threshold")"
+    output_q="$(production_shell_quote "$output_path")"
+
+    remote_env_prefix="JUNO_QUEUE_KAFKA_TLS=$(production_shell_quote "$kafka_tls") "
+    if [[ -n "$kafka_auth_mode" ]]; then
+      remote_env_prefix+="JUNO_QUEUE_KAFKA_AUTH_MODE=$(production_shell_quote "$kafka_auth_mode") "
+    fi
+    if [[ -n "$kafka_auth_region" ]]; then
+      remote_env_prefix+="JUNO_QUEUE_KAFKA_AWS_REGION=$(production_shell_quote "$kafka_auth_region") "
+      remote_env_prefix+="AWS_REGION=$(production_shell_quote "$kafka_auth_region") "
+      remote_env_prefix+="AWS_DEFAULT_REGION=$(production_shell_quote "$kafka_auth_region") "
+    fi
+
+    remote_cmd="set -eu; rm -f /var/tmp/shared-infra-e2e; curl -fsSL $url_q -o /var/tmp/shared-infra-e2e; chmod 0755 /var/tmp/shared-infra-e2e; ${remote_env_prefix}/var/tmp/shared-infra-e2e --postgres-dsn $pg_q --kafka-brokers $kb_q --required-kafka-topics $topics_q --checkpoint-ipfs-api-url $ipfs_q --checkpoint-operators $operators_q --checkpoint-threshold $threshold_q --output $output_q; cat $output_q"
+    if ! stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd")"; then
+      AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
+      die "shared-infra-e2e failed on app role instance $instance_id"
+    fi
+    AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" s3 rm "$stage_uri" >/dev/null 2>&1 || true
+    [[ -n "$stdout_json" ]] || die "shared-infra-e2e did not return any output from app role instance $instance_id"
+    printf '%s\n' "$stdout_json" >"$output_path"
+    return 0
+  fi
+
+  (
+    export JUNO_QUEUE_KAFKA_TLS="$kafka_tls"
+    if [[ -n "$kafka_auth_mode" ]]; then
+      export JUNO_QUEUE_KAFKA_AUTH_MODE="$kafka_auth_mode"
+    fi
+    if [[ -n "$kafka_auth_region" ]]; then
+      export JUNO_QUEUE_KAFKA_AWS_REGION="$kafka_auth_region"
+      export AWS_REGION="$kafka_auth_region"
+      export AWS_DEFAULT_REGION="$kafka_auth_region"
+    fi
+    production_run_release_binary "$binary" \
+      --postgres-dsn "$postgres_dsn" \
+      --kafka-brokers "$kafka_brokers" \
+      --required-kafka-topics "$required_topics" \
+      --checkpoint-ipfs-api-url "$ipfs_api_url" \
+      --checkpoint-operators "$checkpoint_operators" \
+      --checkpoint-threshold "$checkpoint_threshold" \
+      --output "$output_path"
+  )
+}
+
 [[ -n "$inventory" ]] || die "--inventory is required"
 [[ -f "$inventory" ]] || die "inventory not found: $inventory"
 [[ -n "$dkg_summary" ]] || die "--dkg-summary is required"
@@ -264,15 +422,6 @@ checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
 checkpoint_topics="$(jq -r '.checkpoint.signature_topic + "," + .checkpoint.package_topic' "$shared_manifest")"
 operator_topics="deposits.event.v2,withdrawals.requested.v2"
 required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.alerts.v1,${checkpoint_topics},${operator_topics}"
-production_run_release_binary "$shared_infra_e2e_binary" \
-  --postgres-dsn "$checkpoint_postgres_dsn" \
-  --kafka-brokers "$kafka_brokers" \
-  --required-kafka-topics "$required_topics" \
-  --checkpoint-ipfs-api-url "$ipfs_api_url" \
-  --checkpoint-operators "$checkpoint_operators" \
-  --checkpoint-threshold "$checkpoint_threshold" \
-  --output "$output_dir/e2e/shared-infra-e2e.json"
-
 "$roll_preview_operators_bin" \
   --inventory "$resolved_inventory" \
   --shared-manifest "$shared_manifest" \
@@ -284,6 +433,14 @@ production_run_release_binary "$shared_infra_e2e_binary" \
 
 first_operator_deploy="$(find "$output_dir/operator-rollout/operators" -name operator-deploy.json | sort | head -n1)"
 [[ -n "$first_operator_deploy" ]] || die "operator rollout did not render any operator deploy handoffs"
+
+run_shared_infra_e2e \
+  "$app_deploy" \
+  "$shared_manifest" \
+  "$shared_infra_e2e_binary" \
+  "$checkpoint_postgres_dsn" \
+  "$required_topics" \
+  "$output_dir/e2e/shared-infra-e2e.json"
 
 wireguard_backoffice_refresh_path="$output_dir/wireguard-backoffice.json"
 wireguard_backoffice_args=(
@@ -304,11 +461,20 @@ fi
 "$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/shared-services.json")" == "true" ]] || die "shared services canary failed after wireguard backoffice refresh"
 
+"$roll_preview_operators_bin" \
+  --inventory "$resolved_inventory" \
+  --shared-manifest "$shared_manifest" \
+  --dkg-summary "$dkg_summary" \
+  --operator-stack-ami-release-tag "$operator_stack_ami_release_tag" \
+  --output-dir "$output_dir/operator-rollout-final" \
+  --github-repo "$github_repo" >"$output_dir/operator-rollout-final.json"
+[[ "$(jq -r '.ready_for_deploy' "$output_dir/operator-rollout-final.json")" == "true" ]] || die "final operator rollout failed"
+
 "$refresh_preview_app_backoffice_bin" \
-  --rolled-inventory "$output_dir/operator-rollout/inventory.operators-rolled.json" \
+  --rolled-inventory "$output_dir/operator-rollout-final/inventory.operators-rolled.json" \
   --shared-manifest "$shared_manifest" \
   --app-deploy "$app_deploy" \
-  --output-dir "$output_dir/operator-rollout" >"$output_dir/app-backoffice-refresh.json"
+  --output-dir "$output_dir/operator-rollout-final" >"$output_dir/app-backoffice-refresh.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-backoffice-refresh.json")" == "true" ]] || die "preview app backoffice refresh failed"
 
 release_lock="$output_dir/role-runtime-release-lock.json"
@@ -322,7 +488,7 @@ jq -n \
   --arg shared_manifest "$shared_manifest" \
   --arg app_deploy "$app_deploy" \
   --arg bridge_summary_path "$bridge_summary_path" \
-  --arg operator_rollout_path "$output_dir/operator-rollout.json" \
+  --arg operator_rollout_path "$output_dir/operator-rollout-final.json" \
   --arg app_runtime_refresh_path "$app_runtime_refresh_path" \
   --arg wireguard_backoffice_refresh_path "$wireguard_backoffice_refresh_path" \
   --arg app_backoffice_refresh_path "$output_dir/app-backoffice-refresh.json" \

@@ -362,6 +362,142 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_aws_live_e2e_describer() {
+  local target="$1"
+  shift
+  local services_json='{"VpcEndpoints":[]}'
+  local kms_aliases_json='{}'
+  local launch_templates_json='{}'
+  local mode="vpc"
+  local spec service state alias_name arn launch_template_spec image_id
+
+  while [[ "$#" -gt 0 ]]; do
+    case "$1" in
+      --kms)
+        mode="kms"
+        shift
+        continue
+        ;;
+      --lt)
+        mode="lt"
+        shift
+        continue
+        ;;
+    esac
+    if [[ "$mode" == "vpc" ]]; then
+      service="${1%%:*}"
+      state="${1#*:}"
+      if [[ "$state" == "$1" ]]; then
+        state="available"
+      fi
+      services_json="$(
+        {
+          printf '%s\n' "$services_json" | jq -c '.VpcEndpoints[]?'
+          jq -cn --arg service "$service" --arg state "$state" '{ServiceName: $service, State: $state}'
+        } | jq -s '{VpcEndpoints: .}'
+      )"
+    elif [[ "$mode" == "kms" ]]; then
+      alias_name="${1%%=*}"
+      arn="${1#*=}"
+      kms_aliases_json="$(
+        jq -cn \
+          --argjson current "$kms_aliases_json" \
+          --arg alias_name "$alias_name" \
+          --arg arn "$arn" \
+          '$current + {($alias_name): $arn}'
+      )"
+    else
+      launch_template_spec="${1%%=*}"
+      image_id="${1#*=}"
+      launch_templates_json="$(
+        jq -cn \
+          --argjson current "$launch_templates_json" \
+          --arg launch_template_spec "$launch_template_spec" \
+          --arg image_id "$image_id" \
+          '$current + {($launch_template_spec): $image_id}'
+      )"
+    fi
+    shift
+  done
+
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+args=( "\$@" )
+while [[ \${#args[@]} -gt 0 ]]; do
+  case "\${args[0]}" in
+    --profile|--region)
+      args=( "\${args[@]:2}" )
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "ec2 describe-vpc-endpoints")
+    if [[ " \$* " == *" Name=state,Values="* ]]; then
+      printf 'unexpected state filter: %s\n' "\$*" >&2
+      exit 1
+    fi
+    printf '%s\n' '$services_json'
+    ;;
+  "kms describe-key")
+    key_id=""
+    idx=2
+    while [[ \$idx -lt \${#args[@]} ]]; do
+      case "\${args[\$idx]}" in
+        --key-id)
+          key_id="\${args[\$((idx + 1))]}"
+          idx=\$((idx + 2))
+          ;;
+        *)
+          idx=\$((idx + 1))
+          ;;
+      esac
+    done
+    arn="\$(jq -r --arg key_id "\$key_id" '.[\$key_id] // empty' <<<'$kms_aliases_json')"
+    [[ -n "\$arn" ]] || {
+      printf 'unexpected kms key id: %s\n' "\$key_id" >&2
+      exit 1
+    }
+    printf '%s\n' "\$arn"
+    ;;
+  "ec2 describe-launch-template-versions")
+    launch_template_id=""
+    launch_template_version=""
+    idx=2
+    while [[ \$idx -lt \${#args[@]} ]]; do
+      case "\${args[\$idx]}" in
+        --launch-template-id)
+          launch_template_id="\${args[\$((idx + 1))]}"
+          idx=\$((idx + 2))
+          ;;
+        --versions)
+          launch_template_version="\${args[\$((idx + 1))]}"
+          idx=\$((idx + 2))
+          ;;
+        *)
+          idx=\$((idx + 1))
+          ;;
+      esac
+    done
+    image_id="\$(jq -r --arg spec "\${launch_template_id}@\${launch_template_version}" '.[\$spec] // empty' <<<'$launch_templates_json')"
+    [[ -n "\$image_id" ]] || {
+      printf 'unexpected launch template lookup: %s@%s\n' "\$launch_template_id" "\$launch_template_version" >&2
+      exit 1
+    }
+    jq -cn --arg image_id "\$image_id" '{LaunchTemplateVersions: [{LaunchTemplateData: {ImageId: \$image_id}}]}'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
 write_fake_docker_runner() {
   local target="$1"
   local log_file="$2"
@@ -619,6 +755,9 @@ EOF
   assert_eq "$(jq -r '.wireguard_role.publish_public_dns' "$shared_manifest")" "false" "wireguard role suppresses public dns"
   assert_eq "$(jq -r '.shared_services.postgres.cluster_arn' "$shared_manifest")" "arn:aws:rds:us-east-1:021490342184:cluster:alpha-shared" "postgres cluster arn"
   assert_eq "$(jq -r '.shared_services.kafka.cluster_arn' "$shared_manifest")" "arn:aws:kafka:us-east-1:021490342184:cluster/alpha-shared/11111111-2222-3333-4444-555555555555-1" "kafka cluster arn"
+  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/alpha-shared" "ecs cluster arn"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "alpha-proof-requestor" "ecs proof requestor service name"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "alpha-proof-funder" "ecs proof funder service name"
   assert_eq "$(jq -r '.shared_services.ipfs.target_group_arn' "$shared_manifest")" "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111" "ipfs target group arn"
   assert_eq "$(jq -r '.shared_roles.proof.asg' "$shared_manifest")" "alpha-proof-role" "proof role asg"
   assert_eq "$(jq -r '.shared_roles.proof.launch_template.id' "$shared_manifest")" "lt-proof0123456789abcdef" "proof role launch template"
@@ -718,6 +857,9 @@ EOF
   assert_eq "$(jq -r '.shared_roles.proof.asg' "$shared_manifest")" "alpha-proof-role" "shared manifest prefers proof role asg"
   assert_eq "$(jq -r '.shared_roles.proof.launch_template.id' "$shared_manifest")" "lt-proof0123456789abcdef" "shared manifest prefers proof role launch template"
   assert_eq "$(jq -r '.shared_roles.proof.requestor_address' "$shared_manifest")" "0xabcdefabcdefabcdefabcdefabcdefabcdefabcd" "shared manifest prefers proof role requestor"
+  assert_eq "$(jq -r '.shared_services.ecs.cluster_arn' "$shared_manifest")" "arn:aws:ecs:us-east-1:021490342184:cluster/legacy-shared" "shared manifest retains ecs cluster arn"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_requestor_service_name' "$shared_manifest")" "legacy-proof-requestor" "shared manifest retains proof requestor service"
+  assert_eq "$(jq -r '.shared_services.ecs.proof_funder_service_name' "$shared_manifest")" "legacy-proof-funder" "shared manifest retains proof funder service"
   assert_eq "$(jq -r '.wireguard_role.asg' "$shared_manifest")" "alpha-wireguard-role" "shared manifest prefers wireguard role asg"
   assert_eq "$(jq -r '.wireguard_role.server_key_secret_arn' "$shared_manifest")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key" "shared manifest includes wireguard server key secret"
   assert_eq "$(jq -r '.wireguard_role.endpoint_host' "$shared_manifest")" "nlb-alpha-wireguard.example.internal" "shared manifest prefers wireguard nlb endpoint"
@@ -3071,6 +3213,8 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   write_live_e2e_tfvars_fixture "$workdir/terraform/live-e2e/terraform.tfvars"
   jq '
     .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .shared_postgres_db = "preview-intents-db"
     | .shared_services.live_e2e = {
         allowed_ssh_cidr: "92.98.132.70/32",
         ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
@@ -3094,7 +3238,10 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   override_file="$workdir/shared-terraform.auto.tfvars.json"
   fake_bin="$workdir/bin"
   mkdir -p "$fake_bin"
-  write_fake_aws_vpc_endpoint_describer "$fake_bin/aws"
+  write_fake_aws_live_e2e_describer \
+    "$fake_bin/aws" \
+    --lt \
+    "lt-0123456789abcdef0@1=ami-0d130f29f8f555638"
   old_path="$PATH"
   PATH="$fake_bin:$PATH"
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
@@ -3104,20 +3251,64 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   assert_eq "$(jq -r '.deployment_id' "$override_file")" "preview0316d" "preview override derives live-e2e deployment id from the instance profile"
   assert_eq "$(jq -r '.allowed_ssh_cidr' "$override_file")" "92.98.132.70/32" "preview override preserves live-e2e ssh cidr"
   assert_eq "$(jq -r '.ssh_public_key' "$override_file")" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10" "preview override preserves live-e2e ssh key"
+  assert_eq "$(jq -r '.operator_ami_id' "$override_file")" "ami-0d130f29f8f555638" "preview override preserves the live-e2e operator ami"
   assert_eq "$(jq -r '.operator_instance_count' "$override_file")" "1" "preview override keeps the live-e2e operator count aligned with inventory"
   assert_eq "$(jq -r '.shared_proof_service_image' "$override_file")" "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "preview override includes live-e2e proof image"
   assert_eq "$(jq -r '.shared_sp1_requestor_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor" "preview override includes live-e2e proof requestor secret"
   assert_eq "$(jq -r '.shared_sp1_funder_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-funder" "preview override includes live-e2e proof funder secret"
   assert_eq "$(jq -r '.shared_base_chain_id' "$override_file")" "84532" "preview override includes live-e2e base chain id"
+  assert_eq "$(jq -r '.shared_postgres_password' "$override_file")" "preview-postgres-password" "preview override includes live-e2e postgres password"
+  assert_eq "$(jq -r '.shared_postgres_db' "$override_file")" "preview-intents-db" "preview override includes live-e2e postgres db name"
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$override_file")" "true" "preview override enables wireguard"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$override_file")" "ops.alpha.intents-testing.thejunowallet.com" "preview override falls back to legacy ops dns label"
   assert_eq "$(jq -r '.operator_client_security_group_ids[0]' "$override_file")" "sg-approle012345678" "preview override forwards the app runtime sg to live-e2e operator ingress"
+  assert_eq "$(jq -r '.shared_service_client_security_group_ids[0]' "$override_file")" "sg-approle012345678" "preview override forwards the app runtime sg to live-e2e shared postgres and msk ingress"
+  assert_eq "$(jq -r '.shared_ipfs_client_security_group_ids[0]' "$override_file")" "sg-approle012345678" "preview override forwards the app runtime sg to live-e2e ipfs ingress"
   assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_id")' "$override_file")" "false" "preview override omits the live-e2e wireguard subnet when the inventory relies on module defaults"
   assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_ids")' "$override_file")" "false" "preview override does not write the unsupported plural wireguard subnet input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint_ips")' "$override_file")" "false" "preview override does not write the unsupported plural backoffice endpoint input"
   assert_eq "$(jq -r 'has("shared_wireguard_role_ami_id")' "$override_file")" "false" "preview override does not write the unsupported wireguard ami input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | length' "$override_file")" "0" "preview override writes an empty reusable VPC endpoint list when the VPC has none"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_resolves_checkpoint_signer_kms_arns_from_aliases() {
+  local workdir override_file fake_bin old_path alias_name
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_postgres_password = "preview-postgres-password"
+    | .shared_postgres_db = "preview-intents-db"
+    | .shared_services.live_e2e = {
+        deployment_id: "preview0316d",
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
+    | .app_role.app_security_group_id = "sg-approle012345678"
+    | .operators[0].checkpoint_signer_kms_key_id = null
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  alias_name="alias/intents-juno-preview-checkpoint-signer-$(jq -r '.operators[0].operator_id | ascii_downcase' "$workdir/inventory.json")"
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_live_e2e_describer \
+    "$fake_bin/aws" \
+    --kms \
+    "$alias_name=arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" \
+    --lt \
+    "lt-0123456789abcdef0@1=ami-0d130f29f8f555638"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+  PATH="$old_path"
+
+  assert_eq "$(jq -r '.allowed_checkpoint_signer_kms_key_arns | length' "$override_file")" "1" "preview override writes one checkpoint signer kms arn from alias discovery"
+  assert_eq "$(jq -r '.allowed_checkpoint_signer_kms_key_arns[0]' "$override_file")" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "preview override writes the discovered checkpoint signer kms arn"
   rm -rf "$workdir"
 }
 
@@ -3140,13 +3331,15 @@ test_write_shared_terraform_override_tfvars_reuses_existing_live_e2e_vpc_endpoin
   override_file="$workdir/shared-terraform.auto.tfvars.json"
   fake_bin="$workdir/bin"
   mkdir -p "$fake_bin"
-  write_fake_aws_vpc_endpoint_describer \
+  write_fake_aws_live_e2e_describer \
     "$fake_bin/aws" \
     "com.amazonaws.us-east-1.secretsmanager" \
     "com.amazonaws.us-east-1.s3" \
     "com.amazonaws.us-east-1.sts" \
     "com.amazonaws.us-east-1.kms:deleting" \
-    "com.amazonaws.us-east-1.unrelated"
+    "com.amazonaws.us-east-1.unrelated" \
+    --lt \
+    "lt-0123456789abcdef0@1=ami-0d130f29f8f555638"
   old_path="$PATH"
   PATH="$fake_bin:$PATH"
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"

@@ -307,6 +307,33 @@ live_e2e_deployment_id_from_state() {
   printf '%s\n' "$deployment_id"
 }
 
+live_e2e_operator_asg_name() {
+  local deployment_id="${1:-}"
+  local operator_index="${2:-}"
+  if [[ -n "$deployment_id" && -n "$operator_index" ]]; then
+    printf 'juno-live-e2e-%s-operator-%s\n' "$deployment_id" "$operator_index"
+  fi
+}
+
+resolve_operator_launch_template_json_for_asg() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local operator_asg="$3"
+  local asg_json lt_id lt_version
+
+  [[ -n "$operator_asg" ]] || return 0
+  asg_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names "$operator_asg" \
+    --output json 2>/dev/null || true)"
+  [[ -n "$asg_json" ]] || return 0
+
+  lt_id="$(jq -r '.AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId // .AutoScalingGroups[0].MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.LaunchTemplateId // empty' <<<"$asg_json")"
+  lt_version="$(jq -r '.AutoScalingGroups[0].LaunchTemplate.Version // .AutoScalingGroups[0].MixedInstancesPolicy.LaunchTemplate.LaunchTemplateSpecification.Version // empty' <<<"$asg_json")"
+  if [[ -n "$lt_id" ]]; then
+    jq -cn --arg id "$lt_id" --arg version "$lt_version" '{id: $id, version: $version}'
+  fi
+}
+
 live_e2e_allowed_ssh_cidr_from_state() {
   local state_file="$1"
   jq -r '
@@ -477,10 +504,12 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
   backoffice_cert_arn="$(resolve_cert_arn "$aws_profile" "$aws_region" "${backoffice_dns_label}.${public_subdomain}")"
   [[ -n "$backoffice_cert_arn" ]] || die "failed to resolve backoffice ACM certificate for ${backoffice_dns_label}.${public_subdomain}"
 
+  live_e2e_deployment_id="$(live_e2e_deployment_id_from_state "$state_file" "$app_instance_profile_name")"
+
   operator_roles_json="$(
     jq -cn '{}'
   )"
-  while IFS= read -r operator_host; do
+  while IFS=$'\t' read -r operator_host operator_index; do
     [[ -n "$operator_host" ]] || continue
     operator_instance_json="$(legacy_instance_json_for_ip "$aws_profile" "$aws_region" "$operator_host")"
     operator_asg="$(
@@ -492,8 +521,16 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
         ][0] // empty
       ' <<<"$operator_instance_json"
     )"
+    if [[ -z "$operator_asg" && "$shared_terraform_dir_rel" == "deploy/shared/terraform/live-e2e" ]]; then
+      operator_asg="$(live_e2e_operator_asg_name "$live_e2e_deployment_id" "$operator_index")"
+    fi
     operator_lt_id="$(jq -r '.Reservations[0].Instances[0].LaunchTemplate.LaunchTemplateId // empty' <<<"$operator_instance_json")"
     operator_lt_version="$(jq -r '.Reservations[0].Instances[0].LaunchTemplate.Version // empty' <<<"$operator_instance_json")"
+    if [[ -n "$operator_asg" && -z "$operator_lt_id" ]]; then
+      operator_lt_json="$(resolve_operator_launch_template_json_for_asg "$aws_profile" "$aws_region" "$operator_asg")"
+      operator_lt_id="$(jq -r '.id // empty' <<<"$operator_lt_json")"
+      operator_lt_version="$(jq -r '.version // empty' <<<"$operator_lt_json")"
+    fi
     operator_roles_json="$(
       jq -cn \
         --argjson current "$operator_roles_json" \
@@ -515,7 +552,7 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
             }
         '
     )"
-  done < <(jq -r '.operators[] | .operator_host // empty' "$inventory_abs")
+  done < <(jq -r '.operators[] | [(.operator_host // empty), ((.index // "") | tostring)] | @tsv' "$inventory_abs")
 
   wireguard_network_cidr="$(jq -r '.outputs.shared_wireguard_network_cidr.value // "10.66.0.0/24"' <<<"$state_json")"
   wireguard_listen_port="$(jq -r '.outputs.shared_wireguard_listen_port.value // 51820' <<<"$state_json")"

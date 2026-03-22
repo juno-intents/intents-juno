@@ -1127,12 +1127,100 @@ exec /usr/local/bin/checkpoint-signer \
 EOF_SIGNER_WRAPPER
 sudo install -m 0755 "$signer_tmp" "$checkpoint_signer_script"
 rm -f "$signer_tmp"
-if ! grep -q -- '--base-chain-id "${BASE_CHAIN_ID}"' "$checkpoint_aggregator_script"; then
-  sudo sed -i "s|^  --base-chain-id .*\\\\$|  --base-chain-id ${base_chain_id} \\\\|g" "$checkpoint_aggregator_script"
+aggregator_tmp="$(mktemp)"
+cat >"$aggregator_tmp" <<'EOF_AGGREGATOR_WRAPPER'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+set -a
+source /etc/intents-juno/operator-stack.env
+set +a
+[[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_KAFKA_BROKERS:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_KAFKA_BROKERS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_BLOB_BUCKET:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_BLOB_BUCKET in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_IPFS_API_URL:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_IPFS_API_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "checkpoint-aggregator requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "checkpoint-aggregator requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${CHECKPOINT_THRESHOLD:-}" ]] || {
+  echo "checkpoint-aggregator requires CHECKPOINT_THRESHOLD in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+if [[ "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=require"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-ca"* && "${CHECKPOINT_POSTGRES_DSN}" != *"sslmode=verify-full"* ]]; then
+  echo "checkpoint-aggregator requires CHECKPOINT_POSTGRES_DSN with sslmode=require (or verify-ca/verify-full)" >&2
+  exit 1
 fi
-if ! grep -q -- '--bridge-address "${BRIDGE_ADDRESS}"' "$checkpoint_aggregator_script"; then
-  sudo sed -i "s|^  --bridge-address .*\\\\$|  --bridge-address ${bridge_address} \\\\|g" "$checkpoint_aggregator_script"
+kafka_tls_value="${JUNO_QUEUE_KAFKA_TLS:-true}"
+case "${kafka_tls_value,,}" in
+  1|true|yes|on)
+    export JUNO_QUEUE_KAFKA_TLS=true
+    ;;
+  *)
+    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_TLS=true for kafka TLS transport" >&2
+    exit 1
+    ;;
+esac
+case "$(printf '%s' "${JUNO_QUEUE_KAFKA_AUTH_MODE:-}" | tr '[:upper:]' '[:lower:]')" in
+  aws-msk-iam)
+    export JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam
+    ;;
+  *)
+    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AUTH_MODE=aws-msk-iam for production kafka transport" >&2
+    exit 1
+    ;;
+esac
+if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
+  if [[ -n "${AWS_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_REGION}"
+  elif [[ -n "${AWS_DEFAULT_REGION:-}" ]]; then
+    export JUNO_QUEUE_KAFKA_AWS_REGION="${AWS_DEFAULT_REGION}"
+  else
+    echo "checkpoint-aggregator requires JUNO_QUEUE_KAFKA_AWS_REGION (or AWS_REGION/AWS_DEFAULT_REGION) for aws-msk-iam" >&2
+    exit 1
+  fi
 fi
+exec /usr/local/bin/checkpoint-aggregator \
+  --base-chain-id "${BASE_CHAIN_ID}" \
+  --bridge-address "${BRIDGE_ADDRESS}" \
+  --operators "$CHECKPOINT_OPERATORS" \
+  --threshold "$CHECKPOINT_THRESHOLD" \
+  --store-driver postgres \
+  --postgres-dsn "$CHECKPOINT_POSTGRES_DSN" \
+  --blob-driver s3 \
+  --blob-bucket "$CHECKPOINT_BLOB_BUCKET" \
+  --blob-prefix "${CHECKPOINT_BLOB_PREFIX:-checkpoint-packages}" \
+  --ipfs-enabled=true \
+  --ipfs-api-url "$CHECKPOINT_IPFS_API_URL" \
+  ${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"} \
+  --queue-driver kafka \
+  --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
+  --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
+  --queue-output-topic "${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
+  --health-port "${CHECKPOINT_AGGREGATOR_HEALTH_PORT:-18302}"
+EOF_AGGREGATOR_WRAPPER
+sudo install -m 0755 "$aggregator_tmp" "$checkpoint_aggregator_script"
+rm -f "$aggregator_tmp"
 dkg_admin_tmp="$(mktemp)"
 cat >"$dkg_admin_tmp" <<'EOF_DKG_WRAPPER'
 #!/usr/bin/env bash
@@ -2114,8 +2202,46 @@ rm -f "$juno_scan_backfill_service_tmp"
 
 config_hydrator_script="/usr/local/bin/intents-juno-config-hydrator.sh"
 sudo install -m 0755 "$remote_stage_dir/intents-juno-config-hydrator.sh" "$config_hydrator_script"
+config_hydrator_service_tmp="$(mktemp)"
+cat >"$config_hydrator_service_tmp" <<'EOF_CONFIG_HYDRATOR_SERVICE'
+[Unit]
+Description=Intents Juno Operator config hydrator
+After=network-online.target
+Wants=network-online.target
+Before=checkpoint-signer.service checkpoint-aggregator.service tss-host.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+EnvironmentFile=-/etc/intents-juno/operator-stack-hydrator.env
+ExecStart=/usr/local/bin/intents-juno-config-hydrator.sh
+RemainAfterExit=yes
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/etc/intents-juno /var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=512M
+CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target
+EOF_CONFIG_HYDRATOR_SERVICE
+sudo install -m 0644 "$config_hydrator_service_tmp" /etc/systemd/system/intents-juno-config-hydrator.service
+rm -f "$config_hydrator_service_tmp"
 
 sudo systemctl daemon-reload
+sudo systemctl enable intents-juno-config-hydrator.service >/dev/null
 sudo systemctl enable juno-scan-backfill.service >/dev/null
 sudo systemctl restart intents-juno-config-hydrator.service
 sudo install -m 0600 -o intents-juno -g intents-juno "$remote_stage_dir/ufvk.txt" "$runtime_dir/ufvk.txt"

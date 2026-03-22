@@ -137,6 +137,18 @@ variable "operator_client_security_group_ids" {
   default     = []
 }
 
+variable "shared_service_client_security_group_ids" {
+  description = "Additional security group IDs allowed to reach shared Postgres and Kafka ports."
+  type        = list(string)
+  default     = []
+}
+
+variable "shared_ipfs_client_security_group_ids" {
+  description = "Additional security group IDs allowed to reach the shared IPFS API."
+  type        = list(string)
+  default     = []
+}
+
 variable "iam_instance_profile" {
   description = "Optional IAM instance profile name attached to runner/operator/shared hosts."
   type        = string

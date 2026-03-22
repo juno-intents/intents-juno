@@ -101,12 +101,14 @@ for cmd in jq cast; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
+app_deploy="$(production_abs_path "$(pwd)" "$app_deploy")"
 output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 mkdir -p "$output_dir/app"
 
 patched_app_deploy="$output_dir/app/app-deploy.json"
 backoffice_env="$output_dir/app/backoffice.env"
 tmp_dir="$(mktemp -d)"
+patched_app_deploy_tmp="$tmp_dir/app-deploy.json"
 resolved_env="$tmp_dir/app-secrets.resolved.env"
 cleanup() {
   rm -rf "$tmp_dir"
@@ -121,7 +123,8 @@ operator_endpoints_json="$(
 jq \
   --argjson operator_endpoints "$operator_endpoints_json" \
   '.operator_endpoints = $operator_endpoints' \
-  "$app_deploy" >"$patched_app_deploy"
+  "$app_deploy" >"$patched_app_deploy_tmp"
+mv "$patched_app_deploy_tmp" "$patched_app_deploy"
 
 environment="$(production_json_required "$patched_app_deploy" '.environment | select(type == "string" and length > 0)')"
 allow_local_resolvers="false"
@@ -178,7 +181,9 @@ else
   app_targets_json="$(jq -cn --arg app_host "$app_host" '[$app_host]')"
 fi
 
-cp "$patched_app_deploy" "$app_deploy"
+if [[ "$patched_app_deploy" != "$app_deploy" ]]; then
+  cp "$patched_app_deploy" "$app_deploy"
+fi
 
 jq -n \
   --arg ready "true" \

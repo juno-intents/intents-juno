@@ -224,13 +224,35 @@ case "${args[*]}" in
 JSON
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
-    cat <<'JSON'
+    if [[ "${TEST_UPGRADE_PREVIEW_MISSING_OPERATOR_METADATA:-false}" == "true" ]]; then
+      cat <<'JSON'
+{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134"}]}]}
+JSON
+    else
+      cat <<'JSON'
 {"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-op1","Version":"3"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}
 JSON
+    fi
     ;;
   "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
-    cat <<'JSON'
+    if [[ "${TEST_UPGRADE_PREVIEW_MISSING_OPERATOR_METADATA:-false}" == "true" ]]; then
+      cat <<'JSON'
+{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248"}]}]}
+JSON
+    else
+      cat <<'JSON'
 {"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-op2","Version":"7"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}
+JSON
+    fi
+    ;;
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names juno-live-e2e-preview0316d-operator-1 --output json")
+    cat <<'JSON'
+{"AutoScalingGroups":[{"AutoScalingGroupName":"juno-live-e2e-preview0316d-operator-1","LaunchTemplate":{"LaunchTemplateId":"lt-derived-op1","Version":"11"}}]}
+JSON
+    ;;
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names juno-live-e2e-preview0316d-operator-2 --output json")
+    cat <<'JSON'
+{"AutoScalingGroups":[{"AutoScalingGroupName":"juno-live-e2e-preview0316d-operator-2","LaunchTemplate":{"LaunchTemplateId":"lt-derived-op2","Version":"13"}}]}
 JSON
     ;;
   "acm list-certificates --certificate-statuses ISSUED --includes keyTypes=RSA_2048,EC_prime256v1 --output json")
@@ -410,6 +432,51 @@ test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs() {
   rm -rf "$tmp"
 }
 
+test_upgrade_preview_inventory_derives_live_e2e_operator_rollout_metadata_when_instance_tags_are_missing() {
+  local tmp inventory state output fake_bin aws_log
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  state="$tmp/terraform.tfstate"
+  output="$tmp/inventory.upgraded.json"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/operators/op1" "$tmp/operators/op2"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op1/dkg-backup.zip"
+  : >"$tmp/operators/op1/operator-secrets.env"
+  : >"$tmp/operators/op2/known_hosts"
+  : >"$tmp/operators/op2/dkg-backup.zip"
+  : >"$tmp/operators/op2/operator-secrets.env"
+  mkdir -p "$tmp/legacy-live-e2e"
+
+  write_legacy_preview_inventory "$inventory"
+  write_legacy_state_fixture "$state"
+  write_fake_upgrade_preview_aws "$fake_bin/aws" "$aws_log"
+
+  (
+    cd "$tmp"
+    TEST_AWS_LOG="$aws_log" TEST_UPGRADE_PREVIEW_MISSING_OPERATOR_METADATA=true PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/upgrade-preview-inventory.sh" \
+        --inventory "$inventory" \
+        --legacy-state "$state" \
+        --output "$output" \
+        --app-runtime-ami-release-tag app-runtime-ami-v2026.03.20-testnet \
+        --shared-proof-services-image-release-tag shared-proof-services-image-v2026.03.20-testnet \
+        --wireguard-role-ami-release-tag wireguard-role-ami-v2026.03.20-testnet
+  )
+
+  assert_eq "$(jq -r '.operators[0].asg' "$output")" "juno-live-e2e-preview0316d-operator-1" "legacy preview upgrade derives the first operator asg from live-e2e lineage when tags are missing"
+  assert_eq "$(jq -r '.operators[0].launch_template.id' "$output")" "lt-derived-op1" "legacy preview upgrade resolves the first operator launch template from the derived asg"
+  assert_eq "$(jq -r '.operators[1].asg' "$output")" "juno-live-e2e-preview0316d-operator-2" "legacy preview upgrade derives the second operator asg from live-e2e lineage when tags are missing"
+  assert_eq "$(jq -r '.operators[1].launch_template.id' "$output")" "lt-derived-op2" "legacy preview upgrade resolves the second operator launch template from the derived asg"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names juno-live-e2e-preview0316d-operator-1" "legacy preview upgrade queries autoscaling when operator instance tags are missing"
+
+  rm -rf "$tmp"
+}
+
 test_upgrade_preview_inventory_preserves_production_shared_v2_inputs() {
   local tmp inventory output fake_bin aws_log
   tmp="$(mktemp -d)"
@@ -483,6 +550,7 @@ test_upgrade_preview_inventory_preserves_production_shared_v2_inputs() {
 main() {
   test_upgrade_preview_inventory_translates_legacy_preview_inputs
   test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs
+  test_upgrade_preview_inventory_derives_live_e2e_operator_rollout_metadata_when_instance_tags_are_missing
   test_upgrade_preview_inventory_preserves_production_shared_v2_inputs
 }
 
