@@ -17,6 +17,7 @@ locals {
   }
   cloudfront_cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
   cloudfront_origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
+  viewer_validation_option            = one(aws_acm_certificate.viewer.domain_validation_options)
 }
 
 data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
@@ -48,27 +49,18 @@ resource "aws_acm_certificate" "viewer" {
 }
 
 resource "aws_route53_record" "viewer_validation" {
-  for_each = {
-    for dvo in aws_acm_certificate.viewer.domain_validation_options :
-    dvo.domain_name => {
-      name   = dvo.resource_record_name
-      record = dvo.resource_record_value
-      type   = dvo.resource_record_type
-    }
-  }
-
   allow_overwrite = true
   zone_id = var.zone_id
-  name    = each.value.name
-  type    = each.value.type
+  name    = local.viewer_validation_option.resource_record_name
+  type    = local.viewer_validation_option.resource_record_type
   ttl     = 60
-  records = [each.value.record]
+  records = [local.viewer_validation_option.resource_record_value]
 }
 
 resource "aws_acm_certificate_validation" "viewer" {
   provider                = aws.us_east_1
   certificate_arn         = aws_acm_certificate.viewer.arn
-  validation_record_fqdns = [for record in aws_route53_record.viewer_validation : record.fqdn]
+  validation_record_fqdns = [aws_route53_record.viewer_validation.fqdn]
 }
 
 resource "aws_wafv2_web_acl" "app" {

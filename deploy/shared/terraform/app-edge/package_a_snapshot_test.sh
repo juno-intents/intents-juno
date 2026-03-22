@@ -61,6 +61,9 @@ main() {
   assert_contains "$origin_cname" 'records = [var.public_lb_dns_name]' "origin CNAME points at the public app load balancer"
   assert_contains "$origin_cname" 'allow_overwrite = true' "origin CNAME allows overwrite for replay-safe preview deploys"
   assert_contains "$viewer_validation" 'allow_overwrite = true' "viewer certificate validation CNAMEs allow overwrite for replay-safe preview deploys"
+  assert_not_contains "$viewer_validation" 'for_each =' "viewer certificate validation no longer derives record identities from apply-time ACM options"
+  assert_contains "$main_tf" 'viewer_validation_option            = one(aws_acm_certificate.viewer.domain_validation_options)' "viewer certificate validation collapses ACM DNS options to the single preview bridge name"
+  assert_contains "$main_tf" 'validation_record_fqdns = [aws_route53_record.viewer_validation.fqdn]' "viewer certificate validation waits on the singular Route53 validation record"
 
   assert_contains "$bridge_a" 'allow_overwrite = true' "bridge A record allows overwrite for replay-safe preview deploys"
   assert_contains "$bridge_aaaa" 'allow_overwrite = true' "bridge AAAA record allows overwrite for replay-safe preview deploys"
