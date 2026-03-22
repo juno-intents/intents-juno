@@ -562,6 +562,8 @@ production_write_shared_terraform_override_tfvars() {
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
   local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
   local app_security_group_id operator_client_security_group_ids_json shared_service_client_security_group_ids_json
+  local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
+  local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -569,6 +571,7 @@ production_write_shared_terraform_override_tfvars() {
   app_role_json="$(production_inventory_app_role_json "$inventory")"
   wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   proof_role_json="$(production_json_optional "$inventory" '.shared_roles.proof // {}')"
+  live_e2e_json="$(production_json_optional "$inventory" '.shared_services.live_e2e // {}')"
   vpc_id="$(jq -r '.vpc_id // empty' <<<"$app_role_json")"
   private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
   shared_postgres_password="$(production_json_optional "$inventory" '.shared_postgres_password')"
@@ -576,6 +579,7 @@ production_write_shared_terraform_override_tfvars() {
   deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
   withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
   backoffice_hostname="$(jq -r '(.backoffice_hostname // empty)' <<<"$wireguard_role_json")"
+  backoffice_private_endpoint="$(jq -r '.backoffice_private_endpoint // empty' <<<"$wireguard_role_json")"
   wireguard_public_subnet_ids_json="$(
     jq -c '
       if (.public_subnet_ids // [] | type) == "array" and ((.public_subnet_ids // []) | length) > 0 then
@@ -587,6 +591,15 @@ production_write_shared_terraform_override_tfvars() {
       end
     ' <<<"$wireguard_role_json"
   )"
+  wireguard_public_subnet_id="$(jq -r '
+    if (.public_subnet_id // "" | type) == "string" and (.public_subnet_id // "") != "" then
+      .public_subnet_id
+    elif (.public_subnet_ids // [] | type) == "array" and ((.public_subnet_ids // []) | length) > 0 then
+      .public_subnet_ids[0]
+    else
+      ""
+    end
+  ' <<<"$wireguard_role_json")"
   backoffice_private_endpoint_ips_json="$(
     jq -c '
       if (.backoffice_private_endpoint_ips // [] | type) == "array" and ((.backoffice_private_endpoint_ips // []) | length) > 0 then
@@ -610,6 +623,15 @@ production_write_shared_terraform_override_tfvars() {
   shared_wireguard_network_cidr="$(jq -r '.network_cidr // empty' <<<"$wireguard_role_json")"
   alarm_actions_json="$(jq -c '.shared_services.alarm_actions // []' "$inventory")"
   app_security_group_id="$(jq -r '.app_security_group_id // empty' <<<"$app_role_json")"
+  app_instance_profile_name="$(jq -r '.app_instance_profile_name // empty' <<<"$app_role_json")"
+  live_e2e_deployment_id="$(jq -r '.deployment_id // empty' <<<"$live_e2e_json")"
+  if [[ -z "$live_e2e_deployment_id" && "$app_instance_profile_name" == juno-live-e2e-*-instance-profile ]]; then
+    live_e2e_deployment_id="${app_instance_profile_name#juno-live-e2e-}"
+    live_e2e_deployment_id="${live_e2e_deployment_id%-instance-profile}"
+  fi
+  live_e2e_allowed_ssh_cidr="$(jq -r '.allowed_ssh_cidr // empty' <<<"$live_e2e_json")"
+  live_e2e_ssh_public_key="$(jq -r '.ssh_public_key // empty' <<<"$live_e2e_json")"
+  operator_instance_count="$(jq -r '(.operators // []) | length' "$inventory")"
   if [[ -n "$app_security_group_id" ]]; then
     shared_service_client_security_group_ids_json="$(jq -cn --arg sg "$app_security_group_id" '[$sg]')"
   else
@@ -623,35 +645,65 @@ production_write_shared_terraform_override_tfvars() {
   [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
-    [[ -n "$shared_wireguard_role_ami_id" ]] || die "wireguard_role.ami_id is required for shared terraform role runtime"
+    [[ -n "$live_e2e_deployment_id" ]] || die "shared_services.live_e2e.deployment_id is required for live-e2e shared terraform"
+    [[ -n "$live_e2e_allowed_ssh_cidr" ]] || die "shared_services.live_e2e.allowed_ssh_cidr is required for live-e2e shared terraform"
+    [[ -n "$live_e2e_ssh_public_key" ]] || die "shared_services.live_e2e.ssh_public_key is required for live-e2e shared terraform"
+    [[ -n "$proof_requestor_secret_arn" ]] || die "shared_roles.proof.requestor_secret_arn is required for live-e2e shared terraform"
+    [[ -n "$proof_funder_secret_arn" ]] || die "shared_roles.proof.funder_secret_arn is required for live-e2e shared terraform"
+    [[ -n "$proof_requestor_address" ]] || die "shared_roles.proof.requestor_address is required for live-e2e shared terraform"
+    [[ -n "$proof_rpc_url" ]] || die "shared_roles.proof.rpc_url is required for live-e2e shared terraform"
+    [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for live-e2e shared terraform"
+    [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for live-e2e shared terraform"
 
     jq -n \
+      --arg aws_region "$aws_region" \
+      --arg deployment_id "$live_e2e_deployment_id" \
+      --arg allowed_ssh_cidr "$live_e2e_allowed_ssh_cidr" \
+      --arg ssh_public_key "$live_e2e_ssh_public_key" \
+      --argjson operator_instance_count "$operator_instance_count" \
+      --arg shared_sp1_requestor_secret_arn "$proof_requestor_secret_arn" \
+      --arg shared_sp1_funder_secret_arn "$proof_funder_secret_arn" \
+      --arg shared_sp1_requestor_address "$proof_requestor_address" \
+      --argjson shared_base_chain_id "$base_chain_id" \
+      --arg shared_deposit_image_id "$deposit_image_id" \
+      --arg shared_withdraw_image_id "$withdraw_image_id" \
+      --arg shared_sp1_rpc_url "$proof_rpc_url" \
+      --arg wireguard_public_subnet_id "$wireguard_public_subnet_id" \
       --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
       --arg backoffice_hostname "$backoffice_hostname" \
+      --arg backoffice_private_endpoint "$backoffice_private_endpoint" \
       --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
       --arg shared_proof_service_image "$shared_proof_service_image" \
-      --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
+      --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
+      --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
       --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
       '{
+        aws_region: $aws_region,
+        deployment_id: $deployment_id,
+        allowed_ssh_cidr: $allowed_ssh_cidr,
+        ssh_public_key: $ssh_public_key,
+        operator_instance_count: $operator_instance_count,
         shared_wireguard_enabled: true,
         shared_wireguard_backoffice_hostname: $backoffice_hostname,
         shared_proof_service_image: $shared_proof_service_image,
-        shared_proof_role_min_size: 2,
-        shared_proof_role_desired_capacity: 2,
-        shared_proof_role_max_size: 4,
-        shared_wireguard_min_size: 2,
-        shared_wireguard_desired_capacity: 2,
-        shared_wireguard_max_size: 4,
-        shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id
+        shared_sp1_requestor_secret_arn: $shared_sp1_requestor_secret_arn,
+        shared_sp1_funder_secret_arn: $shared_sp1_funder_secret_arn,
+        shared_sp1_requestor_address: $shared_sp1_requestor_address,
+        shared_base_chain_id: $shared_base_chain_id,
+        shared_deposit_image_id: $shared_deposit_image_id,
+        shared_withdraw_image_id: $shared_withdraw_image_id,
+        shared_sp1_rpc_url: $shared_sp1_rpc_url,
+        shared_wireguard_listen_port: $shared_wireguard_listen_port,
+        shared_wireguard_network_cidr: $shared_wireguard_network_cidr
       }
       + (if ($operator_client_security_group_ids | length) == 0 then {} else {
         operator_client_security_group_ids: $operator_client_security_group_ids
       } end)
-      + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
-        shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
+      + (if $wireguard_public_subnet_id == "" then {} else {
+        shared_wireguard_public_subnet_id: $wireguard_public_subnet_id
       } end)
-      + (if ($backoffice_private_endpoint_ips | length) == 0 then {} else {
-        shared_wireguard_backoffice_private_endpoint_ips: $backoffice_private_endpoint_ips
+      + (if $backoffice_private_endpoint == "" then {} else {
+        shared_wireguard_backoffice_private_endpoint: $backoffice_private_endpoint
       } end)' >"$output_file"
     return 0
   fi

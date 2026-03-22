@@ -145,6 +145,41 @@ write_legacy_state_fixture() {
           }
         }
       ]
+    },
+    {
+      "type": "aws_key_pair",
+      "name": "runner",
+      "instances": [
+        {
+          "attributes": {
+            "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10",
+            "tags": {
+              "Deployment": "preview0316d"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "type": "aws_security_group",
+      "name": "runner",
+      "instances": [
+        {
+          "attributes": {
+            "ingress": [
+              {
+                "cidr_blocks": ["92.98.132.70/32"],
+                "from_port": 22,
+                "protocol": "tcp",
+                "to_port": 22
+              }
+            ],
+            "tags": {
+              "Deployment": "preview0316d"
+            }
+          }
+        }
+      ]
     }
   ],
   "outputs": {
@@ -254,6 +289,9 @@ test_upgrade_preview_inventory_translates_legacy_preview_inputs() {
 
   assert_eq "$(jq -r '.app_role.terraform_dir' "$output")" "deploy/shared/terraform/app-runtime" "legacy preview upgrade sets app runtime terraform dir"
   assert_eq "$(jq -r '.shared_services.terraform_dir' "$output")" "deploy/shared/terraform/live-e2e" "legacy preview upgrade preserves live-e2e shared terraform dir"
+  assert_eq "$(jq -r '.shared_services.live_e2e.deployment_id' "$output")" "preview0316d" "legacy preview upgrade preserves live-e2e deployment id"
+  assert_eq "$(jq -r '.shared_services.live_e2e.allowed_ssh_cidr' "$output")" "92.98.132.70/32" "legacy preview upgrade preserves live-e2e ssh cidr"
+  assert_eq "$(jq -r '.shared_services.live_e2e.ssh_public_key' "$output")" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10" "legacy preview upgrade preserves live-e2e ssh key"
   assert_eq "$(jq -r '.app_role.vpc_id' "$output")" "vpc-0e9830a2e4abe7118" "legacy preview upgrade copies vpc id"
   assert_eq "$(jq -r '.app_role.public_subnet_ids[1]' "$output")" "subnet-03d50beebb2734da8" "legacy preview upgrade copies public subnet ids"
   assert_eq "$(jq -r '.app_role.private_subnet_ids[1]' "$output")" "subnet-0dfe9dd62ddea943b" "legacy preview upgrade copies private subnet ids"
@@ -289,6 +327,7 @@ test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs() {
   : >"$tmp/operators/op2/known_hosts"
   : >"$tmp/operators/op2/dkg-backup.zip"
   : >"$tmp/operators/op2/operator-secrets.env"
+  write_legacy_state_fixture "$tmp/legacy-live-e2e.tfstate.json"
 
   write_legacy_preview_inventory "$inventory"
   jq '
@@ -363,6 +402,9 @@ test_upgrade_preview_inventory_normalizes_partial_v2_preview_inputs() {
   assert_eq "$(jq -r '.app_role.public_bridge_additional_certificate_arns[0]' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-preview" "partial v2 preview upgrade preserves the bridge hostname certificate"
   assert_eq "$(jq -r '.app_role.internal_backoffice_certificate_arn' "$output")" "arn:aws:acm:us-east-1:021490342184:certificate/ops-preview" "partial v2 preview upgrade restores the backoffice certificate"
   assert_eq "$(jq -r '.shared_services.terraform_dir' "$output")" "deploy/shared/terraform/live-e2e" "partial v2 preview upgrade repairs live-e2e shared terraform dir"
+  assert_eq "$(jq -r '.shared_services.live_e2e.deployment_id' "$output")" "preview0316d" "partial v2 preview upgrade restores live-e2e deployment id"
+  assert_eq "$(jq -r '.shared_services.live_e2e.allowed_ssh_cidr' "$output")" "92.98.132.70/32" "partial v2 preview upgrade restores live-e2e ssh cidr"
+  assert_eq "$(jq -r '.shared_services.live_e2e.ssh_public_key' "$output")" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10" "partial v2 preview upgrade restores live-e2e ssh key"
   assert_contains "$(cat "$aws_log")" "acm list-certificates" "partial v2 preview upgrade queries ACM certificates"
 
   rm -rf "$tmp"

@@ -228,6 +228,111 @@ resolve_preview_shared_terraform_dir() {
   printf 'deploy/shared/terraform/production-shared\n'
 }
 
+find_live_e2e_state_file() {
+  local inventory_file="$1"
+  local inventory_root="$2"
+  local discovered_state_file="$3"
+  local configured_dir candidate
+
+  for candidate in \
+    "$discovered_state_file" \
+    "$inventory_root/legacy-live-e2e.tfstate.json" \
+    "$inventory_root/legacy-live-e2e.tfstate" \
+    "$inventory_root/terraform/live-e2e/terraform.tfstate.localbak" \
+    "$inventory_root/terraform/live-e2e/terraform.tfstate" \
+    "$inventory_root/terraform/live-e2e/terraform.tfstate.backup" \
+    "$inventory_root/terraform/live-e2e/terraform.tfstate.backup.localbak"; do
+    if [[ -n "$candidate" && -f "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  configured_dir="$(production_json_optional "$inventory_file" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
+  if [[ "$configured_dir" == *"live-e2e"* ]]; then
+    configured_dir="$(production_abs_path "$inventory_root" "$configured_dir")"
+    for candidate in \
+      "$configured_dir/terraform.tfstate.localbak" \
+      "$configured_dir/terraform.tfstate" \
+      "$configured_dir/terraform.tfstate.backup" \
+      "$configured_dir/terraform.tfstate.backup.localbak"; do
+      if [[ -f "$candidate" ]]; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    done
+  fi
+
+  return 1
+}
+
+live_e2e_deployment_id_from_instance_profile() {
+  local app_instance_profile_name="${1:-}"
+
+  if [[ "$app_instance_profile_name" == juno-live-e2e-*-instance-profile ]]; then
+    local deployment_id="${app_instance_profile_name#juno-live-e2e-}"
+    deployment_id="${deployment_id%-instance-profile}"
+    printf '%s\n' "$deployment_id"
+  fi
+}
+
+live_e2e_deployment_id_from_state() {
+  local state_file="$1"
+  local app_instance_profile_name="${2:-}"
+  local deployment_id
+
+  deployment_id="$(
+    jq -r '
+      [
+        .outputs.effective_instance_profile.value // empty,
+        (
+          (.resources // [])[]
+          | select(.type == "aws_key_pair" and .name == "runner")
+          | .instances[0].attributes.tags.Deployment // empty
+        ),
+        (
+          (.resources // [])[]
+          | select(.type == "aws_security_group" and .name == "runner")
+          | .instances[0].attributes.tags.Deployment // empty
+        )
+      ]
+      | map(select(type == "string" and length > 0))
+      | .[0] // empty
+    ' "$state_file"
+  )"
+  deployment_id="$(live_e2e_deployment_id_from_instance_profile "$deployment_id")"
+  if [[ -z "$deployment_id" ]]; then
+    deployment_id="$(live_e2e_deployment_id_from_instance_profile "$app_instance_profile_name")"
+  fi
+  printf '%s\n' "$deployment_id"
+}
+
+live_e2e_allowed_ssh_cidr_from_state() {
+  local state_file="$1"
+  jq -r '
+    [
+      (.resources // [])[]
+      | select(.type == "aws_security_group" and .name == "runner")
+      | .instances[0].attributes.ingress[]?
+      | select((.from_port // 0) == 22 and (.to_port // 0) == 22 and (.protocol // "") == "tcp")
+      | .cidr_blocks[]?
+      | select(type == "string" and length > 0)
+    ][0] // empty
+  ' "$state_file"
+}
+
+live_e2e_ssh_public_key_from_state() {
+  local state_file="$1"
+  jq -r '
+    [
+      (.resources // [])[]
+      | select(.type == "aws_key_pair" and .name == "runner")
+      | .instances[0].attributes.public_key
+      | select(type == "string" and length > 0)
+    ][0] // empty
+  ' "$state_file"
+}
+
 normalize_preview_app_role_certificates() {
   local inventory_file="$1"
   local output_file="$2"
@@ -512,12 +617,39 @@ if ! production_inventory_has_v2_roles "$inventory_abs"; then
     ' "$inventory_abs" >"$upgraded_inventory"
 fi
 
+live_e2e_state_file=""
+live_e2e_deployment_id=""
+live_e2e_allowed_ssh_cidr=""
+live_e2e_ssh_public_key=""
+if [[ "$shared_terraform_dir_rel" == "deploy/shared/terraform/live-e2e" ]]; then
+  live_e2e_state_file="$(find_live_e2e_state_file "$inventory_abs" "$inventory_dir" "$state_file" || true)"
+  if [[ -n "$live_e2e_state_file" ]]; then
+    live_e2e_deployment_id="$(live_e2e_deployment_id_from_state "$live_e2e_state_file" "$app_instance_profile_name")"
+    live_e2e_allowed_ssh_cidr="$(live_e2e_allowed_ssh_cidr_from_state "$live_e2e_state_file")"
+    live_e2e_ssh_public_key="$(live_e2e_ssh_public_key_from_state "$live_e2e_state_file")"
+  else
+    live_e2e_deployment_id="$(live_e2e_deployment_id_from_instance_profile "$app_instance_profile_name")"
+  fi
+fi
+
 normalized_shared_terraform_inventory="$tmp_dir/inventory.shared-terraform-dir.json"
 jq \
   --arg shared_terraform_dir_rel "$shared_terraform_dir_rel" \
+  --arg live_e2e_deployment_id "$live_e2e_deployment_id" \
+  --arg live_e2e_allowed_ssh_cidr "$live_e2e_allowed_ssh_cidr" \
+  --arg live_e2e_ssh_public_key "$live_e2e_ssh_public_key" \
   '
     .shared_services = (.shared_services // {})
     | .shared_services.terraform_dir = $shared_terraform_dir_rel
+    | if $shared_terraform_dir_rel == "deploy/shared/terraform/live-e2e" then
+        .shared_services.live_e2e = (
+          (.shared_services.live_e2e // {})
+          + (if $live_e2e_deployment_id == "" then {} else {deployment_id: $live_e2e_deployment_id} end)
+          + (if $live_e2e_allowed_ssh_cidr == "" then {} else {allowed_ssh_cidr: $live_e2e_allowed_ssh_cidr} end)
+          + (if $live_e2e_ssh_public_key == "" then {} else {ssh_public_key: $live_e2e_ssh_public_key} end)
+        )
+      else .
+      end
   ' "$upgraded_inventory" >"$normalized_shared_terraform_inventory"
 upgraded_inventory="$normalized_shared_terraform_inventory"
 

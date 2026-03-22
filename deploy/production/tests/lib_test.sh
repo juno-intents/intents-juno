@@ -128,7 +128,23 @@ write_inventory_fixture() {
           endpoint_host: "198.51.100.25",
           publish_public_dns: false
         }
-    ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
+  ' "$REPO_ROOT/deploy/production/schema/deployment-inventory.example.json" >"$target"
+}
+
+write_live_e2e_tfvars_fixture() {
+  local target="$1"
+  cat >"$target" <<'EOF'
+deployment_id = "preview0316d"
+allowed_ssh_cidr = "92.98.132.70/32"
+ssh_public_key = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+operator_ami_id = "ami-0d130f29f8f555638"
+
+allowed_checkpoint_signer_kms_key_arns = [
+  "arn:aws:kms:us-east-1:021490342184:key/0aa20bf8-bf3c-43ca-9bfe-85d964a5c3b9",
+  "arn:aws:kms:us-east-1:021490342184:key/e9ac19f2-8726-417f-9dfb-97ea3e5beb5e",
+  "arn:aws:kms:us-east-1:021490342184:key/d493d944-7c7c-459c-b364-88c6b1089475",
+]
+EOF
 }
 
 test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars() {
@@ -3001,8 +3017,15 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   local workdir override_file
   workdir="$(mktemp -d)"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mkdir -p "$workdir/terraform/live-e2e"
+  write_live_e2e_tfvars_fixture "$workdir/terraform/live-e2e/terraform.tfvars"
   jq '
     .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_services.live_e2e = {
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
     | .app_host.backoffice_dns_label = ""
     | .app_host.ops_public_dns_label = "ops"
     | .app_role.app_security_group_id = "sg-approle012345678"
@@ -3021,10 +3044,22 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   override_file="$workdir/shared-terraform.auto.tfvars.json"
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
 
+  assert_eq "$(jq -r '.aws_region' "$override_file")" "us-east-1" "preview override includes live-e2e aws region"
+  assert_eq "$(jq -r '.deployment_id' "$override_file")" "preview0316d" "preview override derives live-e2e deployment id from the instance profile"
+  assert_eq "$(jq -r '.allowed_ssh_cidr' "$override_file")" "92.98.132.70/32" "preview override preserves live-e2e ssh cidr"
+  assert_eq "$(jq -r '.ssh_public_key' "$override_file")" "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10" "preview override preserves live-e2e ssh key"
+  assert_eq "$(jq -r '.operator_instance_count' "$override_file")" "1" "preview override keeps the live-e2e operator count aligned with inventory"
+  assert_eq "$(jq -r '.shared_proof_service_image' "$override_file")" "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef" "preview override includes live-e2e proof image"
+  assert_eq "$(jq -r '.shared_sp1_requestor_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-requestor" "preview override includes live-e2e proof requestor secret"
+  assert_eq "$(jq -r '.shared_sp1_funder_secret_arn' "$override_file")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-proof-funder" "preview override includes live-e2e proof funder secret"
+  assert_eq "$(jq -r '.shared_base_chain_id' "$override_file")" "84532" "preview override includes live-e2e base chain id"
   assert_eq "$(jq -r '.shared_wireguard_enabled' "$override_file")" "true" "preview override enables wireguard"
   assert_eq "$(jq -r '.shared_wireguard_backoffice_hostname' "$override_file")" "ops.alpha.intents-testing.thejunowallet.com" "preview override falls back to legacy ops dns label"
   assert_eq "$(jq -r '.operator_client_security_group_ids[0]' "$override_file")" "sg-approle012345678" "preview override forwards the app runtime sg to live-e2e operator ingress"
-  assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_id")' "$override_file")" "false" "preview override omits public subnet when inventory relies on live-e2e defaults"
+  assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_id")' "$override_file")" "false" "preview override omits the live-e2e wireguard subnet when the inventory relies on module defaults"
+  assert_eq "$(jq -r 'has("shared_wireguard_public_subnet_ids")' "$override_file")" "false" "preview override does not write the unsupported plural wireguard subnet input"
+  assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint_ips")' "$override_file")" "false" "preview override does not write the unsupported plural backoffice endpoint input"
+  assert_eq "$(jq -r 'has("shared_wireguard_role_ami_id")' "$override_file")" "false" "preview override does not write the unsupported wireguard ami input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
   rm -rf "$workdir"
 }
