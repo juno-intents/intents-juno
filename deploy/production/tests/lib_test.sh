@@ -315,10 +315,20 @@ EOF
 write_fake_aws_vpc_endpoint_describer() {
   local target="$1"
   shift
-  local services_json='[]'
+  local services_json='{"VpcEndpoints":[]}'
+  local spec service state
 
   if [[ "$#" -gt 0 ]]; then
-    services_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
+    services_json="$(
+      for spec in "$@"; do
+        service="${spec%%:*}"
+        state="${spec#*:}"
+        if [[ "$state" == "$spec" ]]; then
+          state="available"
+        fi
+        jq -cn --arg service "$service" --arg state "$state" '{ServiceName: $service, State: $state}'
+      done | jq -s '{VpcEndpoints: .}'
+    )"
   fi
 
   cat >"$target" <<EOF
@@ -337,6 +347,10 @@ while [[ \${#args[@]} -gt 0 ]]; do
 done
 case "\${args[0]:-} \${args[1]:-}" in
   "ec2 describe-vpc-endpoints")
+    if [[ " \$* " == *" Name=state,Values="* ]]; then
+      printf 'unexpected state filter: %s\n' "\$*" >&2
+      exit 1
+    fi
     printf '%s\n' '$services_json'
     ;;
   *)
@@ -3131,6 +3145,7 @@ test_write_shared_terraform_override_tfvars_reuses_existing_live_e2e_vpc_endpoin
     "com.amazonaws.us-east-1.secretsmanager" \
     "com.amazonaws.us-east-1.s3" \
     "com.amazonaws.us-east-1.sts" \
+    "com.amazonaws.us-east-1.kms:deleting" \
     "com.amazonaws.us-east-1.unrelated"
   old_path="$PATH"
   PATH="$fake_bin:$PATH"
@@ -3141,6 +3156,7 @@ test_write_shared_terraform_override_tfvars_reuses_existing_live_e2e_vpc_endpoin
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.secretsmanager") != null' "$override_file")" "true" "preview override keeps the reusable Secrets Manager endpoint"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.s3") != null' "$override_file")" "true" "preview override keeps the reusable S3 endpoint"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.sts") != null' "$override_file")" "true" "preview override keeps the reusable STS endpoint"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.kms") != null' "$override_file")" "false" "preview override ignores endpoints that are not in a reusable state"
   assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.unrelated") != null' "$override_file")" "false" "preview override ignores unrelated VPC endpoint services"
   rm -rf "$workdir"
 }

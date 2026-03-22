@@ -560,10 +560,7 @@ production_aws_existing_shared_vpc_endpoint_services_json() {
 
   if ! raw_services="$(
     aws --profile "$aws_profile" --region "$aws_region" ec2 describe-vpc-endpoints \
-      --filters \
-        "Name=vpc-id,Values=$vpc_id" \
-        "Name=state,Values=available,pending,pendingAcceptance,modifying" \
-      --query 'VpcEndpoints[].ServiceName' \
+      --filters "Name=vpc-id,Values=$vpc_id" \
       --output json 2>/dev/null
   )"; then
     printf '[]\n'
@@ -573,7 +570,28 @@ production_aws_existing_shared_vpc_endpoint_services_json() {
   jq -cn \
     --argjson discovered "$raw_services" \
     --arg region "$aws_region" '
-      ($discovered | if type == "array" then . else [] end | map(select(type == "string"))) as $services
+      (
+        $discovered
+        | if type == "object" then (.VpcEndpoints // []) else . end
+        | if type == "array" then . else [] end
+        | map(
+            if type == "object" then
+              select(
+                (.State // "") as $state
+                | $state == "available"
+                  or $state == "pending"
+                  or $state == "pendingAcceptance"
+                  or $state == "modifying"
+              )
+              | .ServiceName
+            elif type == "string" then
+              .
+            else
+              empty
+            end
+          )
+        | map(select(type == "string"))
+      ) as $services
       | [
           "com.amazonaws.\($region).secretsmanager",
           "com.amazonaws.\($region).ecr.api",
