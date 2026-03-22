@@ -60,6 +60,7 @@ backend_account_id="$(production_json_optional "$inventory" '.shared_services.ac
 if [[ -z "$backend_account_id" ]]; then
   backend_account_id="$(production_json_optional "$inventory" '.app_role.account_id')"
 fi
+app_instance_profile_name="$(production_json_optional "$inventory" '.app_role.app_instance_profile_name')"
 
 if [[ -z "$current_output_root" ]]; then
   current_output_root="$inventory_dir/production-output"
@@ -69,10 +70,23 @@ destroy_work_dir="$(dirname "$current_output_root")/$env_slug"
 mkdir -p "$destroy_work_dir"
 
 shared_name_prefix="$(production_json_optional "$inventory" '.shared_services.name_prefix')"
-if [[ -z "$shared_name_prefix" ]]; then
-  shared_name_prefix="intents-juno-shared"
+if [[ "$shared_terraform_dir_rel" == "deploy/shared/terraform/live-e2e" ]]; then
+  live_e2e_deployment_id="$(production_json_optional "$inventory" '.shared_services.live_e2e.deployment_id')"
+  if [[ -z "$live_e2e_deployment_id" && "$app_instance_profile_name" == juno-live-e2e-*-instance-profile ]]; then
+    live_e2e_deployment_id="${app_instance_profile_name#juno-live-e2e-}"
+    live_e2e_deployment_id="${live_e2e_deployment_id%-instance-profile}"
+  fi
+  [[ -n "$live_e2e_deployment_id" ]] || die "shared_services.live_e2e.deployment_id is required for live-e2e shared destroy"
+  if [[ -z "$shared_name_prefix" ]]; then
+    shared_name_prefix="juno-live-e2e"
+  fi
+  shared_resource_name="${shared_name_prefix}-${live_e2e_deployment_id}"
+else
+  if [[ -z "$shared_name_prefix" ]]; then
+    shared_name_prefix="intents-juno-shared"
+  fi
+  shared_resource_name="${shared_name_prefix}-${env_slug}"
 fi
-shared_resource_name="${shared_name_prefix}-${env_slug}"
 shared_resource_slug="$(production_safe_slug "$shared_resource_name")"
 shared_postgres_cluster_id="${shared_resource_name}-shared-aurora"
 shared_postgres_final_snapshot_identifier="${shared_resource_slug}-shared-aurora-final"

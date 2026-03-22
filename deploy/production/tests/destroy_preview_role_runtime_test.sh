@@ -517,6 +517,53 @@ test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_mi
   rm -rf "$tmp"
 }
 
+test_destroy_preview_role_runtime_uses_live_e2e_shared_resource_names() {
+  local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  app_deploy="$tmp/production-output/preview/app/app-deploy.json"
+  edge_state="$tmp/edge-state/preview.tfstate"
+  fake_bin="$tmp/bin"
+  combined_log="$tmp/combined.log"
+  cloudfront_state_dir="$tmp/cloudfront"
+
+  mkdir -p "$fake_bin" "$tmp/app" "$tmp/production-output/preview/app" "$tmp/edge-state"
+  : >"$tmp/app/known_hosts"
+  : >"$tmp/app/app-secrets.env"
+  : >"$edge_state"
+  write_destroy_inventory_fixture "$inventory"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_services.live_e2e = {
+        deployment_id: "preview0316d",
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
+  ' "$inventory" >"$inventory.next"
+  mv "$inventory.next" "$inventory"
+  write_app_deploy_fixture "$app_deploy"
+  write_fake_destroy_terraform "$fake_bin/terraform" "$combined_log" "ENKATN26PZLPX"
+  write_fake_destroy_aws "$fake_bin/aws" "$combined_log" "$cloudfront_state_dir"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+      PRODUCTION_TEST_STS_REGIONAL_IPS=10.0.11.214 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_INTERVAL_SECONDS=0 \
+      PRODUCTION_PREVIEW_EDGE_CLOUDFRONT_POLL_ATTEMPTS=2 \
+      bash "$REPO_ROOT/deploy/production/destroy-preview-role-runtime.sh" \
+        --inventory "$inventory" \
+        --current-output-root "$tmp/production-output"
+  )
+
+  assert_contains "$(cat "$combined_log")" "aws rds modify-db-cluster --profile juno --region us-east-1 --db-cluster-identifier juno-live-e2e-preview0316d-shared-aurora --no-deletion-protection --apply-immediately" "preview destroy derives the live-e2e aurora identifier from the deployment id"
+  assert_contains "$(cat "$combined_log")" "aws backup delete-recovery-point --profile juno --region us-east-1 --backup-vault-name juno-live-e2e-preview0316d-shared-postgres" "preview destroy purges the live-e2e primary backup vault"
+  assert_contains "$(cat "$combined_log")" "aws backup delete-recovery-point --profile juno --region us-west-2 --backup-vault-name juno-live-e2e-preview0316d-shared-postgres-dr" "preview destroy purges the live-e2e dr backup vault"
+
+  rm -rf "$tmp"
+}
+
 test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes() {
   local tmp inventory app_deploy fake_bin combined_log edge_state cloudfront_state_dir
   tmp="$(mktemp -d)"
@@ -636,6 +683,7 @@ test_destroy_preview_role_runtime_deletes_stale_shared_final_snapshot() {
 main() {
   test_destroy_preview_role_runtime_tears_down_edge_then_app_then_shared
   test_destroy_preview_role_runtime_discovers_app_security_group_when_output_is_missing
+  test_destroy_preview_role_runtime_uses_live_e2e_shared_resource_names
   test_destroy_preview_role_runtime_batches_cloudtrail_bucket_deletes
   test_destroy_preview_role_runtime_force_deletes_scheduled_shared_secrets
   test_destroy_preview_role_runtime_deletes_stale_shared_final_snapshot
