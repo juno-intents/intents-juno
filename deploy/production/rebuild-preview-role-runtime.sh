@@ -290,6 +290,10 @@ run_shared_infra_e2e() {
 [[ -n "$shared_infra_e2e_binary" ]] || die "--shared-infra-e2e-binary is required"
 [[ -f "$shared_infra_e2e_binary" ]] || die "shared-infra-e2e binary not found: $shared_infra_e2e_binary"
 
+if [[ -n "$funder_key_file" && -z "$ephemeral_funding_amount_wei" ]]; then
+  ephemeral_funding_amount_wei="$(production_required_min_base_relayer_balance_wei)"
+fi
+
 upgrade_preview_inventory_bin="${PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN:-$SCRIPT_DIR/upgrade-preview-inventory.sh}"
 destroy_preview_role_runtime_bin="${PRODUCTION_DESTROY_PREVIEW_ROLE_RUNTIME_BIN:-$SCRIPT_DIR/destroy-preview-role-runtime.sh}"
 resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEASE_INPUTS_BIN:-$SCRIPT_DIR/resolve-role-runtime-release-inputs.sh}"
