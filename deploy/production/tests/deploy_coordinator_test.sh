@@ -186,13 +186,16 @@ while [[ \${#args[@]} -gt 0 ]]; do
       ;;
   esac
 done
-case "\${args[0]:-} \${args[1]:-}" in
+  case "\${args[0]:-} \${args[1]:-}" in
   "sts get-caller-identity")
     if [[ " \$* " == *" --query Account "* && " \$* " == *" --output text "* ]]; then
       printf '021490342184\n'
     else
       printf '{"Account":"021490342184"}\n'
     fi
+    ;;
+  "ec2 describe-vpc-endpoints")
+    printf '[]\n'
     ;;
   "s3api head-bucket")
     exit 255

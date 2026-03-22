@@ -547,6 +547,46 @@ production_inventory_has_v2_roles() {
   ' "$inventory" >/dev/null 2>&1
 }
 
+production_aws_existing_shared_vpc_endpoint_services_json() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local vpc_id="$3"
+  local raw_services
+
+  if [[ -z "$vpc_id" ]] || ! command -v aws >/dev/null 2>&1; then
+    printf '[]\n'
+    return 0
+  fi
+
+  if ! raw_services="$(
+    aws --profile "$aws_profile" --region "$aws_region" ec2 describe-vpc-endpoints \
+      --filters \
+        "Name=vpc-id,Values=$vpc_id" \
+        "Name=state,Values=available,pending,pendingAcceptance,modifying" \
+      --query 'VpcEndpoints[].ServiceName' \
+      --output json 2>/dev/null
+  )"; then
+    printf '[]\n'
+    return 0
+  fi
+
+  jq -cn \
+    --argjson discovered "$raw_services" \
+    --arg region "$aws_region" '
+      ($discovered | if type == "array" then . else [] end | map(select(type == "string"))) as $services
+      | [
+          "com.amazonaws.\($region).secretsmanager",
+          "com.amazonaws.\($region).ecr.api",
+          "com.amazonaws.\($region).ecr.dkr",
+          "com.amazonaws.\($region).sts",
+          "com.amazonaws.\($region).kms",
+          "com.amazonaws.\($region).logs",
+          "com.amazonaws.\($region).s3"
+        ] as $managed
+      | [$services[] | select(. as $service | $managed | index($service))] | unique
+    '
+}
+
 production_write_shared_terraform_override_tfvars() {
   local inventory="$1"
   local output_file="$2"
@@ -562,6 +602,7 @@ production_write_shared_terraform_override_tfvars() {
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
   local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
   local app_security_group_id operator_client_security_group_ids_json shared_service_client_security_group_ids_json
+  local aws_profile shared_existing_vpc_endpoint_services_json
   local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
   local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
 
@@ -622,6 +663,7 @@ production_write_shared_terraform_override_tfvars() {
   shared_wireguard_listen_port="$(jq -r '.listen_port // empty' <<<"$wireguard_role_json")"
   shared_wireguard_network_cidr="$(jq -r '.network_cidr // empty' <<<"$wireguard_role_json")"
   alarm_actions_json="$(jq -c '.shared_services.alarm_actions // []' "$inventory")"
+  aws_profile="$(jq -r '.aws_profile // "juno"' <<<"$app_role_json")"
   app_security_group_id="$(jq -r '.app_security_group_id // empty' <<<"$app_role_json")"
   app_instance_profile_name="$(jq -r '.app_instance_profile_name // empty' <<<"$app_role_json")"
   live_e2e_deployment_id="$(jq -r '.deployment_id // empty' <<<"$live_e2e_json")"
@@ -654,6 +696,7 @@ production_write_shared_terraform_override_tfvars() {
     [[ -n "$proof_rpc_url" ]] || die "shared_roles.proof.rpc_url is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for live-e2e shared terraform"
     [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for live-e2e shared terraform"
+    shared_existing_vpc_endpoint_services_json="$(production_aws_existing_shared_vpc_endpoint_services_json "$aws_profile" "$aws_region" "$vpc_id")"
 
     jq -n \
       --arg aws_region "$aws_region" \
@@ -677,6 +720,7 @@ production_write_shared_terraform_override_tfvars() {
       --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
       --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
       --argjson operator_client_security_group_ids "$operator_client_security_group_ids_json" \
+      --argjson shared_existing_vpc_endpoint_services "$shared_existing_vpc_endpoint_services_json" \
       '{
         aws_region: $aws_region,
         deployment_id: $deployment_id,
@@ -694,7 +738,8 @@ production_write_shared_terraform_override_tfvars() {
         shared_withdraw_image_id: $shared_withdraw_image_id,
         shared_sp1_rpc_url: $shared_sp1_rpc_url,
         shared_wireguard_listen_port: $shared_wireguard_listen_port,
-        shared_wireguard_network_cidr: $shared_wireguard_network_cidr
+        shared_wireguard_network_cidr: $shared_wireguard_network_cidr,
+        shared_existing_vpc_endpoint_services: $shared_existing_vpc_endpoint_services
       }
       + (if ($operator_client_security_group_ids | length) == 0 then {} else {
         operator_client_security_group_ids: $operator_client_security_group_ids

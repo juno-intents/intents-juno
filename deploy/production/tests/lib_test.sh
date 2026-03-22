@@ -312,6 +312,42 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_aws_vpc_endpoint_describer() {
+  local target="$1"
+  shift
+  local services_json='[]'
+
+  if [[ "$#" -gt 0 ]]; then
+    services_json="$(printf '%s\n' "$@" | jq -R . | jq -s .)"
+  fi
+
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+args=( "\$@" )
+while [[ \${#args[@]} -gt 0 ]]; do
+  case "\${args[0]}" in
+    --profile|--region)
+      args=( "\${args[@]:2}" )
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "ec2 describe-vpc-endpoints")
+    printf '%s\n' '$services_json'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
 write_fake_docker_runner() {
   local target="$1"
   local log_file="$2"
@@ -3014,7 +3050,7 @@ EOF
 }
 
 test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory() {
-  local workdir override_file
+  local workdir override_file fake_bin old_path
   workdir="$(mktemp -d)"
   write_inventory_fixture "$workdir/inventory.json" "$workdir"
   mkdir -p "$workdir/terraform/live-e2e"
@@ -3042,7 +3078,13 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   override_file="$workdir/shared-terraform.auto.tfvars.json"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_vpc_endpoint_describer "$fake_bin/aws"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+  PATH="$old_path"
 
   assert_eq "$(jq -r '.aws_region' "$override_file")" "us-east-1" "preview override includes live-e2e aws region"
   assert_eq "$(jq -r '.deployment_id' "$override_file")" "preview0316d" "preview override derives live-e2e deployment id from the instance profile"
@@ -3061,6 +3103,45 @@ test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inv
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint_ips")' "$override_file")" "false" "preview override does not write the unsupported plural backoffice endpoint input"
   assert_eq "$(jq -r 'has("shared_wireguard_role_ami_id")' "$override_file")" "false" "preview override does not write the unsupported wireguard ami input"
   assert_eq "$(jq -r 'has("shared_wireguard_backoffice_private_endpoint")' "$override_file")" "false" "preview override omits private endpoint when live-e2e can derive runner private ip"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | length' "$override_file")" "0" "preview override writes an empty reusable VPC endpoint list when the VPC has none"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_reuses_existing_live_e2e_vpc_endpoints() {
+  local workdir override_file fake_bin old_path
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  mkdir -p "$workdir/terraform/live-e2e"
+  write_live_e2e_tfvars_fixture "$workdir/terraform/live-e2e/terraform.tfvars"
+  jq '
+    .shared_services.terraform_dir = "deploy/shared/terraform/live-e2e"
+    | .shared_services.live_e2e = {
+        allowed_ssh_cidr: "92.98.132.70/32",
+        ssh_public_key: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINSRFy2mYiQokwP/vBOs4jMpqBJQ1LXVsa2GsDslAxem root@162.120.18.10"
+      }
+    | .app_role.app_instance_profile_name = "juno-live-e2e-preview0316d-instance-profile"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  write_fake_aws_vpc_endpoint_describer \
+    "$fake_bin/aws" \
+    "com.amazonaws.us-east-1.secretsmanager" \
+    "com.amazonaws.us-east-1.s3" \
+    "com.amazonaws.us-east-1.sts" \
+    "com.amazonaws.us-east-1.unrelated"
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+  PATH="$old_path"
+
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | length' "$override_file")" "3" "preview override records the reusable shared endpoint services returned by aws"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.secretsmanager") != null' "$override_file")" "true" "preview override keeps the reusable Secrets Manager endpoint"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.s3") != null' "$override_file")" "true" "preview override keeps the reusable S3 endpoint"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.sts") != null' "$override_file")" "true" "preview override keeps the reusable STS endpoint"
+  assert_eq "$(jq -r '.shared_existing_vpc_endpoint_services | index("com.amazonaws.us-east-1.unrelated") != null' "$override_file")" "false" "preview override ignores unrelated VPC endpoint services"
   rm -rf "$workdir"
 }
 

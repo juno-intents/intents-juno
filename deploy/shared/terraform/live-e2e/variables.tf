@@ -105,6 +105,28 @@ variable "shared_subnet_ids" {
   default     = []
 }
 
+variable "shared_existing_vpc_endpoint_services" {
+  description = "AWS service names for shared VPC endpoints that already exist in the selected VPC and should be reused instead of recreated."
+  type        = list(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for service in var.shared_existing_vpc_endpoint_services :
+      contains([
+        "com.amazonaws.${var.aws_region}.secretsmanager",
+        "com.amazonaws.${var.aws_region}.ecr.api",
+        "com.amazonaws.${var.aws_region}.ecr.dkr",
+        "com.amazonaws.${var.aws_region}.sts",
+        "com.amazonaws.${var.aws_region}.kms",
+        "com.amazonaws.${var.aws_region}.logs",
+        "com.amazonaws.${var.aws_region}.s3",
+      ], trimspace(service))
+    ])
+    error_message = "shared_existing_vpc_endpoint_services may contain only the supported shared endpoint service names for aws_region."
+  }
+}
+
 variable "runner_associate_public_ip_address" {
   description = "Whether to associate a public IPv4 address to the runner EC2 instance."
   type        = bool
