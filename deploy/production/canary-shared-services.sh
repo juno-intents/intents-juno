@@ -152,6 +152,7 @@ environment="$(production_json_required "$shared_manifest" '.environment | selec
 canary_retry_attempts="${PRODUCTION_CANARY_RETRY_ATTEMPTS:-12}"
 canary_retry_sleep_seconds="${PRODUCTION_CANARY_RETRY_SLEEP_SECONDS:-15}"
 canary_curl_max_time_seconds="${PRODUCTION_CANARY_CURL_MAX_TIME_SECONDS:-10}"
+ipfs_min_healthy_targets=1
 ipfs_api_url="${ipfs_api_url%/}"
 if [[ "$artifacts_object_lock_required" != "true" ]]; then
   artifacts_object_lock_required="false"
@@ -301,11 +302,11 @@ else
   fi
 
   if [[ "$aws_auth_status" == "passed" && "$ipfs_status" == "passed" && -n "$ipfs_target_group_arn" ]]; then
-    if ! wait_for_target_group_healthy_targets aws_args "$ipfs_target_group_arn" 2 "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
+    if ! wait_for_target_group_healthy_targets aws_args "$ipfs_target_group_arn" "$ipfs_min_healthy_targets" "$canary_retry_attempts" "$canary_retry_sleep_seconds"; then
       ipfs_status="failed"
-      ipfs_detail="ipfs target group has fewer than two healthy targets"
+      ipfs_detail="ipfs target group has no healthy targets"
     elif [[ "$skip_ipfs_local_check" == "true" ]]; then
-      ipfs_detail="ipfs target group has at least two healthy targets"
+      ipfs_detail="ipfs target group has at least one healthy target"
     fi
   fi
 

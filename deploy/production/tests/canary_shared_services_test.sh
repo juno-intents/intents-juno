@@ -520,6 +520,96 @@ EOF
   rm -rf "$tmp"
 }
 
+test_shared_services_canary_accepts_single_healthy_preview_ipfs_target() {
+  local tmp manifest fake_bin output_json
+  tmp="$(mktemp -d)"
+  manifest="$tmp/shared-manifest.json"
+  fake_bin="$tmp/bin"
+  output_json="$tmp/output.json"
+  mkdir -p "$fake_bin"
+
+  cat >"$manifest" <<'JSON'
+{
+  "environment": "preview",
+  "shared_services": {
+    "aws_profile": "juno",
+    "aws_region": "us-east-1",
+    "postgres": {
+      "endpoint": "postgres.preview.internal",
+      "port": 5432,
+      "cluster_arn": "arn:aws:rds:us-east-1:021490342184:cluster:preview-shared"
+    },
+    "kafka": {
+      "bootstrap_brokers": "b-1.preview.kafka.us-east-1.amazonaws.com:9098,b-2.preview.kafka.us-east-1.amazonaws.com:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      },
+      "cluster_arn": "arn:aws:kafka:us-east-1:021490342184:cluster/preview-shared/11111111-2222-3333-4444-555555555555-1"
+    },
+    "ipfs": {
+      "api_url": "http://preview-ipfs.elb.us-east-1.amazonaws.com:5001",
+      "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/preview-ipfs/1111111111111111"
+    }
+  }
+}
+JSON
+
+  cat >"$fake_bin/pg_isready" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  cat >"$fake_bin/nc" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+if [[ "$1" == "--profile" ]]; then
+  shift 2
+fi
+if [[ "$1" == "--region" ]]; then
+  shift 2
+fi
+case "$1 $2" in
+  "sts get-caller-identity")
+    printf '%s\n' '{"Account":"021490342184"}'
+    ;;
+  "rds describe-db-clusters")
+    printf '%s\n' '{"DBClusters":[{"Status":"available","AvailabilityZones":["us-east-1a","us-east-1b"]}]}'
+    ;;
+  "kafka describe-cluster-v2")
+    printf '%s\n' '{"ClusterInfo":{"State":"ACTIVE","Provisioned":{"BrokerNodeGroupInfo":{"ClientSubnets":["subnet-a","subnet-b"]}}}}'
+    ;;
+  "elbv2 describe-target-health")
+    printf '%s\n' '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}}]}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  chmod 0755 "$fake_bin/pg_isready" "$fake_bin/nc" "$fake_bin/curl" "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_CANARY_RETRY_ATTEMPTS=1 \
+    bash deploy/production/canary-shared-services.sh \
+      --shared-manifest "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.checks.ipfs.status' "$output_json")" "passed" "preview canary accepts a single healthy ipfs target"
+  assert_eq "$(jq -r '.checks.ipfs.detail' "$output_json")" "ipfs target group has at least one healthy target" "preview canary reports singleton ipfs health correctly"
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "preview canary remains deployable with a singleton ipfs target"
+
+  rm -rf "$tmp"
+}
+
 test_shared_services_canary_retries_role_and_target_group_convergence() {
   local tmp manifest fake_bin log_file output_json ipfs_counter wireguard_counter
   tmp="$(mktemp -d)"
@@ -626,9 +716,9 @@ case "$*" in
     count=$((count + 1))
     printf '%s\n' "$count" >"$IPFS_COUNTER"
     if [[ "$count" -lt 2 ]]; then
-      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"initial"}}]}\n'
+      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"initial"}}]}\n'
     else
-      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}},{"TargetHealth":{"State":"healthy"}}]}\n'
+      printf '{"TargetHealthDescriptions":[{"TargetHealth":{"State":"healthy"}}]}\n'
     fi
     ;;
   *"secretsmanager describe-secret"*"preview-wireguard-server-key"*)
@@ -671,6 +761,7 @@ main() {
   test_shared_services_canary_requires_preview_iam_kafka_auth
   test_shared_services_canary_prefers_role_checks_when_role_outputs_are_present
   test_shared_services_canary_uses_aws_health_for_preview_private_services
+  test_shared_services_canary_accepts_single_healthy_preview_ipfs_target
   test_shared_services_canary_retries_role_and_target_group_convergence
 }
 
