@@ -1040,6 +1040,46 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_coordinator_accepts_existing_bridge_summary_at_output_path() {
+  local workdir output_root output_dir existing_bridge_summary fake_bin log_dir
+  workdir="$(mktemp -d)"
+  output_root="$workdir/output"
+  output_dir="$output_root/alpha"
+  existing_bridge_summary="$output_dir/bridge-summary.json"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/log"
+  mkdir -p "$fake_bin" "$log_dir" "$output_dir"
+  write_test_dkg_backup_zip "$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+BASE_RELAYER_AUTH_TOKEN=literal:token
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" "$existing_bridge_summary"
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log" "1300000000000000"
+
+  PATH="$fake_bin:$PATH" bash "$REPO_ROOT/deploy/production/deploy-coordinator.sh" \
+    --inventory "$workdir/inventory.json" \
+    --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    --existing-bridge-summary "$existing_bridge_summary" \
+    --terraform-output-json "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    --skip-terraform-apply \
+    --output-dir "$output_root" >/dev/null
+
+  assert_file_exists "$output_dir/shared-manifest.json" "coordinator manifest written when bridge summary already lives in output dir"
+  assert_eq "$(jq -r '.operators[0].operator_id' "$output_dir/rollout-state.json")" "0x1111111111111111111111111111111111111111" "coordinator rollout state survives same-path bridge summary"
+  rm -rf "$workdir"
+}
+
 test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk() {
   local workdir output_dir dkg_summary_no_ufvk dkg_completion bridge_summary_no_ua manifest fake_bin log_dir
   workdir="$(mktemp -d)"
@@ -1491,6 +1531,7 @@ main() {
   test_deploy_coordinator_supports_preview_legacy_wireguard_inventory
   test_deploy_coordinator_materializes_dkg_tls_bundle_when_inventory_omits_it
   test_deploy_coordinator_normalizes_relative_output_paths
+  test_deploy_coordinator_accepts_existing_bridge_summary_at_output_path
   test_deploy_coordinator_uses_dkg_completion_for_signer_ufvk
   test_deploy_coordinator_rejects_underfunded_operator_before_render
   test_deploy_coordinator_rejects_legacy_bridge_e2e_binary

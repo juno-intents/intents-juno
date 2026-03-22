@@ -393,7 +393,9 @@ fi
 
 bridge_summary="$output_dir/bridge-summary.json"
 if [[ -n "$existing_bridge_summary" ]]; then
-  cp "$existing_bridge_summary" "$bridge_summary"
+  if [[ ! -e "$bridge_summary" || ! "$existing_bridge_summary" -ef "$bridge_summary" ]]; then
+    cp "$existing_bridge_summary" "$bridge_summary"
+  fi
 else
   log "Deploying bridge contracts"
   bridge_deploy_name="$(basename "$bridge_deploy_binary")"
