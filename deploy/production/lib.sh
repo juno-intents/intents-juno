@@ -2971,18 +2971,44 @@ production_render_operator_handoffs() {
           production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_OWALLET_OVK "$derived_withdraw_owallet_ovk"
         fi
       fi
+      operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
+      [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
       production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS "$shared_owallet_ua"
-      withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "JUNO_TXSIGN_SIGNER_KEYS" || true)"
+      local source_withdraw_extend_signer_keys dkg_withdraw_extend_signer_keys
+      local -a withdraw_extend_signer_values=()
+
+      withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" || true)"
       case "$withdraw_extend_signer_keys" in
         literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
           withdraw_extend_signer_keys="$(production_resolve_secret_value "$withdraw_extend_signer_keys" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")")"
           ;;
       esac
+      if [[ -z "$withdraw_extend_signer_keys" ]]; then
+        source_withdraw_extend_signer_keys="$(production_env_get_value "$secrets_dst" "JUNO_TXSIGN_SIGNER_KEYS" || true)"
+        case "$source_withdraw_extend_signer_keys" in
+          literal:*|file:/*|aws-sm://*|aws-ssm:///*|env:*)
+            source_withdraw_extend_signer_keys="$(production_resolve_secret_value "$source_withdraw_extend_signer_keys" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")")"
+            ;;
+        esac
+        if [[ -n "$source_withdraw_extend_signer_keys" ]]; then
+          source_withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$source_withdraw_extend_signer_keys")"
+          IFS=, read -r -a withdraw_extend_signer_values <<<"$source_withdraw_extend_signer_keys"
+          if (( ${#withdraw_extend_signer_values[@]} > 1 )); then
+            withdraw_extend_signer_keys="$source_withdraw_extend_signer_keys"
+          fi
+        fi
+      fi
+      if [[ -z "$withdraw_extend_signer_keys" ]]; then
+        dkg_withdraw_extend_signer_keys="$(production_dkg_signer_keys_csv "$dkg_summary" || true)"
+        if [[ -n "$dkg_withdraw_extend_signer_keys" ]]; then
+          withdraw_extend_signer_keys="$dkg_withdraw_extend_signer_keys"
+        elif [[ -n "$source_withdraw_extend_signer_keys" ]]; then
+          withdraw_extend_signer_keys="$source_withdraw_extend_signer_keys"
+        fi
+      fi
       [[ -n "$withdraw_extend_signer_keys" ]] || die "operator $operator_id is missing withdraw extend signer keys"
       withdraw_extend_signer_keys="$(production_normalize_ecdsa_private_key_csv "$withdraw_extend_signer_keys")"
       production_secret_contract_upsert_literal "$secrets_dst" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
-      operator_txsign_signer_key="$(production_operator_txsign_signer_key "$dkg_summary" "$operator_id" "$operator_index" "$secrets_dst" "$(jq -r '.aws_profile // empty' <<<"$operator_json")" "$(jq -r '.aws_region // empty' <<<"$operator_json")" || true)"
-      [[ -n "$operator_txsign_signer_key" ]] || die "operator $operator_id is missing an isolated JUNO_TXSIGN_SIGNER_KEYS entry or operator_key_file"
       production_secret_contract_upsert_literal "$secrets_dst" JUNO_TXSIGN_SIGNER_KEYS "$operator_txsign_signer_key"
       production_secret_contract_delete_key "$secrets_dst" CHECKPOINT_SIGNER_PRIVATE_KEY
     fi

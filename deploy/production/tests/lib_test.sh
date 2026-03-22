@@ -1712,6 +1712,64 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_handoffs_derives_withdraw_extend_signer_keys_from_dkg_summary() {
+  local workdir shared_manifest handoff_dir dkg_summary
+  workdir="$(mktemp -d)"
+  printf 'preview-backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/op1.key" <<'EOF'
+aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cat >"$workdir/op2.key" <<'EOF'
+bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$workdir/op3.key" <<'EOF'
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+EOF
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "preview"
+    | .shared_services.public_subdomain = "preview.intents-testing.thejunowallet.com"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+  dkg_summary="$workdir/dkg-summary.json"
+  jq '
+    .operators[0].operator_key_file = "op1.key"
+    | .operators[1].operator_key_file = "op2.key"
+    | .operators[2].operator_key_file = "op3.key"
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$dkg_summary"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$dkg_summary" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$dkg_summary" "$workdir/output" "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb,0xcccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc" "preview handoff derives the full withdraw extend signer roster from dkg operator keys when the source secret omits it"
+  assert_contains "$(cat "$handoff_dir/operator-secrets.env")" "JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "preview handoff derives the operator-scoped juno txsign signer key from dkg operator keys when the source secret omits it"
+  assert_not_contains "$(grep '^JUNO_TXSIGN_SIGNER_KEYS=' "$handoff_dir/operator-secrets.env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "preview handoff keeps the runtime juno txsign key scoped to the local operator"
+  rm -rf "$workdir"
+}
+
 test_render_operator_handoffs_provisions_missing_checkpoint_signer_kms_key() {
   local workdir shared_manifest dkg_summary handoff_dir fake_bin fake_log old_provisioner
   workdir="$(mktemp -d)"
@@ -3122,6 +3180,7 @@ main() {
   test_render_operator_stack_env_uses_kms_contract
   test_render_operator_handoffs_rejects_local_checkpoint_signer_driver
   test_render_operator_handoffs_preserves_secure_preview_signer_configuration
+  test_render_operator_handoffs_derives_withdraw_extend_signer_keys_from_dkg_summary
   test_render_operator_handoffs_provisions_missing_checkpoint_signer_kms_key
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
