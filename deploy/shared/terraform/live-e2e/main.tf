@@ -915,15 +915,6 @@ resource "aws_msk_cluster" "shared" {
       }
     }
 
-    connectivity_info {
-      vpc_connectivity {
-        client_authentication {
-          sasl {
-            iam = true
-          }
-        }
-      }
-    }
   }
 
   client_authentication {
