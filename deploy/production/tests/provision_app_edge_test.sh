@@ -116,6 +116,13 @@ case "${args[*]}" in
       printf '%s\n' '{"WebACLs":[]}'
     fi
     ;;
+  "cloudfront list-distributions --output json")
+    if [[ -n "${TEST_CLOUDFRONT_LIST_JSON_FILE:-}" ]]; then
+      cat "$TEST_CLOUDFRONT_LIST_JSON_FILE"
+    else
+      printf '%s\n' '{"DistributionList":{"Items":[]}}'
+    fi
+    ;;
   *)
     printf 'unexpected aws invocation: %s\n' "$*" >&2
     exit 1
@@ -125,8 +132,8 @@ EOF
   chmod +x "$target"
 }
 
-test_provision_app_edge_imports_existing_waf_when_state_is_missing_it() {
-  local tmp fake_bin app_deploy state_path terraform_log aws_log waf_json
+test_provision_app_edge_imports_existing_edge_resources_when_state_is_missing_them() {
+  local tmp fake_bin app_deploy state_path terraform_log aws_log waf_json cloudfront_json
   tmp="$(mktemp -d)"
   fake_bin="$tmp/bin"
   app_deploy="$tmp/app-deploy.json"
@@ -134,6 +141,7 @@ test_provision_app_edge_imports_existing_waf_when_state_is_missing_it() {
   terraform_log="$tmp/terraform.log"
   aws_log="$tmp/aws.log"
   waf_json="$tmp/waf-list.json"
+  cloudfront_json="$tmp/cloudfront-list.json"
 
   mkdir -p "$fake_bin" "$(dirname "$state_path")"
   : >"$state_path"
@@ -141,6 +149,9 @@ test_provision_app_edge_imports_existing_waf_when_state_is_missing_it() {
   : >"$aws_log"
   cat >"$waf_json" <<'JSON'
 {"WebACLs":[{"Name":"juno-app-edge-preview-waf","Id":"282bcc63-cbc2-49b1-811b-7c242b8817f0","ARN":"arn:aws:wafv2:us-east-1:021490342184:global/webacl/juno-app-edge-preview-waf/282bcc63-cbc2-49b1-811b-7c242b8817f0"}]}
+JSON
+  cat >"$cloudfront_json" <<'JSON'
+{"DistributionList":{"Items":[{"Id":"EKLE2YOSENG5F","ARN":"arn:aws:cloudfront::021490342184:distribution/EKLE2YOSENG5F","Aliases":{"Items":["bridge.preview.intents-testing.thejunowallet.com"]}}]}}
 JSON
   write_provision_app_edge_fixture "$app_deploy" "$state_path"
   write_fake_provision_app_edge_terraform "$fake_bin/terraform"
@@ -151,6 +162,7 @@ JSON
     TEST_TERRAFORM_LOG="$terraform_log" \
       TEST_AWS_LOG="$aws_log" \
       TEST_WAF_LIST_JSON_FILE="$waf_json" \
+      TEST_CLOUDFRONT_LIST_JSON_FILE="$cloudfront_json" \
       PATH="$fake_bin:$PATH" \
       bash "$REPO_ROOT/deploy/production/provision-app-edge.sh" \
         --app-deploy "$app_deploy"
@@ -158,8 +170,10 @@ JSON
 
   assert_contains "$(cat "$terraform_log")" "state list -state=$state_path" "provision checks the existing edge state before importing preview globals"
   assert_contains "$(cat "$aws_log")" "wafv2 list-web-acls --scope CLOUDFRONT --output json" "provision queries existing global WAFs when the edge state lacks the preview ACL"
+  assert_contains "$(cat "$aws_log")" "cloudfront list-distributions --output json" "provision queries existing CloudFront distributions when the edge state lacks the preview bridge"
   assert_contains "$(cat "$terraform_log")" "import -input=false -state=$state_path" "provision imports the existing preview WAF into state before apply"
   assert_contains "$(cat "$terraform_log")" "aws_wafv2_web_acl.app 282bcc63-cbc2-49b1-811b-7c242b8817f0/juno-app-edge-preview-waf/CLOUDFRONT" "provision uses the provider import id format for the preview WAF"
+  assert_contains "$(cat "$terraform_log")" "aws_cloudfront_distribution.bridge EKLE2YOSENG5F" "provision imports the existing preview bridge distribution into state before apply"
   assert_contains "$(cat "$terraform_log")" "apply -input=false -auto-approve -state=$state_path" "provision still runs terraform apply after adopting the preview WAF"
 
   rm -rf "$tmp"
@@ -186,7 +200,7 @@ test_provision_app_edge_skips_waf_lookup_when_state_already_tracks_it() {
     cd "$REPO_ROOT"
     TEST_TERRAFORM_LOG="$terraform_log" \
       TEST_AWS_LOG="$aws_log" \
-      TEST_TERRAFORM_STATE_LIST='aws_wafv2_web_acl.app' \
+      TEST_TERRAFORM_STATE_LIST=$'aws_wafv2_web_acl.app\naws_cloudfront_distribution.bridge' \
       PATH="$fake_bin:$PATH" \
       bash "$REPO_ROOT/deploy/production/provision-app-edge.sh" \
         --app-deploy "$app_deploy"
@@ -195,13 +209,14 @@ test_provision_app_edge_skips_waf_lookup_when_state_already_tracks_it() {
   assert_contains "$(cat "$terraform_log")" "state list -state=$state_path" "provision checks the current edge state before deciding whether to adopt the preview WAF"
   assert_not_contains "$(cat "$terraform_log")" "import -input=false" "provision skips WAF imports when state already tracks the preview ACL"
   assert_not_contains "$(cat "$aws_log")" "wafv2 list-web-acls --scope CLOUDFRONT --output json" "provision skips the WAF lookup when state already contains the preview ACL"
+  assert_not_contains "$(cat "$aws_log")" "cloudfront list-distributions --output json" "provision skips the CloudFront lookup when state already contains the preview bridge"
   assert_contains "$(cat "$terraform_log")" "apply -input=false -auto-approve -state=$state_path" "provision still applies edge changes when the preview WAF is already in state"
 
   rm -rf "$tmp"
 }
 
 main() {
-  test_provision_app_edge_imports_existing_waf_when_state_is_missing_it
+  test_provision_app_edge_imports_existing_edge_resources_when_state_is_missing_them
   test_provision_app_edge_skips_waf_lookup_when_state_already_tracks_it
 }
 

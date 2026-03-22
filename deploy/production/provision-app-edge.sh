@@ -76,6 +76,36 @@ app_edge_import_existing_waf() {
     aws_wafv2_web_acl.app "$id/$name/CLOUDFRONT" >/dev/null
 }
 
+app_edge_import_existing_distribution() {
+  local work_dir="$1"
+  local state_path="$2"
+  local aws_profile="$3"
+  local bridge_record_name="$4"
+  local distribution_id
+
+  app_edge_state_has_resource "$work_dir" "$state_path" "$aws_profile" "aws_cloudfront_distribution.bridge" && return 0
+  have_cmd aws || return 0
+
+  distribution_id="$(
+    AWS_PAGER="" \
+    AWS_PROFILE="${aws_profile:-}" \
+    aws cloudfront list-distributions --output json \
+      | jq -r --arg bridge_record_name "$bridge_record_name" '
+          .DistributionList.Items[]?
+          | select((.Aliases.Items // []) | index($bridge_record_name))
+          | .Id
+        ' \
+      | head -n1
+  )"
+  [[ -n "$distribution_id" ]] || return 0
+
+  log "importing existing app edge distribution into state: $distribution_id"
+  TF_IN_AUTOMATION=1 \
+  AWS_PROFILE="${aws_profile:-}" \
+  terraform -chdir="$work_dir" import -input=false -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" \
+    aws_cloudfront_distribution.bridge "$distribution_id" >/dev/null
+}
+
 app_deploy=""
 dry_run="false"
 
@@ -166,6 +196,7 @@ TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" init -input=false >/dev/null
 app_edge_import_existing_waf "$work_dir" "$state_path" "${aws_profile:-}" "$environment"
+app_edge_import_existing_distribution "$work_dir" "$state_path" "${aws_profile:-}" "$bridge_record_name"
 TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" apply -input=false -auto-approve -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" >/dev/null
