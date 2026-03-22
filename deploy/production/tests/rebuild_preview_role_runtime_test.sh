@@ -237,6 +237,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
   write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$refresh_log"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$e2e_log"
@@ -250,6 +251,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
       PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
       PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
       PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
       PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
       PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
       PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
@@ -265,6 +267,18 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
         --output-dir "$output_root"
   )
 
+  assert_contains "$(cat "$log_file")" "refresh-app-runtime --shared-manifest $output_root/preview/shared-manifest.json" "rebuild refreshes app runtime from the rebuilt shared manifest"
+  assert_contains "$(cat "$log_file")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes app runtime from the rebuilt app handoff"
+  assert_contains "$(cat "$log_file")" "--output-dir $output_root/preview/app-runtime" "rebuild stores app runtime evidence in a dedicated directory"
+  local refresh_line canary_line
+  refresh_line="$(grep -n "refresh-app-runtime" "$log_file" | head -n1 | cut -d: -f1)"
+  canary_line="$(grep -n "canary-app-host" "$log_file" | head -n1 | cut -d: -f1)"
+  assert_eq "${refresh_line:+present}" "present" "rebuild runs app runtime refresh"
+  assert_eq "${canary_line:+present}" "present" "rebuild runs app canary"
+  if (( refresh_line >= canary_line )); then
+    printf 'app runtime refresh must run before app canary\n' >&2
+    exit 1
+  fi
   assert_contains "$(cat "$refresh_log")" "--rolled-inventory $output_root/preview/operator-rollout/inventory.operators-rolled.json" "rebuild refreshes backoffice from the rolled inventory"
   assert_contains "$(cat "$refresh_log")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes the live app handoff in place"
   assert_contains "$(cat "$refresh_log")" "--output-dir $output_root/preview/operator-rollout" "rebuild refresh stores app refresh evidence beside operator rollout evidence"
@@ -273,6 +287,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_eq "$(jq -r '.wireguard_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/wireguard-backoffice.json" "release lock records the wireguard backoffice refresh evidence"
   assert_contains "$(cat "$e2e_log")" "deposits.event.v2" "rebuild ensures the deposit event topic exists before preview validation"
   assert_contains "$(cat "$e2e_log")" "withdrawals.requested.v2" "rebuild ensures the withdraw request topic exists before preview validation"
+  assert_eq "$(jq -r '.app_runtime_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-runtime-refresh.json" "release lock records the app runtime refresh evidence"
   assert_eq "$(jq -r '.app_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-backoffice-refresh.json" "release lock records the app backoffice refresh evidence"
 
   rm -rf "$tmp"
@@ -317,6 +332,7 @@ JSON
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
   write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
@@ -330,6 +346,7 @@ JSON
       PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
       PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
       PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
       PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
       PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
       PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \
@@ -399,6 +416,7 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
   write_fake_rebuild_canary "$fake_bin/canary-shared-services.sh" "$log_file" "canary-shared-services"
   write_fake_rebuild_canary "$fake_bin/canary-app-host.sh" "$log_file" "canary-app-host"
   write_fake_rebuild_roll "$fake_bin/roll-preview-operators.sh" "$log_file" "$fixture_dir"
+  write_fake_rebuild_refresh "$fake_bin/refresh-app-runtime.sh" "$log_file" "refresh-app-runtime"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-app-backoffice.sh" "$log_file"
   write_fake_rebuild_refresh "$fake_bin/refresh-preview-wireguard-backoffice.sh" "$log_file" "refresh-preview-wireguard-backoffice"
   write_fake_rebuild_e2e "$fake_bin/shared-infra-e2e" "$log_file"
@@ -412,6 +430,7 @@ test_rebuild_preview_role_runtime_absolutizes_source_artifact_paths() {
       PRODUCTION_PROVISION_APP_EDGE_BIN="$fake_bin/provision-app-edge.sh" \
       PRODUCTION_CANARY_SHARED_BIN="$fake_bin/canary-shared-services.sh" \
       PRODUCTION_CANARY_APP_BIN="$fake_bin/canary-app-host.sh" \
+      PRODUCTION_REFRESH_APP_RUNTIME_BIN="$fake_bin/refresh-app-runtime.sh" \
       PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN="$fake_bin/roll-preview-operators.sh" \
       PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN="$fake_bin/refresh-preview-app-backoffice.sh" \
       PRODUCTION_REFRESH_PREVIEW_WIREGUARD_BACKOFFICE_BIN="$fake_bin/refresh-preview-wireguard-backoffice.sh" \

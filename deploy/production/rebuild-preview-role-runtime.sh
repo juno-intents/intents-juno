@@ -124,6 +124,7 @@ resolve_role_runtime_release_inputs_bin="${PRODUCTION_RESOLVE_ROLE_RUNTIME_RELEA
 deploy_coordinator_bin="${PRODUCTION_DEPLOY_COORDINATOR_BIN:-$SCRIPT_DIR/deploy-coordinator.sh}"
 provision_app_edge_bin="${PRODUCTION_PROVISION_APP_EDGE_BIN:-$SCRIPT_DIR/provision-app-edge.sh}"
 canary_shared_bin="${PRODUCTION_CANARY_SHARED_BIN:-$SCRIPT_DIR/canary-shared-services.sh}"
+refresh_app_runtime_bin="${PRODUCTION_REFRESH_APP_RUNTIME_BIN:-$SCRIPT_DIR/refresh-app-runtime.sh}"
 canary_app_bin="${PRODUCTION_CANARY_APP_BIN:-$SCRIPT_DIR/canary-app-host.sh}"
 roll_preview_operators_bin="${PRODUCTION_ROLL_PREVIEW_OPERATORS_BIN:-$SCRIPT_DIR/roll-preview-operators.sh}"
 refresh_preview_app_backoffice_bin="${PRODUCTION_REFRESH_PREVIEW_APP_BACKOFFICE_BIN:-$SCRIPT_DIR/refresh-preview-app-backoffice.sh}"
@@ -136,6 +137,7 @@ for cmd in \
   "$deploy_coordinator_bin" \
   "$provision_app_edge_bin" \
   "$canary_shared_bin" \
+  "$refresh_app_runtime_bin" \
   "$canary_app_bin" \
   "$roll_preview_operators_bin" \
   "$refresh_preview_app_backoffice_bin" \
@@ -236,6 +238,12 @@ bridge_summary_path="$output_root/$env_slug/bridge-summary.json"
 "$provision_app_edge_bin" --app-deploy "$app_deploy"
 "$canary_shared_bin" --shared-manifest "$shared_manifest" >"$output_dir/canaries/shared-services.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/shared-services.json")" == "true" ]] || die "shared services canary failed"
+app_runtime_refresh_path="$output_dir/app-runtime-refresh.json"
+"$refresh_app_runtime_bin" \
+  --shared-manifest "$shared_manifest" \
+  --app-deploy "$app_deploy" \
+  --output-dir "$output_dir/app-runtime" >"$app_runtime_refresh_path"
+[[ "$(jq -r '.ready_for_deploy' "$app_runtime_refresh_path")" == "true" ]] || die "app runtime refresh failed"
 "$canary_app_bin" --app-deploy "$app_deploy" >"$output_dir/canaries/app.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/app.json")" == "true" ]] || die "app canary failed"
 
@@ -315,6 +323,7 @@ jq -n \
   --arg app_deploy "$app_deploy" \
   --arg bridge_summary_path "$bridge_summary_path" \
   --arg operator_rollout_path "$output_dir/operator-rollout.json" \
+  --arg app_runtime_refresh_path "$app_runtime_refresh_path" \
   --arg wireguard_backoffice_refresh_path "$wireguard_backoffice_refresh_path" \
   --arg app_backoffice_refresh_path "$output_dir/app-backoffice-refresh.json" \
   --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
@@ -329,6 +338,7 @@ jq -n \
       app_deploy: $app_deploy,
       bridge_summary_path: $bridge_summary_path,
       operator_rollout_path: $operator_rollout_path,
+      app_runtime_refresh_path: $app_runtime_refresh_path,
       wireguard_backoffice_refresh_path: $wireguard_backoffice_refresh_path,
       app_backoffice_refresh_path: $app_backoffice_refresh_path,
       preview_completed_at: $preview_completed_at

@@ -455,6 +455,13 @@ resource "aws_iam_role_policy" "live_e2e_inline" {
   })
 }
 
+resource "aws_iam_role_policy_attachment" "live_e2e_ssm_managed_instance_core" {
+  count = local.managed_instance_profile_enabled ? 1 : 0
+
+  role       = aws_iam_role.live_e2e[0].name
+  policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+}
+
 resource "aws_iam_instance_profile" "live_e2e" {
   count = local.managed_instance_profile_enabled ? 1 : 0
 

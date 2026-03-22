@@ -128,6 +128,8 @@ main() {
     exit 1
   fi
   assert_contains "$main_tf" 'Sid    = "AllowSharedIPFSSecretRead"' "live-e2e runner/operator role can read the shared IPFS bearer token secret"
+  assert_contains "$main_tf" 'resource "aws_iam_role_policy_attachment" "live_e2e_ssm_managed_instance_core"' "live-e2e attaches SSM managed instance core to the shared instance role"
+  assert_contains "$main_tf" 'policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"' "live-e2e uses the AWS-managed SSM instance core policy"
   assert_contains "$main_tf" '"kafka-cluster:Connect"' "live-e2e grants kafka connect permissions to proof task roles"
   assert_contains "$main_tf" 'resources = [local.shared_kafka_cluster_arn]' "live-e2e proof task roles re-use the guarded MSK cluster arn"
 
