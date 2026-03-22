@@ -175,12 +175,20 @@ run_shared_infra_e2e() {
   local output_path="$6"
   local kafka_brokers ipfs_api_url checkpoint_operators checkpoint_threshold
   local kafka_tls kafka_auth_mode kafka_auth_region
+  local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   local app_role_asg app_aws_profile app_aws_region asg_json instance_id
   local checkpoint_blob_bucket stage_key stage_uri presigned_url stdout_json
   local url_q pg_q kb_q topics_q ipfs_q operators_q threshold_q output_q remote_env_prefix remote_cmd
 
   kafka_brokers="$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")"
   ipfs_api_url="$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")"
+  shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
+  shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
+  ipfs_api_auth_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.ipfs.api_auth_secret_arn')"
+  ipfs_api_bearer_token=""
+  if [[ -n "$ipfs_api_auth_secret_arn" ]]; then
+    ipfs_api_bearer_token="$(production_resolve_optional_aws_sm_secret "$ipfs_api_auth_secret_arn" "$shared_aws_profile" "$shared_aws_region")"
+  fi
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   checkpoint_threshold="$(jq -r '.checkpoint.threshold' "$shared_manifest")"
   kafka_tls="$(jq -r 'if (.shared_services.kafka.tls // false) then "true" else "false" end' "$shared_manifest")"
@@ -232,6 +240,9 @@ run_shared_infra_e2e() {
       remote_env_prefix+="AWS_REGION=$(production_shell_quote "$kafka_auth_region") "
       remote_env_prefix+="AWS_DEFAULT_REGION=$(production_shell_quote "$kafka_auth_region") "
     fi
+    if [[ -n "$ipfs_api_bearer_token" ]]; then
+      remote_env_prefix+="CHECKPOINT_IPFS_API_BEARER_TOKEN=$(production_shell_quote "$ipfs_api_bearer_token") "
+    fi
 
     remote_cmd="set -eu; rm -f /var/tmp/shared-infra-e2e; curl -fsSL $url_q -o /var/tmp/shared-infra-e2e; chmod 0755 /var/tmp/shared-infra-e2e; ${remote_env_prefix}/var/tmp/shared-infra-e2e --postgres-dsn $pg_q --kafka-brokers $kb_q --required-kafka-topics $topics_q --checkpoint-ipfs-api-url $ipfs_q --checkpoint-operators $operators_q --checkpoint-threshold $threshold_q --output $output_q; cat $output_q"
     if ! stdout_json="$(ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd")"; then
@@ -253,6 +264,9 @@ run_shared_infra_e2e() {
       export JUNO_QUEUE_KAFKA_AWS_REGION="$kafka_auth_region"
       export AWS_REGION="$kafka_auth_region"
       export AWS_DEFAULT_REGION="$kafka_auth_region"
+    fi
+    if [[ -n "$ipfs_api_bearer_token" ]]; then
+      export CHECKPOINT_IPFS_API_BEARER_TOKEN="$ipfs_api_bearer_token"
     fi
     production_run_release_binary "$binary" \
       --postgres-dsn "$postgres_dsn" \

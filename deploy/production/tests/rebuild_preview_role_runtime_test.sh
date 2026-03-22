@@ -110,7 +110,8 @@ cat >"\$env_dir/shared-manifest.json" <<JSON
       }
     },
     "ipfs": {
-      "api_url": "http://preview-ipfs:5001"
+      "api_url": "http://preview-ipfs:5001",
+      "api_auth_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:preview-ipfs-api-token"
     },
     "artifacts": {
       "checkpoint_blob_bucket": "preview-checkpoint-blobs"
@@ -229,7 +230,7 @@ printf 'aws %s\n' "\$*" >>"$log_file"
 
 while [[ \$# -gt 0 ]]; do
   case "\$1" in
-    autoscaling|s3|ssm)
+    autoscaling|s3|secretsmanager|ssm)
       service="\$1"
       shift
       break
@@ -267,6 +268,18 @@ JSON
         ;;
       rm)
         printf 's3 rm %s\n' "\$1" >>"$log_file"
+        ;;
+      *)
+        exit 1
+        ;;
+    esac
+    ;;
+  secretsmanager)
+    subcommand="\$1"
+    shift
+    case "\$subcommand" in
+      get-secret-value)
+        printf 'preview-ipfs-bearer-token\n'
         ;;
       *)
         exit 1
@@ -439,6 +452,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_TLS='true'" "rebuild enables kafka tls for remote shared infra validation"
   assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_AUTH_MODE='aws-msk-iam'" "rebuild enables aws msk iam auth for remote shared infra validation"
   assert_contains "$(cat "$ssm_commands")" "JUNO_QUEUE_KAFKA_AWS_REGION='us-east-1'" "rebuild forwards the kafka auth region for remote shared infra validation"
+  assert_contains "$(cat "$ssm_commands")" "CHECKPOINT_IPFS_API_BEARER_TOKEN='preview-ipfs-bearer-token'" "rebuild forwards the ipfs bearer token for remote shared infra validation"
   assert_contains "$(cat "$ssm_commands")" "deposits.event.v2" "rebuild ensures the deposit event topic exists before preview validation"
   assert_contains "$(cat "$ssm_commands")" "withdrawals.requested.v2" "rebuild ensures the withdraw request topic exists before preview validation"
   assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the remote shared infra validation output"
