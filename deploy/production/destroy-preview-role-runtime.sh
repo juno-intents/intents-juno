@@ -365,12 +365,44 @@ app_runtime_asg_instance_ids() {
   printf '%s\n' "$ids"
 }
 
+app_runtime_nonterminated_instance_ids() {
+  local ids_text="$1"
+  local filter_values describe_output
+  local -a instance_ids=()
+
+  if [[ -z "${ids_text//[[:space:]]/}" ]]; then
+    return 0
+  fi
+
+  # shellcheck disable=SC2206
+  instance_ids=( $ids_text )
+  if [[ ${#instance_ids[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  filter_values="$(IFS=,; printf '%s' "${instance_ids[*]}")"
+  if ! describe_output="$(aws ec2 describe-instances \
+    --profile "$aws_profile" \
+    --region "$aws_region" \
+    --filters "Name=instance-id,Values=$filter_values" \
+    --query 'Reservations[].Instances[?State.Name!=`terminated`].InstanceId' \
+    --output text 2>/dev/null)"; then
+    printf '%s\n' "$ids_text"
+    return 0
+  fi
+
+  describe_output="${describe_output//$'\r'/}"
+  describe_output="${describe_output//None/}"
+  printf '%s\n' "$describe_output"
+}
+
 wait_for_app_runtime_asg_empty() {
   local asg_name="$1"
   local attempt ids
 
   for ((attempt = 1; attempt <= app_asg_poll_attempts; attempt++)); do
     ids="$(app_runtime_asg_instance_ids "$asg_name")"
+    ids="$(app_runtime_nonterminated_instance_ids "$ids")"
     if [[ -z "${ids//[[:space:]]/}" ]]; then
       return 0
     fi
