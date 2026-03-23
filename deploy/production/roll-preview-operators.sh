@@ -231,9 +231,31 @@ describe_operator_instance_json() {
     --output json
 }
 
+describe_operator_asg_json() {
+  local operator_asg="$1"
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling describe-auto-scaling-groups \
+    --auto-scaling-group-names "$operator_asg" \
+    --output json
+}
+
+extract_operator_asg_name_from_asg_json() {
+  local operator_asg_json="$1"
+  jq -r '.AutoScalingGroups[0].AutoScalingGroupName // empty' <<<"$operator_asg_json"
+}
+
 extract_operator_asg_from_instance_json() {
   local operator_instance_json="$1"
   jq -r '.Reservations[0].Instances[0].Tags[]? | select(.Key == "aws:autoscaling:groupName") | .Value' <<<"$operator_instance_json" | head -n 1
+}
+
+extract_launch_template_id_from_asg_json() {
+  local operator_asg_json="$1"
+  jq -r '.AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId // empty' <<<"$operator_asg_json"
+}
+
+extract_launch_template_version_from_asg_json() {
+  local operator_asg_json="$1"
+  jq -r '.AutoScalingGroups[0].LaunchTemplate.Version // empty' <<<"$operator_asg_json"
 }
 
 extract_launch_template_id_from_instance_json() {
@@ -265,8 +287,20 @@ while IFS= read -r operator_json; do
   operator_public_ip="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
 
   if [[ -z "$operator_asg" || -z "$launch_template_id" || -z "$launch_template_version" ]]; then
-    [[ -n "$operator_public_ip" ]] || die "operator $operator_id is missing public_endpoint/operator_host required for rollout metadata discovery"
-    operator_instance_json="$(describe_operator_instance_json "$operator_public_ip")"
+    if [[ -n "$operator_asg" ]]; then
+      operator_asg_json="$(describe_operator_asg_json "$operator_asg")"
+      if [[ -z "$launch_template_id" ]]; then
+        launch_template_id="$(extract_launch_template_id_from_asg_json "$operator_asg_json")"
+      fi
+      if [[ -z "$launch_template_version" ]]; then
+        launch_template_version="$(extract_launch_template_version_from_asg_json "$operator_asg_json")"
+      fi
+      operator_asg="$(extract_operator_asg_name_from_asg_json "$operator_asg_json")"
+    fi
+    if [[ -z "$operator_asg" || -z "$launch_template_id" || -z "$launch_template_version" ]]; then
+      [[ -n "$operator_public_ip" ]] || die "operator $operator_id is missing public_endpoint/operator_host required for rollout metadata discovery"
+      operator_instance_json="$(describe_operator_instance_json "$operator_public_ip")"
+    fi
     if [[ -z "$operator_asg" ]]; then
       operator_asg="$(extract_operator_asg_from_instance_json "$operator_instance_json")"
     fi
@@ -285,12 +319,30 @@ while IFS= read -r operator_json; do
   if ! lt_response="$(create_operator_launch_template_version "$launch_template_id" "$launch_template_version" 2>"$lt_error_file")"; then
     lt_error="$(cat "$lt_error_file")"
     rm -f "$lt_error_file"
-    [[ -n "$operator_public_ip" ]] || die "operator $operator_id launch template rollout failed without a public endpoint for metadata rediscovery: $lt_error"
+    refreshed_operator_asg=""
+    refreshed_launch_template_id=""
+    refreshed_launch_template_version=""
 
-    operator_instance_json="$(describe_operator_instance_json "$operator_public_ip")"
-    refreshed_operator_asg="$(extract_operator_asg_from_instance_json "$operator_instance_json")"
-    refreshed_launch_template_id="$(extract_launch_template_id_from_instance_json "$operator_instance_json")"
-    refreshed_launch_template_version="$(extract_launch_template_version_from_instance_json "$operator_instance_json")"
+    if [[ -n "$operator_asg" ]]; then
+      operator_asg_json="$(describe_operator_asg_json "$operator_asg")"
+      refreshed_operator_asg="$(extract_operator_asg_name_from_asg_json "$operator_asg_json")"
+      refreshed_launch_template_id="$(extract_launch_template_id_from_asg_json "$operator_asg_json")"
+      refreshed_launch_template_version="$(extract_launch_template_version_from_asg_json "$operator_asg_json")"
+    fi
+
+    if [[ -z "$refreshed_operator_asg" || -z "$refreshed_launch_template_id" || -z "$refreshed_launch_template_version" ]]; then
+      [[ -n "$operator_public_ip" ]] || die "operator $operator_id launch template rollout failed without a public endpoint for metadata rediscovery: $lt_error"
+      operator_instance_json="$(describe_operator_instance_json "$operator_public_ip")"
+      if [[ -z "$refreshed_operator_asg" ]]; then
+        refreshed_operator_asg="$(extract_operator_asg_from_instance_json "$operator_instance_json")"
+      fi
+      if [[ -z "$refreshed_launch_template_id" ]]; then
+        refreshed_launch_template_id="$(extract_launch_template_id_from_instance_json "$operator_instance_json")"
+      fi
+      if [[ -z "$refreshed_launch_template_version" ]]; then
+        refreshed_launch_template_version="$(extract_launch_template_version_from_instance_json "$operator_instance_json")"
+      fi
+    fi
 
     [[ -n "$refreshed_operator_asg" ]] || die "operator $operator_id metadata rediscovery returned an empty autoscaling group after launch template failure: $lt_error"
     [[ -n "$refreshed_launch_template_id" ]] || die "operator $operator_id metadata rediscovery returned an empty launch template id after launch template failure: $lt_error"
