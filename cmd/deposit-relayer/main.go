@@ -21,6 +21,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
+	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
 	"github.com/juno-intents/intents-juno/internal/deposit"
 	depositpg "github.com/juno-intents/intents-juno/internal/deposit/postgres"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
@@ -274,10 +275,11 @@ func main() {
 	}
 
 	var (
-		pool          *pgxpool.Pool
-		store         deposit.Store
-		proofDLQStore dlq.Store
-		proofStore    proof.Store
+		pool            *pgxpool.Pool
+		store           deposit.Store
+		proofDLQStore   dlq.Store
+		proofStore      proof.Store
+		checkpointStore checkpoint.PackageStore
 	)
 	switch strings.ToLower(strings.TrimSpace(*storeDriver)) {
 	case "postgres":
@@ -355,6 +357,17 @@ func main() {
 			os.Exit(2)
 		}
 		proofStore = pgProofStore
+
+		pgCheckpointStore, err := checkpointpg.New(pool)
+		if err != nil {
+			log.Error("init checkpoint package store", "err", err)
+			os.Exit(2)
+		}
+		if err := pgCheckpointStore.EnsureSchema(ctx); err != nil {
+			log.Error("ensure checkpoint package schema", "err", err)
+			os.Exit(2)
+		}
+		checkpointStore = pgCheckpointStore
 	case "memory":
 		store = deposit.NewMemoryStore()
 	default:
@@ -438,6 +451,7 @@ func main() {
 		TipHeightProvider:       rpcClient,
 		ReceiptReader:           baseRPCClient,
 		ProofStore:              proofStore,
+		CheckpointStore:         checkpointStore,
 		BridgeCaller:            baseRPCClient,
 	}, store, baseClient, proofRequester, log)
 	if err != nil {

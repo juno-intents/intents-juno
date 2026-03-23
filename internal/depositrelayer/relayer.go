@@ -2,6 +2,7 @@ package depositrelayer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -113,6 +114,7 @@ type Config struct {
 	TipHeightProvider       TipHeightProvider
 	ReceiptReader           ReceiptReader
 	ProofStore              ProofStore
+	CheckpointStore         checkpoint.PackageStore
 	BridgeCaller            BridgeCaller
 
 	Now func() time.Time
@@ -158,6 +160,7 @@ type Relayer struct {
 	tipHeightReader  TipHeightProvider
 	receiptReader    ReceiptReader
 	proofStore       ProofStore
+	checkpointStore  checkpoint.PackageStore
 	bridgeCaller     BridgeCaller
 
 	// pauseChecker is an optional bridge pause checker.
@@ -262,6 +265,7 @@ func New(cfg Config, store deposit.Store, sender Sender, prover proofclient.Clie
 		tipHeightReader:    cfg.TipHeightProvider,
 		receiptReader:      cfg.ReceiptReader,
 		proofStore:         cfg.ProofStore,
+		checkpointStore:    cfg.CheckpointStore,
 		bridgeCaller:       cfg.BridgeCaller,
 	}, nil
 }
@@ -272,26 +276,47 @@ func (r *Relayer) WithPauseChecker(pc PauseChecker) *Relayer {
 	return r
 }
 
-func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
+type checkpointPackagePayload struct {
+	Version         string                `json:"version"`
+	Digest          common.Hash           `json:"digest"`
+	Checkpoint      checkpoint.Checkpoint `json:"checkpoint"`
+	OperatorSetHash common.Hash           `json:"operatorSetHash"`
+	Signers         []common.Address      `json:"signers"`
+	Signatures      []string              `json:"signatures"`
+	CreatedAt       time.Time             `json:"createdAt"`
+}
+
+func (r *Relayer) applyCheckpoint(pkg CheckpointPackage) (bool, error) {
 	cp := pkg.Checkpoint
 	if cp.BaseChainID != uint64(r.cfg.BaseChainID) {
-		return fmt.Errorf("%w: baseChainID mismatch: want %d got %d", ErrInvalidCheckpoint, r.cfg.BaseChainID, cp.BaseChainID)
+		return false, fmt.Errorf("%w: baseChainID mismatch: want %d got %d", ErrInvalidCheckpoint, r.cfg.BaseChainID, cp.BaseChainID)
 	}
 	if cp.BridgeContract != r.cfg.BridgeAddress {
-		return fmt.Errorf("%w: bridge mismatch: want %s got %s", ErrInvalidCheckpoint, r.cfg.BridgeAddress, cp.BridgeContract)
+		return false, fmt.Errorf("%w: bridge mismatch: want %s got %s", ErrInvalidCheckpoint, r.cfg.BridgeAddress, cp.BridgeContract)
 	}
 	if _, err := r.quorumVerifier.VerifyCheckpointSignatures(cp, pkg.OperatorSignatures); err != nil {
-		return fmt.Errorf("%w: %v", ErrInvalidCheckpoint, err)
+		return false, fmt.Errorf("%w: %v", ErrInvalidCheckpoint, err)
 	}
 
 	// Only move forward in height to avoid accidental reorg/rollback usage.
 	if r.checkpoint != nil && cp.Height <= r.checkpoint.Height {
-		return nil
+		return false, nil
 	}
 
 	r.checkpoint = &cp
 	r.opSigs = pkg.OperatorSignatures
+	return true, nil
+}
 
+func (r *Relayer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
+	updated, err := r.applyCheckpoint(pkg)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	cp := pkg.Checkpoint
 	r.log.Info("updated checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
 	return r.FlushDue(ctx)
 }
@@ -359,6 +384,9 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 	if err := r.recoverStaleBatches(ctx); err != nil {
 		return err
 	}
+	if err := r.restoreCheckpointFromStore(ctx); err != nil {
+		return err
+	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
 		return nil
 	}
@@ -376,6 +404,9 @@ func (r *Relayer) Flush(ctx context.Context) error {
 		return err
 	}
 	if err := r.recoverStaleBatches(ctx); err != nil {
+		return err
+	}
+	if err := r.restoreCheckpointFromStore(ctx); err != nil {
 		return err
 	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
@@ -397,6 +428,9 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 		limit = r.cfg.MaxItems
 	}
 	if err := r.promoteSeenDeposits(ctx, limit); err != nil {
+		return err
+	}
+	if err := r.restoreCheckpointFromStore(ctx); err != nil {
 		return err
 	}
 	if r.checkpoint == nil || len(r.opSigs) == 0 {
@@ -449,6 +483,81 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 		return err
 	}
 	return nil
+}
+
+func (r *Relayer) restoreCheckpointFromStore(ctx context.Context) error {
+	if r.checkpoint != nil || r.checkpointStore == nil {
+		return nil
+	}
+	recs, err := r.checkpointStore.ListByState(ctx, checkpoint.PackageStateEmitted)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: list emitted checkpoints: %w", err)
+	}
+	if len(recs) == 0 {
+		return nil
+	}
+	best := recs[0]
+	for _, rec := range recs[1:] {
+		if newerCheckpointRecord(rec, best) {
+			best = rec
+		}
+	}
+	pkg, err := decodeCheckpointPackageRecord(best)
+	if err != nil {
+		return fmt.Errorf("depositrelayer: decode emitted checkpoint %s: %w", best.Digest, err)
+	}
+	updated, err := r.applyCheckpoint(pkg)
+	if err != nil {
+		return err
+	}
+	if updated {
+		r.log.Info("restored checkpoint", "height", pkg.Checkpoint.Height, "digest", checkpoint.Digest(pkg.Checkpoint))
+	}
+	return nil
+}
+
+func newerCheckpointRecord(candidate, current checkpoint.PackageRecord) bool {
+	if candidate.Checkpoint.Height != current.Checkpoint.Height {
+		return candidate.Checkpoint.Height > current.Checkpoint.Height
+	}
+	if !candidate.EmittedAt.Equal(current.EmittedAt) {
+		return candidate.EmittedAt.After(current.EmittedAt)
+	}
+	return candidate.PersistedAt.After(current.PersistedAt)
+}
+
+func decodeCheckpointPackageRecord(rec checkpoint.PackageRecord) (CheckpointPackage, error) {
+	if len(rec.Payload) == 0 {
+		return CheckpointPackage{}, errors.New("checkpoint package payload is empty")
+	}
+	var payload checkpointPackagePayload
+	if err := json.Unmarshal(rec.Payload, &payload); err != nil {
+		return CheckpointPackage{}, fmt.Errorf("unmarshal checkpoint package payload: %w", err)
+	}
+	if payload.Version != "checkpoints.package.v1" {
+		return CheckpointPackage{}, fmt.Errorf("unexpected checkpoint package version %q", payload.Version)
+	}
+	if rec.Digest != (common.Hash{}) && payload.Digest != rec.Digest {
+		return CheckpointPackage{}, fmt.Errorf("checkpoint package digest mismatch: payload=%s record=%s", payload.Digest, rec.Digest)
+	}
+	if want := checkpoint.Digest(payload.Checkpoint); payload.Digest != want {
+		return CheckpointPackage{}, fmt.Errorf("checkpoint package digest mismatch: computed=%s payload=%s", want, payload.Digest)
+	}
+	sigs := make([][]byte, 0, len(payload.Signatures))
+	for i, sigHex := range payload.Signatures {
+		sig, err := hexutil.Decode(sigHex)
+		if err != nil {
+			return CheckpointPackage{}, fmt.Errorf("decode checkpoint signature[%d]: %w", i, err)
+		}
+		sigs = append(sigs, sig)
+	}
+	if len(sigs) == 0 {
+		return CheckpointPackage{}, errors.New("checkpoint package has no signatures")
+	}
+	return CheckpointPackage{
+		Checkpoint:         payload.Checkpoint,
+		OperatorSignatures: sigs,
+	}, nil
 }
 
 func checkpointCoversDepositHeight(cp checkpoint.Checkpoint, dep deposit.Deposit) bool {

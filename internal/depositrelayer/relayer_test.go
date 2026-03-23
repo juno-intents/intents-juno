@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -156,6 +157,43 @@ func (s *stubDepositWitnessRefresher) RefreshDepositWitness(_ context.Context, a
 		return common.Hash{}, nil, s.err
 	}
 	return s.root, append([]byte(nil), s.item...), nil
+}
+
+func mustEmittedCheckpointRecord(
+	t *testing.T,
+	cp checkpoint.Checkpoint,
+	signers []common.Address,
+	sigs [][]byte,
+	persistedAt time.Time,
+	emittedAt time.Time,
+) checkpoint.PackageRecord {
+	t.Helper()
+
+	payload := checkpointPackagePayload{
+		Version:         "checkpoints.package.v1",
+		Digest:          checkpoint.Digest(cp),
+		Checkpoint:      cp,
+		OperatorSetHash: common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		Signers:         append([]common.Address(nil), signers...),
+		Signatures:      make([]string, 0, len(sigs)),
+		CreatedAt:       emittedAt.UTC(),
+	}
+	for _, sig := range sigs {
+		payload.Signatures = append(payload.Signatures, "0x"+hex.EncodeToString(sig))
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("Marshal checkpoint package payload: %v", err)
+	}
+	return checkpoint.PackageRecord{
+		Digest:          payload.Digest,
+		Checkpoint:      cp,
+		OperatorSetHash: payload.OperatorSetHash,
+		Payload:         raw,
+		State:           checkpoint.PackageStateEmitted,
+		PersistedAt:     persistedAt.UTC(),
+		EmittedAt:       emittedAt.UTC(),
+	}
 }
 
 type flakyDLQStore struct {
@@ -4067,6 +4105,145 @@ func TestRelayer_DefersGuestWitnessRefreshUntilCheckpointCoversDepositHeight(t *
 	}
 	if !bytes.Equal(prover.gotReq.PrivateInput, wantInput) {
 		t.Fatalf("proof requester private input mismatch after checkpoint catch-up")
+	}
+}
+
+func TestRelayer_FlushDueRestoresLatestEmittedCheckpointFromStore(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           124,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	recipient := common.HexToAddress("0x000000000000000000000000000000000000beef")
+	var witness [proverinput.DepositWitnessItemLen]byte
+	for i := range witness {
+		witness[i] = 0x44
+	}
+
+	store := deposit.NewMemoryStore()
+	depositID := idempotency.MustDepositIDV1([32]byte(common.HexToHash("0xaa")), 7)
+	if _, _, err := store.UpsertConfirmed(context.Background(), deposit.Deposit{
+		DepositID:        depositID,
+		Commitment:       [32]byte(common.HexToHash("0xaa")),
+		LeafIndex:        7,
+		Amount:           1000,
+		BaseRecipient:    [20]byte(recipient),
+		ProofWitnessItem: witness[:],
+		JunoHeight:       int64(cp.Height),
+	}); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	checkpointStore := checkpoint.NewMemoryPackageStore()
+	rec := mustEmittedCheckpointRecord(
+		t,
+		cp,
+		operatorAddrs,
+		checkpointSigs,
+		time.Unix(100, 0),
+		time.Unix(101, 0),
+	)
+	if err := checkpointStore.UpsertPackage(context.Background(), rec); err != nil {
+		t.Fatalf("UpsertPackage: %v", err)
+	}
+
+	var ivk [64]byte
+	for i := range ivk {
+		ivk[i] = byte(i + 1)
+	}
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		ClaimTTL:          10 * time.Minute,
+		GasLimit:          55555,
+		OWalletIVKBytes:   ivk[:],
+		RuntimeSettings: &stubDepositRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}},
+		BridgeSettings: &stubDepositBridgeSettingsProvider{snapshot: bridgeconfig.Snapshot{
+			MinDepositAmount: 1,
+		}},
+		TipHeightProvider: &stubTipHeightProvider{height: int64(cp.Height)},
+		CheckpointStore:   checkpointStore,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.FlushDue(ctx); err != nil {
+		t.Fatalf("FlushDue: %v", err)
+	}
+	if r.checkpoint == nil {
+		t.Fatalf("checkpoint was not restored")
+	}
+	if r.checkpoint.Height != cp.Height {
+		t.Fatalf("restored checkpoint height: got=%d want=%d", r.checkpoint.Height, cp.Height)
+	}
+	if prover.calls != 1 {
+		t.Fatalf("proof requester calls: got=%d want=1", prover.calls)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender calls: got=%d want=1", sender.calls)
+	}
+
+	job, err := store.Get(ctx, depositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateFinalized {
+		t.Fatalf("job state: got=%s want=%s", job.State, deposit.StateFinalized)
+	}
+	if prover.gotReq.JobID == (common.Hash{}) {
+		t.Fatalf("expected proof request job id to be set")
+	}
+	if sender.got[0].GasLimit != 55555 {
+		t.Fatalf("gas limit: got=%d want=55555", sender.got[0].GasLimit)
+	}
+	expectedJournal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
+		FinalOrchardRoot: cp.FinalOrchardRoot,
+		BaseChainId:      new(big.Int).SetUint64(cp.BaseChainID),
+		BridgeContract:   cp.BridgeContract,
+		Items: []bridgeabi.MintItem{{
+			DepositId: common.Hash(depositID),
+			Recipient: recipient,
+			Amount:    big.NewInt(1000),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("EncodeDepositJournal: %v", err)
+	}
+	expectedCalldata, err := bridgeabi.PackMintBatchCalldata(cp, checkpointSigs, []byte{0x99}, expectedJournal)
+	if err != nil {
+		t.Fatalf("PackMintBatchCalldata: %v", err)
+	}
+	if got := common.FromHex(sender.got[0].Data); !bytes.Equal(got, expectedCalldata) {
+		t.Fatalf("mint batch calldata mismatch")
+	}
+	if !bytes.Equal(job.Deposit.ProofWitnessItem, witness[:]) {
+		t.Fatalf("deposit witness item changed unexpectedly")
 	}
 }
 
