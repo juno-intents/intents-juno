@@ -231,7 +231,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$hydrator_script" 'set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"' "config hydrator persists operator address"
 
   deposit_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
-  assert_contains "$deposit_wrapper" 'deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"' "deposit wrapper defaults to single-item batches with env override"
+  assert_contains "$deposit_wrapper" 'deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-25}"' "deposit wrapper defaults to deposit-sized batches with env override"
   assert_contains "$deposit_wrapper" 'deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"' "deposit wrapper subscribes to deposits.event.v2 by default"
   assert_contains "$deposit_wrapper" 'deposit_max_age="${DEPOSIT_RELAYER_MAX_AGE:-3m}"' "deposit wrapper sets a bounded batch max-age by default"
   assert_contains "$deposit_wrapper" 'deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-7m}"' "deposit wrapper sets a durable claim ttl by default"
@@ -254,7 +254,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" 'export JUNO_TXSIGN_SIGNER_KEYS' "withdraw wrapper exports juno txsign signer keys"
   assert_contains "$withdraw_wrapper" '--postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper passes DSN by env indirection"
   assert_contains "$withdraw_wrapper" '--claim-ttl "${WITHDRAW_COORDINATOR_CLAIM_TTL:-5m}"' "withdraw wrapper sets a production-safe claim ttl by default"
-  assert_contains "$withdraw_wrapper" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"' "withdraw wrapper defaults to single-item batches with env override"
+  assert_contains "$withdraw_wrapper" 'withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-50}"' "withdraw wrapper defaults to withdraw-sized batches with env override"
   assert_contains "$withdraw_wrapper" '--max-items "${withdraw_coord_max_items}"' "withdraw wrapper passes the withdraw batch size override"
   assert_contains "$withdraw_wrapper" '--juno-scan-url "${WITHDRAW_COORDINATOR_JUNO_SCAN_URL}"' "withdraw wrapper pins juno txbuild to the scanner URL"
   assert_contains "$withdraw_wrapper" '--juno-scan-bearer-env JUNO_SCAN_BEARER_TOKEN' "withdraw wrapper passes the scanner bearer env name"

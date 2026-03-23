@@ -1492,7 +1492,7 @@ esac
 export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
-deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-1}"
+deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-25}"
 deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
 deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
@@ -1730,7 +1730,7 @@ export JUNO_TXSIGN_SIGNER_KEYS
 withdraw_coord_owner="${WITHDRAW_COORDINATOR_OWNER:-$(hostname -s)-withdraw-coordinator}"
 withdraw_coord_queue_group="${WITHDRAW_COORDINATOR_QUEUE_GROUP:-withdraw-coordinator}"
 withdraw_coord_queue_topics="${WITHDRAW_COORDINATOR_QUEUE_TOPIC:-withdrawals.requested.v2}"
-withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-1}"
+withdraw_coord_max_items="${WITHDRAW_COORDINATOR_MAX_ITEMS:-50}"
 
 exec /usr/local/bin/withdraw-coordinator \
   --postgres-dsn-env "${WITHDRAW_COORDINATOR_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}" \
