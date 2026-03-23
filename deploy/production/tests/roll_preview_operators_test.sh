@@ -184,6 +184,86 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_roll_preview_aws_with_stale_launch_templates() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "$*" >>"$TEST_AWS_LOG"
+args=( "$@" )
+if [[ "${args[0]:-}" == "--profile" ]]; then
+  args=( "${args[@]:2}" )
+fi
+if [[ "${args[0]:-}" == "--region" ]]; then
+  args=( "${args[@]:2}" )
+fi
+case "${args[*]}" in
+  "ec2 create-launch-template-version --launch-template-id lt-stale-op1 --source-version 3 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf 'An error occurred (InvalidLaunchTemplateId.NotFound) when calling the CreateLaunchTemplateVersion operation: The specified launch template, with template ID lt-stale-op1, does not exist.\n' >&2
+    exit 254
+    ;;
+  "ec2 create-launch-template-version --launch-template-id lt-stale-op2 --source-version 7 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf 'An error occurred (InvalidLaunchTemplateId.NotFound) when calling the CreateLaunchTemplateVersion operation: The specified launch template, with template ID lt-stale-op2, does not exist.\n' >&2
+    exit 254
+    ;;
+  "ec2 create-launch-template-version --launch-template-id lt-live-op1 --source-version 11 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf '{"LaunchTemplateVersion":{"VersionNumber":12}}\n'
+    ;;
+  "ec2 create-launch-template-version --launch-template-id lt-live-op2 --source-version 13 --launch-template-data {\"ImageId\":\"ami-0operatorfresh123456\"} --output json")
+    printf '{"LaunchTemplateVersion":{"VersionNumber":14}}\n'
+    ;;
+  "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json")
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"44.201.3.134","LaunchTemplate":{"LaunchTemplateId":"lt-live-op1","Version":"11"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op1"}]}]}]}\n'
+    ;;
+  "ec2 describe-instances --filters Name=ip-address,Values=34.207.95.248 --output json")
+    printf '{"Reservations":[{"Instances":[{"PublicIpAddress":"34.207.95.248","LaunchTemplate":{"LaunchTemplateId":"lt-live-op2","Version":"13"},"Tags":[{"Key":"aws:autoscaling:groupName","Value":"preview-op2"}]}]}]}\n'
+    ;;
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op1 --launch-template LaunchTemplateId=lt-live-op1,Version=12")
+    ;;
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-op2 --launch-template LaunchTemplateId=lt-live-op2,Version=14")
+    ;;
+  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op1 --preferences {\"MinHealthyPercentage\":100} --output json")
+    printf '{"InstanceRefreshId":"refresh-op1"}\n'
+    ;;
+  "autoscaling start-instance-refresh --auto-scaling-group-name preview-op2 --preferences {\"MinHealthyPercentage\":100} --output json")
+    printf '{"InstanceRefreshId":"refresh-op2"}\n'
+    ;;
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op1 --instance-refresh-ids refresh-op1 --output json")
+    printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
+    ;;
+  "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2 --output json")
+    printf '{"InstanceRefreshes":[{"Status":"Successful"}]}\n'
+    ;;
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op1 --output json")
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op1","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-op2 --output json")
+    printf '{"AutoScalingGroups":[{"DesiredCapacity":1,"Instances":[{"InstanceId":"i-op2","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    ;;
+  "ec2 describe-instances --instance-ids i-op1 --output json")
+    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op1","PublicIpAddress":"44.201.10.10","PrivateIpAddress":"10.0.10.10","IamInstanceProfile":{"Arn":"arn:aws:iam::021490342184:instance-profile/juno-live-e2e-preview0316d-instance-profile"}}]}]}\n'
+    ;;
+  "ec2 describe-instances --instance-ids i-op2 --output json")
+    printf '{"Reservations":[{"Instances":[{"InstanceId":"i-op2","PublicIpAddress":"34.207.20.20","PrivateIpAddress":"10.0.11.11","IamInstanceProfile":{"Arn":"arn:aws:iam::021490342184:instance-profile/juno-live-e2e-preview0316d-instance-profile"}}]}]}\n'
+    ;;
+  "iam get-instance-profile --instance-profile-name juno-live-e2e-preview0316d-instance-profile --output json")
+    printf '{"InstanceProfile":{"Roles":[{"RoleName":"juno-live-e2e-preview0316d-instance-role"}]}}\n'
+    ;;
+  "s3api get-bucket-encryption --bucket preview-checkpoint-blobs --output json")
+    printf '{"ServerSideEncryptionConfiguration":{"Rules":[{"ApplyServerSideEncryptionByDefault":{"SSEAlgorithm":"aws:kms","KMSMasterKeyID":"arn:aws:kms:us-east-1:021490342184:key/preview-checkpoint-blobs"}}]}}\n'
+    ;;
+  iam\ put-role-policy\ --role-name\ juno-live-e2e-preview0316d-instance-role\ --policy-name\ preview-shared-kafka-access\ --policy-document\ *)
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
 write_fake_deploy_operator_binary() {
   local target="$1"
   local log_file="$2"
@@ -424,9 +504,96 @@ EOF
   rm -rf "$tmp"
 }
 
+test_roll_preview_operators_recovers_from_stale_launch_template_ids() {
+  local tmp inventory shared_manifest releases_dir gh_log aws_log deploy_log canary_log ssh_keyscan_log output_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  releases_dir="$tmp/releases"
+  gh_log="$tmp/gh.log"
+  aws_log="$tmp/aws.log"
+  deploy_log="$tmp/deploy.log"
+  canary_log="$tmp/canary.log"
+  ssh_keyscan_log="$tmp/ssh-keyscan.log"
+  output_dir="$tmp/output"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2" "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  cat >"$tmp/operators/op1/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$tmp/operators/op2/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$tmp/operators/op1/operator-secrets.env"
+  append_default_owallet_proof_keys "$tmp/operators/op2/operator-secrets.env"
+  write_test_dkg_backup_zip "$tmp/operators/op1/dkg-backup.zip"
+  write_test_dkg_backup_zip "$tmp/operators/op2/dkg-backup.zip"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  jq '
+    .operators[0].launch_template = {id: "lt-stale-op1", version: "3"}
+    | .operators[1].launch_template = {id: "lt-stale-op2", version: "7"}
+  ' "$inventory" >"$tmp/inventory.next"
+  mv "$tmp/inventory.next" "$inventory"
+  write_shared_manifest_fixture "$shared_manifest"
+
+  cat >"$releases_dir/operator-stack-ami-v2026.03.20-testnet/operator-ami-manifest.json" <<'JSON'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operatorfresh123456"
+    }
+  }
+}
+JSON
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
+
+  write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
+  write_fake_roll_preview_aws_with_stale_launch_templates "$tmp/bin/aws" "$aws_log"
+  write_fake_deploy_operator_binary "$tmp/bin/deploy-operator.sh" "$deploy_log"
+  write_fake_operator_canary_binary "$tmp/bin/canary-operator-boot.sh" "$canary_log"
+  cat >"$tmp/bin/ssh-keyscan" <<EOF
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "\$*" >>"$ssh_keyscan_log"
+host="\${@: -1}"
+printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey\n' "\$host"
+EOF
+  chmod +x "$tmp/bin/ssh-keyscan"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$tmp/bin:$PATH" \
+      PRODUCTION_DEPLOY_OPERATOR_BIN="$tmp/bin/deploy-operator.sh" \
+      PRODUCTION_CANARY_OPERATOR_BOOT_BIN="$tmp/bin/canary-operator-boot.sh" \
+      bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+        --inventory "$inventory" \
+        --shared-manifest "$shared_manifest" \
+        --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --output-dir "$output_dir" \
+        --github-repo juno-intents/intents-juno >"$tmp/roll-summary.json"
+  )
+
+  assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-stale-op1 --source-version 3" "preview operator roll attempts the persisted first launch template before rediscovery"
+  assert_contains "$(cat "$aws_log")" "ec2 describe-instances --filters Name=ip-address,Values=44.201.3.134 --output json" "preview operator roll rediscovers the first operator when its persisted launch template is gone"
+  assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-live-op1 --source-version 11" "preview operator roll retries the first operator with the live launch template"
+  assert_eq "$(jq -r '.operators[0].launch_template.id' "$output_dir/inventory.operators-rolled.json")" "lt-live-op1" "preview operator roll persists the refreshed first launch template id"
+  assert_eq "$(jq -r '.operators[1].launch_template.version' "$output_dir/inventory.operators-rolled.json")" "14" "preview operator roll persists the refreshed second launch template version"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_roll_preview_operators_refreshes_asgs_and_redeploys_handoffs
   test_roll_preview_operators_discovers_missing_asg_and_launch_template_from_public_ip
+  test_roll_preview_operators_recovers_from_stale_launch_template_ids
 }
 
 main "$@"
