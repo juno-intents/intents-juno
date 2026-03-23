@@ -608,7 +608,7 @@ EOF
   )
 
   assert_contains "$(cat "$log_file")" "--funder-key-file $tmp/funder.key" "rebuild forwards funder mode into deploy coordinator"
-  assert_contains "$(cat "$log_file")" "--ephemeral-funding-amount-wei 50000000000000000" "rebuild defaults the bridge ephemeral funding amount for preview funder mode"
+  assert_contains "$(cat "$log_file")" "--ephemeral-funding-amount-wei 15000000000000000" "rebuild defaults the bridge ephemeral funding amount for preview funder mode"
 
   rm -rf "$tmp"
 }
