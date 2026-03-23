@@ -7,6 +7,7 @@ import (
 	"math/big"
 	"testing"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -233,6 +234,32 @@ func TestLegacyValueTransferFeeWei(t *testing.T) {
 	got := legacyValueTransferFeeWei(gasPrice)
 	if got.Cmp(want) != 0 {
 		t.Fatalf("fee = %s, want %s", got.String(), want.String())
+	}
+}
+
+func TestTransactAuthWithDefaults_PreservesZeroGasLimitForEstimation(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{GasLimit: 0}
+	got := transactAuthWithDefaults(auth, 4_000_000)
+	if got == auth {
+		t.Fatal("transactAuthWithDefaults returned the original auth pointer")
+	}
+	if got.GasLimit != 0 {
+		t.Fatalf("GasLimit = %d, want 0", got.GasLimit)
+	}
+}
+
+func TestTransactAuthWithDefaults_PreservesExplicitGasLimit(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{GasLimit: 123_456}
+	got := transactAuthWithDefaults(auth, 4_000_000)
+	if got == auth {
+		t.Fatal("transactAuthWithDefaults returned the original auth pointer")
+	}
+	if got.GasLimit != auth.GasLimit {
+		t.Fatalf("GasLimit = %d, want %d", got.GasLimit, auth.GasLimit)
 	}
 }
 
