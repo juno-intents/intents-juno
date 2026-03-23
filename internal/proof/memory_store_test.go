@@ -95,3 +95,51 @@ func TestMemoryStore_RequestIDAllocatorConcurrent(t *testing.T) {
 		}
 	}
 }
+
+func TestMemoryStore_ClaimForSubmissionSkipsActiveLeaseEvenForSameOwner(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	store := NewMemoryStore(func() time.Time { return now })
+	job := JobRequest{
+		JobID:        common.HexToHash("0x4314e7904fd1808ad5a2394a4e8e6cf6ccf8802f27195be7d87da01f5c23a1ee"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(context.Background(), job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+
+	first, claimed, err := store.ClaimForSubmission(context.Background(), job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission first: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected first claim to succeed")
+	}
+	if got, want := first.AttemptCount, 1; got != want {
+		t.Fatalf("first attempt count: got %d want %d", got, want)
+	}
+
+	second, claimed, err := store.ClaimForSubmission(context.Background(), job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission second: %v", err)
+	}
+	if claimed {
+		t.Fatalf("expected second claim to skip while lease is active")
+	}
+	if got, want := second.AttemptCount, 1; got != want {
+		t.Fatalf("second attempt count: got %d want %d", got, want)
+	}
+	if got, want := second.RequestID, first.RequestID; got != want {
+		t.Fatalf("request id: got %d want %d", got, want)
+	}
+	if got, want := second.State, StateSubmitting; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+}

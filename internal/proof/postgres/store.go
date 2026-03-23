@@ -135,7 +135,7 @@ func (s *Store) ClaimForSubmission(ctx context.Context, jobID common.Hash, owner
 		}
 		return rec, false, nil
 	}
-	if rec.ProcessingOwner != "" && rec.ProcessingOwner != owner && rec.ProcessingExpiresAt.After(now) {
+	if rec.ProcessingOwner != "" && rec.ProcessingExpiresAt.After(now) {
 		if err := tx.Commit(ctx); err != nil {
 			return proof.JobRecord{}, false, fmt.Errorf("proof/postgres: commit claim read-only: %w", err)
 		}

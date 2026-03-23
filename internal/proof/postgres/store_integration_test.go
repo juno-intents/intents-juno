@@ -137,6 +137,76 @@ func TestStore_AllocatorAndDedupe(t *testing.T) {
 	}
 }
 
+func TestStore_ClaimForSubmissionSkipsActiveLeaseEvenForSameOwner(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0x7ef54f9b1b47c7276375b70ddb2ea3d3a11e6aa0c0d003981c1f3f9a3bf191bf"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(ctx, job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+
+	first, claimed, err := store.ClaimForSubmission(ctx, job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission first: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected first claim to succeed")
+	}
+	if got, want := first.AttemptCount, 1; got != want {
+		t.Fatalf("first attempt count: got %d want %d", got, want)
+	}
+
+	second, claimed, err := store.ClaimForSubmission(ctx, job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission second: %v", err)
+	}
+	if claimed {
+		t.Fatalf("expected second claim to skip while lease is active")
+	}
+	if got, want := second.AttemptCount, 1; got != want {
+		t.Fatalf("second attempt count: got %d want %d", got, want)
+	}
+	if got, want := second.RequestID, first.RequestID; got != want {
+		t.Fatalf("request id: got %d want %d", got, want)
+	}
+	if got, want := second.State, proof.StateSubmitting; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+}
+
 func mustFreePort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

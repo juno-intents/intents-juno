@@ -109,3 +109,50 @@ func TestService_ProofFailureClassification(t *testing.T) {
 		t.Fatalf("expected non-retryable failure")
 	}
 }
+
+func TestService_SkipsDuplicateDeliveryWhileLeaseActive(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	store := proof.NewMemoryStore(func() time.Time { return now })
+	prover := &stubProver{seal: []byte{0xbb}}
+	svc, err := New(Config{
+		Owner:                  "requestor-a",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Minute,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0x76f9b89ef12ee0d6d0f937ae9b73985a27bb85b6d0e9dd6fa738517a826ffba4"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(2 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(context.Background(), job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	if _, claimed, err := store.ClaimForSubmission(context.Background(), job.JobID, "requestor-a", 5*time.Minute, 8453); err != nil {
+		t.Fatalf("ClaimForSubmission: %v", err)
+	} else if !claimed {
+		t.Fatalf("expected initial claim to succeed")
+	}
+
+	out, err := svc.ProcessJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("ProcessJob: %v", err)
+	}
+	if got, want := out.Status, StatusSkipped; got != want {
+		t.Fatalf("status: got %s want %s", got, want)
+	}
+	if prover.calls != 0 {
+		t.Fatalf("prove calls: got %d want 0", prover.calls)
+	}
+}

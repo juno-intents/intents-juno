@@ -99,7 +99,7 @@ func (s *MemoryStore) ClaimForSubmission(_ context.Context, jobID common.Hash, o
 	if rec.State == StateFulfilled || rec.State == StateFailedTerminal {
 		return cloneRecord(rec), false, nil
 	}
-	if rec.ProcessingOwner != "" && rec.ProcessingOwner != owner && rec.ProcessingExpiresAt.After(now) {
+	if rec.ProcessingOwner != "" && rec.ProcessingExpiresAt.After(now) {
 		return cloneRecord(rec), false, nil
 	}
 	if rec.RequestID == 0 {
