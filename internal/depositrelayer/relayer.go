@@ -391,9 +391,6 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	if !r.ready(ctx) {
 		return nil
 	}
-	if r.checkpoint == nil || len(r.opSigs) == 0 {
-		return nil
-	}
 
 	limit := r.cfg.MaxItems * 4
 	if limit < r.cfg.MaxItems {
@@ -401,6 +398,9 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 	}
 	if err := r.promoteSeenDeposits(ctx, limit); err != nil {
 		return err
+	}
+	if r.checkpoint == nil || len(r.opSigs) == 0 {
+		return nil
 	}
 	jobs, err := r.store.ClaimConfirmed(ctx, r.cfg.Owner, r.cfg.ClaimTTL, limit)
 	if err != nil {

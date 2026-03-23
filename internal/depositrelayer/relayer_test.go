@@ -1227,6 +1227,58 @@ func TestRelayer_RefillFromStore_PromotesSeenAndRejectsBelowMin(t *testing.T) {
 	}
 }
 
+func TestRelayer_RefillFromStore_PromotesSeenWithoutCheckpoint(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	depID := seq32ForRelayer(0x31)
+	dep := deposit.Deposit{
+		DepositID:     depID,
+		Commitment:    seq32ForRelayer(0x41),
+		LeafIndex:     9,
+		Amount:        250,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+		JunoHeight:    10,
+	}
+	if _, _, err := store.UpsertSeen(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertSeen: %v", err)
+	}
+
+	r, err := New(Config{
+		BaseChainID:       31337,
+		BridgeAddress:     common.HexToAddress("0x0000000000000000000000000000000000000123"),
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Now:               time.Now,
+		RuntimeSettings: &stubDepositRuntimeSettingsProvider{settings: runtimeconfig.Settings{
+			DepositMinConfirmations:         1,
+			WithdrawPlannerMinConfirmations: 1,
+			WithdrawBatchConfirmations:      1,
+		}},
+		TipHeightProvider: &stubTipHeightProvider{height: 12},
+	}, store, &stubSender{}, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := r.refillFromStore(context.Background()); err != nil {
+		t.Fatalf("refillFromStore: %v", err)
+	}
+
+	job, err := store.Get(context.Background(), depID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateConfirmed {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateConfirmed)
+	}
+}
+
 func TestRelayer_PersistsOpenBatchAcrossRestartBeforeSubmitting(t *testing.T) {
 	t.Parallel()
 
