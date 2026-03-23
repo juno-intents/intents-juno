@@ -487,12 +487,15 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 			cfg.SweepRecipient = funderAddr
 			rep.Actors.SweepRecipient = funderAddr.Hex()
 		}
-		fundTx, err := sendValueTx(ctx, client, funderKey, chainID, deployerAddr, cfg.EphemeralFundingAmountWei)
+		fundTx, fundedAmount, err := fundEphemeralDeployer(ctx, client, funderKey, chainID, deployerAddr, cfg.EphemeralFundingAmountWei)
 		if err != nil {
 			return nil, fmt.Errorf("fund ephemeral deployer: %w", err)
 		}
+		if fundedAmount.Cmp(cfg.EphemeralFundingAmountWei) < 0 {
+			fmt.Fprintf(os.Stderr, "bridge-deploy: lowering ephemeral funding from %s to %s to fit funder balance\n", cfg.EphemeralFundingAmountWei.String(), fundedAmount.String())
+		}
 		rep.Transactions.FundEphemeral = fundTx.Hex()
-		if _, err := waitBigIntAtLeastAttempts(ctx, "ephemeral deployer balance", cfg.EphemeralFundingAmountWei, ephemeralFundingReadRetries, ephemeralFundingReadBackoff, func() (*big.Int, error) {
+		if _, err := waitBigIntAtLeastAttempts(ctx, "ephemeral deployer balance", fundedAmount, ephemeralFundingReadRetries, ephemeralFundingReadBackoff, func() (*big.Int, error) {
 			return client.BalanceAt(ctx, deployerAddr, nil)
 		}); err != nil {
 			return nil, fmt.Errorf("wait for ephemeral deployer funding: %w", err)
@@ -1034,9 +1037,101 @@ func sendValueTx(ctx context.Context, client *ethclient.Client, key *ecdsa.Priva
 	return sendValueTxWithGasPrice(ctx, client, key, chainID, to, value, gasPrice)
 }
 
+type fundingBalanceReader func(context.Context) (*big.Int, error)
+type fundingGasPriceReader func(context.Context) (*big.Int, error)
+type fundingSender func(context.Context, *big.Int, *big.Int) (common.Hash, error)
+
+func fundEphemeralDeployer(ctx context.Context, client *ethclient.Client, key *ecdsa.PrivateKey, chainID *big.Int, to common.Address, requested *big.Int) (common.Hash, *big.Int, error) {
+	from := crypto.PubkeyToAddress(key.PublicKey)
+	return fundEphemeralDeployerWithRetry(
+		ctx,
+		requested,
+		func(ctx context.Context) (*big.Int, error) {
+			balance, err := client.PendingBalanceAt(ctx, from)
+			if err != nil {
+				return nil, fmt.Errorf("read pending funder balance: %w", err)
+			}
+			return balance, nil
+		},
+		func(ctx context.Context) (*big.Int, error) {
+			gasPrice, err := client.SuggestGasPrice(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("suggest funding gas price: %w", err)
+			}
+			return gasPrice, nil
+		},
+		func(ctx context.Context, value, gasPrice *big.Int) (common.Hash, error) {
+			return sendValueTxWithGasPrice(ctx, client, key, chainID, to, value, gasPrice)
+		},
+	)
+}
+
+func fundingValueWei(requested, balance, fee *big.Int) (*big.Int, bool) {
+	if requested == nil || requested.Sign() <= 0 || balance == nil || fee == nil {
+		return big.NewInt(0), false
+	}
+	if balance.Cmp(fee) <= 0 {
+		return big.NewInt(0), false
+	}
+	affordable := new(big.Int).Sub(balance, fee)
+	if affordable.Cmp(requested) >= 0 {
+		return new(big.Int).Set(requested), true
+	}
+	return affordable, true
+}
+
 type sweepBalanceReader func(context.Context) (*big.Int, error)
 type sweepGasPriceReader func(context.Context) (*big.Int, error)
 type sweepSender func(context.Context, *big.Int, *big.Int) (common.Hash, error)
+
+func fundEphemeralDeployerWithRetry(ctx context.Context, requested *big.Int, readBalance fundingBalanceReader, suggestGasPrice fundingGasPriceReader, send fundingSender) (common.Hash, *big.Int, error) {
+	extraReserve := big.NewInt(0)
+	for attempt := 0; attempt < sweepRetryAttempts; attempt++ {
+		balance, err := readBalance(ctx)
+		if err != nil {
+			return common.Hash{}, nil, err
+		}
+		gasPrice, err := suggestGasPrice(ctx)
+		if err != nil {
+			return common.Hash{}, nil, err
+		}
+		fee := new(big.Int).Add(legacyValueTransferFeeWei(gasPrice), extraReserve)
+		value, ok := fundingValueWei(requested, balance, fee)
+		if !ok {
+			return common.Hash{}, nil, fmt.Errorf("funder balance %s does not cover transfer fee %s", balance.String(), fee.String())
+		}
+		txHash, err := send(ctx, value, gasPrice)
+		if err == nil {
+			return txHash, value, nil
+		}
+		if isRetriableNonceError(err) || errors.Is(err, context.DeadlineExceeded) {
+			if attempt+1 >= sweepRetryAttempts {
+				return common.Hash{}, nil, err
+			}
+			select {
+			case <-ctx.Done():
+				return common.Hash{}, nil, ctx.Err()
+			case <-time.After(sweepRetryBackoff):
+			}
+			continue
+		}
+
+		shortage, ok := insufficientFundsShortageWei(err)
+		if !ok {
+			return common.Hash{}, nil, err
+		}
+		extraReserve = new(big.Int).Add(extraReserve, new(big.Int).Add(shortage, big.NewInt(sweepValueSafetyBufferWei)))
+		if attempt+1 >= sweepRetryAttempts {
+			return common.Hash{}, nil, err
+		}
+		select {
+		case <-ctx.Done():
+			return common.Hash{}, nil, ctx.Err()
+		case <-time.After(sweepRetryBackoff):
+		}
+	}
+	return common.Hash{}, nil, nil
+}
 
 func sweepEphemeralDeployer(ctx context.Context, client *ethclient.Client, key *ecdsa.PrivateKey, chainID *big.Int, to common.Address) (common.Hash, bool, error) {
 	from := crypto.PubkeyToAddress(key.PublicKey)

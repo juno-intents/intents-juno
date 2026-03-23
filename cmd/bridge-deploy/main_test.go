@@ -158,6 +158,72 @@ func TestSweepValueWei(t *testing.T) {
 	}
 }
 
+func TestFundingValueWei(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		requested string
+		balance   string
+		fee       string
+		want      string
+		wantOkay  bool
+	}{
+		{
+			name:      "uses requested value when affordable",
+			requested: "15000000000000000",
+			balance:   "20000000000000000",
+			fee:       "126000000000",
+			want:      "15000000000000000",
+			wantOkay:  true,
+		},
+		{
+			name:      "clamps to affordable balance when requested exceeds headroom",
+			requested: "15000000000000000",
+			balance:   "10720564897725620",
+			fee:       "126000000000",
+			want:      "10720438897725620",
+			wantOkay:  true,
+		},
+		{
+			name:      "rejects zero affordable value",
+			requested: "15000000000000000",
+			balance:   "126000000000",
+			fee:       "126000000000",
+			want:      "0",
+			wantOkay:  false,
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			requested, ok := new(big.Int).SetString(tt.requested, 10)
+			if !ok {
+				t.Fatalf("invalid requested test input: %s", tt.requested)
+			}
+			balance, ok := new(big.Int).SetString(tt.balance, 10)
+			if !ok {
+				t.Fatalf("invalid balance test input: %s", tt.balance)
+			}
+			fee, ok := new(big.Int).SetString(tt.fee, 10)
+			if !ok {
+				t.Fatalf("invalid fee test input: %s", tt.fee)
+			}
+
+			got, ok := fundingValueWei(requested, balance, fee)
+			if ok != tt.wantOkay {
+				t.Fatalf("ok = %v, want %v", ok, tt.wantOkay)
+			}
+			if got.String() != tt.want {
+				t.Fatalf("value = %s, want %s", got.String(), tt.want)
+			}
+		})
+	}
+}
+
 func TestLegacyValueTransferFeeWei(t *testing.T) {
 	t.Parallel()
 
@@ -376,6 +442,50 @@ func TestSweepEphemeralDeployerWithRetry_RetriesRetriableNonceErrors(t *testing.
 	}
 	if attempts != 2 {
 		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+}
+
+func TestFundEphemeralDeployerWithRetry_ClampsRequestedFundingToAffordableBalance(t *testing.T) {
+	t.Parallel()
+
+	requested := big.NewInt(15_000_000_000_000_000)
+	balance := big.NewInt(10_720_564_897_725_620)
+	gasPrice := big.NewInt(6_000_000)
+	wantValue := big.NewInt(10_720_438_897_725_620)
+	wantHash := common.HexToHash("0x5")
+	attempts := 0
+
+	gotHash, fundedAmount, err := fundEphemeralDeployerWithRetry(
+		context.Background(),
+		requested,
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(balance), nil
+		},
+		func(context.Context) (*big.Int, error) {
+			return new(big.Int).Set(gasPrice), nil
+		},
+		func(_ context.Context, value, gotGasPrice *big.Int) (common.Hash, error) {
+			attempts++
+			if gotGasPrice.Cmp(gasPrice) != 0 {
+				t.Fatalf("gas price = %s, want %s", gotGasPrice.String(), gasPrice.String())
+			}
+			if value.Cmp(wantValue) != 0 {
+				t.Fatalf("value = %s, want %s", value.String(), wantValue.String())
+			}
+			return wantHash, nil
+		},
+	)
+	if err != nil {
+		t.Fatalf("fundEphemeralDeployerWithRetry: %v", err)
+	}
+	if gotHash != wantHash {
+		t.Fatalf("hash = %s, want %s", gotHash.Hex(), wantHash.Hex())
+	}
+	if fundedAmount.Cmp(wantValue) != 0 {
+		t.Fatalf("fundedAmount = %s, want %s", fundedAmount.String(), wantValue.String())
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }
 
