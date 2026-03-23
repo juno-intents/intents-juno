@@ -2,6 +2,7 @@ package proofrequestor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -125,6 +126,11 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 	}
 	code, retryable, message := sp1.ClassifyProveError(err)
 	if _, markErr := s.store.MarkFailed(ctx, job.JobID, s.cfg.Owner, rec.RequestID, code, message, retryable); markErr != nil {
+		if recovered, ok, recoverErr := s.recoverTerminalOutcome(ctx, job.JobID, rec.RequestID, markErr); recoverErr != nil {
+			return Outcome{}, recoverErr
+		} else if ok {
+			return recovered, nil
+		}
 		return Outcome{}, markErr
 	}
 	return Outcome{
@@ -153,17 +159,14 @@ func (s *Service) markFulfilled(ctx context.Context, jobID common.Hash, requestI
 		sp1.DefaultSubmissionPath,
 	)
 	if err != nil {
+		if recovered, ok, recoverErr := s.recoverTerminalOutcome(ctx, jobID, requestID, err); recoverErr != nil {
+			return Outcome{}, recoverErr
+		} else if ok {
+			return recovered, nil
+		}
 		return Outcome{}, err
 	}
-	return Outcome{
-		Status:         StatusFulfilled,
-		JobID:          jobID.Hex(),
-		RequestID:      rec.RequestID,
-		SubmissionPath: rec.SubmissionPath,
-		FallbackUsed:   false,
-		Seal:           append([]byte(nil), rec.Seal...),
-		Metadata:       cloneMetadata(rec.Metadata),
-	}, nil
+	return outcomeFromRecord(rec), nil
 }
 
 func cloneMetadata(in map[string]string) map[string]string {
@@ -173,6 +176,49 @@ func cloneMetadata(in map[string]string) map[string]string {
 	out := make(map[string]string, len(in))
 	for k, v := range in {
 		out[k] = v
+	}
+	return out
+}
+
+func (s *Service) recoverTerminalOutcome(ctx context.Context, jobID common.Hash, requestID uint64, err error) (Outcome, bool, error) {
+	if !errors.Is(err, proof.ErrTerminalState) {
+		return Outcome{}, false, nil
+	}
+	rec, getErr := s.store.GetJob(ctx, jobID)
+	if getErr != nil {
+		return Outcome{}, false, getErr
+	}
+	if requestID != 0 && rec.RequestID != 0 && rec.RequestID != requestID {
+		return Outcome{}, false, err
+	}
+	switch rec.State {
+	case proof.StateFulfilled, proof.StateFailedTerminal:
+		return outcomeFromRecord(rec), true, nil
+	default:
+		return Outcome{}, false, err
+	}
+}
+
+func outcomeFromRecord(rec proof.JobRecord) Outcome {
+	out := Outcome{
+		JobID:          rec.Job.JobID.Hex(),
+		RequestID:      rec.RequestID,
+		SubmissionPath: rec.SubmissionPath,
+		FallbackUsed:   false,
+		Seal:           append([]byte(nil), rec.Seal...),
+		Metadata:       cloneMetadata(rec.Metadata),
+		Retryable:      rec.Retryable,
+		ErrorCode:      rec.ErrorCode,
+		ErrorMessage:   rec.ErrorMessage,
+		AttemptCount:   rec.AttemptCount,
+	}
+	switch rec.State {
+	case proof.StateFulfilled:
+		out.Status = StatusFulfilled
+	case proof.StateFailedRetry, proof.StateFailedTerminal:
+		out.Status = StatusFailed
+	default:
+		out.Status = StatusSkipped
 	}
 	return out
 }

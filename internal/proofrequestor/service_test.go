@@ -156,3 +156,88 @@ func TestService_SkipsDuplicateDeliveryWhileLeaseActive(t *testing.T) {
 		t.Fatalf("prove calls: got %d want 0", prover.calls)
 	}
 }
+
+func TestService_RecoversFulfillmentWhenStaleFailureLosesRace(t *testing.T) {
+	t.Parallel()
+
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0x47c8d01d300c2ab17fddbd845cf987e16c5c5fd7f93d41822b5edcb36cd4e550"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     time.Date(2026, 3, 23, 16, 5, 0, 0, time.UTC),
+		Priority:     1,
+	}
+
+	store := &terminalStateStore{
+		record: proof.JobRecord{
+			Job:            job,
+			RequestID:      17,
+			State:          proof.StateFulfilled,
+			SubmissionPath: "sp1-network-mainnet",
+			Seal:           []byte{0xaa},
+			Metadata:       map[string]string{"provider": "sp1"},
+		},
+	}
+	prover := &stubProver{err: sp1.NewRetryableError("sp1_request_unfulfillable", errors.New("auction returned unfulfillable"))}
+
+	svc, err := New(Config{
+		Owner:                  "requestor-a",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Minute,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	out, err := svc.ProcessJob(context.Background(), job)
+	if err != nil {
+		t.Fatalf("ProcessJob: %v", err)
+	}
+	if got, want := out.Status, StatusFulfilled; got != want {
+		t.Fatalf("status: got %s want %s", got, want)
+	}
+	if got, want := out.RequestID, uint64(17); got != want {
+		t.Fatalf("request id: got %d want %d", got, want)
+	}
+	if got, want := out.SubmissionPath, "sp1-network-mainnet"; got != want {
+		t.Fatalf("submission path: got %q want %q", got, want)
+	}
+	if len(out.Seal) == 0 {
+		t.Fatalf("expected recovered seal")
+	}
+}
+
+type terminalStateStore struct {
+	record proof.JobRecord
+}
+
+func (s *terminalStateStore) UpsertJob(_ context.Context, _ proof.JobRequest, _ time.Duration) (bool, error) {
+	return false, nil
+}
+
+func (s *terminalStateStore) AllocateRequestID(_ context.Context, _ uint64) (uint64, error) {
+	return 0, nil
+}
+
+func (s *terminalStateStore) ClaimForSubmission(_ context.Context, _ common.Hash, _ string, _ time.Duration, _ uint64) (proof.JobRecord, bool, error) {
+	rec := s.record
+	rec.State = proof.StateSubmitting
+	rec.ProcessingOwner = "requestor-a"
+	rec.ProcessingExpiresAt = time.Now().Add(time.Minute)
+	return rec, true, nil
+}
+
+func (s *terminalStateStore) MarkFulfilled(_ context.Context, _ common.Hash, _ string, _ uint64, _ []byte, _ map[string]string, _ string) (proof.JobRecord, error) {
+	return s.record, proof.ErrTerminalState
+}
+
+func (s *terminalStateStore) MarkFailed(_ context.Context, _ common.Hash, _ string, _ uint64, _ string, _ string, _ bool) (proof.JobRecord, error) {
+	return s.record, proof.ErrTerminalState
+}
+
+func (s *terminalStateStore) GetJob(_ context.Context, _ common.Hash) (proof.JobRecord, error) {
+	return s.record, nil
+}

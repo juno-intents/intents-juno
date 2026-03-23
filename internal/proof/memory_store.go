@@ -129,6 +129,12 @@ func (s *MemoryStore) MarkFulfilled(_ context.Context, jobID common.Hash, owner 
 	if !ok {
 		return JobRecord{}, ErrNotFound
 	}
+	if rec.State == StateFulfilled {
+		return cloneRecord(rec), nil
+	}
+	if rec.State == StateFailedTerminal {
+		return cloneRecord(rec), ErrTerminalState
+	}
 	if rec.RequestID != 0 && requestID != 0 && rec.RequestID != requestID {
 		return JobRecord{}, ErrInvalidTransition
 	}
@@ -166,6 +172,16 @@ func (s *MemoryStore) MarkFailed(_ context.Context, jobID common.Hash, owner str
 	if !ok {
 		return JobRecord{}, ErrNotFound
 	}
+	targetState := StateFailedTerminal
+	if retryable {
+		targetState = StateFailedRetry
+	}
+	if rec.State == targetState {
+		return cloneRecord(rec), nil
+	}
+	if rec.State == StateFulfilled || rec.State == StateFailedTerminal {
+		return cloneRecord(rec), ErrTerminalState
+	}
 	if rec.RequestID != 0 && requestID != 0 && rec.RequestID != requestID {
 		return JobRecord{}, ErrInvalidTransition
 	}
@@ -175,11 +191,7 @@ func (s *MemoryStore) MarkFailed(_ context.Context, jobID common.Hash, owner str
 	if requestID != 0 {
 		rec.RequestID = requestID
 	}
-	if retryable {
-		rec.State = StateFailedRetry
-	} else {
-		rec.State = StateFailedTerminal
-	}
+	rec.State = targetState
 	rec.Retryable = retryable
 	rec.ErrorCode = code
 	rec.ErrorMessage = message

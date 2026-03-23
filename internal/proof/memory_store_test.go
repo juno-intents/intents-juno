@@ -143,3 +143,95 @@ func TestMemoryStore_ClaimForSubmissionSkipsActiveLeaseEvenForSameOwner(t *testi
 		t.Fatalf("state: got %s want %s", got, want)
 	}
 }
+
+func TestMemoryStore_RejectsStaleFailureAfterFulfillment(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	store := NewMemoryStore(func() time.Time { return now })
+	job := JobRequest{
+		JobID:        common.HexToHash("0xe91ea2b8651687490c4f8c6f501c1081a679a98a18b0cab1ac31f16c72154840"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(context.Background(), job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	rec, claimed, err := store.ClaimForSubmission(context.Background(), job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected claim to succeed")
+	}
+	if _, err := store.MarkFulfilled(context.Background(), job.JobID, "requestor-a", rec.RequestID, []byte{0xaa}, map[string]string{"provider": "sp1"}, "sp1-network-mainnet"); err != nil {
+		t.Fatalf("MarkFulfilled: %v", err)
+	}
+
+	_, err = store.MarkFailed(context.Background(), job.JobID, "requestor-a", rec.RequestID, "sp1_request_unfulfillable", "stale failure", true)
+	if !errors.Is(err, ErrTerminalState) {
+		t.Fatalf("expected ErrTerminalState, got %v", err)
+	}
+
+	got, err := store.GetJob(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.State != StateFulfilled {
+		t.Fatalf("state: got %s want %s", got.State, StateFulfilled)
+	}
+	if got.ErrorCode != "" {
+		t.Fatalf("error code: got %q want empty", got.ErrorCode)
+	}
+}
+
+func TestMemoryStore_RejectsStaleFulfillmentAfterTerminalFailure(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	store := NewMemoryStore(func() time.Time { return now })
+	job := JobRequest{
+		JobID:        common.HexToHash("0x564bb6981487b80ca3af9f12aa5a03c3d8dbd44ec1d8c6b75f2c505c4f760d2c"),
+		Pipeline:     "withdraw",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(context.Background(), job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	rec, claimed, err := store.ClaimForSubmission(context.Background(), job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected claim to succeed")
+	}
+	if _, err := store.MarkFailed(context.Background(), job.JobID, "requestor-a", rec.RequestID, "sp1_invalid_input", "bad witness", false); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+
+	_, err = store.MarkFulfilled(context.Background(), job.JobID, "requestor-a", rec.RequestID, []byte{0xbb}, map[string]string{"provider": "sp1"}, "sp1-network-mainnet")
+	if !errors.Is(err, ErrTerminalState) {
+		t.Fatalf("expected ErrTerminalState, got %v", err)
+	}
+
+	got, err := store.GetJob(context.Background(), job.JobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.State != StateFailedTerminal {
+		t.Fatalf("state: got %s want %s", got.State, StateFailedTerminal)
+	}
+	if got.ErrorCode != "sp1_invalid_input" {
+		t.Fatalf("error code: got %q want %q", got.ErrorCode, "sp1_invalid_input")
+	}
+}

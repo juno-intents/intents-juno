@@ -355,6 +355,17 @@ type terminalUpdate struct {
 }
 
 func updateTerminalTx(ctx context.Context, tx pgx.Tx, in terminalUpdate) (proof.JobRecord, error) {
+	current, err := getJobForUpdate(ctx, tx, in.jobID)
+	if err != nil {
+		return proof.JobRecord{}, err
+	}
+	if current.State == in.state {
+		return current, nil
+	}
+	if current.State == proof.StateFulfilled || current.State == proof.StateFailedTerminal {
+		return current, proof.ErrTerminalState
+	}
+
 	var (
 		rec             proof.JobRecord
 		metadataRaw     []byte
@@ -368,7 +379,7 @@ func updateTerminalTx(ctx context.Context, tx pgx.Tx, in terminalUpdate) (proof.
 		errorMessageRaw *string
 	)
 
-	err := tx.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		UPDATE proof_jobs
 		SET request_id = COALESCE(request_id, $2),
 			state = $3,
@@ -457,6 +468,9 @@ func updateTerminalTx(ctx context.Context, tx pgx.Tx, in terminalUpdate) (proof.
 	}
 	if rec.State == in.state {
 		return rec, nil
+	}
+	if rec.State == proof.StateFulfilled || rec.State == proof.StateFailedTerminal {
+		return rec, proof.ErrTerminalState
 	}
 	return proof.JobRecord{}, proof.ErrInvalidTransition
 }

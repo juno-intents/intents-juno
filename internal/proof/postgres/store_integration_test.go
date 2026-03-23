@@ -207,6 +207,142 @@ func TestStore_ClaimForSubmissionSkipsActiveLeaseEvenForSameOwner(t *testing.T) 
 	}
 }
 
+func TestStore_RejectsStaleFailureAfterFulfillment(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0xd9686e62f1292819c937bb25a2da5002b9d38be7bbce2715f5f078d0baa9b36b"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(ctx, job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	rec, claimed, err := store.ClaimForSubmission(ctx, job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected claim to succeed")
+	}
+	if _, err := store.MarkFulfilled(ctx, job.JobID, "requestor-a", rec.RequestID, []byte{0xaa}, map[string]string{"provider": "sp1"}, "sp1-network-mainnet"); err != nil {
+		t.Fatalf("MarkFulfilled: %v", err)
+	}
+
+	_, err = store.MarkFailed(ctx, job.JobID, "requestor-a", rec.RequestID, "sp1_request_unfulfillable", "stale failure", true)
+	if !errors.Is(err, proof.ErrTerminalState) {
+		t.Fatalf("expected ErrTerminalState, got %v", err)
+	}
+
+	got, err := store.GetJob(ctx, job.JobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.State != proof.StateFulfilled {
+		t.Fatalf("state: got %s want %s", got.State, proof.StateFulfilled)
+	}
+	if got.ErrorCode != "" {
+		t.Fatalf("error code: got %q want empty", got.ErrorCode)
+	}
+}
+
+func TestStore_RejectsStaleFulfillmentAfterTerminalFailure(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	store, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := store.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 3, 23, 16, 0, 0, 0, time.UTC)
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0x159b2d7d89c20341161a0e1ea0a88dd401d6f7415c0f371fe7c93be2021cf2cc"),
+		Pipeline:     "withdraw",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(15 * time.Minute),
+		Priority:     1,
+	}
+
+	if _, err := store.UpsertJob(ctx, job, 72*time.Hour); err != nil {
+		t.Fatalf("UpsertJob: %v", err)
+	}
+	rec, claimed, err := store.ClaimForSubmission(ctx, job.JobID, "requestor-a", 15*time.Minute, 8453)
+	if err != nil {
+		t.Fatalf("ClaimForSubmission: %v", err)
+	}
+	if !claimed {
+		t.Fatalf("expected claim to succeed")
+	}
+	if _, err := store.MarkFailed(ctx, job.JobID, "requestor-a", rec.RequestID, "sp1_invalid_input", "bad witness", false); err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+
+	_, err = store.MarkFulfilled(ctx, job.JobID, "requestor-a", rec.RequestID, []byte{0xbb}, map[string]string{"provider": "sp1"}, "sp1-network-mainnet")
+	if !errors.Is(err, proof.ErrTerminalState) {
+		t.Fatalf("expected ErrTerminalState, got %v", err)
+	}
+
+	got, err := store.GetJob(ctx, job.JobID)
+	if err != nil {
+		t.Fatalf("GetJob: %v", err)
+	}
+	if got.State != proof.StateFailedTerminal {
+		t.Fatalf("state: got %s want %s", got.State, proof.StateFailedTerminal)
+	}
+	if got.ErrorCode != "sp1_invalid_input" {
+		t.Fatalf("error code: got %q want %q", got.ErrorCode, "sp1_invalid_input")
+	}
+}
+
 func mustFreePort(t *testing.T) string {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")

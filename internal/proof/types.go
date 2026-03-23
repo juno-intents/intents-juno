@@ -18,6 +18,7 @@ var (
 	ErrNotFound          = errors.New("proof: not found")
 	ErrInvalidConfig     = errors.New("proof: invalid config")
 	ErrInvalidTransition = errors.New("proof: invalid transition")
+	ErrTerminalState     = errors.New("proof: terminal state")
 )
 
 type LifecycleState string
