@@ -292,8 +292,9 @@ run_shared_infra_e2e() {
 
 if [[ -n "$funder_key_file" && -z "$ephemeral_funding_amount_wei" ]]; then
   # Bridge deploy ephemeral mode needs enough ETH to cover both the deploy value
-  # and gas, which is materially higher than the base relayer readiness floor.
-  ephemeral_funding_amount_wei="10000000000000000"
+  # and gas, which is materially higher than the base relayer readiness floor
+  # and higher than the timelock endowment alone.
+  ephemeral_funding_amount_wei="50000000000000000"
 fi
 
 upgrade_preview_inventory_bin="${PRODUCTION_UPGRADE_PREVIEW_INVENTORY_BIN:-$SCRIPT_DIR/upgrade-preview-inventory.sh}"
