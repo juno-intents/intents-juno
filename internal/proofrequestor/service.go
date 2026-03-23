@@ -20,6 +20,8 @@ const (
 	StatusFulfilled Status = "fulfilled"
 	StatusFailed    Status = "failed"
 	StatusSkipped   Status = "skipped"
+
+	defaultProofAttemptGrace = 2 * time.Minute
 )
 
 type Config struct {
@@ -86,7 +88,8 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 	if _, err := s.store.UpsertJob(ctx, job, s.cfg.CallbackIdempotencyTTL); err != nil {
 		return Outcome{}, err
 	}
-	rec, claimed, err := s.store.ClaimForSubmission(ctx, job.JobID, s.cfg.Owner, s.cfg.RequestTimeout, s.cfg.ChainID)
+	attemptTimeout := s.proofAttemptTimeout()
+	rec, claimed, err := s.store.ClaimForSubmission(ctx, job.JobID, s.cfg.Owner, attemptTimeout, s.cfg.ChainID)
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -112,7 +115,7 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 		return out, nil
 	}
 
-	runCtx, cancel := context.WithTimeout(ctx, s.cfg.RequestTimeout)
+	runCtx, cancel := context.WithTimeout(ctx, attemptTimeout)
 	defer cancel()
 
 	seal, err := s.prover.Prove(
@@ -142,6 +145,10 @@ func (s *Service) ProcessJob(ctx context.Context, job proof.JobRequest) (Outcome
 		ErrorMessage: message,
 		AttemptCount: rec.AttemptCount,
 	}, nil
+}
+
+func (s *Service) proofAttemptTimeout() time.Duration {
+	return s.cfg.RequestTimeout + defaultProofAttemptGrace
 }
 
 func (s *Service) markFulfilled(ctx context.Context, jobID common.Hash, requestID uint64, seal []byte) (Outcome, error) {

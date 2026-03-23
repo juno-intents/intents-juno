@@ -12,13 +12,17 @@ import (
 )
 
 type stubProver struct {
-	calls int
-	seal  []byte
-	err   error
+	calls       int
+	seal        []byte
+	err         error
+	gotDeadline time.Time
 }
 
-func (s *stubProver) Prove(_ context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
+func (s *stubProver) Prove(ctx context.Context, _ common.Hash, _ []byte, _ []byte) ([]byte, error) {
 	s.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		s.gotDeadline = deadline
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -107,6 +111,59 @@ func TestService_ProofFailureClassification(t *testing.T) {
 	}
 	if out.Retryable {
 		t.Fatalf("expected non-retryable failure")
+	}
+}
+
+type leaseCapturingStore struct {
+	proof.Store
+	leaseTTL time.Duration
+}
+
+func (s *leaseCapturingStore) ClaimForSubmission(ctx context.Context, jobID common.Hash, owner string, leaseTTL time.Duration, chainID uint64) (proof.JobRecord, bool, error) {
+	s.leaseTTL = leaseTTL
+	return s.Store.ClaimForSubmission(ctx, jobID, owner, leaseTTL, chainID)
+}
+
+func TestService_ProofAttemptTimeoutIncludesGrace(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 23, 20, 0, 0, 0, time.UTC)
+	store := &leaseCapturingStore{Store: proof.NewMemoryStore(func() time.Time { return now })}
+	prover := &stubProver{seal: []byte{0xbb}}
+	svc, err := New(Config{
+		Owner:                  "requestor-a",
+		ChainID:                8453,
+		RequestTimeout:         5 * time.Minute,
+		CallbackIdempotencyTTL: 72 * time.Hour,
+	}, store, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	job := proof.JobRequest{
+		JobID:        common.HexToHash("0x5cc3f0f0fd5cdb949fef76f525f35f4119f455cb7d6f07c30559650295d1ff27"),
+		Pipeline:     "deposit",
+		ImageID:      common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa01"),
+		Journal:      []byte{0x01},
+		PrivateInput: []byte{0x02},
+		Deadline:     now.Add(2 * time.Minute),
+		Priority:     1,
+	}
+
+	startedAt := time.Now()
+	if _, err := svc.ProcessJob(context.Background(), job); err != nil {
+		t.Fatalf("ProcessJob: %v", err)
+	}
+
+	if got, want := store.leaseTTL, 7*time.Minute; got != want {
+		t.Fatalf("lease ttl: got %s want %s", got, want)
+	}
+	if prover.gotDeadline.IsZero() {
+		t.Fatalf("expected prover context deadline")
+	}
+	remaining := time.Until(prover.gotDeadline)
+	if remaining < 6*time.Minute+50*time.Second || remaining > 7*time.Minute+5*time.Second {
+		t.Fatalf("prover deadline remaining: got %s, started_at=%s deadline=%s", remaining, startedAt.Format(time.RFC3339Nano), prover.gotDeadline.Format(time.RFC3339Nano))
 	}
 }
 
