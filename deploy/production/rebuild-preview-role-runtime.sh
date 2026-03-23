@@ -33,6 +33,23 @@ Options:
 EOF
 }
 
+find_latest_clean_preview_bridge_summary() {
+  local current_output_root="$1"
+  local env_slug="$2"
+  local preview_output_root candidate
+
+  preview_output_root="$current_output_root/$env_slug"
+  [[ -d "$preview_output_root" ]] || return 0
+
+  candidate="$(
+    find "$preview_output_root" -maxdepth 2 -type f -path '*/clean-preview-r*/bridge-summary.json' \
+      | LC_ALL=C sort -V \
+      | tail -n1
+  )"
+  [[ -n "$candidate" ]] || return 0
+  printf '%s\n' "$candidate"
+}
+
 inventory=""
 dkg_summary=""
 dkg_completion=""
@@ -331,6 +348,13 @@ upgraded_inventory="$output_dir/inventory.preview-runtime.json"
 resolved_inventory="$output_dir/inventory.resolved.json"
 current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/production-output"
 current_shared_tf_output="$current_output_root/$env_slug/shared-terraform-output.json"
+
+if [[ -z "$existing_bridge_summary" && -n "$funder_key_file" && "$env_slug" == "preview" ]]; then
+  auto_existing_bridge_summary="$(find_latest_clean_preview_bridge_summary "$current_output_root" "$env_slug")"
+  if [[ -n "$auto_existing_bridge_summary" ]]; then
+    existing_bridge_summary="$auto_existing_bridge_summary"
+  fi
+fi
 
 "$upgrade_preview_inventory_bin" \
   --inventory "$inventory" \
