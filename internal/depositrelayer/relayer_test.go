@@ -1273,6 +1273,30 @@ func (s *stubReceiptReader) FilterLogs(context.Context, ethereum.FilterQuery) ([
 	return append([]types.Log(nil), s.filterLogs...), nil
 }
 
+type receiptReaderByHash struct {
+	receipts   map[common.Hash]*types.Receipt
+	errs       map[common.Hash]error
+	filterLogs []types.Log
+	filterErr  error
+}
+
+func (s *receiptReaderByHash) TransactionReceipt(_ context.Context, txHash common.Hash) (*types.Receipt, error) {
+	if err, ok := s.errs[txHash]; ok && err != nil {
+		return nil, err
+	}
+	if receipt, ok := s.receipts[txHash]; ok {
+		return receipt, nil
+	}
+	return nil, ethereum.NotFound
+}
+
+func (s *receiptReaderByHash) FilterLogs(context.Context, ethereum.FilterQuery) ([]types.Log, error) {
+	if s.filterErr != nil {
+		return nil, s.filterErr
+	}
+	return append([]types.Log(nil), s.filterLogs...), nil
+}
+
 type stubBridgeCaller struct {
 	responses map[string][]byte
 	err       error
@@ -2719,6 +2743,135 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesNoTxHashBatchAfterStalenessWin
 	}
 	if len(attempts) != 0 {
 		t.Fatalf("expected submitted attempts to be cleared, got %d", len(attempts))
+	}
+}
+
+func TestRelayer_FlushContinuesPastRecoveredBatchReconcileError(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0xc1),
+		FinalOrchardRoot: seq32ForRelayer(0xc2),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	staleDep := deposit.Deposit{
+		DepositID:        seq32ForRelayer(0xc3),
+		Commitment:       seq32ForRelayer(0xc4),
+		LeafIndex:        1,
+		Amount:           500,
+		BaseRecipient:    to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+		ProofWitnessItem: testDepositWitnessItem(),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), staleDep); err != nil {
+		t.Fatalf("UpsertConfirmed staleDep: %v", err)
+	}
+	staleBatchID := seq32ForRelayer(0xc5)
+	if _, err := store.MarkBatchSubmitted(
+		context.Background(),
+		"owner-1",
+		staleBatchID,
+		[][32]byte{staleDep.DepositID},
+		cp,
+		checkpointSigs,
+		[]byte{0xaa},
+	); err != nil {
+		t.Fatalf("MarkBatchSubmitted staleDep: %v", err)
+	}
+	staleTxHash := seq32ForRelayer(0xc6)
+	if err := store.SetBatchSubmissionTxHash(context.Background(), staleBatchID, staleTxHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash staleDep: %v", err)
+	}
+
+	freshDep := deposit.Deposit{
+		DepositID:        seq32ForRelayer(0xc7),
+		Commitment:       seq32ForRelayer(0xc8),
+		LeafIndex:        2,
+		Amount:           700,
+		BaseRecipient:    to20(common.HexToAddress("0x0000000000000000000000000000000000000789")),
+		ProofWitnessItem: testDepositWitnessItem(),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), freshDep); err != nil {
+		t.Fatalf("UpsertConfirmed freshDep: %v", err)
+	}
+
+	freshTxHash := seq32ForRelayer(0xc9)
+	mintedEventSig := crypto.Keccak256Hash([]byte("Minted(bytes32,address,uint256,uint256,uint256)"))
+	skippedEventSig := crypto.Keccak256Hash([]byte("DepositSkipped(bytes32)"))
+	receiptReader := &receiptReaderByHash{
+		receipts: map[common.Hash]*types.Receipt{
+			common.Hash(staleTxHash): {
+				Status: types.ReceiptStatusSuccessful,
+				Logs: []*types.Log{{
+					Address: bridge,
+					Topics:  []common.Hash{skippedEventSig, common.Hash(staleDep.DepositID)},
+				}},
+			},
+			common.Hash(freshTxHash): {
+				Status: types.ReceiptStatusSuccessful,
+				Logs: []*types.Log{{
+					Address: bridge,
+					Topics:  []common.Hash{mintedEventSig, common.Hash(freshDep.DepositID)},
+				}},
+			},
+		},
+		filterErr: errors.New("backend unavailable"),
+	}
+	sender := &stubSender{
+		res: httpapi.SendResponse{
+			TxHash:  common.Hash(freshTxHash).Hex(),
+			Receipt: &httpapi.ReceiptResponse{Status: 1},
+		},
+	}
+	prover := &stubProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Owner:             "owner-1",
+		Now:               time.Now,
+		ReceiptReader:     receiptReader,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	r.checkpoint = &cp
+	r.opSigs = checkpointSigs
+
+	if err := r.Flush(context.Background()); err != nil {
+		t.Fatalf("Flush: %v", err)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("sender calls: got %d want 1", sender.calls)
+	}
+
+	job, err := store.Get(context.Background(), freshDep.DepositID)
+	if err != nil {
+		t.Fatalf("Get freshDep: %v", err)
+	}
+	if got, want := job.State, deposit.StateFinalized; got != want {
+		t.Fatalf("freshDep state: got %s want %s", got, want)
+	}
+
+	staleJob, err := store.Get(context.Background(), staleDep.DepositID)
+	if err != nil {
+		t.Fatalf("Get staleDep: %v", err)
+	}
+	if got, want := staleJob.State, deposit.StateSubmitted; got != want {
+		t.Fatalf("staleDep state: got %s want %s", got, want)
 	}
 }
 

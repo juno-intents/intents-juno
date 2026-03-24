@@ -653,7 +653,11 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 		}
 		if attempt.TxHash != ([32]byte{}) {
 			if err := r.reconcileSubmittedAttempt(ctx, attempt, expired, expiredReason); err != nil {
-				return fmt.Errorf("depositrelayer: reconcile recovered batch: %w", err)
+				r.log.Error("depositrelayer: reconcile recovered batch failed",
+					"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
+					"err", err,
+				)
+				continue
 			}
 			continue
 		}
