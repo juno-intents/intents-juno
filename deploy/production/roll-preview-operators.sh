@@ -451,14 +451,15 @@ done < <(jq -c '.operators[]' "$working_inventory")
 production_render_operator_handoffs "$working_inventory" "$shared_manifest" "$dkg_summary" "$output_dir" "$inventory_dir"
 
 ready_for_deploy="true"
-while IFS= read -r operator_deploy; do
-  "$deploy_operator_bin" --operator-deploy "$operator_deploy"
+mapfile -t operator_deploys < <(find "$output_dir/operators" -name operator-deploy.json | sort)
+for operator_deploy in "${operator_deploys[@]}"; do
+  "$deploy_operator_bin" --operator-deploy "$operator_deploy" </dev/null
   canary_output="${operator_deploy%/*}/boot-canary.json"
-  "$canary_operator_boot_bin" --operator-deploy "$operator_deploy" >"$canary_output"
+  "$canary_operator_boot_bin" --operator-deploy "$operator_deploy" </dev/null >"$canary_output"
   if [[ "$(jq -r '.ready_for_deploy // "false"' "$canary_output")" != "true" ]]; then
     ready_for_deploy="false"
   fi
-done < <(find "$output_dir/operators" -name operator-deploy.json | sort)
+done
 
 jq -n \
   --arg operator_stack_ami_release_tag "$operator_stack_ami_release_tag" \

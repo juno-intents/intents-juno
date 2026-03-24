@@ -282,6 +282,21 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_deploy_operator_binary_consumes_stdin() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'deploy-operator %s\n' "\$*" >>"$log_file"
+if IFS= read -r _; then
+  :
+fi
+exit 0
+EOF
+  chmod +x "$target"
+}
+
 write_fake_operator_canary_binary() {
   local target="$1"
   local log_file="$2"
@@ -684,11 +699,92 @@ EOF
   rm -rf "$tmp"
 }
 
+test_roll_preview_operators_redeploys_all_handoffs_when_deploy_consumes_stdin() {
+  local tmp inventory shared_manifest releases_dir gh_log aws_log deploy_log canary_log ssh_keyscan_log output_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  releases_dir="$tmp/releases"
+  gh_log="$tmp/gh.log"
+  aws_log="$tmp/aws.log"
+  deploy_log="$tmp/deploy.log"
+  canary_log="$tmp/canary.log"
+  ssh_keyscan_log="$tmp/ssh-keyscan.log"
+  output_dir="$tmp/output"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2" "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  cat >"$tmp/operators/op1/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$tmp/operators/op2/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$tmp/operators/op1/operator-secrets.env"
+  append_default_owallet_proof_keys "$tmp/operators/op2/operator-secrets.env"
+  write_test_dkg_backup_zip "$tmp/operators/op1/dkg-backup.zip"
+  write_test_dkg_backup_zip "$tmp/operators/op2/dkg-backup.zip"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  write_shared_manifest_fixture "$shared_manifest"
+
+  cat >"$releases_dir/operator-stack-ami-v2026.03.20-testnet/operator-ami-manifest.json" <<'JSON'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operatorfresh123456"
+    }
+  }
+}
+JSON
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
+
+  write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
+  write_fake_roll_preview_aws "$tmp/bin/aws" "$aws_log"
+  write_fake_deploy_operator_binary_consumes_stdin "$tmp/bin/deploy-operator.sh" "$deploy_log"
+  write_fake_operator_canary_binary "$tmp/bin/canary-operator-boot.sh" "$canary_log"
+  cat >"$tmp/bin/ssh-keyscan" <<EOF
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "\$*" >>"$ssh_keyscan_log"
+host="\${@: -1}"
+printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey\n' "\$host"
+EOF
+  chmod +x "$tmp/bin/ssh-keyscan"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$tmp/bin:$PATH" \
+      PRODUCTION_DEPLOY_OPERATOR_BIN="$tmp/bin/deploy-operator.sh" \
+      PRODUCTION_CANARY_OPERATOR_BOOT_BIN="$tmp/bin/canary-operator-boot.sh" \
+      bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+        --inventory "$inventory" \
+        --shared-manifest "$shared_manifest" \
+        --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --output-dir "$output_dir" \
+        --github-repo juno-intents/intents-juno >"$tmp/roll-summary.json"
+  )
+
+  deploy_count="$(grep -c '^deploy-operator ' "$deploy_log")"
+  canary_count="$(grep -c '^canary-operator ' "$canary_log")"
+  assert_eq "$deploy_count" "2" "preview operator roll redeploys every handoff even when deploy-operator consumes stdin"
+  assert_eq "$canary_count" "2" "preview operator roll canaries every handoff even when deploy-operator consumes stdin"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_roll_preview_operators_refreshes_asgs_and_redeploys_handoffs
   test_roll_preview_operators_discovers_missing_asg_and_launch_template_from_public_ip
   test_roll_preview_operators_recovers_from_stale_launch_template_ids
   test_roll_preview_operators_recovers_from_asg_when_public_ip_is_stale
+  test_roll_preview_operators_redeploys_all_handoffs_when_deploy_consumes_stdin
 }
 
 main "$@"
