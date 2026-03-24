@@ -781,6 +781,127 @@ func TestRelayer_DoesNotExhaustProofAttemptsOnProofStoreLookupError(t *testing.T
 	}
 }
 
+func TestRelayer_DoesNotExhaustProofAttemptsOnRequestTimeoutRecoveryLookupError(t *testing.T) {
+	t.Parallel()
+
+	bridge := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	baseChainID := uint32(31337)
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      uint64(baseChainID),
+		BridgeContract:   bridge,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	var bridge20 [20]byte
+	copy(bridge20[:], bridge[:])
+	recipient := common.HexToAddress("0x0000000000000000000000000000000000000456")
+	var recip20 [20]byte
+	copy(recip20[:], recipient[:])
+	memoBytes := memo.DepositMemoV1{
+		BaseChainID:   baseChainID,
+		BridgeAddr:    bridge20,
+		BaseRecipient: recip20,
+		Nonce:         1,
+		Flags:         0,
+	}.Encode()
+
+	var cm common.Hash
+	cm[0] = 0xce
+	store := deposit.NewMemoryStore()
+	sender := &stubSender{res: httpapi.SendResponse{TxHash: "0x01", Receipt: &httpapi.ReceiptResponse{Status: 1}}}
+	prover := &scriptedProofRequester{
+		plan: []scriptedProofRequesterStep{
+			{err: context.DeadlineExceeded},
+			{err: context.DeadlineExceeded},
+		},
+	}
+	proofStore := &scriptedProofStore{
+		plan: []scriptedProofStoreStep{
+			{err: proof.ErrNotFound},
+			{err: context.DeadlineExceeded},
+			{err: proof.ErrNotFound},
+			{err: context.DeadlineExceeded},
+			{rec: proof.JobRecord{State: proof.StateFulfilled, Seal: []byte{0x99}}},
+		},
+	}
+
+	r, err := New(Config{
+		BaseChainID:       baseChainID,
+		BridgeAddress:     bridge,
+		DepositImageID:    common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000d001"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		MaxItems:          1,
+		MaxAge:            10 * time.Minute,
+		DedupeMax:         1000,
+		MaxProofAttempts:  2,
+		ProofStore:        proofStore,
+		Now:               time.Now,
+	}, store, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	t.Cleanup(cancel)
+
+	if err := r.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+	err = r.IngestDeposit(ctx, DepositEvent{
+		Commitment:       cm,
+		LeafIndex:        12,
+		Amount:           1000,
+		Memo:             memoBytes[:],
+		ProofWitnessItem: testDepositWitnessItem(),
+	})
+	if err == nil {
+		t.Fatal("expected proof recovery lookup error")
+	}
+	if !strings.Contains(err.Error(), "load proof job") {
+		t.Fatalf("expected proof recovery lookup failure, got %v", err)
+	}
+
+	if err := r.Flush(ctx); err == nil {
+		t.Fatal("expected second proof recovery lookup error")
+	} else if !strings.Contains(err.Error(), "load proof job") {
+		t.Fatalf("expected proof recovery lookup failure on flush, got %v", err)
+	}
+
+	if err := r.Flush(ctx); err != nil {
+		t.Fatalf("Flush recovery: %v", err)
+	}
+
+	if prover.calls != 2 {
+		t.Fatalf("proof requester calls: got %d want 2", prover.calls)
+	}
+	if proofStore.calls != 5 {
+		t.Fatalf("proof store calls: got %d want 5", proofStore.calls)
+	}
+	if sender.calls != 1 {
+		t.Fatalf("bridge sender calls: got %d want 1", sender.calls)
+	}
+	if len(r.proofAttempts) != 0 {
+		t.Fatalf("expected proofAttempts cleared after successful recovery, got %d entries", len(r.proofAttempts))
+	}
+
+	depositIDBytes, err := idempotency.DepositIDV1([32]byte(cm), 12)
+	if err != nil {
+		t.Fatalf("DepositIDV1: %v", err)
+	}
+	job, err := store.Get(ctx, depositIDBytes)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got, want := job.State, deposit.StateFinalized; got != want {
+		t.Fatalf("state: got %s want %s", got, want)
+	}
+}
+
 func TestRelayer_QuarantinesTerminalProofFailureBySplittingBatch(t *testing.T) {
 	t.Parallel()
 

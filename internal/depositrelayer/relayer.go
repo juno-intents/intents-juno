@@ -886,15 +886,23 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 				return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *proofFailure)
 			}
 		} else {
+			rollbackProofAttempt := r.recordProofAttempt(proofBatchID)
+			keepProofAttempt := false
+			defer func() {
+				if !keepProofAttempt {
+					rollbackProofAttempt()
+				}
+			}()
 			if r.cfg.MaxProofAttempts > 0 {
-				r.proofAttempts[proofBatchID]++
 				attempts := r.proofAttempts[proofBatchID]
 				if attempts >= r.cfg.MaxProofAttempts {
 					if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
 						fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
+						keepProofAttempt = true
 						return err
 					}
 					delete(r.proofAttempts, proofBatchID)
+					keepProofAttempt = true
 					return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
 				}
 			}
@@ -913,6 +921,7 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 					return recoverErr
 				}
 				if recovered {
+					keepProofAttempt = true
 					if proofFailure != nil {
 						return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *proofFailure)
 					}
@@ -920,10 +929,16 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 				} else {
 					var fail *proofclient.FailureError
 					if errors.As(err, &fail) && !fail.Retryable {
+						keepProofAttempt = true
 						return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *fail)
+					}
+					if errors.As(err, &fail) {
+						keepProofAttempt = true
 					}
 					return err
 				}
+			} else {
+				keepProofAttempt = true
 			}
 		}
 		seal = proofRes.Seal
@@ -1005,6 +1020,20 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+func (r *Relayer) recordProofAttempt(proofBatchID common.Hash) func() {
+	r.proofAttempts[proofBatchID]++
+	rollback := func() {
+		attempts := r.proofAttempts[proofBatchID]
+		switch {
+		case attempts <= 1:
+			delete(r.proofAttempts, proofBatchID)
+		default:
+			r.proofAttempts[proofBatchID] = attempts - 1
+		}
+	}
+	return rollback
 }
 
 func (r *Relayer) recoverStaleBatches(ctx context.Context) error {
