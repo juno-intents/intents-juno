@@ -486,7 +486,7 @@ func (r *Relayer) refillFromStore(ctx context.Context) error {
 }
 
 func (r *Relayer) restoreCheckpointFromStore(ctx context.Context) error {
-	if r.checkpoint != nil || r.checkpointStore == nil {
+	if r.checkpointStore == nil {
 		return nil
 	}
 	recs, err := r.checkpointStore.ListByState(ctx, checkpoint.PackageStateEmitted)
@@ -506,12 +506,17 @@ func (r *Relayer) restoreCheckpointFromStore(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("depositrelayer: decode emitted checkpoint %s: %w", best.Digest, err)
 	}
+	hadCheckpoint := r.checkpoint != nil
 	updated, err := r.applyCheckpoint(pkg)
 	if err != nil {
 		return err
 	}
 	if updated {
-		r.log.Info("restored checkpoint", "height", pkg.Checkpoint.Height, "digest", checkpoint.Digest(pkg.Checkpoint))
+		msg := "restored checkpoint"
+		if hadCheckpoint {
+			msg = "updated checkpoint from store"
+		}
+		r.log.Info(msg, "height", pkg.Checkpoint.Height, "digest", checkpoint.Digest(pkg.Checkpoint))
 	}
 	return nil
 }
