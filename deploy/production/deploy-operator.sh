@@ -1497,7 +1497,6 @@ deposit_queue_group="${DEPOSIT_RELAYER_QUEUE_GROUP:-deposit-relayer}"
 deposit_queue_topics="${DEPOSIT_RELAYER_QUEUE_TOPICS:-deposits.event.v2,checkpoints.packages.v1}"
 deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname -s)-deposit-relayer-proof}"
 deposit_max_age="${DEPOSIT_RELAYER_MAX_AGE:-3m}"
-deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-7m}"
 deposit_flush_interval="${DEPOSIT_RELAYER_FLUSH_INTERVAL:-1s}"
 sp1_request_timeout_seconds="${SP1_REQUEST_TIMEOUT_SECONDS:-1500}"
 [[ "$sp1_request_timeout_seconds" =~ ^[0-9]+$ ]] || {
@@ -1507,6 +1506,8 @@ sp1_request_timeout_seconds="${SP1_REQUEST_TIMEOUT_SECONDS:-1500}"
 relayer_submit_timeout_seconds="$((10#$sp1_request_timeout_seconds + 300))"
 (( relayer_submit_timeout_seconds >= 1800 )) || relayer_submit_timeout_seconds=1800
 deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-${relayer_submit_timeout_seconds}s}"
+deposit_claim_ttl_seconds="$((relayer_submit_timeout_seconds + 120))"
+deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-${deposit_claim_ttl_seconds}s}"
 deposit_base_rpc_url="${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}"
 [[ -n "${deposit_base_rpc_url}" ]] || {
   echo "deposit-relayer requires BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
