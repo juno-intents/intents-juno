@@ -512,7 +512,7 @@ for operator_deploy in "${operator_deploys[@]}"; do
   operator_id="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
   rollout_state_file="$(production_abs_path "$operator_deploy_dir" "$(production_json_required "$operator_deploy" '.rollout_state_file | select(type == "string" and length > 0)')")"
 
-  "$deploy_operator_bin" --operator-deploy "$operator_deploy" </dev/null >&2
+  "$deploy_operator_bin" --operator-deploy "$operator_deploy" --force </dev/null >&2
   production_rollout_reserve "$rollout_state_file" "$operator_id"
 
   canary_output="${operator_deploy%/*}/boot-canary.json"
