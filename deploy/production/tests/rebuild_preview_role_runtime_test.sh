@@ -436,6 +436,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_eq "${first_roll_line:+present}" "present" "rebuild performs the initial operator rollout"
   assert_eq "${wireguard_refresh_line:+present}" "present" "rebuild refreshes wireguard backoffice routing"
   assert_eq "${final_roll_line:+present}" "present" "rebuild performs the final operator rollout"
+  assert_contains "$(cat "$log_file")" "--inventory $output_root/preview/operator-rollout/inventory.operators-rolled.json --shared-manifest $output_root/preview/shared-manifest.json --dkg-summary $dkg_summary --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet --output-dir $output_root/preview/operator-rollout-final" "rebuild seeds the final operator rollout from the first rolled inventory"
   if (( first_roll_line >= wireguard_refresh_line )); then
     printf 'initial operator rollout must run before wireguard backoffice refresh\n' >&2
     exit 1

@@ -509,6 +509,8 @@ required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.a
 
 first_operator_deploy="$(find_lowest_index_operator_deploy "$output_dir/operator-rollout/operators")"
 [[ -n "$first_operator_deploy" ]] || die "operator rollout did not render any operator deploy handoffs"
+first_rolled_inventory="$output_dir/operator-rollout/inventory.operators-rolled.json"
+[[ -f "$first_rolled_inventory" ]] || die "operator rollout did not render a rolled inventory"
 
 run_shared_infra_e2e \
   "$app_deploy" \
@@ -538,7 +540,7 @@ fi
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/canaries/shared-services.json")" == "true" ]] || die "shared services canary failed after wireguard backoffice refresh"
 
 "$roll_preview_operators_bin" \
-  --inventory "$resolved_inventory" \
+  --inventory "$first_rolled_inventory" \
   --shared-manifest "$shared_manifest" \
   --dkg-summary "$dkg_summary" \
   --operator-stack-ami-release-tag "$operator_stack_ami_release_tag" \
