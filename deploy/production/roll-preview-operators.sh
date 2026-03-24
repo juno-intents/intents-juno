@@ -181,6 +181,59 @@ ensure_preview_shared_kafka_role_policy() {
   shared_kafka_policy_roles[$instance_profile_name]="$role_name"
 }
 
+resolve_active_instance_refresh_id() {
+  local operator_asg="$1"
+
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling describe-instance-refreshes \
+    --auto-scaling-group-name "$operator_asg" \
+    --output json \
+    | jq -r '
+        [
+          .InstanceRefreshes[]?
+          | select(
+              (.Status // "") == "Pending"
+              or (.Status // "") == "InProgress"
+              or (.Status // "") == "Baking"
+            )
+        ]
+        | sort_by(.StartTime // "")
+        | reverse
+        | .[0].InstanceRefreshId // empty
+      '
+}
+
+start_or_resume_instance_refresh() {
+  local operator_asg="$1"
+  local refresh_error_file refresh_error refresh_id
+
+  refresh_error_file="$(mktemp)"
+  if refresh_id="$(
+    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling start-instance-refresh \
+      --auto-scaling-group-name "$operator_asg" \
+      --preferences '{"MinHealthyPercentage":100}' \
+      --output json 2>"$refresh_error_file" \
+      | jq -r '.InstanceRefreshId // empty'
+  )"; then
+    rm -f "$refresh_error_file"
+    [[ -n "$refresh_id" ]] || die "failed to start the instance refresh for autoscaling group $operator_asg"
+    printf '%s\n' "$refresh_id"
+    return 0
+  fi
+
+  refresh_error="$(cat "$refresh_error_file")"
+  rm -f "$refresh_error_file"
+
+  if [[ "$refresh_error" == *"InstanceRefreshInProgress"* ]]; then
+    refresh_id="$(resolve_active_instance_refresh_id "$operator_asg")"
+    [[ -n "$refresh_id" ]] || die "instance refresh is already in progress for autoscaling group $operator_asg but aws did not return an active refresh id"
+    printf '%s\n' "$refresh_id"
+    return 0
+  fi
+
+  printf '%s\n' "$refresh_error" >&2
+  return 1
+}
+
 update_inventory_operator() {
   local inventory_file="$1"
   local operator_id="$2"
@@ -370,14 +423,8 @@ while IFS= read -r operator_json; do
     --auto-scaling-group-name "$operator_asg" \
     --launch-template "LaunchTemplateId=$launch_template_id,Version=$new_launch_template_version" >/dev/null
 
-  refresh_id="$(
-    AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling start-instance-refresh \
-      --auto-scaling-group-name "$operator_asg" \
-      --preferences '{"MinHealthyPercentage":100}' \
-      --output json \
-      | jq -r '.InstanceRefreshId // empty'
-  )"
-  [[ -n "$refresh_id" ]] || die "failed to start the instance refresh for operator $operator_id"
+  refresh_id="$(start_or_resume_instance_refresh "$operator_asg")" \
+    || die "failed to start or resume the instance refresh for operator $operator_id"
 
   refresh_status=""
   for _ in $(seq 1 "$instance_refresh_poll_attempts"); do
