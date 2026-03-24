@@ -268,6 +268,7 @@ resource "aws_autoscaling_group" "app" {
   desired_capacity          = var.app_desired_capacity
   min_size                  = var.app_min_size
   max_size                  = var.app_max_size
+  force_delete              = true
   health_check_type         = "ELB"
   health_check_grace_period = 300
   vpc_zone_identifier       = var.private_subnet_ids

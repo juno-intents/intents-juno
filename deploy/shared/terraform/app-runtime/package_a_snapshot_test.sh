@@ -59,6 +59,7 @@ main() {
   assert_contains "$app_asg" 'desired_capacity          = var.app_desired_capacity' "app-runtime keeps desired app capacity configurable"
   assert_contains "$app_asg" 'min_size                  = var.app_min_size' "app-runtime keeps app minimum capacity configurable"
   assert_contains "$app_asg" 'max_size                  = var.app_max_size' "app-runtime keeps app maximum capacity configurable"
+  assert_contains "$app_asg" 'force_delete              = true' "app-runtime force-deletes stale preview asg members during teardown"
   assert_contains "$app_asg" 'health_check_type         = "ELB"' "app-runtime uses load balancer health checks for app instances"
   assert_contains "$app_asg" 'vpc_zone_identifier       = var.private_subnet_ids' "app-runtime keeps app instances on private subnets"
   assert_contains "$app_asg" 'target_group_arns         = [aws_lb_target_group.bridge.arn, aws_lb_target_group.backoffice.arn]' "app-runtime registers app instances behind both target groups"
