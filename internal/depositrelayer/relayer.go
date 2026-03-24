@@ -843,24 +843,13 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 		return nil
 	}
 
-	// Check per-batch proof attempt limits after any pre-proof split/reject path.
+	// Track proof attempts by the deterministic proof batch id so retries for the
+	// same deposit set share the same budget across relayer restarts and splits.
 	depositIDs := make([]common.Hash, 0, len(batch.Items))
 	for _, it := range batch.Items {
 		depositIDs = append(depositIDs, common.Hash(it.ID))
 	}
 	proofBatchID := idempotency.DepositBatchIDV1(depositIDs)
-	if r.cfg.MaxProofAttempts > 0 {
-		r.proofAttempts[proofBatchID]++
-		attempts := r.proofAttempts[proofBatchID]
-		if attempts >= r.cfg.MaxProofAttempts {
-			if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
-				fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
-				return err
-			}
-			delete(r.proofAttempts, proofBatchID)
-			return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
-		}
-	}
 
 	journal, err := bridgeabi.EncodeDepositJournal(bridgeabi.DepositJournal{
 		FinalOrchardRoot: cp.FinalOrchardRoot,
@@ -897,6 +886,18 @@ func (r *Relayer) submitBatch(ctx context.Context, batch durableMintBatch) error
 				return r.rejectBatchForProofFailure(ctx, batch.Meta.BatchID, batch, *proofFailure)
 			}
 		} else {
+			if r.cfg.MaxProofAttempts > 0 {
+				r.proofAttempts[proofBatchID]++
+				attempts := r.proofAttempts[proofBatchID]
+				if attempts >= r.cfg.MaxProofAttempts {
+					if err := r.maybeDLQDepositBatch(ctx, batch.Meta.BatchID, batch, "proof", "proof_attempts_exhausted",
+						fmt.Sprintf("exceeded max proof attempts (%d)", r.cfg.MaxProofAttempts), attempts); err != nil {
+						return err
+					}
+					delete(r.proofAttempts, proofBatchID)
+					return fmt.Errorf("%w: batch %x after %d attempts", ErrProofAttemptsExhausted, proofBatchID[:8], attempts)
+				}
+			}
 			proofRes, err = r.prover.RequestProof(pctx, proofclient.Request{
 				JobID:        jobID,
 				Pipeline:     "deposit",
