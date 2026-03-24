@@ -156,8 +156,8 @@ if [[ -n "$app_role_asg" ]]; then
   asg_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling describe-auto-scaling-groups \
     --auto-scaling-group-names "$app_role_asg" \
     --output json)"
-  app_targets_json="$(jq -c '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService" and .HealthStatus == "Healthy") | .InstanceId]' <<<"$asg_json")"
-  [[ "$(jq -r 'length' <<<"$app_targets_json")" -gt 0 ]] || die "app role asg $app_role_asg does not have any healthy in-service instances"
+  app_targets_json="$(jq -c '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService") | .InstanceId]' <<<"$asg_json")"
+  [[ "$(jq -r 'length' <<<"$app_targets_json")" -gt 0 ]] || die "app role asg $app_role_asg does not have any in-service instances"
 
   backoffice_env_b64="$(base64 <"$backoffice_env" | tr -d '\n')"
   while IFS= read -r instance_id; do

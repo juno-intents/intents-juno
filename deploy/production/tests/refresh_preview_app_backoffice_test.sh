@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 source "$SCRIPT_DIR/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if grep -Fq -- "$needle" <<<"$haystack"; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 write_refresh_shared_manifest_fixture() {
   local target="$1"
   cat >"$target" <<'JSON'
@@ -221,9 +231,9 @@ fi
 if [[ "${args[0]:-}" == "--region" ]]; then
   args=( "${args[@]:2}" )
 fi
-case "${args[*]}" in
+  case "${args[*]}" in
   "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg --output json")
-    printf '{"AutoScalingGroups":[{"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+    printf '{"AutoScalingGroups":[{"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Unhealthy"},{"InstanceId":"i-app003","LifecycleState":"Terminating","HealthStatus":"Unhealthy"}]}]}\n'
     ;;
   ssm\ send-command\ --instance-ids\ i-app001\ --document-name\ AWS-RunShellScript\ --parameters\ *\ --output\ json)
     printf '{"Command":{"CommandId":"cmd-app001"}}\n'
@@ -328,9 +338,10 @@ test_refresh_preview_app_backoffice_updates_all_app_role_instances_via_ssm() {
         --output-dir "$output_dir" >"$tmp/refresh-summary.json"
   )
 
-  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers healthy app instances from the app role asg"
+  assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers in-service app instances from the app role asg"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh pushes the backoffice env to the first app instance over ssm"
-  assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh pushes the backoffice env to the second app instance over ssm"
+  assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh pushes the backoffice env to the second in-service app instance over ssm even before it is marked healthy"
+  assert_not_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app003" "refresh skips terminating app instances"
   assert_contains "$(cat "$aws_log")" "systemctl is-active --quiet bridge-api.service backoffice.service" "refresh waits for the local app runtime services before rewriting backoffice env over ssm"
   assert_contains "$(cat "$aws_log")" "systemctl restart backoffice.service" "refresh restarts the explicit backoffice service unit over ssm"
   assert_eq "$(jq -r '.app_target_mode' "$tmp/refresh-summary.json")" "asg" "refresh summary reports app role mode"
