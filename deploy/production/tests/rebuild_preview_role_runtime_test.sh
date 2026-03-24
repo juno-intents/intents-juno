@@ -412,11 +412,15 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_contains "$(cat "$log_file")" "refresh-app-runtime --shared-manifest $output_root/preview/shared-manifest.json" "rebuild refreshes app runtime from the rebuilt shared manifest"
   assert_contains "$(cat "$log_file")" "--app-deploy $output_root/preview/app/app-deploy.json" "rebuild refreshes app runtime from the rebuilt app handoff"
   assert_contains "$(cat "$log_file")" "--output-dir $output_root/preview/app-runtime" "rebuild stores app runtime evidence in a dedicated directory"
-  local refresh_line canary_line
+  local refresh_line canary_line canary_count first_canary_line final_canary_line
   refresh_line="$(grep -n "refresh-app-runtime" "$log_file" | head -n1 | cut -d: -f1)"
   canary_line="$(grep -n "canary-app-host" "$log_file" | head -n1 | cut -d: -f1)"
+  canary_count="$(grep -c '^canary-app-host ' "$log_file")"
+  first_canary_line="$(grep -n '^canary-app-host ' "$log_file" | head -n1 | cut -d: -f1)"
+  final_canary_line="$(grep -n '^canary-app-host ' "$log_file" | tail -n1 | cut -d: -f1)"
   assert_eq "${refresh_line:+present}" "present" "rebuild runs app runtime refresh"
   assert_eq "${canary_line:+present}" "present" "rebuild runs app canary"
+  assert_eq "$canary_count" "2" "rebuild runs app canaries before and after the final operator rollout"
   if (( refresh_line >= canary_line )); then
     printf 'app runtime refresh must run before app canary\n' >&2
     exit 1
@@ -443,6 +447,15 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_contains "$(cat "$refresh_log")" "--output-dir $output_root/preview/operator-rollout-final" "rebuild refresh stores app refresh evidence beside the final operator rollout evidence"
   assert_contains "$(cat "$log_file")" "refresh-preview-wireguard-backoffice --inventory $output_root/preview/inventory.resolved.json" "rebuild refreshes wireguard backoffice routing after operator rollout"
   assert_contains "$(cat "$log_file")" "--operator-deploy $output_root/preview/operator-rollout/operators/0x1111111111111111111111111111111111111111/operator-deploy.json" "rebuild uses a rendered operator handoff to resolve internal backoffice endpoints"
+  assert_contains "$(cat "$refresh_log")" "refresh-preview-app-backoffice" "rebuild refreshes app backoffice after the final operator rollout"
+  if (( first_canary_line >= final_roll_line )); then
+    printf 'the initial app canary must run before the final operator rollout\n' >&2
+    exit 1
+  fi
+  if (( final_roll_line >= final_canary_line )); then
+    printf 'the final app canary must run after the final operator rollout\n' >&2
+    exit 1
+  fi
   assert_eq "$(jq -r '.wireguard_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/wireguard-backoffice.json" "release lock records the wireguard backoffice refresh evidence"
   if [[ -s "$e2e_log" ]]; then
     printf 'shared-infra-e2e must execute remotely for preview app role rebuilds\n' >&2
@@ -458,6 +471,7 @@ test_rebuild_preview_role_runtime_refreshes_backoffice_after_operator_rollout() 
   assert_eq "$(jq -r '.ok' "$output_root/preview/e2e/shared-infra-e2e.json")" "true" "rebuild records the remote shared infra validation output"
   assert_eq "$(jq -r '.app_runtime_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-runtime-refresh.json" "release lock records the app runtime refresh evidence"
   assert_eq "$(jq -r '.app_backoffice_refresh_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/app-backoffice-refresh.json" "release lock records the app backoffice refresh evidence"
+  assert_eq "$(jq -r '.app_post_rollout_canary_path' "$output_root/preview/role-runtime-release-lock.json")" "$output_root/preview/canaries/app-post-final-rollout.json" "release lock records the final app canary evidence"
 
   rm -rf "$tmp"
 }

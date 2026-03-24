@@ -521,6 +521,9 @@ fi
   --app-deploy "$app_deploy" \
   --output-dir "$output_dir/operator-rollout-final" >"$output_dir/app-backoffice-refresh.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/app-backoffice-refresh.json")" == "true" ]] || die "preview app backoffice refresh failed"
+final_app_canary_path="$output_dir/canaries/app-post-final-rollout.json"
+"$canary_app_bin" --app-deploy "$app_deploy" >"$final_app_canary_path"
+[[ "$(jq -r '.ready_for_deploy' "$final_app_canary_path")" == "true" ]] || die "app canary failed after final operator rollout"
 
 release_lock="$output_dir/role-runtime-release-lock.json"
 jq -n \
@@ -537,6 +540,7 @@ jq -n \
   --arg app_runtime_refresh_path "$app_runtime_refresh_path" \
   --arg wireguard_backoffice_refresh_path "$wireguard_backoffice_refresh_path" \
   --arg app_backoffice_refresh_path "$output_dir/app-backoffice-refresh.json" \
+  --arg app_post_rollout_canary_path "$final_app_canary_path" \
   --arg preview_completed_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" '
     {
       workflow: $workflow,
@@ -552,6 +556,7 @@ jq -n \
       app_runtime_refresh_path: $app_runtime_refresh_path,
       wireguard_backoffice_refresh_path: $wireguard_backoffice_refresh_path,
       app_backoffice_refresh_path: $app_backoffice_refresh_path,
+      app_post_rollout_canary_path: $app_post_rollout_canary_path,
       preview_completed_at: $preview_completed_at
     }
   ' >"$release_lock"
