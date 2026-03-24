@@ -488,6 +488,48 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_operator_canary_binary_fail_once_for_first_operator() {
+  local target="$1"
+  local log_file="$2"
+  local marker_file="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'canary-operator %s\n' "\$*" >>"$log_file"
+if [[ "\$*" == *"0x1111111111111111111111111111111111111111"* ]] && [[ ! -f "$marker_file" ]]; then
+  : >"$marker_file"
+  cat <<'JSON'
+{"ready_for_deploy":false}
+JSON
+  exit 0
+fi
+cat <<'JSON'
+{"ready_for_deploy":true}
+JSON
+EOF
+  chmod +x "$target"
+}
+
+write_fake_operator_canary_binary_always_fails_for_first_operator() {
+  local target="$1"
+  local log_file="$2"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'canary-operator %s\n' "\$*" >>"$log_file"
+if [[ "\$*" == *"0x1111111111111111111111111111111111111111"* ]]; then
+  cat <<'JSON'
+{"ready_for_deploy":false}
+JSON
+  exit 0
+fi
+cat <<'JSON'
+{"ready_for_deploy":true}
+JSON
+EOF
+  chmod +x "$target"
+}
+
 write_shared_manifest_fixture() {
   local target="$1"
   cat >"$target" <<'JSON'
@@ -773,6 +815,172 @@ EOF
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "true" "preview operator roll reuses an in-progress refresh instead of failing"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --output json" "preview operator roll queries the active refresh when aws rejects a second refresh start"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-instance-refreshes --auto-scaling-group-name preview-op2 --instance-refresh-ids refresh-op2-existing --output json" "preview operator roll waits on the existing refresh id"
+
+  rm -rf "$tmp"
+}
+
+test_roll_preview_operators_retries_transient_operator_canary_failures() {
+  local tmp inventory shared_manifest releases_dir gh_log aws_log deploy_log canary_log ssh_keyscan_log output_dir canary_marker
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  releases_dir="$tmp/releases"
+  gh_log="$tmp/gh.log"
+  aws_log="$tmp/aws.log"
+  deploy_log="$tmp/deploy.log"
+  canary_log="$tmp/canary.log"
+  ssh_keyscan_log="$tmp/ssh-keyscan.log"
+  output_dir="$tmp/output"
+  canary_marker="$tmp/canary-marker"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2" "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  cat >"$tmp/operators/op1/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$tmp/operators/op2/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$tmp/operators/op1/operator-secrets.env"
+  append_default_owallet_proof_keys "$tmp/operators/op2/operator-secrets.env"
+  write_test_dkg_backup_zip "$tmp/operators/op1/dkg-backup.zip"
+  write_test_dkg_backup_zip "$tmp/operators/op2/dkg-backup.zip"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  write_shared_manifest_fixture "$shared_manifest"
+
+  cat >"$releases_dir/operator-stack-ami-v2026.03.20-testnet/operator-ami-manifest.json" <<'JSON'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operatorfresh123456"
+    }
+  }
+}
+JSON
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
+
+  write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
+  write_fake_roll_preview_aws "$tmp/bin/aws" "$aws_log"
+  write_fake_deploy_operator_binary "$tmp/bin/deploy-operator.sh" "$deploy_log"
+  write_fake_operator_canary_binary_fail_once_for_first_operator "$tmp/bin/canary-operator-boot.sh" "$canary_log" "$canary_marker"
+  cat >"$tmp/bin/ssh-keyscan" <<EOF
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "\$*" >>"$ssh_keyscan_log"
+host="\${@: -1}"
+printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey\n' "\$host"
+EOF
+  chmod +x "$tmp/bin/ssh-keyscan"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$tmp/bin:$PATH" \
+      PRODUCTION_DEPLOY_OPERATOR_BIN="$tmp/bin/deploy-operator.sh" \
+      PRODUCTION_CANARY_OPERATOR_BOOT_BIN="$tmp/bin/canary-operator-boot.sh" \
+      PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_ATTEMPTS=2 \
+      PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_INTERVAL_SECONDS=0 \
+      bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+        --inventory "$inventory" \
+        --shared-manifest "$shared_manifest" \
+        --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --output-dir "$output_dir" \
+        --github-repo juno-intents/intents-juno >"$tmp/roll-summary.json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "true" "preview operator roll retries transient boot canary failures"
+  assert_eq "$(grep -c '0x1111111111111111111111111111111111111111' "$canary_log")" "2" "preview operator roll reruns the first operator boot canary after a transient failure"
+  assert_eq "$(grep -c '0x6666666666666666666666666666666666666666' "$canary_log")" "1" "preview operator roll does not retry healthy operators unnecessarily"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id == "0x1111111111111111111111111111111111111111") | .status' "$output_dir/rollout-state.json")" "done" "preview operator roll keeps the recovered operator rollout state as done"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id == "0x1111111111111111111111111111111111111111") | .note' "$output_dir/rollout-state.json")" "healthy" "preview operator roll records the recovered operator as healthy"
+
+  rm -rf "$tmp"
+}
+
+test_roll_preview_operators_marks_rollout_state_failed_when_canary_never_recovers() {
+  local tmp inventory shared_manifest releases_dir gh_log aws_log deploy_log canary_log ssh_keyscan_log output_dir
+  tmp="$(mktemp -d)"
+  inventory="$tmp/inventory.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  releases_dir="$tmp/releases"
+  gh_log="$tmp/gh.log"
+  aws_log="$tmp/aws.log"
+  deploy_log="$tmp/deploy.log"
+  canary_log="$tmp/canary.log"
+  ssh_keyscan_log="$tmp/ssh-keyscan.log"
+  output_dir="$tmp/output"
+
+  mkdir -p "$tmp/bin" "$tmp/operators/op1" "$tmp/operators/op2" "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+  : >"$tmp/operators/op1/known_hosts"
+  : >"$tmp/operators/op2/known_hosts"
+  cat >"$tmp/operators/op1/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  cat >"$tmp/operators/op2/operator-secrets.env" <<'EOF'
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$tmp/operators/op1/operator-secrets.env"
+  append_default_owallet_proof_keys "$tmp/operators/op2/operator-secrets.env"
+  write_test_dkg_backup_zip "$tmp/operators/op1/dkg-backup.zip"
+  write_test_dkg_backup_zip "$tmp/operators/op2/dkg-backup.zip"
+  write_roll_inventory_fixture "$inventory" "$tmp"
+  write_shared_manifest_fixture "$shared_manifest"
+
+  cat >"$releases_dir/operator-stack-ami-v2026.03.20-testnet/operator-ami-manifest.json" <<'JSON'
+{
+  "regions": {
+    "us-east-1": {
+      "ami_id": "ami-0operatorfresh123456"
+    }
+  }
+}
+JSON
+  (
+    cd "$releases_dir/operator-stack-ami-v2026.03.20-testnet"
+    digest="$(shasum -a 256 operator-ami-manifest.json | awk '{print $1}')"
+    printf '%s  .ci/out/operator-ami-manifest.json\n' "$digest" > operator-ami-manifest.json.sha256
+  )
+
+  write_fake_operator_release_downloader "$tmp/bin/gh" "$releases_dir" "$gh_log"
+  write_fake_roll_preview_aws "$tmp/bin/aws" "$aws_log"
+  write_fake_deploy_operator_binary "$tmp/bin/deploy-operator.sh" "$deploy_log"
+  write_fake_operator_canary_binary_always_fails_for_first_operator "$tmp/bin/canary-operator-boot.sh" "$canary_log"
+  cat >"$tmp/bin/ssh-keyscan" <<EOF
+#!/usr/bin/env bash
+printf 'ssh-keyscan %s\n' "\$*" >>"$ssh_keyscan_log"
+host="\${@: -1}"
+printf '%s ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITestHostKey\n' "\$host"
+EOF
+  chmod +x "$tmp/bin/ssh-keyscan"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_AWS_LOG="$aws_log" PATH="$tmp/bin:$PATH" \
+      PRODUCTION_DEPLOY_OPERATOR_BIN="$tmp/bin/deploy-operator.sh" \
+      PRODUCTION_CANARY_OPERATOR_BOOT_BIN="$tmp/bin/canary-operator-boot.sh" \
+      PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_ATTEMPTS=2 \
+      PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_INTERVAL_SECONDS=0 \
+      bash "$REPO_ROOT/deploy/production/roll-preview-operators.sh" \
+        --inventory "$inventory" \
+        --shared-manifest "$shared_manifest" \
+        --dkg-summary "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        --operator-stack-ami-release-tag operator-stack-ami-v2026.03.20-testnet \
+        --output-dir "$output_dir" \
+        --github-repo juno-intents/intents-juno >"$tmp/roll-summary.json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$tmp/roll-summary.json")" "false" "preview operator roll reports failure when the boot canary never recovers"
+  assert_eq "$(grep -c '0x1111111111111111111111111111111111111111' "$canary_log")" "2" "preview operator roll exhausts the configured canary retries for the failing operator"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id == "0x1111111111111111111111111111111111111111") | .status' "$output_dir/rollout-state.json")" "failed" "preview operator roll marks a permanently failing canary operator as failed"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id == "0x1111111111111111111111111111111111111111") | .note' "$output_dir/rollout-state.json")" "boot canary failed" "preview operator roll records the boot canary failure in rollout state"
 
   rm -rf "$tmp"
 }
@@ -1201,6 +1409,8 @@ main() {
   test_roll_preview_operators_refreshes_asgs_and_redeploys_handoffs
   test_roll_preview_operators_waits_for_slow_but_successful_instance_refreshes
   test_roll_preview_operators_reuses_existing_instance_refreshes
+  test_roll_preview_operators_retries_transient_operator_canary_failures
+  test_roll_preview_operators_marks_rollout_state_failed_when_canary_never_recovers
   test_roll_preview_operators_discovers_missing_asg_and_launch_template_from_public_ip
   test_roll_preview_operators_recovers_from_stale_launch_template_ids
   test_roll_preview_operators_recovers_from_asg_when_public_ip_is_stale

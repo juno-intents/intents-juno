@@ -32,6 +32,8 @@ output_dir=""
 github_repo="juno-intents/intents-juno"
 instance_refresh_poll_attempts="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_ATTEMPTS:-360}"
 instance_refresh_poll_interval_seconds="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_INTERVAL_SECONDS:-5}"
+boot_canary_attempts="${PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_ATTEMPTS:-6}"
+boot_canary_interval_seconds="${PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_INTERVAL_SECONDS:-30}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -54,6 +56,10 @@ done
 [[ -f "$dkg_summary" ]] || die "dkg summary not found: $dkg_summary"
 [[ -n "$operator_stack_ami_release_tag" ]] || die "--operator-stack-ami-release-tag is required"
 [[ -n "$output_dir" ]] || die "--output-dir is required"
+[[ "$instance_refresh_poll_attempts" =~ ^[1-9][0-9]*$ ]] || die "PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_ATTEMPTS must be a positive integer"
+[[ "$instance_refresh_poll_interval_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_INTERVAL_SECONDS must be a non-negative integer"
+[[ "$boot_canary_attempts" =~ ^[1-9][0-9]*$ ]] || die "PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_ATTEMPTS must be a positive integer"
+[[ "$boot_canary_interval_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_PREVIEW_OPERATOR_BOOT_CANARY_INTERVAL_SECONDS must be a non-negative integer"
 
 for cmd in jq aws gh ssh-keyscan; do
   have_cmd "$cmd" || die "required command not found: $cmd"
@@ -502,11 +508,31 @@ production_render_operator_handoffs "$working_inventory" "$shared_manifest" "$dk
 ready_for_deploy="true"
 mapfile -t operator_deploys < <(find "$output_dir/operators" -name operator-deploy.json | sort)
 for operator_deploy in "${operator_deploys[@]}"; do
+  operator_deploy_dir="$(cd "$(dirname "$operator_deploy")" && pwd)"
+  operator_id="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
+  rollout_state_file="$(production_abs_path "$operator_deploy_dir" "$(production_json_required "$operator_deploy" '.rollout_state_file | select(type == "string" and length > 0)')")"
+
   "$deploy_operator_bin" --operator-deploy "$operator_deploy" </dev/null >&2
+  production_rollout_reserve "$rollout_state_file" "$operator_id"
+
   canary_output="${operator_deploy%/*}/boot-canary.json"
-  "$canary_operator_boot_bin" --operator-deploy "$operator_deploy" </dev/null >"$canary_output"
-  if [[ "$(jq -r '.ready_for_deploy // "false"' "$canary_output")" != "true" ]]; then
+  canary_ready="false"
+  for attempt in $(seq 1 "$boot_canary_attempts"); do
+    "$canary_operator_boot_bin" --operator-deploy "$operator_deploy" </dev/null >"$canary_output"
+    if [[ "$(jq -r '.ready_for_deploy // "false"' "$canary_output")" == "true" ]]; then
+      canary_ready="true"
+      break
+    fi
+    if (( attempt < boot_canary_attempts )); then
+      sleep "$boot_canary_interval_seconds"
+    fi
+  done
+
+  if [[ "$canary_ready" == "true" ]]; then
+    production_rollout_complete "$rollout_state_file" "$operator_id" "done" "healthy"
+  else
     ready_for_deploy="false"
+    production_rollout_complete "$rollout_state_file" "$operator_id" "failed" "boot canary failed"
   fi
 done
 
