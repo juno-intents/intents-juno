@@ -143,6 +143,8 @@ app_host="$(jq -r '.app_host // empty' "$patched_app_deploy")"
 app_user="$(jq -r '.app_user // "ubuntu"' "$patched_app_deploy")"
 app_target_mode="host"
 app_targets_json='[]'
+wait_for_local_app_runtime_cmd='ready=""; for _ in $(seq 1 60); do if systemctl is-active --quiet bridge-api.service backoffice.service && curl -fsS http://127.0.0.1:8090/readyz >/dev/null; then ready=yes; break; fi; sleep 5; done; [ "${ready:-}" = "yes" ]'
+wait_for_backoffice_ready_cmd='ready=""; for _ in $(seq 1 60); do if curl -fsS http://127.0.0.1:8090/readyz >/dev/null; then ready=yes; break; fi; sleep 5; done; [ "${ready:-}" = "yes" ]'
 
 if [[ -n "$app_role_asg" ]]; then
   have_cmd aws || die "required command not found: aws"
@@ -159,7 +161,7 @@ if [[ -n "$app_role_asg" ]]; then
 
   backoffice_env_b64="$(base64 <"$backoffice_env" | tr -d '\n')"
   while IFS= read -r instance_id; do
-    remote_cmd="tmp_file=\$(mktemp) && printf '%s' '$backoffice_env_b64' | base64 -d >\"\$tmp_file\" && sudo install -m 0600 \"\$tmp_file\" /etc/intents-juno/backoffice.env && rm -f \"\$tmp_file\" && sudo systemctl restart backoffice && sleep 3 && curl -fsS http://127.0.0.1:8090/readyz >/dev/null"
+    remote_cmd="$wait_for_local_app_runtime_cmd && tmp_file=\$(mktemp) && printf '%s' '$backoffice_env_b64' | base64 -d >\"\$tmp_file\" && sudo install -m 0600 \"\$tmp_file\" /etc/intents-juno/backoffice.env && rm -f \"\$tmp_file\" && sudo systemctl restart backoffice.service && $wait_for_backoffice_ready_cmd"
     ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd" >/dev/null || die "failed to refresh backoffice on app instance $instance_id"
   done < <(jq -r '.[]' <<<"$app_targets_json")
 else
@@ -177,7 +179,7 @@ else
 
   scp "${SCP_OPTS[@]}" "$backoffice_env" "$ssh_target:$remote_stage"
   ssh "${SSH_OPTS[@]}" "$ssh_target" \
-    "sudo install -m 0600 '$remote_stage' /etc/intents-juno/backoffice.env && sudo systemctl restart backoffice && sleep 3 && curl -fsS http://127.0.0.1:8090/readyz >/dev/null"
+    "$wait_for_local_app_runtime_cmd && sudo install -m 0600 '$remote_stage' /etc/intents-juno/backoffice.env && sudo systemctl restart backoffice.service && $wait_for_backoffice_ready_cmd"
   app_targets_json="$(jq -cn --arg app_host "$app_host" '[$app_host]')"
 fi
 

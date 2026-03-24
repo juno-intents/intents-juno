@@ -288,7 +288,8 @@ test_refresh_preview_app_backoffice_renders_private_operator_endpoints_and_resta
   assert_contains "$(cat "$output_dir/app/backoffice.env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x1111111111111111111111111111111111111111=10.0.0.12:18443,0x2222222222222222222222222222222222222222=10.0.1.13:18444" "refresh writes private operator probes into backoffice env"
   assert_contains "$(cat "$output_dir/app/backoffice.env")" "BACKOFFICE_JUNO_RPC_URLS=http://10.0.0.12:18232,http://10.0.1.13:18232" "refresh writes private operator rpc fallbacks into backoffice env"
   assert_contains "$(cat "$scp_log")" "/tmp/intents-juno-preview-backoffice.env" "refresh uploads the rendered backoffice env"
-  assert_contains "$(cat "$ssh_log")" "systemctl restart backoffice" "refresh restarts backoffice after uploading env"
+  assert_contains "$(cat "$ssh_log")" "systemctl is-active --quiet bridge-api.service backoffice.service" "refresh waits for the local app runtime services before rewriting backoffice env over ssh"
+  assert_contains "$(cat "$ssh_log")" "systemctl restart backoffice.service" "refresh restarts backoffice after uploading env"
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/refresh-summary.json")" "true" "refresh summary reports success"
 
   rm -rf "$tmp"
@@ -330,6 +331,8 @@ test_refresh_preview_app_backoffice_updates_all_app_role_instances_via_ssm() {
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers healthy app instances from the app role asg"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh pushes the backoffice env to the first app instance over ssm"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh pushes the backoffice env to the second app instance over ssm"
+  assert_contains "$(cat "$aws_log")" "systemctl is-active --quiet bridge-api.service backoffice.service" "refresh waits for the local app runtime services before rewriting backoffice env over ssm"
+  assert_contains "$(cat "$aws_log")" "systemctl restart backoffice.service" "refresh restarts the explicit backoffice service unit over ssm"
   assert_eq "$(jq -r '.app_target_mode' "$tmp/refresh-summary.json")" "asg" "refresh summary reports app role mode"
   assert_eq "$(jq -r '.app_role_asg' "$tmp/refresh-summary.json")" "preview-app-asg" "refresh summary reports the app role asg"
   assert_eq "$(jq -r '.app_targets[0]' "$tmp/refresh-summary.json")" "i-app001" "refresh summary reports the first app instance id"
