@@ -95,6 +95,10 @@ scan_catchup_status="passed"
 scan_catchup_detail="juno-scan is caught up enough"
 scan_catchup_lag_blocks="${PRODUCTION_OPERATOR_SCAN_CATCHUP_LAG_BLOCKS:-1}"
 [[ "$scan_catchup_lag_blocks" =~ ^[0-9]+$ ]] || die "PRODUCTION_OPERATOR_SCAN_CATCHUP_LAG_BLOCKS must be a non-negative integer"
+scan_catchup_poll_attempts="${PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_ATTEMPTS:-180}"
+[[ "$scan_catchup_poll_attempts" =~ ^[1-9][0-9]*$ ]] || die "PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_ATTEMPTS must be a positive integer"
+scan_catchup_poll_interval_seconds="${PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_INTERVAL_SECONDS:-5}"
+[[ "$scan_catchup_poll_interval_seconds" =~ ^[0-9]+$ ]] || die "PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_INTERVAL_SECONDS must be a non-negative integer"
 allow_local_resolvers="false"
 if production_environment_allows_local_secret_resolvers "$environment"; then
   allow_local_resolvers="true"
@@ -317,29 +321,34 @@ else
       fi
 
       if [[ "$systemd_status" == "passed" ]]; then
-        scan_status_response="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo curl -fsS http://127.0.0.1:8080/v1/health" 2>/dev/null || true)"
-        scan_tip_height="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'set -euo pipefail; set -a; source /etc/intents-juno/operator-stack.env; set +a; /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser=\"\$JUNO_RPC_USER\" -rpcpassword=\"\$JUNO_RPC_PASS\" getblockcount'" 2>/dev/null || true)"
-        scan_tip_height="$(tr -d '[:space:]' <<<"$scan_tip_height")"
-        scan_tip_valid="false"
-        if [[ "$scan_tip_height" =~ ^[0-9]+$ ]]; then
-          scan_tip_valid="true"
-        fi
-        scan_scanned_height="$(jq -r '.scanned_height // empty' <<<"$scan_status_response" 2>/dev/null || true)"
-        if [[ "$scan_status_response" != *'"status":"ok"'* && "$scan_status_response" != *'"status": "ok"'* ]]; then
-          scan_catchup_status="failed"
-          scan_catchup_detail="juno-scan health check failed on $operator_host"
-        elif ! [[ "$scan_scanned_height" =~ ^[0-9]+$ ]]; then
-          scan_catchup_status="failed"
-          scan_catchup_detail="juno-scan health did not report a numeric scanned_height on $operator_host"
-        elif [[ "$scan_tip_valid" != "true" ]]; then
-          scan_catchup_status="failed"
-          scan_catchup_detail="junocashd getblockcount did not return a numeric tip on $operator_host"
-        elif (( scan_scanned_height + scan_catchup_lag_blocks < scan_tip_height )); then
-          scan_catchup_status="failed"
-          scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is behind local tip $scan_tip_height by more than $scan_catchup_lag_blocks block(s)"
-        else
-          scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is within $scan_catchup_lag_blocks block(s) of local tip $scan_tip_height"
-        fi
+        scan_catchup_status="failed"
+        for ((scan_attempt=1; scan_attempt<=scan_catchup_poll_attempts; scan_attempt++)); do
+          scan_status_response="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo curl -fsS http://127.0.0.1:8080/v1/health" 2>/dev/null || true)"
+          scan_tip_height="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'set -euo pipefail; set -a; source /etc/intents-juno/operator-stack.env; set +a; /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser=\"\$JUNO_RPC_USER\" -rpcpassword=\"\$JUNO_RPC_PASS\" getblockcount'" 2>/dev/null || true)"
+          scan_tip_height="$(tr -d '[:space:]' <<<"$scan_tip_height")"
+          scan_tip_valid="false"
+          if [[ "$scan_tip_height" =~ ^[0-9]+$ ]]; then
+            scan_tip_valid="true"
+          fi
+          scan_scanned_height="$(jq -r '.scanned_height // empty' <<<"$scan_status_response" 2>/dev/null || true)"
+          if [[ "$scan_status_response" != *'"status":"ok"'* && "$scan_status_response" != *'"status": "ok"'* ]]; then
+            scan_catchup_detail="juno-scan health check failed on $operator_host"
+          elif ! [[ "$scan_scanned_height" =~ ^[0-9]+$ ]]; then
+            scan_catchup_detail="juno-scan health did not report a numeric scanned_height on $operator_host"
+          elif [[ "$scan_tip_valid" != "true" ]]; then
+            scan_catchup_detail="junocashd getblockcount did not return a numeric tip on $operator_host"
+          elif (( scan_scanned_height + scan_catchup_lag_blocks < scan_tip_height )); then
+            scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is behind local tip $scan_tip_height by more than $scan_catchup_lag_blocks block(s)"
+          else
+            scan_catchup_status="passed"
+            scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is within $scan_catchup_lag_blocks block(s) of local tip $scan_tip_height"
+            break
+          fi
+
+          if (( scan_attempt < scan_catchup_poll_attempts )); then
+            sleep "$scan_catchup_poll_interval_seconds"
+          fi
+        done
 
         if [[ "$scan_catchup_status" != "passed" ]]; then
           deposit_relayer_ready_status="blocked"
