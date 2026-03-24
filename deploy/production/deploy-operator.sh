@@ -1499,7 +1499,14 @@ deposit_proof_response_group="${DEPOSIT_RELAYER_PROOF_RESPONSE_GROUP:-$(hostname
 deposit_max_age="${DEPOSIT_RELAYER_MAX_AGE:-3m}"
 deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-7m}"
 deposit_flush_interval="${DEPOSIT_RELAYER_FLUSH_INTERVAL:-1s}"
-deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-5m}"
+sp1_request_timeout_seconds="${SP1_REQUEST_TIMEOUT_SECONDS:-1500}"
+[[ "$sp1_request_timeout_seconds" =~ ^[0-9]+$ ]] || {
+  echo "deposit-relayer requires SP1_REQUEST_TIMEOUT_SECONDS to be an integer number of seconds" >&2
+  exit 1
+}
+relayer_submit_timeout_seconds="$((10#$sp1_request_timeout_seconds + 300))"
+(( relayer_submit_timeout_seconds >= 1800 )) || relayer_submit_timeout_seconds=1800
+deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-${relayer_submit_timeout_seconds}s}"
 deposit_base_rpc_url="${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}"
 [[ -n "${deposit_base_rpc_url}" ]] || {
   echo "deposit-relayer requires BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
