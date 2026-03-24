@@ -17,6 +17,7 @@ import (
 type RPCClient interface {
 	TransactionReceipt(ctx context.Context, txHash common.Hash) (*types.Receipt, error)
 	FilterLogs(ctx context.Context, q ethereum.FilterQuery) ([]types.Log, error)
+	BlockNumber(ctx context.Context) (uint64, error)
 	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
 	Close()
 }
@@ -80,7 +81,7 @@ func (c *MultiRPCClient) FilterLogs(ctx context.Context, q ethereum.FilterQuery)
 	)
 
 	for _, client := range c.clients {
-		logs, err := client.FilterLogs(ctx, q)
+		logs, err := filterLogsWithHeadClamp(ctx, client, q)
 		if err != nil {
 			errs = append(errs, err)
 			continue
@@ -112,6 +113,57 @@ func (c *MultiRPCClient) FilterLogs(ctx context.Context, q ethereum.FilterQuery)
 		return combined[i].TxHash.Hex() < combined[j].TxHash.Hex()
 	})
 	return combined, nil
+}
+
+func (c *MultiRPCClient) BlockNumber(ctx context.Context) (uint64, error) {
+	var errs []error
+	for _, client := range c.clients {
+		head, err := client.BlockNumber(ctx)
+		if err == nil {
+			return head, nil
+		}
+		errs = append(errs, err)
+	}
+	return 0, errors.Join(errs...)
+}
+
+func filterLogsWithHeadClamp(ctx context.Context, client RPCClient, q ethereum.FilterQuery) ([]types.Log, error) {
+	logs, err := client.FilterLogs(ctx, q)
+	if err == nil || q.ToBlock == nil || !isFilterLogsRangeBeyondHeadError(err) {
+		return logs, err
+	}
+
+	head, headErr := client.BlockNumber(ctx)
+	if headErr != nil {
+		return nil, errors.Join(err, fmt.Errorf("eth: fetch backend head for log query: %w", headErr))
+	}
+
+	clampedQuery, ok := clampFilterQueryToHead(q, head)
+	if !ok {
+		return nil, err
+	}
+	return client.FilterLogs(ctx, clampedQuery)
+}
+
+func clampFilterQueryToHead(q ethereum.FilterQuery, head uint64) (ethereum.FilterQuery, bool) {
+	if q.ToBlock == nil {
+		return q, true
+	}
+
+	clamped := q
+	clampedHead := new(big.Int).SetUint64(head)
+	if q.FromBlock != nil && q.FromBlock.Cmp(clampedHead) > 0 {
+		return ethereum.FilterQuery{}, false
+	}
+	clamped.ToBlock = clampedHead
+	return clamped, true
+}
+
+func isFilterLogsRangeBeyondHeadError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "block range extends beyond current head block")
 }
 
 func (c *MultiRPCClient) CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error) {

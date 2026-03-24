@@ -15,8 +15,11 @@ type stubMultiRPCClient struct {
 	receipt    *types.Receipt
 	receiptErr error
 
-	logs    []types.Log
-	logsErr error
+	logs         []types.Log
+	logsErr      error
+	filterLogsFn func(q ethereum.FilterQuery) ([]types.Log, error)
+	head         uint64
+	headErr      error
 
 	callResult []byte
 	callErr    error
@@ -31,11 +34,21 @@ func (s *stubMultiRPCClient) TransactionReceipt(context.Context, common.Hash) (*
 	return s.receipt, nil
 }
 
-func (s *stubMultiRPCClient) FilterLogs(context.Context, ethereum.FilterQuery) ([]types.Log, error) {
+func (s *stubMultiRPCClient) FilterLogs(_ context.Context, q ethereum.FilterQuery) ([]types.Log, error) {
+	if s.filterLogsFn != nil {
+		return s.filterLogsFn(q)
+	}
 	if s.logsErr != nil {
 		return nil, s.logsErr
 	}
 	return append([]types.Log(nil), s.logs...), nil
+}
+
+func (s *stubMultiRPCClient) BlockNumber(context.Context) (uint64, error) {
+	if s.headErr != nil {
+		return 0, s.headErr
+	}
+	return s.head, nil
 }
 
 func (s *stubMultiRPCClient) CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error) {
@@ -127,6 +140,63 @@ func TestMultiRPCClient_FilterLogsUnionsAndDeduplicatesAcrossClients(t *testing.
 	}
 
 	got, err := client.FilterLogs(context.Background(), ethereum.FilterQuery{})
+	if err != nil {
+		t.Fatalf("FilterLogs: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("log count = %d, want 2", len(got))
+	}
+	if got[0].TxHash != logA.TxHash || got[1].TxHash != logB.TxHash {
+		t.Fatalf("unexpected log order: got %x then %x", got[0].TxHash, got[1].TxHash)
+	}
+}
+
+func TestMultiRPCClient_FilterLogsClampsToLaggingBackendHead(t *testing.T) {
+	t.Parallel()
+
+	rangeErr := errors.New("block range extends beyond current head block\ninvalid block range params")
+	query := ethereum.FilterQuery{
+		FromBlock: big.NewInt(100),
+		ToBlock:   big.NewInt(120),
+	}
+	logA := types.Log{
+		Address:     common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+		BlockNumber: 105,
+		TxHash:      common.HexToHash("0x100"),
+		TxIndex:     1,
+		Index:       0,
+	}
+	logB := types.Log{
+		Address:     common.HexToAddress("0x00000000000000000000000000000000000000bb"),
+		BlockNumber: 110,
+		TxHash:      common.HexToHash("0x200"),
+		TxIndex:     2,
+		Index:       0,
+	}
+	laggingClient := func(head uint64, lg types.Log) *stubMultiRPCClient {
+		return &stubMultiRPCClient{
+			head: head,
+			filterLogsFn: func(q ethereum.FilterQuery) ([]types.Log, error) {
+				if q.ToBlock == nil {
+					t.Fatalf("expected ToBlock to be set")
+				}
+				if q.ToBlock.Uint64() > head {
+					return nil, rangeErr
+				}
+				return []types.Log{lg}, nil
+			},
+		}
+	}
+
+	client, err := NewMultiRPCClient(
+		laggingClient(110, logA),
+		laggingClient(115, logB),
+	)
+	if err != nil {
+		t.Fatalf("NewMultiRPCClient: %v", err)
+	}
+
+	got, err := client.FilterLogs(context.Background(), query)
 	if err != nil {
 		t.Fatalf("FilterLogs: %v", err)
 	}
