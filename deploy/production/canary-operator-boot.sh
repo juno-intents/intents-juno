@@ -19,6 +19,7 @@ Checks:
   - Remote extend signer supports sign-digest and returns enough signatures for checkpoint quorum
   - Remote KMS export receipt exists when checkpoint blob export is configured
   - Remote operator services are active over strict-host-key SSH
+  - Local juno-scan is caught up enough for deposit witness refreshes
 
 Output:
   JSON summary to stdout suitable for rollout gating
@@ -90,6 +91,10 @@ deposit_relayer_ready_status="passed"
 deposit_relayer_ready_detail="deposit-relayer /readyz passed"
 kms_export_status="skipped"
 kms_export_detail="no checkpoint blob bucket configured"
+scan_catchup_status="passed"
+scan_catchup_detail="juno-scan is caught up enough"
+scan_catchup_lag_blocks="${PRODUCTION_OPERATOR_SCAN_CATCHUP_LAG_BLOCKS:-1}"
+[[ "$scan_catchup_lag_blocks" =~ ^[0-9]+$ ]] || die "PRODUCTION_OPERATOR_SCAN_CATCHUP_LAG_BLOCKS must be a non-negative integer"
 allow_local_resolvers="false"
 if production_environment_allows_local_secret_resolvers "$environment"; then
   allow_local_resolvers="true"
@@ -312,7 +317,36 @@ else
       fi
 
       if [[ "$systemd_status" == "passed" ]]; then
-        if ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'source /etc/intents-juno/operator-stack.env && curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz >/dev/null'" 2>/dev/null; then
+        scan_status_response="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo curl -fsS http://127.0.0.1:8080/v1/health" 2>/dev/null || true)"
+        scan_tip_height="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'set -euo pipefail; set -a; source /etc/intents-juno/operator-stack.env; set +a; /usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser=\"\$JUNO_RPC_USER\" -rpcpassword=\"\$JUNO_RPC_PASS\" getblockcount'" 2>/dev/null || true)"
+        scan_tip_height="$(tr -d '[:space:]' <<<"$scan_tip_height")"
+        scan_tip_valid="false"
+        if [[ "$scan_tip_height" =~ ^[0-9]+$ ]]; then
+          scan_tip_valid="true"
+        fi
+        scan_scanned_height="$(jq -r '.scanned_height // empty' <<<"$scan_status_response" 2>/dev/null || true)"
+        if [[ "$scan_status_response" != *'"status":"ok"'* && "$scan_status_response" != *'"status": "ok"'* ]]; then
+          scan_catchup_status="failed"
+          scan_catchup_detail="juno-scan health check failed on $operator_host"
+        elif ! [[ "$scan_scanned_height" =~ ^[0-9]+$ ]]; then
+          scan_catchup_status="failed"
+          scan_catchup_detail="juno-scan health did not report a numeric scanned_height on $operator_host"
+        elif [[ "$scan_tip_valid" != "true" ]]; then
+          scan_catchup_status="failed"
+          scan_catchup_detail="junocashd getblockcount did not return a numeric tip on $operator_host"
+        elif (( scan_scanned_height + scan_catchup_lag_blocks < scan_tip_height )); then
+          scan_catchup_status="failed"
+          scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is behind local tip $scan_tip_height by more than $scan_catchup_lag_blocks block(s)"
+        else
+          scan_catchup_detail="juno-scan scanned_height $scan_scanned_height is within $scan_catchup_lag_blocks block(s) of local tip $scan_tip_height"
+        fi
+
+        if [[ "$scan_catchup_status" != "passed" ]]; then
+          deposit_relayer_ready_status="blocked"
+          deposit_relayer_ready_detail="blocked by juno-scan catch-up failure"
+        fi
+
+        if [[ "$scan_catchup_status" == "passed" ]] && ! ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo bash -lc 'source /etc/intents-juno/operator-stack.env && curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz >/dev/null'" 2>/dev/null; then
           deposit_relayer_ready_status="failed"
           deposit_relayer_ready_detail="deposit-relayer /readyz failed"
         fi
@@ -325,7 +359,7 @@ else
 fi
 
 ready_for_deploy="true"
-for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$kms_export_status" "$systemd_status" "$deposit_relayer_ready_status"; do
+for status in "$input_status" "$relayer_funding_status" "$withdraw_config_status" "$txsign_runtime_status" "$kms_export_status" "$systemd_status" "$scan_catchup_status" "$deposit_relayer_ready_status"; do
   if [[ "$status" != "passed" && "$status" != "skipped" ]]; then
     ready_for_deploy="false"
   fi
@@ -352,6 +386,8 @@ jq -n \
   --arg kms_export_detail "$kms_export_detail" \
   --arg systemd_status "$systemd_status" \
   --arg systemd_detail "$systemd_detail" \
+  --arg scan_catchup_status "$scan_catchup_status" \
+  --arg scan_catchup_detail "$scan_catchup_detail" \
   --arg deposit_relayer_ready_status "$deposit_relayer_ready_status" \
   --arg deposit_relayer_ready_detail "$deposit_relayer_ready_detail" \
   --argjson ready_for_deploy "$ready_for_deploy" \
@@ -382,6 +418,10 @@ jq -n \
       kms_export: {
         status: $kms_export_status,
         detail: $kms_export_detail
+      },
+      scan_catchup: {
+        status: $scan_catchup_status,
+        detail: $scan_catchup_detail
       },
       systemd: {
         status: $systemd_status,
