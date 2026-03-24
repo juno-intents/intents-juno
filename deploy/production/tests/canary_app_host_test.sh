@@ -1387,7 +1387,18 @@ fi
 if [[ "$1" == "ssm" && "$2" == "get-command-invocation" ]]; then
   case "$*" in
     *"cmd-bridge-systemd"*)
-      printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
+      state_file="$TEST_LOG_DIR/cmd-bridge-systemd.count"
+      attempt=0
+      if [[ -f "$state_file" ]]; then
+        attempt="$(cat "$state_file")"
+      fi
+      attempt=$((attempt + 1))
+      printf '%s' "$attempt" >"$state_file"
+      if (( attempt == 1 )); then
+        printf '{"Status":"Pending","StandardOutputContent":"","StandardErrorContent":""}\n'
+      else
+        printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
+      fi
       ;;
     *"cmd-backoffice-systemd"*)
       printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
@@ -1430,6 +1441,7 @@ EOF
     printf 'expected no ssh invocations in role mode\n' >&2
     exit 1
   fi
+  assert_eq "$(tr -d '\n' <"$log_dir/cmd-bridge-systemd.count")" "2" "role-mode app canary retries pending ssm systemd reads"
   assert_eq "$(jq -r '.checks.systemd.status' "$output_json")" "passed" "role-mode app canary validates systemd via ssm"
   assert_eq "$(jq -r '.checks.app_capacity.status' "$output_json")" "passed" "role-mode app canary validates app asg capacity"
   assert_eq "$(jq -r '.checks.public_bridge_lb.status' "$output_json")" "passed" "role-mode app canary validates bridge target health"

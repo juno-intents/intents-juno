@@ -326,19 +326,38 @@ ssm_run_shell_command() {
   command_id="$(jq -r '.Command.CommandId // empty' <<<"$send_json")"
   [[ -n "$command_id" ]] || return 1
 
-  invocation_json="$(AWS_PAGER="" aws "${aws_args[@]}" ssm get-command-invocation \
-    --command-id "$command_id" \
-    --instance-id "$instance_id" \
-    --output json 2>/dev/null || true)"
-  [[ -n "$invocation_json" ]] || return 1
-  invocation_status="$(jq -r '.Status // empty' <<<"$invocation_json")"
-  stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
-  stderr="$(jq -r '.StandardErrorContent // ""' <<<"$invocation_json")"
-  if [[ "$invocation_status" != "Success" ]]; then
-    [[ -n "$stderr" ]] && printf '%s\n' "$stderr" >&2
-    return 1
-  fi
-  printf '%s' "$stdout"
+  for _ in $(seq 1 30); do
+    invocation_json="$(AWS_PAGER="" aws "${aws_args[@]}" ssm get-command-invocation \
+      --command-id "$command_id" \
+      --instance-id "$instance_id" \
+      --output json 2>/dev/null || true)"
+    [[ -n "$invocation_json" ]] || {
+      sleep 2
+      continue
+    }
+
+    invocation_status="$(jq -r '.Status // empty' <<<"$invocation_json")"
+    case "$invocation_status" in
+      Success)
+        stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
+        printf '%s' "$stdout"
+        return 0
+        ;;
+      Failed|Cancelled|TimedOut|Cancelling)
+        stderr="$(jq -r '.StandardErrorContent // ""' <<<"$invocation_json")"
+        [[ -n "$stderr" ]] && printf '%s\n' "$stderr" >&2
+        return 1
+        ;;
+      Pending|InProgress|Delayed|"")
+        sleep 2
+        ;;
+      *)
+        sleep 2
+        ;;
+    esac
+  done
+
+  return 1
 }
 
 ssm_http_get_with_retry() {
