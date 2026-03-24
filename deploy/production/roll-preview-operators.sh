@@ -30,6 +30,8 @@ dkg_summary=""
 operator_stack_ami_release_tag=""
 output_dir=""
 github_repo="juno-intents/intents-juno"
+instance_refresh_poll_attempts="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_ATTEMPTS:-360}"
+instance_refresh_poll_interval_seconds="${PRODUCTION_PREVIEW_OPERATOR_INSTANCE_REFRESH_POLL_INTERVAL_SECONDS:-5}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -378,7 +380,7 @@ while IFS= read -r operator_json; do
   [[ -n "$refresh_id" ]] || die "failed to start the instance refresh for operator $operator_id"
 
   refresh_status=""
-  for _ in $(seq 1 60); do
+  for _ in $(seq 1 "$instance_refresh_poll_attempts"); do
     refresh_status="$(
       AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" autoscaling describe-instance-refreshes \
         --auto-scaling-group-name "$operator_asg" \
@@ -389,7 +391,7 @@ while IFS= read -r operator_json; do
     case "$refresh_status" in
       Successful) break ;;
       Failed|Cancelled) die "instance refresh failed for operator $operator_id: $refresh_status" ;;
-      *) sleep 5 ;;
+      *) sleep "$instance_refresh_poll_interval_seconds" ;;
     esac
   done
   [[ "$refresh_status" == "Successful" ]] || die "instance refresh did not complete successfully for operator $operator_id"
