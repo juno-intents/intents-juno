@@ -110,6 +110,10 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
+if [[ "\$*" == *"getblockchaininfo"* ]]; then
+  printf '%s\n' '{"blocks":5000,"headers":5000,"verificationprogress":1,"initial_block_download_complete":true}'
+  exit 0
+fi
 if [[ "\$*" == *"getblockcount"* ]]; then
   printf '5000\n'
   exit 0
@@ -157,7 +161,7 @@ fi
 if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+if [[ "\$*" == *"/readyz"* ]]; then
   exit 0
 fi
 exit 0
@@ -262,6 +266,10 @@ if [[ "$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
+if [[ "$*" == *"getblockchaininfo"* ]]; then
+  printf '%s\n' '{"blocks":5000,"headers":5000,"verificationprogress":1,"initial_block_download_complete":true}'
+  exit 0
+fi
 if [[ "$*" == *"getblockcount"* ]]; then
   printf '5000\n'
   exit 0
@@ -309,7 +317,7 @@ fi
 if [[ "$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
   exit 0
 fi
-if [[ "$*" == *"curl -fsS http://127.0.0.1:${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+if [[ "$*" == *"/readyz"* ]]; then
   exit 0
 fi
 printf 'unexpected ssh invocation: %s\n' "$*" >&2
@@ -391,6 +399,10 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
+if [[ "\$*" == *"getblockchaininfo"* ]]; then
+  printf '%s\n' '{"blocks":5000,"headers":5000,"verificationprogress":1,"initial_block_download_complete":true}'
+  exit 0
+fi
 if [[ "\$*" == *"getblockcount"* ]]; then
   printf '5000\n'
   exit 0
@@ -445,7 +457,7 @@ fi
 if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+if [[ "\$*" == *"/readyz"* ]]; then
   exit 0
 fi
 exit 0
@@ -465,6 +477,157 @@ EOF
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "operator canary waits for juno-scan to catch up"
   assert_eq "$(jq -r '.checks.scan_catchup.status' "$output_json")" "passed" "operator canary scan catch-up eventually passes"
   assert_eq "$(cat "$scan_attempts")" "3" "operator canary retries juno-scan catch-up before passing"
+
+  rm -rf "$tmp"
+}
+
+test_operator_boot_canary_waits_for_junocashd_sync_before_scan_catchup() {
+  local tmp fake_bin manifest output_json shared_manifest scan_attempts node_attempts
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  manifest="$tmp/operator-deploy.json"
+  output_json="$tmp/output.json"
+  shared_manifest="$tmp/shared-manifest.json"
+  scan_attempts="$tmp/scan-attempts"
+  node_attempts="$tmp/node-attempts"
+  mkdir -p "$fake_bin"
+  printf '0\n' >"$scan_attempts"
+  printf '0\n' >"$node_attempts"
+
+  printf '203.0.113.11 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBundleHostKey\n' >"$tmp/known_hosts"
+  cat >"$tmp/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=literal:wallet-op1
+EOF
+  printf 'backup' >"$tmp/dkg-backup.zip"
+  cat >"$shared_manifest" <<JSON
+{
+  "shared_services": {
+    "artifacts": {
+      "checkpoint_blob_bucket": "preview-op1-dkg-keypackages"
+    }
+  },
+  "checkpoint": {
+    "threshold": 2
+  },
+  "contracts": {
+    "base_rpc_url": "https://base-sepolia.example.invalid"
+  }
+}
+JSON
+
+  cat >"$manifest" <<JSON
+{
+  "environment": "alpha",
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "operator_host": "203.0.113.11",
+  "operator_user": "intents-juno",
+  "runtime_dir": "/var/lib/intents-juno/operator-runtime",
+  "shared_manifest_path": "$shared_manifest",
+  "checkpoint_blob_bucket": "preview-op1-dkg-keypackages",
+  "checkpoint_blob_prefix": "operators/op1/checkpoint-packages",
+  "dkg_backup_zip": "$tmp/dkg-backup.zip",
+  "known_hosts_file": "$tmp/known_hosts",
+  "secret_contract_file": "$tmp/operator-secrets.env"
+}
+JSON
+
+  cat >"$fake_bin/ssh" <<EOF
+#!/usr/bin/env bash
+if [[ "\$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "\$*" == *"getblockchaininfo"* ]]; then
+  attempt=\$(( \$(cat "$node_attempts") + 1 ))
+  printf '%s\n' "\$attempt" >"$node_attempts"
+  if (( attempt < 3 )); then
+    printf '%s\n' '{"blocks":100,"headers":200,"verificationprogress":0.5,"initial_block_download_complete":false}'
+  else
+    printf '%s\n' '{"blocks":200,"headers":200,"verificationprogress":1,"initial_block_download_complete":true}'
+  fi
+  exit 0
+fi
+if [[ "\$*" == *"getblockcount"* ]]; then
+  printf '200\n'
+  exit 0
+fi
+if [[ "\$*" == *"/v1/health"* ]]; then
+  attempt=\$(( \$(cat "$scan_attempts") + 1 ))
+  printf '%s\n' "\$attempt" >"$scan_attempts"
+  if (( attempt < 2 )); then
+    printf '%s\n' '{"status":"ok","scanned_height":50,"scanned_hash":"0000"}'
+  else
+    printf '%s\n' '{"status":"ok","scanned_height":199,"scanned_hash":"0001"}'
+  fi
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_DRIVER=aws-kms$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^CHECKPOINT_SIGNER_PRIVATE_KEY='"* ]]; then
+  exit 1
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -q '^WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"awk -F= '/^WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/"* ]]; then
+  printf '/var/lib/intents-juno/operator-runtime/bin/juno-txsign'
+  exit 0
+fi
+if [[ "\$*" == *"test -x"*"/var/lib/intents-juno/operator-runtime/bin/juno-txsign"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"grep -qE '^JUNO_TXSIGN_SIGNER_KEYS=0x[0-9a-fA-F]{64}\$'"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help"* ]]; then
+  printf 'Usage: juno-txsign sign-digest [flags]\n'
+  exit 0
+fi
+if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json"* ]]; then
+  printf '%s\n' '{"version":"v1","status":"ok","data":{"signatures":["0x01","0x02"]}}'
+  exit 0
+fi
+if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
+  exit 0
+fi
+if [[ "\$*" == *"/readyz"* ]]; then
+  exit 0
+fi
+printf 'unexpected ssh invocation: %s\n' "\$*" >&2
+exit 1
+EOF
+  write_fake_cast "$fake_bin/cast" "$tmp/cast.log" "1300000000000000"
+  chmod 0755 "$fake_bin/ssh"
+
+  (
+    cd "$REPO_ROOT"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_ATTEMPTS=2 \
+    PRODUCTION_OPERATOR_SCAN_CATCHUP_POLL_INTERVAL_SECONDS=0 \
+    PRODUCTION_OPERATOR_JUNO_SYNC_POLL_ATTEMPTS=3 \
+    PRODUCTION_OPERATOR_JUNO_SYNC_POLL_INTERVAL_SECONDS=0 \
+    bash deploy/production/canary-operator-boot.sh \
+      --operator-deploy "$manifest" >"$output_json"
+  )
+
+  assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "operator canary waits for junocashd sync before consuming scan retries"
+  assert_eq "$(jq -r '.checks.junocashd_sync.status' "$output_json")" "passed" "operator canary waits for junocashd sync"
+  assert_eq "$(jq -r '.checks.scan_catchup.status' "$output_json")" "passed" "operator canary scan catch-up passes after junocashd sync"
+  assert_eq "$(cat "$node_attempts")" "3" "operator canary retries junocashd sync before passing"
+  assert_eq "$(cat "$scan_attempts")" "2" "operator canary only spends scan retries after junocashd sync"
 
   rm -rf "$tmp"
 }
@@ -591,6 +754,10 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
+if [[ "\$*" == *"getblockchaininfo"* ]]; then
+  printf '%s\n' '{"blocks":5000,"headers":5000,"verificationprogress":1,"initial_block_download_complete":true}'
+  exit 0
+fi
 if [[ "\$*" == *"getblockcount"* ]]; then
   printf '5000\n'
   exit 0
@@ -638,7 +805,7 @@ if [[ "\$*" == *"/var/lib/intents-juno/operator-runtime/bin/juno-txsign sign-dig
   printf '%s\n' '{"version":"v1","status":"ok","data":{"signatures":["0x01","0x02"]}}'
   exit 0
 fi
-if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+if [[ "\$*" == *"/readyz"* ]]; then
   exit 0
 fi
 exit 0
@@ -715,6 +882,10 @@ if [[ "\$*" == *"systemctl is-active"* ]]; then
   printf 'active\n'
   exit 0
 fi
+if [[ "\$*" == *"getblockchaininfo"* ]]; then
+  printf '%s\n' '{"blocks":5000,"headers":5000,"verificationprogress":1,"initial_block_download_complete":true}'
+  exit 0
+fi
 if [[ "\$*" == *"getblockcount"* ]]; then
   printf '5000\n'
   exit 0
@@ -762,7 +933,7 @@ fi
 if [[ "\$*" == *"test -e /var/lib/intents-juno/operator-runtime/exports/kms-export-receipt.json"* ]]; then
   exit 0
 fi
-if [[ "\$*" == *"curl -fsS http://127.0.0.1:\${DEPOSIT_RELAYER_HEALTH_PORT:-18303}/readyz"* ]]; then
+if [[ "\$*" == *"/readyz"* ]]; then
   exit 0
 fi
 exit 0
@@ -790,6 +961,7 @@ main() {
   test_operator_boot_canary_checks_services_over_strict_ssh
   test_operator_boot_canary_rejects_stale_juno_scan
   test_operator_boot_canary_waits_for_eventual_juno_scan_catchup
+  test_operator_boot_canary_waits_for_junocashd_sync_before_scan_catchup
   test_operator_boot_canary_rejects_underfunded_relayer
   test_operator_boot_canary_preserves_secure_preview_signer_configuration
   test_operator_boot_canary_accepts_operator_scoped_extend_signer_signature
