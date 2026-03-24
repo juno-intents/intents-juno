@@ -739,7 +739,9 @@ EOF
   write_fake_aws "$fake_bin/aws" 0 0
   chmod +x "$fake_bin/ssh" "$fake_bin/curl"
 
-  TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+  PRODUCTION_CANARY_INFRA_MAX_ATTEMPTS=1 \
+    PRODUCTION_CANARY_INFRA_RETRY_SLEEP_SECONDS=0 \
+    TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
     bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
       --app-deploy "$app_manifest" >"$output_json"
 
@@ -1438,6 +1440,290 @@ EOF
   rm -rf "$workdir"
 }
 
+test_canary_app_host_retries_transient_target_group_health() {
+  local workdir fake_bin log_dir shared_manifest app_manifest output_json tf_json
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+EOF
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  tf_json="$workdir/terraform-output.json"
+  jq '
+    .app_role = {
+      value: {
+        asg: "alpha-app-role",
+        launch_template: {
+          id: "lt-app0123456789abcdef",
+          version: "12"
+        },
+        public_lb: {
+          dns_name: "bridge-role.alpha.intents-testing.thejunowallet.com",
+          zone_id: "ZROLEPUBLIC123",
+          security_group_id: "sg-public-role",
+          target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-app-bridge/1234567890abcdef"
+        },
+        internal_lb: {
+          dns_name: "ops-role.alpha.intents-testing.thejunowallet.com",
+          zone_id: "ZROLEINTERNAL456",
+          security_group_id: "sg-internal-role",
+          target_group_arn: "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-app-backoffice/fedcba0987654321"
+        }
+      }
+    }
+    | .shared_proof_role = {
+      value: {
+        asg: "alpha-proof-role",
+        launch_template: { id: "lt-proof0123456789abcdef", version: "7" }
+      }
+    }
+    | .shared_wireguard_role = {
+      value: {
+        asg: "alpha-wireguard-role",
+        launch_template: { id: "lt-wireguard0123456789ab", version: "11" }
+      }
+    }
+    | .shared_sp1_requestor_address = {
+      value: "0x4444444444444444444444444444444444444444"
+    }
+    | .shared_sp1_rpc_url = {
+      value: "https://rpc.mainnet.succinct.xyz"
+    }
+  ' "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$shared_manifest" \
+    "$workdir"
+  jq '
+    .shared_services.proof.requestor_address = "0x4444444444444444444444444444444444444444"
+    | .shared_roles.proof.requestor_address = "0x4444444444444444444444444444444444444444"
+  ' "$shared_manifest" >"$shared_manifest.tmp"
+  mv "$shared_manifest.tmp" "$shared_manifest"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir" "$tf_json"
+  app_manifest="$workdir/output/app/app-deploy.json"
+  jq '
+    .services.backoffice.internal_url = "http://127.0.0.1:8090"
+    | .app_role.public_lb.target_group_arn = "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-app-bridge/1234567890abcdef"
+    | .app_role.internal_lb.target_group_arn = "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-app-backoffice/fedcba0987654321"
+  ' "$app_manifest" >"$app_manifest.tmp"
+  mv "$app_manifest.tmp" "$app_manifest"
+  rm -f "$workdir/output/app/known_hosts"
+  output_json="$workdir/canary.json"
+
+cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+printf 'ssh %s\n' "$*" >>"$TEST_LOG_DIR/ssh.log"
+if [[ "$*" == *"systemctl is-active"* ]]; then
+  printf 'active\n'
+  exit 0
+fi
+if [[ "$*" == *"curl -fsS "* ]]; then
+  eval "${@: -1}"
+  exit $?
+fi
+exit 0
+EOF
+  cat >"$fake_bin/dig" <<'EOF'
+#!/usr/bin/env bash
+printf 'dig %s\n' "$*" >>"$TEST_LOG_DIR/dig.log"
+if [[ "$*" == *"bridge.alpha.intents-testing.thejunowallet.com"* ]]; then
+  printf '203.0.113.21\n'
+  exit 0
+fi
+exit 1
+EOF
+  cat >"$fake_bin/curl" <<'EOF'
+#!/usr/bin/env bash
+printf 'curl %s\n' "$*" >>"$TEST_LOG_DIR/curl.log"
+url="${@: -1}"
+resolve_value=""
+next_is_resolve="false"
+for arg in "$@"; do
+  if [[ "$next_is_resolve" == "true" ]]; then
+    resolve_value="$arg"
+    next_is_resolve="false"
+    continue
+  fi
+  if [[ "$arg" == "--resolve" ]]; then
+    next_is_resolve="true"
+  fi
+done
+case "$url" in
+  https://bridge.alpha.intents-testing.thejunowallet.com/readyz)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"status":"ok"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/config)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"version":"v1","baseChainId":84532,"bridgeAddress":"0x2222222222222222222222222222222222222222","wjunoAddress":"0x3333333333333333333333333333333333333333","oWalletUA":"u1alphaexample","minDepositAmount":"201005025","depositMinConfirmations":2}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/v1/deposit-memo?baseRecipient=0x1111111111111111111111111111111111111111)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '{"version":"v1","baseRecipient":"0x1111111111111111111111111111111111111111","nonce":"7","memoHex":"'
+    printf 'aa%.0s' $(seq 1 512)
+    printf '"}\n'
+    ;;
+  https://bridge.alpha.intents-testing.thejunowallet.com/)
+    [[ "$resolve_value" == "bridge.alpha.intents-testing.thejunowallet.com:443:203.0.113.21" ]] || exit 6
+    printf '<!doctype html><html><body>Bridge UI</body></html>\n'
+    ;;
+  http://127.0.0.1:8090/readyz)
+    printf '{"status":"ok"}\n'
+    ;;
+  http://127.0.0.1:8090/api/settings/runtime)
+    printf '{"version":"v1","data":{"minDepositAmount":"201005025","minDepositAdmin":"0x0000000000000000000000000000000000000abc","depositMinConfirmations":2,"withdrawPlannerMinConfirmations":3,"withdrawBatchConfirmations":4}}\n'
+    ;;
+  http://127.0.0.1:8090/api/funds)
+    printf '{"version":"v1","bridge":{"wjunoBalanceRaw":"0","wjunoBalanceFormatted":"0.0"},"operators":[{"address":"0x660B5284fF10C873050a286A124127e3E310ad05","balanceWei":"2000000000000000","balanceEth":"0.002","belowThreshold":false}],"prover":{"address":"0x4444444444444444444444444444444444444444","creditsRaw":"123","creditsFormatted":"0.000000000000000123","network":"succinct","detail":"shared proof requestor"},"mpcWallet":{"address":"jtest1exampleaddress","total":"1.25","detail":"app-host rpc"}}\n'
+    ;;
+  http://127.0.0.1:8090/)
+    printf '<!doctype html><html><body>JUNO BACKOFFICE</body></html>\n'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
+  cat >"$fake_bin/aws" <<'EOF'
+#!/usr/bin/env bash
+printf 'aws %s\n' "$*" >>"$TEST_LOG_DIR/aws.log"
+if [[ "$1" == "--profile" ]]; then
+  shift 2
+fi
+if [[ "$1" == "--region" ]]; then
+  shift 2
+fi
+if [[ "$1" == "autoscaling" && "$2" == "describe-auto-scaling-groups" ]]; then
+  case "$*" in
+    *"alpha-app-role"*)
+      printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+      ;;
+    *"alpha-proof-role"*)
+      printf '{"AutoScalingGroups":[{"DesiredCapacity":2,"Instances":[{"InstanceId":"i-proof001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-proof002","LifecycleState":"InService","HealthStatus":"Healthy"}]}]}\n'
+      ;;
+    *)
+      printf '{"AutoScalingGroups":[]}\n'
+      ;;
+  esac
+  exit 0
+fi
+if [[ "$1" == "elbv2" && "$2" == "describe-target-health" ]]; then
+  case "$*" in
+    *"alpha-app-bridge"*)
+      state_file="$TEST_LOG_DIR/bridge-target-health.count"
+      ;;
+    *"alpha-app-backoffice"*)
+      state_file="$TEST_LOG_DIR/backoffice-target-health.count"
+      ;;
+    *)
+      state_file="$TEST_LOG_DIR/unknown-target-health.count"
+      ;;
+  esac
+  count=0
+  if [[ -f "$state_file" ]]; then
+    count="$(cat "$state_file")"
+  fi
+  count=$((count + 1))
+  printf '%s\n' "$count" >"$state_file"
+  if (( count == 1 )); then
+    printf '{"TargetHealthDescriptions":[{"Target":{"Id":"i-app001"},"TargetHealth":{"State":"healthy"}},{"Target":{"Id":"i-app002"},"TargetHealth":{"State":"initial"}}]}\n'
+  else
+    printf '{"TargetHealthDescriptions":[{"Target":{"Id":"i-app001"},"TargetHealth":{"State":"healthy"}},{"Target":{"Id":"i-app002"},"TargetHealth":{"State":"healthy"}}]}\n'
+  fi
+  exit 0
+fi
+if [[ "$1" == "ssm" && "$2" == "send-command" ]]; then
+  case "$*" in
+    *"systemctl is-active bridge-api"*)
+      printf '{"Command":{"CommandId":"cmd-bridge-systemd"}}\n'
+      ;;
+    *"systemctl is-active backoffice"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-systemd"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/readyz"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-readyz"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/api/settings/runtime"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-settings"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/api/funds"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-funds"}}\n'
+      ;;
+    *"http://127.0.0.1:8090/"*)
+      printf '{"Command":{"CommandId":"cmd-backoffice-ui"}}\n'
+      ;;
+    *)
+      printf '{"Command":{"CommandId":"cmd-unknown"}}\n'
+      ;;
+  esac
+  exit 0
+fi
+if [[ "$1" == "ssm" && "$2" == "get-command-invocation" ]]; then
+  case "$*" in
+    *"cmd-bridge-systemd"*)
+      printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-systemd"*)
+      printf '{"Status":"Success","StandardOutputContent":"active\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-readyz"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"status\\":\\"ok\\"}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-settings"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"version\\":\\"v1\\",\\"data\\":{\\"minDepositAmount\\":\\"201005025\\",\\"minDepositAdmin\\":\\"0x0000000000000000000000000000000000000abc\\",\\"depositMinConfirmations\\":2,\\"withdrawPlannerMinConfirmations\\":3,\\"withdrawBatchConfirmations\\":4}}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-funds"*)
+      printf '{"Status":"Success","StandardOutputContent":"{\\"version\\":\\"v1\\",\\"bridge\\":{\\"wjunoBalanceRaw\\":\\"0\\",\\"wjunoBalanceFormatted\\":\\"0.0\\"},\\"operators\\":[{\\"address\\":\\"0x660B5284fF10C873050a286A124127e3E310ad05\\",\\"balanceWei\\":\\"2000000000000000\\",\\"balanceEth\\":\\"0.002\\",\\"belowThreshold\\":false}],\\"prover\\":{\\"address\\":\\"0x4444444444444444444444444444444444444444\\",\\"creditsRaw\\":\\"123\\",\\"creditsFormatted\\":\\"0.000000000000000123\\",\\"network\\":\\"succinct\\",\\"detail\\":\\"shared proof requestor\\"},\\"mpcWallet\\":{\\"address\\":\\"jtest1exampleaddress\\",\\"total\\":\\"1.25\\",\\"detail\\":\\"app-host rpc\\"}}\\n","StandardErrorContent":""}\n'
+      ;;
+    *"cmd-backoffice-ui"*)
+      printf '{"Status":"Success","StandardOutputContent":"<!doctype html><html><body>JUNO BACKOFFICE</body></html>\\n","StandardErrorContent":""}\n'
+      ;;
+    *)
+      printf '{"Status":"Failed","StandardOutputContent":"","StandardErrorContent":"unexpected ssm invocation"}\n'
+      ;;
+  esac
+  exit 0
+fi
+printf 'unexpected aws invocation: %s\n' "$*" >&2
+exit 1
+EOF
+  write_fake_cast "$fake_bin/cast" "$log_dir/cast.log"
+  chmod +x "$fake_bin/ssh" "$fake_bin/dig" "$fake_bin/curl" "$fake_bin/aws"
+
+  PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK=true \
+    PRODUCTION_CANARY_INFRA_MAX_ATTEMPTS=3 \
+    PRODUCTION_CANARY_INFRA_RETRY_SLEEP_SECONDS=0 \
+    TEST_LOG_DIR="$log_dir" PATH="$fake_bin:$PATH" \
+    bash "$REPO_ROOT/deploy/production/canary-app-host.sh" \
+      --app-deploy "$app_manifest" >"$output_json"
+
+  assert_eq "$(tr -d '\n' <"$log_dir/bridge-target-health.count")" "2" "role-mode app canary retries bridge target health"
+  assert_eq "$(tr -d '\n' <"$log_dir/backoffice-target-health.count")" "2" "role-mode app canary retries backoffice target health"
+  assert_eq "$(jq -r '.checks.public_bridge_lb.status' "$output_json")" "passed" "role-mode app canary accepts transient bridge target health"
+  assert_eq "$(jq -r '.checks.internal_backoffice_lb.status' "$output_json")" "passed" "role-mode app canary accepts transient backoffice target health"
+  assert_eq "$(jq -r '.ready_for_test' "$output_json")" "true" "role-mode app canary stays ready after target health converges"
+  rm -rf "$workdir"
+}
+
 main() {
   test_canary_app_host_checks_remote_services_and_http_endpoints
   test_canary_app_host_blocks_backoffice_funds_missing_prover_and_mpc
@@ -1449,6 +1735,7 @@ main() {
   test_canary_app_host_rejects_non_https_manifest
   test_canary_app_host_prefers_role_capacity_checks_over_ecs_when_present
   test_canary_app_host_uses_role_runtime_checks_without_ssh
+  test_canary_app_host_retries_transient_target_group_health
 }
 
 main "$@"

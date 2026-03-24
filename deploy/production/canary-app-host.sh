@@ -176,6 +176,8 @@ shared_proof_services_status="passed"
 shared_proof_services_detail="shared proof ECS services active"
 http_retry_max_attempts="${PRODUCTION_CANARY_HTTP_MAX_ATTEMPTS:-20}"
 http_retry_sleep_seconds="${PRODUCTION_CANARY_HTTP_RETRY_SLEEP_SECONDS:-3}"
+infra_retry_max_attempts="${PRODUCTION_CANARY_INFRA_MAX_ATTEMPTS:-24}"
+infra_retry_sleep_seconds="${PRODUCTION_CANARY_INFRA_RETRY_SLEEP_SECONDS:-10}"
 require_funds_check="${PRODUCTION_CANARY_REQUIRE_FUNDS_CHECK:-false}"
 deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 
@@ -389,7 +391,7 @@ ssm_http_get_with_retry() {
   return 1
 }
 
-check_asg_capacity() {
+check_asg_capacity_once() {
   local asg_name="$1"
   local min_healthy="$2"
   local asg_json
@@ -407,7 +409,26 @@ check_asg_capacity() {
   printf '%s' "$asg_json"
 }
 
-check_target_group_health() {
+check_asg_capacity() {
+  local asg_name="$1"
+  local min_healthy="$2"
+  local asg_json attempt
+
+  for ((attempt = 1; attempt <= infra_retry_max_attempts; attempt++)); do
+    asg_json="$(check_asg_capacity_once "$asg_name" "$min_healthy" || true)"
+    if [[ -n "$asg_json" ]]; then
+      printf '%s' "$asg_json"
+      return 0
+    fi
+    if (( attempt < infra_retry_max_attempts )); then
+      sleep "$infra_retry_sleep_seconds"
+    fi
+  done
+
+  return 1
+}
+
+check_target_group_health_once() {
   local target_group_arn="$1"
   local min_healthy="$2"
   local target_health_json
@@ -420,6 +441,23 @@ check_target_group_health() {
     ' >/dev/null <<<"$target_health_json"; then
     return 1
   fi
+}
+
+check_target_group_health() {
+  local target_group_arn="$1"
+  local min_healthy="$2"
+  local attempt
+
+  for ((attempt = 1; attempt <= infra_retry_max_attempts; attempt++)); do
+    if check_target_group_health_once "$target_group_arn" "$min_healthy"; then
+      return 0
+    fi
+    if (( attempt < infra_retry_max_attempts )); then
+      sleep "$infra_retry_sleep_seconds"
+    fi
+  done
+
+  return 1
 }
 
 backoffice_http_get_with_retry() {
