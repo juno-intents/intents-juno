@@ -647,36 +647,35 @@ func (r *Relayer) recoverSubmittedAttempts(ctx context.Context) error {
 	}
 
 	for _, attempt := range attempts {
-		expired, expiredReason, err := r.submittedAttemptExpired(ctx, attempt)
-		if err != nil {
-			return err
-		}
-		if attempt.TxHash != ([32]byte{}) {
-			if err := r.reconcileSubmittedAttempt(ctx, attempt, expired, expiredReason); err != nil {
-				r.log.Error("depositrelayer: reconcile recovered batch failed",
-					"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
-					"err", err,
-				)
-				continue
-			}
+		if err := r.recoverSubmittedAttempt(ctx, attempt); err != nil {
+			r.log.Error("depositrelayer: recover submitted batch failed",
+				"batchID", fmt.Sprintf("%x", attempt.BatchID[:8]),
+				"hasTxHash", attempt.TxHash != ([32]byte{}),
+				"err", err,
+			)
 			continue
-		}
-		if stale, reason, err := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint); err != nil {
-			return err
-		} else if stale || expired {
-			if reason == "" {
-				reason = expiredReason
-			}
-			if err := r.resetBatch(ctx, attempt.BatchID, reason); err != nil {
-				return err
-			}
-			continue
-		}
-		if err := r.resubmitSubmittedAttempt(ctx, attempt); err != nil {
-			return err
 		}
 	}
 	return nil
+}
+
+func (r *Relayer) recoverSubmittedAttempt(ctx context.Context, attempt deposit.SubmittedBatchAttempt) error {
+	expired, expiredReason, err := r.submittedAttemptExpired(ctx, attempt)
+	if err != nil {
+		return err
+	}
+	if attempt.TxHash != ([32]byte{}) {
+		return r.reconcileSubmittedAttempt(ctx, attempt, expired, expiredReason)
+	}
+	if stale, reason, err := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint); err != nil {
+		return err
+	} else if stale || expired {
+		if reason == "" {
+			reason = expiredReason
+		}
+		return r.resetBatch(ctx, attempt.BatchID, reason)
+	}
+	return r.resubmitSubmittedAttempt(ctx, attempt)
 }
 
 func (r *Relayer) currentCheckpointSupersedes(attempt checkpoint.Checkpoint) bool {
