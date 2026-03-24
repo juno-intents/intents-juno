@@ -50,6 +50,30 @@ find_latest_clean_preview_bridge_summary() {
   printf '%s\n' "$candidate"
 }
 
+find_lowest_index_operator_deploy() {
+  local operator_rollout_dir="$1"
+  local operator_deploy_path operator_index
+  local selected_path=""
+  local selected_index=""
+
+  while IFS= read -r operator_deploy_path; do
+    operator_index="$(jq -r '.operator_index // empty' "$operator_deploy_path")"
+    if [[ "$operator_index" =~ ^[0-9]+$ ]]; then
+      if [[ -z "$selected_index" || "$operator_index" -lt "$selected_index" ]]; then
+        selected_index="$operator_index"
+        selected_path="$operator_deploy_path"
+      fi
+    fi
+  done < <(find "$operator_rollout_dir" -name operator-deploy.json | sort)
+
+  if [[ -n "$selected_path" ]]; then
+    printf '%s\n' "$selected_path"
+    return 0
+  fi
+
+  find "$operator_rollout_dir" -name operator-deploy.json | sort | head -n1
+}
+
 inventory=""
 dkg_summary=""
 dkg_completion=""
@@ -476,7 +500,7 @@ required_topics="proof.requests.v1,proof.fulfillments.v1,proof.failures.v1,ops.a
   --github-repo "$github_repo" >"$output_dir/operator-rollout.json"
 [[ "$(jq -r '.ready_for_deploy' "$output_dir/operator-rollout.json")" == "true" ]] || die "operator rollout failed"
 
-first_operator_deploy="$(find "$output_dir/operator-rollout/operators" -name operator-deploy.json | sort | head -n1)"
+first_operator_deploy="$(find_lowest_index_operator_deploy "$output_dir/operator-rollout/operators")"
 [[ -n "$first_operator_deploy" ]] || die "operator rollout did not render any operator deploy handoffs"
 
 run_shared_infra_e2e \

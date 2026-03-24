@@ -173,12 +173,14 @@ for ((i = 0; i < \${#args[@]}; i++)); do
     --inventory) inventory="\${args[i+1]}" ;;
   esac
 done
-mkdir -p "\$output_dir/operators/0x1111111111111111111111111111111111111111"
-cp "\$inventory" "\$output_dir/inventory.operators-rolled.json"
-printf '{"environment":"preview","secret_contract_file":"$fixture_dir/operator-secrets.env"}' >"\$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
-if [[ -n "$ready_file" ]]; then
-  : >"$ready_file"
-fi
+  mkdir -p "\$output_dir/operators/0x0111111111111111111111111111111111111111"
+  mkdir -p "\$output_dir/operators/0x1111111111111111111111111111111111111111"
+  cp "\$inventory" "\$output_dir/inventory.operators-rolled.json"
+  printf '{"environment":"preview","operator_index":2,"secret_contract_file":"$fixture_dir/operator-secrets.env"}' >"\$output_dir/operators/0x0111111111111111111111111111111111111111/operator-deploy.json"
+  printf '{"environment":"preview","operator_index":1,"secret_contract_file":"$fixture_dir/operator-secrets.env"}' >"\$output_dir/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+  if [[ -n "$ready_file" ]]; then
+    : >"$ready_file"
+  fi
 printf '{"ready_for_deploy":true}\n'
 EOF
   chmod +x "$target"
