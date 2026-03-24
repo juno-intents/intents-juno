@@ -17,7 +17,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/bridgeconfig"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
@@ -29,6 +28,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
 	"github.com/juno-intents/intents-juno/internal/emf"
+	internaleth "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -98,7 +98,7 @@ func main() {
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
-		baseRPCURL         = flag.String("base-rpc-url", "", "Base/EVM JSON-RPC URL (required)")
+		baseRPCURL         = flag.String("base-rpc-url", "", "Base/EVM JSON-RPC URL or comma-separated URLs (required)")
 
 		maxItems             = flag.Int("max-items", 25, "maximum items per mint batch")
 		maxAge               = flag.Duration("max-age", 3*time.Minute, "maximum batch age before flushing")
@@ -252,7 +252,7 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	baseRPCClient, err := ethclient.DialContext(ctx, strings.TrimSpace(*baseRPCURL))
+	baseRPCClient, err := internaleth.DialMultiRPCClient(ctx, strings.TrimSpace(*baseRPCURL))
 	if err != nil {
 		log.Error("dial base rpc", "err", err)
 		os.Exit(2)

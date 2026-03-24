@@ -1746,6 +1746,7 @@ EOF
   assert_not_contains "$(cat "$output_env")" "BRIDGE_ADDRESS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "rendered env ignores stale bridge address from resolved secrets"
   assert_not_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_BRIDGE_ADDRESS=0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env ignores stale base event scanner bridge address from resolved secrets"
   assert_contains "$(cat "$output_env")" "BASE_EVENT_SCANNER_START_BLOCK=12345" "rendered env base event scanner start block"
+  assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://base-sepolia.example.invalid" "rendered env stages the dedicated deposit relayer rpc url"
   assert_contains "$(cat "$output_env")" "AWS_REGION=us-east-1" "rendered env aws region"
   assert_contains "$(cat "$output_env")" "AWS_DEFAULT_REGION=us-east-1" "rendered env aws default region"
   assert_contains "$(cat "$output_env")" "JUNO_RPC_USER=juno" "rendered env juno rpc user"
@@ -1783,6 +1784,50 @@ EOF
   assert_contains "$(cat "$output_env")" "TSS_TLS_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/server.key" "rendered env tss key path"
   assert_contains "$(cat "$output_env")" "TSS_CLIENT_CA_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/ca.pem" "rendered env tss client ca"
   assert_not_contains "$(cat "$output_env")" "CHECKPOINT_SIGNER_PRIVATE_KEY=" "rendered env omits private key for kms signer"
+  rm -rf "$workdir"
+}
+
+test_render_operator_stack_env_adds_base_sepolia_deposit_relayer_fallback() {
+  local workdir shared_manifest handoff_dir resolved_env output_env
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+JUNO_TXSIGN_SIGNER_KEYS=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '.contracts.base_rpc_url = "https://sepolia.base.org"' "$workdir/inventory.json" >"$workdir/inventory.tmp"
+  mv "$workdir/inventory.tmp" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_resolve_secret_contract "$handoff_dir/operator-secrets.env" "true" "" "" "$resolved_env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "DEPOSIT_RELAYER_BASE_RPC_URL=https://sepolia.base.org,https://base-sepolia-rpc.publicnode.com" "rendered env adds the public fallback for Base Sepolia deposit relayer recovery"
   rm -rf "$workdir"
 }
 
@@ -3545,6 +3590,7 @@ main() {
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
   test_render_operator_stack_env_prefers_inline_ipfs_bearer_token
   test_render_operator_stack_env_prefers_inline_queueauth_hmac_key
+  test_render_operator_stack_env_adds_base_sepolia_deposit_relayer_fallback
   test_render_operator_stack_env_requires_juno_rpc_credentials
   test_render_operator_stack_env_rejects_withdraw_expiry_overrides
   test_render_operator_stack_env_rejects_private_key_with_kms_contract

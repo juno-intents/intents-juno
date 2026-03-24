@@ -507,6 +507,7 @@ BASE_RELAYER_RATE_LIMIT_BURST=40
 BASE_RELAYER_RATE_LIMIT_MAX_TRACKED_CLIENTS=10000
 BASE_RELAYER_TLS_CERT_FILE=
 BASE_RELAYER_TLS_KEY_FILE=
+DEPOSIT_RELAYER_BASE_RPC_URL=
 PROOF_REQUEST_TOPIC=proof.requests.v1
 PROOF_RESULT_TOPIC=proof.fulfillments.v1
 PROOF_FAILURE_TOPIC=proof.failures.v1
@@ -1847,6 +1848,16 @@ relayer_submit_timeout_seconds="$((10#$sp1_request_timeout_seconds + 300))"
 deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-${relayer_submit_timeout_seconds}s}"
 deposit_claim_ttl_seconds="$((relayer_submit_timeout_seconds + 120))"
 deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-${deposit_claim_ttl_seconds}s}"
+deposit_base_rpc_url="${DEPOSIT_RELAYER_BASE_RPC_URL:-${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}}"
+[[ -n "${deposit_base_rpc_url}" ]] || {
+  echo "deposit-relayer requires DEPOSIT_RELAYER_BASE_RPC_URL, BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+deposit_juno_rpc_url="${DEPOSIT_SCAN_JUNO_RPC_URL:-${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}}"
+[[ -n "${deposit_juno_rpc_url}" ]] || {
+  echo "deposit-relayer requires DEPOSIT_SCAN_JUNO_RPC_URL or WITHDRAW_COORDINATOR_JUNO_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 
 args=(
   --postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"
@@ -1858,6 +1869,8 @@ args=(
   --deposit-image-id "${DEPOSIT_IMAGE_ID}"
   --base-relayer-url "${BASE_RELAYER_URL}"
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
+  --base-rpc-url "${deposit_base_rpc_url}"
+  --juno-rpc-url "${deposit_juno_rpc_url}"
   --max-age "${deposit_max_age}"
   --claim-ttl "${deposit_claim_ttl}"
   --flush-interval "${deposit_flush_interval}"

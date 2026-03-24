@@ -2406,6 +2406,22 @@ production_resolve_base_event_scanner_start_block() {
   printf '%s\n' "$max_block"
 }
 
+production_deposit_relayer_base_rpc_urls() {
+  local shared_manifest="$1"
+  local base_rpc_url base_chain_id fallback_url
+
+  base_rpc_url="$(production_json_required "$shared_manifest" '.contracts.base_rpc_url | select(type == "string" and length > 0)')"
+  base_chain_id="$(production_json_required "$shared_manifest" '.contracts.base_chain_id')"
+  fallback_url="https://base-sepolia-rpc.publicnode.com"
+
+  if [[ "$base_chain_id" == "84532" && "$base_rpc_url" == "https://sepolia.base.org" ]]; then
+    printf '%s,%s\n' "$base_rpc_url" "$fallback_url"
+    return 0
+  fi
+
+  printf '%s\n' "$base_rpc_url"
+}
+
 production_render_shared_manifest() {
   local inventory="$1"
   local bridge_summary="$2"
@@ -3344,6 +3360,7 @@ production_render_operator_stack_env() {
   local juno_rpc_bind juno_rpc_allow_ips
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
+  local deposit_relayer_base_rpc_url
   local shared_aws_profile shared_aws_region ipfs_api_auth_secret_arn ipfs_api_bearer_token
   local kafka_critical_key_id kafka_critical_hmac_secret_arn kafka_critical_hmac_key
   juno_txsign_signer_keys=""
@@ -3381,6 +3398,7 @@ production_render_operator_stack_env() {
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
+  deposit_relayer_base_rpc_url="$(production_deposit_relayer_base_rpc_urls "$shared_manifest")"
   environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
   signer_driver="$(production_json_required "$operator_deploy" '.checkpoint_signer_driver | select(type == "string" and length > 0)')"
   signer_kms_key_id="$(production_json_optional "$operator_deploy" '.checkpoint_signer_kms_key_id')"
@@ -3436,6 +3454,7 @@ OPERATOR_ADDRESS=$operator_address
 BASE_CHAIN_ID=$(jq -r '.contracts.base_chain_id' "$shared_manifest")
 BRIDGE_ADDRESS=$(jq -r '.contracts.bridge' "$shared_manifest")
 BASE_RELAYER_RPC_URL=$(jq -r '.contracts.base_rpc_url' "$shared_manifest")
+DEPOSIT_RELAYER_BASE_RPC_URL=$deposit_relayer_base_rpc_url
 BASE_RELAYER_MIN_READY_BALANCE_WEI=$min_base_relayer_balance_wei
 BASE_RELAYER_ALLOWED_SELECTORS=$(production_base_relayer_allowed_selectors)
 RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS=$runtime_deposit_min_confirmations

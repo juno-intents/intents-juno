@@ -11,8 +11,8 @@ import (
 	"syscall"
 
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/jackc/pgx/v5/pgxpool"
+	internaleth "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/depositrepair"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
 )
@@ -20,7 +20,7 @@ import (
 func main() {
 	var (
 		postgresDSN = flag.String("postgres-dsn", "", "Postgres DSN (required)")
-		baseRPCURL  = flag.String("base-rpc-url", "", "Base RPC URL (required)")
+		baseRPCURL  = flag.String("base-rpc-url", "", "Base RPC URL or comma-separated URLs (required)")
 		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address (required)")
 		limit       = flag.Int("limit", 100, "maximum distinct tx hashes to inspect")
 	)
@@ -47,7 +47,7 @@ func main() {
 	}
 	defer pool.Close()
 
-	baseClient, err := ethclient.DialContext(ctx, *baseRPCURL)
+	baseClient, err := internaleth.DialMultiRPCClient(ctx, *baseRPCURL)
 	if err != nil {
 		log.Error("dial base rpc", "err", err)
 		os.Exit(2)

@@ -1508,9 +1508,9 @@ relayer_submit_timeout_seconds="$((10#$sp1_request_timeout_seconds + 300))"
 deposit_submit_timeout="${DEPOSIT_RELAYER_SUBMIT_TIMEOUT:-${relayer_submit_timeout_seconds}s}"
 deposit_claim_ttl_seconds="$((relayer_submit_timeout_seconds + 120))"
 deposit_claim_ttl="${DEPOSIT_RELAYER_CLAIM_TTL:-${deposit_claim_ttl_seconds}s}"
-deposit_base_rpc_url="${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}"
+deposit_base_rpc_url="${DEPOSIT_RELAYER_BASE_RPC_URL:-${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}}"
 [[ -n "${deposit_base_rpc_url}" ]] || {
-  echo "deposit-relayer requires BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
+  echo "deposit-relayer requires DEPOSIT_RELAYER_BASE_RPC_URL, BASE_RPC_URL, BASE_RELAYER_RPC_URL, or BASE_EVENT_SCANNER_BASE_RPC_URL in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
 deposit_juno_rpc_url="${DEPOSIT_SCAN_JUNO_RPC_URL:-${WITHDRAW_COORDINATOR_JUNO_RPC_URL:-}}"
