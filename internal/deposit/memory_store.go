@@ -33,6 +33,8 @@ type claimLease struct {
 	expiresAt time.Time
 }
 
+const submittedAttemptFallbackLeaseTTL = time.Minute
+
 func NewMemoryStore() *MemoryStore {
 	return &MemoryStore{
 		jobs:             make(map[[32]byte]Job),
@@ -815,11 +817,22 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 		}
 	}
 
+	now := time.Now().UTC()
+	attemptLease := claimLease{
+		owner:     owner,
+		expiresAt: now.Add(submittedAttemptFallbackLeaseTTL),
+	}
+
 	if existing, ok := s.attempts[batchID]; ok {
 		if !submittedBatchAttemptEqual(existing, owner, ids, cp, operatorSignatures, seal) {
 			return SubmittedBatchAttempt{}, ErrDepositMismatch
 		}
 		if batch, ok := s.batches[batchID]; ok {
+			if batch.LeaseOwner == owner && batch.LeaseExpiresAt.After(now) {
+				attemptLease.expiresAt = batch.LeaseExpiresAt
+			} else {
+				batch.LeaseExpiresAt = attemptLease.expiresAt
+			}
 			batch.State = BatchStateSubmitted
 			batch.Checkpoint = cp
 			batch.ProofRequested = true
@@ -828,6 +841,7 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 			batch.LeaseOwner = owner
 			s.putBatch(batch)
 		}
+		s.attemptClaim[batchID] = attemptLease
 		for _, id := range ids {
 			s.attemptByDeposit[id] = batchID
 		}
@@ -844,8 +858,15 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 		ProofSeal:          append([]byte(nil), seal...),
 	}
 	s.attempts[batchID] = attempt
+	s.attemptClaim[batchID] = attemptLease
 	s.attemptOrder = append(s.attemptOrder, batchID)
 	if batch, ok := s.batches[batchID]; ok {
+		if batch.LeaseOwner == owner && batch.LeaseExpiresAt.After(now) {
+			attemptLease.expiresAt = batch.LeaseExpiresAt
+			s.attemptClaim[batchID] = attemptLease
+		} else {
+			batch.LeaseExpiresAt = attemptLease.expiresAt
+		}
 		batch.State = BatchStateSubmitted
 		batch.Checkpoint = cp
 		batch.ProofRequested = true
@@ -860,8 +881,9 @@ func (s *MemoryStore) MarkBatchSubmitted(_ context.Context, owner string, batchI
 			DepositIDs:         cloneDepositIDs(ids),
 			Owner:              owner,
 			LeaseOwner:         owner,
-			StartedAt:          time.Now().UTC(),
-			ClosedAt:           time.Now().UTC(),
+			LeaseExpiresAt:     attemptLease.expiresAt,
+			StartedAt:          now,
+			ClosedAt:           now,
 			Checkpoint:         cp,
 			ProofRequested:     true,
 			OperatorSignatures: clone2DBytes(operatorSignatures),

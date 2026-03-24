@@ -1020,6 +1020,14 @@ func TestMemoryStore_SubmittedAttemptsHonorClaimTTLAndClearOnFinalize(t *testing
 		t.Fatalf("MarkBatchSubmitted: %v", err)
 	}
 
+	preClaimOther, err := s.ClaimSubmittedAttempts(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts worker-b before owner claim: %v", err)
+	}
+	if len(preClaimOther) != 0 {
+		t.Fatalf("expected worker-b exclusion before owner claim while fresh submit attempt lease is active")
+	}
+
 	first, err := s.ClaimSubmittedAttempts(ctx, "worker-a", 80*time.Millisecond, 10)
 	if err != nil {
 		t.Fatalf("ClaimSubmittedAttempts worker-a: %v", err)

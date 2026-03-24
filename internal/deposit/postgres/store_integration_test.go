@@ -1099,6 +1099,14 @@ func TestStore_SubmittedAttemptsPersistAndResumeDeterministically(t *testing.T) 
 		t.Fatalf("expected submitted deposits to be excluded from ClaimConfirmed")
 	}
 
+	preClaimOther, err := s.ClaimSubmittedAttempts(ctx, "worker-b", 80*time.Millisecond, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts worker-b before owner claim: %v", err)
+	}
+	if len(preClaimOther) != 0 {
+		t.Fatalf("expected worker-b exclusion before owner claim while fresh submit attempt lease is active")
+	}
+
 	var txHash [32]byte
 	txHash[0] = 0x77
 	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {

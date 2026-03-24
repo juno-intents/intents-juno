@@ -19,6 +19,8 @@ import (
 
 var ErrInvalidConfig = errors.New("deposit/postgres: invalid config")
 
+const submittedAttemptFallbackLeaseTTL = time.Minute
+
 type Store struct {
 	pool *pgxpool.Pool
 }
@@ -1325,6 +1327,16 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 		}
 	}
 
+	now := time.Now().UTC()
+	batch, batchFound, err := loadBatchTx(ctx, tx, batchID, true)
+	if err != nil {
+		return deposit.SubmittedBatchAttempt{}, err
+	}
+	claimExpiresAt := now.Add(submittedAttemptFallbackLeaseTTL)
+	if batchFound && batch.LeaseOwner == owner && batch.LeaseExpiresAt.After(now) {
+		claimExpiresAt = batch.LeaseExpiresAt
+	}
+
 	attempt, foundExisting, err := loadSubmittedBatchAttemptTx(ctx, tx, batchID)
 	if err != nil {
 		return deposit.SubmittedBatchAttempt{}, err
@@ -1332,6 +1344,9 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 	if foundExisting {
 		if !submittedBatchAttemptMatches(attempt, owner, ids, cp, operatorSignatures, seal) {
 			return deposit.SubmittedBatchAttempt{}, deposit.ErrDepositMismatch
+		}
+		if err := setSubmittedBatchAttemptClaimTx(ctx, tx, batchID, owner, claimExpiresAt); err != nil {
+			return deposit.SubmittedBatchAttempt{}, err
 		}
 	} else {
 		attempt = deposit.SubmittedBatchAttempt{
@@ -1343,7 +1358,7 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 			OperatorSignatures: clone2DBytes(operatorSignatures),
 			ProofSeal:          append([]byte(nil), seal...),
 		}
-		if err := insertSubmittedBatchAttemptTx(ctx, tx, attempt); err != nil {
+		if err := insertSubmittedBatchAttemptTx(ctx, tx, attempt, owner, claimExpiresAt); err != nil {
 			return deposit.SubmittedBatchAttempt{}, err
 		}
 	}
@@ -1353,8 +1368,9 @@ func (s *Store) MarkBatchSubmitted(ctx context.Context, owner string, batchID [3
 		State:              deposit.BatchStateSubmitted,
 		Owner:              owner,
 		LeaseOwner:         owner,
-		StartedAt:          time.Now().UTC(),
-		ClosedAt:           time.Now().UTC(),
+		LeaseExpiresAt:     claimExpiresAt,
+		StartedAt:          now,
+		ClosedAt:           now,
 		Checkpoint:         cp,
 		ProofRequested:     true,
 		OperatorSignatures: operatorSignatures,
@@ -2675,12 +2691,17 @@ func upsertBatchMetadataTx(ctx context.Context, tx pgx.Tx, batch deposit.Batch) 
 	if !batch.ClosedAt.IsZero() {
 		closedAtAny = batch.ClosedAt
 	}
+	var leaseExpiresAtAny any
+	if !batch.LeaseExpiresAt.IsZero() {
+		leaseExpiresAtAny = batch.LeaseExpiresAt
+	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO deposit_batches (
 			batch_id,
 			state,
 			owner,
 			lease_owner,
+			lease_expires_at,
 			started_at,
 			closed_at,
 			checkpoint_height,
@@ -2694,12 +2715,13 @@ func upsertBatchMetadataTx(ctx context.Context, tx pgx.Tx, batch deposit.Batch) 
 			tx_hash,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,now(),now())
 		ON CONFLICT (batch_id) DO UPDATE
 		SET
 			state = EXCLUDED.state,
 			owner = EXCLUDED.owner,
 			lease_owner = EXCLUDED.lease_owner,
+			lease_expires_at = EXCLUDED.lease_expires_at,
 			closed_at = COALESCE(EXCLUDED.closed_at, deposit_batches.closed_at),
 			checkpoint_height = EXCLUDED.checkpoint_height,
 			checkpoint_block_hash = EXCLUDED.checkpoint_block_hash,
@@ -2711,7 +2733,7 @@ func upsertBatchMetadataTx(ctx context.Context, tx pgx.Tx, batch deposit.Batch) 
 			proof_seal = EXCLUDED.proof_seal,
 			tx_hash = EXCLUDED.tx_hash,
 			updated_at = now()
-	`, batch.BatchID[:], int16(batch.State), batch.Owner, batch.LeaseOwner, batch.StartedAt, closedAtAny, int64(batch.Checkpoint.Height), batch.Checkpoint.BlockHash[:], batch.Checkpoint.FinalOrchardRoot[:], int64(batch.Checkpoint.BaseChainID), batch.Checkpoint.BridgeContract[:], batch.ProofRequested, operatorSignaturesJSON, batch.ProofSeal, null32(batch.TxHash))
+	`, batch.BatchID[:], int16(batch.State), batch.Owner, batch.LeaseOwner, leaseExpiresAtAny, batch.StartedAt, closedAtAny, int64(batch.Checkpoint.Height), batch.Checkpoint.BlockHash[:], batch.Checkpoint.FinalOrchardRoot[:], int64(batch.Checkpoint.BaseChainID), batch.Checkpoint.BridgeContract[:], batch.ProofRequested, operatorSignaturesJSON, batch.ProofSeal, null32(batch.TxHash))
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: upsert batch metadata: %w", err)
 	}
@@ -2878,7 +2900,7 @@ func loadSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, batchID [32]byt
 	return attempt, true, nil
 }
 
-func insertSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, attempt deposit.SubmittedBatchAttempt) error {
+func insertSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, attempt deposit.SubmittedBatchAttempt, claimedBy string, claimExpiresAt time.Time) error {
 	depositIDsJSON, err := marshalDepositIDs(attempt.DepositIDs)
 	if err != nil {
 		return err
@@ -2901,9 +2923,11 @@ func insertSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, attempt depos
 			checkpoint_bridge_contract,
 			operator_signatures_json,
 			proof_seal,
+			claimed_by,
+			claim_expires_at,
 			created_at,
 			updated_at
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now(),now())
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
 	`,
 		attempt.BatchID[:],
 		attempt.Owner,
@@ -2916,9 +2940,26 @@ func insertSubmittedBatchAttemptTx(ctx context.Context, tx pgx.Tx, attempt depos
 		attempt.Checkpoint.BridgeContract[:],
 		operatorSignaturesJSON,
 		attempt.ProofSeal,
+		claimedBy,
+		claimExpiresAt,
 	)
 	if err != nil {
 		return fmt.Errorf("deposit/postgres: insert submitted batch attempt: %w", err)
+	}
+	return nil
+}
+
+func setSubmittedBatchAttemptClaimTx(ctx context.Context, tx pgx.Tx, batchID [32]byte, claimedBy string, claimExpiresAt time.Time) error {
+	tag, err := tx.Exec(ctx, `
+		UPDATE deposit_batch_attempts
+		SET claimed_by = $2, claim_expires_at = $3, updated_at = now()
+		WHERE batch_id = $1
+	`, batchID[:], claimedBy, claimExpiresAt)
+	if err != nil {
+		return fmt.Errorf("deposit/postgres: set submitted batch attempt claim: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return deposit.ErrNotFound
 	}
 	return nil
 }

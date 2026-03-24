@@ -1978,6 +1978,7 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesStaleCheckpointBatch(t *testin
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		Now:               time.Now,
 	}, store, sender, &stubProofRequester{}, nil)
 	if err != nil {
@@ -2089,6 +2090,7 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsStaleCheckpointWhenReceiptMissin
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		Now:               time.Now,
 		ReceiptReader:     &stubReceiptReader{err: ethereum.NotFound},
 		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
@@ -2170,6 +2172,7 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsSameHeightCheckpointConflict(t *
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		Now:               time.Now,
 	}, store, sender, &stubProofRequester{}, nil)
 	if err != nil {
@@ -2263,6 +2266,7 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsOnChainStaleCheckpointRevert(t *
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		Now:               time.Now,
 		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
 			hex.EncodeToString(heightCall[:4]):    common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
@@ -2342,6 +2346,7 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesReceiptMissingBatchAfterLeaseE
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		ClaimTTL:          10 * time.Millisecond,
 		Now:               time.Now,
 		ReceiptReader:     &stubReceiptReader{err: ethereum.NotFound},
@@ -2423,6 +2428,7 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesNoTxHashBatchAfterStalenessWin
 		MaxItems:          10,
 		MaxAge:            time.Minute,
 		DedupeMax:         100,
+		Owner:             "owner-1",
 		ClaimTTL:          10 * time.Millisecond,
 		Now:               time.Now,
 	}, store, sender, &stubProofRequester{}, nil)
@@ -3762,7 +3768,7 @@ func TestRelayer_ResumesSubmittedAttemptWithoutRequestingNewProof(t *testing.T) 
 		MaxItems:          1,
 		MaxAge:            10 * time.Minute,
 		DedupeMax:         1000,
-		Owner:             "worker-2",
+		Owner:             "worker-1",
 		Now:               time.Now,
 	}, store, resumeSender, resumeProver, nil)
 	if err != nil {
