@@ -2870,6 +2870,46 @@ STAMP
   done
 }
 
+wait_for_juno_scan_catchup() {
+  local rpc_user rpc_pass rpc_args health_response scan_height tip_height now scan_deadline
+  rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
+  rpc_args=(-testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
+
+  scan_deadline=\$(( \$(date +%s) + __BOOTSTRAP_SYNC_TIMEOUT_SECONDS__ ))
+
+  while true; do
+    now=\$(date +%s)
+    if (( now >= scan_deadline )); then
+      echo "timed out waiting for juno-scan catch-up" >&2
+      return 1
+    fi
+
+    health_response="\$(curl -fsS http://127.0.0.1:8080/v1/health 2>/dev/null || true)"
+    scan_height="\$(jq -r '.scanned_height // empty' <<<"\$health_response" 2>/dev/null || true)"
+    if ! [[ "\$scan_height" =~ ^[0-9]+$ ]]; then
+      sleep 10
+      continue
+    fi
+
+    if ! tip_height="\$(/usr/local/bin/junocash-cli "\${rpc_args[@]}" getblockcount 2>/dev/null)"; then
+      sleep 10
+      continue
+    fi
+    tip_height="\$(tr -d '[:space:]' <<<"\$tip_height")"
+    if ! [[ "\$tip_height" =~ ^[0-9]+$ ]]; then
+      sleep 10
+      continue
+    fi
+
+    if (( scan_height + 1 >= tip_height )); then
+      return 0
+    fi
+
+    sleep 10
+  done
+}
+
 write_bootstrap_metadata() {
   local juno_release_tag juno_scan_release_tag block_height block_hash operator_address
   juno_release_tag="\$(cat "\$HOME/.junocash-release-tag")"
@@ -2946,6 +2986,8 @@ wait_for_sync_and_record_blockstamp
 for svc in junocashd.service juno-scan.service; do
   wait_for_service_active "\$svc"
 done
+
+wait_for_juno_scan_catchup
 
 write_bootstrap_metadata
 

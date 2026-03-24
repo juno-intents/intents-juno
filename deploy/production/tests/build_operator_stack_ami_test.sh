@@ -531,6 +531,18 @@ EOF
   rm -rf "$tmp"
 }
 
+test_build_operator_stack_ami_waits_for_juno_scan_catchup_before_imaging() {
+  local script_text
+  script_text="$(cat "$RUNBOOK_PATH")"
+
+  assert_contains "$script_text" 'wait_for_juno_scan_catchup() {' "builder defines a juno-scan catch-up wait helper"
+  assert_contains "$script_text" 'health_response="\$(curl -fsS http://127.0.0.1:8080/v1/health 2>/dev/null || true)"' "builder polls juno-scan health before imaging"
+  assert_contains \
+    "$script_text" \
+    $'for svc in junocashd.service juno-scan.service; do\n  wait_for_service_active "\\$svc"\ndone\n\nwait_for_juno_scan_catchup\n\nwrite_bootstrap_metadata' \
+    "builder waits for juno-scan catch-up after service activation and before recording bootstrap metadata"
+}
+
 test_build_operator_stack_ami_juno_scan_backfill_wrapper_resumes_progress() {
   local tmp env_file fake_bin state_dir curl_log state_file
   tmp="$(mktemp -d)"
@@ -1046,6 +1058,7 @@ main() {
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness
+  test_build_operator_stack_ami_waits_for_juno_scan_catchup_before_imaging
   test_build_operator_stack_ami_juno_scan_backfill_wrapper_resumes_progress
   test_build_operator_stack_ami_wrapper_smoke
 }
