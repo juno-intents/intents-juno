@@ -17,6 +17,20 @@ assert_not_contains() {
   fi
 }
 
+assert_line_order() {
+  local haystack="$1"
+  local first="$2"
+  local second="$3"
+  local msg="$4"
+  local first_line second_line
+  first_line="$(awk -v needle="$first" 'index($0, needle) { print NR; exit }' <<<"$haystack")"
+  second_line="$(awk -v needle="$second" 'index($0, needle) { print NR; exit }' <<<"$haystack")"
+  if [[ -z "$first_line" || -z "$second_line" || "$first_line" -ge "$second_line" ]]; then
+    printf 'assert_line_order failed: %s\nfirst=%s (line %s)\nsecond=%s (line %s)\n' "$msg" "$first" "${first_line:-missing}" "$second" "${second_line:-missing}" >&2
+    exit 1
+  fi
+}
+
 write_refresh_runtime_shared_manifest_fixture() {
   local target="$1"
   cat >"$target" <<'JSON'
@@ -97,7 +111,9 @@ write_refresh_runtime_app_deploy_fixture() {
   "aws_region": "us-east-1",
   "juno_rpc_url": "http://127.0.0.1:18232",
   "app_role": {
-    "asg": "preview-app-asg"
+    "asg": "preview-app-asg",
+    "app_instance_profile_name": "juno-live-e2e-preview0316d-instance-profile",
+    "app_security_group_id": "sg-approle1234567890"
   },
   "operator_addresses": [
     "0x1111111111111111111111111111111111111111",
@@ -150,6 +166,24 @@ fi
 case "${args[*]}" in
   "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg --output json")
     printf '{"AutoScalingGroups":[{"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Unhealthy"},{"InstanceId":"i-app003","LifecycleState":"Terminating","HealthStatus":"Unhealthy"}]}]}\n'
+    ;;
+  "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-shared-sg --query SecurityGroups[0].GroupId --output text")
+    printf 'sg-shared1234567890\n'
+    ;;
+  "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-ipfs-sg --query SecurityGroups[0].GroupId --output text")
+    printf 'sg-ipfs1234567890\n'
+    ;;
+  "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-operator-sg --query SecurityGroups[0].GroupId --output text")
+    printf 'sg-operator1234567890\n'
+    ;;
+  ec2\ authorize-security-group-ingress\ --group-id\ sg-shared1234567890\ --ip-permissions\ * )
+    printf '{}\n'
+    ;;
+  ec2\ authorize-security-group-ingress\ --group-id\ sg-ipfs1234567890\ --ip-permissions\ * )
+    printf '{}\n'
+    ;;
+  ec2\ authorize-security-group-ingress\ --group-id\ sg-operator1234567890\ --ip-permissions\ * )
+    printf '{}\n'
     ;;
   ssm\ send-command\ --instance-ids\ i-app001\ --document-name\ AWS-RunShellScript\ --parameters\ *\ --output\ json)
     printf '{"Command":{"CommandId":"cmd-app001"}}\n'
@@ -222,10 +256,23 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "map_hash_bucket_size 128;" "refresh sizes nginx host routing maps for long preview hostnames"
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "bridge.preview.intents-testing.thejunowallet.com" "refresh renders bridge host routing into nginx config"
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "ops.preview.intents-testing.thejunowallet.com" "refresh renders backoffice host routing into nginx config"
+  assert_contains "$(cat "$aws_log")" "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-shared-sg" "refresh discovers the live-e2e shared security group"
+  assert_contains "$(cat "$aws_log")" "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-ipfs-sg" "refresh discovers the live-e2e ipfs security group"
+  assert_contains "$(cat "$aws_log")" "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-operator-sg" "refresh discovers the live-e2e operator security group"
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-shared1234567890" "refresh restores preview app ingress to shared postgres and kafka"
+  assert_contains "$(cat "$aws_log")" '"FromPort":5432' "refresh restores shared postgres ingress for the app security group"
+  assert_contains "$(cat "$aws_log")" '"FromPort":9098' "refresh restores shared kafka ingress for the app security group"
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-ipfs1234567890" "refresh restores preview app ingress to shared ipfs"
+  assert_contains "$(cat "$aws_log")" '"FromPort":5001' "refresh restores shared ipfs ingress for the app security group"
+  assert_contains "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-operator1234567890" "refresh restores preview app ingress to operator services"
+  assert_contains "$(cat "$aws_log")" '"FromPort":18443' "refresh restores operator grpc ingress using the published operator endpoint ports"
+  assert_contains "$(cat "$aws_log")" '"ToPort":18444' "refresh restores operator grpc ingress across the preview operator port range"
+  assert_contains "$(cat "$aws_log")" '"FromPort":18232' "refresh restores operator juno rpc ingress for the app security group"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers app instances from the app role asg"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh bootstraps the first in-service app instance over ssm"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh bootstraps the second in-service app instance over ssm even before it is marked healthy"
   assert_not_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app003" "refresh skips terminating app instances"
+  assert_line_order "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-shared1234567890" "ssm send-command --instance-ids i-app001" "refresh reopens shared ingress before restarting app services"
   assert_eq "$(jq -r '.app_target_mode' "$tmp/refresh-summary.json")" "asg" "refresh summary reports app role mode"
   assert_eq "$(jq -r '.app_targets[0]' "$tmp/refresh-summary.json")" "i-app001" "refresh summary reports the first app instance id"
   assert_eq "$(jq -r '.app_targets[1]' "$tmp/refresh-summary.json")" "i-app002" "refresh summary reports the second app instance id"

@@ -60,6 +60,98 @@ ssm_run_shell_command() {
   return 1
 }
 
+live_e2e_deployment_id_from_app_deploy() {
+  local app_deploy="$1"
+  local deployment_id app_instance_profile_name
+
+  deployment_id="$(production_json_optional "$app_deploy" '.shared_services.live_e2e.deployment_id')"
+  if [[ -n "$deployment_id" ]]; then
+    printf '%s\n' "$deployment_id"
+    return 0
+  fi
+
+  app_instance_profile_name="$(jq -r '.app_role.app_instance_profile_name // empty' "$app_deploy")"
+  if [[ "$app_instance_profile_name" == juno-live-e2e-*-instance-profile ]]; then
+    deployment_id="${app_instance_profile_name#juno-live-e2e-}"
+    deployment_id="${deployment_id%-instance-profile}"
+  fi
+
+  printf '%s\n' "$deployment_id"
+}
+
+security_group_id_by_name() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local group_name="$3"
+  local group_id
+
+  group_id="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 describe-security-groups \
+    --filters "Name=group-name,Values=$group_name" \
+    --query 'SecurityGroups[0].GroupId' \
+    --output text 2>/dev/null || true)"
+  group_id="${group_id//$'\r'/}"
+  group_id="${group_id//None/}"
+  printf '%s\n' "$group_id"
+}
+
+ensure_security_group_ingress_rule() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local group_id="$3"
+  local from_port="$4"
+  local to_port="$5"
+  local source_group_id="$6"
+  local description="$7"
+
+  [[ -n "$group_id" && -n "$source_group_id" ]] || return 0
+
+  AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ec2 authorize-security-group-ingress \
+    --group-id "$group_id" \
+    --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":$from_port,\"ToPort\":$to_port,\"UserIdGroupPairs\":[{\"GroupId\":\"$source_group_id\",\"Description\":\"$description\"}]}]" \
+    >/dev/null 2>&1 || true
+}
+
+ensure_live_e2e_app_runtime_ingress() {
+  local shared_manifest="$1"
+  local app_deploy="$2"
+  local aws_profile="$3"
+  local aws_region="$4"
+  local app_security_group_id deployment_id shared_resource_name
+  local shared_security_group_id ipfs_security_group_id operator_security_group_id
+  local shared_postgres_port shared_kafka_port shared_ipfs_api_port operator_grpc_min_port operator_grpc_max_port juno_rpc_port
+
+  app_security_group_id="$(jq -r '.app_role.app_security_group_id // empty' "$app_deploy")"
+  [[ -n "$app_security_group_id" ]] || return 0
+
+  deployment_id="$(live_e2e_deployment_id_from_app_deploy "$app_deploy")"
+  [[ -n "$deployment_id" ]] || return 0
+
+  shared_resource_name="juno-live-e2e-${deployment_id}"
+  shared_security_group_id="$(security_group_id_by_name "$aws_profile" "$aws_region" "${shared_resource_name}-shared-sg")"
+  ipfs_security_group_id="$(security_group_id_by_name "$aws_profile" "$aws_region" "${shared_resource_name}-ipfs-sg")"
+  operator_security_group_id="$(security_group_id_by_name "$aws_profile" "$aws_region" "${shared_resource_name}-operator-sg")"
+
+  [[ -n "$shared_security_group_id" ]] || die "live-e2e shared security group not found: ${shared_resource_name}-shared-sg"
+  [[ -n "$ipfs_security_group_id" ]] || die "live-e2e ipfs security group not found: ${shared_resource_name}-ipfs-sg"
+  [[ -n "$operator_security_group_id" ]] || die "live-e2e operator security group not found: ${shared_resource_name}-operator-sg"
+
+  shared_postgres_port="$(jq -r '.shared_services.postgres.port // 5432' "$shared_manifest")"
+  shared_kafka_port="$(jq -r '(.shared_services.kafka.bootstrap_brokers // "" | split(",") | map(select(length > 0)) | .[0] // "") | capture(":(?<port>[0-9]+)$").port // "9098"' "$shared_manifest")"
+  shared_ipfs_api_port="$(jq -r '(.shared_services.ipfs.api_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "5001"' "$shared_manifest")"
+  operator_grpc_min_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | min // empty' "$app_deploy")"
+  operator_grpc_max_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | max // empty' "$app_deploy")"
+  juno_rpc_port="$(jq -r '(.juno_rpc_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "18232"' "$app_deploy")"
+
+  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_postgres_port" "$shared_postgres_port" "$app_security_group_id" "Postgres from app runtime"
+  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_kafka_port" "$shared_kafka_port" "$app_security_group_id" "Kafka from app runtime"
+  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$ipfs_security_group_id" "$shared_ipfs_api_port" "$shared_ipfs_api_port" "$app_security_group_id" "IPFS API from app runtime"
+
+  if [[ -n "$operator_grpc_min_port" && -n "$operator_grpc_max_port" ]]; then
+    ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$operator_grpc_min_port" "$operator_grpc_max_port" "$app_security_group_id" "Operator gRPC from app runtime"
+  fi
+  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$juno_rpc_port" "$juno_rpc_port" "$app_security_group_id" "Juno RPC from app runtime"
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -378,6 +470,7 @@ else
     [[ -n "$app_aws_region" ]] || die "app aws region is required for app role refresh"
 
     app_target_mode="asg"
+    ensure_live_e2e_app_runtime_ingress "$shared_manifest" "$app_deploy" "$app_aws_profile" "$app_aws_region"
     asg_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling describe-auto-scaling-groups \
       --auto-scaling-group-names "$app_role_asg" \
       --output json)"
