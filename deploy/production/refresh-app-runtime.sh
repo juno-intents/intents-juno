@@ -152,6 +152,29 @@ ensure_live_e2e_app_runtime_ingress() {
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$juno_rpc_port" "$juno_rpc_port" "$app_security_group_id" "Juno RPC from app runtime"
 }
 
+render_app_runtime_bootstrap_user_data() {
+  local bundle_b64="$1"
+  local output_file="$2"
+
+  cat >"$output_file" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+tmp_dir="\$(mktemp -d)"
+cleanup() {
+  rm -rf "\$tmp_dir"
+}
+trap cleanup EXIT
+
+archive_path="\$tmp_dir/app-runtime-bootstrap.tgz"
+cat <<'APP_RUNTIME_BUNDLE_EOF' | base64 -d >"\$archive_path"
+$bundle_b64
+APP_RUNTIME_BUNDLE_EOF
+tar -xzf "\$archive_path" -C "\$tmp_dir"
+bash "\$tmp_dir/install.sh"
+EOF
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -458,6 +481,8 @@ app_host="$(jq -r '.app_host // empty' "$app_deploy")"
 app_user="$(jq -r '.app_user // "ubuntu"' "$app_deploy")"
 app_target_mode="host"
 app_targets_json='[]'
+app_launch_template_id=""
+app_launch_template_version=""
 
 if [[ "$dry_run" == "true" ]]; then
   if [[ -n "$app_role_asg" ]]; then
@@ -474,6 +499,36 @@ else
     asg_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling describe-auto-scaling-groups \
       --auto-scaling-group-names "$app_role_asg" \
       --output json)"
+    app_launch_template_id="$(jq -r '.AutoScalingGroups[0].LaunchTemplate.LaunchTemplateId // empty' <<<"$asg_json")"
+    [[ -n "$app_launch_template_id" ]] || die "app role asg $app_role_asg did not return a launch template id"
+    app_launch_template_source_version="$(jq -r '.AutoScalingGroups[0].LaunchTemplate.Version // empty' <<<"$asg_json")"
+    [[ -n "$app_launch_template_source_version" ]] || die "app role asg $app_role_asg did not return a launch template version"
+    bootstrap_user_data="$tmp_dir/app-launch-template-user-data.sh"
+    render_app_runtime_bootstrap_user_data "$bundle_b64" "$bootstrap_user_data"
+    launch_template_data_json="$(jq -cn --arg user_data "$(base64 <"$bootstrap_user_data" | tr -d '\n')" '{UserData: $user_data}')"
+    launch_template_create_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" ec2 create-launch-template-version \
+      --launch-template-id "$app_launch_template_id" \
+      --source-version "$app_launch_template_source_version" \
+      --launch-template-data "$launch_template_data_json" \
+      --output json)"
+    app_launch_template_version="$(jq -r '.LaunchTemplateVersion.VersionNumber // empty' <<<"$launch_template_create_json")"
+    [[ -n "$app_launch_template_version" && "$app_launch_template_version" != "null" ]] || die "failed to create a new launch template version for app role asg $app_role_asg"
+    AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling update-auto-scaling-group \
+      --auto-scaling-group-name "$app_role_asg" \
+      --launch-template "LaunchTemplateId=$app_launch_template_id,Version=$app_launch_template_version" \
+      >/dev/null
+    app_deploy_tmp="$tmp_dir/app-deploy.json"
+    jq \
+      --arg lt_id "$app_launch_template_id" \
+      --arg lt_version "$app_launch_template_version" \
+      '
+      if (.app_role? | type) == "object" then
+        .app_role.launch_template = {id: $lt_id, version: $lt_version}
+      else
+        .
+      end
+      ' "$app_deploy" >"$app_deploy_tmp"
+    mv "$app_deploy_tmp" "$app_deploy"
     app_targets_json="$(jq -c '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService") | .InstanceId]' <<<"$asg_json")"
     [[ "$(jq -r 'length' <<<"$app_targets_json")" -gt 0 ]] || die "app role asg $app_role_asg does not have any in-service instances"
 
@@ -514,6 +569,8 @@ jq -n \
   --arg nginx_config "$nginx_config" \
   --arg app_target_mode "$app_target_mode" \
   --arg app_role_asg "$app_role_asg" \
+  --arg app_launch_template_id "$app_launch_template_id" \
+  --arg app_launch_template_version "$app_launch_template_version" \
   --arg app_host "$app_host" \
   --arg bridge_hostname "$bridge_hostname" \
   --arg backoffice_hostname "$backoffice_hostname" \
@@ -533,6 +590,8 @@ jq -n \
       backoffice_hostname: $backoffice_hostname,
       app_target_mode: $app_target_mode,
       app_role_asg: (if $app_role_asg == "" then null else $app_role_asg end),
+      launch_template_id: (if $app_launch_template_id == "" then null else $app_launch_template_id end),
+      launch_template_version: (if $app_launch_template_version == "" then null else $app_launch_template_version end),
       app_host: (if $app_host == "" then null else $app_host end),
       app_targets: $app_targets
     }

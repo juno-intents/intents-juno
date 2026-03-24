@@ -126,6 +126,10 @@ write_refresh_runtime_app_deploy_fixture() {
   "service_urls": [
     "bridge-api=http://127.0.0.1:8082/readyz"
   ],
+  "launch_template": {
+    "id": "lt-app1234567890",
+    "version": "9"
+  },
   "services": {
     "bridge_api": {
       "listen_addr": "127.0.0.1:8082",
@@ -165,7 +169,7 @@ if [[ "${args[0]:-}" == "--region" ]]; then
 fi
 case "${args[*]}" in
   "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg --output json")
-    printf '{"AutoScalingGroups":[{"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Unhealthy"},{"InstanceId":"i-app003","LifecycleState":"Terminating","HealthStatus":"Unhealthy"}]}]}\n'
+    printf '{"AutoScalingGroups":[{"LaunchTemplate":{"LaunchTemplateId":"lt-app1234567890","Version":"9"},"Instances":[{"InstanceId":"i-app001","LifecycleState":"InService","HealthStatus":"Healthy"},{"InstanceId":"i-app002","LifecycleState":"InService","HealthStatus":"Unhealthy"},{"InstanceId":"i-app003","LifecycleState":"Terminating","HealthStatus":"Unhealthy"}]}]}\n'
     ;;
   "ec2 describe-security-groups --filters Name=group-name,Values=juno-live-e2e-preview0316d-shared-sg --query SecurityGroups[0].GroupId --output text")
     printf 'sg-shared1234567890\n'
@@ -183,6 +187,12 @@ case "${args[*]}" in
     printf '{}\n'
     ;;
   ec2\ authorize-security-group-ingress\ --group-id\ sg-operator1234567890\ --ip-permissions\ * )
+    printf '{}\n'
+    ;;
+  ec2\ create-launch-template-version\ --launch-template-id\ lt-app1234567890\ --source-version\ 9\ --launch-template-data\ *\ --output\ json)
+    printf '{"LaunchTemplateVersion":{"VersionNumber":10}}\n'
+    ;;
+  "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-app-asg --launch-template LaunchTemplateId=lt-app1234567890,Version=10")
     printf '{}\n'
     ;;
   ssm\ send-command\ --instance-ids\ i-app001\ --document-name\ AWS-RunShellScript\ --parameters\ *\ --output\ json)
@@ -269,13 +279,18 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$aws_log")" '"ToPort":18444' "refresh restores operator grpc ingress across the preview operator port range"
   assert_contains "$(cat "$aws_log")" '"FromPort":18232' "refresh restores operator juno rpc ingress for the app security group"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers app instances from the app role asg"
+  assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9" "refresh publishes the rendered app runtime bundle into a new app launch template version"
+  assert_contains "$(cat "$aws_log")" "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-app-asg --launch-template LaunchTemplateId=lt-app1234567890,Version=10" "refresh moves the app asg to the new bootstrap launch template version"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app001" "refresh bootstraps the first in-service app instance over ssm"
   assert_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app002" "refresh bootstraps the second in-service app instance over ssm even before it is marked healthy"
   assert_not_contains "$(cat "$aws_log")" "ssm send-command --instance-ids i-app003" "refresh skips terminating app instances"
   assert_line_order "$(cat "$aws_log")" "authorize-security-group-ingress --group-id sg-shared1234567890" "ssm send-command --instance-ids i-app001" "refresh reopens shared ingress before restarting app services"
+  assert_line_order "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9" "ssm send-command --instance-ids i-app001" "refresh updates the app launch template before touching the live instances"
   assert_eq "$(jq -r '.app_target_mode' "$tmp/refresh-summary.json")" "asg" "refresh summary reports app role mode"
   assert_eq "$(jq -r '.app_targets[0]' "$tmp/refresh-summary.json")" "i-app001" "refresh summary reports the first app instance id"
   assert_eq "$(jq -r '.app_targets[1]' "$tmp/refresh-summary.json")" "i-app002" "refresh summary reports the second app instance id"
+  assert_eq "$(jq -r '.launch_template_id' "$tmp/refresh-summary.json")" "lt-app1234567890" "refresh summary reports the app launch template id"
+  assert_eq "$(jq -r '.launch_template_version' "$tmp/refresh-summary.json")" "10" "refresh summary reports the new app launch template version"
   assert_eq "$(jq -r '.ready_for_deploy' "$tmp/refresh-summary.json")" "true" "refresh summary reports success"
 
   rm -rf "$tmp"
