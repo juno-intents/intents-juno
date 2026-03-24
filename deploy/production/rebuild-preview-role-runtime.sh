@@ -16,6 +16,7 @@ Usage:
 
 Options:
   --inventory PATH                             Preview inventory JSON (required)
+  --current-output-root DIR                    Current preview output root used for destroy/handoff discovery
   --dkg-summary PATH                           DKG summary JSON (required)
   --dkg-completion PATH                        Optional DKG completion JSON
   --bridge-deploy-binary PATH                  Released bridge-deploy binary (required unless reusing bridge)
@@ -75,6 +76,7 @@ find_lowest_index_operator_deploy() {
 }
 
 inventory=""
+current_output_root_override=""
 dkg_summary=""
 dkg_completion=""
 bridge_deploy_binary=""
@@ -93,6 +95,7 @@ output_root="./preview-reset-output"
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --inventory) inventory="$2"; shift 2 ;;
+    --current-output-root) current_output_root_override="$2"; shift 2 ;;
     --dkg-summary) dkg_summary="$2"; shift 2 ;;
     --dkg-completion) dkg_completion="$2"; shift 2 ;;
     --bridge-deploy-binary) bridge_deploy_binary="$2"; shift 2 ;;
@@ -370,7 +373,11 @@ mkdir -p "$output_dir/canaries" "$output_dir/e2e"
 
 upgraded_inventory="$output_dir/inventory.preview-runtime.json"
 resolved_inventory="$output_dir/inventory.resolved.json"
-current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/production-output"
+if [[ -n "$current_output_root_override" ]]; then
+  current_output_root="$(production_abs_path "$(pwd)" "$current_output_root_override")"
+else
+  current_output_root="$(dirname "$(production_abs_path "$(pwd)" "$inventory")")/production-output"
+fi
 current_shared_tf_output="$current_output_root/$env_slug/shared-terraform-output.json"
 
 if [[ -z "$existing_bridge_summary" && -n "$funder_key_file" && "$env_slug" == "preview" ]]; then
