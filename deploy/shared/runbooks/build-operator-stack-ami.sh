@@ -2982,6 +2982,16 @@ run_with_retry sudo dpkg --configure -a
 run_with_retry sudo apt-get update -y
 run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl unzip
 run_with_retry install_aws_cli
+if snap list amazon-ssm-agent >/dev/null 2>&1; then
+  sudo systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true
+  sudo systemctl start snap.amazon-ssm-agent.amazon-ssm-agent.service || sudo snap start amazon-ssm-agent
+else
+  ssm_agent_deb="/tmp/amazon-ssm-agent.deb"
+  run_with_retry curl -fsSL "__BOOTSTRAP_SSM_AGENT_URL__" -o "$ssm_agent_deb"
+  run_with_retry sudo dpkg -i "$ssm_agent_deb"
+  sudo systemctl enable amazon-ssm-agent
+  sudo systemctl start amazon-ssm-agent
+fi
 
 install_junocash
 install_juno_scan
@@ -3022,6 +3032,7 @@ REMOTE_SCRIPT
   script="${script//__BOOTSTRAP_REPO_COMMIT__/$repo_commit}"
   script="${script//__BOOTSTRAP_BASE_CHAIN_ID__/$base_chain_id}"
   script="${script//__BOOTSTRAP_BRIDGE_ADDRESS__/$bridge_address}"
+  script="${script//__BOOTSTRAP_SSM_AGENT_URL__/https:\/\/s3.${aws_region}.amazonaws.com\/amazon-ssm-${aws_region}\/latest\/debian_amd64\/amazon-ssm-agent.deb}"
   script="${script//__BOOTSTRAP_SYNC_TIMEOUT_SECONDS__/$sync_timeout_seconds}"
   script="${script//__BOOTSTRAP_TSS_SIGNER_RUNTIME_MODE__/$tss_signer_runtime_mode}"
   script="${script//__BOOTSTRAP_GO_TOOLCHAIN__/$GO_TOOLCHAIN_PIN}"

@@ -175,6 +175,16 @@ test_build_operator_stack_ami_repairs_dpkg_before_apt() {
   assert_line_order "$script_text" 'run_with_retry sudo dpkg --configure -a' 'run_with_retry sudo apt-get install -y ca-certificates curl jq tar git golang-go build-essential make openssl unzip' "builder repairs dpkg before apt install"
 }
 
+test_build_operator_stack_ami_bootstraps_ssm_agent() {
+  local script_text
+  script_text="$(cat "$RUNBOOK_PATH")"
+
+  assert_contains "$script_text" 'snap list amazon-ssm-agent >/dev/null 2>&1' "operator ami bootstrap checks for a snap-based ssm agent first"
+  assert_contains "$script_text" 'snap.amazon-ssm-agent.amazon-ssm-agent.service' "operator ami bootstrap manages the snap-based ssm service when present"
+  assert_contains "$script_text" 'amazon-ssm-agent.deb' "operator ami bootstrap keeps a deb-based ssm fallback"
+  assert_contains "$script_text" '__BOOTSTRAP_SSM_AGENT_URL__' "operator ami bootstrap templates the regional ssm agent package url"
+}
+
 test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   local script_text hydrator_script deposit_wrapper withdraw_wrapper tss_wrapper signer_wrapper aggregator_wrapper
   script_text="$(cat "$RUNBOOK_PATH")"
@@ -1059,6 +1069,7 @@ EOF
 main() {
   test_build_operator_stack_ami_enforces_service_user_and_hardening
   test_build_operator_stack_ami_repairs_dpkg_before_apt
+  test_build_operator_stack_ami_bootstraps_ssm_agent
   test_build_operator_stack_ami_uses_checksum_and_env_wiring
   test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry
   test_build_operator_stack_ami_juno_scan_wrapper_waits_for_rpc_readiness

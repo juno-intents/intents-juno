@@ -46,15 +46,27 @@ done
 
 [[ -n "$operator_deploy" ]] || die "--operator-deploy is required"
 [[ -f "$operator_deploy" ]] || die "operator deploy manifest not found: $operator_deploy"
-for cmd in jq ssh scp; do
-  have_cmd "$cmd" || die "required command not found: $cmd"
-done
 
 manifest_dir="$(cd "$(dirname "$operator_deploy")" && pwd)"
 environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
 allow_local_resolvers="false"
 if production_environment_allows_local_secret_resolvers "$environment"; then
   allow_local_resolvers="true"
+fi
+using_runtime_material_ref="false"
+if production_operator_uses_runtime_material_ref "$operator_deploy"; then
+  using_runtime_material_ref="true"
+fi
+for cmd in jq; do
+  have_cmd "$cmd" || die "required command not found: $cmd"
+done
+if [[ "$allow_local_resolvers" == "true" ]]; then
+  for cmd in ssh scp; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+else
+  have_cmd aws || die "required command not found: aws"
+  [[ "$using_runtime_material_ref" == "true" ]] || die "operator deploy manifest must set runtime_material_ref.mode=s3-kms-zip when environment=$environment"
 fi
 
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
@@ -74,8 +86,34 @@ operator_user="$(production_json_required "$operator_deploy" '.operator_user | s
 runtime_dir="$(production_json_required "$operator_deploy" '.runtime_dir | select(type == "string" and length > 0)')"
 aws_profile="$(production_json_optional "$operator_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
-dkg_backup_zip="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.dkg_backup_zip | select(type == "string" and length > 0)')")"
-[[ -f "$dkg_backup_zip" ]] || die "dkg backup zip not found: $dkg_backup_zip"
+dkg_backup_zip=""
+runtime_material_bucket=""
+runtime_material_key=""
+runtime_material_region=""
+runtime_material_kms_key_id=""
+runtime_config_secret_id=""
+runtime_config_secret_region=""
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  [[ -n "$aws_profile" ]] || die "operator deploy manifest is missing aws_profile for runtime_material_ref rollout"
+  [[ -n "$aws_region" ]] || die "operator deploy manifest is missing aws_region for runtime_material_ref rollout"
+  runtime_material_bucket="$(production_runtime_material_ref_field "$operator_deploy" 'bucket')"
+  runtime_material_key="$(production_runtime_material_ref_field "$operator_deploy" 'key')"
+  runtime_material_region="$(production_runtime_material_ref_field "$operator_deploy" 'region')"
+  runtime_material_kms_key_id="$(production_runtime_material_ref_field "$operator_deploy" 'kms_key_id')"
+  runtime_config_secret_id="$(production_json_required "$operator_deploy" '.runtime_config_secret_id | select(type == "string" and length > 0)')"
+  runtime_config_secret_region="$(production_json_optional "$operator_deploy" '.runtime_config_secret_region')"
+  if [[ -z "$runtime_config_secret_region" ]]; then
+    runtime_config_secret_region="${runtime_material_region:-$aws_region}"
+  fi
+  [[ -n "$runtime_material_bucket" ]] || die "operator deploy manifest is missing runtime_material_ref.bucket"
+  [[ -n "$runtime_material_key" ]] || die "operator deploy manifest is missing runtime_material_ref.key"
+  [[ -n "$runtime_material_region" ]] || die "operator deploy manifest is missing runtime_material_ref.region"
+  [[ -n "$runtime_material_kms_key_id" ]] || die "operator deploy manifest is missing runtime_material_ref.kms_key_id"
+  [[ -n "$runtime_config_secret_region" ]] || die "operator deploy manifest is missing runtime_config_secret_region"
+else
+  dkg_backup_zip="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.dkg_backup_zip | select(type == "string" and length > 0)')")"
+  [[ -f "$dkg_backup_zip" ]] || die "dkg backup zip not found: $dkg_backup_zip"
+fi
 dkg_tls_dir="$dkg_tls_dir_override"
 if [[ -z "$dkg_tls_dir" ]]; then
   dkg_tls_dir="$(production_json_optional "$operator_deploy" '.dkg_tls_dir')"
@@ -89,19 +127,23 @@ if [[ -n "$dkg_tls_dir" ]]; then
   [[ -f "$dkg_tls_dir/coordinator-client.key" ]] || die "dkg tls dir missing coordinator-client.key: $dkg_tls_dir"
 fi
 
-known_hosts_file="$known_hosts_override"
-if [[ -z "$known_hosts_file" ]]; then
-  known_hosts_file="$(production_json_required "$operator_deploy" '.known_hosts_file | select(type == "string" and length > 0)')"
-fi
-known_hosts_file="$(production_abs_path "$manifest_dir" "$known_hosts_file")"
-[[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
+known_hosts_file=""
+secret_contract_file=""
+if [[ "$using_runtime_material_ref" != "true" ]]; then
+  known_hosts_file="$known_hosts_override"
+  if [[ -z "$known_hosts_file" ]]; then
+    known_hosts_file="$(production_json_required "$operator_deploy" '.known_hosts_file | select(type == "string" and length > 0)')"
+  fi
+  known_hosts_file="$(production_abs_path "$manifest_dir" "$known_hosts_file")"
+  [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
 
-secret_contract_file="$secret_contract_override"
-if [[ -z "$secret_contract_file" ]]; then
-  secret_contract_file="$(production_json_required "$operator_deploy" '.secret_contract_file | select(type == "string" and length > 0)')"
+  secret_contract_file="$secret_contract_override"
+  if [[ -z "$secret_contract_file" ]]; then
+    secret_contract_file="$(production_json_required "$operator_deploy" '.secret_contract_file | select(type == "string" and length > 0)')"
+  fi
+  secret_contract_file="$(production_abs_path "$manifest_dir" "$secret_contract_file")"
+  [[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"
 fi
-secret_contract_file="$(production_abs_path "$manifest_dir" "$secret_contract_file")"
-[[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"
 
 public_endpoint="$(production_json_optional "$operator_deploy" '.public_endpoint')"
 dns_mode="$(production_json_optional "$operator_deploy" '.dns.mode')"
@@ -120,8 +162,13 @@ if [[ "$current_status" == "done" ]]; then
 fi
 
 ssh_target="${operator_user}@${operator_host}"
-SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
-SCP_OPTS=("${SSH_OPTS[@]}")
+instance_id=""
+SSH_OPTS=()
+SCP_OPTS=()
+if [[ "$using_runtime_material_ref" != "true" ]]; then
+  SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
+  SCP_OPTS=("${SSH_OPTS[@]}")
+fi
 service_active_retries="${PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES:-20}"
 service_active_sleep_seconds="${PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS:-2}"
 
@@ -130,8 +177,10 @@ resolved_secret_env="$tmp_dir/operator-secrets.resolved.env"
 merged_env="$tmp_dir/operator-stack.env"
 junocashd_conf="$tmp_dir/junocashd.conf"
 config_hydrator_stage="$tmp_dir/intents-juno-config-hydrator.sh"
+operator_stack_hydrator_env="$tmp_dir/operator-stack-hydrator.env"
 signer_ufvk_file="$tmp_dir/ufvk.txt"
 dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
+run_operator_rollout_stage="$tmp_dir/run-operator-rollout.sh"
 generated_base_relayer_tls_files=()
 generated_dkg_server_tls_files=()
 staged_dkg_tls_files=()
@@ -398,7 +447,13 @@ wait_for_remote_service_active() {
   local status=""
   local attempt
   for ((attempt = 1; attempt <= service_active_retries; attempt++)); do
-    status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
+    if [[ "$using_runtime_material_ref" == "true" ]]; then
+      status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc 2>/dev/null || echo inactive" 2>/dev/null || printf 'inactive')"
+      status="${status//$'\r'/}"
+      status="${status//$'\n'/}"
+    else
+      status="$(ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl is-active $svc" 2>/dev/null || echo "inactive")"
+    fi
     if [[ "$status" == "active" ]]; then
       return 0
     fi
@@ -418,6 +473,41 @@ remote_juno_scan_post() {
   local bearer_token_b64
   payload_b64="$(printf '%s' "$payload" | base64 | tr -d '\n')"
   bearer_token_b64="$(printf '%s' "$bearer_token" | base64 | tr -d '\n')"
+  if [[ "$using_runtime_material_ref" == "true" ]]; then
+    local remote_cmd
+    remote_cmd="$(cat <<EOF
+set -euo pipefail
+scan_url="$scan_url"
+path="$path"
+payload_b64="$payload_b64"
+bearer_token_b64="$bearer_token_b64"
+
+if payload="\$(printf '%s' "\$payload_b64" | base64 --decode 2>/dev/null)"; then
+  :
+else
+  payload="\$(printf '%s' "\$payload_b64" | base64 -D)"
+fi
+if [[ -n "\$bearer_token_b64" ]]; then
+  if bearer_token="\$(printf '%s' "\$bearer_token_b64" | base64 --decode 2>/dev/null)"; then
+    :
+  else
+    bearer_token="\$(printf '%s' "\$bearer_token_b64" | base64 -D)"
+  fi
+else
+  bearer_token=""
+fi
+
+curl_headers=()
+if [[ -n "\$bearer_token" ]]; then
+  curl_headers=(-H "Authorization: Bearer \$bearer_token")
+fi
+
+curl -fsS -X POST "\${curl_headers[@]}" -H "Content-Type: application/json" --data "\$payload" "\${scan_url%/}\${path}"
+EOF
+)"
+    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd" >/dev/null
+    return 0
+  fi
   ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$payload_b64" "$bearer_token_b64" <<'REMOTE_EOF'
 set -euo pipefail
 scan_url="$1"
@@ -455,6 +545,35 @@ remote_juno_scan_get() {
   local bearer_token="$3"
   local bearer_token_b64
   bearer_token_b64="$(printf '%s' "$bearer_token" | base64 | tr -d '\n')"
+  if [[ "$using_runtime_material_ref" == "true" ]]; then
+    local remote_cmd
+    remote_cmd="$(cat <<EOF
+set -euo pipefail
+scan_url="$scan_url"
+path="$path"
+bearer_token_b64="$bearer_token_b64"
+
+if [[ -n "\$bearer_token_b64" ]]; then
+  if bearer_token="\$(printf '%s' "\$bearer_token_b64" | base64 --decode 2>/dev/null)"; then
+    :
+  else
+    bearer_token="\$(printf '%s' "\$bearer_token_b64" | base64 -D)"
+  fi
+else
+  bearer_token=""
+fi
+
+curl_headers=()
+if [[ -n "\$bearer_token" ]]; then
+  curl_headers=(-H "Authorization: Bearer \$bearer_token")
+fi
+
+curl -fsS "\${curl_headers[@]}" "\${scan_url%/}\${path}"
+EOF
+)"
+    production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "$remote_cmd"
+    return 0
+  fi
   ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$scan_url" "$path" "$bearer_token_b64" <<'REMOTE_EOF'
 set -euo pipefail
 scan_url="$1"
@@ -499,6 +618,13 @@ wait_for_remote_juno_scan_tip() {
 start_remote_scan_wallet_backfill() {
   local scan_url="$1"
   local bearer_token="$2"
+
+  if [[ "$using_runtime_material_ref" == "true" ]]; then
+    production_ssm_run_shell_command \
+      "$aws_profile" "$aws_region" "$instance_id" \
+      "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service" >/dev/null
+    return 0
+  fi
 
   wait_for_remote_juno_scan_tip "$scan_url" "$bearer_token"
   ssh "${SSH_OPTS[@]}" "$ssh_target" "sudo systemctl reset-failed juno-scan-backfill.service || true && sudo systemctl start --no-block juno-scan-backfill.service"
@@ -617,15 +743,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
-if env_has_key "$resolved_secret_env" "CHECKPOINT_SIGNER_PRIVATE_KEY"; then
-  die "deploy-operator rejects CHECKPOINT_SIGNER_PRIVATE_KEY; plaintext operator key configuration is dev/test-only"
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  : >"$resolved_secret_env"
+else
+  production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$aws_profile" "$aws_region" "$resolved_secret_env"
+  if env_has_key "$resolved_secret_env" "CHECKPOINT_SIGNER_PRIVATE_KEY"; then
+    die "deploy-operator rejects CHECKPOINT_SIGNER_PRIVATE_KEY; plaintext operator key configuration is dev/test-only"
+  fi
 fi
 production_render_operator_stack_env "$shared_manifest_path" "$operator_deploy" "$resolved_secret_env" "$merged_env"
 if env_has_key "$merged_env" "CHECKPOINT_SIGNER_PRIVATE_KEY"; then
   die "deploy-operator rendered CHECKPOINT_SIGNER_PRIVATE_KEY; plaintext operator key configuration is dev/test-only"
 fi
-production_render_junocashd_conf "$merged_env" "$junocashd_conf"
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  cat >"$operator_stack_hydrator_env" <<EOF
+OPERATOR_STACK_CONFIG_JSON_PATH=/etc/intents-juno/operator-stack-config.json
+OPERATOR_STACK_CONFIG_SECRET_ID=$runtime_config_secret_id
+OPERATOR_STACK_CONFIG_SECRET_REGION=$runtime_config_secret_region
+EOF
+else
+  production_render_junocashd_conf "$merged_env" "$junocashd_conf"
+fi
 extract_build_runbook_block \
   "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
   "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" \
@@ -653,6 +791,8 @@ if [[ -n "$resolved_withdraw_tss_server_name" ]]; then
   set_env_value_local "$merged_env" "WITHDRAW_COORDINATOR_TSS_SERVER_NAME" "$resolved_withdraw_tss_server_name"
 fi
 set_env_value_local "$merged_env" "JUNO_SCAN_BACKFILL_FROM_HEIGHT" "${PRODUCTION_DEPLOY_SCAN_BACKFILL_FROM_HEIGHT:-0}"
+cp "$SCRIPT_DIR/run-operator-rollout.sh" "$run_operator_rollout_stage"
+chmod 0755 "$run_operator_rollout_stage"
 
 if [[ -n "$dkg_tls_dir" ]]; then
   resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"
@@ -670,18 +810,29 @@ fi
 
 remote_stage_dir="/tmp/intents-juno-deploy-$(production_safe_slug "$operator_id")"
 files_to_copy=(
-  "$dkg_backup_zip"
   "$merged_env"
-  "$junocashd_conf"
   "$config_hydrator_stage"
   "$signer_ufvk_file"
   "$dkg_peer_hosts_file"
   "$shared_manifest_path"
   "$operator_deploy"
-  "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
-  "$REPO_ROOT/deploy/operators/dkg/common.sh"
-  "$REPO_ROOT/deploy/operators/dkg/operator-export-kms.sh"
 )
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  files_to_copy+=(
+    "$operator_stack_hydrator_env"
+    "$run_operator_rollout_stage"
+    "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
+    "$REPO_ROOT/deploy/operators/dkg/common.sh"
+  )
+else
+  files_to_copy+=(
+    "$dkg_backup_zip"
+    "$junocashd_conf"
+    "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
+    "$REPO_ROOT/deploy/operators/dkg/common.sh"
+    "$REPO_ROOT/deploy/operators/dkg/operator-export-kms.sh"
+  )
+fi
 for tls_file in "${generated_base_relayer_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
 done
@@ -693,19 +844,48 @@ for tls_file in "${staged_dkg_tls_files[@]}"; do
 done
 
 if [[ "$dry_run" == "true" ]]; then
-  log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
+  if [[ "$using_runtime_material_ref" == "true" ]]; then
+    log "[DRY RUN] would deploy operator $operator_id via ssm/$operator_host"
+  else
+    log "[DRY RUN] would deploy operator $operator_id via $ssh_target"
+  fi
 else
-  production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url"
+  if [[ "$using_runtime_material_ref" != "true" ]]; then
+    production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url"
+  fi
   production_require_registered_operator "$shared_manifest_path" "$operator_deploy"
   ensure_operator_grpc_mesh_ingress "$aws_profile" "$aws_region" "$operator_host"
   production_rollout_reserve "$rollout_state_file" "$operator_id"
   reserved="true"
-  ssh "${SSH_OPTS[@]}" "$ssh_target" "rm -rf '$remote_stage_dir' && mkdir -p '$remote_stage_dir'"
-  for source_path in "${files_to_copy[@]}"; do
-    scp "${SCP_OPTS[@]}" "$source_path" "$ssh_target:$remote_stage_dir/$(basename "$source_path")"
-  done
+  if [[ "$using_runtime_material_ref" == "true" ]]; then
+    instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
+    production_ssm_run_shell_command \
+      "$aws_profile" "$aws_region" "$instance_id" \
+      "sudo rm -rf '$remote_stage_dir' && sudo install -d -m 0755 '$remote_stage_dir'" >/dev/null \
+      || die "failed to create remote stage dir over ssm: $remote_stage_dir"
+    for source_path in "${files_to_copy[@]}"; do
+      file_mode="0640"
+      case "$(basename "$source_path")" in
+        *.sh)
+          file_mode="0755"
+          ;;
+        *.key|ufvk.txt|operator-stack-hydrator.env)
+          file_mode="0600"
+          ;;
+      esac
+      production_ssm_stage_file "$aws_profile" "$aws_region" "$instance_id" "$source_path" "$remote_stage_dir/$(basename "$source_path")" "$file_mode"
+    done
+    production_ssm_run_shell_command \
+      "$aws_profile" "$aws_region" "$instance_id" \
+      "set -euo pipefail; cleanup(){ sudo rm -rf '$remote_stage_dir'; }; trap cleanup EXIT; sudo bash '$remote_stage_dir/run-operator-rollout.sh' --stage-dir '$remote_stage_dir' --runtime-dir '$runtime_dir'" >/dev/null \
+      || die "remote rollout failed over ssm for operator $operator_id"
+  else
+    ssh "${SSH_OPTS[@]}" "$ssh_target" "rm -rf '$remote_stage_dir' && mkdir -p '$remote_stage_dir'"
+    for source_path in "${files_to_copy[@]}"; do
+      scp "${SCP_OPTS[@]}" "$source_path" "$ssh_target:$remote_stage_dir/$(basename "$source_path")"
+    done
 
-  ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$remote_stage_dir" "$runtime_dir" "$base_chain_id" "$bridge_address" <<'REMOTE_EOF'
+    ssh "${SSH_OPTS[@]}" "$ssh_target" bash -s -- "$remote_stage_dir" "$runtime_dir" "$base_chain_id" "$bridge_address" <<'REMOTE_EOF'
 set -euo pipefail
 
 remote_stage_dir="$1"
@@ -2262,6 +2442,7 @@ for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin
   sudo systemctl restart "$svc"
 done
 REMOTE_EOF
+  fi
 
   for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
     wait_for_remote_service_active "$svc"

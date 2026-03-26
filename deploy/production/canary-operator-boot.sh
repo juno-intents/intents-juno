@@ -54,7 +54,13 @@ done
 for cmd in jq; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
-if [[ "$dry_run" != "true" ]]; then
+using_runtime_material_ref="false"
+if production_operator_uses_runtime_material_ref "$operator_deploy"; then
+  using_runtime_material_ref="true"
+fi
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  have_cmd aws || die "required command not found: aws"
+elif [[ "$dry_run" != "true" ]]; then
   have_cmd cast || die "required command not found: cast"
   have_cmd ssh || die "required command not found: ssh"
 fi
@@ -68,11 +74,63 @@ runtime_dir="$(production_json_required "$operator_deploy" '.runtime_dir | selec
 shared_manifest_path="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.shared_manifest_path | select(type == "string" and length > 0)')")"
 aws_profile="$(production_json_optional "$operator_deploy" '.aws_profile')"
 aws_region="$(production_json_optional "$operator_deploy" '.aws_region')"
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  [[ -n "$aws_profile" ]] || die "operator deploy manifest is missing aws_profile for runtime_material_ref rollout"
+  [[ -n "$aws_region" ]] || die "operator deploy manifest is missing aws_region for runtime_material_ref rollout"
+fi
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  [[ -n "$(production_runtime_material_ref_field "$operator_deploy" 'bucket')" ]] || die "operator deploy manifest is missing runtime_material_ref.bucket"
+  [[ -n "$(production_runtime_material_ref_field "$operator_deploy" 'key')" ]] || die "operator deploy manifest is missing runtime_material_ref.key"
+  [[ -n "$(production_runtime_material_ref_field "$operator_deploy" 'region')" ]] || die "operator deploy manifest is missing runtime_material_ref.region"
+  [[ -n "$(production_runtime_material_ref_field "$operator_deploy" 'kms_key_id')" ]] || die "operator deploy manifest is missing runtime_material_ref.kms_key_id"
+  [[ -n "$(production_json_required "$operator_deploy" '.runtime_config_secret_id | select(type == "string" and length > 0)')" ]] || die "operator deploy manifest is missing runtime_config_secret_id"
+fi
+
+[[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
+if [[ "$using_runtime_material_ref" == "true" ]]; then
+  if [[ "$dry_run" == "true" ]]; then
+    jq -n \
+      --arg operator_id "$operator_id" \
+      '{
+        operator_id: $operator_id,
+        ready_for_deploy: false,
+        checks: {
+          inputs: {status: "skipped", detail: "dry run"},
+          relayer_funding: {status: "skipped", detail: "dry run"},
+          withdraw_config: {status: "skipped", detail: "dry run"},
+          txsign_runtime: {status: "skipped", detail: "dry run"},
+          systemd: {status: "skipped", detail: "dry run"},
+          junocashd_sync: {status: "skipped", detail: "dry run"},
+          deposit_relayer_ready: {status: "skipped", detail: "dry run"},
+          kms_export: {status: "skipped", detail: "dry run"},
+          scan_catchup: {status: "skipped", detail: "dry run"}
+        }
+      }'
+    exit 0
+  fi
+
+  instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$operator_host")"
+  remote_stage_dir="/tmp/intents-juno-canary-$(production_safe_slug "$operator_id")"
+  production_ssm_run_shell_command \
+    "$aws_profile" "$aws_region" "$instance_id" \
+    "sudo rm -rf '$remote_stage_dir' && sudo install -d -m 0755 '$remote_stage_dir'" >/dev/null \
+    || die "failed to create remote canary stage dir over ssm: $remote_stage_dir"
+  production_ssm_stage_file \
+    "$aws_profile" "$aws_region" "$instance_id" \
+    "$SCRIPT_DIR/run-operator-local-canary.sh" \
+    "$remote_stage_dir/run-operator-local-canary.sh" \
+    0755
+  canary_json="$(production_ssm_run_shell_command \
+    "$aws_profile" "$aws_region" "$instance_id" \
+    "set -euo pipefail; cleanup(){ sudo rm -rf '$remote_stage_dir'; }; trap cleanup EXIT; sudo bash '$remote_stage_dir/run-operator-local-canary.sh' --operator-id '$operator_id'")" \
+    || die "runtime canary failed over ssm for operator $operator_id"
+  printf '%s\n' "$canary_json"
+  exit 0
+fi
+
 dkg_backup_zip="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.dkg_backup_zip | select(type == "string" and length > 0)')")"
 known_hosts_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.known_hosts_file | select(type == "string" and length > 0)')")"
 secret_contract_file="$(production_abs_path "$manifest_dir" "$(production_json_required "$operator_deploy" '.secret_contract_file | select(type == "string" and length > 0)')")"
-
-[[ -f "$shared_manifest_path" ]] || die "shared manifest not found: $shared_manifest_path"
 [[ -f "$dkg_backup_zip" ]] || die "dkg backup zip not found: $dkg_backup_zip"
 [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
 [[ -f "$secret_contract_file" ]] || die "secret contract file not found: $secret_contract_file"

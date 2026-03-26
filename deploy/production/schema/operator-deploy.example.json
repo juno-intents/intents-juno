@@ -1,13 +1,13 @@
 {
-  "version": "1",
-  "environment": "alpha",
-  "shared_manifest_path": "production-output/alpha/shared-manifest.json",
-  "rollout_state_file": "production-output/alpha/rollout-state.json",
+  "version": "3",
+  "environment": "mainnet",
+  "shared_manifest_path": "production-output/mainnet/shared-manifest.json",
+  "rollout_state_file": "production-output/mainnet/rollout-state.json",
   "operator_id": "0x1111111111111111111111111111111111111111",
   "operator_address": "0x9999999999999999999999999999999999999999",
   "checkpoint_signer_driver": "aws-kms",
   "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555",
-  "checkpoint_blob_bucket": "alpha-op1-dkg-keypackages",
+  "checkpoint_blob_bucket": "mainnet-op1-dkg-keypackages",
   "checkpoint_blob_prefix": "operators/op1/checkpoint-packages",
   "checkpoint_blob_sse_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
   "operator_index": 1,
@@ -22,15 +22,21 @@
   },
   "operator_user": "ubuntu",
   "runtime_dir": "/var/lib/intents-juno/operator-runtime",
-  "dkg_backup_zip": "production-output/alpha/operators/0x1111111111111111111111111111111111111111/dkg-backup.zip",
+  "runtime_material_ref": {
+    "mode": "s3-kms-zip",
+    "bucket": "mainnet-runtime-materials",
+    "key": "operators/op1/runtime-material.zip",
+    "region": "us-east-1",
+    "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+  },
+  "runtime_config_secret_id": "mainnet/op1/runtime-config",
+  "runtime_config_secret_region": "us-east-1",
   "dkg_tls_dir": "",
-  "known_hosts_file": "production-output/alpha/operators/0x1111111111111111111111111111111111111111/known_hosts",
-  "secret_contract_file": "production-output/alpha/operators/0x1111111111111111111111111111111111111111/operator-secrets.env",
   "public_endpoint": "203.0.113.11",
   "dns": {
     "mode": "public-zone",
     "zone_id": "Z01169511CVMQJAD7T3TJ",
-    "record_name": "op1.alpha.intents-testing.thejunowallet.com",
+    "record_name": "op1.mainnet.intents.thejunowallet.com",
     "ttl_seconds": 60
   }
 }
