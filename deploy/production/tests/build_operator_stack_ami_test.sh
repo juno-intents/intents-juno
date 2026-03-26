@@ -824,6 +824,44 @@ EOF
   "$tmp/intents-juno-multikey-extend-signer.sh" "$env_file" "$fake_bin/extend-signer" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null
   assert_contains "$(cat "$tmp/extend.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "withdraw extend signer wrapper exports the full signer roster"
 
+  cat >"$env_file" <<EOF
+JUNO_DEV_MODE=false
+OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443,0x8888888888888888888888888888888888888888=203.0.113.12:18444
+EOF
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-multikey-extend-signer.sh <<'EOF_WITHDRAW_EXTEND_SIGNER'" \
+    "EOF_WITHDRAW_EXTEND_SIGNER" \
+    "$tmp/intents-juno-multikey-extend-signer.sh" \
+    "$env_file"
+  python3 - "$tmp/intents-juno-multikey-extend-signer.sh" "$fake_bin/extend-signer" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("/usr/local/bin/juno-txsign", sys.argv[2])
+path.write_text(text)
+EOF
+  cat >"$fake_bin/extend-signer" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "--help" ]]; then
+  printf 'Usage: juno-txsign sign-digest --operator-endpoint <url>\n'
+  exit 0
+fi
+printf '%s\n' "\$*" >"$extend_output_file"
+env | sort >"$tmp/extend.env"
+printf '{"version":"v1","status":"ok","data":{"signatures":["0x111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111b"]}}\n'
+exit 0
+EOF
+  chmod 0755 "$fake_bin/extend-signer"
+  "$tmp/intents-juno-multikey-extend-signer.sh" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null
+  assert_contains "$(cat "$tmp/extend.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "live withdraw extend signer keeps only the local signer key in env"
+  assert_contains "$(cat "$extend_output_file")" '--operator-endpoint https://203.0.113.12:18444' "live withdraw extend signer forwards remote operator endpoints"
+  assert_not_contains "$(cat "$extend_output_file")" 'https://203.0.113.11:18443' "live withdraw extend signer skips the local operator endpoint"
+
   local finalizer_output_file
   finalizer_output_file="$tmp/finalizer.args"
   cat >"$fake_bin/withdraw-finalizer" <<EOF

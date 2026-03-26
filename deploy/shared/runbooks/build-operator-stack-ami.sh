@@ -561,6 +561,7 @@ WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=/var/lib/intents-juno/operator-runtime/b
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.pem
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh
+WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=
 WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_FINALIZER_OWNER=
@@ -828,6 +829,7 @@ checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env
 checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
 juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
+withdraw_operator_endpoints="$(resolve_value "WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS" "$(read_env_value WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS || true)" || true)"
 withdraw_extend_signer_keys="$(resolve_value "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" "$(read_env_value WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
@@ -899,10 +901,16 @@ case "$checkpoint_signer_driver" in
     ;;
 esac
 [[ "$juno_txsign_signer_keys" =~ ^0x[0-9a-fA-F]{64}$ ]] || fail "requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in production"
-if [[ -z "$withdraw_extend_signer_keys" ]]; then
-  withdraw_extend_signer_keys="$juno_txsign_signer_keys"
+if [[ -n "$withdraw_operator_endpoints" ]]; then
+  [[ "$withdraw_operator_endpoints" =~ ^0x[0-9a-fA-F]{40}=[^,]+:[0-9]+(,0x[0-9a-fA-F]{40}=[^,]+:[0-9]+)*$ ]] \
+    || fail "requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS as comma-separated addr=host:port pairs"
 fi
-[[ "$withdraw_extend_signer_keys" =~ ^0x[0-9a-fA-F]{64}(,0x[0-9a-fA-F]{64})*$ ]] || fail "requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS as comma-separated 32-byte hex keys"
+if [[ -n "$withdraw_extend_signer_keys" ]]; then
+  [[ "$withdraw_extend_signer_keys" =~ ^0x[0-9a-fA-F]{64}(,0x[0-9a-fA-F]{64})*$ ]] \
+    || fail "requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS as comma-separated 32-byte hex keys"
+fi
+[[ -n "$withdraw_operator_endpoints" || -n "$withdraw_extend_signer_keys" ]] \
+  || fail "requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS or WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in production"
 
 [[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
 
@@ -935,13 +943,22 @@ set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
 set_env_value "$tmp_env" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys"
-set_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
 set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
 set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_TLS "$kafka_tls"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_AUTH_MODE "$kafka_auth_mode"
 set_env_value "$tmp_env" JUNO_QUEUE_KAFKA_AWS_REGION "$kafka_aws_region"
 delete_env_value "$tmp_env" CHECKPOINT_SIGNER_PRIVATE_KEY
+if [[ -n "$withdraw_operator_endpoints" ]]; then
+  set_env_value "$tmp_env" WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS "$withdraw_operator_endpoints"
+else
+  delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS
+fi
+if [[ -n "$withdraw_extend_signer_keys" ]]; then
+  set_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
+else
+  delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS
+fi
 
 if [[ -n "$checkpoint_blob_prefix" ]]; then
   set_env_value "$tmp_env" CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
@@ -2126,9 +2143,36 @@ EOF_WITHDRAW_COORDINATOR
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+local_signer_key="${JUNO_TXSIGN_SIGNER_KEYS:-}"
+[[ "$local_signer_key" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+  echo "withdraw extend signer requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+export JUNO_TXSIGN_SIGNER_KEYS="$local_signer_key"
+
+if [[ -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
+  txsign_help="$(/usr/local/bin/juno-txsign --help 2>&1 || true)"
+  grep -q -- '--operator-endpoint' <<<"$txsign_help" || {
+    echo "withdraw extend signer requires juno-txsign support for --operator-endpoint" >&2
+    exit 1
+  }
+  IFS=',' read -r -a endpoint_pairs <<<"${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS}"
+  endpoint_args=()
+  for endpoint_pair in "${endpoint_pairs[@]}"; do
+    [[ -n "$endpoint_pair" ]] || continue
+    endpoint_addr="${endpoint_pair%%=*}"
+    endpoint_host_port="${endpoint_pair#*=}"
+    if [[ -n "${OPERATOR_ADDRESS:-}" && "$endpoint_addr" == "${OPERATOR_ADDRESS}" ]]; then
+      continue
+    fi
+    endpoint_args+=(--operator-endpoint "https://${endpoint_host_port}")
+  done
+  exec /usr/local/bin/juno-txsign "$@" "${endpoint_args[@]}"
+fi
+
 extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
 [[ -n "$extend_signer_keys" ]] || {
-  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS or JUNO_TXSIGN_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
+  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS or WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
 export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"

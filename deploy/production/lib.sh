@@ -3237,7 +3237,7 @@ production_render_operator_handoffs() {
   local env_slug public_subdomain zone_id dns_mode ttl_seconds dkg_tls_dir shared_owallet_ua
   local shared_aws_profile shared_aws_region
   local signer_ufvk derived_deposit_owallet_ivk derived_withdraw_owallet_ovk
-  local manifest_version allow_local_material_inputs
+  local manifest_version allow_local_material_inputs withdraw_operator_endpoints_json
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
@@ -3264,6 +3264,7 @@ production_render_operator_handoffs() {
   elif production_inventory_has_v2_roles "$inventory"; then
     manifest_version="2"
   fi
+  withdraw_operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
 
   local rollout_state="$output_dir/rollout-state.json"
   production_write_rollout_state "$inventory" "$rollout_state"
@@ -3469,6 +3470,7 @@ production_render_operator_handoffs() {
       --arg zone_id "$zone_id" \
       --arg dns_mode "$dns_mode" \
       --argjson ttl_seconds "$ttl_seconds" \
+      --argjson withdraw_operator_endpoints "$withdraw_operator_endpoints_json" \
       --argjson operator "$operator_json" \
       --argjson operator_role "$operator_role_json" \
       '{
@@ -3506,6 +3508,7 @@ production_render_operator_handoffs() {
         dkg_tls_dir: (if $dkg_tls_dir == "" then null else $dkg_tls_dir end),
         known_hosts_file: (if $known_hosts_file == "" then null else $known_hosts_file end),
         secret_contract_file: (if $secret_contract_file == "" then null else $secret_contract_file end),
+        withdraw_operator_endpoints: $withdraw_operator_endpoints,
         public_endpoint: (if $public_endpoint == "" then null else $public_endpoint end),
         dns: {
           mode: $dns_mode,
@@ -3525,7 +3528,7 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
-  local juno_txsign_signer_keys withdraw_extend_signer_keys owallet_ua withdraw_change_address
+  local juno_txsign_signer_keys withdraw_extend_signer_keys withdraw_operator_endpoints owallet_ua withdraw_change_address
   local juno_rpc_bind juno_rpc_allow_ips
   local withdraw_expiry_safety_margin withdraw_max_expiry_extension min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
@@ -3552,6 +3555,7 @@ production_render_operator_stack_env() {
   ipfs_api_bearer_token="$(production_env_first_value "$resolved_secret_env" CHECKPOINT_IPFS_API_BEARER_TOKEN || true)"
   kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
   environment="$(production_json_required "$operator_deploy" '.environment | select(type == "string" and length > 0)')"
+  withdraw_operator_endpoints="$(jq -r '.withdraw_operator_endpoints // [] | join(",")' "$operator_deploy")"
   runtime_config_secret_id="$(production_json_optional "$operator_deploy" '.runtime_config_secret_id')"
   render_host_runtime_config="false"
   if [[ -n "$runtime_config_secret_id" ]] && ! production_environment_allows_local_secret_resolvers "$environment"; then
@@ -3601,6 +3605,8 @@ production_render_operator_stack_env() {
     if [[ -n "$withdraw_max_expiry_extension" && "$withdraw_max_expiry_extension" != "12h" ]]; then
       die "resolved secret env must not override WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION (expected 12h, got $withdraw_max_expiry_extension)"
     fi
+  else
+    [[ -n "$withdraw_operator_endpoints" ]] || die "operator deploy manifest is missing withdraw_operator_endpoints for host-local runtime config"
   fi
 
   case "$signer_driver" in
@@ -3683,7 +3689,9 @@ EOF
   if [[ -n "$juno_txsign_signer_keys" ]]; then
     printf 'JUNO_TXSIGN_SIGNER_KEYS=%s\n' "$juno_txsign_signer_keys" >>"$output_file"
   fi
-  if [[ -n "$withdraw_extend_signer_keys" ]]; then
+  if [[ "$render_host_runtime_config" == "true" && -n "$withdraw_operator_endpoints" ]]; then
+    printf 'WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=%s\n' "$withdraw_operator_endpoints" >>"$output_file"
+  elif [[ -n "$withdraw_extend_signer_keys" ]]; then
     printf 'WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=%s\n' "$withdraw_extend_signer_keys" >>"$output_file"
   fi
   if [[ -n "$juno_rpc_bind" ]]; then

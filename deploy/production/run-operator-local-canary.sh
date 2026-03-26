@@ -89,6 +89,9 @@ elif [[ "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-}" != "6h" ]]; then
 elif [[ "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-}" != "12h" ]]; then
   withdraw_config_status="failed"
   withdraw_config_detail="operator env is missing WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h"
+elif [[ -z "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
+  withdraw_config_status="failed"
+  withdraw_config_detail="operator env is missing WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS"
 elif [[ -z "$extend_signer_bin" ]]; then
   withdraw_config_status="failed"
   withdraw_config_detail="operator env is missing WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN"
@@ -105,6 +108,9 @@ if [[ "$withdraw_config_status" == "passed" ]]; then
   if [[ "$txsign_help" != *"sign-digest"* ]]; then
     txsign_runtime_status="failed"
     txsign_runtime_detail="juno-txsign help does not list sign-digest"
+  elif [[ "$txsign_help" != *"--operator-endpoint"* ]]; then
+    txsign_runtime_status="failed"
+    txsign_runtime_detail="juno-txsign help does not list --operator-endpoint"
   else
     txsign_probe="$("$extend_signer_bin" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json 2>/dev/null || true)"
     signature_count="$(jq -r '.data.signatures | length // 0' <<<"$txsign_probe" 2>/dev/null || printf '0')"

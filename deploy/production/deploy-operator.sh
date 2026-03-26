@@ -1153,6 +1153,13 @@ grep -qE '(^|[[:space:]])sign-digest([[:space:]]|$)' <<<"$juno_txsign_help" || {
   echo "restored runtime juno-txsign binary does not support sign-digest: $juno_txsign_runtime_bin" >&2
   exit 1
 }
+withdraw_operator_endpoints_remote="$(env_get_value_remote "WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS")"
+if [[ -n "$withdraw_operator_endpoints_remote" ]]; then
+  grep -q -- '--operator-endpoint' <<<"$juno_txsign_help" || {
+    echo "restored runtime juno-txsign binary does not support --operator-endpoint: $juno_txsign_runtime_bin" >&2
+    exit 1
+  }
+fi
 
 checkpoint_signer_script="/usr/local/bin/intents-juno-checkpoint-signer.sh"
 checkpoint_aggregator_script="/usr/local/bin/intents-juno-checkpoint-aggregator.sh"
@@ -1172,9 +1179,36 @@ set -euo pipefail
 set -a
 source /etc/intents-juno/operator-stack.env
 set +a
+local_signer_key="${JUNO_TXSIGN_SIGNER_KEYS:-}"
+[[ "$local_signer_key" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+  echo "withdraw extend signer requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+export JUNO_TXSIGN_SIGNER_KEYS="$local_signer_key"
+
+if [[ -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
+  txsign_help="$(/var/lib/intents-juno/operator-runtime/bin/juno-txsign --help 2>&1 || true)"
+  grep -q -- '--operator-endpoint' <<<"$txsign_help" || {
+    echo "withdraw extend signer requires juno-txsign support for --operator-endpoint" >&2
+    exit 1
+  }
+  IFS=',' read -r -a endpoint_pairs <<<"${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS}"
+  endpoint_args=()
+  for endpoint_pair in "${endpoint_pairs[@]}"; do
+    [[ -n "$endpoint_pair" ]] || continue
+    endpoint_addr="${endpoint_pair%%=*}"
+    endpoint_host_port="${endpoint_pair#*=}"
+    if [[ -n "${OPERATOR_ADDRESS:-}" && "$endpoint_addr" == "${OPERATOR_ADDRESS}" ]]; then
+      continue
+    fi
+    endpoint_args+=(--operator-endpoint "https://${endpoint_host_port}")
+  done
+  exec /var/lib/intents-juno/operator-runtime/bin/juno-txsign "$@" "${endpoint_args[@]}"
+fi
+
 extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
 [[ -n "$extend_signer_keys" ]] || {
-  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS or JUNO_TXSIGN_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
+  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS or WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
 export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
