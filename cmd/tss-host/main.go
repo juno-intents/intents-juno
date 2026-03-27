@@ -30,21 +30,20 @@ func main() {
 	var (
 		listenAddr = flag.String("listen-addr", "127.0.0.1:8443", "listen address")
 
-		tlsCertFile  = flag.String("tls-cert-file", "", "server TLS cert PEM file (required unless --insecure-http)")
-		tlsKeyFile   = flag.String("tls-key-file", "", "server TLS key PEM file (required unless --insecure-http)")
-		clientCAFile = flag.String("client-ca-file", "", "client CA PEM file (enables mTLS when set)")
+		tlsCertFile  = flag.String("tls-cert-file", "", "server TLS cert PEM file (required)")
+		tlsKeyFile   = flag.String("tls-key-file", "", "server TLS key PEM file (required)")
+		clientCAFile = flag.String("client-ca-file", "", "client CA PEM file (required for mTLS)")
 
-		insecureHTTP       = flag.Bool("insecure-http", false, "serve plain HTTP (DANGEROUS; dev only)")
 		signerBin          = flag.String("signer-bin", "", "path to signer command binary (required; typically tss-signer)")
 		signerMaxRespBytes = flag.Int("signer-max-response-bytes", 1<<20, "max signer response size (bytes)")
 
 		maxBodyBytes   = flag.Int64("max-body-bytes", 1<<20, "max HTTP request body size (bytes)")
 		maxTxPlanBytes = flag.Int("max-txplan-bytes", 1<<20, "max decoded txPlan size (bytes)")
 		maxSessions    = flag.Int("max-sessions", 1024, "max in-memory sessions for idempotency")
-		authTokenEnv   = flag.String("auth-token-env", "TSS_AUTH_TOKEN", "env var containing the shared bearer token for /v1/sign (required unless --insecure-http)")
+		authTokenEnv   = flag.String("auth-token-env", "TSS_AUTH_TOKEN", "env var containing the shared bearer token for /v1/sign (required)")
 
-		baseChainID  = flag.Uint("base-chain-id", 0, "Base/EVM chain id used to validate withdrawal tx plans (required unless --insecure-http)")
-		bridgeAddr   = flag.String("bridge-address", "", "Bridge contract address used to validate withdrawal tx plans (required unless --insecure-http)")
+		baseChainID = flag.Uint("base-chain-id", 0, "Base/EVM chain id used to validate withdrawal tx plans (required)")
+		bridgeAddr  = flag.String("bridge-address", "", "Bridge contract address used to validate withdrawal tx plans (required)")
 
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
 		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
@@ -93,32 +92,21 @@ func main() {
 	authToken := strings.TrimSpace(os.Getenv(strings.TrimSpace(*authTokenEnv)))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	devMode := devModeEnabled()
-	if *insecureHTTP && !devMode {
-		log.Error("--insecure-http requires JUNO_DEV_MODE=true")
+	resolvedPostgresDSN, err := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
+	if err != nil {
+		log.Error("resolve postgres dsn", "err", err)
 		os.Exit(2)
 	}
-	if !devMode {
-		if strings.TrimSpace(*clientCAFile) == "" {
-			log.Error("missing --client-ca-file; production mode requires client mTLS")
-			os.Exit(2)
-		}
-		if err := validatePrivateListenAddr(*listenAddr); err != nil {
-			log.Error("invalid --listen-addr for production mode", "err", err)
-			os.Exit(2)
-		}
-		if authToken == "" {
-			log.Error("missing auth token env", "env", *authTokenEnv)
-			os.Exit(2)
-		}
-		if *baseChainID == 0 {
-			log.Error("missing --base-chain-id")
-			os.Exit(2)
-		}
-		if !common.IsHexAddress(strings.TrimSpace(*bridgeAddr)) {
-			log.Error("invalid --bridge-address")
-			os.Exit(2)
-		}
+	if err := validateSecureTSSHostConfig(secureTSSHostConfig{
+		ListenAddr:   *listenAddr,
+		ClientCAFile: *clientCAFile,
+		AuthToken:    authToken,
+		BaseChainID:  *baseChainID,
+		BridgeAddr:   *bridgeAddr,
+		PostgresDSN:  resolvedPostgresDSN,
+	}); err != nil {
+		log.Error("invalid secure config", "err", err)
+		os.Exit(2)
 	}
 
 	signer, err := tsshost.NewExecSigner(*signerBin, signerArgs.Values(), *signerMaxRespBytes)
@@ -132,41 +120,33 @@ func main() {
 		verifier tsshost.Verifier
 		dbReady  func(context.Context) error
 	)
-	resolvedPostgresDSN, err := pgxpoolutil.ResolveDSN(*postgresDSN, *postgresDSNEnv)
-	if err != nil {
-		if !devMode {
-			log.Error("resolve postgres dsn", "err", err)
-			os.Exit(2)
-		}
-	} else {
-		poolCfg, cfgErr := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
-			MinConns:          int32(*postgresMinConns),
-			MaxConns:          int32(*postgresMaxConns),
-			HealthCheckPeriod: *postgresHealthCheckPeriod,
-		})
-		if cfgErr != nil {
-			log.Error("parse pgx pool config", "err", cfgErr)
-			os.Exit(2)
-		}
-		pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
-		if err != nil {
-			log.Error("connect postgres", "err", err)
-			os.Exit(2)
-		}
-		defer pool.Close()
-
-		withdrawStore, storeErr := withdrawpg.New(pool)
-		if storeErr != nil {
-			log.Error("init withdraw store", "err", storeErr)
-			os.Exit(2)
-		}
-		verifier = tsshost.NewWithdrawBatchVerifier(withdrawStore, tsshost.WithdrawBatchVerifierConfig{
-			BaseChainID:   uint32(*baseChainID),
-			BridgeAddress: common.HexToAddress(strings.TrimSpace(*bridgeAddr)),
-		})
-		dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+	poolCfg, cfgErr := pgxpoolutil.ParseConfig(resolvedPostgresDSN, pgxpoolutil.Settings{
+		MinConns:          int32(*postgresMinConns),
+		MaxConns:          int32(*postgresMaxConns),
+		HealthCheckPeriod: *postgresHealthCheckPeriod,
+	})
+	if cfgErr != nil {
+		log.Error("parse pgx pool config", "err", cfgErr)
+		os.Exit(2)
 	}
-	if verifier == nil && !devMode {
+	pool, err = pgxpool.NewWithConfig(ctx, poolCfg)
+	if err != nil {
+		log.Error("connect postgres", "err", err)
+		os.Exit(2)
+	}
+	defer pool.Close()
+
+	withdrawStore, storeErr := withdrawpg.New(pool)
+	if storeErr != nil {
+		log.Error("init withdraw store", "err", storeErr)
+		os.Exit(2)
+	}
+	verifier = tsshost.NewWithdrawBatchVerifier(withdrawStore, tsshost.WithdrawBatchVerifierConfig{
+		BaseChainID:   uint32(*baseChainID),
+		BridgeAddress: common.HexToAddress(strings.TrimSpace(*bridgeAddr)),
+	})
+	dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
+	if verifier == nil {
 		log.Error("missing withdrawal verifier configuration")
 		os.Exit(2)
 	}
@@ -199,12 +179,7 @@ func main() {
 
 	errCh := make(chan error, 1)
 	go func() {
-		log.Info("tss-host starting", "addr", *listenAddr, "tls", !*insecureHTTP, "mtls", *clientCAFile != "", "batch_verifier", verifier != nil)
-		if *insecureHTTP {
-			errCh <- srv.ListenAndServe()
-			return
-		}
-
+		log.Info("tss-host starting", "addr", *listenAddr, "tls", true, "mtls", true, "batch_verifier", verifier != nil)
 		tlsCfg, err := buildTLSConfig(*tlsCertFile, *tlsKeyFile, *clientCAFile)
 		if err != nil {
 			errCh <- err
@@ -233,6 +208,9 @@ func buildTLSConfig(certFile string, keyFile string, clientCAFile string) (*tls.
 	if certFile == "" || keyFile == "" {
 		return nil, fmt.Errorf("missing --tls-cert-file/--tls-key-file")
 	}
+	if clientCAFile == "" {
+		return nil, fmt.Errorf("missing --client-ca-file")
+	}
 
 	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
 	if err != nil {
@@ -244,18 +222,16 @@ func buildTLSConfig(certFile string, keyFile string, clientCAFile string) (*tls.
 		Certificates: []tls.Certificate{cert},
 	}
 
-	if clientCAFile != "" {
-		caPEM, err := os.ReadFile(clientCAFile)
-		if err != nil {
-			return nil, fmt.Errorf("read client ca file: %w", err)
-		}
-		pool := x509.NewCertPool()
-		if ok := pool.AppendCertsFromPEM(caPEM); !ok {
-			return nil, fmt.Errorf("parse client ca file")
-		}
-		cfg.ClientCAs = pool
-		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+	caPEM, err := os.ReadFile(clientCAFile)
+	if err != nil {
+		return nil, fmt.Errorf("read client ca file: %w", err)
 	}
+	pool := x509.NewCertPool()
+	if ok := pool.AppendCertsFromPEM(caPEM); !ok {
+		return nil, fmt.Errorf("parse client ca file")
+	}
+	cfg.ClientCAs = pool
+	cfg.ClientAuth = tls.RequireAndVerifyClientCert
 
 	return cfg, nil
 }
@@ -281,13 +257,35 @@ func validatePrivateListenAddr(addr string) error {
 	return fmt.Errorf("listen host %q must be loopback or private", host)
 }
 
-func devModeEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("JUNO_DEV_MODE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
+type secureTSSHostConfig struct {
+	ListenAddr   string
+	ClientCAFile string
+	AuthToken    string
+	BaseChainID  uint
+	BridgeAddr   string
+	PostgresDSN  string
+}
+
+func validateSecureTSSHostConfig(cfg secureTSSHostConfig) error {
+	if strings.TrimSpace(cfg.ClientCAFile) == "" {
+		return fmt.Errorf("missing --client-ca-file")
 	}
+	if err := validatePrivateListenAddr(cfg.ListenAddr); err != nil {
+		return fmt.Errorf("invalid --listen-addr: %w", err)
+	}
+	if strings.TrimSpace(cfg.AuthToken) == "" {
+		return fmt.Errorf("missing auth token env")
+	}
+	if cfg.BaseChainID == 0 {
+		return fmt.Errorf("missing --base-chain-id")
+	}
+	if !common.IsHexAddress(strings.TrimSpace(cfg.BridgeAddr)) {
+		return fmt.Errorf("invalid --bridge-address")
+	}
+	if strings.TrimSpace(cfg.PostgresDSN) == "" {
+		return fmt.Errorf("missing postgres dsn")
+	}
+	return nil
 }
 
 type readyChecker interface {

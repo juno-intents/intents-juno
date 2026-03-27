@@ -303,7 +303,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
   assert_contains "$tss_wrapper" 'export "$tss_postgres_dsn_env"' "tss wrapper exports the selected postgres dsn env var"
   assert_contains "$tss_wrapper" '--postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "tss wrapper passes postgres DSN by env indirection"
-  assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires JUNO_DEV_MODE=true"' "tss wrapper blocks host-process outside dev mode"
+  assert_contains "$tss_wrapper" 'echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable' "tss wrapper validates host-process signer wiring directly"
 
   local dkg_wrapper
   dkg_wrapper="$(extract_block "cat > /tmp/intents-juno-dkg-admin-serve.sh <<'EOF_DKG_SERVE'" "EOF_DKG_SERVE")"
@@ -659,7 +659,6 @@ test_build_operator_stack_ami_wrapper_smoke() {
   printf 'cert' >"$tmp/server.pem"
   printf 'key' >"$tmp/server.key"
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 TSS_SIGNER_UFVK_FILE=$tmp/ufvk.txt
 TSS_SIGNER_WORK_DIR=$tmp/work
 TSS_TLS_CERT_FILE=$tmp/server.pem
@@ -669,10 +668,10 @@ BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 EOF
 
   if PATH="$fake_bin:$PATH" "$tmp/intents-juno-tss-host.sh" >"$tmp/tss.stdout" 2>"$stderr_file"; then
-    printf 'expected tss wrapper to reject missing client CA in production mode\n' >&2
+    printf 'expected tss wrapper to reject missing client CA\n' >&2
     exit 1
   fi
-  assert_contains "$(cat "$stderr_file")" "tss-host production mode requires TSS_CLIENT_CA_FILE" "tss wrapper rejects non-mTLS production wiring"
+  assert_contains "$(cat "$stderr_file")" "tss-host requires TSS_CLIENT_CA_FILE" "tss wrapper rejects non-mTLS wiring"
 
   cat >"$fake_bin/tss-host" <<EOF
 #!/usr/bin/env bash
@@ -690,7 +689,6 @@ EOF
   printf 'eif' >"$tmp/spendauth.eif"
   printf 'attestation' >"$tmp/attestation.json"
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://tss?sslmode=require
 TSS_SIGNER_UFVK_FILE=$tmp/ufvk.txt
 TSS_SIGNER_WORK_DIR=$tmp/work
@@ -737,7 +735,6 @@ EOF
   printf 'coord-cert' >"$tmp/coordinator-client.pem"
   printf 'coord-key' >"$tmp/coordinator-client.key"
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://coordinator?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 BASE_CHAIN_ID=84532
@@ -849,7 +846,6 @@ EOF
   assert_contains "$(cat "$extend_stderr_file")" "must not receive WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" "withdraw extend signer wrapper rejects legacy signer rosters"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999
 JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443,0x8888888888888888888888888888888888888888=203.0.113.12:18444
@@ -897,7 +893,6 @@ EOF
   chmod 0755 "$fake_bin/withdraw-finalizer"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://finalizer?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 CHECKPOINT_OPERATORS=0x1111111111111111111111111111111111111111,0x2222222222222222222222222222222222222222,0x3333333333333333333333333333333333333333
@@ -966,7 +961,6 @@ EOF
     "$env_file"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
@@ -988,7 +982,6 @@ EOF
   assert_contains "$(cat "$signer_output_file")" '--lease-name checkpoint-signer-0x2222222222222222222222222222222222222222' "checkpoint signer wrapper uses a unique lease name per operator"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
@@ -1025,7 +1018,6 @@ EOF
   chmod 0755 "$fake_bin/checkpoint-signer"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
@@ -1048,7 +1040,6 @@ EOF
   assert_contains "$(cat "$signer_stderr_file")" "checkpoint-signer binary does not support CHECKPOINT_SIGNER_DRIVER=aws-kms" "checkpoint signer wrapper fails closed on legacy binaries"
 
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=false
 CHECKPOINT_POSTGRES_DSN=postgres://signer?sslmode=require
 CHECKPOINT_KAFKA_BROKERS=b-1.example:9094
 CHECKPOINT_SIGNATURE_TOPIC=checkpoints.signatures.v1
@@ -1080,7 +1071,6 @@ EOF
   mkdir -p "$tmp/operator-runtime/bundle"
   printf '{"network":"testnet"}\n' >"$tmp/operator-runtime/bundle/admin-config.json"
   cat >"$env_file" <<EOF
-JUNO_DEV_MODE=true
 TSS_SIGNER_RUNTIME_MODE=host-process
 TSS_SPENDAUTH_SIGNER_BIN=$fake_bin/dkg-admin
 DKG_ADMIN_CONFIG_FILE=$tmp/operator-runtime/bundle/admin-config.json

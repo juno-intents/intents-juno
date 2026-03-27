@@ -154,15 +154,14 @@ func main() {
 		junoConfirmWait   = flag.Duration("juno-confirm-max-wait", 30*time.Second, "maximum wait per confirmation check before yielding pending/missing status")
 
 		// Signer (tss-host)
-		tssURL            = flag.String("tss-url", "", "tss-host base url (required; must be https unless --tss-insecure-http)")
-		tssInsecureHTTP   = flag.Bool("tss-insecure-http", false, "allow tss-url over plain http (DANGEROUS; dev only)")
+		tssURL            = flag.String("tss-url", "", "tss-host base url (required; must use https)")
 		tssTimeout        = flag.Duration("tss-timeout", 120*time.Second, "tss request timeout")
 		tssMaxRespBytes   = flag.Int64("tss-max-response-bytes", 1<<20, "max tss response size (bytes)")
 		tssAuthTokenEnv   = flag.String("tss-auth-token-env", "TSS_AUTH_TOKEN", "env var containing the shared bearer token for tss-host")
-		tssServerCAFile   = flag.String("tss-server-ca-file", "", "server root CA PEM file (optional; defaults to system roots)")
+		tssServerCAFile   = flag.String("tss-server-ca-file", "", "server root CA PEM file (required)")
 		tssServerName     = flag.String("tss-server-name", "", "optional TLS server name override for tss-url certificate validation")
-		tssClientCertFile = flag.String("tss-client-cert-file", "", "client cert PEM file (optional; for mTLS)")
-		tssClientKeyFile  = flag.String("tss-client-key-file", "", "client key PEM file (optional; for mTLS)")
+		tssClientCertFile = flag.String("tss-client-cert-file", "", "client cert PEM file (required for mTLS)")
+		tssClientKeyFile  = flag.String("tss-client-key-file", "", "client key PEM file (required for mTLS)")
 
 		// Base expiry extension path
 		baseChainID         = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
@@ -202,8 +201,6 @@ func main() {
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(2)
 	}
-	devMode := devModeEnabled()
-
 	if *owner == "" {
 		fmt.Fprintln(os.Stderr, "error: --owner is required")
 		os.Exit(2)
@@ -267,19 +264,14 @@ func main() {
 			fmt.Fprintln(os.Stderr, "error: --extend-signer-bin is required and --extend-signer-max-response-bytes must be > 0")
 			os.Exit(2)
 		}
-		if *tssInsecureHTTP && !devMode {
-			fmt.Fprintln(os.Stderr, "error: --tss-insecure-http requires JUNO_DEV_MODE=true")
+		if err := validateSecureTSSClientConfig(secureTSSClientConfig{
+			URL:            *tssURL,
+			ServerCAFile:   *tssServerCAFile,
+			ClientCertFile: *tssClientCertFile,
+			ClientKeyFile:  *tssClientKeyFile,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
 			os.Exit(2)
-		}
-		if !devMode {
-			if strings.TrimSpace(*tssServerCAFile) == "" {
-				fmt.Fprintln(os.Stderr, "error: --tss-server-ca-file is required in production mode")
-				os.Exit(2)
-			}
-			if strings.TrimSpace(*tssClientCertFile) == "" || strings.TrimSpace(*tssClientKeyFile) == "" {
-				fmt.Fprintln(os.Stderr, "error: --tss-client-cert-file and --tss-client-key-file are required in production mode")
-				os.Exit(2)
-			}
 		}
 	}
 	if *ackTimeout <= 0 {
@@ -454,9 +446,6 @@ func main() {
 	}
 	if tssAuthToken != "" {
 		tssOpts = append(tssOpts, tss.WithBearerToken(tssAuthToken))
-	}
-	if *tssInsecureHTTP {
-		tssOpts = append(tssOpts, tss.WithInsecureHTTP())
 	}
 	signer, err = tss.NewClient(*tssURL, tssOpts...)
 	if err != nil {
@@ -986,6 +975,27 @@ func validFinalitySource(s string) bool {
 	return remainder != "0"
 }
 
+type secureTSSClientConfig struct {
+	URL            string
+	ServerCAFile   string
+	ClientCertFile string
+	ClientKeyFile  string
+}
+
+func validateSecureTSSClientConfig(cfg secureTSSClientConfig) error {
+	url := strings.TrimSpace(strings.ToLower(cfg.URL))
+	if !strings.HasPrefix(url, "https://") {
+		return fmt.Errorf("--tss-url must use https")
+	}
+	if strings.TrimSpace(cfg.ServerCAFile) == "" {
+		return fmt.Errorf("--tss-server-ca-file is required")
+	}
+	if strings.TrimSpace(cfg.ClientCertFile) == "" || strings.TrimSpace(cfg.ClientKeyFile) == "" {
+		return fmt.Errorf("--tss-client-cert-file and --tss-client-key-file are required")
+	}
+	return nil
+}
+
 func normalizeRuntimeMode(v string) (string, error) {
 	mode := strings.ToLower(strings.TrimSpace(v))
 	switch mode {
@@ -1023,15 +1033,6 @@ func resolveRequiredFlagOrEnv(flagName string, flagValue string, envName string)
 		return "", fmt.Errorf("missing %s in env %s", flagName, envName)
 	}
 	return value, nil
-}
-
-func devModeEnabled() bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv("JUNO_DEV_MODE"))) {
-	case "1", "true", "yes", "on":
-		return true
-	default:
-		return false
-	}
 }
 
 func newBlobStore(ctx context.Context, driver string, bucket string, prefix string, maxGetSize int64) (blobstore.Store, error) {

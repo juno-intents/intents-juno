@@ -75,6 +75,32 @@ func TestNewTSSHTTPClient_ServerName(t *testing.T) {
 	}
 }
 
+func TestValidateSecureTSSClientConfig(t *testing.T) {
+	t.Parallel()
+
+	valid := secureTSSClientConfig{
+		URL:            "https://127.0.0.1:9443",
+		ServerCAFile:   "/tmp/ca.pem",
+		ClientCertFile: "/tmp/client.pem",
+		ClientKeyFile:  "/tmp/client.key",
+	}
+	if err := validateSecureTSSClientConfig(valid); err != nil {
+		t.Fatalf("validateSecureTSSClientConfig(valid): %v", err)
+	}
+
+	invalid := valid
+	invalid.ServerCAFile = ""
+	if err := validateSecureTSSClientConfig(invalid); err == nil {
+		t.Fatalf("expected missing server CA to fail")
+	}
+
+	invalid = valid
+	invalid.URL = "http://127.0.0.1:9443"
+	if err := validateSecureTSSClientConfig(invalid); err == nil {
+		t.Fatalf("expected non-https url to fail")
+	}
+}
+
 func TestShouldAckWithdrawIngestError(t *testing.T) {
 	t.Parallel()
 

@@ -491,7 +491,6 @@ CHECKPOINT_BLOB_PREFIX=checkpoint-packages
 CHECKPOINT_BLOB_SSE_KMS_KEY_ID=
 CHECKPOINT_IPFS_API_URL=
 JUNO_QUEUE_KAFKA_TLS=true
-JUNO_DEV_MODE=false
 BASE_CHAIN_ID=__BOOTSTRAP_BASE_CHAIN_ID__
 BRIDGE_ADDRESS=__BOOTSTRAP_BRIDGE_ADDRESS__
 BASE_RELAYER_RPC_URL=
@@ -1428,13 +1427,6 @@ parse_epoch() {
   date -u -d "$raw" +%s 2>/dev/null
 }
 
-dev_mode_enabled() {
-  case "${JUNO_DEV_MODE:-false}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
 validate_nitro_attestation() {
   local attestation_file="$1"
   local expected_pcr0="$2"
@@ -1545,10 +1537,6 @@ case "$runtime_mode" in
     exec "${TSS_NITRO_SPENDAUTH_SIGNER_BIN}" "$@"
     ;;
   host-process)
-    if ! dev_mode_enabled; then
-      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
-      exit 1
-    fi
     [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
       echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
       exit 1
@@ -1594,30 +1582,22 @@ source /etc/intents-juno/operator-stack.env
   echo "tss-host TLS key is missing or empty: ${TSS_TLS_KEY_FILE:-unset}" >&2
   exit 1
 }
-dev_mode_enabled() {
-  case "${JUNO_DEV_MODE:-false}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
+[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {
+  echo "tss-host requires TSS_CLIENT_CA_FILE to reference a readable PEM file" >&2
+  exit 1
 }
-if ! dev_mode_enabled; then
-  [[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {
-    echo "tss-host production mode requires TSS_CLIENT_CA_FILE to reference a readable PEM file" >&2
-    exit 1
-  }
-  [[ -n "${TSS_AUTH_TOKEN:-}" ]] || {
-    echo "tss-host production mode requires TSS_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
-    exit 1
-  }
-  [[ -n "${BASE_CHAIN_ID:-}" ]] || {
-    echo "tss-host production mode requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
-    exit 1
-  }
-  [[ -n "${BRIDGE_ADDRESS:-}" ]] || {
-    echo "tss-host production mode requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
-    exit 1
-  }
-fi
+[[ -n "${TSS_AUTH_TOKEN:-}" ]] || {
+  echo "tss-host requires TSS_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BASE_CHAIN_ID:-}" ]] || {
+  echo "tss-host requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+[[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+  echo "tss-host requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
 case "$runtime_mode" in
   nitro-enclave)
@@ -1651,10 +1631,6 @@ case "$runtime_mode" in
     }
     ;;
   host-process)
-    if ! dev_mode_enabled; then
-      echo "tss-host host-process mode requires JUNO_DEV_MODE=true" >&2
-      exit 1
-    fi
     [[ -x "${TSS_SPENDAUTH_SIGNER_BIN:-}" ]] || {
       echo "tss-host host-process mode requires TSS_SPENDAUTH_SIGNER_BIN executable: ${TSS_SPENDAUTH_SIGNER_BIN:-unset}" >&2
       exit 1
@@ -1667,12 +1643,10 @@ case "$runtime_mode" in
 esac
 mkdir -p "${TSS_SIGNER_WORK_DIR}"
 tss_postgres_dsn_env="${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
-if ! dev_mode_enabled; then
-  [[ -n "${!tss_postgres_dsn_env:-}" ]] || {
-    echo "tss-host production mode requires ${tss_postgres_dsn_env} to reference a Postgres DSN" >&2
-    exit 1
-  }
-fi
+[[ -n "${!tss_postgres_dsn_env:-}" ]] || {
+  echo "tss-host requires ${tss_postgres_dsn_env} to reference a Postgres DSN" >&2
+  exit 1
+}
 if [[ "${!tss_postgres_dsn_env+x}" == "x" ]]; then
   export "$tss_postgres_dsn_env"
 fi
@@ -1962,12 +1936,6 @@ export_optional_env_vars() {
   done
 }
 export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
-dev_mode_enabled() {
-  case "${JUNO_DEV_MODE:-false}" in
-    1|true|TRUE|yes|YES|on|ON) return 0 ;;
-    *) return 1 ;;
-  esac
-}
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "withdraw-coordinator requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -2032,16 +2000,14 @@ dev_mode_enabled() {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE to reference a readable PEM file" >&2
   exit 1
 }
-if ! dev_mode_enabled; then
-  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE:-}" ]] || {
-    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE to reference a readable PEM file" >&2
-    exit 1
-  }
-  [[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE:-}" ]] || {
-    echo "withdraw-coordinator production mode requires WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE to reference a readable PEM file" >&2
-    exit 1
-  }
-fi
+[[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE to reference a readable PEM file" >&2
+  exit 1
+}
+[[ -s "${WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE:-}" ]] || {
+  echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE to reference a readable PEM file" >&2
+  exit 1
+}
 [[ -n "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN:-}" ]] || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN in /etc/intents-juno/operator-stack.env" >&2
   exit 1

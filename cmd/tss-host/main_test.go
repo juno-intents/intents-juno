@@ -66,3 +66,32 @@ func TestSignerReadinessCheck_IgnoresSignersWithoutReadyMethod(t *testing.T) {
 		t.Fatalf("expected nil readiness check for signer without Ready method")
 	}
 }
+
+func TestValidateSecureTSSHostConfig(t *testing.T) {
+	t.Parallel()
+
+	valid := secureTSSHostConfig{
+		ListenAddr:   "127.0.0.1:9443",
+		ClientCAFile: "/tmp/ca.pem",
+		AuthToken:    "secret",
+		BaseChainID:  8453,
+		BridgeAddr:   "0x1111111111111111111111111111111111111111",
+		PostgresDSN:  "postgres://example?sslmode=require",
+	}
+
+	if err := validateSecureTSSHostConfig(valid); err != nil {
+		t.Fatalf("validateSecureTSSHostConfig(valid): %v", err)
+	}
+
+	invalid := valid
+	invalid.ClientCAFile = ""
+	if err := validateSecureTSSHostConfig(invalid); err == nil {
+		t.Fatalf("expected missing client CA to fail")
+	}
+
+	invalid = valid
+	invalid.AuthToken = ""
+	if err := validateSecureTSSHostConfig(invalid); err == nil {
+		t.Fatalf("expected missing auth token to fail")
+	}
+}
