@@ -202,6 +202,14 @@ contract BridgeTest is Test {
         assertFalse(bridge.paused());
     }
 
+    function test_bridgeRejectsDirectEthTransfers() public {
+        vm.deal(address(this), 1 ether);
+
+        (bool ok,) = address(bridge).call{value: 1 wei}("");
+
+        assertFalse(ok);
+    }
+
     function test_pauseGuardian_cannotSetAdminRoles() public {
         bridge.setPauseGuardian(pauseGuardian);
 
