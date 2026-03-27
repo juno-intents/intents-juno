@@ -3,6 +3,7 @@ package eth
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -19,15 +20,23 @@ type NonceManager struct {
 	backend PendingNoncer
 	addr    common.Address
 
-	mu   sync.Mutex
-	next uint64
-	have bool
+	mu sync.Mutex
+
+	next           uint64
+	have           bool
+	lastReservedAt time.Time
+	now            func() time.Time
+	resyncInterval time.Duration
 }
+
+const defaultNonceResyncInterval = 30 * time.Second
 
 func NewNonceManager(backend PendingNoncer, addr common.Address) *NonceManager {
 	return &NonceManager{
-		backend: backend,
-		addr:    addr,
+		backend:        backend,
+		addr:           addr,
+		now:            time.Now,
+		resyncInterval: defaultNonceResyncInterval,
 	}
 }
 
@@ -43,10 +52,17 @@ func (m *NonceManager) Next(ctx context.Context) (uint64, error) {
 		}
 		m.next = n
 		m.have = true
+	} else if m.shouldResyncLocked() {
+		n, err := m.backend.PendingNonceAt(ctx, m.addr)
+		if err != nil {
+			return 0, err
+		}
+		m.next = n
 	}
 
 	n := m.next
 	m.next++
+	m.lastReservedAt = m.now()
 	return n, nil
 }
 
@@ -66,4 +82,11 @@ func (m *NonceManager) Sync(ctx context.Context) (uint64, error) {
 		m.have = true
 	}
 	return n, nil
+}
+
+func (m *NonceManager) shouldResyncLocked() bool {
+	if m.resyncInterval <= 0 || m.now == nil || m.lastReservedAt.IsZero() {
+		return false
+	}
+	return !m.now().Before(m.lastReservedAt.Add(m.resyncInterval))
 }

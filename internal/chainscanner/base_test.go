@@ -237,6 +237,75 @@ func TestBaseScanner_PollNoNewBlocks(t *testing.T) {
 	}
 }
 
+func TestBaseScanner_PollFlushesPendingEventsBeforeScanningNewBlocks(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	stateStore := NewMemoryStateStore()
+	client := &mockEthClient{blockNumber: 10}
+
+	header10, err := client.HeaderByNumber(ctx, big.NewInt(10))
+	if err != nil {
+		t.Fatalf("HeaderByNumber(10): %v", err)
+	}
+
+	pendingEvent := WithdrawRequestedEvent{
+		WithdrawalID: [32]byte{0x44},
+		Requester:    common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		Amount:       big.NewInt(123),
+		RecipientUA:  []byte("pending"),
+		Expiry:       1700000000,
+		FeeBps:       50,
+		BlockNumber:  10,
+		BlockHash:    common.HexToHash("0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+		TxHash:       common.HexToHash("0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+		LogIndex:     1,
+	}
+	if err := stateStore.StageScanData(ctx, "test-scanner", []BlockRef{{
+		Height:     10,
+		Hash:       header10.Hash(),
+		ParentHash: header10.ParentHash,
+	}}, []WithdrawRequestedEvent{pendingEvent}, 10); err != nil {
+		t.Fatalf("StageScanData: %v", err)
+	}
+
+	scanner, err := NewBaseScanner(BaseScannerConfig{
+		Client:      client,
+		BridgeAddr:  common.HexToAddress("0x1234"),
+		StateStore:  stateStore,
+		ServiceName: "test-scanner",
+	})
+	if err != nil {
+		t.Fatalf("NewBaseScanner: %v", err)
+	}
+
+	var published []WithdrawRequestedEvent
+	if err := scanner.poll(ctx, 0, func(_ context.Context, e WithdrawRequestedEvent) error {
+		published = append(published, e)
+		return nil
+	}); err != nil {
+		t.Fatalf("poll: %v", err)
+	}
+
+	if len(published) != 1 {
+		t.Fatalf("published count: got %d want 1", len(published))
+	}
+	if published[0].WithdrawalID != pendingEvent.WithdrawalID {
+		t.Fatalf("published withdrawal id: got %x want %x", published[0].WithdrawalID, pendingEvent.WithdrawalID)
+	}
+	if got := len(client.filterCalls); got != 0 {
+		t.Fatalf("filter calls: got %d want 0", got)
+	}
+
+	pending, err := stateStore.ListPendingWithdrawEvents(ctx, "test-scanner", 10)
+	if err != nil {
+		t.Fatalf("ListPendingWithdrawEvents: %v", err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("expected pending queue to be drained, got %d events", len(pending))
+	}
+}
+
 // buildWithdrawRequestedLog creates a synthetic WithdrawRequested log for testing.
 func buildWithdrawRequestedLog(
 	bridgeAddr common.Address,
@@ -460,10 +529,19 @@ func TestBaseScanner_PublishErrorStopsProcessing(t *testing.T) {
 		t.Fatalf("expected publish called twice, got %d", callCount)
 	}
 
-	// State should NOT be updated since publish failed.
+	// The scan cursor is durably staged before publish. The failed event must
+	// remain pending so a restart can resume without rescanning the block range.
 	h, _ := stateStore.GetLastHeight(ctx, "test-scanner")
-	if h != 0 {
-		t.Fatalf("expected state not updated, got height=%d", h)
+	if h != 20 {
+		t.Fatalf("expected staged height=20, got %d", h)
+	}
+
+	pending, err := stateStore.ListPendingWithdrawEvents(ctx, "test-scanner", 10)
+	if err != nil {
+		t.Fatalf("ListPendingWithdrawEvents: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("expected one pending event after publish failure, got %d", len(pending))
 	}
 }
 

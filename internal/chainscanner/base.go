@@ -173,6 +173,10 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 		fromBlock = startBlock
 	}
 
+	if err := s.publishPending(ctx, publish); err != nil {
+		return err
+	}
+
 	if fromBlock > int64(currentBlock) {
 		return nil // nothing to scan
 	}
@@ -192,28 +196,24 @@ func (s *BaseScanner) poll(ctx context.Context, startBlock int64, publish func(c
 		return err
 	}
 
-	for _, event := range events {
-		event.FinalitySource = finalitySource
-		if err := publish(ctx, event); err != nil {
-			return fmt.Errorf("publish event: %w", err)
-		}
+	for i := range events {
+		events[i].FinalitySource = finalitySource
 	}
 
+	refs := make([]BlockRef, 0, len(headers))
 	for _, hdr := range headers {
-		if err := s.stateStore.StoreBlockRef(ctx, s.serviceName, BlockRef{
+		refs = append(refs, BlockRef{
 			Height:     hdr.Number.Int64(),
 			Hash:       hdr.Hash(),
 			ParentHash: hdr.ParentHash,
-		}); err != nil {
-			return fmt.Errorf("store block ref: %w", err)
-		}
+		})
 	}
 
-	if err := s.stateStore.SetLastHeight(ctx, s.serviceName, toBlock); err != nil {
-		return fmt.Errorf("set last height: %w", err)
+	if err := s.stateStore.StageScanData(ctx, s.serviceName, refs, events, toBlock); err != nil {
+		return fmt.Errorf("stage scan data: %w", err)
 	}
 
-	return nil
+	return s.publishPending(ctx, publish)
 }
 
 func (s *BaseScanner) resolveScanHead(ctx context.Context) (uint64, string, error) {
@@ -278,6 +278,9 @@ func (s *BaseScanner) rewindToCanonicalHeight(ctx context.Context, currentBlock 
 				if err := s.stateStore.DeleteBlockRefsFromHeight(ctx, s.serviceName, probeHeight+1); err != nil {
 					return 0, fmt.Errorf("delete rewound block refs: %w", err)
 				}
+				if err := s.stateStore.DeletePendingWithdrawEventsFromHeight(ctx, s.serviceName, probeHeight+1); err != nil {
+					return 0, fmt.Errorf("delete rewound pending events: %w", err)
+				}
 				if err := s.stateStore.SetLastHeight(ctx, s.serviceName, probeHeight); err != nil {
 					return 0, fmt.Errorf("rewind last height: %w", err)
 				}
@@ -291,10 +294,34 @@ func (s *BaseScanner) rewindToCanonicalHeight(ctx context.Context, currentBlock 
 	if err := s.stateStore.DeleteBlockRefsFromHeight(ctx, s.serviceName, 1); err != nil {
 		return 0, fmt.Errorf("clear block refs after reorg: %w", err)
 	}
+	if err := s.stateStore.DeletePendingWithdrawEventsFromHeight(ctx, s.serviceName, 1); err != nil {
+		return 0, fmt.Errorf("clear pending events after reorg: %w", err)
+	}
 	if err := s.stateStore.SetLastHeight(ctx, s.serviceName, 0); err != nil {
 		return 0, fmt.Errorf("reset last height after reorg: %w", err)
 	}
 	return 0, nil
+}
+
+func (s *BaseScanner) publishPending(ctx context.Context, publish func(ctx context.Context, event WithdrawRequestedEvent) error) error {
+	for {
+		events, err := s.stateStore.ListPendingWithdrawEvents(ctx, s.serviceName, 1000)
+		if err != nil {
+			return fmt.Errorf("list pending withdraw events: %w", err)
+		}
+		if len(events) == 0 {
+			return nil
+		}
+
+		for _, event := range events {
+			if err := publish(ctx, event); err != nil {
+				return fmt.Errorf("publish event: %w", err)
+			}
+			if err := s.stateStore.DeletePendingWithdrawEvent(ctx, s.serviceName, event); err != nil {
+				return fmt.Errorf("delete pending withdraw event: %w", err)
+			}
+		}
+	}
 }
 
 func (s *BaseScanner) loadHeaders(ctx context.Context, lastHeight, fromBlock, toBlock int64) ([]*types.Header, error) {

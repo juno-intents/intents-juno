@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
 )
@@ -97,5 +98,35 @@ func TestNonceManager_Sync_AdoptsHigherBackendNonce(t *testing.T) {
 	}
 	if n != 20 {
 		t.Fatalf("nonce after Sync: got %d want %d", n, 20)
+	}
+}
+
+func TestNonceManager_Next_ReconcilesStaleGapWithLowerBackendNonce(t *testing.T) {
+	ctx := context.Background()
+	addr := common.HexToAddress("0x1234567890abcdef1234567890abcdef12345678")
+	backend := &fakeNoncer{nonce: 10}
+
+	now := time.Unix(1_700_000_000, 0)
+	m := NewNonceManager(backend, addr)
+	m.now = func() time.Time { return now }
+	m.resyncInterval = time.Minute
+
+	n0, err := m.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next: %v", err)
+	}
+	if n0 != 10 {
+		t.Fatalf("first nonce: got %d want %d", n0, 10)
+	}
+
+	now = now.Add(2 * time.Minute)
+	backend.nonce = 10
+
+	n1, err := m.Next(ctx)
+	if err != nil {
+		t.Fatalf("Next after stale gap: %v", err)
+	}
+	if n1 != 10 {
+		t.Fatalf("stale gap nonce: got %d want %d", n1, 10)
 	}
 }
