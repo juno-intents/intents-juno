@@ -1423,6 +1423,101 @@ func TestStore_ApplyBatchOutcome_RequeuesUnresolvedDeposits(t *testing.T) {
 	}
 }
 
+func TestStore_FailBatch_RequeuesUnrejectedDeposits(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	var rejectedID [32]byte
+	rejectedID[0] = 0x61
+	var requeueID [32]byte
+	requeueID[0] = 0x62
+	var cm [32]byte
+	cm[0] = 0x63
+	var recip [20]byte
+	recip[0] = 0x64
+
+	for _, id := range [][32]byte{rejectedID, requeueID} {
+		if _, _, err := s.UpsertConfirmed(ctx, deposit.Deposit{
+			DepositID:     id,
+			Commitment:    cm,
+			LeafIndex:     7,
+			Amount:        1000,
+			BaseRecipient: recip,
+		}); err != nil {
+			t.Fatalf("UpsertConfirmed(%x): %v", id[:1], err)
+		}
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        common.HexToHash("0x0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"),
+		FinalOrchardRoot: common.HexToHash("0x1112131415161718191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f30"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := [32]byte{0x65}
+	if _, err := s.MarkBatchSubmitted(ctx, "owner-a", batchID, [][32]byte{rejectedID, requeueID}, cp, [][]byte{{0x01}}, []byte{0x02}); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+	var txHash [32]byte
+	txHash[0] = 0x66
+	if err := s.SetBatchSubmissionTxHash(ctx, batchID, txHash); err != nil {
+		t.Fatalf("SetBatchSubmissionTxHash: %v", err)
+	}
+
+	if err := s.FailBatch(ctx, "owner-a", batchID, "bridge rejected deposit", [][32]byte{rejectedID}); err != nil {
+		t.Fatalf("FailBatch: %v", err)
+	}
+
+	rejectedJob, err := s.Get(ctx, rejectedID)
+	if err != nil {
+		t.Fatalf("Get(rejected): %v", err)
+	}
+	if rejectedJob.State != deposit.StateRejected {
+		t.Fatalf("rejected state: got %s want %s", rejectedJob.State, deposit.StateRejected)
+	}
+	if rejectedJob.RejectionReason != "bridge rejected deposit" {
+		t.Fatalf("rejection reason: got %q want %q", rejectedJob.RejectionReason, "bridge rejected deposit")
+	}
+
+	requeuedJob, err := s.Get(ctx, requeueID)
+	if err != nil {
+		t.Fatalf("Get(requeued): %v", err)
+	}
+	if requeuedJob.State != deposit.StateConfirmed {
+		t.Fatalf("requeued state: got %s want %s", requeuedJob.State, deposit.StateConfirmed)
+	}
+	if requeuedJob.TxHash != ([32]byte{}) {
+		t.Fatalf("requeued tx hash should be cleared, got %x", requeuedJob.TxHash)
+	}
+	if len(requeuedJob.ProofSeal) != 0 {
+		t.Fatalf("requeued proof seal should be cleared, got %x", requeuedJob.ProofSeal)
+	}
+}
+
 func TestStore_ClaimBatchesAndResetBatch(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")

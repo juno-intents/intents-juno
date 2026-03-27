@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/segmentio/kafka-go"
 )
 
 func TestNewConsumerValidation(t *testing.T) {
@@ -173,6 +174,45 @@ func TestMessageAckNoOp(t *testing.T) {
 	m := Message{Topic: "t1", Value: []byte("x")}
 	if err := m.Ack(context.Background()); err != nil {
 		t.Fatalf("Ack: %v", err)
+	}
+}
+
+func TestKafkaAckManager_CommitsOnlyContiguousOffsets(t *testing.T) {
+	t.Parallel()
+
+	var committed []int64
+	manager := newKafkaAckManager(func(_ context.Context, km kafka.Message) error {
+		committed = append(committed, km.Offset)
+		return nil
+	})
+
+	msg10 := kafka.Message{Topic: "deposits.event.v2", Partition: 0, Offset: 10}
+	msg11 := kafka.Message{Topic: "deposits.event.v2", Partition: 0, Offset: 11}
+	msg12 := kafka.Message{Topic: "deposits.event.v2", Partition: 0, Offset: 12}
+
+	manager.Track(msg10)
+	manager.Track(msg11)
+	manager.Track(msg12)
+
+	if err := manager.Ack(context.Background(), msg12); err != nil {
+		t.Fatalf("Ack(12): %v", err)
+	}
+	if len(committed) != 0 {
+		t.Fatalf("unexpected commit before gap closes: %#v", committed)
+	}
+
+	if err := manager.Ack(context.Background(), msg10); err != nil {
+		t.Fatalf("Ack(10): %v", err)
+	}
+	if got, want := committed, []int64{10}; len(got) != len(want) || got[0] != want[0] {
+		t.Fatalf("commit after acking offset 10: got=%v want=%v", got, want)
+	}
+
+	if err := manager.Ack(context.Background(), msg11); err != nil {
+		t.Fatalf("Ack(11): %v", err)
+	}
+	if got, want := committed, []int64{10, 12}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("commit after gap closes: got=%v want=%v", got, want)
 	}
 }
 

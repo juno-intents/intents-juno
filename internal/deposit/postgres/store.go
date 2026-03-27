@@ -1207,7 +1207,7 @@ func (s *Store) FailBatch(ctx context.Context, owner string, batchID [32]byte, r
 			UPDATE deposit_jobs
 			SET
 				state = CASE
-					WHEN state IN ($2, $3) THEN $1
+					WHEN state IN ($3, $4, $5) THEN $2
 					ELSE state
 				END,
 				checkpoint_height = NULL,
@@ -1222,9 +1222,9 @@ func (s *Store) FailBatch(ctx context.Context, owner string, batchID [32]byte, r
 				claimed_by = NULL,
 				claim_expires_at = NULL,
 				updated_at = now()
-			WHERE deposit_id = ANY($4)
-				AND state NOT IN ($5, $6)
-		`, rawIDs(requeueIDs), int16(deposit.StateConfirmed), int16(deposit.StateProofRequested), int16(deposit.StateProofReady), int16(deposit.StateFinalized), int16(deposit.StateRejected)); err != nil {
+			WHERE deposit_id = ANY($1)
+				AND state NOT IN ($6, $7)
+		`, rawIDs(requeueIDs), int16(deposit.StateConfirmed), int16(deposit.StateProofRequested), int16(deposit.StateProofReady), int16(deposit.StateSubmitted), int16(deposit.StateFinalized), int16(deposit.StateRejected)); err != nil {
 			return fmt.Errorf("deposit/postgres: requeue failed batch rows: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `

@@ -56,6 +56,112 @@ type Consumer interface {
 	Close() error
 }
 
+type kafkaPartitionKey struct {
+	topic     string
+	partition int
+}
+
+type kafkaPartitionAcks struct {
+	nextOffset int64
+	inflight   map[int64]kafka.Message
+	acked      map[int64]struct{}
+}
+
+type kafkaAckManager struct {
+	mu       sync.Mutex
+	parts    map[kafkaPartitionKey]*kafkaPartitionAcks
+	commitFn func(context.Context, kafka.Message) error
+}
+
+func newKafkaAckManager(commitFn func(context.Context, kafka.Message) error) *kafkaAckManager {
+	return &kafkaAckManager{
+		parts:    make(map[kafkaPartitionKey]*kafkaPartitionAcks),
+		commitFn: commitFn,
+	}
+}
+
+func (m *kafkaAckManager) Track(km kafka.Message) {
+	if m == nil {
+		return
+	}
+
+	key := kafkaPartitionKey{topic: km.Topic, partition: km.Partition}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	part := m.parts[key]
+	if part == nil {
+		part = &kafkaPartitionAcks{
+			nextOffset: km.Offset,
+			inflight:   make(map[int64]kafka.Message),
+			acked:      make(map[int64]struct{}),
+		}
+		m.parts[key] = part
+	}
+	if km.Offset < part.nextOffset {
+		return
+	}
+	part.inflight[km.Offset] = km
+}
+
+func (m *kafkaAckManager) Ack(ctx context.Context, km kafka.Message) error {
+	if m == nil || m.commitFn == nil {
+		return nil
+	}
+
+	key := kafkaPartitionKey{topic: km.Topic, partition: km.Partition}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	part := m.parts[key]
+	if part == nil || km.Offset < part.nextOffset {
+		return nil
+	}
+	if _, ok := part.inflight[km.Offset]; !ok {
+		return nil
+	}
+	part.acked[km.Offset] = struct{}{}
+
+	var (
+		commitMsg        kafka.Message
+		shouldCommit     bool
+		committedOffsets []int64
+	)
+	nextOffset := part.nextOffset
+	for {
+		msg, ok := part.inflight[nextOffset]
+		if !ok {
+			break
+		}
+		if _, ok := part.acked[nextOffset]; !ok {
+			break
+		}
+		commitMsg = msg
+		shouldCommit = true
+		committedOffsets = append(committedOffsets, nextOffset)
+		nextOffset++
+	}
+
+	if !shouldCommit {
+		return nil
+	}
+	if err := m.commitFn(ctx, commitMsg); err != nil {
+		return err
+	}
+
+	for _, offset := range committedOffsets {
+		delete(part.inflight, offset)
+		delete(part.acked, offset)
+	}
+	part.nextOffset = nextOffset
+	if len(part.inflight) == 0 && len(part.acked) == 0 {
+		delete(m.parts, key)
+	}
+	return nil
+}
+
 // Producer publishes queue messages.
 type Producer interface {
 	Publish(ctx context.Context, topic string, payload []byte) error
@@ -247,6 +353,7 @@ type kafkaConsumer struct {
 	cancel context.CancelFunc
 	done   chan struct{}
 	once   sync.Once
+	acks   *kafkaAckManager
 }
 
 func shouldStopKafkaConsumerOnFetchError(err error) bool {
@@ -303,6 +410,9 @@ func newKafkaConsumer(parent context.Context, cfg ConsumerConfig) (Consumer, err
 		errCh:  make(chan error, 8),
 		cancel: cancel,
 		done:   make(chan struct{}),
+		acks: newKafkaAckManager(func(ackCtx context.Context, km kafka.Message) error {
+			return reader.CommitMessages(ackCtx, km)
+		}),
 	}
 	go c.run(ctx)
 	return c, nil
@@ -326,6 +436,7 @@ func (c *kafkaConsumer) run(ctx context.Context) {
 			}
 			continue
 		}
+		c.acks.Track(km)
 
 		msg := Message{
 			Topic:     km.Topic,
@@ -333,7 +444,7 @@ func (c *kafkaConsumer) run(ctx context.Context) {
 			Value:     append([]byte(nil), km.Value...),
 			Timestamp: km.Time,
 			ackFn: func(ackCtx context.Context) error {
-				return c.reader.CommitMessages(ackCtx, km)
+				return c.acks.Ack(ackCtx, km)
 			},
 		}
 		select {
