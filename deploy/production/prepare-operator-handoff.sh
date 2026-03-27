@@ -100,6 +100,71 @@ aws_cmd() {
   AWS_PAGER="" aws "${args[@]}" "$@"
 }
 
+validate_rollout_policy_document() {
+  local policy_document_json="$1"
+  local label="$2"
+  local validation
+
+  validation="$(
+    jq -cer '
+      def listify:
+        if . == null then []
+        elif type == "array" then .
+        elif type == "string" then [.]
+        else error("policy Action/Resource entries must be strings or arrays")
+        end;
+      def action_list($stmt): ($stmt.Action // null) | listify | map(ascii_downcase);
+      def not_action_list($stmt): ($stmt.NotAction // null) | listify | map(ascii_downcase);
+      def resource_list($stmt): ($stmt.Resource // null) | listify | map(tostring);
+      def has_forbidden_action($stmt):
+        action_list($stmt) | any(.[]; . == "*"
+          or . == "secretsmanager:*"
+          or . == "secretsmanager:getsecretvalue"
+          or . == "kms:*"
+          or . == "kms:decrypt"
+          or . == "s3:*"
+          or . == "s3:getobject"
+          or . == "ssm:*"
+          or . == "ssm:startsession");
+      def has_wildcard_secret_resource($stmt):
+        (action_list($stmt) | any(.[]; startswith("secretsmanager:")))
+        and (resource_list($stmt) | any(.[]; . == "*"));
+      (.Statement // []) as $raw_statements
+      | ($raw_statements | if type == "array" then . else [.] end) as $statements
+      | [
+          $statements[]
+          | select(
+              (not_action_list(.) | length) > 0
+              or has_forbidden_action(.)
+              or has_wildcard_secret_resource(.)
+            )
+        ] as $violations
+      | if ($violations | length) > 0 then
+          error("forbidden rollout policy permission detected")
+        else
+          "ok"
+        end
+    ' <<<"$policy_document_json" 2>/dev/null || true
+  )"
+
+  [[ "$validation" == "ok" ]] || die "$label includes forbidden rollout permissions"
+}
+
+validate_managed_rollout_policy() {
+  local policy_arn="$1"
+  local policy_json version_id policy_version_json policy_document_json
+
+  policy_json="$(aws_cmd --region "$aws_region" iam get-policy --policy-arn "$policy_arn")" \
+    || die "failed to describe managed policy: $policy_arn"
+  version_id="$(jq -r '.Policy.DefaultVersionId // empty' <<<"$policy_json")"
+  [[ -n "$version_id" ]] || die "managed policy is missing DefaultVersionId: $policy_arn"
+  policy_version_json="$(aws_cmd --region "$aws_region" iam get-policy-version --policy-arn "$policy_arn" --version-id "$version_id")" \
+    || die "failed to read managed policy version: $policy_arn:$version_id"
+  policy_document_json="$(jq -c '.PolicyVersion.Document | if type == "string" then fromjson else . end' <<<"$policy_version_json")" \
+    || die "managed policy document is not valid JSON: $policy_arn"
+  validate_rollout_policy_document "$policy_document_json" "managed policy $policy_arn"
+}
+
 tmp_dir="$(mktemp -d)"
 cleanup() {
   rm -rf "$tmp_dir"
@@ -117,10 +182,7 @@ generate_hex() {
   openssl rand -hex "$byte_count" | tr -d '\n'
 }
 
-operator_private_key="${PRODUCTION_PREPARE_OPERATOR_HANDOFF_PRIVATE_KEY:-}"
-if [[ -z "$operator_private_key" ]]; then
-  operator_private_key="0x$(generate_hex 32)"
-fi
+operator_private_key="0x$(generate_hex 32)"
 operator_private_key="0x${operator_private_key#0x}"
 [[ "$operator_private_key" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "generated operator private key is not 32-byte hex"
 
@@ -193,6 +255,13 @@ checkpoint_signer_kms_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' "
 
 access_inline_policy_json="$(jq -c '.access.inline_policy_document // empty' "$setup_json")"
 access_managed_policy_arns_json="$(jq -c '.access.managed_policy_arns // []' "$setup_json")"
+if [[ -n "$access_inline_policy_json" && "$access_inline_policy_json" != "null" ]]; then
+  validate_rollout_policy_document "$access_inline_policy_json" "access.inline_policy_document"
+fi
+while IFS= read -r managed_policy_arn; do
+  [[ -n "$managed_policy_arn" ]] || continue
+  validate_managed_rollout_policy "$managed_policy_arn"
+done < <(jq -r '.[]? // empty' <<<"$access_managed_policy_arns_json")
 if ! aws_cmd --region "$aws_region" iam get-user --user-name "$access_user_name" >/dev/null 2>&1; then
   aws_cmd --region "$aws_region" iam create-user --user-name "$access_user_name" >/dev/null
 fi

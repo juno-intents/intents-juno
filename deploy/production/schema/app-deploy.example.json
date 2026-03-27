@@ -1,9 +1,9 @@
 {
-  "version": "2",
+  "version": "3",
   "environment": "alpha",
   "shared_manifest_path": "production-output/alpha/shared-manifest.json",
-  "known_hosts_file": "production-output/alpha/app/known_hosts",
-  "secret_contract_file": "production-output/alpha/app/app-secrets.env",
+  "runtime_config_secret_id": "alpha/app/runtime-config",
+  "runtime_config_secret_region": "us-east-1",
   "app_host": "203.0.113.21",
   "app_role": {
     "host": "203.0.113.21",

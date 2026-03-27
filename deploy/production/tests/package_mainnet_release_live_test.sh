@@ -88,7 +88,8 @@ JSON
 
   assert_file_exists "$bundle_root/deploy/production/run-operator-rollout.sh" "live bundle includes the host rollout entrypoint"
   assert_file_exists "$bundle_root/deploy/production/run-operator-local-canary.sh" "live bundle includes the host canary entrypoint"
-  assert_file_exists "$bundle_root/deploy/production/prepare-runtime-materials.sh" "live bundle includes the runtime material setup helper"
+  assert_file_exists "$bundle_root/deploy/production/prepare-operator-handoff.sh" "live bundle includes the operator handoff helper"
+  assert_file_missing "$bundle_root/deploy/production/prepare-runtime-materials.sh" "live bundle does not publish the low-level runtime material helper"
   assert_eq "$(jq -r '.runtime_material_ref.mode' "$manifest_path")" "s3-kms-zip" "live bundle preserves the runtime material mode"
   assert_eq "$(jq -r '.runtime_config_secret_id' "$manifest_path")" "mainnet/op1/runtime-config" "live bundle preserves the runtime config secret id"
   assert_eq "$(jq -r '.dkg_backup_zip // ""' "$manifest_path")" "" "live bundle omits local runtime packages from the manifest"

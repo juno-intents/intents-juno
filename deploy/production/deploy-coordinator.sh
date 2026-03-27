@@ -153,10 +153,6 @@ deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_im
 withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
 bridge_verifier_address="$(production_bridge_verifier_address "$inventory")"
 bridge_threshold="$(production_threshold "$dkg_summary")"
-allow_local_resolvers="false"
-if production_environment_allows_local_secret_resolvers "$env_slug"; then
-  allow_local_resolvers="true"
-fi
 inventory_aws_profile="$(production_json_optional "$inventory" '.shared_services.aws_profile')"
 inventory_aws_region="$(production_json_optional "$inventory" '.shared_services.aws_region')"
 terraform_backend_account_id="$(production_json_optional "$inventory" '.shared_services.account_id')"
@@ -249,36 +245,9 @@ if [[ "$role_runtime_release_resolution_required" == "true" ]]; then
   coordinator_inventory="$resolved_role_runtime_inventory"
 fi
 
-minimum_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
-preflight_secret_dir="$(mktemp -d)"
-trap 'rm -rf "$preflight_secret_dir"' EXIT
-while IFS= read -r operator_json; do
-  operator_id="$(jq -r '.operator_id | select(type == "string" and length > 0)' <<<"$operator_json")"
-  secret_contract_rel="$(jq -r '.secret_contract_file | select(type == "string" and length > 0)' <<<"$operator_json")"
-  secret_contract_file="$(production_abs_path "$inventory_dir" "$secret_contract_rel")"
-  [[ -f "$secret_contract_file" ]] || die "operator secret contract file not found: $secret_contract_file"
-  resolved_secret_env="$preflight_secret_dir/${operator_id}.env"
-  production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$inventory_aws_profile" "$inventory_aws_region" "$resolved_secret_env"
-  production_require_base_relayer_balance "$resolved_secret_env" "$base_rpc_url" "$minimum_base_relayer_balance_wei"
-done < <(jq -c '.operators[]' "$inventory")
-
 min_deposit_admin_address=""
 governance_safe_address=""
 pause_guardian_address=""
-app_role_json="$(production_inventory_app_role_json "$inventory")"
-if [[ "$(jq -r 'length' <<<"$app_role_json")" != "0" ]]; then
-  app_secret_contract_rel="$(jq -r '.secret_contract_file | select(type == "string" and length > 0)' <<<"$app_role_json")"
-  app_secret_contract_file="$(production_abs_path "$inventory_dir" "$app_secret_contract_rel")"
-  [[ -f "$app_secret_contract_file" ]] || die "app secret contract file not found: $app_secret_contract_file"
-  resolved_app_secret_env="$preflight_secret_dir/app.env"
-  production_resolve_secret_contract "$app_secret_contract_file" "$allow_local_resolvers" "$inventory_aws_profile" "$inventory_aws_region" "$resolved_app_secret_env"
-  min_deposit_admin_private_key="$(production_env_first_value "$resolved_app_secret_env" MIN_DEPOSIT_ADMIN_PRIVATE_KEY APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY || true)"
-  [[ -n "$min_deposit_admin_private_key" ]] || die "app secret contract is missing MIN_DEPOSIT_ADMIN_PRIVATE_KEY or APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY"
-  min_deposit_admin_private_key="$(trim "$min_deposit_admin_private_key")"
-  [[ "$min_deposit_admin_private_key" != *,* ]] || die "app min deposit admin secret must contain exactly one private key"
-  min_deposit_admin_address="$(cast wallet address --private-key "$min_deposit_admin_private_key" | tr -d '[:space:]')"
-  [[ "$min_deposit_admin_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "derived min deposit admin address is invalid: $min_deposit_admin_address"
-fi
 if jq -e '.governance != null' "$inventory" >/dev/null 2>&1; then
   governance_safe_address="$(production_json_optional "$inventory" '.governance.safe')"
   pause_guardian_address="$(production_json_optional "$inventory" '.governance.pause_guardian')"

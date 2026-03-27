@@ -92,13 +92,11 @@ test_live_handoffs_reject_local_runtime_inputs() {
   workdir="$(mktemp -d)"
   write_live_inventory_fixture "$workdir/inventory.json"
   jq '
-    .operators[0].dkg_backup_zip = "operators/op1/dkg-backup.zip"
-    | .operators[0].secret_contract_file = "operators/op1/operator-secrets.env"
+    .operators[0].secret_contract_file = "operators/op1/operator-secrets.env"
   ' "$workdir/inventory.json" >"$workdir/inventory.next"
   mv "$workdir/inventory.next" "$workdir/inventory.json"
 
   mkdir -p "$workdir/operators/op1"
-  printf 'placeholder' >"$workdir/operators/op1/dkg-backup.zip"
   printf 'CHECKPOINT_POSTGRES_DSN=aws-sm://runtime\n' >"$workdir/operators/op1/operator-secrets.env"
 
   set +e
@@ -126,6 +124,47 @@ test_live_handoffs_reject_local_runtime_inputs() {
     exit 1
   fi
   assert_contains "$output" "must not set secret_contract_file" "live handoff rendering rejects local secret contracts"
+
+  rm -rf "$workdir"
+}
+
+test_live_handoffs_reject_local_runtime_packages() {
+  local workdir output
+  workdir="$(mktemp -d)"
+  write_live_inventory_fixture "$workdir/inventory.json"
+  jq '
+    .operators[0].dkg_backup_zip = "operators/op1/dkg-backup.zip"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  mkdir -p "$workdir/operators/op1"
+  printf 'placeholder' >"$workdir/operators/op1/dkg-backup.zip"
+
+  set +e
+  output="$(
+    (
+      production_render_shared_manifest \
+        "$workdir/inventory.json" \
+        "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+        "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+        "$workdir/shared-manifest.json" \
+        "$workdir"
+      production_render_operator_handoffs \
+        "$workdir/inventory.json" \
+        "$workdir/shared-manifest.json" \
+        "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+        "$workdir/output" \
+        "$workdir"
+    ) 2>&1
+  )"
+  status=$?
+  set -e
+  if [[ $status -eq 0 ]]; then
+    printf 'expected live handoff rendering to reject local runtime packages\n' >&2
+    exit 1
+  fi
+  assert_contains "$output" "must not set dkg_backup_zip" "live handoff rendering rejects local runtime packages"
 
   rm -rf "$workdir"
 }
@@ -161,6 +200,7 @@ test_runtime_config_render_skips_local_secret_requirements() {
 main() {
   test_live_handoffs_emit_runtime_material_refs
   test_live_handoffs_reject_local_runtime_inputs
+  test_live_handoffs_reject_local_runtime_packages
   test_runtime_config_render_skips_local_secret_requirements
 }
 

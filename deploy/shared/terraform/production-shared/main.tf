@@ -2150,14 +2150,21 @@ data "aws_iam_policy_document" "wireguard_gateway_access" {
   count = local.wireguard_legacy_enabled ? 1 : 0
 
   statement {
-    sid = "AllowWireGuardClientConfigSecretWrite"
+    sid = "AllowWireGuardInstanceDiscovery"
     actions = [
       "ec2:DescribeInstances",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid = "AllowWireGuardClientConfigSecretWrite"
+    actions = [
       "secretsmanager:DescribeSecret",
       "secretsmanager:GetSecretValue",
       "secretsmanager:PutSecretValue",
     ]
-    resources = ["*"]
+    resources = [aws_secretsmanager_secret.shared_wireguard_client_config[0].arn]
   }
 }
 

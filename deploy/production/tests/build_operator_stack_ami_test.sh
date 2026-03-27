@@ -201,6 +201,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'expected="${asset_digest#sha256:}"' "runbook falls back to the asset digest when checksum files omit the asset"
   assert_not_contains "$script_text" '/etc/intents-juno/checkpoint-signer.key' "runbook no longer bakes a checkpoint signer key file into production AMIs"
   assert_not_contains "$script_text" 'CHECKPOINT_SIGNER_PRIVATE_KEY=' "runbook no longer bakes checkpoint signer private keys into operator env"
+  assert_not_contains "$script_text" 'WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=' "runbook no longer bakes the legacy withdraw signer roster placeholder into operator env"
   assert_contains "$script_text" 'CHECKPOINT_SIGNER_DRIVER=aws-kms' "runbook defaults the baked operator env to aws-kms signer mode"
   assert_contains "$script_text" 'CHECKPOINT_SIGNER_KMS_KEY_ID=' "runbook reserves a kms key id slot in operator env"
   assert_contains "$script_text" 'CHECKPOINT_BLOB_SSE_KMS_KEY_ID=' "runbook reserves a blob sse kms key id slot in operator env"
@@ -799,8 +800,9 @@ EOF
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw wrapper exports AWS default region"
   assert_contains "$(cat "$tmp/withdraw.env")" 'AWS_PROFILE=alpha-testnet' "withdraw wrapper exports AWS profile"
 
-  local extend_output_file
+  local extend_output_file extend_stderr_file
   extend_output_file="$tmp/extend.args"
+  extend_stderr_file="$tmp/extend.stderr"
   cat >"$fake_bin/extend-signer" <<EOF
 #!/usr/bin/env bash
 printf '%s\n' "\$*" >"$extend_output_file"
@@ -809,20 +811,25 @@ printf '{"version":"v1","status":"ok","data":{"signatures":["0x11111111111111111
 exit 0
 EOF
   chmod 0755 "$fake_bin/extend-signer"
+  render_wrapper \
+    "cat > /tmp/intents-juno-multikey-extend-signer.sh <<'EOF_WITHDRAW_EXTEND_SIGNER'" \
+    "EOF_WITHDRAW_EXTEND_SIGNER" \
+    "$tmp/intents-juno-multikey-extend-signer.sh" \
+    "$env_file"
+  python3 - "$tmp/intents-juno-multikey-extend-signer.sh" "$fake_bin/extend-signer" <<'EOF'
+from pathlib import Path
+import sys
 
-  cat >"$tmp/intents-juno-multikey-extend-signer.sh" <<'EOF'
-#!/usr/bin/env bash
-set -euo pipefail
-# shellcheck disable=SC1091
-source "$1"
-shift
-extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
-export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
-exec "$1" "$@"
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("/usr/local/bin/juno-txsign", sys.argv[2])
+path.write_text(text)
 EOF
-  chmod 0755 "$tmp/intents-juno-multikey-extend-signer.sh"
-  "$tmp/intents-juno-multikey-extend-signer.sh" "$env_file" "$fake_bin/extend-signer" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null
-  assert_contains "$(cat "$tmp/extend.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa,0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' "withdraw extend signer wrapper exports the full signer roster"
+  if PATH="$fake_bin:$PATH" "$tmp/intents-juno-multikey-extend-signer.sh" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null 2>"$extend_stderr_file"; then
+    printf 'expected withdraw extend signer wrapper to reject legacy signer rosters\n' >&2
+    exit 1
+  fi
+  assert_contains "$(cat "$extend_stderr_file")" "must not receive WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" "withdraw extend signer wrapper rejects legacy signer rosters"
 
   cat >"$env_file" <<EOF
 JUNO_DEV_MODE=false

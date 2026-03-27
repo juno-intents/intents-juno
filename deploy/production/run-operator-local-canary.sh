@@ -89,6 +89,9 @@ elif [[ "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-}" != "6h" ]]; then
 elif [[ "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-}" != "12h" ]]; then
   withdraw_config_status="failed"
   withdraw_config_detail="operator env is missing WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h"
+elif [[ -n "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-}" ]]; then
+  withdraw_config_status="failed"
+  withdraw_config_detail="operator env must not contain WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS"
 elif [[ -z "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
   withdraw_config_status="failed"
   withdraw_config_detail="operator env is missing WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS"

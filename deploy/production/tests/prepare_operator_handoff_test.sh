@@ -128,7 +128,7 @@ test_prepare_operator_handoff_discovers_inputs_and_emits_handoff() {
           "Action": [
             "secretsmanager:PutSecretValue"
           ],
-          "Resource": "*"
+          "Resource": "arn:aws:secretsmanager:us-east-1:021490342184:secret:mainnet/op1/runtime-config"
         }
       ]
     }
@@ -149,7 +149,6 @@ JSON
     cd "$tmp"
     PATH="$fake_bin:$PATH" \
     PRODUCTION_PREPARE_RUNTIME_MATERIALS_CHECKPOINT_SIGNER_BIN="$provisioner" \
-    PRODUCTION_PREPARE_OPERATOR_HANDOFF_PRIVATE_KEY="0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" \
     PRODUCTION_PREPARE_OPERATOR_HANDOFF_BASE_RELAYER_AUTH_TOKEN="base-relayer-token-op1" \
     PRODUCTION_PREPARE_OPERATOR_HANDOFF_JUNO_RPC_USER="juno-op1" \
     PRODUCTION_PREPARE_OPERATOR_HANDOFF_JUNO_RPC_PASS="rpc-pass-op1" \
@@ -169,18 +168,95 @@ JSON
   assert_contains "$(cat "$aws_log")" "s3 cp" "handoff uploads the runtime package"
   assert_contains "$(cat "$aws_log")" "iam create-user --user-name mainnet-op1-runtime-access" "handoff creates the access identity"
   assert_contains "$(cat "$aws_log")" "iam put-user-policy --user-name mainnet-op1-runtime-access --policy-name mainnet-op1-runtime-access" "handoff installs the inline access policy"
-  assert_eq "$(jq -r '.JUNO_TXSIGN_SIGNER_KEYS' "$secret_payload")" "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "handoff stores the generated operator key as the only local txsign key"
+  if ! [[ "$(jq -r '.JUNO_TXSIGN_SIGNER_KEYS' "$secret_payload")" =~ ^0x[0-9a-fA-F]{64}$ ]]; then
+    printf 'expected handoff to generate a single 32-byte operator key\n' >&2
+    exit 1
+  fi
   assert_eq "$(jq -r '.BASE_RELAYER_AUTH_TOKEN' "$secret_payload")" "base-relayer-token-op1" "handoff stores the generated base relayer auth token"
   assert_eq "$(jq -r '.JUNO_RPC_USER' "$secret_payload")" "juno-op1" "handoff stores the generated juno rpc user"
   assert_eq "$(jq -r '.JUNO_RPC_PASS' "$secret_payload")" "rpc-pass-op1" "handoff stores the generated juno rpc password"
   assert_eq "$(jq -r '.WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS // empty' "$secret_payload")" "" "handoff does not store the legacy withdraw extend signer key roster"
   assert_eq "$(jq -r '.Statement[0].Action[0]' "$policy_payload")" "secretsmanager:PutSecretValue" "handoff applies the configured inline policy"
+  assert_eq "$(jq -r '.Statement[0].Resource' "$policy_payload")" "arn:aws:secretsmanager:us-east-1:021490342184:secret:mainnet/op1/runtime-config" "handoff scopes the inline policy to the runtime config secret"
+
+  rm -rf "$tmp"
+}
+
+test_prepare_operator_handoff_rejects_forbidden_policy_permissions() {
+  local tmp fake_bin aws_log secret_payload policy_payload provisioner output
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+  secret_payload="$tmp/runtime-secret.json"
+  policy_payload="$tmp/access-policy.json"
+  provisioner="$tmp/fake-provision-checkpoint-signer-kms"
+  mkdir -p "$fake_bin"
+
+  write_test_dkg_backup_zip "$tmp/dkg-backup.zip"
+  cat >"$tmp/handoff-setup.json" <<'JSON'
+{
+  "aws_profile": "operator-op1",
+  "aws_region": "us-east-1",
+  "runtime_material": {
+    "bucket": "mainnet-runtime-materials",
+    "key": "operators/op1/runtime-material.zip",
+    "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+  },
+  "runtime_config_secret": {
+    "id": "mainnet/op1/runtime-config",
+    "region": "us-east-1"
+  },
+  "checkpoint_signer": {
+    "alias_name": "alias/mainnet-op1-checkpoint-signer"
+  },
+  "access": {
+    "user_name": "mainnet-op1-runtime-access",
+    "policy_name": "mainnet-op1-runtime-access",
+    "inline_policy_document": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": [
+            "ssm:StartSession"
+          ],
+          "Resource": "*"
+        }
+      ]
+    }
+  },
+  "runtime_config": {
+    "CHECKPOINT_POSTGRES_DSN": "postgres://checkpoint.example.internal:5432/juno?sslmode=require"
+  }
+}
+JSON
+
+  write_fake_prepare_operator_handoff_aws "$fake_bin/aws" "$aws_log" "$secret_payload" "$policy_payload"
+  write_fake_prepare_operator_handoff_cast "$fake_bin/cast"
+  write_fake_prepare_operator_handoff_provisioner "$provisioner"
+
+  set +e
+  output="$(
+    cd "$tmp" && \
+      PATH="$fake_bin:$PATH" \
+      PRODUCTION_PREPARE_RUNTIME_MATERIALS_CHECKPOINT_SIGNER_BIN="$provisioner" \
+      bash "$REPO_ROOT/deploy/production/prepare-operator-handoff.sh" 2>&1
+  )"
+  status=$?
+  set -e
+
+  if [[ $status -eq 0 ]]; then
+    printf 'expected handoff to reject forbidden rollout permissions\n' >&2
+    exit 1
+  fi
+  assert_contains "$output" "forbidden rollout permissions" "handoff rejects interactive or read-capable rollout policies"
 
   rm -rf "$tmp"
 }
 
 main() {
   test_prepare_operator_handoff_discovers_inputs_and_emits_handoff
+  test_prepare_operator_handoff_rejects_forbidden_policy_permissions
 }
 
 main "$@"

@@ -20,7 +20,6 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	checkpointpg "github.com/juno-intents/intents-juno/internal/checkpoint/postgres"
-	"github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
 	"github.com/juno-intents/intents-juno/internal/leases"
@@ -74,12 +73,11 @@ func main() {
 		rpcUserEnv = flag.String("juno-rpc-user-env", "JUNO_RPC_USER", "env var containing junocashd RPC username")
 		rpcPassEnv = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var containing junocashd RPC password")
 
-		signerDriver   = flag.String("signer-driver", "local-env", "checkpoint signer backend: local-env|aws-kms")
-		kmsKeyID       = flag.String("kms-key-id", "", "AWS KMS asymmetric key id/arn (required when --signer-driver=aws-kms)")
-		operatorKeyEnv = flag.String("operator-key-env", "CHECKPOINT_SIGNER_PRIVATE_KEY", "env var containing operator ECDSA private key (32-byte hex)")
-		baseChainID    = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
-		bridgeAddr     = flag.String("bridge-address", "", "Bridge contract address (required)")
-		confirmations  = flag.Uint64("confirmations", 100, "confirmations (k) for checkpoint height h = tip - k")
+		signerDriver  = flag.String("signer-driver", "aws-kms", "checkpoint signer backend: aws-kms")
+		kmsKeyID      = flag.String("kms-key-id", "", "AWS KMS asymmetric key id/arn (required)")
+		baseChainID   = flag.Uint64("base-chain-id", 0, "Base/EVM chain id (required)")
+		bridgeAddr    = flag.String("bridge-address", "", "Bridge contract address (required)")
+		confirmations = flag.Uint64("confirmations", 100, "confirmations (k) for checkpoint height h = tip - k")
 
 		pollInterval = flag.Duration("poll-interval", 2*time.Second, "poll interval for tip height")
 		rpcTimeout   = flag.Duration("rpc-timeout", 10*time.Second, "HTTP client timeout for junocashd RPC calls")
@@ -135,7 +133,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	digestSigner, operator, err := loadDigestSigner(ctx, strings.TrimSpace(*signerDriver), strings.TrimSpace(*kmsKeyID), strings.TrimSpace(*operatorKeyEnv))
+	digestSigner, operator, err := loadDigestSigner(ctx, strings.TrimSpace(*signerDriver), strings.TrimSpace(*kmsKeyID))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "error: init digest signer: %v\n", err)
 		os.Exit(2)
@@ -324,25 +322,8 @@ func main() {
 	}
 }
 
-func loadDigestSigner(ctx context.Context, driver, kmsKeyID, operatorKeyEnv string) (checkpoint.DigestSigner, common.Address, error) {
+func loadDigestSigner(ctx context.Context, driver, kmsKeyID string) (checkpoint.DigestSigner, common.Address, error) {
 	switch strings.ToLower(strings.TrimSpace(driver)) {
-	case "", "local-env":
-		keyRaw := os.Getenv(operatorKeyEnv)
-		if keyRaw == "" {
-			return nil, common.Address{}, fmt.Errorf("missing operator private key in env %s", operatorKeyEnv)
-		}
-		keys, err := eth.ParsePrivateKeysHexList(keyRaw)
-		if err != nil {
-			return nil, common.Address{}, fmt.Errorf("parse operator key: %w", err)
-		}
-		if len(keys) != 1 {
-			return nil, common.Address{}, errors.New("operator key env must contain exactly one private key")
-		}
-		signer, err := checkpoint.NewLocalDigestSigner(keys[0])
-		if err != nil {
-			return nil, common.Address{}, err
-		}
-		return signer, signer.Address(), nil
 	case "aws-kms":
 		expectedOperatorRaw := strings.TrimSpace(os.Getenv("OPERATOR_ADDRESS"))
 		if expectedOperatorRaw == "" {
@@ -367,7 +348,7 @@ func loadDigestSigner(ctx context.Context, driver, kmsKeyID, operatorKeyEnv stri
 		}
 		return signer, signer.Address(), nil
 	default:
-		return nil, common.Address{}, fmt.Errorf("unsupported signer driver %q", driver)
+		return nil, common.Address{}, fmt.Errorf("unsupported signer driver %q: only aws-kms is supported", driver)
 	}
 }
 

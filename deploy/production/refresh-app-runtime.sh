@@ -8,58 +8,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./lib.sh
 source "$SCRIPT_DIR/lib.sh"
 
-ssm_run_shell_command() {
-  local aws_profile="$1"
-  local aws_region="$2"
-  local instance_id="$3"
-  local command="$4"
-  local send_json command_id invocation_json invocation_status stderr stdout parameters_json
-
-  parameters_json="$(jq -cn --arg command "$command" '{commands: [$command]}')"
-
-  send_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm send-command \
-    --instance-ids "$instance_id" \
-    --document-name "AWS-RunShellScript" \
-    --parameters "$parameters_json" \
-    --output json 2>/dev/null || true)"
-  [[ -n "$send_json" ]] || return 1
-  command_id="$(jq -r '.Command.CommandId // empty' <<<"$send_json")"
-  [[ -n "$command_id" ]] || return 1
-
-  for _ in $(seq 1 30); do
-    invocation_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm get-command-invocation \
-      --command-id "$command_id" \
-      --instance-id "$instance_id" \
-      --output json 2>/dev/null || true)"
-    [[ -n "$invocation_json" ]] || {
-      sleep 2
-      continue
-    }
-
-    invocation_status="$(jq -r '.Status // empty' <<<"$invocation_json")"
-    case "$invocation_status" in
-      Success)
-        stdout="$(jq -r '.StandardOutputContent // ""' <<<"$invocation_json")"
-        printf '%s' "$stdout"
-        return 0
-        ;;
-      Failed|Cancelled|TimedOut|Cancelling)
-        stderr="$(jq -r '.StandardErrorContent // ""' <<<"$invocation_json")"
-        [[ -n "$stderr" ]] && printf '%s\n' "$stderr" >&2
-        return 1
-        ;;
-      Pending|InProgress|Delayed|"")
-        sleep 2
-        ;;
-      *)
-        sleep 2
-        ;;
-    esac
-  done
-
-  return 1
-}
-
 live_e2e_deployment_id_from_app_deploy() {
   local app_deploy="$1"
   local deployment_id app_instance_profile_name
@@ -210,7 +158,7 @@ done
 [[ -f "$app_deploy" ]] || die "app deploy handoff not found: $app_deploy"
 [[ -n "$output_dir" ]] || die "--output-dir is required"
 
-for cmd in jq base64 tar cast; do
+for cmd in jq base64 tar cast aws; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
@@ -218,29 +166,27 @@ output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 mkdir -p "$output_dir" "$output_dir/nginx" "$output_dir/systemd" "$output_dir/bin"
 
 tmp_dir="$(mktemp -d)"
-resolved_env="$tmp_dir/app-secrets.resolved.env"
 bundle_dir="$tmp_dir/bundle"
 bundle_tar="$tmp_dir/app-runtime-bootstrap.tgz"
+empty_env="$tmp_dir/app-runtime.empty.env"
 cleanup() {
   rm -rf "$tmp_dir"
 }
 trap cleanup EXIT
+: >"$empty_env"
 
-environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
-allow_local_resolvers="false"
-if production_environment_allows_local_secret_resolvers "$environment"; then
-  allow_local_resolvers="true"
+app_aws_profile="$(production_json_required "$app_deploy" '.aws_profile | select(type == "string" and length > 0)')"
+app_aws_region="$(production_json_required "$app_deploy" '.aws_region | select(type == "string" and length > 0)')"
+runtime_config_secret_id="$(production_json_required "$app_deploy" '.runtime_config_secret_id | select(type == "string" and length > 0)')"
+runtime_config_secret_region="$(production_json_optional "$app_deploy" '.runtime_config_secret_region')"
+if [[ -z "$runtime_config_secret_region" ]]; then
+  runtime_config_secret_region="$app_aws_region"
 fi
-
-secret_contract_file="$(production_json_required "$app_deploy" '.secret_contract_file | select(type == "string" and length > 0)')"
-app_aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
-app_aws_region="$(production_json_optional "$app_deploy" '.aws_region')"
-production_resolve_secret_contract "$secret_contract_file" "$allow_local_resolvers" "$app_aws_profile" "$app_aws_region" "$resolved_env"
 
 bridge_env="$output_dir/bridge-api.env"
 backoffice_env="$output_dir/backoffice.env"
-production_render_bridge_api_env "$shared_manifest" "$app_deploy" "$resolved_env" "$bridge_env"
-production_render_backoffice_env "$shared_manifest" "$app_deploy" "$resolved_env" "$backoffice_env"
+production_render_bridge_api_env "$shared_manifest" "$app_deploy" "$empty_env" "$bridge_env"
+production_render_backoffice_env "$shared_manifest" "$app_deploy" "$empty_env" "$backoffice_env"
 
 bridge_hostname="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 backoffice_hostname="$(production_json_optional "$shared_manifest" '.wireguard_role.backoffice_hostname // .shared_roles.wireguard.backoffice_hostname')"
@@ -341,12 +287,120 @@ exec /usr/local/bin/backoffice "${args[@]}"
 EOF
 chmod +x "$backoffice_wrapper"
 
+app_hydrator_env="$output_dir/app-runtime-hydrator.env"
+cat >"$app_hydrator_env" <<EOF
+APP_RUNTIME_CONFIG_SECRET_ID=$runtime_config_secret_id
+APP_RUNTIME_CONFIG_SECRET_REGION=$runtime_config_secret_region
+EOF
+
+app_hydrator_script="$output_dir/bin/app-config-hydrator.sh"
+cat >"$app_hydrator_script" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+hydrator_env_file="/etc/intents-juno/app-runtime-hydrator.env"
+bridge_env_file="/etc/intents-juno/bridge-api.env"
+backoffice_env_file="/etc/intents-juno/backoffice.env"
+
+log() {
+  printf 'app-config-hydrator: %s\n' "$*" >&2
+}
+
+die() {
+  log "$*"
+  exit 1
+}
+
+set_env_value() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+  local tmp
+  tmp="$(mktemp)"
+  awk -v key="$key" -v value="$value" '
+    BEGIN { updated = 0 }
+    index($0, key "=") == 1 {
+      print key "=" value
+      updated = 1
+      next
+    }
+    { print }
+    END {
+      if (updated == 0) {
+        print key "=" value
+      }
+    }
+  ' "$file" >"$tmp"
+  mv "$tmp" "$file"
+}
+
+json_first_string() {
+  local json="$1"
+  shift
+  jq -r --argjson keys "$(printf '%s\n' "$@" | jq -R . | jq -s .)" '
+    first(
+      $keys[]
+      | . as $key
+      | $json[$key]
+      | select(type == "string" and length > 0)
+    ) // empty
+  ' --argjson json "$json" 'null' 2>/dev/null
+}
+
+[[ -f "$hydrator_env_file" ]] || die "missing $hydrator_env_file"
+[[ -f "$bridge_env_file" ]] || die "missing $bridge_env_file"
+[[ -f "$backoffice_env_file" ]] || die "missing $backoffice_env_file"
+command -v aws >/dev/null 2>&1 || die "aws CLI is required on the host"
+command -v jq >/dev/null 2>&1 || die "jq is required on the host"
+
+# shellcheck disable=SC1091
+source "$hydrator_env_file"
+[[ -n "${APP_RUNTIME_CONFIG_SECRET_ID:-}" ]] || die "APP_RUNTIME_CONFIG_SECRET_ID is required"
+[[ -n "${APP_RUNTIME_CONFIG_SECRET_REGION:-}" ]] || die "APP_RUNTIME_CONFIG_SECRET_REGION is required"
+
+secret_string="$(AWS_PAGER="" aws --region "$APP_RUNTIME_CONFIG_SECRET_REGION" secretsmanager get-secret-value \
+  --secret-id "$APP_RUNTIME_CONFIG_SECRET_ID" \
+  --query SecretString \
+  --output text)"
+[[ -n "$secret_string" && "$secret_string" != "None" ]] || die "secret payload is empty for $APP_RUNTIME_CONFIG_SECRET_ID"
+secret_json="$(jq -c . <<<"$secret_string")" || die "secret payload is not valid JSON"
+
+bridge_postgres_dsn="$(jq -r '.BRIDGE_API_POSTGRES_DSN // .APP_POSTGRES_DSN // .CHECKPOINT_POSTGRES_DSN // empty' <<<"$secret_json")"
+backoffice_postgres_dsn="$(jq -r '.BACKOFFICE_POSTGRES_DSN // .APP_POSTGRES_DSN // .CHECKPOINT_POSTGRES_DSN // empty' <<<"$secret_json")"
+backoffice_auth_secret="$(jq -r '.BACKOFFICE_AUTH_SECRET // .APP_BACKOFFICE_AUTH_SECRET // empty' <<<"$secret_json")"
+backoffice_ipfs_api_bearer_token="$(jq -r '.BACKOFFICE_IPFS_API_BEARER_TOKEN // .IPFS_API_BEARER_TOKEN // empty' <<<"$secret_json")"
+backoffice_juno_rpc_user="$(jq -r '.BACKOFFICE_JUNO_RPC_USER // .APP_JUNO_RPC_USER // .JUNO_RPC_USER // empty' <<<"$secret_json")"
+backoffice_juno_rpc_pass="$(jq -r '.BACKOFFICE_JUNO_RPC_PASS // .APP_JUNO_RPC_PASS // .JUNO_RPC_PASS // empty' <<<"$secret_json")"
+min_deposit_admin_private_key="$(jq -r '.MIN_DEPOSIT_ADMIN_PRIVATE_KEY // .APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY // empty' <<<"$secret_json")"
+
+[[ -n "$bridge_postgres_dsn" ]] || die "runtime secret is missing bridge postgres dsn"
+[[ -n "$backoffice_postgres_dsn" ]] || die "runtime secret is missing backoffice postgres dsn"
+[[ -n "$backoffice_auth_secret" ]] || die "runtime secret is missing backoffice auth secret"
+[[ -n "$backoffice_juno_rpc_user" ]] || die "runtime secret is missing juno rpc user"
+[[ -n "$backoffice_juno_rpc_pass" ]] || die "runtime secret is missing juno rpc pass"
+[[ -n "$min_deposit_admin_private_key" ]] || die "runtime secret is missing min deposit admin private key"
+
+set_env_value "$bridge_env_file" BRIDGE_API_POSTGRES_DSN "$bridge_postgres_dsn"
+set_env_value "$backoffice_env_file" BACKOFFICE_POSTGRES_DSN "$backoffice_postgres_dsn"
+set_env_value "$backoffice_env_file" BACKOFFICE_AUTH_SECRET "$backoffice_auth_secret"
+set_env_value "$backoffice_env_file" BACKOFFICE_JUNO_RPC_USER "$backoffice_juno_rpc_user"
+set_env_value "$backoffice_env_file" BACKOFFICE_JUNO_RPC_PASS "$backoffice_juno_rpc_pass"
+set_env_value "$backoffice_env_file" MIN_DEPOSIT_ADMIN_PRIVATE_KEY "$min_deposit_admin_private_key"
+if [[ -n "$backoffice_ipfs_api_bearer_token" ]]; then
+  set_env_value "$backoffice_env_file" BACKOFFICE_IPFS_API_BEARER_TOKEN "$backoffice_ipfs_api_bearer_token"
+fi
+
+chmod 0600 "$bridge_env_file" "$backoffice_env_file"
+log "hydrated app runtime env"
+EOF
+chmod +x "$app_hydrator_script"
+
 bridge_unit="$output_dir/systemd/bridge-api.service"
 cat >"$bridge_unit" <<'EOF'
 [Unit]
 Description=Juno bridge-api
-After=network-online.target
-Wants=network-online.target
+After=network-online.target intents-juno-app-config-hydrator.service
+Wants=network-online.target intents-juno-app-config-hydrator.service
 
 [Service]
 Type=simple
@@ -362,14 +416,30 @@ backoffice_unit="$output_dir/systemd/backoffice.service"
 cat >"$backoffice_unit" <<'EOF'
 [Unit]
 Description=Juno backoffice
-After=network-online.target
-Wants=network-online.target
+After=network-online.target intents-juno-app-config-hydrator.service
+Wants=network-online.target intents-juno-app-config-hydrator.service
 
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/backoffice-wrapper
 Restart=always
 RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+app_hydrator_unit="$output_dir/systemd/intents-juno-app-config-hydrator.service"
+cat >"$app_hydrator_unit" <<'EOF'
+[Unit]
+Description=Intents Juno App config hydrator
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-/etc/intents-juno/app-runtime-hydrator.env
+ExecStart=/usr/local/bin/intents-juno-app-config-hydrator.sh
 
 [Install]
 WantedBy=multi-user.target
@@ -421,8 +491,11 @@ cp "$bridge_env" "$bundle_dir/bridge-api.env"
 cp "$backoffice_env" "$bundle_dir/backoffice.env"
 cp "$bridge_wrapper" "$bundle_dir/bridge-api-wrapper"
 cp "$backoffice_wrapper" "$bundle_dir/backoffice-wrapper"
+cp "$app_hydrator_env" "$bundle_dir/app-runtime-hydrator.env"
+cp "$app_hydrator_script" "$bundle_dir/app-config-hydrator.sh"
 cp "$bridge_unit" "$bundle_dir/systemd/bridge-api.service"
 cp "$backoffice_unit" "$bundle_dir/systemd/backoffice.service"
+cp "$app_hydrator_unit" "$bundle_dir/systemd/intents-juno-app-config-hydrator.service"
 cp "$nginx_config" "$bundle_dir/nginx/app.conf"
 
 install_script="$output_dir/install.sh"
@@ -435,8 +508,11 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 install -d -m 0755 /etc/intents-juno /etc/nginx/intents-juno /etc/nginx/sites-available /etc/nginx/sites-enabled
 install -m 0600 "$script_dir/bridge-api.env" /etc/intents-juno/bridge-api.env
 install -m 0600 "$script_dir/backoffice.env" /etc/intents-juno/backoffice.env
+install -m 0600 "$script_dir/app-runtime-hydrator.env" /etc/intents-juno/app-runtime-hydrator.env
+install -m 0755 "$script_dir/app-config-hydrator.sh" /usr/local/bin/intents-juno-app-config-hydrator.sh
 install -m 0755 "$script_dir/bridge-api-wrapper" /usr/local/bin/bridge-api-wrapper
 install -m 0755 "$script_dir/backoffice-wrapper" /usr/local/bin/backoffice-wrapper
+install -m 0644 "$script_dir/systemd/intents-juno-app-config-hydrator.service" /etc/systemd/system/intents-juno-app-config-hydrator.service
 install -m 0644 "$script_dir/systemd/bridge-api.service" /etc/systemd/system/bridge-api.service
 install -m 0644 "$script_dir/systemd/backoffice.service" /etc/systemd/system/backoffice.service
 install -m 0644 "$script_dir/nginx/app.conf" /etc/nginx/sites-available/intents-juno-app.conf
@@ -452,15 +528,16 @@ if [[ ! -s /etc/nginx/intents-juno/server.key || ! -s /etc/nginx/intents-juno/se
   chmod 0644 /etc/nginx/intents-juno/server.crt
 fi
 
-nginx -t
 systemctl daemon-reload
-systemctl enable bridge-api.service backoffice.service nginx.service >/dev/null
+systemctl enable intents-juno-app-config-hydrator.service bridge-api.service backoffice.service nginx.service >/dev/null
+systemctl restart intents-juno-app-config-hydrator.service
 systemctl restart bridge-api.service
 systemctl restart backoffice.service
+nginx -t
 systemctl restart nginx.service
 
 for _ in $(seq 1 60); do
-  if systemctl is-active --quiet bridge-api.service backoffice.service nginx.service \
+  if systemctl is-active --quiet bridge-api.service backoffice.service nginx.service intents-juno-app-config-hydrator.service \
     && curl -ksfS https://127.0.0.1/healthz >/dev/null; then
     exit 0
   fi
@@ -477,23 +554,14 @@ COPYFILE_DISABLE=1 tar -czf "$bundle_tar" -C "$bundle_dir" .
 bundle_b64="$(base64 <"$bundle_tar" | tr -d '\n')"
 
 app_role_asg="$(jq -r '.app_role.asg // empty' "$app_deploy")"
-app_host="$(jq -r '.app_host // empty' "$app_deploy")"
-app_user="$(jq -r '.app_user // "ubuntu"' "$app_deploy")"
+app_host="$(jq -r '.app_role.host // .app_host // empty' "$app_deploy")"
 app_target_mode="host"
 app_targets_json='[]'
 app_launch_template_id=""
 app_launch_template_version=""
 
-if [[ "$dry_run" == "true" ]]; then
+if [[ "$dry_run" != "true" ]]; then
   if [[ -n "$app_role_asg" ]]; then
-    app_target_mode="asg"
-  fi
-else
-  if [[ -n "$app_role_asg" ]]; then
-    have_cmd aws || die "required command not found: aws"
-    [[ -n "$app_aws_profile" ]] || die "app aws profile is required for app role refresh"
-    [[ -n "$app_aws_region" ]] || die "app aws region is required for app role refresh"
-
     app_target_mode="asg"
     ensure_live_e2e_app_runtime_ingress "$shared_manifest" "$app_deploy" "$app_aws_profile" "$app_aws_region"
     asg_json="$(AWS_PAGER="" aws --profile "$app_aws_profile" --region "$app_aws_region" autoscaling describe-auto-scaling-groups \
@@ -531,29 +599,30 @@ else
     mv "$app_deploy_tmp" "$app_deploy"
     app_targets_json="$(jq -c '[.AutoScalingGroups[0].Instances[]? | select(.LifecycleState == "InService") | .InstanceId]' <<<"$asg_json")"
     [[ "$(jq -r 'length' <<<"$app_targets_json")" -gt 0 ]] || die "app role asg $app_role_asg does not have any in-service instances"
-
-    while IFS= read -r instance_id; do
-      remote_cmd="tmp_dir=\$(mktemp -d) && archive_path=\$tmp_dir/app-runtime-bootstrap.tgz && printf '%s' '$bundle_b64' | base64 -d >\"\$archive_path\" && tar -xzf \"\$archive_path\" -C \"\$tmp_dir\" && sudo bash \"\$tmp_dir/install.sh\" && rm -rf \"\$tmp_dir\""
-      ssm_run_shell_command "$app_aws_profile" "$app_aws_region" "$instance_id" "$remote_cmd" >/dev/null || die "failed to refresh app runtime on app instance $instance_id"
-    done < <(jq -r '.[]' <<<"$app_targets_json")
   else
-    have_cmd ssh || die "required command not found: ssh"
-    have_cmd scp || die "required command not found: scp"
-    [[ -n "$app_host" ]] || die "app host is required when app role asg is not present"
-    known_hosts_file="$(production_json_required "$app_deploy" '.known_hosts_file | select(type == "string" and length > 0)')"
-    known_hosts_file="$(production_abs_path "$(dirname "$app_deploy")" "$known_hosts_file")"
-    [[ -f "$known_hosts_file" ]] || die "known_hosts file not found: $known_hosts_file"
-
-    app_targets_json="$(jq -cn --arg app_host "$app_host" '[$app_host]')"
-    remote_stage="/tmp/intents-juno-app-runtime-bootstrap.tgz"
-    SSH_OPTS=(-o StrictHostKeyChecking=yes -o UserKnownHostsFile="$known_hosts_file" -o ConnectTimeout=10)
-    SCP_OPTS=("${SSH_OPTS[@]}")
-    ssh_target="${app_user}@${app_host}"
-
-    scp "${SCP_OPTS[@]}" "$bundle_tar" "$ssh_target:$remote_stage"
-    ssh "${SSH_OPTS[@]}" "$ssh_target" \
-      "tmp_dir=\$(mktemp -d) && tar -xzf '$remote_stage' -C \"\$tmp_dir\" && sudo bash \"\$tmp_dir/install.sh\" && rm -rf \"\$tmp_dir\" '$remote_stage'"
+    [[ -n "$app_host" ]] || die "app deploy must define app_role.asg or app_host"
+    app_targets_json="$(jq -cn --arg instance_id "$(production_resolve_instance_id_from_host "$app_aws_profile" "$app_aws_region" "$app_host")" '[ $instance_id ]')"
   fi
+
+  while IFS= read -r instance_id; do
+    [[ -n "$instance_id" ]] || continue
+    remote_stage_dir="/tmp/intents-juno-app-runtime-$(production_safe_slug "$instance_id")"
+    production_ssm_run_shell_command \
+      "$app_aws_profile" "$app_aws_region" "$instance_id" \
+      "sudo rm -rf '$remote_stage_dir' && sudo install -d -m 0755 '$remote_stage_dir'" >/dev/null \
+      || die "failed to create app runtime stage dir over ssm: $remote_stage_dir"
+    production_ssm_stage_file \
+      "$app_aws_profile" "$app_aws_region" "$instance_id" \
+      "$bundle_tar" \
+      "$remote_stage_dir/app-runtime-bootstrap.tgz" \
+      0640
+    production_ssm_run_shell_command \
+      "$app_aws_profile" "$app_aws_region" "$instance_id" \
+      "set -euo pipefail; cleanup(){ sudo rm -rf '$remote_stage_dir'; }; trap cleanup EXIT; sudo tar -xzf '$remote_stage_dir/app-runtime-bootstrap.tgz' -C '$remote_stage_dir'; sudo bash '$remote_stage_dir/install.sh'" >/dev/null \
+      || die "failed to refresh app runtime on instance $instance_id"
+  done < <(jq -r '.[]' <<<"$app_targets_json")
+elif [[ -n "$app_role_asg" ]]; then
+  app_target_mode="asg"
 fi
 
 jq -n \

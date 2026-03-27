@@ -562,7 +562,6 @@ WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=/var/lib/intents-juno/operator-runtime
 WITHDRAW_COORDINATOR_TSS_CLIENT_KEY_FILE=/var/lib/intents-juno/operator-runtime/bundle/tls/coordinator-client.key
 WITHDRAW_COORDINATOR_EXTEND_SIGNER_BIN=/usr/local/bin/intents-juno-multikey-extend-signer.sh
 WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=
-WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS=
 WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET=240
 WITHDRAW_FINALIZER_OWNER=
 WITHDRAW_FINALIZER_QUEUE_GROUP=withdraw-finalizer
@@ -830,7 +829,6 @@ checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
 juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
 withdraw_operator_endpoints="$(resolve_value "WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS" "$(read_env_value WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS || true)" || true)"
-withdraw_extend_signer_keys="$(resolve_value "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS" "$(read_env_value WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
 juno_rpc_bind="$(resolve_value "JUNO_RPC_BIND" "$(read_env_value JUNO_RPC_BIND || true)" || true)"
@@ -905,12 +903,10 @@ if [[ -n "$withdraw_operator_endpoints" ]]; then
   [[ "$withdraw_operator_endpoints" =~ ^0x[0-9a-fA-F]{40}=[^,]+:[0-9]+(,0x[0-9a-fA-F]{40}=[^,]+:[0-9]+)*$ ]] \
     || fail "requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS as comma-separated addr=host:port pairs"
 fi
-if [[ -n "$withdraw_extend_signer_keys" ]]; then
-  [[ "$withdraw_extend_signer_keys" =~ ^0x[0-9a-fA-F]{64}(,0x[0-9a-fA-F]{64})*$ ]] \
-    || fail "requires WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS as comma-separated 32-byte hex keys"
-fi
-[[ -n "$withdraw_operator_endpoints" || -n "$withdraw_extend_signer_keys" ]] \
-  || fail "requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS or WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in production"
+[[ -z "$(read_env_value WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS || true)" ]] \
+  || fail "WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS is not supported in production"
+[[ -n "$withdraw_operator_endpoints" ]] \
+  || fail "requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS in production"
 
 [[ "$checkpoint_threshold" =~ ^[0-9]+$ ]] || fail "requires CHECKPOINT_THRESHOLD to be numeric"
 
@@ -954,11 +950,7 @@ if [[ -n "$withdraw_operator_endpoints" ]]; then
 else
   delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS
 fi
-if [[ -n "$withdraw_extend_signer_keys" ]]; then
-  set_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS "$withdraw_extend_signer_keys"
-else
-  delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS
-fi
+delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS
 
 if [[ -n "$checkpoint_blob_prefix" ]]; then
   set_env_value "$tmp_env" CHECKPOINT_BLOB_PREFIX "$checkpoint_blob_prefix"
@@ -2170,13 +2162,12 @@ if [[ -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
   exec /usr/local/bin/juno-txsign "$@" "${endpoint_args[@]}"
 fi
 
-extend_signer_keys="${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-${JUNO_TXSIGN_SIGNER_KEYS:-}}"
-[[ -n "$extend_signer_keys" ]] || {
-  echo "withdraw extend signer requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS or WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
+[[ -z "${WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS:-}" ]] || {
+  echo "withdraw extend signer must not receive WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-export JUNO_TXSIGN_SIGNER_KEYS="$extend_signer_keys"
-exec /usr/local/bin/juno-txsign "$@"
+echo "withdraw extend signer requires WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS in /etc/intents-juno/operator-stack.env" >&2
+exit 1
 EOF_WITHDRAW_EXTEND_SIGNER
   sudo install -m 0755 /tmp/intents-juno-multikey-extend-signer.sh /usr/local/bin/intents-juno-multikey-extend-signer.sh
 

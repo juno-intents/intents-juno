@@ -88,19 +88,9 @@ rewrite_operator_manifest_for_bundle() {
             null
           end
         )
-      | if (.runtime_material_ref.mode // "") == "s3-kms-zip" then
-          .known_hosts_file = null
-          | .secret_contract_file = null
-          | .dkg_backup_zip = null
-        elif .operator_id == $local_operator_id then
-          .known_hosts_file = "./known_hosts"
-          | .secret_contract_file = "./operator-secrets.env"
-          | .dkg_backup_zip = "./dkg-backup.zip"
-        else
-          .known_hosts_file = null
-          | .secret_contract_file = null
-          | .dkg_backup_zip = null
-        end
+      | .known_hosts_file = null
+      | .secret_contract_file = null
+      | .dkg_backup_zip = null
     ' "$source_manifest" >"$output_manifest"
 }
 
@@ -441,7 +431,7 @@ for operator_manifest in "${operator_manifests[@]}"; do
   cp "$SCRIPT_DIR/canary-operator-boot.sh" "$bundle_root/deploy/production/canary-operator-boot.sh"
   cp "$SCRIPT_DIR/run-operator-rollout.sh" "$bundle_root/deploy/production/run-operator-rollout.sh"
   cp "$SCRIPT_DIR/run-operator-local-canary.sh" "$bundle_root/deploy/production/run-operator-local-canary.sh"
-  cp "$SCRIPT_DIR/prepare-runtime-materials.sh" "$bundle_root/deploy/production/prepare-runtime-materials.sh"
+  cp "$SCRIPT_DIR/prepare-operator-handoff.sh" "$bundle_root/deploy/production/prepare-operator-handoff.sh"
   cp "$SCRIPT_DIR/lib.sh" "$bundle_root/deploy/production/lib.sh"
   cp "$REPO_ROOT/deploy/operators/dkg/backup-package.sh" "$bundle_root/deploy/operators/dkg/backup-package.sh"
   cp "$REPO_ROOT/deploy/operators/dkg/common.sh" "$bundle_root/deploy/operators/dkg/common.sh"
@@ -451,7 +441,7 @@ for operator_manifest in "${operator_manifests[@]}"; do
     "$bundle_root/deploy/production/canary-operator-boot.sh" \
     "$bundle_root/deploy/production/run-operator-rollout.sh" \
     "$bundle_root/deploy/production/run-operator-local-canary.sh" \
-    "$bundle_root/deploy/production/prepare-runtime-materials.sh" \
+    "$bundle_root/deploy/production/prepare-operator-handoff.sh" \
     "$bundle_root/deploy/operators/dkg/backup-package.sh" \
     "$bundle_root/deploy/operators/dkg/operator-export-kms.sh"
 
@@ -461,15 +451,6 @@ for operator_manifest in "${operator_manifests[@]}"; do
     mkdir -p "$peer_dir"
     rewrite_operator_manifest_for_bundle "$peer_manifest" "$peer_dir/operator-deploy.json" "$operator_id"
   done
-
-  local_handoff_dir="$(cd "$(dirname "$operator_manifest")" && pwd)"
-  dkg_backup_zip_src="$(jq -r '.dkg_backup_zip // empty' "$operator_manifest")"
-  if [[ -n "$dkg_backup_zip_src" ]]; then
-    dkg_backup_zip_src="$(production_abs_path "$local_handoff_dir" "$dkg_backup_zip_src")"
-    cp "$local_handoff_dir/known_hosts" "$bundle_operator_dir/known_hosts"
-    cp "$local_handoff_dir/operator-secrets.env" "$bundle_operator_dir/operator-secrets.env"
-    cp "$dkg_backup_zip_src" "$bundle_operator_dir/dkg-backup.zip"
-  fi
   jq -n '{status: "pending"}' >"$bundle_operator_root/canary-result.json"
   jq -n '{status: "pending"}' >"$bundle_operator_root/deployment-report.json"
   render_deploy_wrapper "$bundle_operator_root/deploy-mainnet-operator.sh" "$operator_id"

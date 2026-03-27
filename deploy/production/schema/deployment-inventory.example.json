@@ -109,8 +109,8 @@
     "aws_region": "us-east-1",
     "account_id": "021490342184",
     "security_group_id": "sg-0123456789abcdef0",
-    "known_hosts_file": "app/known_hosts",
-    "secret_contract_file": "app/app-secrets.env",
+    "runtime_config_secret_id": "alpha/app/runtime-config",
+    "runtime_config_secret_region": "us-east-1",
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
     "public_scheme": "https",
@@ -160,8 +160,8 @@
     "aws_region": "us-east-1",
     "account_id": "021490342184",
     "security_group_id": "sg-0123456789abcdef0",
-    "known_hosts_file": "app/known_hosts",
-    "secret_contract_file": "app/app-secrets.env",
+    "runtime_config_secret_id": "alpha/app/runtime-config",
+    "runtime_config_secret_region": "us-east-1",
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
     "public_scheme": "https",
@@ -199,9 +199,15 @@
         "id": "lt-0123456789abcdef0",
         "version": "1"
       },
-      "known_hosts_file": "operators/op1/known_hosts",
-      "dkg_backup_zip": "operators/op1/dkg-backup.zip",
-      "secret_contract_file": "operators/op1/operator-secrets.env"
+      "runtime_material_ref": {
+        "mode": "s3-kms-zip",
+        "bucket": "alpha-runtime-materials",
+        "key": "operators/op1/runtime-material.zip",
+        "region": "us-east-1",
+        "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+      },
+      "runtime_config_secret_id": "alpha/op1/runtime-config",
+      "runtime_config_secret_region": "us-east-1"
     }
   ],
   "dns": {

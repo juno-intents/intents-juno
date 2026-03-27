@@ -139,26 +139,17 @@ fetch_restore_package() {
   local runtime_material_mode runtime_material_bucket runtime_material_key runtime_material_region
 
   runtime_material_mode="$(jq -r '.runtime_material_ref.mode // empty' "$operator_deploy")"
-  if [[ "$runtime_material_mode" == "s3-kms-zip" ]]; then
-    have_cmd aws || die "required command not found: aws"
-    runtime_material_bucket="$(jq -r '.runtime_material_ref.bucket // empty' "$operator_deploy")"
-    runtime_material_key="$(jq -r '.runtime_material_ref.key // empty' "$operator_deploy")"
-    runtime_material_region="$(jq -r '.runtime_material_ref.region // empty' "$operator_deploy")"
-    [[ -n "$runtime_material_bucket" ]] || die "runtime_material_ref.bucket is required"
-    [[ -n "$runtime_material_key" ]] || die "runtime_material_ref.key is required"
-    [[ -n "$runtime_material_region" ]] || die "runtime_material_ref.region is required"
-    restore_package_path="$stage_dir/runtime-material.zip"
-    AWS_PAGER="" aws --region "$runtime_material_region" s3 cp "s3://${runtime_material_bucket}/${runtime_material_key}" "$restore_package_path" >/dev/null
-    cleanup_restore_package="true"
-    return 0
-  fi
-
-  if [[ -f "$stage_dir/dkg-backup.zip" ]]; then
-    restore_package_path="$stage_dir/dkg-backup.zip"
-    return 0
-  fi
-
-  die "no runtime material package available in stage or runtime_material_ref"
+  [[ "$runtime_material_mode" == "s3-kms-zip" ]] || die "operator deploy manifest must set runtime_material_ref.mode=s3-kms-zip"
+  have_cmd aws || die "required command not found: aws"
+  runtime_material_bucket="$(jq -r '.runtime_material_ref.bucket // empty' "$operator_deploy")"
+  runtime_material_key="$(jq -r '.runtime_material_ref.key // empty' "$operator_deploy")"
+  runtime_material_region="$(jq -r '.runtime_material_ref.region // empty' "$operator_deploy")"
+  [[ -n "$runtime_material_bucket" ]] || die "runtime_material_ref.bucket is required"
+  [[ -n "$runtime_material_key" ]] || die "runtime_material_ref.key is required"
+  [[ -n "$runtime_material_region" ]] || die "runtime_material_ref.region is required"
+  restore_package_path="$stage_dir/runtime-material.zip"
+  AWS_PAGER="" aws --region "$runtime_material_region" s3 cp "s3://${runtime_material_bucket}/${runtime_material_key}" "$restore_package_path" >/dev/null
+  cleanup_restore_package="true"
 }
 
 restore_runtime() {

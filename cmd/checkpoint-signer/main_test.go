@@ -7,29 +7,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/leases"
 )
 
-func TestLoadDigestSigner_LocalEnv(t *testing.T) {
-	t.Setenv("TEST_CHECKPOINT_SIGNER_PRIVATE_KEY", "4f3edf983ac636a65a842ce7c78d9aa706d3b113b37c2b1b4c1c5f5d8f5e2d3a")
-
-	signer, operator, err := loadDigestSigner(context.Background(), "local-env", "", "TEST_CHECKPOINT_SIGNER_PRIVATE_KEY")
-	if err != nil {
-		t.Fatalf("loadDigestSigner: %v", err)
-	}
-	if signer == nil {
-		t.Fatalf("expected signer")
-	}
-	want := common.HexToAddress("0xeD99D54580044F325C6e9E12236fa90A165257ff")
-	if operator != want {
-		t.Fatalf("operator mismatch: got %s want %s", operator, want)
-	}
-}
-
 func TestLoadDigestSigner_AWSKMSRequiresOperatorAddress(t *testing.T) {
-	_, _, err := loadDigestSigner(context.Background(), "aws-kms", "arn:aws:kms:us-east-1:123:key/test", "IGNORED")
+	_, _, err := loadDigestSigner(context.Background(), "aws-kms", "arn:aws:kms:us-east-1:123:key/test")
 	if err == nil {
 		t.Fatalf("expected error")
 	}
@@ -39,7 +22,7 @@ func TestLoadDigestSigner_AWSKMSRequiresOperatorAddress(t *testing.T) {
 }
 
 func TestLoadDigestSigner_RejectsUnknownDriver(t *testing.T) {
-	_, _, err := loadDigestSigner(context.Background(), "bad-driver", "", "IGNORED")
+	_, _, err := loadDigestSigner(context.Background(), "bad-driver", "")
 	if err == nil {
 		t.Fatalf("expected error")
 	}
