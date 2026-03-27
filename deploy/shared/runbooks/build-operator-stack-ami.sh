@@ -1605,6 +1605,18 @@ if ! dev_mode_enabled; then
     echo "tss-host production mode requires TSS_CLIENT_CA_FILE to reference a readable PEM file" >&2
     exit 1
   }
+  [[ -n "${TSS_AUTH_TOKEN:-}" ]] || {
+    echo "tss-host production mode requires TSS_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${BASE_CHAIN_ID:-}" ]] || {
+    echo "tss-host production mode requires BASE_CHAIN_ID in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
+  [[ -n "${BRIDGE_ADDRESS:-}" ]] || {
+    echo "tss-host production mode requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+    exit 1
+  }
 fi
 runtime_mode="$(printf '%s' "${TSS_SIGNER_RUNTIME_MODE:-nitro-enclave}" | tr '[:upper:]' '[:lower:]')"
 case "$runtime_mode" in
@@ -1664,6 +1676,7 @@ fi
 if [[ "${!tss_postgres_dsn_env+x}" == "x" ]]; then
   export "$tss_postgres_dsn_env"
 fi
+export TSS_AUTH_TOKEN
 args=(
   --listen-addr "${TSS_LISTEN_ADDR:-127.0.0.1:9443}"
   --tls-cert-file "${TSS_TLS_CERT_FILE}"
@@ -1671,6 +1684,9 @@ args=(
   --read-timeout 120s
   --write-timeout 120s
   --idle-timeout 120s
+  --auth-token-env TSS_AUTH_TOKEN
+  --base-chain-id "${BASE_CHAIN_ID}"
+  --bridge-address "${BRIDGE_ADDRESS}"
   --postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"
   --signer-bin /usr/local/bin/tss-signer
   --signer-arg --ufvk-file
@@ -2004,6 +2020,10 @@ dev_mode_enabled() {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_URL in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${TSS_AUTH_TOKEN:-}" ]] || {
+  echo "withdraw-coordinator requires TSS_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 [[ "${WITHDRAW_COORDINATOR_TSS_URL}" == https://* ]] || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TSS_URL to use https://" >&2
   exit 1
@@ -2080,7 +2100,7 @@ fi
   echo "withdraw-coordinator requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY TSS_AUTH_TOKEN
 export JUNO_SCAN_BEARER_TOKEN
 export JUNO_TXSIGN_SIGNER_KEYS
 
@@ -2111,6 +2131,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-expiry-offset "${WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET:-240}" \
   --juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
+  --tss-auth-token-env TSS_AUTH_TOKEN \
   --tss-server-ca-file "${WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE}" \
   "${tss_server_name_args[@]}" \
   --tss-client-cert-file "${WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE}" \
@@ -2217,6 +2238,11 @@ export_optional_env_vars AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FI
   echo "withdraw-finalizer requires BASE_RELAYER_URL in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+withdraw_finalizer_base_rpc_url="${WITHDRAW_FINALIZER_BASE_RPC_URL:-${BASE_RPC_URL:-${BASE_RELAYER_RPC_URL:-${BASE_EVENT_SCANNER_BASE_RPC_URL:-}}}}"
+[[ -n "${withdraw_finalizer_base_rpc_url:-}" ]] || {
+  echo "withdraw-finalizer requires WITHDRAW_FINALIZER_BASE_RPC_URL (or BASE_RPC_URL / BASE_RELAYER_RPC_URL / BASE_EVENT_SCANNER_BASE_RPC_URL) in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 [[ -n "${BASE_RELAYER_AUTH_TOKEN:-}" ]] || {
   echo "withdraw-finalizer requires BASE_RELAYER_AUTH_TOKEN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -2300,6 +2326,7 @@ args=(
   --juno-rpc-user-env JUNO_RPC_USER
   --juno-rpc-pass-env JUNO_RPC_PASS
   --base-relayer-url "${BASE_RELAYER_URL}"
+  --base-rpc-url "${withdraw_finalizer_base_rpc_url}"
   --base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN
   --owner "${withdraw_finalizer_owner}"
   --proof-driver queue

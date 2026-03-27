@@ -5,11 +5,14 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"math/big"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/juno-intents/intents-juno/internal/blobstore"
@@ -169,8 +172,59 @@ func (s *failSetFinalizedStore) SetBatchFinalized(context.Context, [32]byte, wit
 	return s.err
 }
 
+type stubWithdrawBridgeCaller struct {
+	response []byte
+	err      error
+	calls    int
+}
+
+func (s *stubWithdrawBridgeCaller) CallContract(context.Context, ethereum.CallMsg, *big.Int) ([]byte, error) {
+	s.calls++
+	if s.err != nil {
+		return nil, s.err
+	}
+	return append([]byte(nil), s.response...), nil
+}
+
 func testFence(owner string) withdraw.Fence {
 	return withdraw.Fence{Owner: owner, LeaseVersion: 1}
+}
+
+func mustEncodeGetWithdrawalResult(t *testing.T, finalized bool) []byte {
+	t.Helper()
+
+	const bridgeViewABI = `[
+	  {
+	    "inputs": [{"internalType":"bytes32","name":"withdrawalId","type":"bytes32"}],
+	    "name":"getWithdrawal",
+	    "outputs":[
+	      {"internalType":"address","name":"requester","type":"address"},
+	      {"internalType":"uint256","name":"amount","type":"uint256"},
+	      {"internalType":"uint64","name":"expiry","type":"uint64"},
+	      {"internalType":"uint96","name":"feeBpsAtRequest","type":"uint96"},
+	      {"internalType":"bool","name":"finalized","type":"bool"},
+	      {"internalType":"bytes","name":"recipientUA","type":"bytes"}
+	    ],
+	    "stateMutability":"view",
+	    "type":"function"
+	  }
+	]`
+	a, err := abi.JSON(strings.NewReader(bridgeViewABI))
+	if err != nil {
+		t.Fatalf("parse bridge view abi: %v", err)
+	}
+	raw, err := a.Methods["getWithdrawal"].Outputs.Pack(
+		common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+		big.NewInt(1000),
+		uint64(123),
+		big.NewInt(50),
+		finalized,
+		[]byte{0x01},
+	)
+	if err != nil {
+		t.Fatalf("pack getWithdrawal outputs: %v", err)
+	}
+	return raw
 }
 
 type trackingLeaseStore struct {
@@ -306,6 +360,56 @@ func TestFinalizer_NoCheckpoint_NoOp(t *testing.T) {
 	}
 	if b.State != withdraw.BatchStateConfirmed {
 		t.Fatalf("expected confirmed, got %s", b.State)
+	}
+}
+
+func TestFinalizer_RestoreCheckpointLoadsPersistedPackage(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 3, 27, 13, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+
+	cp := checkpoint.Checkpoint{
+		Height:           42,
+		BlockHash:        common.HexToHash("0x1234"),
+		FinalOrchardRoot: common.HexToHash("0x5678"),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+	if err := store.StoreFinalizerCheckpoint(context.Background(), cp, checkpointSigs); err != nil {
+		t.Fatalf("StoreFinalizerCheckpoint: %v", err)
+	}
+
+	f, err := New(Config{
+		Owner:               "finalizer-a",
+		LeaseTTL:            30 * time.Second,
+		LeaseRenewInterval:  10 * time.Second,
+		MaxBatches:          1,
+		BaseChainID:         cp.BaseChainID,
+		BridgeAddress:       cp.BridgeContract,
+		WithdrawImageID:     common.HexToHash("0x99"),
+		OperatorAddresses:   operatorAddrs,
+		OperatorThreshold:   1,
+		ProofRequestTimeout: time.Minute,
+	}, store, leaseStore, &recordingSender{}, &staticProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := f.RestoreCheckpoint(context.Background()); err != nil {
+		t.Fatalf("RestoreCheckpoint: %v", err)
+	}
+	if f.checkpoint == nil {
+		t.Fatalf("expected checkpoint to be restored")
+	}
+	if f.checkpoint.Height != cp.Height {
+		t.Fatalf("checkpoint height = %d, want %d", f.checkpoint.Height, cp.Height)
+	}
+	if len(f.opSigs) != len(checkpointSigs) {
+		t.Fatalf("operator signature count = %d, want %d", len(f.opSigs), len(checkpointSigs))
 	}
 }
 
@@ -445,6 +549,91 @@ func TestFinalizer_TickFinalizesConfirmedBatch(t *testing.T) {
 	// Lease should be immediately acquirable on success.
 	if _, ok, err := leaseStore.TryAcquire(ctx, batchLeaseName(batchID), "other", 10*time.Second); err != nil || !ok {
 		t.Fatalf("expected lease to be released, ok=%v err=%v", ok, err)
+	}
+}
+
+func TestFinalizer_TickSkipsSendWhenBatchAlreadyFinalizedOnChain(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	nowFn := func() time.Time { return now }
+	store := withdraw.NewMemoryStore(nowFn)
+	leaseStore := leases.NewMemoryStore(nowFn)
+	ctx := context.Background()
+
+	w := withdraw.Withdrawal{ID: seq32(0x40), Amount: 1000, FeeBps: 50, RecipientUA: []byte{0x01}, Expiry: now.Add(24 * time.Hour), ProofWitnessItem: testWithdrawWitnessItem()}
+	_, _, _ = store.UpsertRequested(ctx, w)
+	_, _ = store.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1)
+	batchID := seq32(0x41)
+	_ = store.CreatePlannedBatch(ctx, testFence("a"), withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	})
+	_ = store.MarkBatchSigning(ctx, batchID, testFence("a"))
+	_ = store.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01})
+	_ = store.MarkBatchBroadcastLocked(ctx, batchID, testFence("a"))
+	_ = store.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1")
+	_ = store.MarkBatchJunoConfirmed(ctx, batchID, testFence("a"))
+	_ = store.SetBatchConfirmed(ctx, batchID, testFence("a"))
+
+	bridgeAddr := common.HexToAddress("0x0000000000000000000000000000000000000123")
+	cp := checkpoint.Checkpoint{
+		Height:           1,
+		BlockHash:        common.Hash{},
+		FinalOrchardRoot: common.Hash{},
+		BaseChainID:      31337,
+		BridgeContract:   bridgeAddr,
+	}
+	operatorAddrs, checkpointSigs := mustSignedCheckpoint(t, cp)
+
+	bridgeCaller := &stubWithdrawBridgeCaller{response: mustEncodeGetWithdrawalResult(t, true)}
+	sender := &recordingSender{err: errors.New("send should not be called")}
+	prover := &staticProofRequester{res: proofclient.Result{Seal: []byte{0x99}}}
+
+	f, err := New(Config{
+		Owner:             "f1",
+		LeaseTTL:          10 * time.Second,
+		MaxBatches:        10,
+		BaseChainID:       31337,
+		BridgeAddress:     bridgeAddr,
+		WithdrawImageID:   common.HexToHash("0x000000000000000000000000000000000000000000000000000000000000aa02"),
+		OperatorAddresses: operatorAddrs,
+		OperatorThreshold: 1,
+		GasLimit:          123_000,
+		OWalletOVKBytes:   testOWalletOVKBytes(),
+		BridgeCaller:      bridgeCaller,
+	}, store, leaseStore, sender, prover, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := f.IngestCheckpoint(ctx, CheckpointPackage{Checkpoint: cp, OperatorSignatures: checkpointSigs}); err != nil {
+		t.Fatalf("IngestCheckpoint: %v", err)
+	}
+
+	if err := f.Tick(ctx); err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if bridgeCaller.calls != 1 {
+		t.Fatalf("bridge caller calls = %d, want 1", bridgeCaller.calls)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender calls = %d, want 0", sender.calls)
+	}
+	if prover.gotReq.JobID != (common.Hash{}) {
+		t.Fatalf("expected proof requester to be skipped when batch already finalized on chain")
+	}
+
+	b, err := store.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateFinalized {
+		t.Fatalf("state: got %s want %s", b.State, withdraw.BatchStateFinalized)
+	}
+	if b.BaseTxHash != "" {
+		t.Fatalf("base tx hash: got %q want empty", b.BaseTxHash)
 	}
 }
 

@@ -672,6 +672,11 @@ func (r *Relayer) recoverSubmittedAttempt(ctx context.Context, attempt deposit.S
 	if attempt.TxHash != ([32]byte{}) {
 		return r.reconcileSubmittedAttempt(ctx, attempt, expired, expiredReason)
 	}
+	if finalized, err := r.submittedAttemptAlreadyFinalizedOnChain(ctx, attempt); err != nil {
+		return err
+	} else if finalized {
+		return r.store.ApplyBatchOutcome(ctx, attempt.BatchID, attempt.TxHash, attempt.DepositIDs, nil, "")
+	}
 	if stale, reason, err := r.submittedAttemptCheckpointStale(ctx, attempt.Checkpoint); err != nil {
 		return err
 	} else if stale || expired {
@@ -681,6 +686,34 @@ func (r *Relayer) recoverSubmittedAttempt(ctx context.Context, attempt deposit.S
 		return r.resetBatch(ctx, attempt.BatchID, reason)
 	}
 	return r.resubmitSubmittedAttempt(ctx, attempt)
+}
+
+func (r *Relayer) submittedAttemptAlreadyFinalizedOnChain(ctx context.Context, attempt deposit.SubmittedBatchAttempt) (bool, error) {
+	if len(attempt.DepositIDs) == 0 || r.bridgeCaller == nil {
+		return false, nil
+	}
+	bridgeAddress := attempt.Checkpoint.BridgeContract
+	for _, depositID := range attempt.DepositIDs {
+		calldata, err := bridgeabi.PackDepositUsedCalldata(common.Hash(depositID))
+		if err != nil {
+			return false, err
+		}
+		raw, err := r.bridgeCaller.CallContract(ctx, ethereum.CallMsg{
+			To:   &bridgeAddress,
+			Data: calldata,
+		}, nil)
+		if err != nil {
+			return false, err
+		}
+		used, err := bridgeabi.UnpackDepositUsedResult(raw)
+		if err != nil {
+			return false, err
+		}
+		if !used {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func (r *Relayer) currentCheckpointSupersedes(attempt checkpoint.Checkpoint) bool {

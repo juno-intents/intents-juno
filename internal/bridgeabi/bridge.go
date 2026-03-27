@@ -50,6 +50,15 @@ type WithdrawJournal struct {
 	Items            []FinalizeItem
 }
 
+type WithdrawalView struct {
+	Requester       common.Address
+	Amount          *big.Int
+	Expiry          uint64
+	FeeBpsAtRequest *big.Int
+	Finalized       bool
+	RecipientUA     []byte
+}
+
 var (
 	initOnce sync.Once
 	initErr  error
@@ -255,6 +264,91 @@ func PackMarkWithdrawPaidBatchCalldata(withdrawalIDs []common.Hash, operatorSigs
 		return nil, fmt.Errorf("bridgeabi: pack markWithdrawPaidBatch calldata: %w", err)
 	}
 	return b, nil
+}
+
+func PackDepositUsedCalldata(depositID common.Hash) ([]byte, error) {
+	if err := initABI(); err != nil {
+		return nil, err
+	}
+	b, err := bridgeABI.Pack("depositUsed", depositID)
+	if err != nil {
+		return nil, fmt.Errorf("bridgeabi: pack depositUsed calldata: %w", err)
+	}
+	return b, nil
+}
+
+func UnpackDepositUsedResult(raw []byte) (bool, error) {
+	if err := initABI(); err != nil {
+		return false, err
+	}
+	values, err := bridgeABI.Methods["depositUsed"].Outputs.Unpack(raw)
+	if err != nil {
+		return false, fmt.Errorf("bridgeabi: unpack depositUsed result: %w", err)
+	}
+	if len(values) != 1 {
+		return false, fmt.Errorf("%w: unexpected depositUsed output count", ErrInvalidInput)
+	}
+	used, ok := values[0].(bool)
+	if !ok {
+		return false, fmt.Errorf("%w: unexpected depositUsed output type", ErrInvalidInput)
+	}
+	return used, nil
+}
+
+func PackGetWithdrawalCalldata(withdrawalID common.Hash) ([]byte, error) {
+	if err := initABI(); err != nil {
+		return nil, err
+	}
+	b, err := bridgeABI.Pack("getWithdrawal", withdrawalID)
+	if err != nil {
+		return nil, fmt.Errorf("bridgeabi: pack getWithdrawal calldata: %w", err)
+	}
+	return b, nil
+}
+
+func UnpackGetWithdrawalResult(raw []byte) (WithdrawalView, error) {
+	if err := initABI(); err != nil {
+		return WithdrawalView{}, err
+	}
+	values, err := bridgeABI.Methods["getWithdrawal"].Outputs.Unpack(raw)
+	if err != nil {
+		return WithdrawalView{}, fmt.Errorf("bridgeabi: unpack getWithdrawal result: %w", err)
+	}
+	if len(values) != 6 {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal output count", ErrInvalidInput)
+	}
+	requester, ok := values[0].(common.Address)
+	if !ok {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal requester output type", ErrInvalidInput)
+	}
+	amount, ok := values[1].(*big.Int)
+	if !ok || amount == nil {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal amount output type", ErrInvalidInput)
+	}
+	expiry, ok := values[2].(uint64)
+	if !ok {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal expiry output type", ErrInvalidInput)
+	}
+	feeBpsAtRequest, ok := values[3].(*big.Int)
+	if !ok || feeBpsAtRequest == nil {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal fee output type", ErrInvalidInput)
+	}
+	finalized, ok := values[4].(bool)
+	if !ok {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal finalized output type", ErrInvalidInput)
+	}
+	recipientUA, ok := values[5].([]byte)
+	if !ok {
+		return WithdrawalView{}, fmt.Errorf("%w: unexpected getWithdrawal recipient output type", ErrInvalidInput)
+	}
+	return WithdrawalView{
+		Requester:       requester,
+		Amount:          amount,
+		Expiry:          expiry,
+		FeeBpsAtRequest: feeBpsAtRequest,
+		Finalized:       finalized,
+		RecipientUA:     append([]byte(nil), recipientUA...),
+	}, nil
 }
 
 func PackMinDepositAmountCalldata() ([]byte, error) {
@@ -618,6 +712,27 @@ const bridgeABIJSON = `[
     "name":"markWithdrawPaidBatch",
     "outputs":[],
     "stateMutability":"nonpayable",
+    "type":"function"
+  },
+  {
+    "inputs":[{"internalType":"bytes32","name":"","type":"bytes32"}],
+    "name":"depositUsed",
+    "outputs":[{"internalType":"bool","name":"","type":"bool"}],
+    "stateMutability":"view",
+    "type":"function"
+  },
+  {
+    "inputs": [{"internalType":"bytes32","name":"withdrawalId","type":"bytes32"}],
+    "name":"getWithdrawal",
+    "outputs":[
+      {"internalType":"address","name":"requester","type":"address"},
+      {"internalType":"uint256","name":"amount","type":"uint256"},
+      {"internalType":"uint64","name":"expiry","type":"uint64"},
+      {"internalType":"uint96","name":"feeBpsAtRequest","type":"uint96"},
+      {"internalType":"bool","name":"finalized","type":"bool"},
+      {"internalType":"bytes","name":"recipientUA","type":"bytes"}
+    ],
+    "stateMutability":"view",
     "type":"function"
   },
   {

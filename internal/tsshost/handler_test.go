@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/juno-intents/intents-juno/internal/tss"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
@@ -380,6 +381,53 @@ func TestHandler_Sign_VerifiesBatchBindingBeforeSigning(t *testing.T) {
 	}
 }
 
+func TestHandler_Sign_RequiresBearerAuthWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	signer := &stubSigner{ret: []byte("signed")}
+	batchID := seq32(0x73)
+	txPlan := []byte(`{"version":"v0","kind":"withdrawal","change_address":"jtest1change000000000000000000000000000000000000000000000000000000","outputs":[]}`)
+	sessionID := tss.DeriveSigningSessionID(batchID, txPlan)
+	h := NewHandler(signer, Config{
+		MaxBodyBytes:   1 << 20,
+		MaxTxPlanBytes: 1 << 20,
+		MaxSessions:    16,
+		Now:            time.Now,
+		AuthToken:      "secret-token",
+	})
+
+	body, err := json.Marshal(map[string]any{
+		"version":   "tss.sign.v1",
+		"sessionId": tss.FormatSessionID(sessionID),
+		"batchId":   tss.FormatBatchID(batchID),
+		"txPlan":    txPlan,
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signer.calls != 0 {
+		t.Fatalf("expected 0 signer calls, got %d", signer.calls)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/v1/sign", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer secret-token")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if signer.calls != 1 {
+		t.Fatalf("expected 1 signer call, got %d", signer.calls)
+	}
+}
+
 func TestHandler_Sign_BadRequestOnInvalidJSON(t *testing.T) {
 	t.Parallel()
 
@@ -554,7 +602,10 @@ func TestWithdrawBatchVerifier_RejectsMismatchedSessionBinding(t *testing.T) {
 		t.Fatalf("CreatePlannedBatch: %v", err)
 	}
 
-	verifier := NewWithdrawBatchVerifier(store)
+	verifier := NewWithdrawBatchVerifier(store, WithdrawBatchVerifierConfig{
+		BaseChainID:  8453,
+		BridgeAddress: common.HexToAddress("0x00000000000000000000000000000000000000b7"),
+	})
 	err := verifier.VerifySignRequest(ctx, seq32(0x82), batchID, txPlan)
 	if err == nil {
 		t.Fatalf("expected verifier rejection")

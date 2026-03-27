@@ -119,3 +119,18 @@ func (s *MemoryStore) Get(_ context.Context, name string) (Lease, error) {
 	}
 	return l, nil
 }
+
+func (s *MemoryStore) GetWithStoreTime(_ context.Context, name string) (Lease, time.Time, error) {
+	if name == "" {
+		return Lease{}, time.Time{}, ErrInvalidInput
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	l, ok := s.leases[name]
+	if !ok {
+		return Lease{}, time.Time{}, ErrNotFound
+	}
+	return l, s.now(), nil
+}

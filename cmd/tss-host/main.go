@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/juno-intents/intents-juno/internal/emf"
 	"github.com/juno-intents/intents-juno/internal/pgxpoolutil"
@@ -40,6 +41,10 @@ func main() {
 		maxBodyBytes   = flag.Int64("max-body-bytes", 1<<20, "max HTTP request body size (bytes)")
 		maxTxPlanBytes = flag.Int("max-txplan-bytes", 1<<20, "max decoded txPlan size (bytes)")
 		maxSessions    = flag.Int("max-sessions", 1024, "max in-memory sessions for idempotency")
+		authTokenEnv   = flag.String("auth-token-env", "TSS_AUTH_TOKEN", "env var containing the shared bearer token for /v1/sign (required unless --insecure-http)")
+
+		baseChainID  = flag.Uint("base-chain-id", 0, "Base/EVM chain id used to validate withdrawal tx plans (required unless --insecure-http)")
+		bridgeAddr   = flag.String("bridge-address", "", "Bridge contract address used to validate withdrawal tx plans (required unless --insecure-http)")
 
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
 		postgresDSNEnv            = flag.String("postgres-dsn-env", "", "env var containing Postgres DSN (required unless --postgres-dsn is set)")
@@ -85,6 +90,7 @@ func main() {
 		log.Error("missing --signer-bin")
 		os.Exit(2)
 	}
+	authToken := strings.TrimSpace(os.Getenv(strings.TrimSpace(*authTokenEnv)))
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	devMode := devModeEnabled()
@@ -99,6 +105,18 @@ func main() {
 		}
 		if err := validatePrivateListenAddr(*listenAddr); err != nil {
 			log.Error("invalid --listen-addr for production mode", "err", err)
+			os.Exit(2)
+		}
+		if authToken == "" {
+			log.Error("missing auth token env", "env", *authTokenEnv)
+			os.Exit(2)
+		}
+		if *baseChainID == 0 {
+			log.Error("missing --base-chain-id")
+			os.Exit(2)
+		}
+		if !common.IsHexAddress(strings.TrimSpace(*bridgeAddr)) {
+			log.Error("invalid --bridge-address")
 			os.Exit(2)
 		}
 	}
@@ -142,7 +160,10 @@ func main() {
 			log.Error("init withdraw store", "err", storeErr)
 			os.Exit(2)
 		}
-		verifier = tsshost.NewWithdrawBatchVerifier(withdrawStore)
+		verifier = tsshost.NewWithdrawBatchVerifier(withdrawStore, tsshost.WithdrawBatchVerifierConfig{
+			BaseChainID:   uint32(*baseChainID),
+			BridgeAddress: common.HexToAddress(strings.TrimSpace(*bridgeAddr)),
+		})
 		dbReady = pgxpoolutil.ReadinessCheck(pool, pgxpoolutil.DefaultReadyTimeout)
 	}
 	if verifier == nil && !devMode {
@@ -156,6 +177,7 @@ func main() {
 		MaxSessions:    *maxSessions,
 		ReadinessCheck: combineReadinessChecks(signerReadinessCheck(signer), dbReady),
 		Verifier:       verifier,
+		AuthToken:      authToken,
 		Now:            time.Now,
 	})
 

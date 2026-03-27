@@ -240,17 +240,32 @@ func (c *Coordinator) assertLeadership(ctx context.Context) error {
 	if c.currentLeader.Name == "" || c.currentLeader.Owner == "" || c.currentLeader.Version <= 0 {
 		return fmt.Errorf("%w: missing current leader lease", ErrInvalidConfig)
 	}
-	lease, err := c.leaderLeaseStore.Get(ctx, c.currentLeader.Name)
-	if err != nil {
+	storeNow := c.cfg.Now()
+	var (
+		lease leases.Lease
+		err   error
+	)
+	if timeAwareStore, ok := c.leaderLeaseStore.(leases.TimeAwareStore); ok {
+		lease, storeNow, err = timeAwareStore.GetWithStoreTime(ctx, c.currentLeader.Name)
+		if err != nil {
+			if errors.Is(err, leases.ErrNotFound) {
+				return ErrLeadershipLost
+			}
+			return err
+		}
+	} else {
+		lease, err = c.leaderLeaseStore.Get(ctx, c.currentLeader.Name)
+		if err != nil {
 		if errors.Is(err, leases.ErrNotFound) {
 			return ErrLeadershipLost
 		}
 		return err
+		}
 	}
 	if lease.Owner != c.currentLeader.Owner || lease.Version != c.currentLeader.Version {
 		return ErrLeadershipLost
 	}
-	if !lease.ExpiresAt.After(c.cfg.Now()) {
+	if !lease.ExpiresAt.After(storeNow) {
 		return ErrLeadershipLost
 	}
 	return nil

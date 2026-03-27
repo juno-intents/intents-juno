@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sync"
 	"time"
+
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 )
 
 type MemoryStore struct {
@@ -15,6 +17,8 @@ type MemoryStore struct {
 	withdrawals map[[32]byte]withdrawalRec
 	batches     map[[32]byte]Batch
 	scanCursor  map[string]scanBackfillCursorRec
+
+	finalizerCheckpoint *finalizerCheckpointRec
 }
 
 type scanBackfillCursorRec struct {
@@ -31,6 +35,11 @@ type withdrawalRec struct {
 	claimExpiresAt    time.Time
 
 	batchID [32]byte
+}
+
+type finalizerCheckpointRec struct {
+	checkpoint         checkpoint.Checkpoint
+	operatorSignatures [][]byte
 }
 
 func NewMemoryStore(now func() time.Time) *MemoryStore {
@@ -259,6 +268,35 @@ func (s *MemoryStore) GetBatch(_ context.Context, batchID [32]byte) (Batch, erro
 		return Batch{}, ErrNotFound
 	}
 	return cloneBatch(b), nil
+}
+
+func (s *MemoryStore) StoreFinalizerCheckpoint(_ context.Context, cp checkpoint.Checkpoint, operatorSignatures [][]byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clonedSigs := make([][]byte, len(operatorSignatures))
+	for i, sig := range operatorSignatures {
+		clonedSigs[i] = append([]byte(nil), sig...)
+	}
+	s.finalizerCheckpoint = &finalizerCheckpointRec{
+		checkpoint:         cp,
+		operatorSignatures: clonedSigs,
+	}
+	return nil
+}
+
+func (s *MemoryStore) LoadFinalizerCheckpoint(_ context.Context) (checkpoint.Checkpoint, [][]byte, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.finalizerCheckpoint == nil {
+		return checkpoint.Checkpoint{}, nil, false, nil
+	}
+	clonedSigs := make([][]byte, len(s.finalizerCheckpoint.operatorSignatures))
+	for i, sig := range s.finalizerCheckpoint.operatorSignatures {
+		clonedSigs[i] = append([]byte(nil), sig...)
+	}
+	return s.finalizerCheckpoint.checkpoint, clonedSigs, true, nil
 }
 
 func (s *MemoryStore) ListBatchesByState(_ context.Context, state BatchState) ([]Batch, error) {
@@ -748,9 +786,6 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, fen
 	if err := fence.Validate(); err != nil {
 		return err
 	}
-	if baseTxHash == "" {
-		return ErrInvalidConfig
-	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -763,14 +798,16 @@ func (s *MemoryStore) SetBatchFinalized(_ context.Context, batchID [32]byte, fen
 		return ErrInvalidTransition
 	}
 	if b.State >= BatchStateFinalized {
-		if b.BaseTxHash != baseTxHash {
+		if b.BaseTxHash != "" && baseTxHash != "" && b.BaseTxHash != baseTxHash {
 			return ErrBatchMismatch
 		}
 		return nil
 	}
 
 	b.State = BatchStateFinalized
-	b.BaseTxHash = baseTxHash
+	if baseTxHash != "" {
+		b.BaseTxHash = baseTxHash
+	}
 	b.UpdatedAt = s.now().UTC()
 	s.batches[batchID] = b
 	return nil

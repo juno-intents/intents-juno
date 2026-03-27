@@ -37,6 +37,13 @@ type Store interface {
 	Get(ctx context.Context, name string) (Lease, error)
 }
 
+// TimeAwareStore exposes the store's notion of "now" alongside the current lease record.
+// Callers should prefer this when expiry decisions must be made against durable time rather
+// than the local process clock.
+type TimeAwareStore interface {
+	GetWithStoreTime(ctx context.Context, name string) (Lease, time.Time, error)
+}
+
 func validate(name, owner string, ttl time.Duration) error {
 	if name == "" || owner == "" || ttl <= 0 {
 		return fmt.Errorf("%w: name/owner must be non-empty and ttl must be > 0", ErrInvalidInput)

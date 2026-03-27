@@ -283,6 +283,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" '--juno-expiry-offset "${WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET:-240}"' "withdraw wrapper passes a safer juno expiry offset default"
   assert_contains "$withdraw_wrapper" '--juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-1}"' "withdraw wrapper passes withdraw batch confirmation seed"
   assert_contains "$withdraw_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper passes base-relayer auth env name"
+  assert_contains "$withdraw_wrapper" '--tss-auth-token-env TSS_AUTH_TOKEN' "withdraw wrapper passes the tss auth env name"
   assert_contains "$withdraw_wrapper" '--expiry-safety-margin "${WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN:-6h}"' "withdraw wrapper defaults expiry safety margin within the extension bound"
   assert_contains "$withdraw_wrapper" '--max-expiry-extension "${WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION:-12h}"' "withdraw wrapper passes the max expiry extension from env"
   assert_not_contains "$withdraw_wrapper" '--postgres-dsn "${CHECKPOINT_POSTGRES_DSN}"' "withdraw wrapper does not pass raw Postgres DSN"
@@ -295,6 +296,10 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   tss_wrapper="$(extract_block "cat > /tmp/intents-juno-tss-host.sh <<'EOF_TSS'" "EOF_TSS")"
   assert_contains "$tss_wrapper" '[[ -s "${TSS_CLIENT_CA_FILE:-}" ]] || {' "tss wrapper requires client CA in production"
+  assert_contains "$tss_wrapper" '[[ -n "${TSS_AUTH_TOKEN:-}" ]] || {' "tss wrapper requires tss auth token in production"
+  assert_contains "$tss_wrapper" '--auth-token-env TSS_AUTH_TOKEN' "tss wrapper passes the auth token env name"
+  assert_contains "$tss_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "tss wrapper passes base chain id to verifier"
+  assert_contains "$tss_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "tss wrapper passes bridge address to verifier"
   assert_contains "$tss_wrapper" 'args+=(--client-ca-file "${TSS_CLIENT_CA_FILE}")' "tss wrapper forwards client CA to tss-host"
   assert_contains "$tss_wrapper" 'export "$tss_postgres_dsn_env"' "tss wrapper exports the selected postgres dsn env var"
   assert_contains "$tss_wrapper" '--postgres-dsn-env "${TSS_HOST_POSTGRES_DSN_ENV:-CHECKPOINT_POSTGRES_DSN}"' "tss wrapper passes postgres DSN by env indirection"
@@ -659,6 +664,8 @@ TSS_SIGNER_UFVK_FILE=$tmp/ufvk.txt
 TSS_SIGNER_WORK_DIR=$tmp/work
 TSS_TLS_CERT_FILE=$tmp/server.pem
 TSS_TLS_KEY_FILE=$tmp/server.key
+BASE_CHAIN_ID=8453
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 EOF
 
   if PATH="$fake_bin:$PATH" "$tmp/intents-juno-tss-host.sh" >"$tmp/tss.stdout" 2>"$stderr_file"; then
@@ -690,6 +697,9 @@ TSS_SIGNER_WORK_DIR=$tmp/work
 TSS_TLS_CERT_FILE=$tmp/server.pem
 TSS_TLS_KEY_FILE=$tmp/server.key
 TSS_CLIENT_CA_FILE=$tmp/ca.pem
+TSS_AUTH_TOKEN=actual-tss-auth-secret
+BASE_CHAIN_ID=8453
+BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 TSS_NITRO_SPENDAUTH_SIGNER_BIN=$tmp/nitro-signer
 TSS_NITRO_ENCLAVE_EIF_FILE=$tmp/spendauth.eif
 TSS_NITRO_ATTESTATION_FILE=$tmp/attestation.json
@@ -701,8 +711,12 @@ EOF
 
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-tss-host.sh"
   assert_contains "$(cat "$tmp/tss.args")" '--postgres-dsn-env CHECKPOINT_POSTGRES_DSN' "tss wrapper forwards the postgres env name"
+  assert_contains "$(cat "$tmp/tss.args")" '--auth-token-env TSS_AUTH_TOKEN' "tss wrapper forwards the auth token env name"
+  assert_contains "$(cat "$tmp/tss.args")" '--base-chain-id 8453' "tss wrapper forwards base chain id"
+  assert_contains "$(cat "$tmp/tss.args")" '--bridge-address 0x1111111111111111111111111111111111111111' "tss wrapper forwards bridge address"
   assert_not_contains "$(cat "$tmp/tss.args")" 'postgres://tss?sslmode=require' "tss wrapper does not pass raw postgres dsn in argv"
   assert_contains "$(cat "$tmp/tss.env")" 'CHECKPOINT_POSTGRES_DSN=postgres://tss?sslmode=require' "tss wrapper preserves postgres dsn in env"
+  assert_contains "$(cat "$tmp/tss.env")" 'TSS_AUTH_TOKEN=actual-tss-auth-secret' "tss wrapper preserves the auth token in env"
 
   cat >"$fake_bin/withdraw-coordinator" <<EOF
 #!/usr/bin/env bash
@@ -738,6 +752,7 @@ JUNO_RPC_USER=actual-rpc-username-secret
 JUNO_RPC_PASS=actual-rpc-password-secret
 JUNO_SCAN_BEARER_TOKEN=actual-juno-scan-bearer-secret
 WITHDRAW_COORDINATOR_TSS_URL=https://127.0.0.1:9443
+TSS_AUTH_TOKEN=actual-tss-auth-secret
 WITHDRAW_COORDINATOR_TSS_SERVER_CA_FILE=$tmp/ca.pem
 WITHDRAW_COORDINATOR_TSS_SERVER_NAME=10.0.0.11
 WITHDRAW_COORDINATOR_TSS_CLIENT_CERT_FILE=$tmp/coordinator-client.pem
@@ -783,11 +798,13 @@ EOF
   assert_contains "$(cat "$output_file")" '--juno-expiry-offset 240' "withdraw wrapper forwards the safer default juno expiry offset"
   assert_contains "$(cat "$output_file")" '--juno-confirmations 4' "withdraw wrapper forwards withdraw batch confirmation seed"
   assert_contains "$(cat "$output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper forwards base relayer auth env name"
+  assert_contains "$(cat "$output_file")" '--tss-auth-token-env TSS_AUTH_TOKEN' "withdraw wrapper forwards tss auth env name"
   assert_contains "$(cat "$output_file")" '--expiry-safety-margin 6h' "withdraw wrapper forwards the bounded expiry safety margin"
   assert_contains "$(cat "$output_file")" '--max-expiry-extension 12h' "withdraw wrapper forwards the max expiry extension"
   assert_contains "$(cat "$output_file")" '--tss-server-name 10.0.0.11' "withdraw wrapper forwards optional tss server name override"
   assert_not_contains "$(cat "$output_file")" 'postgres://coordinator?sslmode=require' "withdraw wrapper does not pass raw DSN in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-base-relayer-secret-token' "withdraw wrapper does not pass base relayer secret in argv"
+  assert_not_contains "$(cat "$output_file")" 'actual-tss-auth-secret' "withdraw wrapper does not pass tss auth secret in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-rpc-username-secret' "withdraw wrapper does not pass RPC username in argv"
   assert_not_contains "$(cat "$output_file")" 'actual-rpc-password-secret' "withdraw wrapper does not pass RPC password in argv"
   assert_contains "$(cat "$tmp/withdraw.env")" 'CHECKPOINT_POSTGRES_DSN=postgres://coordinator?sslmode=require' "withdraw wrapper exports Postgres DSN"
@@ -889,6 +906,7 @@ BASE_CHAIN_ID=84532
 BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111
 WITHDRAW_IMAGE_ID=deadbeef
 BASE_RELAYER_URL=https://127.0.0.1:18081
+BASE_RPC_URL=https://127.0.0.1:8545
 BASE_RELAYER_AUTH_TOKEN=actual-base-relayer-secret-token
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
@@ -919,6 +937,7 @@ EOF
   PATH="$fake_bin:$PATH" "$tmp/intents-juno-withdraw-finalizer.sh"
 
   assert_contains "$(cat "$finalizer_output_file")" '--blob-driver s3' "withdraw finalizer wrapper uses the S3 blobstore"
+  assert_contains "$(cat "$finalizer_output_file")" '--base-rpc-url https://127.0.0.1:8545' "withdraw finalizer wrapper passes the dedicated base rpc url"
   assert_contains "$(cat "$finalizer_output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw finalizer wrapper forwards base relayer auth env name"
   assert_contains "$(cat "$tmp/finalizer.env")" 'AWS_REGION=us-east-1' "withdraw finalizer wrapper exports AWS region"
   assert_contains "$(cat "$tmp/finalizer.env")" 'AWS_DEFAULT_REGION=us-east-1' "withdraw finalizer wrapper exports AWS default region"

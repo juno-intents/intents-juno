@@ -275,3 +275,82 @@ func TestFindMintedDepositTxHashes_WalksBackMultipleWindows(t *testing.T) {
 		t.Fatalf("minted tx hash: got %x want %x", got[depositID], [32]byte(mintedTxHash))
 	}
 }
+
+func TestPackDepositUsedCalldata_UnpackMatches(t *testing.T) {
+	t.Parallel()
+
+	depositID := common.HexToHash("0x" + strings.Repeat("11", 32))
+
+	calldata, err := PackDepositUsedCalldata(depositID)
+	if err != nil {
+		t.Fatalf("PackDepositUsedCalldata: %v", err)
+	}
+
+	a, err := abi.JSON(strings.NewReader(bridgeABIJSON))
+	if err != nil {
+		t.Fatalf("parse abi json: %v", err)
+	}
+	vals, err := a.Methods["depositUsed"].Inputs.Unpack(calldata[4:])
+	if err != nil {
+		t.Fatalf("unpack calldata: %v", err)
+	}
+	if len(vals) != 1 {
+		t.Fatalf("unpack len: got %d want 1", len(vals))
+	}
+	if got := vals[0].([32]byte); got != depositID {
+		t.Fatalf("deposit id: got %x want %x", got, depositID)
+	}
+
+	used, err := UnpackDepositUsedResult(common.LeftPadBytes([]byte{1}, 32))
+	if err != nil {
+		t.Fatalf("UnpackDepositUsedResult: %v", err)
+	}
+	if !used {
+		t.Fatalf("expected depositUsed result to decode true")
+	}
+}
+
+func TestPackGetWithdrawalCalldata_UnpackFinalizedResult(t *testing.T) {
+	t.Parallel()
+
+	withdrawalID := common.HexToHash("0x" + strings.Repeat("22", 32))
+
+	calldata, err := PackGetWithdrawalCalldata(withdrawalID)
+	if err != nil {
+		t.Fatalf("PackGetWithdrawalCalldata: %v", err)
+	}
+
+	a, err := abi.JSON(strings.NewReader(bridgeABIJSON))
+	if err != nil {
+		t.Fatalf("parse abi json: %v", err)
+	}
+	vals, err := a.Methods["getWithdrawal"].Inputs.Unpack(calldata[4:])
+	if err != nil {
+		t.Fatalf("unpack calldata: %v", err)
+	}
+	if len(vals) != 1 {
+		t.Fatalf("unpack len: got %d want 1", len(vals))
+	}
+	if got := vals[0].([32]byte); got != withdrawalID {
+		t.Fatalf("withdrawal id: got %x want %x", got, withdrawalID)
+	}
+
+	raw, err := a.Methods["getWithdrawal"].Outputs.Pack(
+		common.HexToAddress("0x00000000000000000000000000000000000000aa"),
+		big.NewInt(1000),
+		uint64(123),
+		big.NewInt(25),
+		true,
+		[]byte{0x01, 0x02},
+	)
+	if err != nil {
+		t.Fatalf("pack outputs: %v", err)
+	}
+	result, err := UnpackGetWithdrawalResult(raw)
+	if err != nil {
+		t.Fatalf("UnpackGetWithdrawalResult: %v", err)
+	}
+	if !result.Finalized {
+		t.Fatalf("expected finalized result to decode true")
+	}
+}

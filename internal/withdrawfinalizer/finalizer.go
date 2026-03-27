@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/crypto"
@@ -67,6 +68,15 @@ type PauseChecker interface {
 	IsPaused(ctx context.Context) (bool, error)
 }
 
+type BridgeCaller interface {
+	CallContract(ctx context.Context, msg ethereum.CallMsg, blockNumber *big.Int) ([]byte, error)
+}
+
+type checkpointPersistenceStore interface {
+	StoreFinalizerCheckpoint(ctx context.Context, cp checkpoint.Checkpoint, operatorSignatures [][]byte) error
+	LoadFinalizerCheckpoint(ctx context.Context) (checkpoint.Checkpoint, [][]byte, bool, error)
+}
+
 type Config struct {
 	Owner              string
 	LeaseTTL           time.Duration
@@ -91,6 +101,7 @@ type Config struct {
 
 	WitnessExtractor WithdrawWitnessExtractor
 	ReadinessChecker ReadinessChecker
+	BridgeCaller     BridgeCaller
 }
 
 type Finalizer struct {
@@ -108,6 +119,7 @@ type Finalizer struct {
 	witnessExtractor WithdrawWitnessExtractor
 	readinessChecker ReadinessChecker
 	pauseChecker     PauseChecker
+	bridgeCaller     BridgeCaller
 
 	checkpoint *checkpoint.Checkpoint
 	opSigs     [][]byte
@@ -172,6 +184,7 @@ func New(cfg Config, store withdraw.Store, leaseStore leases.Store, sender Sende
 		quorumVerifier:   quorumVerifier,
 		witnessExtractor: cfg.WitnessExtractor,
 		readinessChecker: cfg.ReadinessChecker,
+		bridgeCaller:     cfg.BridgeCaller,
 	}, nil
 }
 
@@ -189,6 +202,57 @@ func (f *Finalizer) WithPauseChecker(pc PauseChecker) *Finalizer {
 
 func (f *Finalizer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage) error {
 	cp := pkg.Checkpoint
+	if err := f.validateCheckpointPackage(pkg); err != nil {
+		return err
+	}
+
+	// Only move forward in height to avoid accidental reorg/rollback usage.
+	if f.checkpoint != nil && cp.Height <= f.checkpoint.Height {
+		return nil
+	}
+	if checkpointStore, ok := f.store.(checkpointPersistenceStore); ok {
+		if err := checkpointStore.StoreFinalizerCheckpoint(ctx, cp, pkg.OperatorSignatures); err != nil {
+			return err
+		}
+	}
+
+	f.checkpoint = &cp
+	f.opSigs = cloneOperatorSignatures(pkg.OperatorSignatures)
+
+	f.log.Info("updated checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
+	return f.Tick(ctx)
+}
+
+func (f *Finalizer) RestoreCheckpoint(ctx context.Context) error {
+	if f == nil {
+		return fmt.Errorf("%w: nil finalizer", ErrInvalidConfig)
+	}
+	checkpointStore, ok := f.store.(checkpointPersistenceStore)
+	if !ok {
+		return nil
+	}
+	cp, operatorSigs, ok, err := checkpointStore.LoadFinalizerCheckpoint(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil
+	}
+	pkg := CheckpointPackage{
+		Checkpoint:         cp,
+		OperatorSignatures: operatorSigs,
+	}
+	if err := f.validateCheckpointPackage(pkg); err != nil {
+		return err
+	}
+	f.checkpoint = &cp
+	f.opSigs = cloneOperatorSignatures(operatorSigs)
+	f.log.Info("restored checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
+	return nil
+}
+
+func (f *Finalizer) validateCheckpointPackage(pkg CheckpointPackage) error {
+	cp := pkg.Checkpoint
 	if cp.BaseChainID != f.cfg.BaseChainID {
 		return fmt.Errorf("%w: baseChainID mismatch: want %d got %d", ErrInvalidCheckpoint, f.cfg.BaseChainID, cp.BaseChainID)
 	}
@@ -198,17 +262,15 @@ func (f *Finalizer) IngestCheckpoint(ctx context.Context, pkg CheckpointPackage)
 	if _, err := f.quorumVerifier.VerifyCheckpointSignatures(cp, pkg.OperatorSignatures); err != nil {
 		return fmt.Errorf("%w: %v", ErrInvalidCheckpoint, err)
 	}
+	return nil
+}
 
-	// Only move forward in height to avoid accidental reorg/rollback usage.
-	if f.checkpoint != nil && cp.Height <= f.checkpoint.Height {
-		return nil
+func cloneOperatorSignatures(operatorSignatures [][]byte) [][]byte {
+	out := make([][]byte, len(operatorSignatures))
+	for i, sig := range operatorSignatures {
+		out[i] = append([]byte(nil), sig...)
 	}
-
-	f.checkpoint = &cp
-	f.opSigs = pkg.OperatorSignatures
-
-	f.log.Info("updated checkpoint", "height", cp.Height, "digest", checkpoint.Digest(cp))
-	return f.Tick(ctx)
+	return out
 }
 
 func (f *Finalizer) Tick(ctx context.Context) error {
@@ -335,6 +397,14 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		if err := f.store.MarkBatchFinalizing(workCtx, batchID, fence); err != nil {
 			return heartbeat.Wrap(err)
 		}
+	}
+	if finalizedOnChain, err := f.batchAlreadyFinalizedOnChain(workCtx, b.WithdrawalIDs); err != nil {
+		return heartbeat.Wrap(err)
+	} else if finalizedOnChain {
+		if err := f.store.SetBatchFinalized(workCtx, batchID, fence, ""); err != nil {
+			return heartbeat.Wrap(err)
+		}
+		return nil
 	}
 
 	cp := *f.checkpoint
@@ -513,6 +583,34 @@ func (f *Finalizer) finalizeBatch(ctx context.Context, batchID [32]byte) error {
 		"txHash", res.TxHash,
 	)
 	return nil
+}
+
+func (f *Finalizer) batchAlreadyFinalizedOnChain(ctx context.Context, withdrawalIDs [][32]byte) (bool, error) {
+	if len(withdrawalIDs) == 0 || f.bridgeCaller == nil {
+		return false, nil
+	}
+	bridgeAddress := f.cfg.BridgeAddress
+	for _, withdrawalID := range withdrawalIDs {
+		calldata, err := bridgeabi.PackGetWithdrawalCalldata(common.Hash(withdrawalID))
+		if err != nil {
+			return false, err
+		}
+		raw, err := f.bridgeCaller.CallContract(ctx, ethereum.CallMsg{
+			To:   &bridgeAddress,
+			Data: calldata,
+		}, nil)
+		if err != nil {
+			return false, err
+		}
+		result, err := bridgeabi.UnpackGetWithdrawalResult(raw)
+		if err != nil {
+			return false, err
+		}
+		if !result.Finalized {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 func finalizerFence(owner string) withdraw.Fence {

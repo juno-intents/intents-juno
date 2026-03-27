@@ -3,6 +3,7 @@ package postgres
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -13,6 +14,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/withdraw"
 )
 
@@ -52,6 +54,58 @@ func (s *Store) EnsureSchema(ctx context.Context) error {
 		}
 		return fmt.Errorf("withdraw/postgres: ensure schema: %w", err)
 	}
+}
+
+func (s *Store) StoreFinalizerCheckpoint(ctx context.Context, cp checkpoint.Checkpoint, operatorSignatures [][]byte) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	checkpointJSON, err := json.Marshal(cp)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: marshal finalizer checkpoint: %w", err)
+	}
+	_, err = s.pool.Exec(ctx, `
+		INSERT INTO withdraw_finalizer_checkpoint_state (singleton, checkpoint_json, operator_signatures, updated_at)
+		VALUES (TRUE, $1, $2, now())
+		ON CONFLICT (singleton) DO UPDATE
+		SET checkpoint_json = EXCLUDED.checkpoint_json,
+			operator_signatures = EXCLUDED.operator_signatures,
+			updated_at = now()
+	`, checkpointJSON, operatorSignatures)
+	if err != nil {
+		return fmt.Errorf("withdraw/postgres: store finalizer checkpoint: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) LoadFinalizerCheckpoint(ctx context.Context) (checkpoint.Checkpoint, [][]byte, bool, error) {
+	if s == nil || s.pool == nil {
+		return checkpoint.Checkpoint{}, nil, false, fmt.Errorf("%w: nil store", ErrInvalidConfig)
+	}
+	var (
+		checkpointJSON []byte
+		operatorSigs   [][]byte
+	)
+	err := s.pool.QueryRow(ctx, `
+		SELECT checkpoint_json, operator_signatures
+		FROM withdraw_finalizer_checkpoint_state
+		WHERE singleton = TRUE
+	`).Scan(&checkpointJSON, &operatorSigs)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return checkpoint.Checkpoint{}, nil, false, nil
+		}
+		return checkpoint.Checkpoint{}, nil, false, fmt.Errorf("withdraw/postgres: load finalizer checkpoint: %w", err)
+	}
+	var cp checkpoint.Checkpoint
+	if err := json.Unmarshal(checkpointJSON, &cp); err != nil {
+		return checkpoint.Checkpoint{}, nil, false, fmt.Errorf("withdraw/postgres: unmarshal finalizer checkpoint: %w", err)
+	}
+	clonedSigs := make([][]byte, len(operatorSigs))
+	for i, sig := range operatorSigs {
+		clonedSigs[i] = append([]byte(nil), sig...)
+	}
+	return cp, clonedSigs, true, nil
 }
 
 func (s *Store) UpsertRequested(ctx context.Context, w withdraw.Withdrawal) (withdraw.Withdrawal, bool, error) {
@@ -1267,8 +1321,9 @@ func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, fence w
 	if err := fence.Validate(); err != nil {
 		return err
 	}
-	if baseTxHash == "" {
-		return withdraw.ErrInvalidConfig
+	var baseTxHashValue any
+	if baseTxHash != "" {
+		baseTxHashValue = baseTxHash
 	}
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
@@ -1279,9 +1334,9 @@ func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, fence w
 		  AND lease_owner = $2
 		  AND lease_version = $3
 		  AND state IN ($6, $7, $5)
-		  AND (base_tx_hash IS NULL OR base_tx_hash = $4)
+		  AND ($4 IS NULL OR base_tx_hash IS NULL OR base_tx_hash = $4)
 		  AND dlq_at IS NULL
-	`, batchID[:], fence.Owner, fence.LeaseVersion, baseTxHash,
+	`, batchID[:], fence.Owner, fence.LeaseVersion, baseTxHashValue,
 		int16(withdraw.BatchStateFinalized),
 		int16(withdraw.BatchStateConfirmed),
 		int16(withdraw.BatchStateFinalizing),
@@ -1299,7 +1354,7 @@ func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, fence w
 	if b.State < withdraw.BatchStateConfirmed {
 		return withdraw.ErrInvalidTransition
 	}
-	if b.BaseTxHash != "" && b.BaseTxHash != baseTxHash {
+	if b.BaseTxHash != "" && baseTxHash != "" && b.BaseTxHash != baseTxHash {
 		return withdraw.ErrBatchMismatch
 	}
 	if b.State >= withdraw.BatchStateFinalized {

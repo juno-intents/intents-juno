@@ -3,12 +3,14 @@ package tsshost
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,6 +52,9 @@ type Config struct {
 	// Verifier, if non-nil, validates that the sign request is bound to a known
 	// persisted batch before the signer is invoked.
 	Verifier Verifier
+
+	// AuthToken, when non-empty, requires exactly "Bearer <token>" on /v1/sign.
+	AuthToken string
 
 	// Log emits audit records for sign requests. Defaults to a discard logger.
 	Log *slog.Logger
@@ -155,6 +160,14 @@ func (h *httpHandler) MetricsSnapshot() MetricsSnapshot {
 func (h *handler) handleSign(w http.ResponseWriter, r *http.Request) {
 	startedAt := h.cfg.Now().UTC()
 	sessionIDForLog := ""
+
+	if h.cfg.AuthToken != "" {
+		if _, ok := parseBearer(r.Header.Get("Authorization"), h.cfg.AuthToken); !ok {
+			h.audit("", "unauthorized", startedAt)
+			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "unauthorized"})
+			return
+		}
+	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, h.cfg.MaxBodyBytes)
 	dec := json.NewDecoder(r.Body)
@@ -417,4 +430,20 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseBearer(header string, wantToken string) (string, bool) {
+	const prefix = "Bearer "
+	if wantToken == "" || len(header) <= len(prefix) || header[:len(prefix)] != prefix {
+		return "", false
+	}
+	got := header[len(prefix):]
+	if got != "" && got[len(got)-1] == ' ' {
+		return "", false
+	}
+	got = strings.TrimSpace(got)
+	if got == "" {
+		return "", false
+	}
+	return got, subtle.ConstantTimeCompare([]byte(got), []byte(wantToken)) == 1
 }

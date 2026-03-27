@@ -214,6 +214,10 @@ func (s *Store) Get(ctx context.Context, name string) (leases.Lease, error) {
 	}, nil
 }
 
+func (s *Store) GetWithStoreTime(ctx context.Context, name string) (leases.Lease, time.Time, error) {
+	return s.getWithDBNow(ctx, name)
+}
+
 func (s *Store) getWithDBNow(ctx context.Context, name string) (leases.Lease, time.Time, error) {
 	if s == nil || s.pool == nil {
 		return leases.Lease{}, time.Time{}, fmt.Errorf("%w: nil store", ErrInvalidConfig)

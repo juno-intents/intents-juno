@@ -126,6 +126,73 @@ func TestMemoryStore_UpsertRequested_RejectsBaseEventMetadataMismatch(t *testing
 	}
 }
 
+func TestMemoryStore_SetBatchFinalized_AllowsEmptyBaseTxHashForOnChainRepair(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	s := NewMemoryStore(func() time.Time { return now })
+	ctx := context.Background()
+
+	w := Withdrawal{
+		ID:          seq32(0x31),
+		Amount:      1000,
+		FeeBps:      50,
+		RecipientUA: []byte{0x01},
+		Expiry:      now.Add(24 * time.Hour),
+	}
+	if _, _, err := s.UpsertRequested(ctx, w); err != nil {
+		t.Fatalf("UpsertRequested: %v", err)
+	}
+	if _, err := s.ClaimUnbatched(ctx, testFence("a"), 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+	batchID := seq32(0x32)
+	if err := s.CreatePlannedBatch(ctx, testFence("a"), Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID, testFence("a")); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := s.SetBatchSigned(ctx, batchID, testFence("a"), []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	if err := s.MarkBatchBroadcastLocked(ctx, batchID, testFence("a")); err != nil {
+		t.Fatalf("MarkBatchBroadcastLocked: %v", err)
+	}
+	if err := s.SetBatchBroadcasted(ctx, batchID, testFence("a"), "tx1"); err != nil {
+		t.Fatalf("SetBatchBroadcasted: %v", err)
+	}
+	if err := s.MarkBatchJunoConfirmed(ctx, batchID, testFence("a")); err != nil {
+		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
+	if err := s.SetBatchConfirmed(ctx, batchID, testFence("a")); err != nil {
+		t.Fatalf("SetBatchConfirmed: %v", err)
+	}
+
+	if err := s.SetBatchFinalized(ctx, batchID, testFence("a"), ""); err != nil {
+		t.Fatalf("SetBatchFinalized empty: %v", err)
+	}
+	if err := s.SetBatchFinalized(ctx, batchID, testFence("a"), ""); err != nil {
+		t.Fatalf("SetBatchFinalized empty #2: %v", err)
+	}
+
+	b, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != BatchStateFinalized {
+		t.Fatalf("state: got %s want %s", b.State, BatchStateFinalized)
+	}
+	if b.BaseTxHash != "" {
+		t.Fatalf("base tx hash: got %q want empty", b.BaseTxHash)
+	}
+}
+
 func TestMemoryStore_UpsertRequested_RejectsDuplicateBaseEventKeyAcrossWithdrawalIDs(t *testing.T) {
 	t.Parallel()
 

@@ -81,6 +81,40 @@ func TestClient_Sign_SendsExpectedRequestAndParsesResponse(t *testing.T) {
 	}
 }
 
+func TestClient_Sign_SetsBearerAuthorizationWhenConfigured(t *testing.T) {
+	t.Parallel()
+
+	batchID := seq32(0x11)
+	txPlan := []byte("plan-v1")
+	wantSessionID := DeriveSigningSessionID(batchID, txPlan)
+
+	rt := roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.Header.Get("Authorization"); got != "Bearer secret-token" {
+			t.Fatalf("Authorization = %q, want %q", got, "Bearer secret-token")
+		}
+		respBody, _ := json.Marshal(SignResponse{
+			Version:   SignResponseVersion,
+			SessionID: FormatSessionID(wantSessionID),
+			SignedTx:  []byte("signed"),
+		})
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(bytes.NewReader(respBody)),
+		}, nil
+	})
+
+	hc := &http.Client{Transport: rt, Timeout: 2 * time.Second}
+	c, err := NewClient("https://tss.local", WithHTTPClient(hc), WithBearerToken("secret-token"))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+
+	if _, err := c.Sign(context.Background(), batchID, txPlan); err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+}
+
 func TestClient_Sign_RejectsMismatchedSessionID(t *testing.T) {
 	t.Parallel()
 

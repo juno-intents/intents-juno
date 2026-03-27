@@ -53,6 +53,17 @@ func WithMaxResponseBytes(n int64) Option {
 	}
 }
 
+func WithBearerToken(token string) Option {
+	return func(c *Client) error {
+		token = strings.TrimSpace(token)
+		if token == "" {
+			return fmt.Errorf("%w: bearer token must be non-empty", ErrInvalidConfig)
+		}
+		c.authToken = token
+		return nil
+	}
+}
+
 // WithInsecureHTTP allows using plain HTTP. This is dangerous for signing traffic and should only be
 // used for local development.
 func WithInsecureHTTP() Option {
@@ -67,6 +78,7 @@ type Client struct {
 	hc      *http.Client
 
 	maxRespBytes int64
+	authToken    string
 
 	allowInsecureHTTP bool
 }
@@ -126,6 +138,9 @@ func (c *Client) Sign(ctx context.Context, batchID [32]byte, txPlan []byte) ([]b
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
+	if c.authToken != "" {
+		req.Header.Set("Authorization", "Bearer "+c.authToken)
+	}
 
 	resp, err := c.hc.Do(req)
 	if err != nil {

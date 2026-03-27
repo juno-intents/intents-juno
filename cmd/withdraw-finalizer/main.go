@@ -27,6 +27,7 @@ import (
 	"github.com/juno-intents/intents-juno/internal/checkpoint"
 	"github.com/juno-intents/intents-juno/internal/dlq"
 	dlqpg "github.com/juno-intents/intents-juno/internal/dlq/postgres"
+	internaleth "github.com/juno-intents/intents-juno/internal/eth"
 	"github.com/juno-intents/intents-juno/internal/eth/httpapi"
 	"github.com/juno-intents/intents-juno/internal/healthz"
 	"github.com/juno-intents/intents-juno/internal/junorpc"
@@ -87,6 +88,7 @@ func main() {
 
 		baseRelayerURL     = flag.String("base-relayer-url", "", "base-relayer HTTP URL (required)")
 		baseRelayerAuthEnv = flag.String("base-relayer-auth-env", "BASE_RELAYER_AUTH_TOKEN", "env var containing base-relayer bearer auth token (required)")
+		baseRPCURL         = flag.String("base-rpc-url", "", "Base/EVM JSON-RPC URL or comma-separated URLs (required)")
 
 		owner              = flag.String("owner", "", "unique finalizer owner id (required; used for DB leases)")
 		leaseTTL           = flag.Duration("lease-ttl", 30*time.Second, "per-batch lease TTL")
@@ -136,8 +138,8 @@ func main() {
 		os.Exit(2)
 	}
 
-	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *withdrawImageID == "" || *baseRelayerURL == "" || *owner == "" {
-		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --operators, --operator-threshold, --withdraw-image-id, --base-relayer-url, and --owner are required")
+	if *postgresDSN == "" || *baseChainID == 0 || *bridgeAddr == "" || *operators == "" || *threshold <= 0 || *withdrawImageID == "" || *baseRelayerURL == "" || *baseRPCURL == "" || *owner == "" {
+		fmt.Fprintln(os.Stderr, "error: --postgres-dsn, --base-chain-id, --bridge-address, --operators, --operator-threshold, --withdraw-image-id, --base-relayer-url, --base-rpc-url, and --owner are required")
 		os.Exit(2)
 	}
 	if !common.IsHexAddress(*bridgeAddr) {
@@ -220,6 +222,12 @@ func main() {
 		log.Error("init base-relayer client", "err", err)
 		os.Exit(2)
 	}
+	baseRPCClient, err := internaleth.DialMultiRPCClient(context.Background(), strings.TrimSpace(*baseRPCURL))
+	if err != nil {
+		log.Error("dial base rpc", "err", err)
+		os.Exit(2)
+	}
+	defer baseRPCClient.Close()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -333,12 +341,17 @@ func main() {
 		OWalletOVKBytes:     owalletOVKBytes,
 		WitnessExtractor:    witnessExtractor,
 		ReadinessChecker:    baseClient,
+		BridgeCaller:        baseRPCClient,
 	}, store, leaseStore, baseClient, proofRequester, log)
 	if err != nil {
 		log.Error("init withdraw finalizer", "err", err)
 		os.Exit(2)
 	}
 	f.WithBlobStore(artifactStore)
+	if err := f.RestoreCheckpoint(ctx); err != nil {
+		log.Error("restore checkpoint", "err", err)
+		os.Exit(2)
+	}
 
 	go func() {
 		if err := healthz.ListenAndServe(

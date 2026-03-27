@@ -208,4 +208,15 @@ ALTER TABLE withdraw_scan_backfill_cursors DROP CONSTRAINT IF EXISTS wallet_id_n
 ALTER TABLE withdraw_scan_backfill_cursors ADD CONSTRAINT wallet_id_nonempty CHECK (wallet_id <> '');
 ALTER TABLE withdraw_scan_backfill_cursors DROP CONSTRAINT IF EXISTS cursor_height_nonneg;
 ALTER TABLE withdraw_scan_backfill_cursors ADD CONSTRAINT cursor_height_nonneg CHECK (cursor_height >= 0);
+
+CREATE TABLE IF NOT EXISTS withdraw_finalizer_checkpoint_state (
+	singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),
+	checkpoint_json JSONB NOT NULL,
+	operator_signatures BYTEA[] NOT NULL,
+	updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE withdraw_finalizer_checkpoint_state ADD COLUMN IF NOT EXISTS checkpoint_json JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE withdraw_finalizer_checkpoint_state ADD COLUMN IF NOT EXISTS operator_signatures BYTEA[] NOT NULL DEFAULT ARRAY[]::BYTEA[];
+ALTER TABLE withdraw_finalizer_checkpoint_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 `

@@ -2528,6 +2528,10 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsOnChainStaleCheckpointRevert(t *
 	if err != nil {
 		t.Fatalf("PackLastAcceptedCheckpointFinalOrchardRootCalldata: %v", err)
 	}
+	depositUsedCall, err := bridgeabi.PackDepositUsedCalldata(common.Hash(dep.DepositID))
+	if err != nil {
+		t.Fatalf("PackDepositUsedCalldata: %v", err)
+	}
 	acceptedBlockHash := seq32ForRelayer(0x95)
 	acceptedRoot := seq32ForRelayer(0x96)
 
@@ -2551,6 +2555,7 @@ func TestRelayer_RecoverSubmittedAttempts_ResetsOnChainStaleCheckpointRevert(t *
 		Owner:             "owner-1",
 		Now:               time.Now,
 		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
+			hex.EncodeToString(depositUsedCall[:4]): common.LeftPadBytes([]byte{0}, 32),
 			hex.EncodeToString(heightCall[:4]):    common.LeftPadBytes(big.NewInt(124).Bytes(), 32),
 			hex.EncodeToString(blockHashCall[:4]): acceptedBlockHash[:],
 			hex.EncodeToString(rootCall[:4]):      acceptedRoot[:],
@@ -2743,6 +2748,93 @@ func TestRelayer_RecoverSubmittedAttempts_RequeuesNoTxHashBatchAfterStalenessWin
 	}
 	if len(attempts) != 0 {
 		t.Fatalf("expected submitted attempts to be cleared, got %d", len(attempts))
+	}
+}
+
+func TestRelayer_RecoverSubmittedAttempts_SkipsResubmitWhenDepositAlreadyUsedOnChain(t *testing.T) {
+	t.Parallel()
+
+	store := deposit.NewMemoryStore()
+	dep := deposit.Deposit{
+		DepositID:     seq32ForRelayer(0xb6),
+		Commitment:    seq32ForRelayer(0xb7),
+		LeafIndex:     1,
+		Amount:        500,
+		BaseRecipient: to20(common.HexToAddress("0x0000000000000000000000000000000000000456")),
+	}
+	if _, _, err := store.UpsertConfirmed(context.Background(), dep); err != nil {
+		t.Fatalf("UpsertConfirmed: %v", err)
+	}
+
+	cp := checkpoint.Checkpoint{
+		Height:           123,
+		BlockHash:        seq32ForRelayer(0xb8),
+		FinalOrchardRoot: seq32ForRelayer(0xb9),
+		BaseChainID:      31337,
+		BridgeContract:   common.HexToAddress("0x0000000000000000000000000000000000000123"),
+	}
+	batchID := seq32ForRelayer(0xba)
+	if _, err := store.MarkBatchSubmitted(
+		context.Background(),
+		"owner-1",
+		batchID,
+		[][32]byte{dep.DepositID},
+		cp,
+		[][]byte{{0xaa}},
+		[]byte{0xbb},
+	); err != nil {
+		t.Fatalf("MarkBatchSubmitted: %v", err)
+	}
+
+	sender := &stubSender{err: errors.New("send should not be called")}
+	depositUsedCall, err := bridgeabi.PackDepositUsedCalldata(common.Hash(dep.DepositID))
+	if err != nil {
+		t.Fatalf("PackDepositUsedCalldata: %v", err)
+	}
+	r, err := New(Config{
+		BaseChainID:       uint32(cp.BaseChainID),
+		BridgeAddress:     cp.BridgeContract,
+		DepositImageID:    common.HexToHash("0x01"),
+		OWalletIVKBytes:   testOWalletIVKBytes(),
+		OperatorAddresses: []common.Address{common.HexToAddress("0x0000000000000000000000000000000000000999")},
+		OperatorThreshold: 1,
+		MaxItems:          10,
+		MaxAge:            time.Minute,
+		DedupeMax:         100,
+		Owner:             "owner-1",
+		Now:               time.Now,
+		BridgeCaller: &stubBridgeCaller{responses: map[string][]byte{
+			hex.EncodeToString(depositUsedCall[:4]): common.LeftPadBytes([]byte{1}, 32),
+		}},
+	}, store, sender, &stubProofRequester{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if err := r.recoverSubmittedAttempts(context.Background()); err != nil {
+		t.Fatalf("recoverSubmittedAttempts: %v", err)
+	}
+	if sender.calls != 0 {
+		t.Fatalf("sender called %d times, want 0", sender.calls)
+	}
+
+	job, err := store.Get(context.Background(), dep.DepositID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if job.State != deposit.StateFinalized {
+		t.Fatalf("state: got %s want %s", job.State, deposit.StateFinalized)
+	}
+	if job.TxHash != ([32]byte{}) {
+		t.Fatalf("tx hash should remain empty, got %x", job.TxHash)
+	}
+
+	attempts, err := store.ClaimSubmittedAttempts(context.Background(), "worker-2", time.Second, 10)
+	if err != nil {
+		t.Fatalf("ClaimSubmittedAttempts: %v", err)
+	}
+	if len(attempts) != 0 {
+		t.Fatalf("submitted attempts len: got %d want 0", len(attempts))
 	}
 }
 

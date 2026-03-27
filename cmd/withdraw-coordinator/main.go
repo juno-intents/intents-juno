@@ -158,6 +158,7 @@ func main() {
 		tssInsecureHTTP   = flag.Bool("tss-insecure-http", false, "allow tss-url over plain http (DANGEROUS; dev only)")
 		tssTimeout        = flag.Duration("tss-timeout", 120*time.Second, "tss request timeout")
 		tssMaxRespBytes   = flag.Int64("tss-max-response-bytes", 1<<20, "max tss response size (bytes)")
+		tssAuthTokenEnv   = flag.String("tss-auth-token-env", "TSS_AUTH_TOKEN", "env var containing the shared bearer token for tss-host")
 		tssServerCAFile   = flag.String("tss-server-ca-file", "", "server root CA PEM file (optional; defaults to system roots)")
 		tssServerName     = flag.String("tss-server-name", "", "optional TLS server name override for tss-url certificate validation")
 		tssClientCertFile = flag.String("tss-client-cert-file", "", "client cert PEM file (optional; for mTLS)")
@@ -298,6 +299,7 @@ func main() {
 	junoRPCPass := ""
 	baseRelayerAuth := ""
 	scanBearerToken := ""
+	tssAuthToken := ""
 	if mode == runtimeModeFull {
 		junoRPCUser = os.Getenv(*junoRPCUserEnv)
 		junoRPCPass = os.Getenv(*junoRPCPassEnv)
@@ -308,6 +310,11 @@ func main() {
 		baseRelayerAuth = os.Getenv(*baseRelayerAuthEnv)
 		if baseRelayerAuth == "" {
 			fmt.Fprintf(os.Stderr, "error: missing base-relayer auth token in env %s\n", *baseRelayerAuthEnv)
+			os.Exit(2)
+		}
+		tssAuthToken = strings.TrimSpace(os.Getenv(*tssAuthTokenEnv))
+		if tssAuthToken == "" {
+			fmt.Fprintf(os.Stderr, "error: missing tss auth token in env %s\n", *tssAuthTokenEnv)
 			os.Exit(2)
 		}
 		scanBearerToken = strings.TrimSpace(os.Getenv(*junoScanBearerEnv))
@@ -444,6 +451,9 @@ func main() {
 	tssOpts := []tss.Option{
 		tss.WithHTTPClient(tssHTTPClient),
 		tss.WithMaxResponseBytes(*tssMaxRespBytes),
+	}
+	if tssAuthToken != "" {
+		tssOpts = append(tssOpts, tss.WithBearerToken(tssAuthToken))
 	}
 	if *tssInsecureHTTP {
 		tssOpts = append(tssOpts, tss.WithInsecureHTTP())

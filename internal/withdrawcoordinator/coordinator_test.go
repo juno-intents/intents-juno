@@ -45,6 +45,16 @@ func (p *leaseStealingPlanner) Plan(ctx context.Context, _ [32]byte, _ []withdra
 	return []byte(`{"v":1}`), nil
 }
 
+type storeTimeLeaseStore struct {
+	leases.Store
+	storeNow time.Time
+}
+
+func (s *storeTimeLeaseStore) GetWithStoreTime(ctx context.Context, name string) (leases.Lease, time.Time, error) {
+	lease, err := s.Store.Get(ctx, name)
+	return lease, s.storeNow, err
+}
+
 type sequencePlanner struct {
 	calls int
 	plans [][]byte
@@ -462,6 +472,39 @@ func TestCoordinator_TickRejectsStaleLeaderLeaseAfterPlannerPause(t *testing.T) 
 	}
 	if len(planned) != 0 {
 		t.Fatalf("expected no planned batches after leadership loss, got %d", len(planned))
+	}
+}
+
+func TestCoordinator_AssertLeadershipUsesStoreTimeWhenAvailable(t *testing.T) {
+	t.Parallel()
+
+	localNow := time.Date(2026, 3, 27, 12, 0, 0, 0, time.UTC)
+	storeNow := localNow.Add(2 * time.Minute)
+	nowFn := func() time.Time { return localNow }
+
+	backingStore := leases.NewMemoryStore(func() time.Time { return localNow })
+	ctx := context.Background()
+	lease, ok, err := backingStore.TryAcquire(ctx, "withdraw-coordinator", "a", time.Minute)
+	if err != nil || !ok {
+		t.Fatalf("TryAcquire leader lease: ok=%v err=%v", ok, err)
+	}
+
+	c, err := newCoordinatorForTest(Config{
+		Owner:            "a",
+		MaxItems:         1,
+		MaxAge:           3 * time.Minute,
+		ClaimTTL:         10 * time.Second,
+		LeaderLeaseStore: &storeTimeLeaseStore{Store: backingStore, storeNow: storeNow},
+		Now:              nowFn,
+	}, withdraw.NewMemoryStore(nowFn), &stubPlanner{}, &stubSigner{}, &stubBroadcaster{txid: "tx1"}, &stubConfirmer{}, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	c.SetLeaderLease(lease)
+
+	err = c.assertLeadership(ctx)
+	if !errors.Is(err, ErrLeadershipLost) {
+		t.Fatalf("expected ErrLeadershipLost, got %v", err)
 	}
 }
 
