@@ -200,3 +200,15 @@ func TestCanonicalizeRequestedEvent_RetriesTransientHeaderLookupMiss(t *testing.
 		t.Fatalf("expected retry after transient header miss, got %d calls", reader.calls)
 	}
 }
+
+func TestToUint64RejectsBigIntOverflow(t *testing.T) {
+	t.Parallel()
+
+	_, err := toUint64(new(big.Int).Lsh(big.NewInt(1), 65))
+	if err == nil {
+		t.Fatalf("expected overflow error")
+	}
+	if !strings.Contains(err.Error(), "uint64") {
+		t.Fatalf("overflow error = %v, want uint64 guidance", err)
+	}
+}

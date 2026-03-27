@@ -540,7 +540,7 @@ ensure_dkg_binary() {
       actual="$(sha256_hex_file "$archive")"
       [[ "$expected" == "$actual" ]] || die "checksum mismatch for $asset"
     else
-      log "checksum file unavailable for $asset; proceeding without checksum validation"
+      die "checksum file unavailable for $asset"
     fi
     tar -xzf "$archive" -C "$tmp_dir" || die "failed to extract $asset"
     [[ -f "$tmp_dir/$tool" ]] || die "$tool not present in archive $asset"
@@ -621,7 +621,7 @@ ensure_juno_txsign_binary() {
       actual="$(sha256_hex_file "$archive")"
       [[ "$expected" == "$actual" ]] || die "checksum mismatch for $asset"
     else
-      log "checksum file unavailable for $asset; proceeding without checksum validation"
+      die "checksum file unavailable for $asset"
     fi
     tar -xzf "$archive" -C "$tmp_dir" || die "failed to extract $asset"
     [[ -f "$tmp_dir/juno-txsign" ]] || die "juno-txsign not present in archive $asset"
@@ -701,7 +701,7 @@ ensure_juno_txbuild_binary() {
       actual="$(sha256_hex_file "$archive")"
       [[ "$expected" == "$actual" ]] || die "checksum mismatch for $asset"
     else
-      log "checksum file unavailable for $asset; proceeding without checksum validation"
+      die "checksum file unavailable for $asset"
     fi
     tar -xzf "$archive" -C "$tmp_dir" || die "failed to extract $asset"
     [[ -f "$tmp_dir/juno-txbuild" ]] || die "juno-txbuild not present in archive $asset"

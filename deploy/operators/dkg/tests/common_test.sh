@@ -163,6 +163,17 @@ test_aws_dependency_install_fallback_exists() {
   assert_contains "$common_text" "install_aws_cli || die \"failed to install awscli\"" "common aws dependency path uses installer fallback"
 }
 
+test_checksum_downloads_fail_closed() {
+  local common_text
+  common_text="$(cat "$SCRIPT_DIR/../common.sh")"
+
+  if [[ "$common_text" == *"proceeding without checksum validation"* ]]; then
+    printf 'expected checksum download failures to hard fail\n' >&2
+    exit 1
+  fi
+  assert_contains "$common_text" 'die "checksum file unavailable for $asset"' "common hard-fails when checksum files are unavailable"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -173,6 +184,7 @@ main() {
   test_require_tailscale_active_allows_insecure_override
   test_require_tailscale_active_allows_vpc_private_mode
   test_aws_dependency_install_fallback_exists
+  test_checksum_downloads_fail_closed
 }
 
 main "$@"

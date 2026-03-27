@@ -379,7 +379,7 @@ func toUint64(v any) (uint64, error) {
 		return tv, nil
 	case *big.Int:
 		if tv.Sign() < 0 || !tv.IsUint64() {
-			return 0, fmt.Errorf("value out of range: %s", tv.String())
+			return 0, fmt.Errorf("value out of range for uint64: %s", tv.String())
 		}
 		return tv.Uint64(), nil
 	default:

@@ -18,7 +18,7 @@ assert_not_contains() {
 }
 
 main() {
-  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg
+  local main_tf variables_tf monitoring_tf outputs_tf versions_tf password_block key_rotation failover restore_runbook min_healthy_count max_healthy_count rollback_count proof_role_asg wireguard_role_asg proof_role_launch_template ipfs_launch_template wireguard_role_launch_template
   main_tf="$(cat "$SCRIPT_DIR/main.tf")"
   variables_tf="$(cat "$SCRIPT_DIR/variables.tf")"
   monitoring_tf="$(cat "$SCRIPT_DIR/monitoring.tf")"
@@ -29,8 +29,23 @@ main() {
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/main.tf")"
+  proof_role_launch_template="$(awk '
+    /resource "aws_launch_template" "proof_role" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  ipfs_launch_template="$(awk '
+    /resource "aws_launch_template" "ipfs" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
   wireguard_role_asg="$(awk '
     /resource "aws_autoscaling_group" "wireguard_role" \{/ { in_block = 1 }
+    in_block { print }
+    in_block && /^\}/ { exit }
+  ' "$SCRIPT_DIR/main.tf")"
+  wireguard_role_launch_template="$(awk '
+    /resource "aws_launch_template" "wireguard_role" \{/ { in_block = 1 }
     in_block { print }
     in_block && /^\}/ { exit }
   ' "$SCRIPT_DIR/main.tf")"
@@ -76,6 +91,8 @@ main() {
   assert_contains "$main_tf" 'resource "aws_secretsmanager_secret" "shared_kafka_critical_hmac_key"' "production-shared provisions a dedicated Kafka critical-topic HMAC secret"
   assert_contains "$main_tf" 'resource "aws_security_group" "proof_role"' "production-shared provisions a dedicated proof-role security group"
   assert_contains "$main_tf" 'resource "aws_launch_template" "proof_role"' "production-shared provisions a proof-role launch template"
+  assert_contains "$proof_role_launch_template" 'metadata_options {' "production-shared proof-role launch template configures instance metadata options"
+  assert_contains "$proof_role_launch_template" 'http_tokens   = "required"' "production-shared proof-role launch template requires IMDSv2 tokens"
   assert_contains "$main_tf" 'resource "aws_autoscaling_group" "proof_role"' "production-shared provisions a proof-role autoscaling group"
   assert_contains "$main_tf" 'resource "aws_iam_instance_profile" "proof_role"' "production-shared provisions a proof-role instance profile"
   assert_contains "$main_tf" 'proof-requestor.service' "production-shared writes a proof-requestor systemd unit for the proof role"
@@ -86,6 +103,8 @@ main() {
   assert_contains "$main_tf" 'secretsmanager get-secret-value --secret-id "$funder_secret_arn"' "production-shared proof-role bootstrap reads the funder signer secret at runtime"
   assert_contains "$main_tf" 'resource "aws_security_group" "wireguard_role"' "production-shared provisions a wireguard role security group"
   assert_contains "$main_tf" 'resource "aws_launch_template" "wireguard_role"' "production-shared provisions a wireguard role launch template"
+  assert_contains "$wireguard_role_launch_template" 'metadata_options {' "production-shared wireguard-role launch template configures instance metadata options"
+  assert_contains "$wireguard_role_launch_template" 'http_tokens   = "required"' "production-shared wireguard-role launch template requires IMDSv2 tokens"
   assert_contains "$main_tf" 'resource "aws_autoscaling_group" "wireguard_role"' "production-shared provisions a wireguard role autoscaling group"
   assert_contains "$main_tf" 'resource "aws_lb" "wireguard"' "production-shared provisions a UDP network load balancer for wireguard"
   assert_contains "$main_tf" 'resource "aws_lb_target_group" "wireguard_udp"' "production-shared provisions a wireguard UDP target group"
@@ -97,6 +116,8 @@ main() {
   assert_contains "$main_tf" 'wireguard_legacy_enabled       = local.wireguard_enabled && length(var.shared_wireguard_public_subnet_ids) == 0' "production-shared disables the legacy singleton wireguard path when role subnets are supplied"
   assert_contains "$main_tf" 'resource "aws_instance" "wireguard_gateway"' "production-shared keeps the legacy wireguard gateway resource behind an explicit compatibility gate"
   assert_contains "$main_tf" 'count                       = local.wireguard_legacy_enabled ? 1 : 0' "production-shared gates the legacy wireguard instance behind the compatibility flag"
+  assert_contains "$ipfs_launch_template" 'metadata_options {' "production-shared ipfs launch template configures instance metadata options"
+  assert_contains "$ipfs_launch_template" 'http_tokens   = "required"' "production-shared ipfs launch template requires IMDSv2 tokens"
   assert_contains "$main_tf" 'for_each = local.shared_wireguard_named_peers' "production-shared materializes named wireguard peers"
   assert_contains "$main_tf" 'load_balancer_type               = "network"' "production-shared uses an NLB for wireguard"
   assert_contains "$main_tf" 'protocol    = "UDP"' "production-shared exposes wireguard over UDP"

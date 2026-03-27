@@ -14,7 +14,8 @@ var (
 
 // Withdrawal is the off-chain record corresponding to a Bridge.WithdrawRequested event.
 //
-// Amounts are uint64 in this repo scaffold; production should use uint256-compatible math end-to-end.
+// Amounts are stored as uint64 in this service and out-of-range on-chain values
+// must be rejected at ingestion boundaries before reaching this type.
 type Withdrawal struct {
 	ID [32]byte
 

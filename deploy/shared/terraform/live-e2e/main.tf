@@ -1653,6 +1653,11 @@ resource "aws_launch_template" "ipfs" {
     name = local.instance_profile_name
   }
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
   network_interfaces {
     associate_public_ip_address = true
     security_groups             = [aws_security_group.ipfs[0].id]
@@ -2099,6 +2104,11 @@ resource "aws_launch_template" "operator" {
 
   iam_instance_profile {
     name = local.instance_profile_name
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
   }
 
   network_interfaces {

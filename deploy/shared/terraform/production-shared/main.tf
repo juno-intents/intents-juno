@@ -1361,6 +1361,11 @@ resource "aws_launch_template" "proof_role" {
     name = aws_iam_instance_profile.proof_role.name
   }
 
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
+  }
+
   block_device_mappings {
     device_name = "/dev/sda1"
 
@@ -1605,6 +1610,11 @@ resource "aws_launch_template" "ipfs" {
 
   iam_instance_profile {
     name = aws_iam_instance_profile.ipfs.name
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
   }
 
   network_interfaces {
@@ -1941,6 +1951,11 @@ resource "aws_launch_template" "wireguard_role" {
 
   iam_instance_profile {
     name = aws_iam_instance_profile.wireguard_role[0].name
+  }
+
+  metadata_options {
+    http_endpoint = "enabled"
+    http_tokens   = "required"
   }
 
   block_device_mappings {

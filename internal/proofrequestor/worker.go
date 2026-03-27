@@ -144,7 +144,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 
 	job, err := proof.DecodeJobRequest(msg.Value)
 	if err != nil {
-		w.maybeDLQMalformedRequest(ctx, msg, err)
+		if derr := w.maybeDLQMalformedRequest(ctx, msg, err); derr != nil {
+			return derr
+		}
 		failPayload, ferr := proof.EncodeFailureMessage(proof.FailureMessage{
 			JobID:     common.Hash{},
 			ErrorCode: "invalid_payload",
@@ -152,7 +154,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 			Message:   err.Error(),
 		})
 		if ferr == nil {
-			_ = w.producer.Publish(ctx, w.cfg.FailureTopic, failPayload)
+			if perr := w.producer.Publish(ctx, w.cfg.FailureTopic, failPayload); perr != nil {
+				return perr
+			}
 		}
 		w.failureCount.Add(1)
 		w.emitMetrics(msg.Timestamp, false, false, time.Since(startedAt))
@@ -249,9 +253,9 @@ func (w *Worker) handleMessage(ctx context.Context, msg queue.Message) error {
 	return nil
 }
 
-func (w *Worker) maybeDLQMalformedRequest(ctx context.Context, msg queue.Message, decodeErr error) {
+func (w *Worker) maybeDLQMalformedRequest(ctx context.Context, msg queue.Message, decodeErr error) error {
 	if w.cfg.DLQStore == nil {
-		return
+		return nil
 	}
 
 	sum := sha256.Sum256([]byte(msg.Topic + "\x00" + string(msg.Value)))
@@ -267,7 +271,9 @@ func (w *Worker) maybeDLQMalformedRequest(ctx context.Context, msg queue.Message
 	}
 	if err := w.cfg.DLQStore.InsertProofDLQ(ctx, rec); err != nil {
 		w.log.Error("proof-requestor failed to insert malformed request into DLQ", "err", err)
+		return err
 	}
+	return nil
 }
 
 // maybeDLQProof inserts a failed proof job into the dead-letter queue.
