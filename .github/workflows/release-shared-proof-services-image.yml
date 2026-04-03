@@ -64,6 +64,26 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Release Tier
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_tag="${{ inputs.release_tag }}"
+          [[ "$release_tag" != *latest* ]] || {
+            echo "must not use latest tags: $release_tag" >&2
+            exit 1
+          }
+          case "$release_tag" in
+            *-testnet) release_tier="testnet" ;;
+            *-mainnet) release_tier="mainnet" ;;
+            *)
+              echo "release tag must end with -testnet or -mainnet: $release_tag" >&2
+              exit 1
+              ;;
+          esac
+          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
+          echo "RELEASE_TIER=$release_tier" >>"$GITHUB_ENV"
+
       - name: Ensure ECR Repository
         id: ensure_ecr
         shell: bash
@@ -152,7 +172,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ inputs.release_tag }}"
+          tag="${RELEASE_TAG}"
           region="${{ inputs.aws_region }}"
           image_uri="$(jq -r --arg region "$region" '.regions[$region].image_uri // empty' .ci/out/shared-proof-services-image-manifest.json)"
           if [[ -z "$image_uri" ]]; then
@@ -163,7 +183,7 @@ jobs:
           notes="Shared proof services image release for ${region}
 
           Image: ${image_uri}
-          Juno network: testnet
+          Juno network: ${RELEASE_TIER}
           Repo commit: ${GITHUB_SHA}"
 
           if gh release view "$tag" >/dev/null 2>&1; then

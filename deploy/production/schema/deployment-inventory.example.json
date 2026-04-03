@@ -91,6 +91,7 @@
     "juno_network": "testnet",
     "base_rpc_url": "https://base-sepolia.example.invalid",
     "base_chain_id": 84532,
+    "bridge_guest_release_tag": "bridge-guests-v1.2.3-testnet",
     "deposit_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa01",
     "withdraw_image_id": "0x000000000000000000000000000000000000000000000000000000000000aa02",
     "owallet_ua": "u1alphaexample"

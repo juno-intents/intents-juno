@@ -25,6 +25,7 @@ Options:
   --name-prefix <prefix>           image/resource name prefix (default: intents-juno-operator-stack)
   --repo-url <url>                 intents-juno repo URL (default: https://github.com/juno-intents/intents-juno.git)
   --repo-commit <sha>              intents-juno commit to bake (default: local git HEAD or $GITHUB_SHA)
+  --juno-network <name>            Juno network baked into the stack (testnet|mainnet, default: testnet)
   --base-chain-id <id>             Base chain id for standby checkpoint stack (default: 84532)
   --bridge-address <address>       Bridge address for standby checkpoint stack
                                    (default: 0x0000000000000000000000000000000000000000)
@@ -150,10 +151,29 @@ wait_for_ssh() {
 build_remote_bootstrap_script() {
   local repo_url="$1"
   local repo_commit="$2"
-  local base_chain_id="$3"
-  local bridge_address="$4"
-  local sync_timeout_seconds="$5"
-  local tss_signer_runtime_mode="$6"
+  local juno_network="$3"
+  local base_chain_id="$4"
+  local bridge_address="$5"
+  local sync_timeout_seconds="$6"
+  local tss_signer_runtime_mode="$7"
+  local junocashd_testnet_line=""
+  local juno_scan_ua_hrp="jtest"
+  local junocash_cli_network_flag="-testnet"
+
+  case "$juno_network" in
+    testnet)
+      junocashd_testnet_line="testnet=1"
+      juno_scan_ua_hrp="jtest"
+      junocash_cli_network_flag="-testnet"
+      ;;
+    mainnet)
+      juno_scan_ua_hrp="juno"
+      junocash_cli_network_flag=""
+      ;;
+    *)
+      die "unsupported --juno-network: $juno_network"
+      ;;
+  esac
 
   local script
 script="$(cat <<'REMOTE_SCRIPT'
@@ -455,7 +475,7 @@ write_stack_config() {
     /var/lib/intents-juno/tss-signer
 
   cat > /tmp/junocashd.conf <<CFG
- testnet=1
+__BOOTSTRAP_JUNOCASHD_TESTNET_LINE__
  server=1
  txindex=1
  txunpaidactionlimit=10000
@@ -475,7 +495,7 @@ JUNO_RPC_USER=\${rpc_user}
 JUNO_RPC_PASS=\${rpc_pass}
 JUNO_RPC_BIND=127.0.0.1
 JUNO_RPC_ALLOW_IPS=127.0.0.1
-JUNO_SCAN_UA_HRP=jtest
+JUNO_SCAN_UA_HRP=__BOOTSTRAP_JUNO_SCAN_UA_HRP__
 JUNO_SCAN_CONFIRMATIONS=1
 CHECKPOINT_SIGNER_DRIVER=aws-kms
 CHECKPOINT_SIGNER_KMS_KEY_ID=
@@ -973,7 +993,7 @@ rm -f "$tmp_env"
 junocashd_conf_file="/etc/intents-juno/junocashd.conf"
 tmp_junocashd_conf="$(mktemp)"
 cat > "$tmp_junocashd_conf" <<CFG
-testnet=1
+__BOOTSTRAP_JUNOCASHD_TESTNET_LINE__
 server=1
 txindex=1
 txunpaidactionlimit=10000
@@ -1040,7 +1060,7 @@ exec /usr/local/bin/juno-scan \
   -rpc-pass "\$JUNO_RPC_PASS" \
   -db-driver rocksdb \
   -db-path /var/lib/intents-juno/juno-scan.db \
-  -ua-hrp "${JUNO_SCAN_UA_HRP:-jtest}" \
+  -ua-hrp "${JUNO_SCAN_UA_HRP:-__BOOTSTRAP_JUNO_SCAN_UA_HRP__}" \
   -confirmations "${JUNO_SCAN_CONFIRMATIONS:-1}" \
   -listen 127.0.0.1:8080
 EOF_SCAN
@@ -2869,7 +2889,7 @@ wait_for_sync_and_record_blockstamp() {
   local rpc_user rpc_pass rpc_args info blocks headers progress block_hash now sync_deadline
   rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
   rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-  rpc_args=(-testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
+  rpc_args=(__BOOTSTRAP_JUNOCLI_NETWORK_FLAG__ -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
 
   sync_deadline=\$(( \$(date +%s) + __BOOTSTRAP_SYNC_TIMEOUT_SECONDS__ ))
 
@@ -2915,7 +2935,7 @@ wait_for_juno_scan_catchup() {
   local rpc_user rpc_pass rpc_args health_response scan_height tip_height now scan_deadline
   rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
   rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-  rpc_args=(-testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
+  rpc_args=(__BOOTSTRAP_JUNOCLI_NETWORK_FLAG__ -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass")
 
   scan_deadline=\$(( \$(date +%s) + __BOOTSTRAP_SYNC_TIMEOUT_SECONDS__ ))
 
@@ -3045,7 +3065,7 @@ write_bootstrap_metadata
 sudo systemctl stop juno-scan-backfill.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
 rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
-/usr/local/bin/junocash-cli -testnet -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true
+/usr/local/bin/junocash-cli __BOOTSTRAP_JUNOCLI_NETWORK_FLAG__ -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true
 for _ in \$(seq 1 60); do
   if ! pgrep -x junocashd >/dev/null 2>&1; then
     break
@@ -3058,6 +3078,9 @@ REMOTE_SCRIPT
 
   script="${script//__BOOTSTRAP_REPO_URL__/$repo_url}"
   script="${script//__BOOTSTRAP_REPO_COMMIT__/$repo_commit}"
+  script="${script//__BOOTSTRAP_JUNOCASHD_TESTNET_LINE__/$junocashd_testnet_line}"
+  script="${script//__BOOTSTRAP_JUNO_SCAN_UA_HRP__/$juno_scan_ua_hrp}"
+  script="${script//__BOOTSTRAP_JUNOCLI_NETWORK_FLAG__/$junocash_cli_network_flag}"
   script="${script//__BOOTSTRAP_BASE_CHAIN_ID__/$base_chain_id}"
   script="${script//__BOOTSTRAP_BRIDGE_ADDRESS__/$bridge_address}"
   script="${script//__BOOTSTRAP_SSM_AGENT_URL__/https:\/\/s3.${aws_region}.amazonaws.com\/amazon-ssm-${aws_region}\/latest\/debian_amd64\/amazon-ssm-agent.deb}"
@@ -3078,6 +3101,7 @@ command_create() {
   local name_prefix="intents-juno-operator-stack"
   local repo_url="https://github.com/juno-intents/intents-juno.git"
   local repo_commit=""
+  local juno_network="testnet"
   local base_chain_id="84532"
   local bridge_address="0x0000000000000000000000000000000000000000"
   local sync_timeout_seconds="21600"
@@ -3122,6 +3146,11 @@ command_create() {
       --repo-commit)
         [[ $# -ge 2 ]] || die "missing value for --repo-commit"
         repo_commit="$2"
+        shift 2
+        ;;
+      --juno-network)
+        [[ $# -ge 2 ]] || die "missing value for --juno-network"
+        juno_network="${2,,}"
         shift 2
         ;;
       --base-chain-id)
@@ -3204,6 +3233,10 @@ command_create() {
   case "$tss_signer_runtime_mode" in
     nitro-enclave|host-process) ;;
     *) die "--tss-signer-runtime-mode must be nitro-enclave or host-process" ;;
+  esac
+  case "$juno_network" in
+    testnet|mainnet) ;;
+    *) die "--juno-network must be testnet or mainnet" ;;
   esac
   [[ "$base_chain_id" =~ ^[0-9]+$ ]] || die "--base-chain-id must be numeric"
   [[ "$bridge_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "--bridge-address must be a 20-byte hex address"
@@ -3337,7 +3370,7 @@ command_create() {
 
   local remote_bootstrap_script
   remote_bootstrap_script="$(mktemp)"
-  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" "$tss_signer_runtime_mode" >"$remote_bootstrap_script"
+  build_remote_bootstrap_script "$repo_url" "$repo_commit" "$juno_network" "$base_chain_id" "$bridge_address" "$sync_timeout_seconds" "$tss_signer_runtime_mode" >"$remote_bootstrap_script"
   chmod 0700 "$remote_bootstrap_script"
 
   local -a ssh_opts
@@ -3412,6 +3445,7 @@ command_create() {
     --arg juno_scan_release_tag "$juno_scan_release_tag" \
     --argjson synced_block_height "$synced_block_height" \
     --arg synced_block_hash "$synced_block_hash" \
+    --arg juno_network "$juno_network" \
     --argjson base_chain_id "$base_chain_id" \
     --arg bridge_address "$bridge_address" \
     --arg tss_signer_runtime_mode "$tss_signer_runtime_mode" \
@@ -3436,6 +3470,7 @@ command_create() {
         release_tag: $juno_scan_release_tag
       },
       stack: {
+        juno_network: $juno_network,
         base_chain_id: $base_chain_id,
         bridge_address: $bridge_address,
         tss_signer_runtime_mode_default: $tss_signer_runtime_mode,

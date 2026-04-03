@@ -638,7 +638,7 @@ production_write_shared_terraform_override_tfvars() {
     return 0
   fi
 
-  local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id
+  local env_slug aws_region vpc_id shared_postgres_password shared_postgres_db base_chain_id deposit_image_id withdraw_image_id bridge_guest_release_tag
   local backoffice_hostname app_role_json wireguard_role_json proof_role_json shared_terraform_dir
   local private_subnet_ids_json wireguard_public_subnet_ids_json backoffice_private_endpoint_ips_json wireguard_source_cidrs_json
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
@@ -664,6 +664,7 @@ production_write_shared_terraform_override_tfvars() {
   base_chain_id="$(production_json_required "$inventory" '.contracts.base_chain_id')"
   deposit_image_id="$(production_json_required "$inventory" '.contracts.deposit_image_id | select(type == "string" and length > 0)')"
   withdraw_image_id="$(production_json_required "$inventory" '.contracts.withdraw_image_id | select(type == "string" and length > 0)')"
+  bridge_guest_release_tag="$(production_json_optional "$inventory" '.contracts.bridge_guest_release_tag')"
   backoffice_hostname="$(jq -r '(.backoffice_hostname // empty)' <<<"$wireguard_role_json")"
   backoffice_private_endpoint="$(jq -r '.backoffice_private_endpoint // empty' <<<"$wireguard_role_json")"
   wireguard_public_subnet_ids_json="$(
@@ -834,6 +835,9 @@ production_write_shared_terraform_override_tfvars() {
   [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for production shared terraform"
   [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for production shared terraform"
   [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty for production shared terraform"
+  if [[ "$env_slug" == "mainnet" ]]; then
+    [[ -n "$bridge_guest_release_tag" ]] || die "contracts.bridge_guest_release_tag is required for production shared terraform"
+  fi
   jq -e 'type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' <<<"$alarm_actions_json" >/dev/null 2>&1 \
     || die "shared_services.alarm_actions must be a non-empty array for production shared terraform"
 
@@ -850,6 +854,7 @@ production_write_shared_terraform_override_tfvars() {
     --argjson shared_base_chain_id "$base_chain_id" \
     --arg shared_deposit_image_id "$deposit_image_id" \
     --arg shared_withdraw_image_id "$withdraw_image_id" \
+    --arg shared_bridge_guest_release_tag "$bridge_guest_release_tag" \
     --argjson alarm_actions "$alarm_actions_json" \
     --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
     --arg backoffice_hostname "$backoffice_hostname" \
@@ -890,6 +895,9 @@ production_write_shared_terraform_override_tfvars() {
       shared_wireguard_network_cidr: $shared_wireguard_network_cidr,
       shared_wireguard_source_cidrs: $wireguard_source_cidrs
     }
+    + (if $shared_bridge_guest_release_tag == "" then {} else {
+      shared_bridge_guest_release_tag: $shared_bridge_guest_release_tag
+    } end)
     + (if ($shared_service_client_security_group_ids | length) == 0 then {} else {
       shared_service_client_security_group_ids: $shared_service_client_security_group_ids,
       shared_ipfs_client_security_group_ids: $shared_service_client_security_group_ids

@@ -89,6 +89,37 @@ jobs:
             exit 1
           fi
 
+      - name: Resolve Release Tier
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          release_tag="${{ inputs.release_tag }}"
+          [[ "$release_tag" != *latest* ]] || {
+            echo "must not use latest tags: $release_tag" >&2
+            exit 1
+          }
+
+          case "$release_tag" in
+            *-testnet)
+              release_tier="testnet"
+              base_chain_id="84532"
+              ;;
+            *-mainnet)
+              release_tier="mainnet"
+              base_chain_id="8453"
+              ;;
+            *)
+              echo "release tag must end with -testnet or -mainnet: $release_tag" >&2
+              exit 1
+              ;;
+          esac
+
+          echo "RELEASE_TAG=$release_tag" >>"$GITHUB_ENV"
+          echo "RELEASE_TIER=$release_tier" >>"$GITHUB_ENV"
+          echo "JUNO_NETWORK=$release_tier" >>"$GITHUB_ENV"
+          echo "BASE_CHAIN_ID=$base_chain_id" >>"$GITHUB_ENV"
+
       - name: Resolve Builder Network
         id: resolve_network
         shell: bash
@@ -181,6 +212,8 @@ jobs:
             --vpc-id "${{ steps.resolve_network.outputs.vpc_id }}" \
             --subnet-id "${{ steps.resolve_network.outputs.subnet_id }}" \
             --repo-commit "${GITHUB_SHA}" \
+            --juno-network "${JUNO_NETWORK}" \
+            --base-chain-id "${BASE_CHAIN_ID}" \
             --sync-timeout-seconds "${{ inputs.sync_timeout_seconds }}" \
             "${source_ami_args[@]}" \
             --manifest-out ".ci/out/operator-ami-manifest.json" \
@@ -195,7 +228,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          tag="${{ inputs.release_tag }}"
+          tag="${RELEASE_TAG}"
 
           region="${{ inputs.aws_region }}"
           ami_id="$(jq -r --arg region "$region" '.regions[$region].ami_id // empty' .ci/out/operator-ami-manifest.json)"
@@ -208,7 +241,7 @@ jobs:
           notes="Operator stack AMI release for ${region}
 
           AMI: ${ami_id}
-          Juno network: testnet
+          Juno network: ${RELEASE_TIER}
           Synced blockstamp: height=${block_height} hash=${block_hash}
           Repo commit: ${GITHUB_SHA}"
 
