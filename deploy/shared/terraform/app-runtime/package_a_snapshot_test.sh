@@ -7,6 +7,16 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../../.." && pwd)"
 source "$REPO_ROOT/deploy/production/tests/common_test.sh"
 
+assert_not_contains() {
+  local haystack="$1"
+  local needle="$2"
+  local msg="$3"
+  if [[ "$haystack" == *"$needle"* ]]; then
+    printf 'assert_not_contains failed: %s: found=%q\n' "$msg" "$needle" >&2
+    exit 1
+  fi
+}
+
 main() {
   local main_tf variables_tf outputs_tf versions_tf app_asg app_lt public_lb internal_lb
 
@@ -72,7 +82,8 @@ main() {
   assert_contains "$internal_lb" 'internal                         = true' "internal backoffice load balancer stays private"
   assert_contains "$internal_lb" 'enable_cross_zone_load_balancing = true' "internal backoffice load balancer keeps cross-zone balancing enabled"
 
-  assert_contains "$main_tf" 'cidr_blocks = var.wireguard_cidr_blocks' "internal backoffice ingress is restricted to WireGuard CIDRs"
+  assert_contains "$main_tf" 'data "aws_vpc" "selected"' "app-runtime resolves the selected vpc for internal backoffice ingress"
+  assert_contains "$main_tf" 'cidr_blocks = [data.aws_vpc.selected.cidr_block]' "internal backoffice ingress is limited to the VPC CIDR"
   assert_contains "$main_tf" 'security_groups = [aws_security_group.public_bridge_lb.id]' "app bridge ingress only trusts the public load balancer security group"
   assert_contains "$main_tf" 'security_groups = [aws_security_group.internal_backoffice_lb.id]' "app backoffice ingress only trusts the internal load balancer security group"
 
@@ -80,7 +91,7 @@ main() {
   assert_contains "$variables_tf" 'variable "public_bridge_additional_certificate_arns"' "app-runtime accepts additional public bridge listener certificates"
   assert_contains "$variables_tf" 'variable "private_subnet_ids"' "app-runtime requires private app subnets"
   assert_contains "$variables_tf" 'variable "public_subnet_ids"' "app-runtime requires public bridge load balancer subnets"
-  assert_contains "$variables_tf" 'variable "wireguard_cidr_blocks"' "app-runtime requires explicit WireGuard CIDR allowlisting"
+  assert_not_contains "$variables_tf" 'variable "wireguard_cidr_blocks"' "app-runtime no longer requires WireGuard CIDR allowlisting"
   assert_contains "$variables_tf" 'alarm_actions must include at least one CloudWatch action ARN.' "app-runtime requires CloudWatch alarm actions"
   assert_contains "$variables_tf" 'At least two private subnet IDs across AZs for the app autoscaling group.' "app-runtime documents the private subnet requirement"
   assert_contains "$variables_tf" 'At least two public subnet IDs across AZs for the public bridge load balancer.' "app-runtime documents the public subnet requirement"

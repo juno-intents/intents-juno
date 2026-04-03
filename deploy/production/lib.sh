@@ -732,9 +732,9 @@ production_write_shared_terraform_override_tfvars() {
     operator_client_security_group_ids_json='[]'
   fi
   allowed_checkpoint_signer_kms_key_arns_json="$(production_inventory_checkpoint_signer_kms_key_arns_json "$inventory")"
-  [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required when inventory.app_role or inventory.app_host is present"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
+    [[ -n "$backoffice_hostname" ]] || die "wireguard_role.backoffice_hostname is required for live-e2e shared terraform"
     [[ -n "$live_e2e_deployment_id" ]] || die "shared_services.live_e2e.deployment_id is required for live-e2e shared terraform"
     [[ -n "$live_e2e_allowed_ssh_cidr" ]] || die "shared_services.live_e2e.allowed_ssh_cidr is required for live-e2e shared terraform"
     [[ -n "$live_e2e_ssh_public_key" ]] || die "shared_services.live_e2e.ssh_public_key is required for live-e2e shared terraform"
@@ -831,10 +831,6 @@ production_write_shared_terraform_override_tfvars() {
   [[ -n "$proof_funder_secret_arn" ]] || die "shared_roles.proof.funder_secret_arn is required for production shared terraform"
   [[ -n "$proof_rpc_url" ]] || die "shared_roles.proof.rpc_url is required for production shared terraform"
   [[ -n "$shared_proof_service_image_ecr_repository_arn" ]] || die "shared_roles.proof.image_ecr_repository_arn is required for shared terraform role runtime"
-  [[ -n "$shared_wireguard_role_ami_id" ]] || die "wireguard_role.ami_id is required for shared terraform role runtime"
-  [[ -n "$shared_wireguard_listen_port" ]] || die "wireguard_role.listen_port is required for production shared terraform"
-  [[ -n "$shared_wireguard_network_cidr" ]] || die "wireguard_role.network_cidr is required for production shared terraform"
-  [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty for production shared terraform"
   if [[ "$env_slug" == "mainnet" ]]; then
     [[ -n "$bridge_guest_release_tag" ]] || die "contracts.bridge_guest_release_tag is required for production shared terraform"
   fi
@@ -856,15 +852,8 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_withdraw_image_id "$withdraw_image_id" \
     --arg shared_bridge_guest_release_tag "$bridge_guest_release_tag" \
     --argjson alarm_actions "$alarm_actions_json" \
-    --argjson wireguard_public_subnet_ids "$wireguard_public_subnet_ids_json" \
-    --arg backoffice_hostname "$backoffice_hostname" \
-    --argjson backoffice_private_endpoint_ips "$backoffice_private_endpoint_ips_json" \
-    --argjson wireguard_source_cidrs "$wireguard_source_cidrs_json" \
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
-    --arg shared_wireguard_role_ami_id "$shared_wireguard_role_ami_id" \
-    --argjson shared_wireguard_listen_port "$shared_wireguard_listen_port" \
-    --arg shared_wireguard_network_cidr "$shared_wireguard_network_cidr" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
     '{
       aws_region: $aws_region,
@@ -880,20 +869,12 @@ production_write_shared_terraform_override_tfvars() {
       shared_deposit_image_id: $shared_deposit_image_id,
       shared_withdraw_image_id: $shared_withdraw_image_id,
       alarm_actions: $alarm_actions,
-      shared_wireguard_enabled: true,
-      shared_wireguard_backoffice_hostname: $backoffice_hostname,
+      shared_wireguard_enabled: false,
       shared_proof_service_image: $shared_proof_service_image,
       shared_proof_service_image_ecr_repository_arn: $shared_proof_service_image_ecr_repository_arn,
       shared_proof_role_min_size: 2,
       shared_proof_role_desired_capacity: 2,
-      shared_proof_role_max_size: 4,
-      shared_wireguard_min_size: 2,
-      shared_wireguard_desired_capacity: 2,
-      shared_wireguard_max_size: 4,
-      shared_wireguard_role_ami_id: $shared_wireguard_role_ami_id,
-      shared_wireguard_listen_port: $shared_wireguard_listen_port,
-      shared_wireguard_network_cidr: $shared_wireguard_network_cidr,
-      shared_wireguard_source_cidrs: $wireguard_source_cidrs
+      shared_proof_role_max_size: 4
     }
     + (if $shared_bridge_guest_release_tag == "" then {} else {
       shared_bridge_guest_release_tag: $shared_bridge_guest_release_tag
@@ -901,12 +882,6 @@ production_write_shared_terraform_override_tfvars() {
     + (if ($shared_service_client_security_group_ids | length) == 0 then {} else {
       shared_service_client_security_group_ids: $shared_service_client_security_group_ids,
       shared_ipfs_client_security_group_ids: $shared_service_client_security_group_ids
-    } end)
-    + (if ($wireguard_public_subnet_ids | length) == 0 then {} else {
-      shared_wireguard_public_subnet_ids: $wireguard_public_subnet_ids
-    } end)
-    + (if ($backoffice_private_endpoint_ips | length) == 0 then {} else {
-      shared_wireguard_backoffice_private_endpoint_ips: $backoffice_private_endpoint_ips
     } end)' >"$output_file"
 }
 
@@ -918,7 +893,7 @@ production_write_app_terraform_override_tfvars() {
     return 0
   fi
 
-  local env_slug app_role_json wireguard_role_json wireguard_cidr_blocks_json
+  local env_slug app_role_json
   local aws_region vpc_id public_subnet_ids_json private_subnet_ids_json
   local app_ami_id app_instance_profile_name public_bridge_certificate_arn internal_backoffice_certificate_arn
   local public_bridge_additional_certificate_arns_json
@@ -926,7 +901,6 @@ production_write_app_terraform_override_tfvars() {
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   app_role_json="$(production_inventory_app_role_json "$inventory")"
-  wireguard_role_json="$(production_inventory_wireguard_role_json "$inventory")"
   aws_region="$(jq -r '.aws_region // empty' <<<"$app_role_json")"
   if [[ -z "$aws_region" ]]; then
     aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -937,8 +911,6 @@ production_write_app_terraform_override_tfvars() {
   private_subnet_ids_json="$(jq -c '(.private_subnet_ids // []) | if type == "array" then . else [] end' <<<"$app_role_json")"
   [[ "$(jq -r 'length' <<<"$public_subnet_ids_json")" -ge 2 ]] || die "app_role.public_subnet_ids must include at least two subnet ids"
   [[ "$(jq -r 'length' <<<"$private_subnet_ids_json")" -ge 2 ]] || die "app_role.private_subnet_ids must include at least two subnet ids"
-  wireguard_cidr_blocks_json="$(jq -c '(.source_cidrs // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
-  [[ "$(jq -r 'length' <<<"$wireguard_cidr_blocks_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty for app runtime terraform"
   app_ami_id="$(jq -r '.app_ami_id // empty' <<<"$app_role_json")"
   [[ -n "$app_ami_id" ]] || die "app_role.app_ami_id is required for app runtime terraform"
   app_instance_profile_name="$(jq -r '.app_instance_profile_name // empty' <<<"$app_role_json")"
@@ -966,7 +938,6 @@ production_write_app_terraform_override_tfvars() {
     --arg vpc_id "$vpc_id" \
     --argjson public_subnet_ids "$public_subnet_ids_json" \
     --argjson private_subnet_ids "$private_subnet_ids_json" \
-    --argjson wireguard_cidr_blocks "$wireguard_cidr_blocks_json" \
     --arg app_ami_id "$app_ami_id" \
     --arg app_instance_profile_name "$app_instance_profile_name" \
     --arg public_bridge_certificate_arn "$public_bridge_certificate_arn" \
@@ -979,7 +950,6 @@ production_write_app_terraform_override_tfvars() {
       vpc_id: $vpc_id,
       public_subnet_ids: $public_subnet_ids,
       private_subnet_ids: $private_subnet_ids,
-      wireguard_cidr_blocks: $wireguard_cidr_blocks,
       app_ami_id: $app_ami_id,
       app_instance_profile_name: $app_instance_profile_name,
       public_bridge_certificate_arn: $public_bridge_certificate_arn,
@@ -2663,7 +2633,7 @@ production_render_app_handoff() {
   local app_json app_dir manifest_path app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
   local bridge_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
-  local bridge_record_name bridge_public_url
+  local bridge_record_name bridge_public_url backoffice_access_mode backoffice_record_name backoffice_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
   local juno_rpc_url operator_addresses_json
@@ -2671,7 +2641,7 @@ production_render_app_handoff() {
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_public_lb_dns_name edge_public_lb_zone_id
   local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json edge_viewer_certificate_arn
-  local wireguard_source_cidrs_json
+  local wireguard_source_cidrs_json backoffice_access_json backoffice_dns_label
   local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json tf_app_role_json
   local runtime_config_secret_id runtime_config_secret_region
 
@@ -2735,6 +2705,7 @@ production_render_app_handoff() {
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.public_lb.security_group_id // .security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
+  backoffice_dns_label="$(jq -r '.backoffice_dns_label // empty' <<<"$app_json")"
   [[ -n "$bridge_dns_label" ]] || die "app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
   [[ "$public_scheme" == "https" ]] || die "app_role.public_scheme must be https"
@@ -2750,24 +2721,41 @@ production_render_app_handoff() {
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
+  backoffice_access_json="$(jq -c '.backoffice_access // {}' <<<"$app_json")"
+  backoffice_access_mode="$(jq -r '.mode // empty' <<<"$backoffice_access_json")"
+  backoffice_record_name="$(jq -r '.public_hostname // empty' <<<"$backoffice_access_json")"
   if ! jq -e '.shared_services.alarm_actions | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' "$inventory" >/dev/null 2>&1; then
     die "shared_services.alarm_actions must be a non-empty array when inventory.app_role or inventory.app_host is present"
   fi
   edge_alarm_actions_json="$(jq -c '.shared_services.alarm_actions' "$inventory")"
-  wireguard_source_cidrs_json="$(jq -c '
-    if ((.wireguard_role.source_cidrs // []) | type == "array" and length > 0) then
-      .wireguard_role.source_cidrs
+  wireguard_source_cidrs_json='[]'
+  backoffice_wireguard_source_cidrs_json='[]'
+  if [[ -z "$backoffice_access_mode" ]]; then
+    if jq -e '
+      ((.wireguard_role.source_cidrs // []) | type == "array" and length > 0)
+      or ((.wireguard_role.endpoint_host // "") | type == "string" and length > 0)
+    ' "$shared_manifest" >/dev/null 2>&1; then
+      backoffice_access_mode="wireguard"
     else
-      (.wireguard_role.endpoint_host // "")
-      | if test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") then
-          [ . + "/32" ]
-        else
-          []
-        end
-    end
-  ' "$shared_manifest")"
-  [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty"
-  backoffice_wireguard_source_cidrs_json="$wireguard_source_cidrs_json"
+      backoffice_access_mode="cloudflare-access"
+    fi
+  fi
+  if [[ "$backoffice_access_mode" == "wireguard" ]]; then
+    wireguard_source_cidrs_json="$(jq -c '
+      if ((.wireguard_role.source_cidrs // []) | type == "array" and length > 0) then
+        .wireguard_role.source_cidrs
+      else
+        (.wireguard_role.endpoint_host // "")
+        | if test("^([0-9]{1,3}\\.){3}[0-9]{1,3}$") then
+            [ . + "/32" ]
+          else
+            []
+          end
+      end
+    ' "$shared_manifest")"
+    [[ "$(jq -r 'length' <<<"$wireguard_source_cidrs_json")" -gt 0 ]] || die "wireguard_role.source_cidrs must not be empty"
+    backoffice_wireguard_source_cidrs_json="$wireguard_source_cidrs_json"
+  fi
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi
@@ -2778,6 +2766,16 @@ production_render_app_handoff() {
   backoffice_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
   bridge_probe_url="$bridge_public_url"
   backoffice_probe_url="$backoffice_internal_url"
+  if [[ "$backoffice_access_mode" == "cloudflare-access" ]]; then
+    if [[ -z "$backoffice_record_name" && -n "$backoffice_dns_label" ]]; then
+      backoffice_record_name="${backoffice_dns_label}.${public_subdomain}"
+    fi
+    [[ -n "$backoffice_record_name" ]] || die "app_role.backoffice_access.public_hostname or app_role.backoffice_dns_label is required when backoffice_access.mode=cloudflare-access"
+    backoffice_public_url="$(production_origin_url "$public_scheme" "$backoffice_record_name")"
+  else
+    backoffice_record_name=""
+    backoffice_public_url=""
+  fi
   edge_enabled="true"
   edge_output_root="$(dirname "$output_dir")"
   edge_state_dir="$edge_output_root/edge-state"
@@ -2825,8 +2823,11 @@ production_render_app_handoff() {
     --argjson bridge_min_withdraw_amount "$bridge_min_withdraw_amount" \
     --argjson bridge_fee_bps "$bridge_fee_bps" \
     --arg backoffice_listen_addr "$backoffice_listen_addr" \
+    --arg backoffice_public_url "$backoffice_public_url" \
     --arg backoffice_probe_url "$backoffice_probe_url" \
     --arg backoffice_internal_url "$backoffice_internal_url" \
+    --arg backoffice_record_name "$backoffice_record_name" \
+    --arg backoffice_access_mode "$backoffice_access_mode" \
     --argjson backoffice_wireguard_source_cidrs "$backoffice_wireguard_source_cidrs_json" \
     --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
@@ -2887,13 +2888,13 @@ production_render_app_handoff() {
         },
         backoffice: {
           listen_addr: $backoffice_listen_addr,
-          public_url: null,
+          public_url: (if $backoffice_public_url == "" then null else $backoffice_public_url end),
           probe_url: $backoffice_probe_url,
           internal_url: $backoffice_internal_url,
-          record_name: null,
+          record_name: (if $backoffice_record_name == "" then null else $backoffice_record_name end),
           access: {
-            mode: "wireguard",
-            source_cidrs: $backoffice_wireguard_source_cidrs,
+            mode: $backoffice_access_mode,
+            source_cidrs: (if $backoffice_access_mode == "wireguard" then $backoffice_wireguard_source_cidrs else [] end),
             publish_public_dns: false
           }
         }
@@ -3387,6 +3388,7 @@ BACKOFFICE_WITHDRAW_BATCH_CONFIRMATIONS=$runtime_withdraw_batch_confirmations
 BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$shared_manifest")
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 BACKOFFICE_IPFS_API_BEARER_TOKEN=
+BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=
 BACKOFFICE_JUNO_RPC_USER=
 BACKOFFICE_JUNO_RPC_PASS=
 MIN_DEPOSIT_ADMIN_PRIVATE_KEY=

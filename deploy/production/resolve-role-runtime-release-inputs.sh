@@ -192,10 +192,23 @@ wireguard_release_tag="$(production_json_optional "$inventory" '.wireguard_role.
 if [[ -z "$wireguard_release_tag" ]]; then
   wireguard_release_tag="$(production_json_optional "$inventory" '.shared_roles.wireguard.ami_release_tag')"
 fi
+wireguard_release_required="$(
+  jq -r '
+    if (.shared_services.terraform_dir // "") == "deploy/shared/terraform/live-e2e" then
+      "true"
+    elif (.wireguard_role? | type == "object" and length > 0) or (.shared_roles.wireguard? | type == "object" and length > 0) then
+      "true"
+    else
+      "false"
+    end
+  ' "$inventory"
+)"
 
 validate_release_tag "$app_runtime_release_tag" "app_role.ami_release_tag"
 validate_release_tag "$shared_proof_release_tag" "shared_roles.proof.image_release_tag"
-validate_release_tag "$wireguard_release_tag" "wireguard_role.ami_release_tag"
+if [[ "$wireguard_release_required" == "true" ]]; then
+  validate_release_tag "$wireguard_release_tag" "wireguard_role.ami_release_tag"
+fi
 validate_release_tag "$operator_stack_ami_release_tag" "operator_stack_ami_release_tag"
 
 app_runtime_manifest="$release_tmp_dir/app-runtime-ami-manifest.json"
@@ -205,11 +218,15 @@ operator_stack_manifest="$release_tmp_dir/operator-ami-manifest.json"
 
 [[ -n "$app_runtime_release_tag" ]] || die "inventory is missing app_role.ami_release_tag"
 [[ -n "$shared_proof_release_tag" ]] || die "inventory is missing shared_roles.proof.image_release_tag"
-[[ -n "$wireguard_release_tag" ]] || die "inventory is missing wireguard_role.ami_release_tag or shared_roles.wireguard.ami_release_tag"
+if [[ "$wireguard_release_required" == "true" ]]; then
+  [[ -n "$wireguard_release_tag" ]] || die "inventory is missing wireguard_role.ami_release_tag or shared_roles.wireguard.ami_release_tag"
+fi
 
 download_release_asset_with_checksum "$app_runtime_release_tag" "app-runtime-ami-manifest.json" "$app_runtime_manifest"
 download_release_asset_with_checksum "$shared_proof_release_tag" "shared-proof-services-image-manifest.json" "$shared_proof_manifest"
-download_release_asset_with_checksum "$wireguard_release_tag" "wireguard-role-ami-manifest.json" "$wireguard_manifest"
+if [[ "$wireguard_release_required" == "true" ]]; then
+  download_release_asset_with_checksum "$wireguard_release_tag" "wireguard-role-ami-manifest.json" "$wireguard_manifest"
+fi
 if [[ -n "$operator_stack_ami_release_tag" ]]; then
   download_release_asset_with_checksum "$operator_stack_ami_release_tag" "operator-ami-manifest.json" "$operator_stack_manifest"
 fi
@@ -219,8 +236,11 @@ app_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empt
 shared_proof_image_uri="$(jq -r --arg region "$aws_region" '.regions[$region].image_uri // .image_uri // empty' "$shared_proof_manifest")"
 [[ -n "$shared_proof_image_uri" ]] || die "shared proof release manifest is missing regions[$aws_region].image_uri"
 shared_proof_repository_arn="$(resolve_proof_repository_arn "$shared_proof_manifest")"
-wireguard_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$wireguard_manifest")"
-[[ -n "$wireguard_ami_id" ]] || die "wireguard release manifest is missing regions[$aws_region].ami_id"
+wireguard_ami_id=""
+if [[ "$wireguard_release_required" == "true" ]]; then
+  wireguard_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$wireguard_manifest")"
+  [[ -n "$wireguard_ami_id" ]] || die "wireguard release manifest is missing regions[$aws_region].ami_id"
+fi
 operator_stack_ami_id=""
 if [[ -n "$operator_stack_ami_release_tag" ]]; then
   operator_stack_ami_id="$(jq -r --arg region "$aws_region" '.regions[$region].ami_id // empty' "$operator_stack_manifest")"
@@ -242,10 +262,13 @@ jq \
     | .shared_roles.proof.image_uri = $proof_image_uri
     | .shared_roles.proof.image_release_tag = $proof_image_release_tag
     | .shared_roles.proof.image_ecr_repository_arn = $proof_image_ecr_repository_arn
-    | .shared_roles.wireguard.ami_id = $wireguard_ami_id
-    | .shared_roles.wireguard.ami_release_tag = $wireguard_release_tag
-    | .wireguard_role.ami_id = $wireguard_ami_id
-    | .wireguard_role.ami_release_tag = $wireguard_release_tag
+    | if $wireguard_ami_id != "" then
+        .shared_roles.wireguard.ami_id = $wireguard_ami_id
+        | .shared_roles.wireguard.ami_release_tag = $wireguard_release_tag
+        | .wireguard_role.ami_id = $wireguard_ami_id
+        | .wireguard_role.ami_release_tag = $wireguard_release_tag
+      else .
+      end
     | if $operator_stack_ami_id != ""
          and (.shared_services.terraform_dir // "") == "deploy/shared/terraform/live-e2e"
          and (.shared_services.live_e2e.operator_ami_id // "") == "" then

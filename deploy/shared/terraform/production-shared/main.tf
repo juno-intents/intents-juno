@@ -417,6 +417,30 @@ resource "aws_security_group" "ipfs" {
   description = "Security group for intents-juno production shared IPFS nodes"
   vpc_id      = data.aws_vpc.selected.id
 
+  ingress {
+    description     = "IPFS API from the internal load balancer"
+    from_port       = var.shared_ipfs_api_port
+    to_port         = var.shared_ipfs_api_port
+    protocol        = "tcp"
+    security_groups = [aws_security_group.ipfs_lb.id]
+  }
+
+  egress {
+    description = "All outbound"
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  tags = local.common_tags
+}
+
+resource "aws_security_group" "ipfs_lb" {
+  name        = "${local.resource_name}-ipfs-lb-sg"
+  description = "Security group for intents-juno production shared IPFS load balancer"
+  vpc_id      = data.aws_vpc.selected.id
+
   dynamic "ingress" {
     for_each = toset(local.shared_ipfs_ingress_cidrs)
     content {
@@ -1520,14 +1544,15 @@ resource "aws_autoscaling_group" "proof_role" {
 resource "aws_lb" "ipfs" {
   name                             = local.ipfs_lb_name
   internal                         = true
-  load_balancer_type               = "network"
+  load_balancer_type               = "application"
   enable_cross_zone_load_balancing = true
+  security_groups                  = [aws_security_group.ipfs_lb.id]
   subnets                          = local.shared_subnets
 
   lifecycle {
     precondition {
       condition     = length(local.shared_subnets) >= 2
-      error_message = "production-shared IPFS NLB requires at least two subnets."
+      error_message = "production-shared IPFS ALB requires at least two subnets."
     }
   }
 
@@ -1539,12 +1564,14 @@ resource "aws_lb" "ipfs" {
 resource "aws_lb_target_group" "ipfs_api" {
   name        = local.ipfs_target_group_name
   port        = var.shared_ipfs_api_port
-  protocol    = "TCP"
+  protocol    = "HTTP"
   target_type = "instance"
   vpc_id      = data.aws_vpc.selected.id
 
   health_check {
-    protocol = "TCP"
+    protocol = "HTTP"
+    path     = "/healthz"
+    matcher  = "200"
     port     = tostring(var.shared_ipfs_api_port)
   }
 
@@ -1556,7 +1583,7 @@ resource "aws_lb_target_group" "ipfs_api" {
 resource "aws_lb_listener" "ipfs_api" {
   load_balancer_arn = aws_lb.ipfs.arn
   port              = var.shared_ipfs_api_port
-  protocol          = "TCP"
+  protocol          = "HTTP"
 
   default_action {
     type             = "forward"
@@ -1697,6 +1724,10 @@ resource "aws_launch_template" "ipfs" {
     {
       printf 'server {\n'
       printf '  listen %s:%s;\n' "$private_ip" "${var.shared_ipfs_api_port}"
+      printf '  location = /healthz {\n'
+      printf '    add_header Content-Type text/plain;\n'
+      printf '    return 200 "ok\\n";\n'
+      printf '  }\n'
       printf '  location /api/v0/ {\n'
       printf '    if ($http_authorization != "Bearer %s") {\n' "$ipfs_api_bearer_token"
       printf '      return 401;\n'

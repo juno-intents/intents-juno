@@ -231,6 +231,11 @@ jobs:
           export DEBIAN_FRONTEND=noninteractive
           apt-get update -y
           apt-get install -y ca-certificates curl jq nginx openssl
+          mkdir -p --mode=0755 /usr/share/keyrings
+          curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg | tee /usr/share/keyrings/cloudflare-main.gpg >/dev/null
+          echo "deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main" | tee /etc/apt/sources.list.d/cloudflared.list
+          apt-get update -y
+          apt-get install -y cloudflared
           install -d -m 0755 /usr/local/bin /var/lib/intents-juno/app-runtime /etc/intents-juno/app /tmp/app-binaries
           if snap list amazon-ssm-agent >/dev/null 2>&1; then
             systemctl enable snap.amazon-ssm-agent.amazon-ssm-agent.service || true

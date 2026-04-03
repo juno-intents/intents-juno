@@ -92,7 +92,7 @@ deposit_probe_base_recipient="0x1111111111111111111111111111111111111111"
 bridge_probe_url="${bridge_probe_url%/}"
 backoffice_probe_url="$backoffice_public_url"
 backoffice_probe_transport="direct"
-if [[ "$backoffice_access_mode" == "wireguard" || -z "$backoffice_probe_url" ]]; then
+if [[ "$backoffice_access_mode" == "wireguard" || "$backoffice_access_mode" == "cloudflare-access" || -z "$backoffice_probe_url" ]]; then
   backoffice_probe_url="$backoffice_internal_url"
   backoffice_probe_transport="ssm-local"
 fi
@@ -344,7 +344,11 @@ else
     instance_id="$(production_resolve_instance_id_from_host "$aws_profile" "$aws_region" "$app_host")"
   fi
 
-  for svc in bridge-api backoffice; do
+  systemd_services=(bridge-api backoffice)
+  if [[ "$backoffice_access_mode" == "cloudflare-access" ]]; then
+    systemd_services+=(cloudflared-backoffice)
+  fi
+  for svc in "${systemd_services[@]}"; do
     svc_status="$(production_ssm_run_shell_command "$aws_profile" "$aws_region" "$instance_id" "sudo systemctl is-active $svc" 2>/dev/null | tr -d '[:space:]' || echo "inactive")"
     if [[ "$svc_status" != "active" ]]; then
       systemd_status="failed"

@@ -2,6 +2,10 @@ provider "aws" {
   region = var.aws_region
 }
 
+data "aws_vpc" "selected" {
+  id = var.vpc_id
+}
+
 locals {
   resource_slug = trim(replace(lower("juno-app-runtime-${var.deployment_id}"), "_", "-"), "-")
   public_bridge_lb_name         = trimsuffix(substr("${local.resource_slug}-bridge-lb", 0, 32), "-")
@@ -52,11 +56,11 @@ resource "aws_security_group" "internal_backoffice_lb" {
   vpc_id      = var.vpc_id
 
   ingress {
-    description = "HTTPS from WireGuard gateways"
+    description = "HTTPS from the VPC"
     from_port   = 443
     to_port     = 443
     protocol    = "tcp"
-    cidr_blocks = var.wireguard_cidr_blocks
+    cidr_blocks = [data.aws_vpc.selected.cidr_block]
   }
 
   egress {

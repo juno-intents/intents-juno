@@ -189,8 +189,18 @@ production_render_bridge_api_env "$shared_manifest" "$app_deploy" "$empty_env" "
 production_render_backoffice_env "$shared_manifest" "$app_deploy" "$empty_env" "$backoffice_env"
 
 bridge_hostname="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
-backoffice_hostname="$(production_json_optional "$shared_manifest" '.wireguard_role.backoffice_hostname // .shared_roles.wireguard.backoffice_hostname')"
-[[ -n "$backoffice_hostname" ]] || die "shared manifest is missing wireguard_role.backoffice_hostname"
+backoffice_access_mode="$(production_json_required "$app_deploy" '.services.backoffice.access.mode | select(type == "string" and length > 0)')"
+backoffice_hostname="$(jq -r '
+  if (.services.backoffice.record_name // "") != "" then
+    .services.backoffice.record_name
+  else
+    (try ((.services.backoffice.public_url // "") | capture("^https?://(?<host>[^/:]+)").host) catch "")
+  end
+' "$app_deploy")"
+if [[ -z "$backoffice_hostname" ]]; then
+  backoffice_hostname="$(production_json_optional "$shared_manifest" '.wireguard_role.backoffice_hostname // .shared_roles.wireguard.backoffice_hostname')"
+fi
+[[ -n "$backoffice_hostname" ]] || die "app deploy is missing services.backoffice.record_name or services.backoffice.public_url"
 
 bridge_wrapper="$output_dir/bin/bridge-api-wrapper"
 cat >"$bridge_wrapper" <<'EOF'
@@ -287,6 +297,44 @@ exec /usr/local/bin/backoffice "${args[@]}"
 EOF
 chmod +x "$backoffice_wrapper"
 
+cloudflared_wrapper=""
+cloudflared_unit=""
+if [[ "$backoffice_access_mode" == "cloudflare-access" ]]; then
+  cloudflared_wrapper="$output_dir/bin/cloudflared-backoffice-wrapper"
+  cat >"$cloudflared_wrapper" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+set -a
+source /etc/intents-juno/backoffice.env
+set +a
+
+[[ -n "${BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN:-}" ]] || {
+  printf 'missing BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN\n' >&2
+  exit 1
+}
+
+exec /usr/local/bin/cloudflared tunnel --no-autoupdate run --token "${BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN}"
+EOF
+  chmod +x "$cloudflared_wrapper"
+
+  cloudflared_unit="$output_dir/systemd/cloudflared-backoffice.service"
+  cat >"$cloudflared_unit" <<'EOF'
+[Unit]
+Description=Juno backoffice Cloudflare Tunnel
+After=network-online.target backoffice.service
+Wants=network-online.target backoffice.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared-backoffice-wrapper
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+fi
+
 app_hydrator_env="$output_dir/app-runtime-hydrator.env"
 cat >"$app_hydrator_env" <<EOF
 APP_RUNTIME_CONFIG_SECRET_ID=$runtime_config_secret_id
@@ -372,6 +420,7 @@ backoffice_ipfs_api_bearer_token="$(jq -r '.BACKOFFICE_IPFS_API_BEARER_TOKEN // 
 backoffice_juno_rpc_user="$(jq -r '.BACKOFFICE_JUNO_RPC_USER // .APP_JUNO_RPC_USER // .JUNO_RPC_USER // empty' <<<"$secret_json")"
 backoffice_juno_rpc_pass="$(jq -r '.BACKOFFICE_JUNO_RPC_PASS // .APP_JUNO_RPC_PASS // .JUNO_RPC_PASS // empty' <<<"$secret_json")"
 min_deposit_admin_private_key="$(jq -r '.MIN_DEPOSIT_ADMIN_PRIVATE_KEY // .APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY // empty' <<<"$secret_json")"
+backoffice_cloudflare_tunnel_token="$(jq -r '.BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN // .CLOUDFLARE_TUNNEL_TOKEN // empty' <<<"$secret_json")"
 
 [[ -n "$bridge_postgres_dsn" ]] || die "runtime secret is missing bridge postgres dsn"
 [[ -n "$backoffice_postgres_dsn" ]] || die "runtime secret is missing backoffice postgres dsn"
@@ -388,6 +437,9 @@ set_env_value "$backoffice_env_file" BACKOFFICE_JUNO_RPC_PASS "$backoffice_juno_
 set_env_value "$backoffice_env_file" MIN_DEPOSIT_ADMIN_PRIVATE_KEY "$min_deposit_admin_private_key"
 if [[ -n "$backoffice_ipfs_api_bearer_token" ]]; then
   set_env_value "$backoffice_env_file" BACKOFFICE_IPFS_API_BEARER_TOKEN "$backoffice_ipfs_api_bearer_token"
+fi
+if [[ -n "$backoffice_cloudflare_tunnel_token" ]]; then
+  set_env_value "$backoffice_env_file" BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN "$backoffice_cloudflare_tunnel_token"
 fi
 
 chmod 0600 "$bridge_env_file" "$backoffice_env_file"
@@ -497,6 +549,10 @@ cp "$bridge_unit" "$bundle_dir/systemd/bridge-api.service"
 cp "$backoffice_unit" "$bundle_dir/systemd/backoffice.service"
 cp "$app_hydrator_unit" "$bundle_dir/systemd/intents-juno-app-config-hydrator.service"
 cp "$nginx_config" "$bundle_dir/nginx/app.conf"
+if [[ -n "$cloudflared_wrapper" && -n "$cloudflared_unit" ]]; then
+  cp "$cloudflared_wrapper" "$bundle_dir/cloudflared-backoffice-wrapper"
+  cp "$cloudflared_unit" "$bundle_dir/systemd/cloudflared-backoffice.service"
+fi
 
 install_script="$output_dir/install.sh"
 cat >"$install_script" <<'EOF'
@@ -515,6 +571,13 @@ install -m 0755 "$script_dir/backoffice-wrapper" /usr/local/bin/backoffice-wrapp
 install -m 0644 "$script_dir/systemd/intents-juno-app-config-hydrator.service" /etc/systemd/system/intents-juno-app-config-hydrator.service
 install -m 0644 "$script_dir/systemd/bridge-api.service" /etc/systemd/system/bridge-api.service
 install -m 0644 "$script_dir/systemd/backoffice.service" /etc/systemd/system/backoffice.service
+if [[ -f "$script_dir/cloudflared-backoffice-wrapper" && -f "$script_dir/systemd/cloudflared-backoffice.service" ]]; then
+  install -m 0755 "$script_dir/cloudflared-backoffice-wrapper" /usr/local/bin/cloudflared-backoffice-wrapper
+  install -m 0644 "$script_dir/systemd/cloudflared-backoffice.service" /etc/systemd/system/cloudflared-backoffice.service
+else
+  rm -f /usr/local/bin/cloudflared-backoffice-wrapper /etc/systemd/system/cloudflared-backoffice.service
+  systemctl disable --now cloudflared-backoffice.service >/dev/null 2>&1 || true
+fi
 install -m 0644 "$script_dir/nginx/app.conf" /etc/nginx/sites-available/intents-juno-app.conf
 ln -sfn /etc/nginx/sites-available/intents-juno-app.conf /etc/nginx/sites-enabled/intents-juno-app.conf
 rm -f /etc/nginx/sites-enabled/default
@@ -529,16 +592,36 @@ if [[ ! -s /etc/nginx/intents-juno/server.key || ! -s /etc/nginx/intents-juno/se
 fi
 
 systemctl daemon-reload
-systemctl enable intents-juno-app-config-hydrator.service bridge-api.service backoffice.service nginx.service >/dev/null
+services=(
+  intents-juno-app-config-hydrator.service
+  bridge-api.service
+  backoffice.service
+  nginx.service
+)
+if [[ -f /etc/systemd/system/cloudflared-backoffice.service ]]; then
+  services+=(cloudflared-backoffice.service)
+fi
+systemctl enable "${services[@]}" >/dev/null
 systemctl restart intents-juno-app-config-hydrator.service
 systemctl restart bridge-api.service
 systemctl restart backoffice.service
 nginx -t
 systemctl restart nginx.service
+if [[ -f /etc/systemd/system/cloudflared-backoffice.service ]]; then
+  systemctl restart cloudflared-backoffice.service
+fi
 
 for _ in $(seq 1 60); do
-  if systemctl is-active --quiet bridge-api.service backoffice.service nginx.service intents-juno-app-config-hydrator.service \
-    && curl -ksfS https://127.0.0.1/healthz >/dev/null; then
+  ready_services=(
+    bridge-api.service
+    backoffice.service
+    nginx.service
+    intents-juno-app-config-hydrator.service
+  )
+  if [[ -f /etc/systemd/system/cloudflared-backoffice.service ]]; then
+    ready_services+=(cloudflared-backoffice.service)
+  fi
+  if systemctl is-active --quiet "${ready_services[@]}" && curl -ksfS https://127.0.0.1/healthz >/dev/null; then
     exit 0
   fi
   sleep 5

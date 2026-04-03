@@ -33,16 +33,6 @@ variable "private_subnet_ids" {
   }
 }
 
-variable "wireguard_cidr_blocks" {
-  description = "CIDR blocks used by the WireGuard gateways that may reach the internal backoffice load balancer."
-  type        = list(string)
-
-  validation {
-    condition     = length(var.wireguard_cidr_blocks) > 0
-    error_message = "wireguard_cidr_blocks must include at least one WireGuard CIDR."
-  }
-}
-
 variable "app_ami_id" {
   description = "AMI id for the immutable app instances."
   type        = string

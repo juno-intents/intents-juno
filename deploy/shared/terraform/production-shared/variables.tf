@@ -20,7 +20,7 @@ variable "vpc_id" {
 }
 
 variable "shared_subnet_ids" {
-  description = "At least two private subnet IDs in distinct AZs for Aurora, MSK, ECS, and the IPFS NLB."
+  description = "At least two private subnet IDs in distinct AZs for Aurora, MSK, ECS, and the IPFS load balancer."
   type        = list(string)
 
   validation {

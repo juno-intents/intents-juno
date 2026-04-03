@@ -95,12 +95,12 @@ output "shared_postgres_dsn_secret_arn" {
 }
 
 output "shared_ipfs_nlb_dns" {
-  description = "Internal NLB DNS name fronting the IPFS ASG."
+  description = "Internal load balancer DNS name fronting the IPFS ASG."
   value       = aws_lb.ipfs.dns_name
 }
 
 output "shared_ipfs_api_url" {
-  description = "IPFS API URL exposed by the internal NLB."
+  description = "IPFS API URL exposed by the internal load balancer."
   value       = "http://${aws_lb.ipfs.dns_name}:${var.shared_ipfs_api_port}"
 }
 
