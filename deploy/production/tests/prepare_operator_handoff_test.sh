@@ -254,9 +254,122 @@ JSON
   rm -rf "$tmp"
 }
 
+test_prepare_operator_handoff_allows_cli_profile_override() {
+  local tmp fake_bin aws_log secret_payload policy_payload provisioner
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+  secret_payload="$tmp/runtime-secret.json"
+  policy_payload="$tmp/access-policy.json"
+  provisioner="$tmp/fake-provision-checkpoint-signer-kms"
+  mkdir -p "$fake_bin"
+
+  write_test_dkg_backup_zip "$tmp/dkg-backup.zip"
+  cat >"$tmp/handoff-setup.json" <<'JSON'
+{
+  "aws_profile": "operator-op1",
+  "aws_region": "us-east-1",
+  "runtime_material": {
+    "bucket": "mainnet-runtime-materials",
+    "key": "operators/op1/runtime-material.zip",
+    "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+  },
+  "runtime_config_secret": {
+    "id": "mainnet/op1/runtime-config",
+    "region": "us-east-1"
+  },
+  "checkpoint_signer": {
+    "alias_name": "alias/mainnet-op1-checkpoint-signer"
+  },
+  "access": {
+    "user_name": "mainnet-op1-runtime-access"
+  },
+  "runtime_config": {
+    "CHECKPOINT_POSTGRES_DSN": "postgres://checkpoint.example.internal:5432/juno?sslmode=require"
+  }
+}
+JSON
+
+  write_fake_prepare_operator_handoff_aws "$fake_bin/aws" "$aws_log" "$secret_payload" "$policy_payload"
+  write_fake_prepare_operator_handoff_cast "$fake_bin/cast"
+  write_fake_prepare_operator_handoff_provisioner "$provisioner"
+
+  (
+    cd "$tmp"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_PREPARE_RUNTIME_MATERIALS_CHECKPOINT_SIGNER_BIN="$provisioner" \
+    bash "$REPO_ROOT/deploy/production/prepare-operator-handoff.sh" --aws-profile juno
+  )
+
+  assert_contains "$(cat "$aws_log")" "--profile juno" "handoff uses the cli aws profile override"
+  if grep -Fq -- "--profile operator-op1" "$aws_log"; then
+    printf 'expected handoff to ignore the setup aws profile when cli override is present\n' >&2
+    exit 1
+  fi
+
+  rm -rf "$tmp"
+}
+
+test_prepare_operator_handoff_allows_disabling_profile() {
+  local tmp fake_bin aws_log secret_payload policy_payload provisioner
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  aws_log="$tmp/aws.log"
+  secret_payload="$tmp/runtime-secret.json"
+  policy_payload="$tmp/access-policy.json"
+  provisioner="$tmp/fake-provision-checkpoint-signer-kms"
+  mkdir -p "$fake_bin"
+
+  write_test_dkg_backup_zip "$tmp/dkg-backup.zip"
+  cat >"$tmp/handoff-setup.json" <<'JSON'
+{
+  "aws_profile": "operator-op1",
+  "aws_region": "us-east-1",
+  "runtime_material": {
+    "bucket": "mainnet-runtime-materials",
+    "key": "operators/op1/runtime-material.zip",
+    "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+  },
+  "runtime_config_secret": {
+    "id": "mainnet/op1/runtime-config",
+    "region": "us-east-1"
+  },
+  "checkpoint_signer": {
+    "alias_name": "alias/mainnet-op1-checkpoint-signer"
+  },
+  "access": {
+    "user_name": "mainnet-op1-runtime-access"
+  },
+  "runtime_config": {
+    "CHECKPOINT_POSTGRES_DSN": "postgres://checkpoint.example.internal:5432/juno?sslmode=require"
+  }
+}
+JSON
+
+  write_fake_prepare_operator_handoff_aws "$fake_bin/aws" "$aws_log" "$secret_payload" "$policy_payload"
+  write_fake_prepare_operator_handoff_cast "$fake_bin/cast"
+  write_fake_prepare_operator_handoff_provisioner "$provisioner"
+
+  (
+    cd "$tmp"
+    PATH="$fake_bin:$PATH" \
+    PRODUCTION_PREPARE_RUNTIME_MATERIALS_CHECKPOINT_SIGNER_BIN="$provisioner" \
+    bash "$REPO_ROOT/deploy/production/prepare-operator-handoff.sh" --no-aws-profile
+  )
+
+  if grep -Fq -- "--profile" "$aws_log"; then
+    printf 'expected handoff to omit aws profile flags when no-profile is requested\n' >&2
+    exit 1
+  fi
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_prepare_operator_handoff_discovers_inputs_and_emits_handoff
   test_prepare_operator_handoff_rejects_forbidden_policy_permissions
+  test_prepare_operator_handoff_allows_cli_profile_override
+  test_prepare_operator_handoff_allows_disabling_profile
 }
 
 main "$@"

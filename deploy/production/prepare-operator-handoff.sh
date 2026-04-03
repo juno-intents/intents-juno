@@ -11,8 +11,10 @@ Usage:
   prepare-operator-handoff.sh [options]
 
 Options:
-  --workdir PATH   folder containing dkg-backup.zip and handoff-setup.json (default: current directory)
-  --output PATH    output path for operator-handoff.json (default: <workdir>/operator-handoff.json)
+  --workdir PATH       folder containing dkg-backup.zip and handoff-setup.json (default: current directory)
+  --output PATH        output path for operator-handoff.json (default: <workdir>/operator-handoff.json)
+  --aws-profile NAME   override handoff-setup.json aws_profile for this run
+  --no-aws-profile     ignore handoff-setup.json aws_profile for this run
 EOF
 }
 
@@ -27,6 +29,9 @@ log() {
 
 workdir="$(pwd)"
 output_path=""
+aws_profile_override=""
+aws_profile_override_set=0
+disable_aws_profile=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -37,6 +42,15 @@ while [[ $# -gt 0 ]]; do
     --output)
       output_path="$2"
       shift 2
+      ;;
+    --aws-profile)
+      aws_profile_override="$2"
+      aws_profile_override_set=1
+      shift 2
+      ;;
+    --no-aws-profile)
+      disable_aws_profile=1
+      shift
       ;;
     --help|-h)
       usage
@@ -60,6 +74,10 @@ fi
 [[ -f "$runtime_package" ]] || die "missing $runtime_package"
 [[ -f "$setup_json" ]] || die "missing $setup_json"
 
+if [[ $aws_profile_override_set -eq 1 && $disable_aws_profile -eq 1 ]]; then
+  die "--aws-profile and --no-aws-profile cannot be used together"
+fi
+
 for cmd in aws jq unzip cast openssl; do
   command -v "$cmd" >/dev/null 2>&1 || die "required command not found: $cmd"
 done
@@ -68,6 +86,11 @@ jq -e 'type == "object"' "$setup_json" >/dev/null 2>&1 \
   || die "handoff-setup.json must contain a JSON object"
 
 aws_profile="$(jq -r '.aws_profile // empty' "$setup_json")"
+if [[ $disable_aws_profile -eq 1 ]]; then
+  aws_profile=""
+elif [[ $aws_profile_override_set -eq 1 ]]; then
+  aws_profile="$aws_profile_override"
+fi
 aws_region="$(jq -r '.aws_region // empty' "$setup_json")"
 runtime_material_bucket="$(jq -r '.runtime_material.bucket // empty' "$setup_json")"
 runtime_material_key="$(jq -r '.runtime_material.key // empty' "$setup_json")"
