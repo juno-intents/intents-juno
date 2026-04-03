@@ -178,7 +178,7 @@ jobs:
           set -euo pipefail
 
           resolved_source_ami_id="${{ inputs.source_ami_id }}"
-          if [[ -z "$resolved_source_ami_id" ]]; then
+          if [[ -z "$resolved_source_ami_id" && "$RELEASE_TIER" != "mainnet" ]]; then
             tmpdir="$(mktemp -d)"
             if gh release download "operator-stack-ami-latest" \
               --repo "${{ github.repository }}" \
