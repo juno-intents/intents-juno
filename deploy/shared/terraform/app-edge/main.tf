@@ -17,7 +17,9 @@ locals {
   }
   cloudfront_cache_policy_id          = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
   cloudfront_origin_request_policy_id = "b689b0a8-53d0-40ab-baf2-68738e2966ac"
-  viewer_validation_option            = one(aws_acm_certificate.viewer.domain_validation_options)
+  viewer_certificate_managed          = var.viewer_certificate_arn == ""
+  viewer_validation_option            = local.viewer_certificate_managed ? one(aws_acm_certificate.viewer[0].domain_validation_options) : null
+  viewer_certificate_effective_arn    = local.viewer_certificate_managed ? aws_acm_certificate_validation.viewer[0].certificate_arn : var.viewer_certificate_arn
 }
 
 data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
@@ -26,6 +28,7 @@ data "aws_ec2_managed_prefix_list" "cloudfront_origin" {
 }
 
 resource "aws_route53_record" "origin_cname" {
+  count           = var.manage_dns_records ? 1 : 0
   allow_overwrite = true
   zone_id = var.zone_id
   name    = var.origin_record_name
@@ -35,6 +38,7 @@ resource "aws_route53_record" "origin_cname" {
 }
 
 resource "aws_acm_certificate" "viewer" {
+  count             = local.viewer_certificate_managed ? 1 : 0
   provider          = aws.us_east_1
   domain_name       = var.bridge_record_name
   validation_method = "DNS"
@@ -49,6 +53,7 @@ resource "aws_acm_certificate" "viewer" {
 }
 
 resource "aws_route53_record" "viewer_validation" {
+  count           = local.viewer_certificate_managed ? 1 : 0
   allow_overwrite = true
   zone_id = var.zone_id
   name    = local.viewer_validation_option.resource_record_name
@@ -58,9 +63,10 @@ resource "aws_route53_record" "viewer_validation" {
 }
 
 resource "aws_acm_certificate_validation" "viewer" {
+  count                   = local.viewer_certificate_managed ? 1 : 0
   provider                = aws.us_east_1
-  certificate_arn         = aws_acm_certificate.viewer.arn
-  validation_record_fqdns = [aws_route53_record.viewer_validation.fqdn]
+  certificate_arn         = aws_acm_certificate.viewer[0].arn
+  validation_record_fqdns = [aws_route53_record.viewer_validation[0].fqdn]
 }
 
 resource "aws_wafv2_web_acl" "app" {
@@ -208,7 +214,7 @@ resource "aws_cloudfront_distribution" "bridge" {
   }
 
   viewer_certificate {
-    acm_certificate_arn      = aws_acm_certificate_validation.viewer.certificate_arn
+    acm_certificate_arn      = local.viewer_certificate_effective_arn
     minimum_protocol_version = "TLSv1.2_2021"
     ssl_support_method       = "sni-only"
   }
@@ -219,6 +225,7 @@ resource "aws_cloudfront_distribution" "bridge" {
 }
 
 resource "aws_route53_record" "bridge_alias_a" {
+  count           = var.manage_dns_records ? 1 : 0
   zone_id         = var.zone_id
   name            = var.bridge_record_name
   type            = "A"
@@ -232,6 +239,7 @@ resource "aws_route53_record" "bridge_alias_a" {
 }
 
 resource "aws_route53_record" "bridge_alias_aaaa" {
+  count           = var.manage_dns_records ? 1 : 0
   zone_id         = var.zone_id
   name            = var.bridge_record_name
   type            = "AAAA"

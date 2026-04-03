@@ -8,6 +8,17 @@ variable "deployment_id" {
 
 variable "zone_id" {
   type = string
+  default = ""
+}
+
+variable "manage_dns_records" {
+  type    = bool
+  default = true
+
+  validation {
+    condition     = var.manage_dns_records || var.viewer_certificate_arn != ""
+    error_message = "viewer_certificate_arn must be set when manage_dns_records is false."
+  }
 }
 
 variable "bridge_record_name" {
@@ -28,6 +39,11 @@ variable "origin_http_port" {
 }
 
 variable "security_group_id" {
+  type    = string
+  default = ""
+}
+
+variable "viewer_certificate_arn" {
   type    = string
   default = ""
 }

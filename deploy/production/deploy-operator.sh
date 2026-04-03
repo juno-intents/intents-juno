@@ -750,7 +750,7 @@ if [[ "$dry_run" != "true" ]]; then
   fi
 fi
 
-if [[ "$dns_mode" == "public-zone" && -n "$dns_zone_id" && -n "$dns_record_name" && -n "$public_endpoint" ]]; then
+if production_dns_mode_uses_managed_public_zone "$dns_mode" && [[ -n "$dns_zone_id" && -n "$dns_record_name" && -n "$public_endpoint" ]]; then
   if [[ "$dry_run" == "true" ]]; then
     log "[DRY RUN] would publish $dns_record_name -> $public_endpoint"
   else

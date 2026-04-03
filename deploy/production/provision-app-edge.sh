@@ -140,7 +140,12 @@ manifest_dir="$(cd "$(dirname "$app_deploy")" && pwd)"
 environment="$(production_json_required "$app_deploy" '.environment | select(type == "string" and length > 0)')"
 aws_profile="$(production_json_optional "$app_deploy" '.aws_profile')"
 aws_region="$(production_json_required "$app_deploy" '.aws_region | select(type == "string" and length > 0)')"
-zone_id="$(production_json_required "$app_deploy" '.dns.zone_id | select(type == "string" and length > 0)')"
+dns_mode="$(production_json_required "$app_deploy" '.dns.mode | select(type == "string" and length > 0)')"
+if production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+  zone_id="$(production_json_required "$app_deploy" '.dns.zone_id | select(type == "string" and length > 0)')"
+else
+  zone_id="$(production_json_optional "$app_deploy" '.dns.zone_id')"
+fi
 bridge_record_name="$(production_json_required "$app_deploy" '.services.bridge_api.record_name | select(type == "string" and length > 0)')"
 origin_record_name="$(production_json_required "$app_deploy" '.edge.origin_record_name | select(type == "string" and length > 0)')"
 public_lb_dns_name="$(production_json_required "$app_deploy" '.edge.public_lb_dns_name | select(type == "string" and length > 0)')"
@@ -153,6 +158,12 @@ alarm_actions_json="$(jq -c '.edge.alarm_actions' "$app_deploy")"
 state_path="$(production_json_required "$app_deploy" '.edge.state_path | select(type == "string" and length > 0)')"
 security_group_id="$(production_json_optional "$app_deploy" '.security_group_id')"
 enable_shield_advanced="$(production_json_optional "$app_deploy" '.edge.enable_shield_advanced')"
+viewer_certificate_arn="$(production_json_optional "$app_deploy" '.edge.viewer_certificate_arn')"
+manage_dns_records="true"
+if ! production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+  manage_dns_records="false"
+  [[ -n "$viewer_certificate_arn" ]] || die "edge.viewer_certificate_arn is required when dns.mode=$dns_mode"
+fi
 
 state_path="$(production_abs_path "$manifest_dir" "$state_path")"
 mkdir -p "$(dirname "$state_path")"
@@ -176,11 +187,13 @@ cat >"$work_dir/terraform.tfvars.json" <<EOF
   "aws_region": $(jq -Rn --arg v "$aws_region" '$v'),
   "deployment_id": $(jq -Rn --arg v "$environment" '$v'),
   "zone_id": $(jq -Rn --arg v "$zone_id" '$v'),
+  "manage_dns_records": $manage_dns_records,
   "bridge_record_name": $(jq -Rn --arg v "$bridge_record_name" '$v'),
   "origin_record_name": $(jq -Rn --arg v "$origin_record_name" '$v'),
   "public_lb_dns_name": $(jq -Rn --arg v "$public_lb_dns_name" '$v'),
   "origin_http_port": $origin_http_port,
   "security_group_id": $(jq -Rn --arg v "$security_group_id" '$v'),
+  "viewer_certificate_arn": $(jq -Rn --arg v "$viewer_certificate_arn" '$v'),
   "rate_limit": $rate_limit,
   "alarm_actions": $alarm_actions_json,
   "enable_shield_advanced": $enable_shield_advanced
@@ -200,5 +213,37 @@ app_edge_import_existing_distribution "$work_dir" "$state_path" "${aws_profile:-
 TF_IN_AUTOMATION=1 \
 AWS_PROFILE="${aws_profile:-}" \
 terraform -chdir="$work_dir" apply -input=false -auto-approve -state="$state_path" -var-file="$work_dir/terraform.tfvars.json" >/dev/null
+
+if ! production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+  edge_dns_receipt="$manifest_dir/edge-dns.json"
+  outputs_json="$(
+    TF_IN_AUTOMATION=1 \
+    AWS_PROFILE="${aws_profile:-}" \
+    terraform -chdir="$work_dir" output -json -state="$state_path"
+  )"
+  jq -n \
+    --arg dns_mode "$dns_mode" \
+    --arg viewer_certificate_arn "$viewer_certificate_arn" \
+    --arg origin_record_name "$origin_record_name" \
+    --arg origin_record_value "$public_lb_dns_name" \
+    --arg bridge_record_name "$bridge_record_name" \
+    --arg bridge_record_value "$(jq -r '.bridge_distribution_domain_name.value // empty' <<<"$outputs_json")" \
+    '{
+      dns_mode: $dns_mode,
+      viewer_certificate_arn: $viewer_certificate_arn,
+      records: [
+        {
+          name: $origin_record_name,
+          type: "CNAME",
+          value: $origin_record_value
+        },
+        {
+          name: $bridge_record_name,
+          type: "CNAME",
+          value: $bridge_record_value
+        }
+      ]
+    }' >"$edge_dns_receipt"
+fi
 
 log "app edge provisioned: $bridge_record_name"

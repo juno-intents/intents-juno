@@ -27,6 +27,7 @@ write_provision_app_edge_fixture() {
   "aws_region": "us-east-1",
   "security_group_id": "",
   "dns": {
+    "mode": "public-zone",
     "zone_id": "Z01169511CVMQJAD7T3TJ"
   },
   "services": {
@@ -45,6 +46,40 @@ write_provision_app_edge_fixture() {
     ],
     "state_path": "$state_path",
     "enable_shield_advanced": false
+  }
+}
+JSON
+}
+
+write_external_provision_app_edge_fixture() {
+  local target="$1"
+  local state_path="$2"
+  cat >"$target" <<JSON
+{
+  "environment": "mainnet",
+  "aws_profile": "juno",
+  "aws_region": "us-east-1",
+  "security_group_id": "",
+  "dns": {
+    "mode": "external"
+  },
+  "services": {
+    "bridge_api": {
+      "record_name": "bridge.mainnet.junointents.com"
+    }
+  },
+  "edge": {
+    "enabled": true,
+    "origin_record_name": "origin.mainnet.junointents.com",
+    "public_lb_dns_name": "juno-app-runtime-mainnet-bridge-1076285917.us-east-1.elb.amazonaws.com",
+    "origin_http_port": 443,
+    "rate_limit": 2000,
+    "alarm_actions": [
+      "arn:aws:sns:us-east-1:021490342184:mainnet-app-edge"
+    ],
+    "state_path": "$state_path",
+    "enable_shield_advanced": false,
+    "viewer_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/bridge-mainnet"
   }
 }
 JSON
@@ -69,6 +104,20 @@ while [[ ${#args[@]} -gt 0 ]]; do
 done
 case "${args[0]:-}" in
   init|apply)
+    for arg in "${args[@]}"; do
+      case "$arg" in
+        -var-file=*)
+          tfvars_path="${arg#-var-file=}"
+          printf 'tfvars %s\n' "$tfvars_path" >>"$TEST_TERRAFORM_LOG"
+          cat "$tfvars_path" >>"$TEST_TERRAFORM_LOG"
+          printf '\n' >>"$TEST_TERRAFORM_LOG"
+          ;;
+      esac
+    done
+    exit 0
+    ;;
+  output)
+    printf '%s\n' "${TEST_TERRAFORM_OUTPUT_JSON:-{\"bridge_distribution_domain_name\":{\"value\":\"d111111abcdef8.cloudfront.net\"}}}"
     exit 0
     ;;
   state)
@@ -215,9 +264,50 @@ test_provision_app_edge_skips_waf_lookup_when_state_already_tracks_it() {
   rm -rf "$tmp"
 }
 
+test_provision_app_edge_supports_external_dns_with_existing_viewer_certificate() {
+  local tmp fake_bin app_deploy state_path terraform_log aws_log dns_receipt
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  app_deploy="$tmp/app-deploy.json"
+  state_path="$tmp/edge-state/mainnet.tfstate"
+  terraform_log="$tmp/terraform.log"
+  aws_log="$tmp/aws.log"
+  dns_receipt="$tmp/edge-dns.json"
+
+  mkdir -p "$fake_bin" "$(dirname "$state_path")"
+  : >"$state_path"
+  : >"$terraform_log"
+  : >"$aws_log"
+  write_external_provision_app_edge_fixture "$app_deploy" "$state_path"
+  write_fake_provision_app_edge_terraform "$fake_bin/terraform"
+  write_fake_provision_app_edge_aws "$fake_bin/aws"
+
+  (
+    cd "$REPO_ROOT"
+    TEST_TERRAFORM_LOG="$terraform_log" \
+      TEST_AWS_LOG="$aws_log" \
+      TEST_TERRAFORM_OUTPUT_JSON='{"bridge_distribution_domain_name":{"value":"d111111abcdef8.cloudfront.net"}}' \
+      PATH="$fake_bin:$PATH" \
+      bash "$REPO_ROOT/deploy/production/provision-app-edge.sh" \
+        --app-deploy "$app_deploy"
+  )
+
+  assert_contains "$(cat "$terraform_log")" '"manage_dns_records": false' "external dns disables terraform-managed dns records"
+  assert_contains "$(cat "$terraform_log")" '"viewer_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/bridge-mainnet"' "external dns passes the provided viewer certificate"
+  assert_not_contains "$(cat "$aws_log")" "route53" "external dns never touches route53"
+  assert_file_exists "$dns_receipt" "external dns receipt"
+  assert_eq "$(jq -r '.records[0].name' "$dns_receipt")" "origin.mainnet.junointents.com" "dns receipt captures the origin record name"
+  assert_eq "$(jq -r '.records[0].value' "$dns_receipt")" "juno-app-runtime-mainnet-bridge-1076285917.us-east-1.elb.amazonaws.com" "dns receipt points the origin record at the app load balancer"
+  assert_eq "$(jq -r '.records[1].name' "$dns_receipt")" "bridge.mainnet.junointents.com" "dns receipt captures the public bridge hostname"
+  assert_eq "$(jq -r '.records[1].value' "$dns_receipt")" "d111111abcdef8.cloudfront.net" "dns receipt points the public bridge hostname at cloudfront"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_provision_app_edge_imports_existing_edge_resources_when_state_is_missing_them
   test_provision_app_edge_skips_waf_lookup_when_state_already_tracks_it
+  test_provision_app_edge_supports_external_dns_with_existing_viewer_certificate
 }
 
 main "$@"

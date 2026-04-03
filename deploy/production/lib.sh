@@ -2308,11 +2308,15 @@ production_render_shared_manifest() {
   aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
   aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
   terraform_dir="$(production_json_required "$inventory" '.shared_services.terraform_dir | select(type == "string" and length > 0)')"
-  zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
+  dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
+  if production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+    zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
+  else
+    zone_id="$(production_json_optional "$inventory" '.shared_services.route53_zone_id')"
+  fi
   zone_name="$(production_json_required "$inventory" '.shared_services.public_zone_name | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
-  dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
 
   postgres_endpoint="$(production_tf_output_value "$tf_json" "shared_postgres_endpoint" true)"
   postgres_cluster_arn="$(production_tf_output_value "$tf_json" "shared_postgres_cluster_arn" false)"
@@ -2631,7 +2635,7 @@ production_render_shared_manifest() {
       operator_roster: $operator_roster,
       dns: {
         mode: $dns_mode,
-        zone_id: $zone_id,
+        zone_id: (if $zone_id == "" then null else $zone_id end),
         zone_name: $zone_name,
         public_subdomain: $public_subdomain,
         ttl_seconds: $ttl_seconds
@@ -2655,7 +2659,7 @@ production_render_app_handoff() {
   shared_manifest="$(production_abs_path "$(pwd)" "$shared_manifest")"
   output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 
-  local env_slug public_subdomain zone_id dns_mode ttl_seconds
+  local env_slug public_subdomain zone_id dns_mode ttl_seconds zone_name
   local app_json app_dir manifest_path app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
   local bridge_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
@@ -2666,15 +2670,20 @@ production_render_app_handoff() {
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_public_lb_dns_name edge_public_lb_zone_id
-  local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json
+  local edge_origin_http_port edge_rate_limit edge_enable_shield_advanced edge_alarm_actions_json edge_viewer_certificate_arn
   local wireguard_source_cidrs_json
   local manifest_version app_role_json proof_role_json wireguard_role_json shared_roles_json tf_app_role_json
   local runtime_config_secret_id runtime_config_secret_region
 
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
-  zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
+  if production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+    zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
+  else
+    zone_id="$(production_json_optional "$inventory" '.shared_services.route53_zone_id')"
+  fi
+  zone_name="$(production_json_required "$inventory" '.shared_services.public_zone_name | select(type == "string" and length > 0)')"
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
   app_json="$(production_inventory_app_role_json "$inventory")"
   tf_app_role_json='{}'
@@ -2782,6 +2791,10 @@ production_render_app_handoff() {
   edge_origin_http_port=443
   edge_rate_limit=2000
   edge_enable_shield_advanced="false"
+  edge_viewer_certificate_arn="$(jq -r '.edge_viewer_certificate_arn // .public_bridge_additional_certificate_arns[0] // .public_bridge_certificate_arn // empty' <<<"$app_json")"
+  if ! production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+    [[ -n "$edge_viewer_certificate_arn" ]] || die "app_role.edge_viewer_certificate_arn or a public bridge certificate is required when dns.mode=$dns_mode"
+  fi
 
   app_dir="$(production_app_dir "$output_dir")"
   mkdir -p "$app_dir"
@@ -2818,6 +2831,7 @@ production_render_app_handoff() {
     --arg public_scheme "$public_scheme" \
     --arg dns_mode "$dns_mode" \
     --arg zone_id "$zone_id" \
+    --arg zone_name "$zone_name" \
     --argjson ttl_seconds "$ttl_seconds" \
     --argjson operator_addresses "$operator_addresses_json" \
     --argjson service_urls "$service_urls_json" \
@@ -2832,6 +2846,7 @@ production_render_app_handoff() {
     --argjson edge_rate_limit "$edge_rate_limit" \
     --argjson edge_alarm_actions "$edge_alarm_actions_json" \
     --arg edge_enable_shield_advanced "$edge_enable_shield_advanced" \
+    --arg edge_viewer_certificate_arn "$edge_viewer_certificate_arn" \
     --argjson app_role "$app_role_json" \
     --argjson proof_role "$proof_role_json" \
     --argjson wireguard_role "$wireguard_role_json" \
@@ -2885,7 +2900,8 @@ production_render_app_handoff() {
       },
       dns: {
         mode: $dns_mode,
-        zone_id: $zone_id,
+        zone_id: (if $zone_id == "" then null else $zone_id end),
+        zone_name: $zone_name,
         ttl_seconds: $ttl_seconds
       },
       edge: (
@@ -2906,6 +2922,9 @@ production_render_app_handoff() {
         } end)
         + (if $edge_origin_endpoint == "" then {} else {
           origin_endpoint: $edge_origin_endpoint
+        } end)
+        + (if $edge_viewer_certificate_arn == "" then {} else {
+          viewer_certificate_arn: $edge_viewer_certificate_arn
         } end)
       )
     }' >"$manifest_path"
@@ -2949,8 +2968,12 @@ production_render_operator_handoffs() {
   local manifest_version withdraw_operator_endpoints_json
   env_slug="$(production_json_required "$inventory" '.environment | select(type == "string" and length > 0)')"
   public_subdomain="$(production_json_required "$inventory" '.shared_services.public_subdomain | select(type == "string" and length > 0)')"
-  zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
   dns_mode="$(production_json_required "$inventory" '.dns.mode | select(type == "string" and length > 0)')"
+  if production_dns_mode_uses_managed_public_zone "$dns_mode"; then
+    zone_id="$(production_json_required "$inventory" '.shared_services.route53_zone_id | select(type == "string" and length > 0)')"
+  else
+    zone_id="$(production_json_optional "$inventory" '.shared_services.route53_zone_id')"
+  fi
   ttl_seconds="$(production_json_required "$inventory" '.dns.ttl_seconds')"
   shared_aws_profile="$(production_json_required "$inventory" '.shared_services.aws_profile | select(type == "string" and length > 0)')"
   shared_aws_region="$(production_json_required "$inventory" '.shared_services.aws_region | select(type == "string" and length > 0)')"
@@ -3113,7 +3136,7 @@ production_render_operator_handoffs() {
         public_endpoint: (if $public_endpoint == "" then null else $public_endpoint end),
         dns: {
           mode: $dns_mode,
-          zone_id: $zone_id,
+          zone_id: (if $zone_id == "" then null else $zone_id end),
           record_name: $public_dns_name,
           ttl_seconds: $ttl_seconds
         }
@@ -3495,4 +3518,16 @@ production_publish_dns_record() {
     --hosted-zone-id "$zone_id" \
     --change-batch "file://$batch_file"
   rm -f "$batch_file"
+}
+
+production_dns_mode_uses_managed_public_zone() {
+  local dns_mode="${1:-}"
+  case "$dns_mode" in
+    public-zone|route53)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }

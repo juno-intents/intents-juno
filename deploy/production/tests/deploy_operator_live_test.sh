@@ -191,8 +191,66 @@ EOF
   rm -rf "$workdir"
 }
 
+test_deploy_operator_skips_route53_for_external_dns_mode() {
+  local workdir fake_bin log_dir manifest state_file shared_manifest output_dir
+  local operator_id
+
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/bin"
+  log_dir="$workdir/logs"
+  output_dir="$workdir/output"
+  operator_id="0x1111111111111111111111111111111111111111"
+  mkdir -p "$fake_bin" "$log_dir"
+
+  write_live_inventory_fixture "$workdir/inventory.json"
+  jq '.dns.mode = "external" | .shared_services.route53_zone_id = null' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs \
+    "$workdir/inventory.json" \
+    "$shared_manifest" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$output_dir" \
+    "$workdir"
+
+  manifest="$(production_operator_dir "$output_dir" "$operator_id")/operator-deploy.json"
+  state_file="$output_dir/rollout-state.json"
+
+  write_fake_live_aws "$fake_bin/aws" "$log_dir"
+  write_fake_cast "$fake_bin/cast"
+  cat >"$fake_bin/ssh" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  cat >"$fake_bin/scp" <<'EOF'
+#!/usr/bin/env bash
+exit 1
+EOF
+  chmod 0755 "$fake_bin/ssh" "$fake_bin/scp"
+
+  PATH="$fake_bin:$PATH" \
+  PRODUCTION_DEPLOY_SERVICE_ACTIVE_RETRIES=1 \
+  PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS=0 \
+  bash "$REPO_ROOT/deploy/production/deploy-operator.sh" \
+    --operator-deploy "$manifest" >/dev/null
+
+  assert_not_contains "$(cat "$log_dir/aws.log")" "route53 change-resource-record-sets" "external dns operator deploy skips route53 publishing"
+  assert_eq "$(jq -r '.operators[] | select(.operator_id=="0x1111111111111111111111111111111111111111") | .status' "$state_file")" "done" "external dns rollout still completes"
+
+  rm -rf "$workdir"
+}
+
 main() {
   test_deploy_operator_uses_ssm_runtime_refs_for_live_rollout
+  test_deploy_operator_skips_route53_for_external_dns_mode
 }
 
 main "$@"

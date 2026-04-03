@@ -2910,6 +2910,86 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_manifests_allow_external_dns_without_route53_zone() {
+  local workdir shared_manifest app_manifest operator_manifest
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY=literal:0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .dns.mode = "external"
+    | .shared_services.route53_zone_id = null
+    | .shared_services.public_zone_name = "junointents.com"
+    | .shared_services.public_subdomain = "mainnet.junointents.com"
+    | .operators[0].known_hosts_file = null
+    | .operators[0].dkg_backup_zip = null
+    | .operators[0].secret_contract_file = null
+    | .operators[0].runtime_material_ref = {
+        mode: "s3-kms-zip",
+        bucket: "mainnet-runtime-materials",
+        key: "operators/op1/runtime-material.zip",
+        region: "us-east-1",
+        kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
+      }
+    | .operators[0].runtime_config_secret_id = "mainnet/op1/runtime-config"
+    | .operators[0].runtime_config_secret_region = "us-east-1"
+    | .app_host.known_hosts_file = null
+    | .app_host.secret_contract_file = null
+    | .app_role.known_hosts_file = null
+    | .app_role.secret_contract_file = null
+    | .app_role.runtime_config_secret_id = "mainnet/app/runtime-config"
+    | .app_role.runtime_config_secret_region = "us-east-1"
+    | .app_role.public_bridge_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/origin-mainnet"
+    | .app_role.public_bridge_additional_certificate_arns = ["arn:aws:acm:us-east-1:021490342184:certificate/bridge-mainnet"]
+    | .app_role.internal_backoffice_certificate_arn = "arn:aws:acm:us-east-1:021490342184:certificate/backoffice-mainnet"
+    | .wireguard_role.backoffice_hostname = "ops.mainnet.junointents.com"
+    | .shared_roles.wireguard.backoffice_hostname = "ops.mainnet.junointents.com"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+
+  app_manifest="$workdir/output/app/app-deploy.json"
+  operator_manifest="$workdir/output/operators/0x1111111111111111111111111111111111111111/operator-deploy.json"
+
+  assert_eq "$(jq -r '.dns.mode' "$shared_manifest")" "external" "shared manifest preserves external dns mode"
+  assert_eq "$(jq -r '.dns.zone_id // empty' "$shared_manifest")" "" "shared manifest omits route53 zone id for external dns"
+  assert_eq "$(jq -r '.dns.zone_name' "$shared_manifest")" "junointents.com" "shared manifest keeps the parent public zone name"
+  assert_eq "$(jq -r '.services.bridge_api.record_name' "$app_manifest")" "bridge.mainnet.junointents.com" "app manifest uses the external public bridge hostname"
+  assert_eq "$(jq -r '.dns.zone_id // empty' "$app_manifest")" "" "app manifest omits route53 zone id for external dns"
+  assert_eq "$(jq -r '.edge.viewer_certificate_arn' "$app_manifest")" "arn:aws:acm:us-east-1:021490342184:certificate/bridge-mainnet" "app manifest carries the existing viewer certificate for external dns"
+  assert_eq "$(jq -r '.dns.zone_id // empty' "$operator_manifest")" "" "operator manifest omits route53 zone id for external dns"
+  assert_eq "$(jq -r '.dns.record_name' "$operator_manifest")" "op1.mainnet.junointents.com" "operator manifest still computes the public hostname"
+
+  rm -rf "$workdir"
+}
+
 test_render_backoffice_env_requires_sp1_requestor_address() {
   local workdir shared_manifest app_manifest resolved_env backoffice_env
   local fake_bin old_path output status
@@ -3598,6 +3678,7 @@ main() {
   test_rollout_state_enforces_one_operator_at_a_time
   test_render_app_handoff_and_envs
   test_render_app_handoff_and_envs_allow_missing_backoffice_juno_rpc_url
+  test_render_manifests_allow_external_dns_without_route53_zone
   test_render_backoffice_env_preserves_non_loopback_juno_rpc_url
   test_render_backoffice_env_uses_private_operator_juno_rpc_fallback
   test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
