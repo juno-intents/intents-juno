@@ -180,6 +180,34 @@ test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .operators[0].private_network = {
+        vpc_id: "vpc-op1west2",
+        vpc_cidr: "10.80.0.0/16",
+        subnet_ids: ["subnet-op1a", "subnet-op1b"],
+        route_table_ids: ["rtb-op1a", "rtb-op1b"],
+        vpc_peering_connection_id: "pcx-op1shared",
+        shared_vpc_id: "vpc-0123456789abcdef0",
+        shared_vpc_cidr: "10.64.0.0/16",
+        shared_route_table_ids: ["rtb-shareda", "rtb-sharedb"]
+      }
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_service_client_cidr_blocks[0]' "$override_file")" "10.80.0.0/16" "production shared tfvars allow operator VPC cidrs into shared postgres and msk"
+  assert_eq "$(jq -r '.shared_ipfs_client_cidr_blocks[0]' "$override_file")" "10.80.0.0/16" "production shared tfvars allow operator VPC cidrs into shared ipfs"
+  rm -rf "$workdir"
+}
+
 write_terraform_tfvars_fixture() {
   local terraform_dir="$1"
   mkdir -p "$terraform_dir"
@@ -3686,6 +3714,7 @@ main() {
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
+  test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
   test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates

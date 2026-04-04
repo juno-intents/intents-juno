@@ -645,6 +645,7 @@ production_write_shared_terraform_override_tfvars() {
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
   local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
   local app_security_group_id operator_client_security_group_ids_json shared_service_client_security_group_ids_json
+  local operator_private_network_cidr_blocks_json
   local aws_profile shared_existing_vpc_endpoint_services_json
   local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
   local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
@@ -731,6 +732,14 @@ production_write_shared_terraform_override_tfvars() {
   else
     operator_client_security_group_ids_json='[]'
   fi
+  operator_private_network_cidr_blocks_json="$(jq -c '
+    [
+      .operators[]?
+      | .private_network?.vpc_cidr // empty
+      | select(type == "string" and length > 0)
+    ]
+    | unique
+  ' "$inventory")"
   allowed_checkpoint_signer_kms_key_arns_json="$(production_inventory_checkpoint_signer_kms_key_arns_json "$inventory")"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
@@ -855,6 +864,7 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
+    --argjson shared_service_client_cidr_blocks "$operator_private_network_cidr_blocks_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
@@ -882,6 +892,10 @@ production_write_shared_terraform_override_tfvars() {
     + (if ($shared_service_client_security_group_ids | length) == 0 then {} else {
       shared_service_client_security_group_ids: $shared_service_client_security_group_ids,
       shared_ipfs_client_security_group_ids: $shared_service_client_security_group_ids
+    } end)
+    + (if ($shared_service_client_cidr_blocks | length) == 0 then {} else {
+      shared_service_client_cidr_blocks: $shared_service_client_cidr_blocks,
+      shared_ipfs_client_cidr_blocks: $shared_service_client_cidr_blocks
     } end)' >"$output_file"
 }
 

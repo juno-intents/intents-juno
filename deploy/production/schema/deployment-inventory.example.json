@@ -155,7 +155,26 @@
         "kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd"
       },
       "runtime_config_secret_id": "alpha/op1/runtime-config",
-      "runtime_config_secret_region": "us-east-1"
+      "runtime_config_secret_region": "us-east-1",
+      "private_network": {
+        "vpc_id": "vpc-0operator1234567890",
+        "vpc_cidr": "10.80.0.0/16",
+        "subnet_ids": [
+          "subnet-0operatora",
+          "subnet-0operatorb"
+        ],
+        "route_table_ids": [
+          "rtb-0operatora",
+          "rtb-0operatorb"
+        ],
+        "vpc_peering_connection_id": "pcx-0123456789abcdef0",
+        "shared_vpc_id": "vpc-0123456789abcdef0",
+        "shared_vpc_cidr": "10.64.0.0/16",
+        "shared_route_table_ids": [
+          "rtb-0shareda",
+          "rtb-0sharedb"
+        ]
+      }
     }
   ],
   "dns": {
