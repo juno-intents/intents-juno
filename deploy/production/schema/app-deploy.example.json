@@ -55,10 +55,10 @@
   "services": {
     "bridge_api": {
       "listen_addr": "127.0.0.1:8082",
-      "public_url": "https://bridge.alpha.intents-testing.thejunowallet.com",
-      "probe_url": "https://bridge.alpha.intents-testing.thejunowallet.com",
+      "public_url": "https://bridge.alpha.junointents.com",
+      "probe_url": "https://bridge.alpha.junointents.com",
       "internal_url": "http://127.0.0.1:8082",
-      "record_name": "bridge.alpha.intents-testing.thejunowallet.com",
+      "record_name": "bridge.alpha.junointents.com",
       "withdrawal_expiry_window_seconds": 86400,
       "min_deposit_amount": 201005025,
       "min_withdraw_amount": 200000000,
@@ -66,35 +66,26 @@
     },
     "backoffice": {
       "listen_addr": "127.0.0.1:8090",
-      "public_url": null,
+      "public_url": "https://ops.alpha.junointents.com",
       "probe_url": "http://127.0.0.1:8090",
       "internal_url": "http://127.0.0.1:8090",
-      "record_name": null,
+      "record_name": "ops.alpha.junointents.com",
       "access": {
-        "mode": "wireguard",
-        "source_cidrs": [
-          "10.0.20.0/24",
-          "10.0.21.0/24"
-        ],
-        "endpoint_host": "198.51.100.25",
-        "listen_port": 51820,
-        "client_address_cidr": "10.66.0.2/32",
-        "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-        "publish_public_dns": false
+        "mode": "cloudflare-access"
       }
     }
   },
   "dns": {
-    "mode": "public-zone",
-    "zone_id": "Z01169511CVMQJAD7T3TJ",
+    "mode": "external",
     "ttl_seconds": 60
   },
   "edge": {
     "enabled": true,
     "state_path": "production-output/alpha/app/edge.tfstate",
-    "origin_record_name": "origin.alpha.intents-testing.thejunowallet.com",
+    "origin_record_name": "origin.alpha.junointents.com",
     "public_lb_dns_name": "bridge-alpha-123456.us-east-1.elb.amazonaws.com",
     "public_lb_zone_id": "Z35SXDOTRQ7X7K",
+    "viewer_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/public-bridge",
     "origin_http_port": 80,
     "rate_limit": 2000,
     "alarm_actions": [

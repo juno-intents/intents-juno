@@ -34,9 +34,9 @@
   "dkg_tls_dir": "",
   "public_endpoint": "203.0.113.11",
   "dns": {
-    "mode": "public-zone",
-    "zone_id": "Z01169511CVMQJAD7T3TJ",
-    "record_name": "op1.mainnet.intents.thejunowallet.com",
+    "mode": "external",
+    "zone_id": "",
+    "record_name": "op1.junointents.com",
     "ttl_seconds": 60
   }
 }

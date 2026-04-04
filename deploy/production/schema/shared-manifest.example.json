@@ -25,17 +25,6 @@
       "api_url": "http://internal-alpha-ipfs.us-east-1.elb.amazonaws.com:5001",
       "target_group_arn": "arn:aws:elasticloadbalancing:us-east-1:021490342184:targetgroup/alpha-ipfs-api/1111111111111111"
     },
-    "wireguard": {
-      "endpoint_host": "198.51.100.25",
-      "listen_port": 51820,
-      "network_cidr": "10.66.0.0/24",
-      "client_address_cidr": "10.66.0.2/32",
-      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-      "source_cidrs": [
-        "10.0.20.0/24",
-        "10.0.21.0/24"
-      ]
-    },
     "artifacts": {
       "checkpoint_blob_bucket": "alpha-dkg-keypackages",
       "checkpoint_blob_prefix": "dkg/keypackages",
@@ -87,51 +76,7 @@
       },
       "requestor_address": "0x1234567890abcdef1234567890abcdef12345678",
       "rpc_url": "https://rpc.mainnet.succinct.xyz"
-    },
-    "wireguard": {
-      "asg": "juno-wireguard",
-      "launch_template": {
-        "id": "lt-0wireguardcafebeef",
-        "version": "9"
-      },
-      "endpoint_host": "198.51.100.25",
-      "listen_port": 51820,
-      "network_cidr": "10.66.0.0/24",
-      "client_address_cidr": "10.66.0.2/32",
-      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-      "source_cidrs": [
-        "10.0.20.0/24",
-        "10.0.21.0/24"
-      ],
-      "peer_roster_secret_arns": [
-        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
-        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
-      ],
-      "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
-      "publish_public_dns": false
     }
-  },
-  "wireguard_role": {
-    "asg": "juno-wireguard",
-    "launch_template": {
-      "id": "lt-0wireguardcafebeef",
-      "version": "9"
-    },
-    "endpoint_host": "198.51.100.25",
-    "listen_port": 51820,
-    "network_cidr": "10.66.0.0/24",
-    "client_address_cidr": "10.66.0.2/32",
-    "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-    "source_cidrs": [
-      "10.0.20.0/24",
-      "10.0.21.0/24"
-    ],
-    "peer_roster_secret_arns": [
-      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
-      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
-    ],
-    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
-    "publish_public_dns": false
   },
   "operator_roster": [
     {
@@ -144,10 +89,10 @@
     }
   ],
   "dns": {
-    "mode": "public-zone",
-    "zone_id": "Z01169511CVMQJAD7T3TJ",
-    "zone_name": "thejunowallet.com",
-    "public_subdomain": "alpha.intents-testing.thejunowallet.com",
+    "mode": "external",
+    "zone_id": "",
+    "zone_name": "junointents.com",
+    "public_subdomain": "alpha.junointents.com",
     "ttl_seconds": 60
   },
   "secret_reference_names": [

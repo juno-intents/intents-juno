@@ -5,15 +5,12 @@
     "aws_profile": "juno",
     "aws_region": "us-east-1",
     "terraform_dir": "deploy/shared/terraform/production-shared",
-    "route53_zone_id": "Z01169511CVMQJAD7T3TJ",
-    "public_zone_name": "thejunowallet.com",
-    "public_subdomain": "alpha.intents-testing.thejunowallet.com",
+    "route53_zone_id": "",
+    "public_zone_name": "junointents.com",
+    "public_subdomain": "alpha.junointents.com",
     "alarm_actions": [
       "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts"
-    ],
-    "wireguard": {
-      "public_subnet_id": "subnet-0123456789abcdef0"
-    }
+    ]
   },
   "shared_roles": {
     "proof": {
@@ -27,65 +24,7 @@
       "image_uri": "021490342184.dkr.ecr.us-east-1.amazonaws.com/intents-juno-proof-services@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
       "image_ecr_repository_arn": "arn:aws:ecr:us-east-1:021490342184:repository/intents-juno-proof-services",
       "image_release_tag": "shared-proof-services-image-v1.2.3-testnet"
-    },
-    "wireguard": {
-      "asg": "juno-wireguard",
-      "launch_template": {
-        "id": "lt-0wireguardcafebeef",
-        "version": "9"
-      },
-      "ami_id": "ami-0wireguardcafebeef0",
-      "public_subnet_id": "subnet-0123456789abcdef0",
-      "public_subnet_ids": [
-        "subnet-0123456789abcdef0"
-      ],
-      "listen_port": 51820,
-      "network_cidr": "10.66.0.0/24",
-      "source_cidrs": [
-        "10.0.20.0/24",
-        "10.0.21.0/24"
-      ],
-      "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
-      "backoffice_private_endpoint": "10.0.10.21",
-      "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-      "peer_roster_secret_arns": [
-        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
-        "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
-      ],
-      "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
-      "ami_release_tag": "wireguard-role-ami-v1.2.3-testnet",
-      "endpoint_host": "198.51.100.25",
-      "publish_public_dns": false
     }
-  },
-  "wireguard_role": {
-    "asg": "juno-wireguard",
-    "launch_template": {
-      "id": "lt-0wireguardcafebeef",
-      "version": "9"
-    },
-    "ami_id": "ami-0wireguardcafebeef0",
-    "public_subnet_id": "subnet-0123456789abcdef0",
-    "public_subnet_ids": [
-      "subnet-0123456789abcdef0"
-    ],
-    "listen_port": 51820,
-    "network_cidr": "10.66.0.0/24",
-    "source_cidrs": [
-      "10.0.20.0/24",
-      "10.0.21.0/24"
-    ],
-    "backoffice_hostname": "ops.alpha.intents-testing.thejunowallet.com",
-    "backoffice_private_endpoint": "10.0.10.21",
-    "client_config_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-client-config",
-    "peer_roster_secret_arns": [
-      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-laptop",
-      "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-peer-ops-phone"
-    ],
-    "server_key_secret_arn": "arn:aws:secretsmanager:us-east-1:021490342184:secret:alpha-wireguard-server-key",
-    "ami_release_tag": "wireguard-role-ami-v1.2.3-testnet",
-    "endpoint_host": "198.51.100.25",
-    "publish_public_dns": false
   },
   "contracts": {
     "juno_network": "testnet",
@@ -114,6 +53,10 @@
     "runtime_config_secret_region": "us-east-1",
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
+    "backoffice_access": {
+      "mode": "cloudflare-access",
+      "public_hostname": "ops.alpha.junointents.com"
+    },
     "public_scheme": "https",
     "bridge_api_listen": "127.0.0.1:8082",
     "backoffice_listen": "127.0.0.1:8090",
@@ -165,9 +108,13 @@
     "runtime_config_secret_region": "us-east-1",
     "bridge_public_dns_label": "bridge",
     "backoffice_dns_label": "ops",
+    "backoffice_access": {
+      "mode": "cloudflare-access",
+      "public_hostname": "ops.alpha.junointents.com"
+    },
     "public_scheme": "https",
     "public_bridge_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/public-bridge",
-    "internal_backoffice_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/internal-backoffice",
+    "edge_viewer_certificate_arn": "arn:aws:acm:us-east-1:021490342184:certificate/public-bridge",
     "bridge_api_listen": "127.0.0.1:8082",
     "backoffice_listen": "127.0.0.1:8090",
     "juno_rpc_url": "http://127.0.0.1:18232",
@@ -212,7 +159,7 @@
     }
   ],
   "dns": {
-    "mode": "public-zone",
+    "mode": "external",
     "write_role_arn": "",
     "ttl_seconds": 60
   }
