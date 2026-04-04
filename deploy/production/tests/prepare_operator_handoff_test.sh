@@ -32,6 +32,22 @@ extract_arg() {
 }
 
 case "\$*" in
+  *"kms describe-key"* )
+    key_id="\$(extract_arg --key-id "\$@" || true)"
+    printf '{"KeyMetadata":{"Arn":"%s"}}\n' "\$key_id"
+    ;;
+  *"s3api get-bucket-location"* )
+    printf '{"LocationConstraint":"us-east-1"}\n'
+    ;;
+  *"s3api create-bucket"* )
+    printf '{}\n'
+    ;;
+  *"s3api put-public-access-block"* )
+    printf '{}\n'
+    ;;
+  *"s3api put-bucket-encryption"* )
+    printf '{}\n'
+    ;;
   *"s3 cp"* )
     ;;
   *"secretsmanager describe-secret"* )

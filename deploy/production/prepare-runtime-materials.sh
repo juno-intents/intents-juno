@@ -52,6 +52,8 @@ operator_id=""
 operator_address=""
 aws_profile=""
 output_path=""
+resolved_runtime_material_kms_key_id=""
+resolved_runtime_config_secret_kms_key_id=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +104,103 @@ aws_cmd() {
   AWS_PAGER="" aws "${aws_args[@]}" "$@"
 }
 
+describe_kms_key_arn() {
+  local region="$1"
+  local key_id="$2"
+  local key_json
+
+  key_json="$(aws_cmd --region "$region" kms describe-key --key-id "$key_id" 2>/dev/null || true)"
+  [[ -n "$key_json" ]] || return 1
+  jq -r '.KeyMetadata.Arn // empty' <<<"$key_json"
+}
+
+ensure_symmetric_kms_key() {
+  local region="$1"
+  local key_id="$2"
+  local resolved_key_arn=""
+  local create_json target_key_id
+
+  [[ -n "$key_id" ]] || die "kms key id is required"
+
+  resolved_key_arn="$(describe_kms_key_arn "$region" "$key_id" || true)"
+  if [[ -n "$resolved_key_arn" ]]; then
+    printf '%s\n' "$resolved_key_arn"
+    return 0
+  fi
+
+  [[ "$key_id" == alias/* ]] || die "kms key not found and cannot auto-provision without alias name: $key_id"
+
+  create_json="$(
+    aws_cmd --region "$region" kms create-key \
+      --description "intents-juno symmetric key for $key_id"
+  )" || die "failed to create kms key for alias $key_id"
+  target_key_id="$(jq -r '.KeyMetadata.Arn // .KeyMetadata.KeyId // empty' <<<"$create_json")"
+  [[ -n "$target_key_id" ]] || die "kms create-key returned no key id for alias $key_id"
+
+  if ! aws_cmd --region "$region" kms create-alias --alias-name "$key_id" --target-key-id "$target_key_id" >/dev/null 2>&1; then
+    resolved_key_arn="$(describe_kms_key_arn "$region" "$key_id" || true)"
+    [[ -n "$resolved_key_arn" ]] || die "failed to create kms alias $key_id"
+    printf '%s\n' "$resolved_key_arn"
+    return 0
+  fi
+
+  resolved_key_arn="$(describe_kms_key_arn "$region" "$key_id" || true)"
+  if [[ -z "$resolved_key_arn" ]]; then
+    resolved_key_arn="$target_key_id"
+  fi
+  printf '%s\n' "$resolved_key_arn"
+}
+
+ensure_runtime_material_bucket() {
+  local bucket="$1"
+  local region="$2"
+  local kms_key_id="$3"
+  local bucket_location_json bucket_location expected_location encryption_json public_access_json
+
+  bucket_location_json="$(aws_cmd --region "$region" s3api get-bucket-location --bucket "$bucket" 2>/dev/null || true)"
+  if [[ -z "$bucket_location_json" ]]; then
+    if [[ "$region" == "us-east-1" ]]; then
+      aws_cmd --region "$region" s3api create-bucket --bucket "$bucket" >/dev/null
+    else
+      aws_cmd --region "$region" s3api create-bucket \
+        --bucket "$bucket" \
+        --create-bucket-configuration "LocationConstraint=$region" >/dev/null
+    fi
+  else
+    bucket_location="$(jq -r '.LocationConstraint // "us-east-1"' <<<"$bucket_location_json")"
+    expected_location="$region"
+    if [[ "$bucket_location" == "EU" ]]; then
+      bucket_location="eu-west-1"
+    fi
+    [[ "$bucket_location" == "$expected_location" ]] || die "runtime material bucket $bucket already exists in region $bucket_location (expected $expected_location)"
+  fi
+
+  public_access_json="$(jq -nc '{
+    BlockPublicAcls: true,
+    IgnorePublicAcls: true,
+    BlockPublicPolicy: true,
+    RestrictPublicBuckets: true
+  }')"
+  aws_cmd --region "$region" s3api put-public-access-block \
+    --bucket "$bucket" \
+    --public-access-block-configuration "$public_access_json" >/dev/null
+
+  encryption_json="$(jq -nc --arg kms_key_id "$kms_key_id" '{
+    Rules: [
+      {
+        ApplyServerSideEncryptionByDefault: {
+          SSEAlgorithm: "aws:kms",
+          KMSMasterKeyID: $kms_key_id
+        },
+        BucketKeyEnabled: true
+      }
+    ]
+  }')"
+  aws_cmd --region "$region" s3api put-bucket-encryption \
+    --bucket "$bucket" \
+    --server-side-encryption-configuration "$encryption_json" >/dev/null
+}
+
 validate_or_provision_checkpoint_signer_key() {
   if [[ -n "$checkpoint_signer_kms_key_id" ]]; then
     aws_cmd --region "$runtime_material_region" kms describe-key --key-id "$checkpoint_signer_kms_key_id" >/dev/null
@@ -141,6 +240,11 @@ upsert_runtime_config_secret() {
   secret_payload="$(cat "$runtime_config_json")"
 
   if aws_cmd --region "$runtime_config_secret_region" secretsmanager describe-secret --secret-id "$runtime_config_secret_id" >/dev/null 2>&1; then
+    if [[ -n "$resolved_runtime_config_secret_kms_key_id" ]]; then
+      aws_cmd --region "$runtime_config_secret_region" secretsmanager update-secret \
+        --secret-id "$runtime_config_secret_id" \
+        --kms-key-id "$resolved_runtime_config_secret_kms_key_id" >/dev/null
+    fi
     aws_cmd --region "$runtime_config_secret_region" secretsmanager put-secret-value \
       --secret-id "$runtime_config_secret_id" \
       --secret-string "$secret_payload" >/dev/null
@@ -153,8 +257,8 @@ upsert_runtime_config_secret() {
     --name "$runtime_config_secret_id"
     --secret-string "$secret_payload"
   )
-  if [[ -n "$runtime_config_secret_kms_key_id" ]]; then
-    create_args+=(--kms-key-id "$runtime_config_secret_kms_key_id")
+  if [[ -n "$resolved_runtime_config_secret_kms_key_id" ]]; then
+    create_args+=(--kms-key-id "$resolved_runtime_config_secret_kms_key_id")
   fi
   aws_cmd "${create_args[@]}" >/dev/null
 }
@@ -163,9 +267,14 @@ upload_runtime_package() {
   aws_cmd --region "$runtime_material_region" s3 cp \
     "$runtime_package" "s3://${runtime_material_bucket}/${runtime_material_key}" \
     --sse aws:kms \
-    --sse-kms-key-id "$runtime_material_kms_key_id" >/dev/null
+    --sse-kms-key-id "$resolved_runtime_material_kms_key_id" >/dev/null
 }
 
+resolved_runtime_material_kms_key_id="$(ensure_symmetric_kms_key "$runtime_material_region" "$runtime_material_kms_key_id")"
+if [[ -n "$runtime_config_secret_kms_key_id" ]]; then
+  resolved_runtime_config_secret_kms_key_id="$(ensure_symmetric_kms_key "$runtime_config_secret_region" "$runtime_config_secret_kms_key_id")"
+fi
+ensure_runtime_material_bucket "$runtime_material_bucket" "$runtime_material_region" "$resolved_runtime_material_kms_key_id"
 validate_or_provision_checkpoint_signer_key
 upload_runtime_package
 upsert_runtime_config_secret
@@ -174,7 +283,7 @@ result_json="$(jq -n \
   --arg runtime_material_bucket "$runtime_material_bucket" \
   --arg runtime_material_key "$runtime_material_key" \
   --arg runtime_material_region "$runtime_material_region" \
-  --arg runtime_material_kms_key_id "$runtime_material_kms_key_id" \
+  --arg runtime_material_kms_key_id "$resolved_runtime_material_kms_key_id" \
   --arg runtime_config_secret_id "$runtime_config_secret_id" \
   --arg runtime_config_secret_region "$runtime_config_secret_region" \
   --arg checkpoint_signer_kms_key_id "$checkpoint_signer_kms_key_id" \
