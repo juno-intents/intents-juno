@@ -199,6 +199,7 @@ unzip -p "$runtime_package" payload/admin-config.json >"$admin_config_json" \
   || die "dkg-backup.zip is missing payload/admin-config.json"
 operator_id="$(jq -r '.operator_id // empty' "$admin_config_json")"
 [[ "$operator_id" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "backup package admin-config.json is missing a valid operator_id"
+operator_network="$(jq -r '.network // empty' "$admin_config_json")"
 
 generate_hex() {
   local byte_count="$1"
@@ -211,6 +212,20 @@ operator_private_key="0x${operator_private_key#0x}"
 
 operator_address="$(cast wallet address --private-key "$operator_private_key" 2>/dev/null | tr -d '[:space:]')"
 [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "failed to derive operator address from generated private key"
+
+base_relayer_private_key="0x$(generate_hex 32)"
+base_relayer_private_key="0x${base_relayer_private_key#0x}"
+[[ "$base_relayer_private_key" =~ ^0x[0-9a-fA-F]{64}$ ]] || die "generated base relayer private key is not 32-byte hex"
+
+base_relayer_address="$(cast wallet address --private-key "$base_relayer_private_key" 2>/dev/null | tr -d '[:space:]')"
+[[ "$base_relayer_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "failed to derive base relayer address from generated private key"
+
+tss_auth_token="tss-$(generate_hex 16)"
+short_operator_id="$(printf '%s' "${operator_id#0x}" | tr 'A-F' 'a-f' | cut -c1-12)"
+wallet_id="wallet-${short_operator_id}"
+if [[ -n "$operator_network" ]]; then
+  wallet_id="wallet-${operator_network}-${short_operator_id}"
+fi
 
 base_relayer_auth_token="${PRODUCTION_PREPARE_OPERATOR_HANDOFF_BASE_RELAYER_AUTH_TOKEN:-}"
 if [[ -z "$base_relayer_auth_token" ]]; then
@@ -229,16 +244,23 @@ runtime_config_json="$tmp_dir/runtime-config.json"
 jq -n \
   --slurpfile setup "$setup_json" \
   --arg base_relayer_auth_token "$base_relayer_auth_token" \
+  --arg base_relayer_private_key "$base_relayer_private_key" \
   --arg juno_rpc_user "$juno_rpc_user" \
   --arg juno_rpc_pass "$juno_rpc_pass" \
   --arg operator_private_key "$operator_private_key" \
+  --arg tss_auth_token "$tss_auth_token" \
+  --arg wallet_id "$wallet_id" \
   '
     (($setup[0].runtime_config // {}) | if type == "object" then . else error("runtime_config must be an object") end)
     + {
         BASE_RELAYER_AUTH_TOKEN: $base_relayer_auth_token,
+        BASE_RELAYER_PRIVATE_KEYS: $base_relayer_private_key,
         JUNO_RPC_USER: $juno_rpc_user,
         JUNO_RPC_PASS: $juno_rpc_pass,
-        JUNO_TXSIGN_SIGNER_KEYS: $operator_private_key
+        JUNO_TXSIGN_SIGNER_KEYS: $operator_private_key,
+        TSS_AUTH_TOKEN: $tss_auth_token,
+        WITHDRAW_COORDINATOR_JUNO_WALLET_ID: $wallet_id,
+        WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID: $wallet_id
       }
   ' >"$runtime_config_json"
 
@@ -311,19 +333,25 @@ secret_access_key="$(jq -r '.AccessKey.SecretAccessKey // empty' <<<"$access_key
 jq -n \
   --arg operator_id "$operator_id" \
   --arg operator_address "$operator_address" \
+  --arg base_relayer_address "$base_relayer_address" \
   --arg aws_region "$aws_region" \
   --arg access_user_name "$access_user_name" \
   --arg access_key_id "$access_key_id" \
   --arg secret_access_key "$secret_access_key" \
+  --arg withdraw_coordinator_juno_wallet_id "$wallet_id" \
+  --arg withdraw_finalizer_juno_scan_wallet_id "$wallet_id" \
   --slurpfile runtime_manifest "$runtime_manifest_json" \
   '{
     operator_id: $operator_id,
     operator_address: $operator_address,
+    base_relayer_address: $base_relayer_address,
     aws_region: $aws_region,
     checkpoint_signer_kms_key_id: $runtime_manifest[0].checkpoint_signer_kms_key_id,
     runtime_material_ref: $runtime_manifest[0].runtime_material_ref,
     runtime_config_secret_id: $runtime_manifest[0].runtime_config_secret_id,
     runtime_config_secret_region: $runtime_manifest[0].runtime_config_secret_region,
+    withdraw_coordinator_juno_wallet_id: $withdraw_coordinator_juno_wallet_id,
+    withdraw_finalizer_juno_scan_wallet_id: $withdraw_finalizer_juno_scan_wallet_id,
     access: {
       user_name: $access_user_name,
       access_key_id: $access_key_id,
