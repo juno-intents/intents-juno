@@ -17,6 +17,8 @@ set -euo pipefail
 printf 'aws %s\n' "\$*" >>"$log_file"
 state_dir="$state_dir"
 pcx_file="\$state_dir/pcx-id"
+accepted_file="\$state_dir/pcx-accepted"
+active_file="\$state_dir/pcx-active"
 
 case "\$*" in
   *"us-east-1 sts get-caller-identity"*)
@@ -48,7 +50,12 @@ case "\$*" in
       if [[ "\$*" == *"--query VpcPeeringConnections[0].VpcPeeringConnectionId"* ]]; then
         cat "\$pcx_file"
       else
-        printf 'active\n'
+        if [[ -f "\$accepted_file" && ! -f "\$active_file" ]]; then
+          : >"\$active_file"
+          printf 'pending-acceptance\n'
+        else
+          printf 'active\n'
+        fi
       fi
     else
       if [[ "\$*" == *"--query VpcPeeringConnections[0].VpcPeeringConnectionId"* ]]; then
@@ -63,9 +70,14 @@ case "\$*" in
     printf 'pcx-op1shared\n'
     ;;
   *"accept-vpc-peering-connection"* )
+    : >"\$accepted_file"
     printf '{}\n'
     ;;
   *"modify-vpc-peering-connection-options"* )
+    if [[ ! -f "\$active_file" ]]; then
+      printf 'peering not active yet\n' >&2
+      exit 254
+    fi
     printf '{}\n'
     ;;
   *"create-route"* )

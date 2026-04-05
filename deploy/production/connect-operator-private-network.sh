@@ -173,6 +173,15 @@ find_existing_peering_id() {
   fi
 }
 
+peering_status() {
+  local profile="$1"
+  local region="$2"
+  local pcx_id="$3"
+  aws_text "$profile" "$region" ec2 describe-vpc-peering-connections \
+    --vpc-peering-connection-ids "$pcx_id" \
+    --query 'VpcPeeringConnections[0].Status.Code'
+}
+
 wait_for_peering_active() {
   local profile="$1"
   local region="$2"
@@ -241,14 +250,20 @@ if [[ -z "$pcx_id" ]]; then
     --vpc-peering-connection-id "$pcx_id" >/dev/null
 fi
 
+pcx_status="$(peering_status "$operator_profile" "$operator_region" "$pcx_id")"
+if [[ "$pcx_status" == "pending-acceptance" ]]; then
+  AWS_PAGER="" aws --profile "$shared_profile" --region "$shared_region" ec2 accept-vpc-peering-connection \
+    --vpc-peering-connection-id "$pcx_id" >/dev/null 2>&1 || true
+fi
+
+wait_for_peering_active "$operator_profile" "$operator_region" "$pcx_id"
+
 AWS_PAGER="" aws --profile "$operator_profile" --region "$operator_region" ec2 modify-vpc-peering-connection-options \
   --vpc-peering-connection-id "$pcx_id" \
   --requester-peering-connection-options AllowDnsResolutionFromRemoteVpc=true >/dev/null
 AWS_PAGER="" aws --profile "$shared_profile" --region "$shared_region" ec2 modify-vpc-peering-connection-options \
   --vpc-peering-connection-id "$pcx_id" \
   --accepter-peering-connection-options AllowDnsResolutionFromRemoteVpc=true >/dev/null
-
-wait_for_peering_active "$operator_profile" "$operator_region" "$pcx_id"
 
 while IFS= read -r route_table_id; do
   [[ -n "$route_table_id" ]] || continue
