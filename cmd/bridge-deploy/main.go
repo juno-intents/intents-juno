@@ -376,9 +376,6 @@ func parseArgs(args []string) (config, error) {
 	if cfg.MinDepositAdmin, err = parseRequiredAddress("--min-deposit-admin-address", minDepositAdminHex); err != nil {
 		return cfg, err
 	}
-	if cfg.GovernanceSafe == cfg.PauseGuardian {
-		return cfg, errors.New("--governance-safe and --pause-guardian must differ")
-	}
 	if cfg.DepositImageID, err = parseRequiredHash("--deposit-image-id", depositImageIDHex); err != nil {
 		return cfg, err
 	}

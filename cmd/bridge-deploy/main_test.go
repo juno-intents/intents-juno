@@ -78,6 +78,31 @@ func TestParseArgs_ValidEphemeralDeployer(t *testing.T) {
 	}
 }
 
+func TestParseArgs_AllowsSameGovernanceSafeAndPauseGuardian(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "8453",
+		"--funder-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--ephemeral-funding-amount-wei", "50000000000000000",
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--governance-safe", "0x1111111111111111111111111111111111111111",
+		"--pause-guardian", "0x1111111111111111111111111111111111111111",
+		"--min-deposit-admin-address", "0x3333333333333333333333333333333333333333",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+	if got := cfg.PauseGuardian.Hex(); got != "0x1111111111111111111111111111111111111111" {
+		t.Fatalf("PauseGuardian = %s", got)
+	}
+}
+
 func TestParseArgs_RejectsMixedDeployerModes(t *testing.T) {
 	t.Parallel()
 
