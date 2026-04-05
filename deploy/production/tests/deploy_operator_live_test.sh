@@ -200,6 +200,7 @@ EOF
   assert_contains "$(cat "$log_dir/commands.log")" "operator-stack-hydrator.env" "live deploy stages the runtime config hydrator env"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-config-hydrator.sh" "live deploy stages the corrected config hydrator"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-deposit-relayer.sh" "live deploy stages refreshed queue consumer wrappers"
+  assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-multikey-extend-signer.sh" "live deploy stages the extend signer wrapper"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-withdraw-coordinator.sh" "live deploy stages refreshed withdraw wrappers"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-withdraw-finalizer.sh" "live deploy stages refreshed finalizer wrappers"
   assert_contains "$(cat "$log_dir/commands.log")" "systemctl is-active checkpoint-signer" "live deploy waits for operator services over ssm"

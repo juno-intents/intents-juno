@@ -27,6 +27,7 @@ test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_n
   assert_contains "$script_text" "with_entries(select(.value != null))" "run-operator-rollout drops null roster fields before hashing"
   assert_contains "$script_text" 'compute_dkg_roster_hash_hex "$dkg_roster_canonical"' "run-operator-rollout hashes the canonical roster through the helper"
   assert_not_contains "$script_text" 'printf '\''%s'\'' "$dkg_roster_canonical" | sha256sum' "run-operator-rollout no longer hashes the raw roster object directly"
+  assert_contains "$script_text" "intents-juno-multikey-extend-signer.sh" "run-operator-rollout reinstalls the extend signer wrapper on live rollouts"
 }
 
 main() {

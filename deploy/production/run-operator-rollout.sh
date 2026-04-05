@@ -137,6 +137,7 @@ install_stage_files() {
     intents-juno-checkpoint-signer.sh \
     intents-juno-checkpoint-aggregator.sh \
     intents-juno-deposit-relayer.sh \
+    intents-juno-multikey-extend-signer.sh \
     intents-juno-withdraw-coordinator.sh \
     intents-juno-withdraw-finalizer.sh \
     intents-juno-base-event-scanner.sh; do

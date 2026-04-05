@@ -890,8 +890,8 @@ EOF
   cat >"$fake_bin/extend-signer" <<EOF
 #!/usr/bin/env bash
 if [[ "\$1" == "--help" ]]; then
-  printf 'Usage: juno-txsign sign-digest --operator-endpoint <url>\n'
-  exit 0
+  printf 'unexpected top-level help probe\n' >&2
+  exit 2
 fi
 printf '%s\n' "\$*" >"$extend_output_file"
 env | sort >"$tmp/extend.env"

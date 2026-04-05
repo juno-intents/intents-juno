@@ -2183,11 +2183,6 @@ local_signer_key="${JUNO_TXSIGN_SIGNER_KEYS:-}"
 export JUNO_TXSIGN_SIGNER_KEYS="$local_signer_key"
 
 if [[ -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
-  txsign_help="$(/usr/local/bin/juno-txsign --help 2>&1 || true)"
-  grep -q -- '--operator-endpoint' <<<"$txsign_help" || {
-    echo "withdraw extend signer requires juno-txsign support for --operator-endpoint" >&2
-    exit 1
-  }
   IFS=',' read -r -a endpoint_pairs <<<"${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS}"
   endpoint_args=()
   for endpoint_pair in "${endpoint_pairs[@]}"; do

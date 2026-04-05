@@ -648,6 +648,7 @@ for wrapper_name in \
   intents-juno-checkpoint-signer.sh \
   intents-juno-checkpoint-aggregator.sh \
   intents-juno-deposit-relayer.sh \
+  intents-juno-multikey-extend-signer.sh \
   intents-juno-withdraw-coordinator.sh \
   intents-juno-withdraw-finalizer.sh \
   intents-juno-base-event-scanner.sh; do
@@ -664,6 +665,10 @@ for wrapper_name in \
     intents-juno-deposit-relayer.sh)
       wrapper_start="cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'"
       wrapper_end="EOF_DEPOSIT_RELAYER"
+      ;;
+    intents-juno-multikey-extend-signer.sh)
+      wrapper_start="cat > /tmp/intents-juno-multikey-extend-signer.sh <<'EOF_WITHDRAW_EXTEND_SIGNER'"
+      wrapper_end="EOF_WITHDRAW_EXTEND_SIGNER"
       ;;
     intents-juno-withdraw-coordinator.sh)
       wrapper_start="cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'"
