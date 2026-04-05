@@ -182,6 +182,33 @@ peering_status() {
     --query 'VpcPeeringConnections[0].Status.Code'
 }
 
+accept_peering_connection() {
+  local profile="$1"
+  local region="$2"
+  local pcx_id="$3"
+  local attempt output rc
+  for attempt in $(seq 1 15); do
+    set +e
+    output="$(AWS_PAGER="" aws --profile "$profile" --region "$region" ec2 accept-vpc-peering-connection \
+      --vpc-peering-connection-id "$pcx_id" 2>&1)"
+    rc=$?
+    set -e
+    if [[ $rc -eq 0 ]]; then
+      return 0
+    fi
+    if [[ "$output" == *"VpcPeeringConnectionAlreadyExists"* || "$output" == *"IncorrectState"* ]]; then
+      return 0
+    fi
+    if [[ "$output" == *"InvalidVpcPeeringConnectionID.NotFound"* ]]; then
+      sleep 2
+      continue
+    fi
+    printf '%s\n' "$output" >&2
+    return "$rc"
+  done
+  die "vpc peering connection $pcx_id was not visible to accepter in $region after repeated retries"
+}
+
 wait_for_peering_active() {
   local profile="$1"
   local region="$2"
@@ -246,14 +273,12 @@ if [[ -z "$pcx_id" ]]; then
     --peer-region "$shared_region" \
     --query 'VpcPeeringConnection.VpcPeeringConnectionId' \
     --output text)"
-  AWS_PAGER="" aws --profile "$shared_profile" --region "$shared_region" ec2 accept-vpc-peering-connection \
-    --vpc-peering-connection-id "$pcx_id" >/dev/null
+  accept_peering_connection "$shared_profile" "$shared_region" "$pcx_id"
 fi
 
 pcx_status="$(peering_status "$operator_profile" "$operator_region" "$pcx_id")"
 if [[ "$pcx_status" == "pending-acceptance" ]]; then
-  AWS_PAGER="" aws --profile "$shared_profile" --region "$shared_region" ec2 accept-vpc-peering-connection \
-    --vpc-peering-connection-id "$pcx_id" >/dev/null 2>&1 || true
+  accept_peering_connection "$shared_profile" "$shared_region" "$pcx_id"
 fi
 
 wait_for_peering_active "$operator_profile" "$operator_region" "$pcx_id"

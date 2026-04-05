@@ -19,6 +19,7 @@ state_dir="$state_dir"
 pcx_file="\$state_dir/pcx-id"
 accepted_file="\$state_dir/pcx-accepted"
 active_file="\$state_dir/pcx-active"
+accept_attempts_file="\$state_dir/accept-attempts"
 
 case "\$*" in
   *"us-east-1 sts get-caller-identity"*)
@@ -70,6 +71,16 @@ case "\$*" in
     printf 'pcx-op1shared\n'
     ;;
   *"accept-vpc-peering-connection"* )
+    attempts=0
+    if [[ -f "\$accept_attempts_file" ]]; then
+      attempts="\$(cat "\$accept_attempts_file")"
+    fi
+    attempts="\$((attempts + 1))"
+    printf '%s' "\$attempts" >"\$accept_attempts_file"
+    if [[ "\$attempts" == "1" ]]; then
+      printf 'An error occurred (InvalidVpcPeeringConnectionID.NotFound) when calling the AcceptVpcPeeringConnection operation: not visible yet\n' >&2
+      exit 254
+    fi
     : >"\$accepted_file"
     printf '{}\n'
     ;;
