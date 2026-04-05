@@ -11,6 +11,36 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 )
 
+type gasSuggestionBackend struct {
+	gasPrice *big.Int
+	gasTip   *big.Int
+}
+
+type legacyGasSuggestionBackend struct {
+	gasPrice *big.Int
+}
+
+func (b legacyGasSuggestionBackend) SuggestGasPrice(context.Context) (*big.Int, error) {
+	if b.gasPrice == nil {
+		return nil, errors.New("no gas price")
+	}
+	return new(big.Int).Set(b.gasPrice), nil
+}
+
+func (b gasSuggestionBackend) SuggestGasPrice(context.Context) (*big.Int, error) {
+	if b.gasPrice == nil {
+		return nil, errors.New("no gas price")
+	}
+	return new(big.Int).Set(b.gasPrice), nil
+}
+
+func (b gasSuggestionBackend) SuggestGasTipCap(context.Context) (*big.Int, error) {
+	if b.gasTip == nil {
+		return nil, errors.New("no gas tip")
+	}
+	return new(big.Int).Set(b.gasTip), nil
+}
+
 func TestParseArgs_ValidDirectDeployer(t *testing.T) {
 	t.Parallel()
 
@@ -285,6 +315,56 @@ func TestTransactAuthWithDefaults_PreservesExplicitGasLimit(t *testing.T) {
 	}
 	if got.GasLimit != auth.GasLimit {
 		t.Fatalf("GasLimit = %d, want %d", got.GasLimit, auth.GasLimit)
+	}
+}
+
+func TestApplyRetryGasBump_PrefersSuggestedLegacyGasPrice(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{}
+	backend := legacyGasSuggestionBackend{gasPrice: big.NewInt(6_000_000)}
+
+	applyRetryGasBump(context.Background(), backend, auth, 1)
+
+	if auth.GasPrice == nil {
+		t.Fatal("GasPrice = nil, want suggested gas price")
+	}
+	if auth.GasPrice.Cmp(big.NewInt(6_000_000)) != 0 {
+		t.Fatalf("GasPrice = %s, want 6000000", auth.GasPrice.String())
+	}
+	if auth.GasTipCap != nil {
+		t.Fatalf("GasTipCap = %s, want nil", auth.GasTipCap.String())
+	}
+	if auth.GasFeeCap != nil {
+		t.Fatalf("GasFeeCap = %s, want nil", auth.GasFeeCap.String())
+	}
+}
+
+func TestApplyRetryGasBump_PrefersSuggestedEIP1559Pricing(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{}
+	backend := gasSuggestionBackend{
+		gasPrice: big.NewInt(6_000_000),
+		gasTip:   big.NewInt(1_000_000),
+	}
+
+	applyRetryGasBump(context.Background(), backend, auth, 1)
+
+	if auth.GasPrice != nil {
+		t.Fatalf("GasPrice = %s, want nil", auth.GasPrice.String())
+	}
+	if auth.GasTipCap == nil {
+		t.Fatal("GasTipCap = nil, want suggested gas tip")
+	}
+	if auth.GasTipCap.Cmp(big.NewInt(1_000_000)) != 0 {
+		t.Fatalf("GasTipCap = %s, want 1000000", auth.GasTipCap.String())
+	}
+	if auth.GasFeeCap == nil {
+		t.Fatal("GasFeeCap = nil, want suggested gas fee cap")
+	}
+	if auth.GasFeeCap.Cmp(big.NewInt(6_000_000)) != 0 {
+		t.Fatalf("GasFeeCap = %s, want 6000000", auth.GasFeeCap.String())
 	}
 }
 

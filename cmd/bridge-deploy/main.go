@@ -41,8 +41,8 @@ const (
 	txMinedGraceTimeout                        = 240 * time.Second
 	deployCodeRecoveryTimeout                  = 8 * time.Minute
 	deployCodeRecoveryPollInterval             = 5 * time.Second
-	defaultRetryGasPriceWei                    = int64(2_000_000_000)
-	defaultRetryGasTipCapWei                   = int64(500_000_000)
+	defaultRetryGasPriceWei                    = int64(10_000_000)
+	defaultRetryGasTipCapWei                   = int64(1_000_000)
 	defaultRunTimeout                          = 20 * time.Minute
 	legacyValueTransferGasLimit                = uint64(21_000)
 	ephemeralFundingReadRetries                = 8
@@ -1337,23 +1337,9 @@ func applyRetryGasBump(ctx context.Context, backend any, txAuth *bind.TransactOp
 		attempt = 1
 	}
 	multiplier := retryGasMultiplier(attempt)
-	gasPriceBase := big.NewInt(defaultRetryGasPriceWei)
-	if txAuth.GasPrice != nil && txAuth.GasPrice.Sign() > 0 {
-		gasPriceBase = new(big.Int).Set(txAuth.GasPrice)
-	}
-	if suggester, ok := backend.(gasPriceSuggester); ok {
-		if suggested, err := suggester.SuggestGasPrice(ctx); err == nil && suggested != nil && suggested.Cmp(gasPriceBase) > 0 {
-			gasPriceBase = new(big.Int).Set(suggested)
-		}
-	}
+	gasPriceBase := preferredGasValue(ctx, backend, txAuth.GasPrice, big.NewInt(defaultRetryGasPriceWei))
 	if suggester, ok := backend.(gasTipCapSuggester); ok {
-		tipBase := big.NewInt(defaultRetryGasTipCapWei)
-		if txAuth.GasTipCap != nil && txAuth.GasTipCap.Sign() > 0 {
-			tipBase = new(big.Int).Set(txAuth.GasTipCap)
-		}
-		if suggested, err := suggester.SuggestGasTipCap(ctx); err == nil && suggested != nil && suggested.Sign() > 0 && suggested.Cmp(tipBase) > 0 {
-			tipBase = new(big.Int).Set(suggested)
-		}
+		tipBase := preferredTipCap(ctx, suggester, txAuth.GasTipCap, big.NewInt(defaultRetryGasTipCapWei))
 
 		feeCapBase := new(big.Int).Set(gasPriceBase)
 		if txAuth.GasFeeCap != nil && txAuth.GasFeeCap.Sign() > 0 && txAuth.GasFeeCap.Cmp(feeCapBase) > 0 {
@@ -1377,6 +1363,28 @@ func applyRetryGasBump(ctx context.Context, backend any, txAuth *bind.TransactOp
 	txAuth.GasPrice = new(big.Int).Mul(gasPriceBase, multiplier)
 	txAuth.GasTipCap = nil
 	txAuth.GasFeeCap = nil
+}
+
+func preferredGasValue(ctx context.Context, backend any, explicitValue *big.Int, fallback *big.Int) *big.Int {
+	if explicitValue != nil && explicitValue.Sign() > 0 {
+		return new(big.Int).Set(explicitValue)
+	}
+	if suggester, ok := backend.(gasPriceSuggester); ok {
+		if suggested, err := suggester.SuggestGasPrice(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+			return new(big.Int).Set(suggested)
+		}
+	}
+	return new(big.Int).Set(fallback)
+}
+
+func preferredTipCap(ctx context.Context, suggester gasTipCapSuggester, explicitValue *big.Int, fallback *big.Int) *big.Int {
+	if explicitValue != nil && explicitValue.Sign() > 0 {
+		return new(big.Int).Set(explicitValue)
+	}
+	if suggested, err := suggester.SuggestGasTipCap(ctx); err == nil && suggested != nil && suggested.Sign() > 0 {
+		return new(big.Int).Set(suggested)
+	}
+	return new(big.Int).Set(fallback)
 }
 
 func retryGasMultiplier(attempt int) *big.Int {
