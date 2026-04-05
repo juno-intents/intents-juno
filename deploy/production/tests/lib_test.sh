@@ -2119,6 +2119,41 @@ EOF
   rm -rf "$workdir"
 }
 
+test_resolve_checkpoint_signer_kms_key_id_uses_explicit_arn_without_provisioner() {
+  local workdir fake_bin fake_log old_provisioner operator_json resolved
+  workdir="$(mktemp -d)"
+  fake_bin="$workdir/fake-checkpoint-kms-provisioner.sh"
+  fake_log="$workdir/checkpoint-kms-provisioner.log"
+  write_fake_checkpoint_signer_kms_provisioner "$fake_bin" "$fake_log"
+  old_provisioner="${PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN:-}"
+  export PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN="$fake_bin"
+
+  operator_json="$(
+    jq -n '{
+      operator_id: "0x1111111111111111111111111111111111111111",
+      operator_address: "0x9999999999999999999999999999999999999999",
+      aws_profile: "op1",
+      aws_region: "us-east-1",
+      account_id: "021490342184",
+      checkpoint_signer_kms_key_id: "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555"
+    }'
+  )"
+
+  resolved="$(production_resolve_checkpoint_signer_kms_key_id "mainnet" "/dev/null" "$operator_json")"
+  assert_eq "$resolved" "arn:aws:kms:us-east-1:021490342184:key/11111111-2222-3333-4444-555555555555" "explicit checkpoint signer kms arn is returned directly"
+  if [[ -f "$fake_log" ]]; then
+    printf 'expected explicit checkpoint signer kms arn to bypass provisioner, but saw:\n%s\n' "$(cat "$fake_log")" >&2
+    return 1
+  fi
+
+  if [[ -n "$old_provisioner" ]]; then
+    export PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN="$old_provisioner"
+  else
+    unset PRODUCTION_CHECKPOINT_SIGNER_KMS_PROVISIONER_BIN
+  fi
+  rm -rf "$workdir"
+}
+
 test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk() {
   local workdir shared_manifest handoff_dir fake_bin derived_ivk derived_ovk old_path
   workdir="$(mktemp -d)"
@@ -3688,6 +3723,7 @@ main() {
   test_render_operator_handoffs_preserves_secure_preview_signer_configuration
   test_render_operator_handoffs_derives_withdraw_extend_signer_keys_from_dkg_summary
   test_render_operator_handoffs_provisions_missing_checkpoint_signer_kms_key
+  test_resolve_checkpoint_signer_kms_key_id_uses_explicit_arn_without_provisioner
   test_render_operator_handoffs_derives_owallet_keys_from_signer_ufvk
   test_render_operator_handoffs_preserves_explicit_owallet_keys
   test_render_operator_handoffs_preserves_dkg_tls_dir

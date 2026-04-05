@@ -1618,7 +1618,11 @@ production_inventory_checkpoint_signer_kms_key_arns_json() {
     aws_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
     aws_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
     if [[ -n "$explicit_key_id" ]]; then
-      key_arn="$(production_try_describe_kms_key_arn "$explicit_key_id" "$aws_profile" "$aws_region" || true)"
+      if [[ "$explicit_key_id" =~ ^arn:aws:kms:[^:]+:[0-9]{12}:key/.+$ ]]; then
+        key_arn="$explicit_key_id"
+      else
+        key_arn="$(production_try_describe_kms_key_arn "$explicit_key_id" "$aws_profile" "$aws_region" || true)"
+      fi
     else
       operator_id="$(jq -r '.operator_id // empty' <<<"$operator_json")"
       [[ -n "$operator_id" ]] || continue
@@ -1649,6 +1653,11 @@ production_resolve_checkpoint_signer_kms_key_id() {
   explicit_key_id="$(jq -r '.checkpoint_signer_kms_key_id // empty' <<<"$operator_json")"
 
   [[ "$operator_address" =~ ^0x[0-9a-fA-F]{40}$ ]] || die "operator $operator_id is missing a valid operator address for checkpoint signer kms"
+
+  if [[ "$explicit_key_id" =~ ^arn:aws:kms:[^:]+:[0-9]{12}:key/.+$ ]]; then
+    printf '%s\n' "$explicit_key_id"
+    return 0
+  fi
 
   provisioner_bin="$(production_checkpoint_signer_kms_provisioner_bin)"
   [[ -x "$provisioner_bin" ]] || die "checkpoint signer kms provisioner not found or not executable: $provisioner_bin"
