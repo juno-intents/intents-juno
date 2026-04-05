@@ -10,6 +10,7 @@ source "$SCRIPT_DIR/common_test.sh"
 write_fake_prepare_runtime_aws() {
   local target="$1"
   local log_file="$2"
+  local capture_upload_path="${3:-}"
 cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -40,6 +41,19 @@ case "\$*" in
     printf '{}\n'
     ;;
   *"s3 cp"* )
+    if [[ -n "${capture_upload_path}" ]]; then
+      src=""
+      args=( "\$@" )
+      for ((i=0; i<\${#args[@]}; i++)); do
+        if [[ "\${args[\$i]}" == "cp" && \$((i + 1)) -lt \${#args[@]} ]]; then
+          src="\${args[\$((i + 1))]}"
+          break
+        fi
+      done
+      if [[ -n "\$src" && -f "\$src" ]]; then
+        cp "\$src" "${capture_upload_path}"
+      fi
+    fi
     ;;
   *"kms describe-key"* )
     key_id="\$(extract_arg --key-id "\$@" || true)"
@@ -66,6 +80,7 @@ EOF
 write_fake_prepare_runtime_aws_with_autoprovision() {
   local target="$1"
   local log_file="$2"
+  local capture_upload_path="${3:-}"
   cat >"$target" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -128,6 +143,19 @@ case "\$*" in
     printf '{}\n'
     ;;
   *"s3 cp"* )
+    if [[ -n "${capture_upload_path}" ]]; then
+      src=""
+      args=( "\$@" )
+      for ((i=0; i<\${#args[@]}; i++)); do
+        if [[ "\${args[\$i]}" == "cp" && \$((i + 1)) -lt \${#args[@]} ]]; then
+          src="\${args[\$((i + 1))]}"
+          break
+        fi
+      done
+      if [[ -n "\$src" && -f "\$src" ]]; then
+        cp "\$src" "${capture_upload_path}"
+      fi
+    fi
     ;;
   *"secretsmanager describe-secret"* )
     exit 255
@@ -169,7 +197,18 @@ test_prepare_runtime_materials_uploads_refs_and_emits_manifest_fragment() {
   private_key="$tmp/checkpoint-signer.key"
   mkdir -p "$fake_bin"
 
-  printf 'runtime-material' >"$runtime_package"
+  mkdir -p "$tmp/payload/bin"
+  printf '{"package_version":1}\n' >"$tmp/manifest.json"
+  printf '{"operator_id":"0x1111111111111111111111111111111111111111"}\n' >"$tmp/payload/admin-config.json"
+  cat >"$tmp/payload/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$tmp/payload/bin/dkg-admin"
+  (
+    cd "$tmp"
+    zip -qr "$runtime_package" manifest.json payload
+  )
   cat >"$runtime_config_json" <<'JSON'
 {"CHECKPOINT_POSTGRES_DSN":"aws-sm://runtime/checkpoint-postgres","JUNO_RPC_USER":"aws-sm://runtime/juno-rpc-user"}
 JSON
@@ -215,7 +254,18 @@ test_prepare_runtime_materials_auto_provisions_symmetric_kms_aliases_and_bucket(
   aws_log="$tmp/aws.log"
   mkdir -p "$fake_bin"
 
-  printf 'runtime-material' >"$runtime_package"
+  mkdir -p "$tmp/payload/bin"
+  printf '{"package_version":1}\n' >"$tmp/manifest.json"
+  printf '{"operator_id":"0x1111111111111111111111111111111111111111"}\n' >"$tmp/payload/admin-config.json"
+  cat >"$tmp/payload/bin/dkg-admin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$tmp/payload/bin/dkg-admin"
+  (
+    cd "$tmp"
+    zip -qr "$runtime_package" manifest.json payload
+  )
   cat >"$runtime_config_json" <<'JSON'
 {"CHECKPOINT_POSTGRES_DSN":"postgres://checkpoint.example.internal:5432/juno?sslmode=require"}
 JSON
@@ -250,9 +300,59 @@ JSON
   rm -rf "$tmp"
 }
 
+test_prepare_runtime_materials_enriches_legacy_runtime_packages_with_dkg_admin() {
+  local tmp fake_bin runtime_package runtime_config_json output_json aws_log uploaded_source dkg_admin_bin
+  tmp="$(mktemp -d)"
+  fake_bin="$tmp/bin"
+  runtime_package="$tmp/runtime-material.zip"
+  runtime_config_json="$tmp/runtime-config.json"
+  output_json="$tmp/output.json"
+  aws_log="$tmp/aws.log"
+  dkg_admin_bin="$tmp/dkg-admin"
+  mkdir -p "$fake_bin" "$tmp/payload"
+
+  printf '{"package_version":1}\n' >"$tmp/manifest.json"
+  printf '{"operator_id":"0x1111111111111111111111111111111111111111"}\n' >"$tmp/payload/admin-config.json"
+  (
+    cd "$tmp"
+    zip -qr "$runtime_package" manifest.json payload
+  )
+  cat >"$dkg_admin_bin" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+  chmod 0755 "$dkg_admin_bin"
+
+  cat >"$runtime_config_json" <<'JSON'
+{"CHECKPOINT_POSTGRES_DSN":"postgres://checkpoint.example.internal:5432/juno?sslmode=require"}
+JSON
+
+  write_fake_prepare_runtime_aws "$fake_bin/aws" "$aws_log"
+
+  PATH="$fake_bin:$PATH" \
+  PRODUCTION_PREPARE_RUNTIME_MATERIALS_DKG_ADMIN_BIN="$dkg_admin_bin" \
+  bash "$REPO_ROOT/deploy/production/prepare-runtime-materials.sh" \
+    --runtime-package "$runtime_package" \
+    --runtime-config-json "$runtime_config_json" \
+    --runtime-material-bucket "mainnet-runtime-materials" \
+    --runtime-material-key "operators/op1/runtime-material.zip" \
+    --runtime-material-region "us-east-1" \
+    --runtime-material-kms-key-id "arn:aws:kms:us-east-1:021490342184:key/99999999-aaaa-bbbb-cccc-dddddddddddd" \
+    --runtime-config-secret-id "mainnet/op1/runtime-config" \
+    --runtime-config-secret-region "us-east-1" \
+    --output "$output_json"
+
+  uploaded_source="$(sed -n 's|.* s3 cp \([^ ]*\) s3://.*|\1|p' "$aws_log" | tail -n 1)"
+  assert_file_exists "$uploaded_source" "runtime material setup uploads an enriched runtime package"
+  assert_contains "$(unzip -l "$uploaded_source")" "payload/bin/dkg-admin" "runtime material setup injects dkg-admin into legacy runtime packages before upload"
+
+  rm -rf "$tmp"
+}
+
 main() {
   test_prepare_runtime_materials_uploads_refs_and_emits_manifest_fragment
   test_prepare_runtime_materials_auto_provisions_symmetric_kms_aliases_and_bucket
+  test_prepare_runtime_materials_enriches_legacy_runtime_packages_with_dkg_admin
 }
 
 main "$@"

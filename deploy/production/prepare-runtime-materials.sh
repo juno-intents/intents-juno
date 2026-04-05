@@ -104,6 +104,36 @@ aws_cmd() {
   AWS_PAGER="" aws "${aws_args[@]}" "$@"
 }
 
+ensure_runtime_package_has_dkg_admin() {
+  local package_path="$1"
+  local package_listing dkg_admin_bin enriched_root enriched_package
+
+  command -v unzip >/dev/null 2>&1 || die "required command not found: unzip"
+  package_listing="$(unzip -Z1 "$package_path" 2>/dev/null || true)"
+  if grep -Fxq 'payload/bin/dkg-admin' <<<"$package_listing"; then
+    printf '%s\n' "$package_path"
+    return 0
+  fi
+
+  dkg_admin_bin="${PRODUCTION_PREPARE_RUNTIME_MATERIALS_DKG_ADMIN_BIN:-$SCRIPT_DIR/dkg-admin_linux_amd64}"
+  [[ -x "$dkg_admin_bin" ]] || die "runtime package is missing payload/bin/dkg-admin and no executable dkg-admin enrichment binary was provided"
+  command -v zip >/dev/null 2>&1 || die "required command not found: zip"
+
+  enriched_root="$(mktemp -d)"
+  enriched_package="$(mktemp "${TMPDIR:-/tmp}/runtime-material.enriched.XXXXXX")"
+  rm -f "$enriched_package"
+  unzip -q "$package_path" -d "$enriched_root"
+  mkdir -p "$enriched_root/payload/bin"
+  cp "$dkg_admin_bin" "$enriched_root/payload/bin/dkg-admin"
+  chmod 0755 "$enriched_root/payload/bin/dkg-admin"
+  (
+    cd "$enriched_root"
+    zip -qr "$enriched_package" .
+  )
+  rm -rf "$enriched_root"
+  printf '%s\n' "$enriched_package"
+}
+
 describe_kms_key_arn() {
   local region="$1"
   local key_id="$2"
@@ -264,8 +294,11 @@ upsert_runtime_config_secret() {
 }
 
 upload_runtime_package() {
+  local package_to_upload
+
+  package_to_upload="$(ensure_runtime_package_has_dkg_admin "$runtime_package")"
   aws_cmd --region "$runtime_material_region" s3 cp \
-    "$runtime_package" "s3://${runtime_material_bucket}/${runtime_material_key}" \
+    "$package_to_upload" "s3://${runtime_material_bucket}/${runtime_material_key}" \
     --sse aws:kms \
     --sse-kms-key-id "$resolved_runtime_material_kms_key_id" >/dev/null
 }
