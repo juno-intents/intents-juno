@@ -1311,11 +1311,13 @@ func parseInsufficientFundsOvershot(message string) (*big.Int, bool) {
 }
 
 func transactAuthWithDefaults(auth *bind.TransactOpts, defaultGasLimit uint64) *bind.TransactOpts {
-	_ = defaultGasLimit
 	if auth == nil {
 		return nil
 	}
 	cloned := *auth
+	if cloned.GasLimit == 0 && defaultGasLimit > 0 {
+		cloned.GasLimit = defaultGasLimit
+	}
 	return &cloned
 }
 

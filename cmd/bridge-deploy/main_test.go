@@ -250,6 +250,19 @@ func TestFundingValueWei(t *testing.T) {
 	}
 }
 
+func TestTransactAuthWithDefaults_SetsDefaultGasLimitWhenUnset(t *testing.T) {
+	t.Parallel()
+
+	auth := &bind.TransactOpts{}
+	got := transactAuthWithDefaults(auth, 4_000_000)
+	if got == auth {
+		t.Fatal("transactAuthWithDefaults returned the original auth pointer")
+	}
+	if got.GasLimit != 4_000_000 {
+		t.Fatalf("GasLimit = %d, want %d", got.GasLimit, 4_000_000)
+	}
+}
+
 func TestLegacyValueTransferFeeWei(t *testing.T) {
 	t.Parallel()
 
@@ -259,19 +272,6 @@ func TestLegacyValueTransferFeeWei(t *testing.T) {
 	got := legacyValueTransferFeeWei(gasPrice)
 	if got.Cmp(want) != 0 {
 		t.Fatalf("fee = %s, want %s", got.String(), want.String())
-	}
-}
-
-func TestTransactAuthWithDefaults_PreservesZeroGasLimitForEstimation(t *testing.T) {
-	t.Parallel()
-
-	auth := &bind.TransactOpts{GasLimit: 0}
-	got := transactAuthWithDefaults(auth, 4_000_000)
-	if got == auth {
-		t.Fatal("transactAuthWithDefaults returned the original auth pointer")
-	}
-	if got.GasLimit != 0 {
-		t.Fatalf("GasLimit = %d, want 0", got.GasLimit)
 	}
 }
 
