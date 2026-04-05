@@ -177,7 +177,8 @@ rewrite_dkg_roster() {
         )
     )
   ' >"$dkg_roster_tmp"
-  jq -r '.roster | @json' "$dkg_roster_tmp" | sha256sum | awk '{print $1}' >"$dkg_roster_hash_tmp"
+  dkg_roster_canonical="$(jq -c '.roster' "$dkg_roster_tmp")"
+  printf '%s' "$dkg_roster_canonical" | sha256sum | awk '{print $1}' >"$dkg_roster_hash_tmp"
   jq --arg roster_hash "$(cat "$dkg_roster_hash_tmp")" '.roster_hash_hex = $roster_hash' "$dkg_roster_tmp" >"${dkg_roster_tmp}.next"
   mv "${dkg_roster_tmp}.next" "$dkg_roster_tmp"
   sudo install -m 0640 -o intents-juno -g intents-juno "$dkg_roster_tmp" "$admin_config_path"

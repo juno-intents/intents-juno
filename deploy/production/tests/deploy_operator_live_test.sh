@@ -19,6 +19,17 @@ assert_not_contains() {
   fi
 }
 
+write_fake_ufvk_derive_cargo() {
+  local target="$1"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'SP1_DEPOSIT_OWALLET_IVK_HEX=%s\n' "0x$(printf 'a%.0s' $(seq 1 128))"
+printf 'SP1_WITHDRAW_OWALLET_OVK_HEX=%s\n' "0x$(printf 'b%.0s' $(seq 1 64))"
+EOF
+  chmod 0755 "$target"
+}
+
 write_live_inventory_fixture() {
   local target="$1"
   jq '
@@ -162,6 +173,7 @@ test_deploy_operator_uses_ssm_runtime_refs_for_live_rollout() {
 
   write_fake_live_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo"
   cat >"$fake_bin/ssh" <<EOF
 #!/usr/bin/env bash
 printf 'ssh %s\n' "\$*" >>"$ssh_log"
@@ -239,6 +251,7 @@ test_deploy_operator_skips_route53_for_external_dns_mode() {
 
   write_fake_live_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo"
   cat >"$fake_bin/ssh" <<'EOF'
 #!/usr/bin/env bash
 exit 1

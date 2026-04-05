@@ -3179,12 +3179,14 @@ production_render_operator_stack_env() {
 
   local checkpoint_operators signer_driver signer_kms_key_id operator_address aws_region environment
   local deposit_scan_wallet_id base_event_scanner_start_block withdraw_juno_fee_add_zat
-  local withdraw_operator_endpoints owallet_ua
+  local withdraw_operator_endpoints owallet_ua signer_ufvk
   local juno_rpc_bind juno_rpc_allow_ips
   local min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local deposit_relayer_base_rpc_url
   local kafka_critical_key_id runtime_config_secret_id
+  local deposit_owallet_ivk withdraw_owallet_ovk
+  local -a derived_owallet_keys=()
   deposit_scan_wallet_id=""
   kafka_critical_key_id=""
   min_base_relayer_balance_wei="$(production_required_min_base_relayer_balance_wei)"
@@ -3199,6 +3201,7 @@ production_render_operator_stack_env() {
   runtime_config_secret_id="$(production_json_optional "$operator_deploy" '.runtime_config_secret_id')"
   [[ -n "$runtime_config_secret_id" ]] || die "operator deploy manifest is missing runtime_config_secret_id"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
+  signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
@@ -3214,6 +3217,19 @@ production_render_operator_stack_env() {
     operator_address="$(production_json_required "$operator_deploy" '.operator_id | select(type == "string" and length > 0)')"
   fi
   [[ -n "$withdraw_operator_endpoints" ]] || die "operator deploy manifest is missing withdraw_operator_endpoints"
+  deposit_scan_wallet_id="$(production_env_first_value "$resolved_secret_env" DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
+  deposit_owallet_ivk="$(production_env_first_value "$resolved_secret_env" DEPOSIT_OWALLET_IVK || true)"
+  withdraw_owallet_ovk="$(production_env_first_value "$resolved_secret_env" WITHDRAW_OWALLET_OVK || true)"
+  if [[ -z "$deposit_owallet_ivk" || -z "$withdraw_owallet_ovk" ]]; then
+    mapfile -t derived_owallet_keys < <(production_derive_owallet_keys_from_ufvk "$signer_ufvk")
+    [[ ${#derived_owallet_keys[@]} -ge 2 ]] || die "failed to derive operator oWallet keys from signer_ufvk"
+    if [[ -z "$deposit_owallet_ivk" ]]; then
+      deposit_owallet_ivk="${derived_owallet_keys[0]}"
+    fi
+    if [[ -z "$withdraw_owallet_ovk" ]]; then
+      withdraw_owallet_ovk="${derived_owallet_keys[1]}"
+    fi
+  fi
 
   case "$signer_driver" in
     aws-kms)
@@ -3310,6 +3326,7 @@ EOF
 
   if [[ -n "$checkpoint_blob_bucket" ]]; then
     printf 'CHECKPOINT_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
+    printf 'WITHDRAW_BLOB_BUCKET=%s\n' "$checkpoint_blob_bucket" >>"$output_file"
   fi
   if [[ -n "$checkpoint_blob_prefix" ]]; then
     printf 'CHECKPOINT_BLOB_PREFIX=%s\n' "$checkpoint_blob_prefix" >>"$output_file"
@@ -3322,6 +3339,18 @@ EOF
   fi
   if [[ -n "$withdraw_image_id" ]]; then
     printf 'WITHDRAW_IMAGE_ID=%s\n' "$withdraw_image_id" >>"$output_file"
+  fi
+  if [[ -n "$deposit_scan_wallet_id" ]]; then
+    printf 'DEPOSIT_SCAN_ENABLED=true\n' >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_SCAN_URL=http://127.0.0.1:8080\n' >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=%s\n' "$deposit_scan_wallet_id" >>"$output_file"
+    printf 'DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232\n' >>"$output_file"
+  fi
+  if [[ -n "$deposit_owallet_ivk" ]]; then
+    printf 'DEPOSIT_OWALLET_IVK=%s\n' "$deposit_owallet_ivk" >>"$output_file"
+  fi
+  if [[ -n "$withdraw_owallet_ovk" ]]; then
+    printf 'WITHDRAW_OWALLET_OVK=%s\n' "$withdraw_owallet_ovk" >>"$output_file"
   fi
   :
 }

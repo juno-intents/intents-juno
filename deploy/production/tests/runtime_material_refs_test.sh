@@ -19,6 +19,19 @@ assert_not_contains() {
   fi
 }
 
+write_fake_ufvk_derive_cargo() {
+  local target="$1"
+  local deposit_ivk="$2"
+  local withdraw_ovk="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'SP1_DEPOSIT_OWALLET_IVK_HEX=%s\n' '$deposit_ivk'
+printf 'SP1_WITHDRAW_OWALLET_OVK_HEX=%s\n' '$withdraw_ovk'
+EOF
+  chmod 0755 "$target"
+}
+
 write_live_inventory_fixture() {
   local target="$1"
   jq '
@@ -170,7 +183,7 @@ test_live_handoffs_reject_local_runtime_packages() {
 }
 
 test_runtime_config_render_skips_local_secret_requirements() {
-  local workdir handoff_dir manifest rendered_env
+  local workdir handoff_dir manifest rendered_env fake_bin old_path derived_ivk derived_ovk
   workdir="$(mktemp -d)"
   write_live_inventory_fixture "$workdir/inventory.json"
 
@@ -180,12 +193,20 @@ test_runtime_config_render_skips_local_secret_requirements() {
   manifest="$handoff_dir/operator-deploy.json"
   rendered_env="$workdir/operator-stack.env"
   : >"$workdir/resolved.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+  derived_ivk="0x$(printf 'a%.0s' $(seq 1 128))"
+  derived_ovk="0x$(printf 'b%.0s' $(seq 1 64))"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo" "$derived_ivk" "$derived_ovk"
 
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
   production_render_operator_stack_env \
     "$workdir/shared-manifest.json" \
     "$manifest" \
     "$workdir/resolved.env" \
     "$rendered_env"
+  PATH="$old_path"
 
   assert_contains "$(cat "$rendered_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "runtime-config render keeps the kms signer mode"
   assert_contains "$(cat "$rendered_env")" "JUNO_RPC_BIND=127.0.0.1" "runtime-config render restores the local rpc bind default"
@@ -198,11 +219,56 @@ test_runtime_config_render_skips_local_secret_requirements() {
   rm -rf "$workdir"
 }
 
+test_runtime_config_render_includes_live_withdraw_and_deposit_derivations() {
+  local workdir handoff_dir manifest rendered_env resolved_env fake_bin old_path expected_blob_bucket derived_ivk derived_ovk
+  workdir="$(mktemp -d)"
+  write_live_inventory_fixture "$workdir/inventory.json"
+
+  render_live_handoffs "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  manifest="$handoff_dir/operator-deploy.json"
+  rendered_env="$workdir/operator-stack.env"
+  resolved_env="$workdir/resolved.env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  cat >"$resolved_env" <<'EOF'
+WITHDRAW_COORDINATOR_JUNO_WALLET_ID=wallet-live-op1
+WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID=wallet-live-op1
+EOF
+
+  derived_ivk="0x$(printf 'a%.0s' $(seq 1 128))"
+  derived_ovk="0x$(printf 'b%.0s' $(seq 1 64))"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo" "$derived_ivk" "$derived_ovk"
+
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env \
+    "$workdir/shared-manifest.json" \
+    "$manifest" \
+    "$resolved_env" \
+    "$rendered_env"
+  PATH="$old_path"
+
+  expected_blob_bucket="$(jq -r '.checkpoint_blob_bucket // empty' "$manifest")"
+  if [[ -z "$expected_blob_bucket" ]]; then
+    expected_blob_bucket="$(jq -r '.shared_services.artifacts.checkpoint_blob_bucket // empty' "$workdir/shared-manifest.json")"
+  fi
+  assert_contains "$(cat "$rendered_env")" "WITHDRAW_BLOB_BUCKET=$expected_blob_bucket" "runtime-config render derives withdraw blob bucket from the shared manifest"
+  assert_contains "$(cat "$rendered_env")" "DEPOSIT_SCAN_ENABLED=true" "runtime-config render enables deposit scan"
+  assert_contains "$(cat "$rendered_env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-live-op1" "runtime-config render derives the deposit scan wallet id from runtime wallet ids"
+  assert_contains "$(cat "$rendered_env")" "DEPOSIT_OWALLET_IVK=$derived_ivk" "runtime-config render derives and stages the deposit oWallet ivk"
+
+  rm -rf "$workdir"
+}
+
 main() {
   test_live_handoffs_emit_runtime_material_refs
   test_live_handoffs_reject_local_runtime_inputs
   test_live_handoffs_reject_local_runtime_packages
   test_runtime_config_render_skips_local_secret_requirements
+  test_runtime_config_render_includes_live_withdraw_and_deposit_derivations
 }
 
 main "$@"
