@@ -731,7 +731,7 @@ else
   done
   production_ssm_run_shell_command \
     "$aws_profile" "$aws_region" "$instance_id" \
-    "set -euo pipefail; cleanup(){ sudo rm -rf '$remote_stage_dir'; }; trap cleanup EXIT; sudo bash '$remote_stage_dir/run-operator-rollout.sh' --stage-dir '$remote_stage_dir' --runtime-dir '$runtime_dir'" >/dev/null \
+    "sudo bash -lc 'set -euo pipefail; cleanup(){ rm -rf \"$remote_stage_dir\"; }; trap cleanup EXIT; bash \"$remote_stage_dir/run-operator-rollout.sh\" --stage-dir \"$remote_stage_dir\" --runtime-dir \"$runtime_dir\"'" >/dev/null \
     || die "remote rollout failed over ssm for operator $operator_id"
 
 

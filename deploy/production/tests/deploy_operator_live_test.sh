@@ -173,6 +173,7 @@ EOF
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live deploy stages files over ssm"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress --group-id sg-op001" "live deploy refreshes grpc mesh ingress"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-rollout.sh" "live deploy runs the host rollout entrypoint over ssm"
+  assert_contains "$(cat "$log_dir/commands.log")" "sudo bash -lc 'set -euo pipefail" "live deploy wraps the remote rollout entrypoint in bash"
   assert_contains "$(cat "$log_dir/commands.log")" "operator-stack-hydrator.env" "live deploy stages the runtime config hydrator env"
   assert_contains "$(cat "$log_dir/commands.log")" "systemctl is-active checkpoint-signer" "live deploy waits for operator services over ssm"
   assert_not_contains "$(cat "$log_dir/commands.log")" "dkg-backup.zip" "live deploy does not stage local runtime packages"
