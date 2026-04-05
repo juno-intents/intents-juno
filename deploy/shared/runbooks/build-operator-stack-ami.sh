@@ -846,8 +846,14 @@ checkpoint_package_topic="$(resolve_value "CHECKPOINT_PACKAGE_TOPIC" "$(read_env
 checkpoint_signer_driver="$(resolve_value "CHECKPOINT_SIGNER_DRIVER" "$(read_env_value CHECKPOINT_SIGNER_DRIVER || true)" || true)"
 checkpoint_signer_kms_key_id="$(resolve_value "CHECKPOINT_SIGNER_KMS_KEY_ID" "$(read_env_value CHECKPOINT_SIGNER_KMS_KEY_ID || true)" || true)"
 operator_address="$(resolve_value "OPERATOR_ADDRESS" "$(read_env_value OPERATOR_ADDRESS || true)" || true)"
+base_relayer_private_keys="$(resolve_value "BASE_RELAYER_PRIVATE_KEYS" "$(read_env_value BASE_RELAYER_PRIVATE_KEYS || true)" || true)"
+base_relayer_auth_token="$(resolve_value "BASE_RELAYER_AUTH_TOKEN" "$(read_env_value BASE_RELAYER_AUTH_TOKEN || true)" || true)"
+tss_auth_token="$(resolve_value "TSS_AUTH_TOKEN" "$(read_env_value TSS_AUTH_TOKEN || true)" || true)"
+withdraw_coordinator_juno_wallet_id="$(resolve_value "WITHDRAW_COORDINATOR_JUNO_WALLET_ID" "$(read_env_value WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)" || true)"
+withdraw_finalizer_juno_scan_wallet_id="$(resolve_value "WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID" "$(read_env_value WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID || true)" || true)"
 juno_txsign_signer_keys="$(resolve_value "JUNO_TXSIGN_SIGNER_KEYS" "$(read_env_value JUNO_TXSIGN_SIGNER_KEYS || true)" || true)"
 withdraw_operator_endpoints="$(resolve_value "WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS" "$(read_env_value WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS || true)" || true)"
+juno_scan_bearer_token="$(resolve_value "JUNO_SCAN_BEARER_TOKEN" "$(read_env_value JUNO_SCAN_BEARER_TOKEN || true)" || true)"
 juno_rpc_user="$(resolve_value "JUNO_RPC_USER" "$(read_env_value JUNO_RPC_USER || true)" || true)"
 juno_rpc_pass="$(resolve_value "JUNO_RPC_PASS" "$(read_env_value JUNO_RPC_PASS || true)" || true)"
 juno_rpc_bind="$(resolve_value "JUNO_RPC_BIND" "$(read_env_value JUNO_RPC_BIND || true)" || true)"
@@ -868,6 +874,11 @@ required_key "CHECKPOINT_KAFKA_BROKERS" "$checkpoint_kafka_brokers"
 required_key "CHECKPOINT_BLOB_BUCKET" "$checkpoint_blob_bucket"
 required_key "CHECKPOINT_BLOB_SSE_KMS_KEY_ID" "$checkpoint_blob_sse_kms_key_id"
 required_key "CHECKPOINT_IPFS_API_URL" "$checkpoint_ipfs_api_url"
+required_key "BASE_RELAYER_PRIVATE_KEYS" "$base_relayer_private_keys"
+required_key "BASE_RELAYER_AUTH_TOKEN" "$base_relayer_auth_token"
+required_key "TSS_AUTH_TOKEN" "$tss_auth_token"
+required_key "WITHDRAW_COORDINATOR_JUNO_WALLET_ID" "$withdraw_coordinator_juno_wallet_id"
+required_key "WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID" "$withdraw_finalizer_juno_scan_wallet_id"
 required_key "JUNO_RPC_USER" "$juno_rpc_user"
 required_key "JUNO_RPC_PASS" "$juno_rpc_pass"
 required_key "JUNO_RPC_BIND" "$juno_rpc_bind"
@@ -957,6 +968,11 @@ set_env_value "$tmp_env" JUNO_RPC_ALLOW_IPS "$juno_rpc_allow_ips"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_DRIVER "$checkpoint_signer_driver"
 set_env_value "$tmp_env" CHECKPOINT_SIGNER_KMS_KEY_ID "$checkpoint_signer_kms_key_id"
 set_env_value "$tmp_env" OPERATOR_ADDRESS "$operator_address"
+set_env_value "$tmp_env" BASE_RELAYER_PRIVATE_KEYS "$base_relayer_private_keys"
+set_env_value "$tmp_env" BASE_RELAYER_AUTH_TOKEN "$base_relayer_auth_token"
+set_env_value "$tmp_env" TSS_AUTH_TOKEN "$tss_auth_token"
+set_env_value "$tmp_env" WITHDRAW_COORDINATOR_JUNO_WALLET_ID "$withdraw_coordinator_juno_wallet_id"
+set_env_value "$tmp_env" WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID "$withdraw_finalizer_juno_scan_wallet_id"
 set_env_value "$tmp_env" JUNO_TXSIGN_SIGNER_KEYS "$juno_txsign_signer_keys"
 set_env_value "$tmp_env" CHECKPOINT_OPERATORS "$checkpoint_operators"
 set_env_value "$tmp_env" CHECKPOINT_THRESHOLD "$checkpoint_threshold"
@@ -968,6 +984,11 @@ if [[ -n "$withdraw_operator_endpoints" ]]; then
   set_env_value "$tmp_env" WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS "$withdraw_operator_endpoints"
 else
   delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS
+fi
+if [[ -n "$juno_scan_bearer_token" ]]; then
+  set_env_value "$tmp_env" JUNO_SCAN_BEARER_TOKEN "$juno_scan_bearer_token"
+else
+  delete_env_value "$tmp_env" JUNO_SCAN_BEARER_TOKEN
 fi
 delete_env_value "$tmp_env" WITHDRAW_COORDINATOR_EXTEND_SIGNER_KEYS
 
