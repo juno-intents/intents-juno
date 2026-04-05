@@ -132,6 +132,7 @@ EOF
 
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live canary uses ssm commands"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-local-canary.sh" "live canary stages the host-local canary helper"
+  assert_contains "$(cat "$log_dir/commands.log")" "sudo bash -lc 'set -euo pipefail" "live canary wraps the remote helper in bash"
   assert_not_contains "$(cat "$log_dir/commands.log")" "operator-secrets.env" "live canary does not resolve local secret contracts"
   assert_not_contains "$(cat "$log_dir/commands.log")" "known_hosts" "live canary does not require ssh trust roots"
   assert_eq "$(jq -r '.ready_for_deploy' "$output_json")" "true" "live canary returns a ready flag"

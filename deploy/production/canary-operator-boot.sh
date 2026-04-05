@@ -105,7 +105,7 @@ production_ssm_stage_file \
 canary_json="$(
   production_ssm_run_shell_command \
     "$aws_profile" "$aws_region" "$instance_id" \
-    "set -euo pipefail; cleanup(){ sudo rm -rf '$remote_stage_dir'; }; trap cleanup EXIT; sudo bash '$remote_stage_dir/run-operator-local-canary.sh' --operator-id '$operator_id'"
+    "sudo bash -lc 'set -euo pipefail; cleanup(){ rm -rf \"$remote_stage_dir\"; }; trap cleanup EXIT; bash \"$remote_stage_dir/run-operator-local-canary.sh\" --operator-id \"$operator_id\"'"
 )" || die "runtime canary failed over ssm for operator $operator_id"
 
 printf '%s\n' "$canary_json"
