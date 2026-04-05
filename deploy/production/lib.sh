@@ -1999,7 +1999,7 @@ production_ssm_run_shell_command() {
   local aws_region="$2"
   local instance_id="$3"
   local command="$4"
-  local send_json command_id invocation_json invocation_status stderr stdout parameters_json
+  local send_json command_id invocation_json invocation_status stderr stdout parameters_json parameters_file
   local poll_attempts="${5:-30}"
   local poll_interval_seconds="${6:-2}"
 
@@ -2007,11 +2007,14 @@ production_ssm_run_shell_command() {
   have_cmd jq || die "required command not found: jq"
 
   parameters_json="$(jq -cn --arg command "$command" '{commands: [$command]}')"
+  parameters_file="$(mktemp)"
+  printf '%s' "$parameters_json" >"$parameters_file"
   send_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm send-command \
     --instance-ids "$instance_id" \
     --document-name "AWS-RunShellScript" \
-    --parameters "$parameters_json" \
+    --parameters "file://$parameters_file" \
     --output json 2>/dev/null || true)"
+  rm -f "$parameters_file"
   [[ -n "$send_json" ]] || return 1
   command_id="$(jq -r '.Command.CommandId // empty' <<<"$send_json")"
   [[ -n "$command_id" ]] || return 1

@@ -39,12 +39,22 @@ extract_arg() {
   return 1
 }
 
+resolve_parameters() {
+  local raw
+  raw="\$(extract_arg --parameters "\$@" || true)"
+  if [[ "\$raw" == file://* ]]; then
+    cat "\${raw#file://}"
+    return 0
+  fi
+  printf '%s' "\$raw"
+}
+
 case "\$*" in
   *"ec2 describe-instances"*"--query Reservations[].Instances[].InstanceId"* )
     printf 'i-op001\n'
     ;;
   *"ssm send-command"* )
-    params="\$(extract_arg --parameters "\$@" || true)"
+    params="\$(resolve_parameters "\$@" || true)"
     printf '%s\n' "\$params" >>"$log_dir/commands.log"
     counter_file="$log_dir/command-counter"
     counter=0

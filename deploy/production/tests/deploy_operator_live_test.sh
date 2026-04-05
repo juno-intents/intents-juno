@@ -76,6 +76,16 @@ extract_arg() {
   return 1
 }
 
+resolve_parameters() {
+  local raw
+  raw="\$(extract_arg --parameters "\$@" || true)"
+  if [[ "\$raw" == file://* ]]; then
+    cat "\${raw#file://}"
+    return 0
+  fi
+  printf '%s' "\$raw"
+}
+
 case "\$*" in
   *"ec2 describe-instances"*"--query Reservations[].Instances[].InstanceId"* )
     printf 'i-op001\n'
@@ -89,7 +99,7 @@ case "\$*" in
     printf '{"ChangeInfo":{"Status":"INSYNC"}}\n'
     ;;
   *"ssm send-command"* )
-    params="\$(extract_arg --parameters "\$@" || true)"
+    params="\$(resolve_parameters "\$@" || true)"
     command_text="\$(jq -r '.commands[0] // empty' <<<"\$params" 2>/dev/null || true)"
     if [[ -n "\$command_text" ]]; then
       printf '%s\n' "\$command_text" >>"$log_dir/commands.log"
@@ -171,6 +181,7 @@ EOF
     --operator-deploy "$manifest" >/dev/null
 
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live deploy stages files over ssm"
+  assert_contains "$(cat "$log_dir/aws.log")" "--parameters file://" "live deploy stages ssm commands through a parameter file"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress --group-id sg-op001" "live deploy refreshes grpc mesh ingress"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-rollout.sh" "live deploy runs the host rollout entrypoint over ssm"
   assert_contains "$(cat "$log_dir/commands.log")" "sudo bash -lc 'set -euo pipefail" "live deploy wraps the remote rollout entrypoint in bash"
