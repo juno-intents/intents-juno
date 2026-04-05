@@ -127,7 +127,6 @@ service_active_sleep_seconds="${PRODUCTION_DEPLOY_SERVICE_ACTIVE_SLEEP_SECONDS:-
 
 tmp_dir="$(mktemp -d)"
 merged_env="$tmp_dir/operator-stack.env"
-config_hydrator_stage="$tmp_dir/intents-juno-config-hydrator.sh"
 operator_stack_hydrator_env="$tmp_dir/operator-stack-hydrator.env"
 signer_ufvk_file="$tmp_dir/ufvk.txt"
 dkg_peer_hosts_file="$tmp_dir/dkg-peer-hosts.json"
@@ -638,12 +637,6 @@ OPERATOR_STACK_CONFIG_JSON_PATH=/etc/intents-juno/operator-stack-config.json
 OPERATOR_STACK_CONFIG_SECRET_ID=$runtime_config_secret_id
 OPERATOR_STACK_CONFIG_SECRET_REGION=$runtime_config_secret_region
 EOF
-extract_build_runbook_block \
-  "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
-  "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" \
-  "EOF_CONFIG_HYDRATOR" \
-  "$config_hydrator_stage"
-chmod 0755 "$config_hydrator_stage"
 prepare_base_relayer_env "$shared_manifest_path" "$merged_env" "$tmp_dir"
 printf '%s\n' "$(production_json_required "$shared_manifest_path" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')" >"$signer_ufvk_file"
 mapfile -t peer_operator_manifests < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -name operator-deploy.json -print | sort)
@@ -685,7 +678,6 @@ fi
 remote_stage_dir="/tmp/intents-juno-deploy-$(production_safe_slug "$operator_id")"
 files_to_copy=(
   "$merged_env"
-  "$config_hydrator_stage"
   "$operator_stack_hydrator_env"
   "$signer_ufvk_file"
   "$dkg_peer_hosts_file"
