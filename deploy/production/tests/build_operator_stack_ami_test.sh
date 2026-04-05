@@ -344,6 +344,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$signer_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint signer reads base chain id from operator env"
   assert_contains "$signer_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint signer reads bridge address from operator env"
   assert_contains "$signer_wrapper" '--lease-name "${checkpoint_signer_lease_name}"' "checkpoint signer passes the per-operator lease name through to the binary"
+  assert_contains "$signer_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "checkpoint signer exports the kafka auth region to the binary"
   assert_not_contains "$signer_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint signer does not bake bootstrap bridge address into wrapper"
 
   aggregator_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'" "EOF_AGG")"
@@ -352,19 +353,21 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$aggregator_wrapper" '--base-chain-id "${BASE_CHAIN_ID}"' "checkpoint aggregator reads base chain id from operator env"
   assert_contains "$aggregator_wrapper" '--bridge-address "${BRIDGE_ADDRESS}"' "checkpoint aggregator reads bridge address from operator env"
   assert_contains "$aggregator_wrapper" '${CHECKPOINT_IPFS_API_BEARER_TOKEN:+--ipfs-api-bearer-token "$CHECKPOINT_IPFS_API_BEARER_TOKEN"}' "checkpoint aggregator forwards the optional IPFS bearer token"
+  assert_contains "$aggregator_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "checkpoint aggregator exports the kafka auth region to the binary"
   assert_not_contains "$aggregator_wrapper" '__BOOTSTRAP_BRIDGE_ADDRESS__' "checkpoint aggregator does not bake bootstrap bridge address into wrapper"
 
   local deposit_relayer_wrapper
   deposit_relayer_wrapper="$(extract_block "cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'" "EOF_DEPOSIT_RELAYER")"
-  assert_contains "$deposit_relayer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "deposit relayer exports queueauth env to the binary"
+  assert_contains "$deposit_relayer_wrapper" 'export_optional_env_vars JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS' "deposit relayer exports AWS SDK env when present"
+  assert_contains "$deposit_relayer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "deposit relayer exports queueauth env to the binary"
 
   local withdraw_wrapper
   withdraw_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'" "EOF_WITHDRAW_COORDINATOR")"
-  assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "withdraw coordinator exports queueauth env to the binary"
+  assert_contains "$withdraw_wrapper" 'export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY TSS_AUTH_TOKEN JUNO_QUEUE_KAFKA_AWS_REGION' "withdraw coordinator exports queueauth env to the binary"
 
   local withdraw_finalizer_wrapper
   withdraw_finalizer_wrapper="$(extract_block "cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'" "EOF_WITHDRAW_FINALIZER")"
-  assert_contains "$withdraw_finalizer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY' "withdraw finalizer exports queueauth env to the binary"
+  assert_contains "$withdraw_finalizer_wrapper" 'export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "withdraw finalizer exports queueauth env to the binary"
 
   local juno_scan_backfill_wrapper
   juno_scan_backfill_wrapper="$(extract_block "cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'" "EOF_SCAN_BACKFILL")"
@@ -375,6 +378,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
 
   base_event_scanner_wrapper="$(extract_block "cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'" "EOF_BASE_EVENT_SCANNER")"
   assert_contains "$base_event_scanner_wrapper" 'export_optional_env_vars JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports queueauth env to the binary"
+  assert_contains "$base_event_scanner_wrapper" 'export JUNO_QUEUE_KAFKA_AWS_REGION' "base-event-scanner exports the kafka auth region to the binary"
   assert_contains "$base_event_scanner_wrapper" '[[ -n "${BASE_EVENT_SCANNER_START_BLOCK:-}" ]] || {' "base-event-scanner requires explicit start block in operator env"
   assert_contains "$base_event_scanner_wrapper" 'base-event-scanner requires BASE_EVENT_SCANNER_START_BLOCK in /etc/intents-juno/operator-stack.env' "base-event-scanner fails closed without start block"
   assert_contains "$base_event_scanner_wrapper" '--start-block "${BASE_EVENT_SCANNER_START_BLOCK}"' "base-event-scanner wrapper uses rendered start block without a genesis fallback"

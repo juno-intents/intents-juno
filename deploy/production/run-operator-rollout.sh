@@ -133,6 +133,17 @@ install_stage_files() {
   if [[ -f "$config_hydrator_stage" ]]; then
     sudo install -m 0755 "$config_hydrator_stage" /usr/local/bin/intents-juno-config-hydrator.sh
   fi
+  for wrapper_name in \
+    intents-juno-checkpoint-signer.sh \
+    intents-juno-checkpoint-aggregator.sh \
+    intents-juno-deposit-relayer.sh \
+    intents-juno-withdraw-coordinator.sh \
+    intents-juno-withdraw-finalizer.sh \
+    intents-juno-base-event-scanner.sh; do
+    if [[ -f "$stage_dir/$wrapper_name" ]]; then
+      sudo install -m 0755 "$stage_dir/$wrapper_name" "/usr/local/bin/$wrapper_name"
+    fi
+  done
 }
 
 fetch_restore_package() {
@@ -157,8 +168,44 @@ restore_runtime() {
   sudo chown -R intents-juno:intents-juno "$runtime_dir"
 }
 
+compute_dkg_roster_hash_hex() {
+  local roster_json="$1"
+  local canonical
+
+  canonical="$(printf '%s' "$roster_json" | jq -c '
+    {
+      roster_version: .roster_version,
+      operators: (
+        .operators
+        | map({
+            operator_id: (.operator_id | tostring | gsub("^\\s+|\\s+$"; "")),
+            grpc_endpoint: (
+              if .grpc_endpoint == null then null
+              else (.grpc_endpoint | tostring | gsub("^\\s+|\\s+$"; ""))
+              end
+            ),
+            age_recipient: (
+              if .age_recipient == null then null
+              else (.age_recipient | tostring | gsub("^\\s+|\\s+$"; ""))
+              end
+            )
+          })
+        | sort_by(.operator_id)
+        | map(with_entries(select(.value != null)))
+      ),
+      coordinator_age_recipient: (
+        if .coordinator_age_recipient == null then null
+        else (.coordinator_age_recipient | tostring | gsub("^\\s+|\\s+$"; ""))
+        end
+      )
+    }
+    | with_entries(select(.value != null))
+  ')"
+  printf '%s' "$canonical" | sha256sum | awk '{print $1}'
+}
+
 rewrite_dkg_roster() {
-  local admin_config_path dkg_roster_tmp dkg_roster_hash_tmp
+  local admin_config_path dkg_roster_tmp dkg_roster_hash_tmp dkg_roster_canonical
   [[ -f "$dkg_peer_hosts_file" ]] || return 0
 
   admin_config_path="$runtime_dir/bundle/admin-config.json"
@@ -178,7 +225,7 @@ rewrite_dkg_roster() {
     )
   ' >"$dkg_roster_tmp"
   dkg_roster_canonical="$(jq -c '.roster' "$dkg_roster_tmp")"
-  printf '%s' "$dkg_roster_canonical" | sha256sum | awk '{print $1}' >"$dkg_roster_hash_tmp"
+  compute_dkg_roster_hash_hex "$dkg_roster_canonical" >"$dkg_roster_hash_tmp"
   jq --arg roster_hash "$(cat "$dkg_roster_hash_tmp")" '.roster_hash_hex = $roster_hash' "$dkg_roster_tmp" >"${dkg_roster_tmp}.next"
   mv "${dkg_roster_tmp}.next" "$dkg_roster_tmp"
   sudo install -m 0640 -o intents-juno -g intents-juno "$dkg_roster_tmp" "$admin_config_path"

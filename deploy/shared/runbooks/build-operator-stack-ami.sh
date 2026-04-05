@@ -1305,6 +1305,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
+export JUNO_QUEUE_KAFKA_AWS_REGION
 signer_driver="$(printf '%s' "${CHECKPOINT_SIGNER_DRIVER:-}" | tr '[:upper:]' '[:lower:]')"
 checkpoint_signer_lease_name="${CHECKPOINT_SIGNER_LEASE_NAME:-checkpoint-signer-${OPERATOR_ADDRESS}}"
 checkpoint_signer_help="$(/usr/local/bin/checkpoint-signer --help 2>&1 || true)"
@@ -1426,6 +1427,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
+export JUNO_QUEUE_KAFKA_AWS_REGION
 exec /usr/local/bin/checkpoint-aggregator \
   --base-chain-id "${BASE_CHAIN_ID}" \
   --bridge-address "${BRIDGE_ADDRESS}" \
@@ -1800,6 +1802,15 @@ EOF_BASE_RELAYER
 set -euo pipefail
 # shellcheck disable=SC1091
 source /etc/intents-juno/operator-stack.env
+export_optional_env_vars() {
+  local name
+  for name in "$@"; do
+    if [[ "${!name+x}" == "x" ]]; then
+      export "$name"
+    fi
+  done
+}
+export_optional_env_vars JUNO_QUEUE_KAFKA_AWS_REGION AWS_REGION AWS_DEFAULT_REGION AWS_PROFILE AWS_CONFIG_FILE AWS_SHARED_CREDENTIALS_FILE AWS_SDK_LOAD_CONFIG AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN AWS_ROLE_ARN AWS_ROLE_SESSION_NAME AWS_WEB_IDENTITY_TOKEN_FILE AWS_CA_BUNDLE AWS_EC2_METADATA_DISABLED AWS_STS_REGIONAL_ENDPOINTS
 [[ -n "${CHECKPOINT_POSTGRES_DSN:-}" ]] || {
   echo "deposit-relayer requires CHECKPOINT_POSTGRES_DSN in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1869,7 +1880,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
-export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
 
 deposit_owner="${DEPOSIT_RELAYER_OWNER:-$(hostname -s)-deposit-relayer}"
 deposit_max_items="${DEPOSIT_RELAYER_MAX_ITEMS:-25}"
@@ -2094,6 +2105,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
+export JUNO_QUEUE_KAFKA_AWS_REGION
 txbuild_bin="${WITHDRAW_COORDINATOR_TXBUILD_BIN:-juno-txbuild}"
 command -v "${txbuild_bin}" >/dev/null 2>&1 || {
   echo "withdraw-coordinator requires WITHDRAW_COORDINATOR_TXBUILD_BIN to resolve an executable (current: ${txbuild_bin})" >&2
@@ -2107,7 +2119,7 @@ fi
   echo "withdraw-coordinator requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
-export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY TSS_AUTH_TOKEN
+export CHECKPOINT_POSTGRES_DSN BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_TXSIGN_SIGNER_KEYS JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY TSS_AUTH_TOKEN JUNO_QUEUE_KAFKA_AWS_REGION
 export JUNO_SCAN_BEARER_TOKEN
 export JUNO_TXSIGN_SIGNER_KEYS
 
@@ -2311,7 +2323,8 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
-export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY
+export JUNO_QUEUE_KAFKA_AWS_REGION
+export BASE_RELAYER_AUTH_TOKEN JUNO_RPC_USER JUNO_RPC_PASS JUNO_SCAN_BEARER_TOKEN JUNO_QUEUE_CRITICAL_KEY_ID JUNO_QUEUE_CRITICAL_HMAC_KEY JUNO_QUEUE_KAFKA_AWS_REGION
 
 withdraw_finalizer_owner="${WITHDRAW_FINALIZER_OWNER:-$(hostname -s)-withdraw-finalizer}"
 withdraw_finalizer_queue_group="${WITHDRAW_FINALIZER_QUEUE_GROUP:-withdraw-finalizer}"
@@ -2425,6 +2438,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
     exit 1
   fi
 fi
+export JUNO_QUEUE_KAFKA_AWS_REGION
 
 exec /usr/local/bin/base-event-scanner "${args[@]}"
 EOF_BASE_EVENT_SCANNER

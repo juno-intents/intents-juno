@@ -135,6 +135,7 @@ run_operator_rollout_stage="$tmp_dir/run-operator-rollout.sh"
 generated_base_relayer_tls_files=()
 generated_dkg_server_tls_files=()
 staged_dkg_tls_files=()
+staged_wrapper_scripts=()
 success="false"
 reserved="false"
 
@@ -643,6 +644,48 @@ extract_build_runbook_block \
   "cat > /tmp/intents-juno-config-hydrator.sh <<'EOF_CONFIG_HYDRATOR'" \
   "EOF_CONFIG_HYDRATOR" \
   "$config_hydrator_stage"
+for wrapper_name in \
+  intents-juno-checkpoint-signer.sh \
+  intents-juno-checkpoint-aggregator.sh \
+  intents-juno-deposit-relayer.sh \
+  intents-juno-withdraw-coordinator.sh \
+  intents-juno-withdraw-finalizer.sh \
+  intents-juno-base-event-scanner.sh; do
+  wrapper_stage="$tmp_dir/$wrapper_name"
+  case "$wrapper_name" in
+    intents-juno-checkpoint-signer.sh)
+      wrapper_start="cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'"
+      wrapper_end="EOF_SIGNER"
+      ;;
+    intents-juno-checkpoint-aggregator.sh)
+      wrapper_start="cat > /tmp/intents-juno-checkpoint-aggregator.sh <<'EOF_AGG'"
+      wrapper_end="EOF_AGG"
+      ;;
+    intents-juno-deposit-relayer.sh)
+      wrapper_start="cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'"
+      wrapper_end="EOF_DEPOSIT_RELAYER"
+      ;;
+    intents-juno-withdraw-coordinator.sh)
+      wrapper_start="cat > /tmp/intents-juno-withdraw-coordinator.sh <<'EOF_WITHDRAW_COORDINATOR'"
+      wrapper_end="EOF_WITHDRAW_COORDINATOR"
+      ;;
+    intents-juno-withdraw-finalizer.sh)
+      wrapper_start="cat > /tmp/intents-juno-withdraw-finalizer.sh <<'EOF_WITHDRAW_FINALIZER'"
+      wrapper_end="EOF_WITHDRAW_FINALIZER"
+      ;;
+    intents-juno-base-event-scanner.sh)
+      wrapper_start="cat > /tmp/intents-juno-base-event-scanner.sh <<'EOF_BASE_EVENT_SCANNER'"
+      wrapper_end="EOF_BASE_EVENT_SCANNER"
+      ;;
+  esac
+  extract_build_runbook_block \
+    "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
+    "$wrapper_start" \
+    "$wrapper_end" \
+    "$wrapper_stage"
+  chmod 0755 "$wrapper_stage"
+  staged_wrapper_scripts+=("$wrapper_stage")
+done
 case "$environment" in
   mainnet)
     sed -i.bak 's/__BOOTSTRAP_JUNOCASHD_TESTNET_LINE__//g' "$config_hydrator_stage"
@@ -712,6 +755,9 @@ for tls_file in "${generated_dkg_server_tls_files[@]}"; do
 done
 for tls_file in "${staged_dkg_tls_files[@]}"; do
   files_to_copy+=("$tls_file")
+done
+for wrapper_stage in "${staged_wrapper_scripts[@]}"; do
+  files_to_copy+=("$wrapper_stage")
 done
 
 if [[ "$dry_run" == "true" ]]; then

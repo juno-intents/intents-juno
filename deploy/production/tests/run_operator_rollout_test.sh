@@ -22,9 +22,11 @@ test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_n
   script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
 
   assert_contains "$script_text" "dkg_roster_canonical=" "run-operator-rollout stores the canonical roster before hashing"
-  assert_contains "$script_text" "jq -c '.roster' \"\$dkg_roster_tmp\"" "run-operator-rollout canonicalizes the nested roster before hashing"
-  assert_contains "$script_text" 'printf '\''%s'\'' "$dkg_roster_canonical" | sha256sum' "run-operator-rollout hashes the canonical roster without a trailing newline"
-  assert_not_contains "$script_text" 'jq -r '\''.roster | @json'\'' "$dkg_roster_tmp" | sha256sum' "run-operator-rollout no longer hashes roster json with an implicit trailing newline"
+  assert_contains "$script_text" "roster_version: .roster_version" "run-operator-rollout hashes the roster through the coordinator canonicalizer"
+  assert_contains "$script_text" "sort_by(.operator_id)" "run-operator-rollout sorts operators before hashing"
+  assert_contains "$script_text" "with_entries(select(.value != null))" "run-operator-rollout drops null roster fields before hashing"
+  assert_contains "$script_text" 'compute_dkg_roster_hash_hex "$dkg_roster_canonical"' "run-operator-rollout hashes the canonical roster through the helper"
+  assert_not_contains "$script_text" 'printf '\''%s'\'' "$dkg_roster_canonical" | sha256sum' "run-operator-rollout no longer hashes the raw roster object directly"
 }
 
 main() {
