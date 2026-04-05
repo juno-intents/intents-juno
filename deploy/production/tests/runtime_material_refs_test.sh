@@ -189,6 +189,7 @@ test_runtime_config_render_skips_local_secret_requirements() {
 
   assert_contains "$(cat "$rendered_env")" "CHECKPOINT_SIGNER_DRIVER=aws-kms" "runtime-config render keeps the kms signer mode"
   assert_contains "$(cat "$rendered_env")" "JUNO_RPC_BIND=127.0.0.1" "runtime-config render restores the local rpc bind default"
+  assert_contains "$(cat "$rendered_env")" "TSS_SIGNER_RUNTIME_MODE=host-process" "runtime-config render forces the host-process signer runtime"
   assert_contains "$(cat "$rendered_env")" "WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "runtime-config render stages operator endpoints for live withdraw signing"
   assert_not_contains "$(cat "$rendered_env")" "CHECKPOINT_POSTGRES_DSN=" "runtime-config render omits host-resolved postgres secrets"
   assert_not_contains "$(cat "$rendered_env")" "JUNO_RPC_USER=" "runtime-config render omits host-resolved rpc credentials"

@@ -3260,6 +3260,7 @@ WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h
 WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS=$owallet_ua
 WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080
 WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232
+TSS_SIGNER_RUNTIME_MODE=host-process
 TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt
 TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin
 TSS_NITRO_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer

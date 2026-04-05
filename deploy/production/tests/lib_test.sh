@@ -1799,6 +1799,7 @@ EOF
   assert_not_contains "$(grep '^JUNO_TXSIGN_SIGNER_KEYS=' "$output_env")" "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" "rendered env keeps juno txsign scoped to the local operator key"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_SCAN_URL=http://127.0.0.1:8080" "rendered env withdraw finalizer scan url"
   assert_contains "$(cat "$output_env")" "WITHDRAW_FINALIZER_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env withdraw finalizer juno rpc url"
+  assert_contains "$(cat "$output_env")" "TSS_SIGNER_RUNTIME_MODE=host-process" "rendered env forces host-process signer runtime"
   assert_contains "$(cat "$output_env")" "TSS_SIGNER_UFVK_FILE=/var/lib/intents-juno/operator-runtime/ufvk.txt" "rendered env tss ufvk path"
   assert_contains "$(cat "$output_env")" "TSS_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-admin" "rendered env tss spendauth signer path"
   assert_contains "$(cat "$output_env")" "TSS_NITRO_SPENDAUTH_SIGNER_BIN=/var/lib/intents-juno/operator-runtime/bin/dkg-attested-signer" "rendered env tss nitro signer path"
