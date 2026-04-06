@@ -50,7 +50,7 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-for cmd in jq sudo systemctl; do
+for cmd in curl jq sha256sum sudo systemctl tar; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
@@ -195,6 +195,90 @@ ensure_runtime_dkg_admin_binary() {
   rm -rf "$dkg_stage_dir"
 }
 
+download_github_release_asset_with_checksum() {
+  local repo="$1"
+  local tag="$2"
+  local asset_name="$3"
+  local output_path="$4"
+  local release_url release_json asset_url checksum_asset_name checksum_url checksum_tmp expected
+
+  if [[ -n "$tag" ]]; then
+    release_url="https://api.github.com/repos/${repo}/releases/tags/${tag}"
+  else
+    release_url="https://api.github.com/repos/${repo}/releases/latest"
+  fi
+
+  release_json="$(curl -fsSL "$release_url")"
+  asset_url="$(jq -r --arg asset_name "$asset_name" '.assets[] | select(.name == $asset_name) | .browser_download_url' <<<"$release_json" | head -n 1)"
+  [[ -n "$asset_url" && "$asset_url" != "null" ]] || die "missing release asset ${asset_name} for ${repo}"
+
+  checksum_asset_name="${asset_name}.sha256"
+  checksum_url="$(jq -r --arg asset_name "$checksum_asset_name" '.assets[] | select(.name == $asset_name) | .browser_download_url' <<<"$release_json" | head -n 1)"
+  [[ -n "$checksum_url" && "$checksum_url" != "null" ]] || die "missing release checksum asset ${checksum_asset_name} for ${repo}"
+
+  curl -fsSL "$asset_url" -o "$output_path"
+  checksum_tmp="$(mktemp)"
+  curl -fsSL "$checksum_url" -o "$checksum_tmp"
+  expected="$(awk 'NF {print $1; exit}' "$checksum_tmp")"
+  rm -f "$checksum_tmp"
+  [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] || die "invalid checksum for ${asset_name}"
+  printf '%s  %s\n' "$expected" "$output_path" | sha256sum -c - >/dev/null
+}
+
+ensure_runtime_juno_txsign_binary() {
+  local requested_tag current_supports_endpoints current_supports_serve arch asset_name archive extract_dir release_tag_marker
+
+  requested_tag="$(jq -r '.juno_txsign_release_tag // empty' "$operator_deploy")"
+  current_supports_endpoints="false"
+  current_supports_serve="false"
+
+  if sudo test -x /usr/local/bin/juno-txsign; then
+    if sudo /usr/local/bin/juno-txsign sign-digest --help 2>&1 | grep -q -- '--operator-endpoint'; then
+      current_supports_endpoints="true"
+    fi
+    if sudo /usr/local/bin/juno-txsign serve --help >/dev/null 2>&1; then
+      current_supports_serve="true"
+    fi
+  fi
+
+  release_tag_marker="/var/lib/intents-juno/.juno-txsign-release-tag"
+  if [[ -n "$requested_tag" && "$current_supports_endpoints" == "true" && "$current_supports_serve" == "true" ]] \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+  if [[ -z "$requested_tag" && "$current_supports_endpoints" == "true" && "$current_supports_serve" == "true" ]]; then
+    return 0
+  fi
+
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) die "unsupported architecture for juno-txsign install: $(uname -m)" ;;
+  esac
+
+  asset_name="juno-txsign_${requested_tag:-v0.0.0}_linux_${arch}.tar.gz"
+  if [[ -z "$requested_tag" ]]; then
+    local latest_release_json latest_release_tag
+    latest_release_json="$(curl -fsSL https://api.github.com/repos/junocash-tools/juno-txsign/releases/latest)"
+    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
+    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest juno-txsign release tag"
+    requested_tag="$latest_release_tag"
+    asset_name="juno-txsign_${requested_tag}_linux_${arch}.tar.gz"
+  fi
+
+  archive="$(mktemp)"
+  download_github_release_asset_with_checksum "junocash-tools/juno-txsign" "$requested_tag" "$asset_name" "$archive"
+  extract_dir="$(mktemp -d)"
+  tar -xzf "$archive" -C "$extract_dir"
+  rm -f "$archive"
+
+  sudo install -m 0755 "$extract_dir/juno-txsign" /usr/local/bin/juno-txsign
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -rf "$extract_dir"
+}
+
 compute_dkg_roster_hash_hex() {
   local roster_json="$1"
   local canonical
@@ -298,6 +382,7 @@ install_stage_files
 fetch_restore_package
 restore_runtime
 ensure_runtime_dkg_admin_binary
+ensure_runtime_juno_txsign_binary
 stage_optional_tls_files
 rewrite_dkg_roster
 hydrate_and_restart
