@@ -818,6 +818,7 @@ EOF
   assert_eq "$(jq -r '.wireguard_role.source_cidrs[0]' "$shared_manifest")" "10.0.20.0/24" "wireguard source cidrs"
   assert_eq "$(jq -r '.shared_services.artifacts.checkpoint_blob_sse_kms_key_id' "$shared_manifest")" "arn:aws:kms:us-east-1:021490342184:key/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" "shared manifest checkpoint blob sse kms key id"
   assert_eq "$(jq -r '.checkpoint.threshold' "$shared_manifest")" "3" "checkpoint threshold"
+  assert_eq "$(jq -r '.checkpoint.operators[0]' "$shared_manifest")" "0x9999999999999999999999999999999999999999" "shared manifest checkpoint operators prefer live operator addresses"
   assert_contains "$(jq -cr '.secret_reference_names' "$shared_manifest")" "CHECKPOINT_POSTGRES_DSN" "secret keys"
   assert_eq "$(jq -r '.governance.timelock.address' "$shared_manifest")" "0x8888888888888888888888888888888888888888" "timelock address"
   assert_eq "$(jq -r '.governance.timelock.min_delay_seconds' "$shared_manifest")" "172800" "timelock delay"
@@ -844,6 +845,11 @@ EOF
   assert_eq "$(jq -r '.services.backoffice.access.publish_public_dns' "$workdir/output/app/app-deploy.json")" "false" "app handoff suppresses public backoffice dns"
   assert_eq "$(jq -r '.services.backoffice.public_url // empty' "$workdir/output/app/app-deploy.json")" "" "app handoff omits backoffice public url"
   assert_eq "$(jq -r '.services.backoffice.record_name // empty' "$workdir/output/app/app-deploy.json")" "" "app handoff omits backoffice record name"
+  resolved_env="$workdir/resolved-operator.env"
+  production_resolve_secret_contract "$workdir/operator-secrets.env" "true" "" "" "$resolved_env"
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$shared_manifest" "$handoff_dir/operator-deploy.json" "$resolved_env" "$output_env"
+  assert_contains "$(cat "$output_env")" "CHECKPOINT_OPERATORS=0x9999999999999999999999999999999999999999" "operator stack env uses live checkpoint operator addresses"
   rm -rf "$workdir"
 }
 

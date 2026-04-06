@@ -2472,7 +2472,7 @@ production_render_shared_manifest() {
   wireguard_client_config_secret_arn="$(jq -r '.client_config_secret_arn // empty' <<<"$wireguard_role_json")"
   wireguard_source_cidrs_json="$(jq -c '(.source_cidrs // []) | if type == "array" then . else [] end' <<<"$wireguard_role_json")"
   shared_roles_json="$(jq -cn --argjson proof "$proof_role_json" --argjson wireguard "$wireguard_role_json" '{proof: $proof, wireguard: $wireguard}')"
-  operators_json="$(jq -c '[.operators[].operator_id]' "$dkg_summary")"
+  operators_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   roster_json="$(
     jq -c '.operators' "$inventory" | jq -c '
       map({
