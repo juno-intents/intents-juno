@@ -314,7 +314,7 @@ ensure_operator_grpc_mesh_ingress() {
   local profile="$1"
   local region="$2"
   local host="$3"
-  local group_ids group_id
+  local group_ids group_id peer_manifest peer_public_endpoint peer_public_cidr
 
   [[ -n "$profile" && -n "$region" ]] || return 0
   have_cmd aws || return 0
@@ -327,6 +327,19 @@ ensure_operator_grpc_mesh_ingress() {
       --group-id "$group_id" \
       --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"UserIdGroupPairs\":[{\"GroupId\":\"$group_id\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
       >/dev/null 2>&1 || true
+
+    if [[ -d "$peer_manifests_dir" ]]; then
+      while IFS= read -r peer_manifest; do
+        [[ -f "$peer_manifest" ]] || continue
+        peer_public_endpoint="$(jq -r '.public_endpoint // empty' "$peer_manifest")"
+        [[ "$peer_public_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+        peer_public_cidr="${peer_public_endpoint}/32"
+        aws --profile "$profile" --region "$region" ec2 authorize-security-group-ingress \
+          --group-id "$group_id" \
+          --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"IpRanges\":[{\"CidrIp\":\"$peer_public_cidr\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
+          >/dev/null 2>&1 || true
+      done < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -type f -name 'operator-deploy.json' | sort)
+    fi
   done
 }
 

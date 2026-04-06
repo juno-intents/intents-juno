@@ -1211,7 +1211,7 @@ EOF
   rm -rf "$workdir"
 }
 
-test_render_app_handoff_prefers_private_operator_endpoints_when_resolvable() {
+test_render_app_handoff_prefers_public_operator_endpoints_when_public_endpoints_are_present() {
   local workdir shared_manifest old_path
   workdir="$(mktemp -d)"
   printf 'backup' >"$workdir/dkg-backup.zip"
@@ -1254,7 +1254,7 @@ EOF
   production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
   PATH="$old_path"
 
-  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=10.0.0.12:18443" "app handoff prefers private operator endpoints"
+  assert_eq "$(jq -r '.operator_endpoints[0]' "$workdir/output/app/app-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "app handoff keeps public operator endpoints when public endpoints are present"
   rm -rf "$workdir"
 }
 
@@ -3747,6 +3747,7 @@ main() {
   test_render_backoffice_env_preserves_non_loopback_juno_rpc_url
   test_render_backoffice_env_uses_private_operator_juno_rpc_fallback
   test_render_app_envs_retarget_runtime_postgres_endpoint_from_shared_manifest
+  test_render_app_handoff_prefers_public_operator_endpoints_when_public_endpoints_are_present
   test_render_app_handoff_defaults_operator_ports_by_index_when_dkg_summary_lacks_endpoints
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners

@@ -1232,7 +1232,7 @@ production_default_dkg_endpoint_for_operator_json() {
 production_default_operator_endpoints_json() {
   local inventory="$1"
   local shared_manifest="${2:-}"
-  local operator_count index operator_json endpoint_addr endpoint_host endpoint_profile endpoint_region
+  local operator_count index operator_json endpoint_addr endpoint_host
   local operator_id dkg_endpoint endpoint_port parsed_endpoint operator_index
 
   operator_count="$(jq -r '.operators | length' "$inventory")"
@@ -1241,9 +1241,15 @@ production_default_operator_endpoints_json() {
     operator_id="$(jq -r '.operator_id // empty' <<<"$operator_json")"
     operator_index="$(jq -r '.index // empty' <<<"$operator_json")"
     endpoint_addr="$(jq -r '.operator_address // .operator_id // empty' <<<"$operator_json")"
-    endpoint_host="$(jq -r '.private_endpoint // .operator_probe_host // .public_endpoint // .operator_host // empty' <<<"$operator_json")"
-    endpoint_profile="$(jq -r '.aws_profile // empty' <<<"$operator_json")"
-    endpoint_region="$(jq -r '.aws_region // empty' <<<"$operator_json")"
+    endpoint_host="$(jq -r '
+      if (.private_endpoint // "") != "" then
+        .private_endpoint
+      elif (.operator_probe_host // "") != "" then
+        .operator_probe_host
+      else
+        (.public_endpoint // .operator_host // "")
+      end
+    ' <<<"$operator_json")"
     endpoint_port="$(production_default_dkg_port_for_index "$operator_index")"
 
     if [[ -n "$shared_manifest" && -f "$shared_manifest" && -n "$operator_id" ]]; then
@@ -1257,9 +1263,6 @@ production_default_operator_endpoints_json() {
     fi
 
     [[ -n "$endpoint_addr" && -n "$endpoint_host" ]] || continue
-    if [[ -n "$endpoint_profile" && -n "$endpoint_region" ]]; then
-      endpoint_host="$(production_aws_resolve_private_ip "$endpoint_profile" "$endpoint_region" "$endpoint_host")"
-    fi
     printf '%s=%s:%s\n' "$endpoint_addr" "$endpoint_host" "$endpoint_port"
   done | jq -R -s 'split("\n") | map(select(length > 0))'
 }

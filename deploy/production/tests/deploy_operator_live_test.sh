@@ -170,6 +170,16 @@ test_deploy_operator_uses_ssm_runtime_refs_for_live_rollout() {
 
   manifest="$(production_operator_dir "$output_dir" "$operator_id")/operator-deploy.json"
   state_file="$output_dir/rollout-state.json"
+  mkdir -p "$output_dir/operators/0x2222222222222222222222222222222222222222"
+  mkdir -p "$output_dir/operators/0x3333333333333333333333333333333333333333"
+  jq -n '{
+    operator_id: "0x2222222222222222222222222222222222222222",
+    public_endpoint: "203.0.113.22"
+  }' >"$output_dir/operators/0x2222222222222222222222222222222222222222/operator-deploy.json"
+  jq -n '{
+    operator_id: "0x3333333333333333333333333333333333333333",
+    public_endpoint: "203.0.113.33"
+  }' >"$output_dir/operators/0x3333333333333333333333333333333333333333/operator-deploy.json"
 
   write_fake_live_aws "$fake_bin/aws" "$log_dir"
   write_fake_cast "$fake_bin/cast"
@@ -195,6 +205,8 @@ EOF
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live deploy stages files over ssm"
   assert_contains "$(cat "$log_dir/aws.log")" "--parameters file://" "live deploy stages ssm commands through a parameter file"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress --group-id sg-op001" "live deploy refreshes grpc mesh ingress"
+  assert_contains "$(cat "$log_dir/aws.log")" "203.0.113.22/32" "live deploy allows peer public endpoint ingress for operator two"
+  assert_contains "$(cat "$log_dir/aws.log")" "203.0.113.33/32" "live deploy allows peer public endpoint ingress for operator three"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-rollout.sh" "live deploy runs the host rollout entrypoint over ssm"
   assert_contains "$(cat "$log_dir/commands.log")" "sudo bash -lc 'set -euo pipefail" "live deploy wraps the remote rollout entrypoint in bash"
   assert_contains "$(cat "$log_dir/commands.log")" "operator-stack-hydrator.env" "live deploy stages the runtime config hydrator env"
