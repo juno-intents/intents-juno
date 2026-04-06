@@ -562,6 +562,35 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 install -d -m 0755 /etc/intents-juno /etc/nginx/intents-juno /etc/nginx/sites-available /etc/nginx/sites-enabled
+
+if ! command -v jq >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y jq
+fi
+
+if ! command -v aws >/dev/null 2>&1; then
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update
+  apt-get install -y curl unzip
+  aws_tmp_dir="$(mktemp -d)"
+  cleanup_aws_tmp_dir() {
+    rm -rf "$aws_tmp_dir"
+  }
+  trap cleanup_aws_tmp_dir EXIT
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) aws_cli_zip_url="https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" ;;
+    aarch64|arm64) aws_cli_zip_url="https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" ;;
+    *) printf 'unsupported architecture for awscli install: %s\n' "$arch" >&2; exit 1 ;;
+  esac
+  curl -fsSL "$aws_cli_zip_url" -o "$aws_tmp_dir/awscliv2.zip"
+  unzip -q "$aws_tmp_dir/awscliv2.zip" -d "$aws_tmp_dir"
+  "$aws_tmp_dir/aws/install" --update
+  trap - EXIT
+  rm -rf "$aws_tmp_dir"
+fi
+
 install -m 0600 "$script_dir/bridge-api.env" /etc/intents-juno/bridge-api.env
 install -m 0600 "$script_dir/backoffice.env" /etc/intents-juno/backoffice.env
 install -m 0600 "$script_dir/app-runtime-hydrator.env" /etc/intents-juno/app-runtime-hydrator.env

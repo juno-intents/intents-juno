@@ -3705,6 +3705,59 @@ test_production_maybe_use_public_sts_endpoint_skips_public_regional_resolution()
   unset PRODUCTION_TEST_STS_REGIONAL_IPS
 }
 
+test_production_ssm_run_shell_command_executes_payload_via_bash() {
+  local workdir fake_aws aws_log stdout path_backup
+  workdir="$(mktemp -d)"
+  fake_aws="$workdir/aws"
+  aws_log="$workdir/aws.log"
+  path_backup="$PATH"
+
+  cat >"$fake_aws" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+printf 'aws %s\n' "$*" >>"$TEST_AWS_LOG"
+
+args=( "$@" )
+if [[ "${args[0]:-}" == "--profile" ]]; then
+  args=( "${args[@]:2}" )
+fi
+if [[ "${args[0]:-}" == "--region" ]]; then
+  args=( "${args[@]:2}" )
+fi
+
+case "${args[*]}" in
+  ssm\ send-command\ --instance-ids\ i-1234567890abcdef0\ --document-name\ AWS-RunShellScript\ --parameters\ file://*\ --output\ json)
+    parameters_path="${args[7]#file://}"
+    jq -r '.commands[0]' "$parameters_path" >"$TEST_AWS_COMMAND_LOG"
+    printf '{"Command":{"CommandId":"cmd-123"}}\n'
+    ;;
+  "ssm get-command-invocation --command-id cmd-123 --instance-id i-1234567890abcdef0 --output json")
+    printf '{"Status":"Success","StandardOutputContent":"ok","StandardErrorContent":""}\n'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$fake_aws"
+
+  PATH="$workdir:$PATH"
+  export TEST_AWS_LOG="$aws_log"
+  export TEST_AWS_COMMAND_LOG="$workdir/command.log"
+  stdout="$(production_ssm_run_shell_command "juno" "us-east-1" "i-1234567890abcdef0" $'set -euo pipefail\nprintf "hello\\n"' 1 0)"
+
+  assert_eq "$stdout" "ok" "ssm helper returns command stdout"
+  assert_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "base64 -d >\"\$tmp_script\"" "ssm helper stages the payload via base64"
+  assert_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "bash \"\$tmp_script\"" "ssm helper executes the staged payload with bash"
+  assert_not_contains "$(cat "$TEST_AWS_COMMAND_LOG")" "set -euo pipefail" "ssm helper does not hand raw bash-only syntax to sh"
+
+  unset TEST_AWS_LOG
+  unset TEST_AWS_COMMAND_LOG
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
 main() {
   setup_default_checkpoint_signer_kms_provisioner
   trap cleanup_default_checkpoint_signer_kms_provisioner EXIT
@@ -3762,6 +3815,7 @@ main() {
   test_production_maybe_use_public_sts_endpoint_sets_global_override_for_private_regional_resolution
   test_production_maybe_use_public_sts_endpoint_preserves_existing_override
   test_production_maybe_use_public_sts_endpoint_skips_public_regional_resolution
+  test_production_ssm_run_shell_command_executes_payload_via_bash
 }
 
 main "$@"

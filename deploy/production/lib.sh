@@ -2033,13 +2033,29 @@ production_ssm_run_shell_command() {
   local instance_id="$3"
   local command="$4"
   local send_json command_id invocation_json invocation_status stderr stdout parameters_json parameters_file
+  local encoded_command wrapped_command
   local poll_attempts="${5:-30}"
   local poll_interval_seconds="${6:-2}"
 
   have_cmd aws || die "required command not found: aws"
+  have_cmd base64 || die "required command not found: base64"
   have_cmd jq || die "required command not found: jq"
 
-  parameters_json="$(jq -cn --arg command "$command" '{commands: [$command]}')"
+  encoded_command="$(printf '%s' "$command" | base64 | tr -d '\n')"
+  wrapped_command="$(cat <<EOF
+tmp_script=\$(mktemp)
+cleanup() {
+  rm -f "\$tmp_script"
+}
+trap cleanup EXIT
+base64 -d >"\$tmp_script" <<'__INTENTS_JUNO_SSM_COMMAND__'
+$encoded_command
+__INTENTS_JUNO_SSM_COMMAND__
+bash "\$tmp_script"
+EOF
+)"
+
+  parameters_json="$(jq -cn --arg command "$wrapped_command" '{commands: [$command]}')"
   parameters_file="$(mktemp)"
   printf '%s' "$parameters_json" >"$parameters_file"
   send_json="$(AWS_PAGER="" aws --profile "$aws_profile" --region "$aws_region" ssm send-command \
