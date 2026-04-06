@@ -50,6 +50,9 @@ write_operator_handoff_fixture() {
   "operator_id": "$operator_id",
   "operator_address": "$operator_address",
   "checkpoint_signer_kms_key_id": "arn:aws:kms:us-east-1:021490342184:key/final-$operator_index",
+  "base_relayer_address": "0x777777777777777777777777777777777777777$operator_index",
+  "withdraw_coordinator_juno_wallet_id": "wallet-mainnet-$operator_index-coordinator",
+  "withdraw_finalizer_juno_scan_wallet_id": "wallet-mainnet-$operator_index-finalizer",
   "runtime_material_ref": {
     "mode": "s3-kms-zip",
     "bucket": "mainnet-runtime-materials",
@@ -111,6 +114,9 @@ JSON
   assert_eq "$(jq -r '.operator_address' "$handoff_dir/operators/$op2/operator-deploy.json")" "0x8888888888888888888888888888888888888888" "apply updates the second operator address"
   assert_eq "$(jq -r '.checkpoint_signer_kms_key_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "arn:aws:kms:us-east-1:021490342184:key/final-1" "apply updates the first operator checkpoint signer kms key"
   assert_eq "$(jq -r '.runtime_config_secret_id' "$handoff_dir/operators/$op2/operator-deploy.json")" "mainnet/op2/runtime-config" "apply updates the second runtime config secret id"
+  assert_eq "$(jq -r '.withdraw_coordinator_juno_wallet_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "wallet-mainnet-1-coordinator" "apply updates the first coordinator wallet id"
+  assert_eq "$(jq -r '.withdraw_finalizer_juno_scan_wallet_id' "$handoff_dir/operators/$op2/operator-deploy.json")" "wallet-mainnet-2-finalizer" "apply updates the second finalizer wallet id"
+  assert_eq "$(jq -r '.deposit_scan_juno_scan_wallet_id' "$handoff_dir/operators/$op1/operator-deploy.json")" "wallet-mainnet-1-finalizer" "apply derives the deposit scan wallet id from the returned handoff"
   assert_eq "$(jq -r '.withdraw_operator_endpoints[0]' "$handoff_dir/operators/$op1/operator-deploy.json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "apply writes the first operator endpoint roster entry"
   assert_eq "$(jq -r '.withdraw_operator_endpoints[1]' "$handoff_dir/operators/$op1/operator-deploy.json")" "0x8888888888888888888888888888888888888888=203.0.113.12:18444" "apply writes the second operator endpoint roster entry"
   assert_eq "$(jq -r '.checkpoint.operators[0]' "$handoff_dir/shared-manifest.json")" "0x9999999999999999999999999999999999999999" "apply rewrites the shared checkpoint operator roster"

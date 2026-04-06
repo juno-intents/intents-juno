@@ -3080,6 +3080,7 @@ production_render_operator_handoffs() {
     local checkpoint_blob_bucket checkpoint_blob_prefix checkpoint_blob_sse_kms_key_id
     local operator_aws_profile operator_aws_region runtime_config_secret_id runtime_config_secret_region
     local runtime_material_mode runtime_material_bucket runtime_material_key runtime_material_region runtime_material_kms_key_id
+    local withdraw_coordinator_juno_wallet_id withdraw_finalizer_juno_scan_wallet_id deposit_scan_juno_scan_wallet_id
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id' <<<"$operator_json")"
     operator_index="$(jq -r '.index' <<<"$operator_json")"
@@ -3117,6 +3118,12 @@ production_render_operator_handoffs() {
     runtime_material_key="$(jq -r '.runtime_material_ref.key // empty' <<<"$operator_json")"
     runtime_material_region="$(jq -r '.runtime_material_ref.region // empty' <<<"$operator_json")"
     runtime_material_kms_key_id="$(jq -r '.runtime_material_ref.kms_key_id // empty' <<<"$operator_json")"
+    withdraw_coordinator_juno_wallet_id="$(jq -r '.withdraw_coordinator_juno_wallet_id // empty' <<<"$operator_json")"
+    withdraw_finalizer_juno_scan_wallet_id="$(jq -r '.withdraw_finalizer_juno_scan_wallet_id // empty' <<<"$operator_json")"
+    deposit_scan_juno_scan_wallet_id="$(jq -r '.deposit_scan_juno_scan_wallet_id // empty' <<<"$operator_json")"
+    if [[ -z "$deposit_scan_juno_scan_wallet_id" ]]; then
+      deposit_scan_juno_scan_wallet_id="${withdraw_finalizer_juno_scan_wallet_id:-$withdraw_coordinator_juno_wallet_id}"
+    fi
     manifest_path="$handoff_dir/operator-deploy.json"
 
     case "$checkpoint_signer_driver" in
@@ -3175,6 +3182,9 @@ production_render_operator_handoffs() {
       --arg runtime_material_kms_key_id "$runtime_material_kms_key_id" \
       --arg runtime_config_secret_id "$runtime_config_secret_id" \
       --arg runtime_config_secret_region "$runtime_config_secret_region" \
+      --arg withdraw_coordinator_juno_wallet_id "$withdraw_coordinator_juno_wallet_id" \
+      --arg withdraw_finalizer_juno_scan_wallet_id "$withdraw_finalizer_juno_scan_wallet_id" \
+      --arg deposit_scan_juno_scan_wallet_id "$deposit_scan_juno_scan_wallet_id" \
       --arg dkg_tls_dir "$dkg_tls_dir" \
       --arg public_dns_name "$public_dns_name" \
       --arg public_endpoint "$public_endpoint" \
@@ -3215,6 +3225,9 @@ production_render_operator_handoffs() {
         ),
         runtime_config_secret_id: (if $runtime_config_secret_id == "" then null else $runtime_config_secret_id end),
         runtime_config_secret_region: (if $runtime_config_secret_region == "" then null else $runtime_config_secret_region end),
+        withdraw_coordinator_juno_wallet_id: (if $withdraw_coordinator_juno_wallet_id == "" then null else $withdraw_coordinator_juno_wallet_id end),
+        withdraw_finalizer_juno_scan_wallet_id: (if $withdraw_finalizer_juno_scan_wallet_id == "" then null else $withdraw_finalizer_juno_scan_wallet_id end),
+        deposit_scan_juno_scan_wallet_id: (if $deposit_scan_juno_scan_wallet_id == "" then null else $deposit_scan_juno_scan_wallet_id end),
         dkg_tls_dir: (if $dkg_tls_dir == "" then null else $dkg_tls_dir end),
         withdraw_operator_endpoints: $withdraw_operator_endpoints,
         public_endpoint: (if $public_endpoint == "" then null else $public_endpoint end),
@@ -3243,6 +3256,7 @@ production_render_operator_stack_env() {
   local deposit_relayer_base_rpc_url
   local kafka_critical_key_id runtime_config_secret_id
   local deposit_owallet_ivk withdraw_owallet_ovk
+  local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
   deposit_scan_wallet_id=""
   kafka_critical_key_id=""
@@ -3257,6 +3271,9 @@ production_render_operator_stack_env() {
   withdraw_operator_endpoints="$(jq -r '.withdraw_operator_endpoints // [] | join(",")' "$operator_deploy")"
   runtime_config_secret_id="$(production_json_optional "$operator_deploy" '.runtime_config_secret_id')"
   [[ -n "$runtime_config_secret_id" ]] || die "operator deploy manifest is missing runtime_config_secret_id"
+  operator_deposit_scan_wallet_id="$(production_json_optional "$operator_deploy" '.deposit_scan_juno_scan_wallet_id')"
+  operator_withdraw_coordinator_juno_wallet_id="$(production_json_optional "$operator_deploy" '.withdraw_coordinator_juno_wallet_id')"
+  operator_withdraw_finalizer_juno_scan_wallet_id="$(production_json_optional "$operator_deploy" '.withdraw_finalizer_juno_scan_wallet_id')"
   owallet_ua="$(production_json_required "$shared_manifest" '.contracts.owallet_ua | select(type == "string" and length > 0)')"
   signer_ufvk="$(production_json_required "$shared_manifest" '.checkpoint.signer_ufvk | select(type == "string" and length > 0)')"
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
@@ -3275,6 +3292,15 @@ production_render_operator_stack_env() {
   fi
   [[ -n "$withdraw_operator_endpoints" ]] || die "operator deploy manifest is missing withdraw_operator_endpoints"
   deposit_scan_wallet_id="$(production_env_first_value "$resolved_secret_env" DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID WITHDRAW_FINALIZER_JUNO_SCAN_WALLET_ID WITHDRAW_COORDINATOR_JUNO_WALLET_ID || true)"
+  if [[ -z "$deposit_scan_wallet_id" ]]; then
+    deposit_scan_wallet_id="$operator_deposit_scan_wallet_id"
+  fi
+  if [[ -z "$deposit_scan_wallet_id" ]]; then
+    deposit_scan_wallet_id="$operator_withdraw_finalizer_juno_scan_wallet_id"
+  fi
+  if [[ -z "$deposit_scan_wallet_id" ]]; then
+    deposit_scan_wallet_id="$operator_withdraw_coordinator_juno_wallet_id"
+  fi
   deposit_owallet_ivk="$(production_env_first_value "$resolved_secret_env" DEPOSIT_OWALLET_IVK || true)"
   withdraw_owallet_ovk="$(production_env_first_value "$resolved_secret_env" WITHDRAW_OWALLET_OVK || true)"
   if [[ -z "$deposit_owallet_ivk" || -z "$withdraw_owallet_ovk" ]]; then

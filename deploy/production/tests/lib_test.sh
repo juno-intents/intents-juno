@@ -2407,6 +2407,86 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_operator_stack_env_enables_deposit_scan_from_manifest_wallet_id() {
+  local workdir output_env resolved_env
+  workdir="$(mktemp -d)"
+
+  cat >"$workdir/shared-manifest.json" <<'JSON'
+{
+  "contracts": {
+    "base_chain_id": 8453,
+    "bridge": "0xCAc6F96b4A242674A29f1F4501EeE9CE85E7fF32",
+    "base_rpc_url": "https://mainnet.base.org",
+    "base_event_scanner_start_block": 44310284,
+    "owallet_ua": "j1mainnetwallet"
+  },
+  "checkpoint": {
+    "operators": ["0x1111111111111111111111111111111111111111"],
+    "threshold": 1,
+    "signer_ufvk": "jview14r9cvwse8qwfccpw9xeldfv0tehgmaq97822rym7lejzc3jn8fyq9a0rysc272nuk9093myllvrqy2tjceyydevxpwx98vmm86fdnwsm7rnhmz44tclcxtr269jz2pny9v53p6z2kuevn2g0a5lhxvn5067jqe58ehhz560utany8uvevcst5gcg2sr9w"
+  },
+  "shared_services": {
+    "kafka": {
+      "bootstrap_brokers": "b-1.example:9098",
+      "auth": {
+        "mode": "aws-msk-iam",
+        "aws_region": "us-east-1"
+      }
+    },
+    "ipfs": {
+      "api_url": "https://ipfs.example.invalid"
+    },
+    "artifacts": {
+      "checkpoint_blob_bucket": "checkpoint-bucket",
+      "checkpoint_blob_prefix": "checkpoints",
+      "checkpoint_blob_sse_kms_key_id": "arn:aws:kms:us-east-1:111111111111:key/checkpoint"
+    }
+  }
+}
+JSON
+
+  cat >"$workdir/operator-deploy.json" <<'JSON'
+{
+  "version": "3",
+  "environment": "mainnet",
+  "operator_id": "0x1111111111111111111111111111111111111111",
+  "operator_address": "0x1111111111111111111111111111111111111111",
+  "operator_index": 1,
+  "aws_region": "us-west-2",
+  "checkpoint_signer_driver": "aws-kms",
+  "checkpoint_signer_kms_key_id": "arn:aws:kms:us-west-2:111111111111:key/signer",
+  "runtime_config_secret_id": "mainnet/op1/runtime-config",
+  "runtime_config_secret_region": "us-west-2",
+  "runtime_material_ref": {
+    "mode": "s3-kms-zip",
+    "bucket": "runtime-bucket",
+    "key": "operators/op1/runtime-material.zip",
+    "region": "us-west-2",
+    "kms_key_id": "arn:aws:kms:us-west-2:111111111111:key/runtime"
+  },
+  "withdraw_coordinator_juno_wallet_id": "wallet-mainnet-op1",
+  "withdraw_finalizer_juno_scan_wallet_id": "wallet-mainnet-op1",
+  "deposit_scan_juno_scan_wallet_id": "wallet-mainnet-op1",
+  "withdraw_operator_endpoints": [
+    "0x1111111111111111111111111111111111111111=172.31.0.10:18443"
+  ]
+  }
+JSON
+
+  cat >"$workdir/resolved.env" <<'EOF'
+DEPOSIT_OWALLET_IVK=0x11111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111111
+WITHDRAW_OWALLET_OVK=0x2222222222222222222222222222222222222222222222222222222222222222
+EOF
+  resolved_env="$workdir/resolved.env"
+  output_env="$workdir/operator-stack.env"
+  production_render_operator_stack_env "$workdir/shared-manifest.json" "$workdir/operator-deploy.json" "$resolved_env" "$output_env"
+
+  assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_ENABLED=true" "rendered env enables deposit scan from manifest fallback"
+  assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_JUNO_SCAN_WALLET_ID=wallet-mainnet-op1" "rendered env uses the manifest wallet id when local secret resolution is disabled"
+  assert_contains "$(cat "$output_env")" "DEPOSIT_SCAN_JUNO_RPC_URL=http://127.0.0.1:18232" "rendered env still wires the scanner rpc url"
+  rm -rf "$workdir"
+}
+
 test_render_operator_stack_env_injects_queueauth_secret_from_shared_manifest() {
   local workdir shared_manifest handoff_dir resolved_env output_env tf_json fake_bin old_path
   local queueauth_secret_arn
@@ -3828,6 +3908,7 @@ main() {
   test_render_operator_stack_env_rejects_local_checkpoint_signer_driver
   test_render_operator_stack_env_preserves_secure_preview_signer_configuration
   test_render_operator_stack_env_enables_deposit_scan_from_withdraw_wallet_id
+  test_render_operator_stack_env_enables_deposit_scan_from_manifest_wallet_id
   test_render_operator_stack_env_prefers_inline_ipfs_bearer_token
   test_render_operator_stack_env_prefers_inline_queueauth_hmac_key
   test_render_operator_stack_env_adds_base_sepolia_deposit_relayer_fallback
