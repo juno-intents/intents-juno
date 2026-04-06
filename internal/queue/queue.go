@@ -344,6 +344,201 @@ func NewKafkaTransportFromEnv() (*kafka.Transport, error) {
 	return kafkaTransportFromEnv()
 }
 
+type kafkaAdminClient interface {
+	Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
+	CreateTopics(ctx context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error)
+}
+
+var newKafkaAdminClient = func(broker string, timeout time.Duration) (kafkaAdminClient, error) {
+	transport, err := NewKafkaTransportFromEnv()
+	if err != nil {
+		return nil, err
+	}
+	return &kafka.Client{
+		Addr:      kafka.TCP(broker),
+		Timeout:   timeout,
+		Transport: transport,
+	}, nil
+}
+
+// EnsureKafkaTopics creates missing Kafka topics before services begin producing
+// or consuming. It is a no-op for empty topic lists.
+func EnsureKafkaTopics(ctx context.Context, brokers []string, topics []string) error {
+	return ensureKafkaTopicsWithFactory(ctx, brokers, topics, newKafkaAdminClient)
+}
+
+func ensureKafkaTopicsWithFactory(
+	ctx context.Context,
+	brokers []string,
+	topics []string,
+	clientFactory func(string, time.Duration) (kafkaAdminClient, error),
+) error {
+	brokers = normalizeList(brokers)
+	if len(brokers) == 0 {
+		return errors.New("kafka topic creation requires at least one broker")
+	}
+	topics = normalizeDedupedList(topics)
+	if len(topics) == 0 {
+		return nil
+	}
+
+	var lastErr error
+	for _, broker := range brokers {
+		client, err := clientFactory(broker, 10*time.Second)
+		if err != nil {
+			lastErr = fmt.Errorf("new admin client for %s: %w", broker, err)
+			continue
+		}
+
+		inspectCtx, inspectCancel := context.WithTimeout(ctx, 15*time.Second)
+		missingTopics, err := kafkaTopicsMissing(inspectCtx, client, topics)
+		inspectCancel()
+		if err != nil {
+			lastErr = fmt.Errorf("metadata topics via %s: %w", broker, err)
+			continue
+		}
+		if len(missingTopics) == 0 {
+			return nil
+		}
+
+		createReq := &kafka.CreateTopicsRequest{
+			Addr:   kafka.TCP(broker),
+			Topics: make([]kafka.TopicConfig, len(missingTopics)),
+		}
+		for i, topic := range missingTopics {
+			createReq.Topics[i] = kafka.TopicConfig{
+				Topic:             topic,
+				NumPartitions:     -1,
+				ReplicationFactor: -1,
+			}
+		}
+
+		createCtx, createCancel := context.WithTimeout(ctx, 15*time.Second)
+		createResp, err := client.CreateTopics(createCtx, createReq)
+		createCancel()
+		if err != nil {
+			lastErr = fmt.Errorf("create topics via %s: %w", broker, err)
+			continue
+		}
+		if createResp != nil {
+			failedTopics := make([]string, 0)
+			for _, topic := range missingTopics {
+				if topicErr := createResp.Errors[topic]; topicErr != nil && !isTopicAlreadyExistsError(topicErr) {
+					failedTopics = append(failedTopics, fmt.Sprintf("%s: %v", topic, topicErr))
+				}
+			}
+			if len(failedTopics) > 0 {
+				lastErr = fmt.Errorf("create topics via %s: %s", broker, strings.Join(failedTopics, "; "))
+				continue
+			}
+		}
+
+		verifyCtx, verifyCancel := context.WithTimeout(ctx, 15*time.Second)
+		err = runWithRetry(verifyCtx, time.Second, func(stepCtx context.Context) error {
+			stillMissing, err := kafkaTopicsMissing(stepCtx, client, topics)
+			if err != nil {
+				return err
+			}
+			if len(stillMissing) > 0 {
+				return fmt.Errorf("missing %s", strings.Join(stillMissing, ", "))
+			}
+			return nil
+		})
+		verifyCancel()
+		if err == nil {
+			return nil
+		}
+		lastErr = fmt.Errorf("verify topics via %s: %w", broker, err)
+	}
+
+	if lastErr == nil {
+		lastErr = errors.New("unable to create kafka topics")
+	}
+	return lastErr
+}
+
+func kafkaTopicsMissing(ctx context.Context, client kafkaAdminClient, topics []string) ([]string, error) {
+	topics = normalizeDedupedList(topics)
+	if len(topics) == 0 {
+		return nil, nil
+	}
+	meta, err := client.Metadata(ctx, &kafka.MetadataRequest{Topics: topics})
+	if err != nil {
+		return nil, err
+	}
+	metadataByTopic := make(map[string]kafka.Topic, len(meta.Topics))
+	for _, topicMeta := range meta.Topics {
+		metadataByTopic[topicMeta.Name] = topicMeta
+	}
+	missing := make([]string, 0)
+	for _, topic := range topics {
+		topicMeta, ok := metadataByTopic[topic]
+		if !ok {
+			missing = append(missing, topic)
+			continue
+		}
+		if topicMeta.Error != nil {
+			if errors.Is(topicMeta.Error, kafka.UnknownTopicOrPartition) {
+				missing = append(missing, topic)
+				continue
+			}
+			return nil, topicMeta.Error
+		}
+		if len(topicMeta.Partitions) == 0 {
+			missing = append(missing, topic)
+		}
+	}
+	return missing, nil
+}
+
+func isTopicAlreadyExistsError(err error) bool {
+	var kafkaErr kafka.Error
+	return errors.As(err, &kafkaErr) && kafkaErr == kafka.TopicAlreadyExists
+}
+
+func normalizeDedupedList(values []string) []string {
+	values = normalizeList(values)
+	if len(values) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, value := range values {
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
+}
+
+func runWithRetry(ctx context.Context, interval time.Duration, fn func(context.Context) error) error {
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
+
+	var lastErr error
+	for {
+		if err := fn(ctx); err == nil {
+			return nil
+		} else {
+			lastErr = err
+		}
+
+		timer := time.NewTimer(interval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			if lastErr == nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("%w (last error: %v)", ctx.Err(), lastErr)
+		case <-timer.C:
+		}
+	}
+}
+
 type kafkaConsumer struct {
 	reader *kafka.Reader
 

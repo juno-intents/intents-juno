@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -13,6 +14,25 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/segmentio/kafka-go"
 )
+
+type stubKafkaAdminClient struct {
+	metadataFunc     func(context.Context, *kafka.MetadataRequest) (*kafka.MetadataResponse, error)
+	createTopicsFunc func(context.Context, *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error)
+}
+
+func (s *stubKafkaAdminClient) Metadata(ctx context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+	if s.metadataFunc == nil {
+		return nil, nil
+	}
+	return s.metadataFunc(ctx, req)
+}
+
+func (s *stubKafkaAdminClient) CreateTopics(ctx context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+	if s.createTopicsFunc == nil {
+		return nil, nil
+	}
+	return s.createTopicsFunc(ctx, req)
+}
 
 func TestNewConsumerValidation(t *testing.T) {
 	t.Parallel()
@@ -240,6 +260,133 @@ func TestQueueKafkaTLSEnabled(t *testing.T) {
 				t.Fatalf("queueKafkaTLSEnabled(%q) = %t, want %t", tc.value, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestEnsureKafkaTopics_CreatesMissingTopics(t *testing.T) {
+	t.Parallel()
+
+	metadataCalls := 0
+	var created []string
+	client := &stubKafkaAdminClient{
+		metadataFunc: func(_ context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+			metadataCalls++
+			if metadataCalls == 1 {
+				return &kafka.MetadataResponse{
+					Topics: []kafka.Topic{
+						{
+							Name:       req.Topics[0],
+							Partitions: []kafka.Partition{{ID: 0}},
+						},
+						{
+							Name:       req.Topics[1],
+							Partitions: nil,
+							Error:      kafka.UnknownTopicOrPartition,
+						},
+					},
+				}, nil
+			}
+			return &kafka.MetadataResponse{
+				Topics: []kafka.Topic{
+					{
+						Name:       req.Topics[0],
+						Partitions: []kafka.Partition{{ID: 0}},
+					},
+					{
+						Name:       req.Topics[1],
+						Partitions: []kafka.Partition{{ID: 0}},
+					},
+				},
+			}, nil
+		},
+		createTopicsFunc: func(_ context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+			for _, topic := range req.Topics {
+				created = append(created, topic.Topic)
+			}
+			return &kafka.CreateTopicsResponse{Errors: map[string]error{}}, nil
+		},
+	}
+
+	err := ensureKafkaTopicsWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098"},
+		[]string{"proof.requests.v1", "proof.fulfillments.v1"},
+		func(string, time.Duration) (kafkaAdminClient, error) { return client, nil },
+	)
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicsWithFactory: %v", err)
+	}
+	if metadataCalls < 2 {
+		t.Fatalf("metadataCalls = %d, want at least 2", metadataCalls)
+	}
+	if got, want := strings.Join(created, ","), "proof.fulfillments.v1"; got != want {
+		t.Fatalf("created = %q, want %q", got, want)
+	}
+}
+
+func TestEnsureKafkaTopics_SkipsWhenTopicsAlreadyExist(t *testing.T) {
+	t.Parallel()
+
+	createCalled := false
+	client := &stubKafkaAdminClient{
+		metadataFunc: func(_ context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+			topics := make([]kafka.Topic, 0, len(req.Topics))
+			for _, topic := range req.Topics {
+				topics = append(topics, kafka.Topic{
+					Name:       topic,
+					Partitions: []kafka.Partition{{ID: 0}},
+				})
+			}
+			return &kafka.MetadataResponse{Topics: topics}, nil
+		},
+		createTopicsFunc: func(_ context.Context, _ *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+			createCalled = true
+			return nil, nil
+		},
+	}
+
+	err := ensureKafkaTopicsWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098"},
+		[]string{"proof.requests.v1", "proof.requests.v1"},
+		func(string, time.Duration) (kafkaAdminClient, error) { return client, nil },
+	)
+	if err != nil {
+		t.Fatalf("ensureKafkaTopicsWithFactory: %v", err)
+	}
+	if createCalled {
+		t.Fatal("expected createTopics not to be called")
+	}
+}
+
+func TestEnsureKafkaTopics_ReturnsCreateError(t *testing.T) {
+	t.Parallel()
+
+	client := &stubKafkaAdminClient{
+		metadataFunc: func(_ context.Context, req *kafka.MetadataRequest) (*kafka.MetadataResponse, error) {
+			topics := make([]kafka.Topic, 0, len(req.Topics))
+			for _, topic := range req.Topics {
+				topics = append(topics, kafka.Topic{Name: topic, Error: kafka.UnknownTopicOrPartition})
+			}
+			return &kafka.MetadataResponse{Topics: topics}, nil
+		},
+		createTopicsFunc: func(_ context.Context, req *kafka.CreateTopicsRequest) (*kafka.CreateTopicsResponse, error) {
+			return &kafka.CreateTopicsResponse{
+				Errors: map[string]error{
+					req.Topics[0].Topic: errors.New("denied"),
+				},
+			}, nil
+		},
+	}
+
+	err := ensureKafkaTopicsWithFactory(
+		context.Background(),
+		[]string{"broker-1:9098"},
+		[]string{"proof.requests.v1"},
+		func(string, time.Duration) (kafkaAdminClient, error) { return client, nil },
+	)
+	if err == nil || !strings.Contains(err.Error(), "denied") {
+		t.Fatalf("expected create error, got %v", err)
 	}
 }
 

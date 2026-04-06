@@ -121,6 +121,17 @@ func main() {
 		os.Exit(2)
 	}
 
+	if strings.EqualFold(strings.TrimSpace(*queueDriver), queue.DriverKafka) {
+		if err := queue.EnsureKafkaTopics(
+			ctx,
+			queue.SplitCommaList(*queueBrokers),
+			[]string{*inputTopic, *resultTopic, *failureTopic},
+		); err != nil {
+			log.Error("ensure kafka topics", "err", err)
+			os.Exit(2)
+		}
+	}
+
 	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
 		Driver:        *queueDriver,
 		Brokers:       queue.SplitCommaList(*queueBrokers),
