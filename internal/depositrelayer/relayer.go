@@ -384,16 +384,7 @@ func (r *Relayer) FlushDue(ctx context.Context) error {
 	if err := r.recoverStaleBatches(ctx); err != nil {
 		return err
 	}
-	if err := r.restoreCheckpointFromStore(ctx); err != nil {
-		return err
-	}
-	if r.checkpoint == nil || len(r.opSigs) == 0 {
-		return nil
-	}
-	if err := r.refillFromStore(ctx); err != nil {
-		return err
-	}
-	return nil
+	return r.refillFromStore(ctx)
 }
 
 func (r *Relayer) Flush(ctx context.Context) error {
@@ -406,16 +397,7 @@ func (r *Relayer) Flush(ctx context.Context) error {
 	if err := r.recoverStaleBatches(ctx); err != nil {
 		return err
 	}
-	if err := r.restoreCheckpointFromStore(ctx); err != nil {
-		return err
-	}
-	if r.checkpoint == nil || len(r.opSigs) == 0 {
-		return nil
-	}
-	if err := r.refillFromStore(ctx); err != nil {
-		return err
-	}
-	return nil
+	return r.refillFromStore(ctx)
 }
 
 func (r *Relayer) refillFromStore(ctx context.Context) error {
