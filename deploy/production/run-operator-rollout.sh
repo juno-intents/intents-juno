@@ -60,6 +60,7 @@ junocashd_conf="$stage_dir/junocashd.conf"
 shared_manifest_path="$stage_dir/shared-manifest.json"
 operator_deploy="$stage_dir/operator-deploy.json"
 backup_package_script="$stage_dir/backup-package.sh"
+dkg_common_stage="$stage_dir/common.sh"
 config_hydrator_stage="$stage_dir/intents-juno-config-hydrator.sh"
 signer_ufvk_file="$stage_dir/ufvk.txt"
 dkg_peer_hosts_file="$stage_dir/dkg-peer-hosts.json"
@@ -68,6 +69,7 @@ dkg_peer_hosts_file="$stage_dir/dkg-peer-hosts.json"
 [[ -f "$shared_manifest_path" ]] || die "missing stage file: $shared_manifest_path"
 [[ -f "$operator_deploy" ]] || die "missing stage file: $operator_deploy"
 [[ -f "$backup_package_script" ]] || die "missing stage file: $backup_package_script"
+[[ -f "$dkg_common_stage" ]] || die "missing stage file: $dkg_common_stage"
 
 restore_package_path=""
 cleanup_restore_package="false"
@@ -167,6 +169,26 @@ fetch_restore_package() {
 restore_runtime() {
   sudo bash "$backup_package_script" restore --package "$restore_package_path" --workdir "$runtime_dir" --force
   sudo chown -R intents-juno:intents-juno "$runtime_dir"
+}
+
+ensure_runtime_dkg_admin_binary() {
+  local dkg_stage_dir dkg_admin_downloaded
+  if sudo test -x "$runtime_dir/bin/dkg-admin"; then
+    return 0
+  fi
+
+  # Some older runtime-material bundles omitted payload/bin/dkg-admin. Repair
+  # them from the published dkg-admin release rather than requiring a re-export.
+  # shellcheck disable=SC1090
+  source "$dkg_common_stage"
+
+  dkg_stage_dir="$(mktemp -d)"
+  export JUNO_DKG_DISABLE_SOURCE_BUILD="true"
+  dkg_admin_downloaded="$(ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}" "$dkg_stage_dir")"
+  sudo install -d -m 0755 "$runtime_dir/bin"
+  sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"
+  sudo chown intents-juno:intents-juno "$runtime_dir/bin/dkg-admin"
+  rm -rf "$dkg_stage_dir"
 }
 
 compute_dkg_roster_hash_hex() {
@@ -270,6 +292,7 @@ ensure_service_user
 install_stage_files
 fetch_restore_package
 restore_runtime
+ensure_runtime_dkg_admin_binary
 stage_optional_tls_files
 rewrite_dkg_roster
 hydrate_and_restart

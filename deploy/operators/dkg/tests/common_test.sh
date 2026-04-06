@@ -174,6 +174,14 @@ test_checksum_downloads_fail_closed() {
   assert_contains "$common_text" 'die "checksum file unavailable for $asset"' "common hard-fails when checksum files are unavailable"
 }
 
+test_dkg_binary_source_build_can_be_disabled() {
+  local common_text
+  common_text="$(cat "$SCRIPT_DIR/../common.sh")"
+
+  assert_contains "$common_text" 'if [[ "${JUNO_DKG_DISABLE_SOURCE_BUILD:-false}" == "true" ]]; then' "common supports disabling dkg source-build fallback"
+  assert_contains "$common_text" 'die "release asset missing for $tool $version and source-build fallback is disabled"' "common fails closed when release-only mode cannot find a dkg asset"
+}
+
 main() {
   test_normalize_eth_address
   test_parse_endpoint_host_port
@@ -185,6 +193,7 @@ main() {
   test_require_tailscale_active_allows_vpc_private_mode
   test_aws_dependency_install_fallback_exists
   test_checksum_downloads_fail_closed
+  test_dkg_binary_source_build_can_be_disabled
 }
 
 main "$@"

@@ -552,6 +552,10 @@ ensure_dkg_binary() {
   fi
   rm -rf "$tmp_dir"
 
+  if [[ "${JUNO_DKG_DISABLE_SOURCE_BUILD:-false}" == "true" ]]; then
+    die "release asset missing for $tool $version and source-build fallback is disabled"
+  fi
+
   log "release asset missing for $tool $version; attempting cargo source build fallback"
   ensure_command go
   ensure_command curl

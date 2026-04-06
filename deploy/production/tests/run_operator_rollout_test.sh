@@ -30,8 +30,22 @@ test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_n
   assert_contains "$script_text" "intents-juno-multikey-extend-signer.sh" "run-operator-rollout reinstalls the extend signer wrapper on live rollouts"
 }
 
+test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release() {
+  local script_text
+  script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
+
+  assert_contains "$script_text" 'dkg_common_stage="$stage_dir/common.sh"' "run-operator-rollout stages the dkg common helper"
+  assert_contains "$script_text" 'ensure_runtime_dkg_admin_binary() {' "run-operator-rollout defines a runtime dkg-admin repair helper"
+  assert_contains "$script_text" 'if sudo test -x "$runtime_dir/bin/dkg-admin"; then' "run-operator-rollout only repairs dkg-admin when runtime restore missed it"
+  assert_contains "$script_text" 'export JUNO_DKG_DISABLE_SOURCE_BUILD="true"' "run-operator-rollout disables dkg source-build fallback during live repair"
+  assert_contains "$script_text" 'ensure_dkg_binary "dkg-admin" "${JUNO_DKG_VERSION_DEFAULT:-v0.1.0}" "$dkg_stage_dir"' "run-operator-rollout repairs dkg-admin from the published release path only"
+  assert_contains "$script_text" 'sudo install -d -m 0755 "$runtime_dir/bin"' "run-operator-rollout creates the runtime bin dir before repairing dkg-admin"
+  assert_contains "$script_text" 'sudo install -m 0755 "$dkg_admin_downloaded" "$runtime_dir/bin/dkg-admin"' "run-operator-rollout installs the repaired dkg-admin into the runtime dir"
+}
+
 main() {
   test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_newline
+  test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release
 }
 
 main "$@"
