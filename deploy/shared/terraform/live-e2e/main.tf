@@ -1497,6 +1497,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
       environment = local.shared_proof_funder_environment
       secrets = [
         {
+          name      = "PROOF_REQUESTOR_KEY"
+          valueFrom = local.shared_sp1_requestor_secret_arn
+        },
+        {
           name      = "PROOF_FUNDER_KEY"
           valueFrom = local.shared_sp1_funder_secret_arn
         }

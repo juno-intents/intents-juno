@@ -845,7 +845,7 @@ data "aws_iam_policy_document" "proof_funder_execution_access" {
       "secretsmanager:DescribeSecret",
       "secretsmanager:GetSecretValue",
     ]
-    resources = [var.shared_sp1_funder_secret_arn]
+    resources = [var.shared_sp1_funder_secret_arn, var.shared_sp1_requestor_secret_arn]
   }
 
   statement {
@@ -1176,6 +1176,10 @@ resource "aws_ecs_task_definition" "proof_funder" {
         {
           name      = "POSTGRES_DSN"
           valueFrom = aws_secretsmanager_secret.shared_postgres_dsn.arn
+        },
+        {
+          name      = "PROOF_REQUESTOR_KEY"
+          valueFrom = var.shared_sp1_requestor_secret_arn
         },
         {
           name      = "PROOF_FUNDER_KEY"
