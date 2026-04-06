@@ -1,6 +1,7 @@
 package depositscanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/binary"
 	"encoding/hex"
@@ -36,6 +37,14 @@ func testMemoHex(recipient common.Address, nonce uint64) string {
 	}
 	encoded := m.Encode()
 	return hex.EncodeToString(encoded[:])
+}
+
+func testASCIIHexWrappedMemoHex(recipient common.Address, nonce uint64) string {
+	raw := common.Hex2Bytes(testMemoHex(recipient, nonce))
+	inner := hex.EncodeToString(bytes.TrimRight(raw, "\x00"))
+	padded := make([]byte, memo.MemoLen)
+	copy(padded, []byte(inner))
+	return hex.EncodeToString(padded)
 }
 
 type stubScan struct {
@@ -142,7 +151,11 @@ func TestScanner_ValidDeposit(t *testing.T) {
 		},
 		witnessResp: makeWitnessResponse(uint32(pos)),
 	}
-	rpc := &stubRPC{}
+	rpc := &stubRPC{
+		blockHashes: map[uint64]common.Hash{
+			77: common.HexToHash("0x77"),
+		},
+	}
 	ingester := &stubIngester{}
 
 	s, err := New(testConfig(), scan, rpc, ingester, slog.Default())
@@ -174,6 +187,50 @@ func TestScanner_ValidDeposit(t *testing.T) {
 	leafIndex := binary.LittleEndian.Uint32(ev.ProofWitnessItem[0:4])
 	if leafIndex != uint32(pos) {
 		t.Fatalf("leaf index: got=%d want=%d", leafIndex, pos)
+	}
+}
+
+func TestScanner_ASCIIHexWrappedMemo_ValidDeposit(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x2121212121212121212121212121212121212121")
+	memoHex := testASCIIHexWrappedMemoHex(recipient, 9)
+	txid := strings.Repeat("ac", 32)
+	var pos int64 = 15
+
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 0, Position: &pos, Height: 88, ValueZat: 123456, MemoHex: memoHex},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	rpc := &stubRPC{
+		blockHashes: map[uint64]common.Hash{
+			88: common.HexToHash("0x88"),
+		},
+	}
+	ingester := &stubIngester{}
+
+	s, err := New(testConfig(), scan, rpc, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	s.poll(ctx)
+
+	if len(ingester.events) != 1 {
+		t.Fatalf("expected 1 ingested event, got %d", len(ingester.events))
+	}
+	ev := ingester.events[0]
+	if ev.Amount != 123456 {
+		t.Fatalf("amount: got=%d want=123456", ev.Amount)
+	}
+	if ev.JunoHeight != 88 {
+		t.Fatalf("juno height: got=%d want=88", ev.JunoHeight)
+	}
+	if len(ev.Memo) != memo.MemoLen {
+		t.Fatalf("memo length: got=%d want=%d", len(ev.Memo), memo.MemoLen)
 	}
 }
 

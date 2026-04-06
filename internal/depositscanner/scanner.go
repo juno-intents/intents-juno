@@ -1,6 +1,7 @@
 package depositscanner
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -135,7 +136,7 @@ func (s *Scanner) poll(ctx context.Context) {
 			continue
 		}
 
-		memoBytes, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(note.MemoHex), "0x"))
+		memoBytes, err := decodeNoteMemoHex(note.MemoHex)
 		if err != nil {
 			s.log.Warn("deposit scanner: decode memo hex", "key", key, "err", err)
 			s.markSeen(key, note.Height)
@@ -161,6 +162,43 @@ func (s *Scanner) poll(ctx context.Context) {
 
 		s.markSeen(key, note.Height)
 	}
+}
+
+func decodeNoteMemoHex(memoHex string) ([]byte, error) {
+	decoded, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(memoHex), "0x"))
+	if err != nil {
+		return nil, err
+	}
+	if len(decoded) != memo.MemoLen {
+		return decoded, nil
+	}
+	trimmedASCIIHex := bytes.TrimRight(decoded, "\x00")
+	if len(trimmedASCIIHex) == 0 || len(trimmedASCIIHex)%2 != 0 || !isASCIIHex(trimmedASCIIHex) {
+		return decoded, nil
+	}
+	unwrapped, err := hex.DecodeString(string(trimmedASCIIHex))
+	if err != nil {
+		return decoded, nil
+	}
+	if len(unwrapped) > memo.MemoLen {
+		return decoded, nil
+	}
+	padded := make([]byte, memo.MemoLen)
+	copy(padded, unwrapped)
+	return padded, nil
+}
+
+func isASCIIHex(raw []byte) bool {
+	for _, b := range raw {
+		switch {
+		case b >= '0' && b <= '9':
+		case b >= 'a' && b <= 'f':
+		case b >= 'A' && b <= 'F':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Scanner) reconcileReorg(ctx context.Context, notes []witnessextract.WalletNote) {
