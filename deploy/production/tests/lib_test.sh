@@ -197,6 +197,10 @@ test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
   production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
 
   assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "production shared tfvars start proof ecs services"
+  assert_eq "$(jq -r '.shared_proof_role_instance_type' "$override_file")" "c7i.large" "production shared tfvars keep the shared proof role on the quota-safe instance type"
+  assert_eq "$(jq -r '.shared_proof_role_min_size' "$override_file")" "1" "production shared tfvars keep the shared proof role minimum within quota"
+  assert_eq "$(jq -r '.shared_proof_role_desired_capacity' "$override_file")" "1" "production shared tfvars keep the shared proof role desired capacity within quota"
+  assert_eq "$(jq -r '.shared_proof_role_max_size' "$override_file")" "2" "production shared tfvars cap the shared proof role autoscaling within quota"
   rm -rf "$workdir"
 }
 

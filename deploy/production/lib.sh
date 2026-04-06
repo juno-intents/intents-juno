@@ -883,9 +883,10 @@ production_write_shared_terraform_override_tfvars() {
       shared_proof_service_image: $shared_proof_service_image,
       shared_proof_service_image_ecr_repository_arn: $shared_proof_service_image_ecr_repository_arn,
       shared_ecs_desired_count: 1,
-      shared_proof_role_min_size: 2,
-      shared_proof_role_desired_capacity: 2,
-      shared_proof_role_max_size: 4
+      shared_proof_role_instance_type: "c7i.large",
+      shared_proof_role_min_size: 1,
+      shared_proof_role_desired_capacity: 1,
+      shared_proof_role_max_size: 2
     }
     + (if $shared_bridge_guest_release_tag == "" then {} else {
       shared_bridge_guest_release_tag: $shared_bridge_guest_release_tag
