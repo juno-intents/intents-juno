@@ -32,6 +32,36 @@ EOF
   chmod 0755 "$target"
 }
 
+write_fake_aws_secret_reader() {
+  local target="$1"
+  local expected_secret_arn="$2"
+  local secret_value="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+args=( "\$@" )
+for ((i=0; i<\${#args[@]}; i++)); do
+  if [[ "\${args[\$i]}" == "secretsmanager" && \$((i + 1)) -lt \${#args[@]} && "\${args[\$((i + 1))]}" == "get-secret-value" ]]; then
+    secret_arn=""
+    for ((j=0; j<\${#args[@]}; j++)); do
+      if [[ "\${args[\$j]}" == "--secret-id" && \$((j + 1)) -lt \${#args[@]} ]]; then
+        secret_arn="\${args[\$((j + 1))]}"
+        break
+      fi
+    done
+    [[ "\$secret_arn" == "$expected_secret_arn" ]] || {
+      printf 'unexpected secret id: %s\n' "\$secret_arn" >&2
+      exit 1
+    }
+    printf '%s\n' "$secret_value"
+    exit 0
+  fi
+done
+exit 0
+EOF
+  chmod 0755 "$target"
+}
+
 write_live_inventory_fixture() {
   local target="$1"
   jq '
@@ -268,12 +298,121 @@ EOF
   rm -rf "$workdir"
 }
 
+test_runtime_config_render_injects_queueauth_hmac_from_shared_manifest() {
+  local workdir handoff_dir manifest rendered_env resolved_env fake_bin old_path queueauth_secret_arn derived_ivk derived_ovk tf_json
+  workdir="$(mktemp -d)"
+  write_live_inventory_fixture "$workdir/inventory.json"
+
+  tf_json="$workdir/terraform-output.json"
+  jq \
+    --arg arn "arn:aws:secretsmanager:us-east-1:021490342184:secret:live-kafka-critical-hmac" \
+    '.shared_kafka_critical_hmac_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs \
+    "$workdir/inventory.json" \
+    "$workdir/shared-manifest.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$workdir/output" \
+    "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  manifest="$handoff_dir/operator-deploy.json"
+  rendered_env="$workdir/operator-stack.env"
+  resolved_env="$workdir/resolved.env"
+  : >"$resolved_env"
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  queueauth_secret_arn="$(jq -r '.shared_services.kafka.critical_hmac_secret_arn' "$workdir/shared-manifest.json")"
+  derived_ivk="0x$(printf 'a%.0s' $(seq 1 128))"
+  derived_ovk="0x$(printf 'b%.0s' $(seq 1 64))"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo" "$derived_ivk" "$derived_ovk"
+  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "queueauth-live-hmac"
+
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env \
+    "$workdir/shared-manifest.json" \
+    "$manifest" \
+    "$resolved_env" \
+    "$rendered_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$rendered_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=queueauth-live-hmac" "runtime-config render injects the shared queueauth hmac secret"
+
+  rm -rf "$workdir"
+}
+
+test_runtime_config_render_prefers_inline_queueauth_hmac_key() {
+  local workdir handoff_dir manifest rendered_env resolved_env fake_bin old_path queueauth_secret_arn derived_ivk derived_ovk tf_json
+  workdir="$(mktemp -d)"
+  write_live_inventory_fixture "$workdir/inventory.json"
+
+  tf_json="$workdir/terraform-output.json"
+  jq \
+    --arg arn "arn:aws:secretsmanager:us-east-1:021490342184:secret:live-kafka-critical-hmac" \
+    '.shared_kafka_critical_hmac_secret_arn = {value: $arn}' \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" >"$tf_json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$tf_json" \
+    "$workdir/shared-manifest.json" \
+    "$workdir"
+  production_render_operator_handoffs \
+    "$workdir/inventory.json" \
+    "$workdir/shared-manifest.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$workdir/output" \
+    "$workdir"
+
+  handoff_dir="$(production_operator_dir "$workdir/output" "0x1111111111111111111111111111111111111111")"
+  manifest="$handoff_dir/operator-deploy.json"
+  rendered_env="$workdir/operator-stack.env"
+  resolved_env="$workdir/resolved.env"
+  cat >"$resolved_env" <<'EOF'
+JUNO_QUEUE_CRITICAL_HMAC_KEY=inline-queueauth-hmac
+EOF
+  fake_bin="$workdir/bin"
+  mkdir -p "$fake_bin"
+
+  queueauth_secret_arn="$(jq -r '.shared_services.kafka.critical_hmac_secret_arn' "$workdir/shared-manifest.json")"
+  derived_ivk="0x$(printf 'a%.0s' $(seq 1 128))"
+  derived_ovk="0x$(printf 'b%.0s' $(seq 1 64))"
+  write_fake_ufvk_derive_cargo "$fake_bin/cargo" "$derived_ivk" "$derived_ovk"
+  write_fake_aws_secret_reader "$fake_bin/aws" "$queueauth_secret_arn" "aws-queueauth-hmac"
+
+  old_path="$PATH"
+  PATH="$fake_bin:$PATH"
+  production_render_operator_stack_env \
+    "$workdir/shared-manifest.json" \
+    "$manifest" \
+    "$resolved_env" \
+    "$rendered_env"
+  PATH="$old_path"
+
+  assert_contains "$(cat "$rendered_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=inline-queueauth-hmac" "runtime-config render prefers the inline queueauth hmac key"
+  assert_not_contains "$(cat "$rendered_env")" "JUNO_QUEUE_CRITICAL_HMAC_KEY=aws-queueauth-hmac" "runtime-config render ignores the shared secret when an inline queueauth hmac key is already set"
+
+  rm -rf "$workdir"
+}
+
 main() {
   test_live_handoffs_emit_runtime_material_refs
   test_live_handoffs_reject_local_runtime_inputs
   test_live_handoffs_reject_local_runtime_packages
   test_runtime_config_render_skips_local_secret_requirements
   test_runtime_config_render_includes_live_withdraw_and_deposit_derivations
+  test_runtime_config_render_injects_queueauth_hmac_from_shared_manifest
+  test_runtime_config_render_prefers_inline_queueauth_hmac_key
 }
 
 main "$@"

@@ -3257,7 +3257,8 @@ production_render_operator_stack_env() {
   local min_base_relayer_balance_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
   local deposit_relayer_base_rpc_url
-  local kafka_critical_key_id runtime_config_secret_id
+  local kafka_critical_key_id kafka_critical_hmac_key runtime_config_secret_id
+  local shared_kafka_critical_hmac_secret_arn shared_aws_profile shared_aws_region
   local deposit_owallet_ivk withdraw_owallet_ovk
   local operator_deposit_scan_wallet_id operator_withdraw_coordinator_juno_wallet_id operator_withdraw_finalizer_juno_scan_wallet_id
   local -a derived_owallet_keys=()
@@ -3282,6 +3283,13 @@ production_render_operator_stack_env() {
   checkpoint_operators="$(jq -r '.checkpoint.operators | join(",")' "$shared_manifest")"
   [[ -n "$checkpoint_operators" ]] || die "shared manifest is missing checkpoint operators"
   kafka_critical_key_id="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_key_id')"
+  kafka_critical_hmac_key="$(production_env_first_value "$resolved_secret_env" JUNO_QUEUE_CRITICAL_HMAC_KEY || true)"
+  if [[ -z "$kafka_critical_hmac_key" ]]; then
+    shared_kafka_critical_hmac_secret_arn="$(production_json_optional "$shared_manifest" '.shared_services.kafka.critical_hmac_secret_arn')"
+    shared_aws_profile="$(production_json_optional "$shared_manifest" '.shared_services.aws_profile')"
+    shared_aws_region="$(production_json_optional "$shared_manifest" '.shared_services.aws_region')"
+    kafka_critical_hmac_key="$(production_resolve_optional_aws_sm_secret "$shared_kafka_critical_hmac_secret_arn" "$shared_aws_profile" "$shared_aws_region" || true)"
+  fi
   base_event_scanner_start_block="$(jq -r '.contracts.base_event_scanner_start_block // empty' "$shared_manifest")"
   production_is_positive_integer "$base_event_scanner_start_block" \
     || die "shared manifest is missing a positive contracts.base_event_scanner_start_block"
@@ -3382,6 +3390,9 @@ EOF
 
   if [[ -n "$kafka_critical_key_id" ]]; then
     printf 'JUNO_QUEUE_CRITICAL_KEY_ID=%s\n' "$kafka_critical_key_id" >>"$output_file"
+  fi
+  if [[ -n "$kafka_critical_hmac_key" ]]; then
+    printf 'JUNO_QUEUE_CRITICAL_HMAC_KEY=%s\n' "$kafka_critical_hmac_key" >>"$output_file"
   fi
   if [[ -n "$signer_kms_key_id" ]]; then
     printf 'CHECKPOINT_SIGNER_KMS_KEY_ID=%s\n' "$signer_kms_key_id" >>"$output_file"
