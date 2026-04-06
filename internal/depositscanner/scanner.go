@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/juno-intents/intents-juno/internal/deposit"
 	"github.com/juno-intents/intents-juno/internal/depositevent"
 	"github.com/juno-intents/intents-juno/internal/depositrelayer"
 	"github.com/juno-intents/intents-juno/internal/memo"
@@ -259,6 +260,10 @@ func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNot
 	if note.ActionIndex < 0 {
 		return fmt.Errorf("invalid action index %d", note.ActionIndex)
 	}
+	sourceEvent, err := noteSourceEvent(s.cfg.BaseChainID, note.TxID, actionIndex)
+	if err != nil {
+		return err
+	}
 
 	res, err := s.builder.BuildDeposit(ctx, witnessextract.DepositRequest{
 		WalletID:    s.cfg.WalletID,
@@ -280,8 +285,27 @@ func (s *Scanner) processNote(ctx context.Context, note witnessextract.WalletNot
 		Amount:           note.ValueZat,
 		JunoHeight:       note.Height,
 		Memo:             memoBytes,
+		SourceEvent:      sourceEvent,
 		ProofWitnessItem: res.WitnessItem,
 	})
+}
+
+func noteSourceEvent(chainID uint32, txID string, actionIndex uint32) (*deposit.SourceEvent, error) {
+	raw, err := hex.DecodeString(strings.TrimPrefix(strings.TrimSpace(txID), "0x"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid txid %q: %w", txID, err)
+	}
+	if len(raw) != common.HashLength {
+		return nil, fmt.Errorf("invalid txid %q: want %d bytes, got %d", txID, common.HashLength, len(raw))
+	}
+
+	var txHash [32]byte
+	copy(txHash[:], raw)
+	return &deposit.SourceEvent{
+		ChainID:  uint64(chainID),
+		TxHash:   txHash,
+		LogIndex: uint64(actionIndex),
+	}, nil
 }
 
 func isPermanent(err error) bool {

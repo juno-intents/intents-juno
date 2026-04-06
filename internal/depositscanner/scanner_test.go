@@ -190,6 +190,53 @@ func TestScanner_ValidDeposit(t *testing.T) {
 	}
 }
 
+func TestScanner_ValidDeposit_EmitsSourceEvent(t *testing.T) {
+	t.Parallel()
+
+	recipient := common.HexToAddress("0x2727272727272727272727272727272727272727")
+	memoHex := testMemoHex(recipient, 7)
+	txid := strings.Repeat("ab", 32)
+	var pos int64 = 6
+
+	scan := &stubScan{
+		notes: []witnessextract.WalletNote{
+			{TxID: txid, ActionIndex: 2, Position: &pos, Height: 91, ValueZat: 424242, MemoHex: memoHex},
+		},
+		witnessResp: makeWitnessResponse(uint32(pos)),
+	}
+	rpc := &stubRPC{
+		blockHashes: map[uint64]common.Hash{
+			91: common.HexToHash("0x91"),
+		},
+	}
+	ingester := &stubIngester{}
+
+	s, err := New(testConfig(), scan, rpc, ingester, slog.Default())
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	ctx := context.Background()
+	s.poll(ctx)
+
+	if len(ingester.events) != 1 {
+		t.Fatalf("expected 1 ingested event, got %d", len(ingester.events))
+	}
+	ev := ingester.events[0]
+	if ev.SourceEvent == nil {
+		t.Fatalf("expected source event metadata")
+	}
+	if ev.SourceEvent.ChainID != uint64(testChainID) {
+		t.Fatalf("source event chain id: got=%d want=%d", ev.SourceEvent.ChainID, testChainID)
+	}
+	if got, want := common.BytesToHash(ev.SourceEvent.TxHash[:]), common.HexToHash("0x"+txid); got != want {
+		t.Fatalf("source event tx hash: got=%s want=%s", got.Hex(), want.Hex())
+	}
+	if ev.SourceEvent.LogIndex != 2 {
+		t.Fatalf("source event log index: got=%d want=2", ev.SourceEvent.LogIndex)
+	}
+}
+
 func TestScanner_ASCIIHexWrappedMemo_ValidDeposit(t *testing.T) {
 	t.Parallel()
 
