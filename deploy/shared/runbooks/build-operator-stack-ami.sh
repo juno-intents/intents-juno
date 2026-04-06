@@ -1386,6 +1386,10 @@ set +a
   echo "checkpoint-aggregator requires BRIDGE_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
 }
+[[ -n "${OPERATOR_ADDRESS:-}" ]] || {
+  echo "checkpoint-aggregator requires OPERATOR_ADDRESS in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
 [[ -n "${CHECKPOINT_OPERATORS:-}" ]] || {
   echo "checkpoint-aggregator requires CHECKPOINT_OPERATORS in /etc/intents-juno/operator-stack.env" >&2
   exit 1
@@ -1428,6 +1432,7 @@ if [[ -z "${JUNO_QUEUE_KAFKA_AWS_REGION:-}" ]]; then
   fi
 fi
 export JUNO_QUEUE_KAFKA_AWS_REGION
+checkpoint_aggregator_queue_group="${CHECKPOINT_AGGREGATOR_QUEUE_GROUP:-checkpoint-aggregator-${OPERATOR_ADDRESS}}"
 exec /usr/local/bin/checkpoint-aggregator \
   --base-chain-id "${BASE_CHAIN_ID}" \
   --bridge-address "${BRIDGE_ADDRESS}" \
@@ -1445,6 +1450,7 @@ exec /usr/local/bin/checkpoint-aggregator \
   --queue-brokers "$CHECKPOINT_KAFKA_BROKERS" \
   --queue-input-topics "${CHECKPOINT_SIGNATURE_TOPIC:-checkpoints.signatures.v1}" \
   --queue-output-topic "${CHECKPOINT_PACKAGE_TOPIC:-checkpoints.packages.v1}" \
+  --queue-group "${checkpoint_aggregator_queue_group}" \
   --health-port "${CHECKPOINT_AGGREGATOR_HEALTH_PORT:-18302}"
 EOF_AGG
   sudo install -m 0755 /tmp/intents-juno-checkpoint-aggregator.sh /usr/local/bin/intents-juno-checkpoint-aggregator.sh
