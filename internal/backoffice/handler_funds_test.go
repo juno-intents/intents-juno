@@ -466,6 +466,159 @@ func TestHandleFundsIncludesConfiguredMPCWalletAddressWithoutJunoRPC(t *testing.
 	}
 }
 
+func TestHandleFundsReturnsBridgeErrorInsteadOfHTTP500OnBridgeBalanceFailure(t *testing.T) {
+	relayerAddr := common.HexToAddress("0xd68c28f414b210a6c519d05159014378a5b8bc0f")
+	bridgeAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	wjunoAddr := common.HexToAddress("0x2222222222222222222222222222222222222222")
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any               `json:"id"`
+			Method string            `json:"method"`
+			Params []json.RawMessage `json:"params"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+
+		switch req.Method {
+		case "eth_getBalance":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  "0x38d7ea4c68000",
+			}); err != nil {
+				t.Fatalf("encode balance response: %v", err)
+			}
+		case "eth_call":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"error": map[string]any{
+					"code":    -32016,
+					"message": "over rate limit",
+				},
+			}); err != nil {
+				t.Fatalf("encode eth_call error: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+	}))
+	defer rpcServer.Close()
+
+	client, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer client.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:                 client,
+			BaseRelayerSignerAddresses: []common.Address{relayerAddr},
+			BaseRelayerFundsMinWei:     big.NewInt(250_000_000_000_000),
+			BridgeAddress:              bridgeAddr,
+			WJunoAddress:               wjunoAddr,
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Operators []struct {
+			Address string `json:"address"`
+		} `json:"operators"`
+		Bridge map[string]any `json:"bridge"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Operators) != 1 {
+		t.Fatalf("operators len = %d, want 1", len(body.Operators))
+	}
+	if body.Bridge == nil {
+		t.Fatalf("bridge = nil, want error payload")
+	}
+	if body.Bridge["error"] == nil {
+		t.Fatalf("bridge error missing in response: %#v", body.Bridge)
+	}
+}
+
+func TestHandleFundsReturnsOperatorErrorInsteadOfHTTP500OnBalanceFailure(t *testing.T) {
+	relayerAddr := common.HexToAddress("0xd68c28f414b210a6c519d05159014378a5b8bc0f")
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			ID     any `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode rpc request: %v", err)
+		}
+		if req.Method != "eth_getBalance" {
+			t.Fatalf("unexpected method: %s", req.Method)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      req.ID,
+			"error": map[string]any{
+				"code":    -32016,
+				"message": "over rate limit",
+			},
+		}); err != nil {
+			t.Fatalf("encode balance error: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	client, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer client.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:                 client,
+			BaseRelayerSignerAddresses: []common.Address{relayerAddr},
+			BaseRelayerFundsMinWei:     big.NewInt(250_000_000_000_000),
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Operators []map[string]any `json:"operators"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Operators) != 1 {
+		t.Fatalf("operators len = %d, want 1", len(body.Operators))
+	}
+	if body.Operators[0]["error"] == nil {
+		t.Fatalf("operator error missing in response: %#v", body.Operators[0])
+	}
+}
+
 func TestHandleFundsFallsBackAcrossConfiguredJunoRPCURLs(t *testing.T) {
 	junoRPC := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

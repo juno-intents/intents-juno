@@ -95,10 +95,10 @@ func New(cfg ServerConfig) (*Server, error) {
 		cfg.Log = slog.Default()
 	}
 	if cfg.RateLimitPerSecond <= 0 {
-		cfg.RateLimitPerSecond = 5
+		cfg.RateLimitPerSecond = 15
 	}
 	if cfg.RateLimitBurst <= 0 {
-		cfg.RateLimitBurst = 20
+		cfg.RateLimitBurst = 30
 	}
 	if cfg.OperatorGasMinWei == nil {
 		cfg.OperatorGasMinWei = new(big.Int)
@@ -222,10 +222,10 @@ type ServiceEntry struct {
 	URL   string
 }
 
-// OperatorEndpoint describes an operator's gRPC endpoint for health checking.
+// OperatorEndpoint describes an operator signer endpoint for health checking.
 type OperatorEndpoint struct {
 	Address  common.Address
-	Endpoint string // host:port for gRPC TLS probe
+	Endpoint string // host:port for HTTP /healthz probe
 }
 
 type RuntimeSettingsStore interface {

@@ -50,8 +50,8 @@ func main() {
 
 		authSecret = flag.String("auth-secret", "", "Bearer token for API auth (required)")
 
-		rateLimitPerSecond = flag.Float64("rate-limit-per-second", 5, "Per-IP rate limit refill rate")
-		rateLimitBurst     = flag.Int("rate-limit-burst", 10, "Per-IP rate limit burst capacity")
+		rateLimitPerSecond = flag.Float64("rate-limit-per-second", 15, "Per-IP rate limit refill rate")
+		rateLimitBurst     = flag.Int("rate-limit-burst", 30, "Per-IP rate limit burst capacity")
 
 		bridgeAddr                = flag.String("bridge-address", "", "Bridge contract address on Base (required)")
 		wjunoAddr                 = flag.String("wjuno-address", "", "wJUNO contract address on Base (required)")

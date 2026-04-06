@@ -42,12 +42,7 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Operator balances.
-	operators, err := s.fetchOperatorBalances(ctx)
-	if err != nil {
-		s.log.Error("fetch operator balances", "err", err)
-		writeError(w, http.StatusInternalServerError, "internal")
-		return
-	}
+	operators := s.fetchOperatorBalances(ctx)
 	resp["operators"] = operators
 	walletBalanceBelowThreshold = walletBalanceBelowThreshold || anyBalanceBelowThreshold(operators)
 
@@ -96,13 +91,17 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 	if s.cfg.WJunoAddress != (common.Address{}) && s.cfg.BridgeAddress != (common.Address{}) {
 		balance, balErr := erc20BalanceOf(ctx, s.cfg.BaseClient, s.cfg.WJunoAddress, s.cfg.BridgeAddress)
 		if balErr != nil {
-			s.log.Error("fetch bridge wjuno balance", "err", balErr)
-			writeError(w, http.StatusInternalServerError, "internal")
-			return
-		}
-		resp["bridge"] = map[string]any{
-			"wjunoBalanceRaw":       balance.String(),
-			"wjunoBalanceFormatted": zatToJunoString(balance.Int64()),
+			s.log.Warn("fetch bridge wjuno balance", "err", balErr)
+			resp["bridge"] = map[string]any{
+				"address": s.cfg.BridgeAddress.Hex(),
+				"error":   balErr.Error(),
+			}
+		} else {
+			resp["bridge"] = map[string]any{
+				"address":               s.cfg.BridgeAddress.Hex(),
+				"wjunoBalanceRaw":       balance.String(),
+				"wjunoBalanceFormatted": zatToJunoString(balance.Int64()),
+			}
 		}
 	}
 
@@ -187,17 +186,22 @@ func (s *Server) fundsBalanceMinWei() *big.Int {
 }
 
 // fetchOperatorBalances queries ETH balance for each configured base relayer signer.
-func (s *Server) fetchOperatorBalances(ctx context.Context) ([]map[string]any, error) {
+func (s *Server) fetchOperatorBalances(ctx context.Context) []map[string]any {
 	addrs := s.fundsBalanceAddresses()
 	results := make([]map[string]any, 0, len(addrs))
 	for _, addr := range addrs {
 		entry, err := s.fetchAddressBalance(ctx, addr, s.fundsBalanceMinWei())
 		if err != nil {
-			return nil, fmt.Errorf("base relayer signer %s: %w", addr.Hex(), err)
+			s.log.Warn("fetch base relayer signer balance", "address", addr.Hex(), "err", err)
+			results = append(results, map[string]any{
+				"address": addr.Hex(),
+				"error":   err.Error(),
+			})
+			continue
 		}
 		results = append(results, entry)
 	}
-	return results, nil
+	return results
 }
 
 // fetchAddressBalance returns the ETH balance for a single address along with threshold info.

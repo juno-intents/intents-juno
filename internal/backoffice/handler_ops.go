@@ -2,7 +2,6 @@ package backoffice
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/hex"
 	"fmt"
 	"io"
@@ -504,28 +503,36 @@ func checkServiceHealth(ctx context.Context, client *http.Client, url string) ma
 	return result
 }
 
-// handleOperatorStatus probes each configured operator gRPC endpoint via TLS
-// and reports online/offline status with latency.
+// handleOperatorStatus probes each configured operator signer health endpoint
+// over HTTP and reports online/offline status with latency.
 func (s *Server) handleOperatorStatus(w http.ResponseWriter, r *http.Request) {
 	results := make([]map[string]any, 0, len(s.cfg.OperatorEndpoints))
+	client := &http.Client{Timeout: 5 * time.Second}
 
 	for _, op := range s.cfg.OperatorEndpoints {
 		start := time.Now()
 		online := false
 		var errMsg string
 
-		conn, err := tls.DialWithDialer(
-			&net.Dialer{Timeout: 5 * time.Second},
-			"tcp",
-			op.Endpoint,
-			&tls.Config{InsecureSkipVerify: true}, //nolint:gosec // operator TLS probe only
-		)
-		latency := time.Since(start).Milliseconds()
+		req, err := http.NewRequestWithContext(r.Context(), http.MethodGet, "http://"+op.Endpoint+"/healthz", nil)
 		if err != nil {
 			errMsg = err.Error()
-		} else {
-			online = true
-			_ = conn.Close()
+		}
+		latency := time.Since(start).Milliseconds()
+		if err == nil {
+			resp, reqErr := client.Do(req)
+			latency = time.Since(start).Milliseconds()
+			if reqErr != nil {
+				errMsg = reqErr.Error()
+			} else {
+				defer resp.Body.Close()
+				_, _ = io.ReadAll(resp.Body)
+				if resp.StatusCode == http.StatusOK {
+					online = true
+				} else {
+					errMsg = fmt.Sprintf("status %d", resp.StatusCode)
+				}
+			}
 		}
 
 		entry := map[string]any{

@@ -2,11 +2,15 @@ package backoffice
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 func TestProbeIPFS_UsesBearerTokenWhenConfigured(t *testing.T) {
@@ -112,6 +116,65 @@ func TestCollectStuckDepositsIncludesSubmittedAttempts(t *testing.T) {
 	}
 	if gotAttempts[0]["owner"] != "owner-a" {
 		t.Fatalf("owner = %v, want owner-a", gotAttempts[0]["owner"])
+	}
+}
+
+func TestHandleOperatorStatusUsesHTTPHealthEndpoint(t *testing.T) {
+	t.Parallel()
+
+	operatorAddr := common.HexToAddress("0x1111111111111111111111111111111111111111")
+	signerAPI := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/healthz" {
+			t.Fatalf("path = %q, want /healthz", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "ok"})
+	}))
+	defer signerAPI.Close()
+
+	endpointURL, err := url.Parse(signerAPI.URL)
+	if err != nil {
+		t.Fatalf("parse signer api url: %v", err)
+	}
+
+	s := &Server{
+		cfg: ServerConfig{
+			OperatorEndpoints: []OperatorEndpoint{{
+				Address:  operatorAddr,
+				Endpoint: endpointURL.Host,
+			}},
+		},
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/ops/operators/status", nil)
+	s.handleOperatorStatus(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		Operators []struct {
+			Address string `json:"address"`
+			Online  bool   `json:"online"`
+			Error   string `json:"error"`
+		} `json:"operators"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Operators) != 1 {
+		t.Fatalf("operators len = %d, want 1", len(body.Operators))
+	}
+	if body.Operators[0].Address != operatorAddr.Hex() {
+		t.Fatalf("address = %q, want %q", body.Operators[0].Address, operatorAddr.Hex())
+	}
+	if !body.Operators[0].Online {
+		t.Fatalf("online = false, want true (error=%q)", body.Operators[0].Error)
+	}
+	if body.Operators[0].Error != "" {
+		t.Fatalf("error = %q, want empty", body.Operators[0].Error)
 	}
 }
 
