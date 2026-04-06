@@ -72,15 +72,18 @@ func TestBackofficeAlertEngineConfigUsesServiceURLsAndThresholds(t *testing.T) {
 	operatorGasMinWei := big.NewInt(123)
 	proverFundsMinWei := big.NewInt(456)
 	operatorAddress := common.HexToAddress("0x0000000000000000000000000000000000000abc")
+	baseRelayerSignerAddress := common.HexToAddress("0x0000000000000000000000000000000000000fed")
 	sp1Requestor := common.HexToAddress("0x0000000000000000000000000000000000000def")
 
 	cfg := backofficeAlertEngineConfig(
 		nil,
 		nil,
 		[]common.Address{operatorAddress},
+		[]common.Address{baseRelayerSignerAddress},
 		sp1Requestor,
 		[]backoffice.ServiceEntry{{Label: "bridge", URL: "https://bridge.example/healthz"}},
 		45*time.Second,
+		240,
 		operatorGasMinWei,
 		proverFundsMinWei,
 	)
@@ -94,8 +97,14 @@ func TestBackofficeAlertEngineConfigUsesServiceURLsAndThresholds(t *testing.T) {
 	if len(cfg.OperatorAddresses) != 1 || cfg.OperatorAddresses[0] != operatorAddress {
 		t.Fatalf("OperatorAddresses = %#v", cfg.OperatorAddresses)
 	}
+	if len(cfg.BaseRelayerSignerAddresses) != 1 || cfg.BaseRelayerSignerAddresses[0] != baseRelayerSignerAddress {
+		t.Fatalf("BaseRelayerSignerAddresses = %#v", cfg.BaseRelayerSignerAddresses)
+	}
 	if cfg.SP1RequestorAddress != sp1Requestor {
 		t.Fatalf("SP1RequestorAddress = %s", cfg.SP1RequestorAddress.Hex())
+	}
+	if cfg.StuckBatchMinutes != 240 {
+		t.Fatalf("StuckBatchMinutes = %d, want 240", cfg.StuckBatchMinutes)
 	}
 	if cfg.OperatorGasMinWei != operatorGasMinWei {
 		t.Fatalf("OperatorGasMinWei pointer mismatch")

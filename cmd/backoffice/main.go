@@ -76,6 +76,7 @@ func main() {
 		minDepositUpdateGasLimit        = flag.Uint64("min-deposit-update-gas-limit", 0, "optional gas limit override for setMinDepositAmount")
 
 		alertCheckInterval = flag.Duration("alert-check-interval", 30*time.Second, "Alert engine check interval")
+		stuckBatchMinutes  = flag.Int("stuck-batch-minutes", 240, "minutes before unresolved deposit/withdrawal batch work is considered stuck")
 
 		operatorGasMinWeiStr    = flag.String("operator-gas-min-wei", "500000000000000000", "Min operator ETH balance (wei)")
 		baseRelayerGasMinWeiStr = flag.String("base-relayer-gas-min-wei", "1000000000000000", "Min Base relayer signer ETH balance (wei)")
@@ -293,9 +294,11 @@ func main() {
 		pool,
 		baseClient,
 		operatorAddresses,
+		baseRelayerSignerAddresses,
 		sp1Requestor,
 		serviceEntries,
 		*alertCheckInterval,
+		*stuckBatchMinutes,
 		operatorGasMinWei,
 		proverFundsMinWei,
 	))
@@ -524,21 +527,25 @@ func backofficeAlertEngineConfig(
 	pool *pgxpool.Pool,
 	baseClient *ethclient.Client,
 	operatorAddresses []common.Address,
+	baseRelayerSignerAddresses []common.Address,
 	sp1Requestor common.Address,
 	serviceEntries []backoffice.ServiceEntry,
 	checkInterval time.Duration,
+	stuckBatchMinutes int,
 	operatorGasMinWei *big.Int,
 	proverFundsMinWei *big.Int,
 ) alerts.EngineConfig {
 	return alerts.EngineConfig{
-		CheckInterval:       checkInterval,
-		Pool:                pool,
-		EthClient:           baseClient,
-		OperatorAddresses:   append([]common.Address(nil), operatorAddresses...),
-		SP1RequestorAddress: sp1Requestor,
-		ServiceURLs:         serviceEntryURLs(serviceEntries),
-		OperatorGasMinWei:   operatorGasMinWei,
-		ProverFundsMinWei:   proverFundsMinWei,
+		CheckInterval:              checkInterval,
+		StuckBatchMinutes:          stuckBatchMinutes,
+		Pool:                       pool,
+		EthClient:                  baseClient,
+		OperatorAddresses:          append([]common.Address(nil), operatorAddresses...),
+		BaseRelayerSignerAddresses: append([]common.Address(nil), baseRelayerSignerAddresses...),
+		SP1RequestorAddress:        sp1Requestor,
+		ServiceURLs:                serviceEntryURLs(serviceEntries),
+		OperatorGasMinWei:          operatorGasMinWei,
+		ProverFundsMinWei:          proverFundsMinWei,
 	}
 }
 

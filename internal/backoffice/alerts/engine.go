@@ -23,17 +23,18 @@ type EngineConfig struct {
 	// Thresholds
 	OperatorGasMinWei      *big.Int // minimum ETH balance per operator
 	ProverFundsMinWei      *big.Int // minimum ETH balance for SP1 requestor
-	StuckBatchMinutes      int      // deposit/withdrawal batch staleness threshold (default 30)
+	StuckBatchMinutes      int      // deposit/withdrawal batch staleness threshold (default 240)
 	CheckpointGapMinutes   int      // checkpoint freshness threshold (default 60)
 	DLQInsertionRatePerMin int      // unused placeholder for rate-based alerting (default 5)
 
 	// Dependencies
-	Pool                *pgxpool.Pool
-	EthClient           *ethclient.Client
-	OperatorAddresses   []common.Address
-	SP1RequestorAddress common.Address
-	ServiceURLs         []string
-	DLQStore            dlq.Store
+	Pool                       *pgxpool.Pool
+	EthClient                  *ethclient.Client
+	OperatorAddresses          []common.Address
+	BaseRelayerSignerAddresses []common.Address
+	SP1RequestorAddress        common.Address
+	ServiceURLs                []string
+	DLQStore                   dlq.Store
 }
 
 func (c *EngineConfig) setDefaults() {
@@ -41,7 +42,7 @@ func (c *EngineConfig) setDefaults() {
 		c.CheckInterval = 30 * time.Second
 	}
 	if c.StuckBatchMinutes == 0 {
-		c.StuckBatchMinutes = 30
+		c.StuckBatchMinutes = 240
 	}
 	if c.CheckpointGapMinutes == 0 {
 		c.CheckpointGapMinutes = 60
@@ -57,6 +58,13 @@ func (c *EngineConfig) setDefaults() {
 		// Default: 0.05 ETH
 		c.ProverFundsMinWei = new(big.Int).Mul(big.NewInt(5e16), big.NewInt(1))
 	}
+}
+
+func (c EngineConfig) gasBalanceAddresses() []common.Address {
+	if len(c.BaseRelayerSignerAddresses) > 0 {
+		return append([]common.Address(nil), c.BaseRelayerSignerAddresses...)
+	}
+	return append([]common.Address(nil), c.OperatorAddresses...)
 }
 
 // Engine runs background alert checks on a configurable interval.
@@ -138,7 +146,8 @@ func (e *Engine) runChecks(ctx context.Context) {
 
 // checkOperatorGas checks each operator address ETH balance on Base.
 func (e *Engine) checkOperatorGas(ctx context.Context) {
-	if e.cfg.EthClient == nil || len(e.cfg.OperatorAddresses) == 0 {
+	addresses := e.cfg.gasBalanceAddresses()
+	if e.cfg.EthClient == nil || len(addresses) == 0 {
 		return
 	}
 	const ruleID = "operator_gas_low"
@@ -146,7 +155,7 @@ func (e *Engine) checkOperatorGas(ctx context.Context) {
 
 	lowCount := 0
 	var details []string
-	for _, addr := range e.cfg.OperatorAddresses {
+	for _, addr := range addresses {
 		bal, err := e.cfg.EthClient.BalanceAt(ctx, addr, nil)
 		if err != nil {
 			slog.Warn("alert check: failed to get operator balance",
@@ -161,12 +170,12 @@ func (e *Engine) checkOperatorGas(ctx context.Context) {
 
 	if lowCount > 0 {
 		sev := SeverityWarning
-		if lowCount == len(e.cfg.OperatorAddresses) {
+		if lowCount == len(addresses) {
 			sev = SeverityCritical
 		}
 		e.fireIfNew(ctx, ruleID, sev,
-			"Operator gas balance low",
-			fmt.Sprintf("%d/%d operators below threshold: %v", lowCount, len(e.cfg.OperatorAddresses), details))
+			"Base relayer gas balance low",
+			fmt.Sprintf("%d/%d relayer addresses below threshold: %v", lowCount, len(addresses), details))
 	} else {
 		e.autoResolve(ctx, ruleID)
 	}
