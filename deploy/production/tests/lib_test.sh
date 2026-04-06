@@ -180,6 +180,26 @@ test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_starts_proof_ecs_services() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.private_subnet_ids = ["subnet-0afebf35409cafe82", "subnet-0dfe9dd62ddea943b"]
+    | .shared_services.alarm_actions = ["arn:aws:sns:us-east-1:021490342184:intents-juno-alerts"]
+    | .contracts.bridge_guest_release_tag = "bridge-guests-v2026.04.06-r1-mainnet"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_ecs_desired_count' "$override_file")" "1" "production shared tfvars start proof ecs services"
+  rm -rf "$workdir"
+}
+
 test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs() {
   local workdir override_file
   workdir="$(mktemp -d)"
@@ -3928,6 +3948,7 @@ main() {
   test_render_app_handoff_rejects_non_https_public_scheme
   test_render_app_handoff_requires_loopback_listeners
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
+  test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
