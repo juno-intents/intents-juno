@@ -9,7 +9,7 @@ source "$SCRIPT_DIR/common_test.sh"
 # shellcheck source=../lib.sh
 source "$REPO_ROOT/deploy/production/lib.sh"
 
-test_default_operator_endpoints_keep_public_endpoints() {
+test_default_operator_endpoints_prefer_private_operator_hosts() {
   local workdir fake_bin inventory_json old_path endpoints_json
   workdir="$(mktemp -d)"
   fake_bin="$workdir/bin"
@@ -23,6 +23,7 @@ test_default_operator_endpoints_keep_public_endpoints() {
       "index": 1,
       "operator_id": "0x1111111111111111111111111111111111111111",
       "operator_address": "0x9999999999999999999999999999999999999999",
+      "operator_host": "10.0.0.11",
       "public_endpoint": "203.0.113.11",
       "aws_profile": "op1",
       "aws_region": "us-west-2"
@@ -52,14 +53,14 @@ EOF
   endpoints_json="$(production_default_operator_endpoints_json "$inventory_json")"
   PATH="$old_path"
 
-  assert_eq "$(jq -r '.[0]' <<<"$endpoints_json")" "0x9999999999999999999999999999999999999999=203.0.113.11:18443" "public endpoint stays public even when aws could resolve a private ip"
+  assert_eq "$(jq -r '.[0]' <<<"$endpoints_json")" "0x9999999999999999999999999999999999999999=10.0.0.11:18443" "operator mesh prefers operator_host when a private host is available"
   assert_eq "$(jq -r '.[1]' <<<"$endpoints_json")" "0x8888888888888888888888888888888888888888=10.0.0.22:18444" "explicit private endpoint still wins"
 
   rm -rf "$workdir"
 }
 
 main() {
-  test_default_operator_endpoints_keep_public_endpoints
+  test_default_operator_endpoints_prefer_private_operator_hosts
 }
 
 main "$@"

@@ -1736,6 +1736,41 @@ exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_confi
 EOF_DKG_SERVE
   sudo install -m 0755 /tmp/intents-juno-dkg-admin-serve.sh /usr/local/bin/intents-juno-dkg-admin-serve.sh
 
+  cat > /tmp/intents-juno-operator-signer-api.sh <<'EOF_OPERATOR_SIGNER_API'
+#!/usr/bin/env bash
+set -euo pipefail
+# shellcheck disable=SC1091
+source /etc/intents-juno/operator-stack.env
+local_signer_key="${JUNO_TXSIGN_SIGNER_KEYS:-}"
+[[ "$local_signer_key" =~ ^0x[0-9a-fA-F]{64}$ ]] || {
+  echo "operator signer api requires JUNO_TXSIGN_SIGNER_KEYS as exactly one 32-byte hex key in /etc/intents-juno/operator-stack.env" >&2
+  exit 1
+}
+export JUNO_TXSIGN_SIGNER_KEYS="$local_signer_key"
+
+listen_addr="${OPERATOR_SIGNER_API_LISTEN_ADDR:-}"
+if [[ -z "$listen_addr" && -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" && -n "${OPERATOR_ADDRESS:-}" ]]; then
+  IFS=',' read -r -a endpoint_pairs <<<"${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS}"
+  for endpoint_pair in "${endpoint_pairs[@]}"; do
+    [[ -n "$endpoint_pair" ]] || continue
+    endpoint_addr="${endpoint_pair%%=*}"
+    endpoint_host_port="${endpoint_pair#*=}"
+    if [[ "$endpoint_addr" == "${OPERATOR_ADDRESS}" ]]; then
+      listen_addr="0.0.0.0:${endpoint_host_port##*:}"
+      break
+    fi
+  done
+fi
+
+[[ -n "$listen_addr" ]] || {
+  echo "operator signer api requires OPERATOR_SIGNER_API_LISTEN_ADDR or a local entry in WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS" >&2
+  exit 1
+}
+
+exec /usr/local/bin/juno-txsign serve --listen "$listen_addr"
+EOF_OPERATOR_SIGNER_API
+  sudo install -m 0755 /tmp/intents-juno-operator-signer-api.sh /usr/local/bin/intents-juno-operator-signer-api.sh
+
   cat > /tmp/intents-juno-base-relayer.sh <<'EOF_BASE_RELAYER'
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2192,7 +2227,7 @@ if [[ -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" ]]; then
     if [[ -n "${OPERATOR_ADDRESS:-}" && "$endpoint_addr" == "${OPERATOR_ADDRESS}" ]]; then
       continue
     fi
-    endpoint_args+=(--operator-endpoint "https://${endpoint_host_port}")
+    endpoint_args+=(--operator-endpoint "http://${endpoint_host_port}")
   done
   exec /usr/local/bin/juno-txsign "$@" "${endpoint_args[@]}"
 fi
@@ -2731,6 +2766,42 @@ WantedBy=multi-user.target
 EOF_TSS_SERVICE
   sudo install -m 0644 /tmp/tss-host.service /etc/systemd/system/tss-host.service
 
+  cat > /tmp/operator-signer-api.service <<'EOF_OPERATOR_SIGNER_API_SERVICE'
+[Unit]
+Description=Intents Juno Operator signer api
+After=network-online.target intents-juno-config-hydrator.service
+Wants=network-online.target intents-juno-config-hydrator.service
+
+[Service]
+Type=simple
+User=intents-juno
+Group=intents-juno
+ExecStart=/usr/local/bin/intents-juno-operator-signer-api.sh
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectControlGroups=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+ReadWritePaths=/var/lib/intents-juno
+MemoryAccounting=true
+CPUAccounting=true
+MemoryMax=512M
+CPUQuota=50%
+
+[Install]
+WantedBy=multi-user.target
+EOF_OPERATOR_SIGNER_API_SERVICE
+  sudo install -m 0644 /tmp/operator-signer-api.service /etc/systemd/system/operator-signer-api.service
+
   cat > /tmp/base-relayer.service <<'EOF_BASE_RELAYER_SERVICE'
 [Unit]
 Description=Intents Juno Operator base-relayer
@@ -3046,6 +3117,7 @@ write_bootstrap_metadata() {
         "juno-scan-backfill.service",
         "checkpoint-signer.service",
         "checkpoint-aggregator.service",
+        "operator-signer-api.service",
         "tss-host.service",
         "base-relayer.service",
         "deposit-relayer.service",
@@ -3079,7 +3151,7 @@ install_intents_binaries
 write_stack_config
 
 sudo systemctl daemon-reload
-sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service juno-scan-backfill.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
+sudo systemctl enable intents-juno-config-hydrator.service junocashd.service juno-scan.service juno-scan-backfill.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service operator-signer-api.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service
 sudo systemctl restart junocashd.service juno-scan.service
 
 wait_for_sync_and_record_blockstamp
@@ -3092,7 +3164,7 @@ wait_for_juno_scan_catchup
 
 write_bootstrap_metadata
 
-sudo systemctl stop juno-scan-backfill.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
+sudo systemctl stop juno-scan-backfill.service juno-scan.service checkpoint-signer.service checkpoint-aggregator.service dkg-admin-serve.service operator-signer-api.service tss-host.service base-relayer.service deposit-relayer.service withdraw-coordinator.service withdraw-finalizer.service base-event-scanner.service || true
 rpc_user="\$(sudo grep '^JUNO_RPC_USER=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 rpc_pass="\$(sudo grep '^JUNO_RPC_PASS=' /etc/intents-juno/operator-stack.env | cut -d= -f2-)"
 /usr/local/bin/junocash-cli __BOOTSTRAP_JUNOCLI_NETWORK_FLAG__ -rpcconnect=127.0.0.1 -rpcport=18232 -rpcuser="\$rpc_user" -rpcpassword="\$rpc_pass" stop >/dev/null 2>&1 || true

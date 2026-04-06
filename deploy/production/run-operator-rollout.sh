@@ -135,10 +135,14 @@ install_stage_files() {
   if [[ -f "$config_hydrator_stage" ]]; then
     sudo install -m 0755 "$config_hydrator_stage" /usr/local/bin/intents-juno-config-hydrator.sh
   fi
+  if [[ -f "$stage_dir/operator-signer-api.service" ]]; then
+    sudo install -m 0644 "$stage_dir/operator-signer-api.service" /etc/systemd/system/operator-signer-api.service
+  fi
   for wrapper_name in \
     intents-juno-checkpoint-signer.sh \
     intents-juno-checkpoint-aggregator.sh \
     intents-juno-deposit-relayer.sh \
+    intents-juno-operator-signer-api.sh \
     intents-juno-multikey-extend-signer.sh \
     intents-juno-withdraw-coordinator.sh \
     intents-juno-withdraw-finalizer.sh \
@@ -263,6 +267,7 @@ hydrate_and_restart() {
     checkpoint-signer
     checkpoint-aggregator
     dkg-admin-serve
+    operator-signer-api
     tss-host
     base-relayer
     deposit-relayer

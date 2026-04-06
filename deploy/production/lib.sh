@@ -1217,53 +1217,83 @@ production_default_dkg_port_for_index() {
   printf '%s\n' "$((18442 + operator_index))"
 }
 
-production_default_dkg_endpoint_for_operator_json() {
-  local operator_json="$1"
-  local endpoint_host operator_index endpoint_port
+production_is_private_ipv4_host() {
+  local host="$1"
+  case "$host" in
+    10.*|192.168.*)
+      return 0
+      ;;
+    172.1[6-9].*|172.2[0-9].*|172.3[0-1].*)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
 
-  endpoint_host="$(jq -r '.public_endpoint // .operator_host // empty' <<<"$operator_json")"
+production_default_mesh_endpoint_for_operator_json() {
+  local operator_json="$1"
+  local private_endpoint operator_probe_host operator_host public_endpoint operator_index endpoint_host endpoint_port endpoint_scheme
+
+  private_endpoint="$(jq -r '.private_endpoint // empty' <<<"$operator_json")"
+  operator_probe_host="$(jq -r '.operator_probe_host // empty' <<<"$operator_json")"
+  operator_host="$(jq -r '.operator_host // empty' <<<"$operator_json")"
+  public_endpoint="$(jq -r '.public_endpoint // empty' <<<"$operator_json")"
   operator_index="$(jq -r '.index // empty' <<<"$operator_json")"
-  [[ -n "$endpoint_host" ]] || return 1
   [[ -n "$operator_index" ]] || return 1
+
+  if [[ -n "$private_endpoint" ]]; then
+    endpoint_host="$private_endpoint"
+    endpoint_scheme="http"
+  elif [[ -n "$operator_probe_host" ]]; then
+    endpoint_host="$operator_probe_host"
+    endpoint_scheme="http"
+  elif [[ -n "$operator_host" ]] && production_is_private_ipv4_host "$operator_host"; then
+    endpoint_host="$operator_host"
+    endpoint_scheme="http"
+  elif [[ -n "$public_endpoint" ]]; then
+    endpoint_host="$public_endpoint"
+    endpoint_scheme="https"
+  elif [[ -n "$operator_host" ]]; then
+    endpoint_host="$operator_host"
+    endpoint_scheme="https"
+  else
+    return 1
+  fi
+
   endpoint_port="$(production_default_dkg_port_for_index "$operator_index")"
-  printf 'https://%s:%s\n' "$endpoint_host" "$endpoint_port"
+  printf '%s://%s:%s\n' "$endpoint_scheme" "$endpoint_host" "$endpoint_port"
+}
+
+production_default_dkg_endpoint_for_operator_json() {
+  production_default_mesh_endpoint_for_operator_json "$1"
 }
 
 production_default_operator_endpoints_json() {
   local inventory="$1"
   local shared_manifest="${2:-}"
-  local operator_count index operator_json endpoint_addr endpoint_host
-  local operator_id dkg_endpoint endpoint_port parsed_endpoint operator_index
+  local operator_count index operator_json endpoint_addr
+  local operator_id dkg_endpoint default_endpoint parsed_endpoint
 
   operator_count="$(jq -r '.operators | length' "$inventory")"
   for ((index = 0; index < operator_count; index++)); do
     operator_json="$(jq -c ".operators[$index]" "$inventory")"
     operator_id="$(jq -r '.operator_id // empty' <<<"$operator_json")"
-    operator_index="$(jq -r '.index // empty' <<<"$operator_json")"
     endpoint_addr="$(jq -r '.operator_address // .operator_id // empty' <<<"$operator_json")"
-    endpoint_host="$(jq -r '
-      if (.private_endpoint // "") != "" then
-        .private_endpoint
-      elif (.operator_probe_host // "") != "" then
-        .operator_probe_host
-      else
-        (.public_endpoint // .operator_host // "")
-      end
-    ' <<<"$operator_json")"
-    endpoint_port="$(production_default_dkg_port_for_index "$operator_index")"
+    default_endpoint="$(production_default_mesh_endpoint_for_operator_json "$operator_json" 2>/dev/null || true)"
 
-    if [[ -n "$shared_manifest" && -f "$shared_manifest" && -n "$operator_id" ]]; then
+    if [[ -z "$default_endpoint" && -n "$shared_manifest" && -f "$shared_manifest" && -n "$operator_id" ]]; then
       dkg_endpoint="$(jq -r --arg operator_id "$operator_id" '.operator_roster[] | select(.operator_id == $operator_id) | .dkg_endpoint // empty' "$shared_manifest")"
       if [[ -n "$dkg_endpoint" ]]; then
-        parsed_endpoint="$(parse_endpoint_host_port "$dkg_endpoint" 2>/dev/null || true)"
-        if [[ -n "$parsed_endpoint" ]]; then
-          endpoint_port="${parsed_endpoint##* }"
-        fi
+        default_endpoint="$dkg_endpoint"
       fi
     fi
 
-    [[ -n "$endpoint_addr" && -n "$endpoint_host" ]] || continue
-    printf '%s=%s:%s\n' "$endpoint_addr" "$endpoint_host" "$endpoint_port"
+    [[ -n "$endpoint_addr" && -n "$default_endpoint" ]] || continue
+    parsed_endpoint="$(printf '%s\n' "$default_endpoint" | sed -nE 's|^https?://([^/]+)$|\1|p')"
+    [[ -n "$parsed_endpoint" ]] || continue
+    printf '%s=%s\n' "$endpoint_addr" "$parsed_endpoint"
   done | jq -R -s 'split("\n") | map(select(length > 0))'
 }
 

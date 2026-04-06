@@ -314,7 +314,7 @@ ensure_operator_grpc_mesh_ingress() {
   local profile="$1"
   local region="$2"
   local host="$3"
-  local group_ids group_id peer_manifest peer_public_endpoint peer_public_cidr
+  local group_ids group_id peer_manifest peer_mesh_host peer_mesh_cidr
 
   [[ -n "$profile" && -n "$region" ]] || return 0
   have_cmd aws || return 0
@@ -331,12 +331,12 @@ ensure_operator_grpc_mesh_ingress() {
     if [[ -d "$peer_manifests_dir" ]]; then
       while IFS= read -r peer_manifest; do
         [[ -f "$peer_manifest" ]] || continue
-        peer_public_endpoint="$(jq -r '.public_endpoint // empty' "$peer_manifest")"
-        [[ "$peer_public_endpoint" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
-        peer_public_cidr="${peer_public_endpoint}/32"
+        peer_mesh_host="$(resolve_dkg_peer_host_from_manifest "$peer_manifest" 2>/dev/null || true)"
+        [[ "$peer_mesh_host" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || continue
+        peer_mesh_cidr="${peer_mesh_host}/32"
         aws --profile "$profile" --region "$region" ec2 authorize-security-group-ingress \
           --group-id "$group_id" \
-          --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"IpRanges\":[{\"CidrIp\":\"$peer_public_cidr\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
+          --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"IpRanges\":[{\"CidrIp\":\"$peer_mesh_cidr\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
           >/dev/null 2>&1 || true
       done < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -type f -name 'operator-deploy.json' | sort)
     fi
@@ -661,6 +661,7 @@ for wrapper_name in \
   intents-juno-checkpoint-signer.sh \
   intents-juno-checkpoint-aggregator.sh \
   intents-juno-deposit-relayer.sh \
+  intents-juno-operator-signer-api.sh \
   intents-juno-multikey-extend-signer.sh \
   intents-juno-withdraw-coordinator.sh \
   intents-juno-withdraw-finalizer.sh \
@@ -678,6 +679,10 @@ for wrapper_name in \
     intents-juno-deposit-relayer.sh)
       wrapper_start="cat > /tmp/intents-juno-deposit-relayer.sh <<'EOF_DEPOSIT_RELAYER'"
       wrapper_end="EOF_DEPOSIT_RELAYER"
+      ;;
+    intents-juno-operator-signer-api.sh)
+      wrapper_start="cat > /tmp/intents-juno-operator-signer-api.sh <<'EOF_OPERATOR_SIGNER_API'"
+      wrapper_end="EOF_OPERATOR_SIGNER_API"
       ;;
     intents-juno-multikey-extend-signer.sh)
       wrapper_start="cat > /tmp/intents-juno-multikey-extend-signer.sh <<'EOF_WITHDRAW_EXTEND_SIGNER'"
@@ -737,6 +742,12 @@ fi
 set_env_value_local "$merged_env" "JUNO_SCAN_BACKFILL_FROM_HEIGHT" "${PRODUCTION_DEPLOY_SCAN_BACKFILL_FROM_HEIGHT:-0}"
 cp "$SCRIPT_DIR/run-operator-rollout.sh" "$run_operator_rollout_stage"
 chmod 0755 "$run_operator_rollout_stage"
+operator_signer_api_service_stage="$tmp_dir/operator-signer-api.service"
+extract_build_runbook_block \
+  "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
+  "cat > /tmp/operator-signer-api.service <<'EOF_OPERATOR_SIGNER_API_SERVICE'" \
+  "EOF_OPERATOR_SIGNER_API_SERVICE" \
+  "$operator_signer_api_service_stage"
 
 if [[ -n "$dkg_tls_dir" ]]; then
   resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"
@@ -762,6 +773,7 @@ files_to_copy=(
   "$shared_manifest_path"
   "$operator_deploy"
   "$run_operator_rollout_stage"
+  "$operator_signer_api_service_stage"
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
   "$REPO_ROOT/deploy/operators/dkg/common.sh"
 )
@@ -808,7 +820,7 @@ else
     || die "remote rollout failed over ssm for operator $operator_id"
 
 
-  for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
+  for svc in junocashd juno-scan checkpoint-signer checkpoint-aggregator dkg-admin-serve operator-signer-api tss-host base-relayer deposit-relayer withdraw-coordinator withdraw-finalizer base-event-scanner; do
     wait_for_remote_service_active "$svc"
   done
 fi

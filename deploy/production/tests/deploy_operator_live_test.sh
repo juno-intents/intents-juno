@@ -174,10 +174,12 @@ test_deploy_operator_uses_ssm_runtime_refs_for_live_rollout() {
   mkdir -p "$output_dir/operators/0x3333333333333333333333333333333333333333"
   jq -n '{
     operator_id: "0x2222222222222222222222222222222222222222",
+    operator_host: "10.92.1.14",
     public_endpoint: "203.0.113.22"
   }' >"$output_dir/operators/0x2222222222222222222222222222222222222222/operator-deploy.json"
   jq -n '{
     operator_id: "0x3333333333333333333333333333333333333333",
+    private_endpoint: "10.93.1.54",
     public_endpoint: "203.0.113.33"
   }' >"$output_dir/operators/0x3333333333333333333333333333333333333333/operator-deploy.json"
 
@@ -205,14 +207,15 @@ EOF
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live deploy stages files over ssm"
   assert_contains "$(cat "$log_dir/aws.log")" "--parameters file://" "live deploy stages ssm commands through a parameter file"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress --group-id sg-op001" "live deploy refreshes grpc mesh ingress"
-  assert_contains "$(cat "$log_dir/aws.log")" "203.0.113.22/32" "live deploy allows peer public endpoint ingress for operator two"
-  assert_contains "$(cat "$log_dir/aws.log")" "203.0.113.33/32" "live deploy allows peer public endpoint ingress for operator three"
+  assert_contains "$(cat "$log_dir/aws.log")" "10.92.1.14/32" "live deploy allows peer private endpoint ingress for operator two"
+  assert_contains "$(cat "$log_dir/aws.log")" "10.93.1.54/32" "live deploy allows peer private endpoint ingress for operator three"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-rollout.sh" "live deploy runs the host rollout entrypoint over ssm"
   assert_contains "$(cat "$log_dir/commands.log")" "sudo bash -lc 'set -euo pipefail" "live deploy wraps the remote rollout entrypoint in bash"
   assert_contains "$(cat "$log_dir/commands.log")" "operator-stack-hydrator.env" "live deploy stages the runtime config hydrator env"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-config-hydrator.sh" "live deploy stages the corrected config hydrator"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-deposit-relayer.sh" "live deploy stages refreshed queue consumer wrappers"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-multikey-extend-signer.sh" "live deploy stages the extend signer wrapper"
+  assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-operator-signer-api.sh" "live deploy stages the operator signer api wrapper"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-withdraw-coordinator.sh" "live deploy stages refreshed withdraw wrappers"
   assert_contains "$(cat "$log_dir/commands.log")" "intents-juno-withdraw-finalizer.sh" "live deploy stages refreshed finalizer wrappers"
   assert_contains "$(cat "$log_dir/commands.log")" "systemctl is-active checkpoint-signer" "live deploy waits for operator services over ssm"

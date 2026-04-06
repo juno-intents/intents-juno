@@ -46,6 +46,7 @@ services=(
   checkpoint-signer
   checkpoint-aggregator
   dkg-admin-serve
+  operator-signer-api
   tss-host
   base-relayer
   deposit-relayer

@@ -81,6 +81,7 @@ unit_marker_start() {
     checkpoint-signer.service) printf "%s" "cat > /tmp/checkpoint-signer.service <<'EOF_SIGNER_SERVICE'" ;;
     checkpoint-aggregator.service) printf "%s" "cat > /tmp/checkpoint-aggregator.service <<'EOF_AGG_SERVICE'" ;;
     dkg-admin-serve.service) printf "%s" "cat > /tmp/dkg-admin-serve.service <<'EOF_DKG_SERVE_SERVICE'" ;;
+    operator-signer-api.service) printf "%s" "cat > /tmp/operator-signer-api.service <<'EOF_OPERATOR_SIGNER_API_SERVICE'" ;;
     tss-host.service) printf "%s" "cat > /tmp/tss-host.service <<'EOF_TSS_SERVICE'" ;;
     base-relayer.service) printf "%s" "cat > /tmp/base-relayer.service <<'EOF_BASE_RELAYER_SERVICE'" ;;
     deposit-relayer.service) printf "%s" "cat > /tmp/deposit-relayer.service <<'EOF_DEPOSIT_RELAYER_SERVICE'" ;;
@@ -99,6 +100,7 @@ unit_marker_end() {
     checkpoint-signer.service) printf "%s" "EOF_SIGNER_SERVICE" ;;
     checkpoint-aggregator.service) printf "%s" "EOF_AGG_SERVICE" ;;
     dkg-admin-serve.service) printf "%s" "EOF_DKG_SERVE_SERVICE" ;;
+    operator-signer-api.service) printf "%s" "EOF_OPERATOR_SIGNER_API_SERVICE" ;;
     tss-host.service) printf "%s" "EOF_TSS_SERVICE" ;;
     base-relayer.service) printf "%s" "EOF_BASE_RELAYER_SERVICE" ;;
     deposit-relayer.service) printf "%s" "EOF_DEPOSIT_RELAYER_SERVICE" ;;
@@ -138,6 +140,7 @@ test_build_operator_stack_ami_enforces_service_user_and_hardening() {
     checkpoint-signer.service \
     checkpoint-aggregator.service \
     dkg-admin-serve.service \
+    operator-signer-api.service \
     tss-host.service \
     base-relayer.service \
     deposit-relayer.service \
@@ -330,6 +333,14 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$dkg_wrapper" 'exec /var/lib/intents-juno/operator-runtime/bin/dkg-admin --config "$admin_config" serve' "dkg-admin wrapper uses restored runtime binary with the expected CLI order"
   assert_not_contains "$dkg_wrapper" 'exec /usr/local/bin/dkg-admin serve --config "$admin_config"' "dkg-admin wrapper does not assume a host-installed binary"
 
+  local operator_signer_api_wrapper
+  operator_signer_api_wrapper="$(extract_block "cat > /tmp/intents-juno-operator-signer-api.sh <<'EOF_OPERATOR_SIGNER_API'" "EOF_OPERATOR_SIGNER_API")"
+  assert_contains "$operator_signer_api_wrapper" 'local_signer_key="${JUNO_TXSIGN_SIGNER_KEYS:-}"' "operator signer api wrapper reads the local txsign key from env"
+  assert_contains "$operator_signer_api_wrapper" 'listen_addr="${OPERATOR_SIGNER_API_LISTEN_ADDR:-}"' "operator signer api wrapper accepts an explicit listen addr override"
+  assert_contains "$operator_signer_api_wrapper" 'if [[ -z "$listen_addr" && -n "${WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS:-}" && -n "${OPERATOR_ADDRESS:-}" ]]; then' "operator signer api wrapper derives the listen port from the operator endpoint roster"
+  assert_contains "$operator_signer_api_wrapper" 'listen_addr="0.0.0.0:${endpoint_host_port##*:}"' "operator signer api wrapper binds the derived signer api port on all interfaces"
+  assert_contains "$operator_signer_api_wrapper" 'exec /usr/local/bin/juno-txsign serve --listen "$listen_addr"' "operator signer api wrapper launches the txsign serve mode"
+
   signer_wrapper="$(extract_block "cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'" "EOF_SIGNER")"
   assert_contains "$signer_wrapper" '[[ -n "${BASE_CHAIN_ID:-}" ]] || {' "checkpoint signer requires base chain id in operator env"
   assert_contains "$signer_wrapper" '[[ -n "${BRIDGE_ADDRESS:-}" ]] || {' "checkpoint signer requires bridge address in operator env"
@@ -399,6 +410,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$script_text" 'BASE_RELAYER_ALLOWED_SELECTORS=0x53a58a48,0xec70b605,0xfe097d57' "bootstrap env pins the base relayer selector allowlist"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_EXPIRY_SAFETY_MARGIN=6h' "bootstrap env pins the withdraw expiry safety margin"
   assert_contains "$script_text" 'WITHDRAW_COORDINATOR_MAX_EXPIRY_EXTENSION=12h' "bootstrap env pins the withdraw max expiry extension"
+  assert_contains "$script_text" 'operator-signer-api.service' "builder installs the operator signer api service"
 }
 
 test_build_operator_stack_ami_digest_fallback_survives_missing_manifest_entry() {
@@ -901,8 +913,31 @@ EOF
   chmod 0755 "$fake_bin/extend-signer"
   "$tmp/intents-juno-multikey-extend-signer.sh" sign-digest --digest 0x1111111111111111111111111111111111111111111111111111111111111111 --json >/dev/null
   assert_contains "$(cat "$tmp/extend.env")" 'JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' "live withdraw extend signer keeps only the local signer key in env"
-  assert_contains "$(cat "$extend_output_file")" '--operator-endpoint https://203.0.113.12:18444' "live withdraw extend signer forwards remote operator endpoints"
-  assert_not_contains "$(cat "$extend_output_file")" 'https://203.0.113.11:18443' "live withdraw extend signer skips the local operator endpoint"
+  assert_contains "$(cat "$extend_output_file")" '--operator-endpoint http://203.0.113.12:18444' "live withdraw extend signer forwards remote operator endpoints over the private mesh transport"
+  assert_not_contains "$(cat "$extend_output_file")" 'http://203.0.113.11:18443' "live withdraw extend signer skips the local operator endpoint"
+
+  cat >"$env_file" <<EOF
+OPERATOR_ADDRESS=0x9999999999999999999999999999999999999999
+JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+WITHDRAW_COORDINATOR_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=10.0.0.11:18443,0x8888888888888888888888888888888888888888=10.0.0.12:18444
+EOF
+
+  render_wrapper \
+    "cat > /tmp/intents-juno-operator-signer-api.sh <<'EOF_OPERATOR_SIGNER_API'" \
+    "EOF_OPERATOR_SIGNER_API" \
+    "$tmp/intents-juno-operator-signer-api.sh" \
+    "$env_file"
+  python3 - "$tmp/intents-juno-operator-signer-api.sh" "$fake_bin/extend-signer" <<'EOF'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace("/usr/local/bin/juno-txsign", sys.argv[2])
+path.write_text(text)
+EOF
+  "$tmp/intents-juno-operator-signer-api.sh" >/dev/null
+  assert_contains "$(cat "$extend_output_file")" 'serve --listen 0.0.0.0:18443' "operator signer api wrapper derives its listen port from the local roster entry"
 
   local finalizer_output_file
   finalizer_output_file="$tmp/finalizer.args"
