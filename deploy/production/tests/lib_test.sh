@@ -2974,6 +2974,48 @@ EOF
   rm -rf "$workdir"
 }
 
+test_render_app_handoff_emits_base_relayer_signer_addresses_from_inventory() {
+  local workdir shared_manifest app_manifest
+  workdir="$(mktemp -d)"
+  printf 'backup' >"$workdir/dkg-backup.zip"
+  cat >"$workdir/operator-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+BASE_RELAYER_PRIVATE_KEYS=literal:0x1111111111111111111111111111111111111111111111111111111111111111
+BASE_RELAYER_AUTH_TOKEN=literal:token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  append_default_owallet_proof_keys "$workdir/operator-secrets.env"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/known_hosts"
+  cp "$REPO_ROOT/deploy/production/tests/fixtures/known_hosts" "$workdir/app-known_hosts"
+  cat >"$workdir/app-secrets.env" <<'EOF'
+CHECKPOINT_POSTGRES_DSN=literal:postgres://alpha
+APP_BACKOFFICE_AUTH_SECRET=literal:backoffice-token
+JUNO_RPC_USER=literal:juno
+JUNO_RPC_PASS=literal:rpcpass
+EOF
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .operators[0].base_relayer_address = "0x9565dECCA82442a86F6F36Aa0cD628e557EaD66b"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  shared_manifest="$workdir/shared-manifest.json"
+  production_render_shared_manifest \
+    "$workdir/inventory.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/bridge-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" \
+    "$REPO_ROOT/deploy/production/tests/fixtures/terraform-output.json" \
+    "$shared_manifest" \
+    "$workdir"
+  production_render_operator_handoffs "$workdir/inventory.json" "$shared_manifest" "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" "$workdir/output" "$workdir"
+  production_render_app_handoff "$workdir/inventory.json" "$shared_manifest" "$workdir/output" "$workdir"
+  app_manifest="$workdir/output/app/app-deploy.json"
+
+  assert_eq "$(jq -r '.base_relayer_signer_addresses' "$app_manifest")" "0x9565dECCA82442a86F6F36Aa0cD628e557EaD66b" "app manifest carries relayer signer addresses from operator inventory"
+  rm -rf "$workdir"
+}
+
 test_render_manifests_allow_external_dns_without_route53_zone() {
   local workdir shared_manifest app_manifest operator_manifest
   workdir="$(mktemp -d)"

@@ -2711,7 +2711,7 @@ production_render_app_handoff() {
   local bridge_record_name bridge_public_url backoffice_access_mode backoffice_record_name backoffice_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
-  local juno_rpc_url operator_addresses_json
+  local juno_rpc_url operator_addresses_json base_relayer_signer_addresses_csv
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_public_lb_dns_name edge_public_lb_zone_id
@@ -2795,6 +2795,7 @@ production_render_app_handoff() {
   bridge_fee_bps="$(production_json_required "$shared_manifest" '.contracts.bridge_params.fee_bps')"
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
+  base_relayer_signer_addresses_csv="$(jq -r '[.operators[] | .base_relayer_address? | select(type == "string" and length > 0)] | join(",")' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
   operator_endpoints_json="$(jq -c '.operator_endpoints // []' <<<"$app_json")"
   backoffice_access_json="$(jq -c '.backoffice_access // {}' <<<"$app_json")"
@@ -2893,6 +2894,7 @@ production_render_app_handoff() {
     --arg account_id "$account_id" \
     --arg security_group_id "$security_group_id" \
     --arg juno_rpc_url "$juno_rpc_url" \
+    --arg base_relayer_signer_addresses_csv "$base_relayer_signer_addresses_csv" \
     --arg bridge_listen_addr "$bridge_listen_addr" \
     --arg bridge_public_url "$bridge_public_url" \
     --arg bridge_probe_url "$bridge_probe_url" \
@@ -2951,6 +2953,7 @@ production_render_app_handoff() {
       security_group_id: (if $security_group_id == "" then null else $security_group_id end),
       public_scheme: $public_scheme,
       juno_rpc_url: (if $juno_rpc_url == "" then null else $juno_rpc_url end),
+      base_relayer_signer_addresses: (if $base_relayer_signer_addresses_csv == "" then null else $base_relayer_signer_addresses_csv end),
       operator_addresses: $operator_addresses,
       service_urls: $service_urls,
       operator_endpoints: $operator_endpoints,
