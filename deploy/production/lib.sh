@@ -2707,7 +2707,7 @@ production_render_app_handoff() {
   local env_slug public_subdomain zone_id dns_mode ttl_seconds zone_name
   local app_json app_dir manifest_path app_host app_user runtime_dir
   local public_endpoint aws_profile aws_region account_id security_group_id
-  local bridge_dns_label public_scheme bridge_listen_addr backoffice_listen_addr
+  local bridge_dns_label bridge_public_hostname public_scheme bridge_listen_addr backoffice_listen_addr
   local bridge_record_name bridge_public_url backoffice_access_mode backoffice_record_name backoffice_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
@@ -2780,8 +2780,9 @@ production_render_app_handoff() {
   account_id="$(jq -r '.account_id // empty' <<<"$app_json")"
   security_group_id="$(jq -r '.public_lb.security_group_id // .security_group_id // empty' <<<"$app_json")"
   bridge_dns_label="$(jq -r '.bridge_public_dns_label // empty' <<<"$app_json")"
+  bridge_public_hostname="$(jq -r '.bridge_public_hostname // empty' <<<"$app_json")"
   backoffice_dns_label="$(jq -r '.backoffice_dns_label // empty' <<<"$app_json")"
-  [[ -n "$bridge_dns_label" ]] || die "app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
+  [[ -n "$bridge_public_hostname" || -n "$bridge_dns_label" ]] || die "app_role.bridge_public_hostname or app_role.bridge_public_dns_label is required when inventory.app_role or inventory.app_host is present"
   public_scheme="$(jq -r '.public_scheme // "https"' <<<"$app_json")"
   [[ "$public_scheme" == "https" ]] || die "app_role.public_scheme must be https"
   bridge_listen_addr="$(jq -r '.bridge_api_listen // "0.0.0.0:8082"' <<<"$app_json")"
@@ -2835,7 +2836,11 @@ production_render_app_handoff() {
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
   fi
 
-  bridge_record_name="${bridge_dns_label}.${public_subdomain}"
+  if [[ -n "$bridge_public_hostname" ]]; then
+    bridge_record_name="$bridge_public_hostname"
+  else
+    bridge_record_name="${bridge_dns_label}.${public_subdomain}"
+  fi
   bridge_public_url="$(production_origin_url "$public_scheme" "$bridge_record_name")"
   bridge_internal_url="$(production_public_url "http" "127.0.0.1" "$bridge_listen_addr")"
   backoffice_internal_url="$(production_public_url "http" "127.0.0.1" "$backoffice_listen_addr")"
