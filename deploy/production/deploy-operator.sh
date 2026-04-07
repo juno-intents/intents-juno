@@ -210,6 +210,22 @@ extract_build_runbook_block() {
   [[ -s "$output_file" ]] || die "failed to extract embedded block from $source_file"
 }
 
+render_live_juno_scan_wrapper() {
+  local wrapper_file="$1"
+  local juno_scan_ua_hrp="jtest"
+  local script
+
+  case "$environment" in
+    mainnet) juno_scan_ua_hrp="juno" ;;
+    *) juno_scan_ua_hrp="jtest" ;;
+  esac
+
+  script="$(cat "$wrapper_file")"
+  script="${script//__BOOTSTRAP_JUNO_SCAN_UA_HRP__/$juno_scan_ua_hrp}"
+  script="${script//\\\$/\$}"
+  printf '%s\n' "$script" >"$wrapper_file"
+}
+
 append_unique_san_entry() {
   local entry="$1"
   shift
@@ -753,6 +769,11 @@ for wrapper_name in \
     "$wrapper_start" \
     "$wrapper_end" \
     "$wrapper_stage"
+  case "$wrapper_name" in
+    intents-juno-juno-scan.sh)
+      render_live_juno_scan_wrapper "$wrapper_stage"
+      ;;
+  esac
   chmod 0755 "$wrapper_stage"
   staged_wrapper_scripts+=("$wrapper_stage")
 done

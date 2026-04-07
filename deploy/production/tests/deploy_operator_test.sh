@@ -121,6 +121,9 @@ test_deploy_operator_stages_live_juno_scan_artifacts() {
   assert_contains "$script_text" 'intents-juno-juno-scan-backfill.sh' "deploy-operator stages the live juno-scan backfill wrapper"
   assert_contains "$script_text" 'juno-scan.service' "deploy-operator stages the juno-scan unit"
   assert_contains "$script_text" 'juno-scan-backfill.service' "deploy-operator stages the juno-scan backfill unit"
+  assert_contains "$script_text" 'render_live_juno_scan_wrapper() {' "deploy-operator renders the staged juno-scan wrapper before rollout"
+  assert_contains "$script_text" 'script="${script//__BOOTSTRAP_JUNO_SCAN_UA_HRP__/$juno_scan_ua_hrp}"' "deploy-operator resolves the staged juno-scan hrp placeholder"
+  assert_contains "$script_text" 'script="${script//\\\$/\$}"' "deploy-operator unescapes staged juno-scan runtime env references"
 }
 
 test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
