@@ -75,6 +75,14 @@ func TestParseArgs_ValidDirectDeployer(t *testing.T) {
 	if got := cfg.MinDepositAdmin.Hex(); got != "0x3333333333333333333333333333333333333333" {
 		t.Fatalf("MinDepositAdmin = %s", got)
 	}
+	if len(cfg.OperatorFeeRecipients) != len(cfg.OperatorAddresses) {
+		t.Fatalf("OperatorFeeRecipients len = %d, want %d", len(cfg.OperatorFeeRecipients), len(cfg.OperatorAddresses))
+	}
+	for i := range cfg.OperatorAddresses {
+		if cfg.OperatorFeeRecipients[i] != cfg.OperatorAddresses[i] {
+			t.Fatalf("OperatorFeeRecipients[%d] = %s, want %s", i, cfg.OperatorFeeRecipients[i].Hex(), cfg.OperatorAddresses[i].Hex())
+		}
+	}
 }
 
 func TestParseArgs_ValidEphemeralDeployer(t *testing.T) {
@@ -130,6 +138,97 @@ func TestParseArgs_AllowsSameGovernanceSafeAndPauseGuardian(t *testing.T) {
 	}
 	if got := cfg.PauseGuardian.Hex(); got != "0x1111111111111111111111111111111111111111" {
 		t.Fatalf("PauseGuardian = %s", got)
+	}
+}
+
+func TestParseArgs_UsesExplicitOperatorFeeRecipients(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "8453",
+		"--funder-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--ephemeral-funding-amount-wei", "50000000000000000",
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-fee-recipient", "0x1111111111111111111111111111111111111111",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-fee-recipient", "0x2222222222222222222222222222222222222222",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--operator-fee-recipient", "0x3333333333333333333333333333333333333333",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--governance-safe", "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		"--pause-guardian", "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		"--min-deposit-admin-address", "0xcccccccccccccccccccccccccccccccccccccccc",
+	})
+	if err != nil {
+		t.Fatalf("parseArgs: %v", err)
+	}
+
+	want := []common.Address{
+		common.HexToAddress("0x1111111111111111111111111111111111111111"),
+		common.HexToAddress("0x2222222222222222222222222222222222222222"),
+		common.HexToAddress("0x3333333333333333333333333333333333333333"),
+	}
+	if len(cfg.OperatorFeeRecipients) != len(want) {
+		t.Fatalf("OperatorFeeRecipients len = %d, want %d", len(cfg.OperatorFeeRecipients), len(want))
+	}
+	for i := range want {
+		if cfg.OperatorFeeRecipients[i] != want[i] {
+			t.Fatalf("OperatorFeeRecipients[%d] = %s, want %s", i, cfg.OperatorFeeRecipients[i].Hex(), want[i].Hex())
+		}
+	}
+}
+
+func TestParseArgs_RejectsOperatorFeeRecipientCountMismatch(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseArgs([]string{
+		"--rpc-url", "https://example-rpc.invalid",
+		"--chain-id", "8453",
+		"--deployer-key-hex", "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+		"--operator-address", "0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F",
+		"--operator-fee-recipient", "0x1111111111111111111111111111111111111111",
+		"--operator-address", "0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7",
+		"--operator-address", "0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1",
+		"--threshold", "3",
+		"--verifier-address", "0x475576d5685465D5bd65E91Cf10053f9d0EFd685",
+		"--governance-safe", "0x1111111111111111111111111111111111111111",
+		"--pause-guardian", "0x2222222222222222222222222222222222222222",
+		"--min-deposit-admin-address", "0x3333333333333333333333333333333333333333",
+	})
+	if err == nil {
+		t.Fatalf("parseArgs: got nil error, want error")
+	}
+}
+
+func TestSortedOperatorBindings_PreservesFeeRecipientMapping(t *testing.T) {
+	t.Parallel()
+
+	bindings := sortedOperatorBindings(
+		[]common.Address{
+			common.HexToAddress("0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7"),
+			common.HexToAddress("0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F"),
+			common.HexToAddress("0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1"),
+		},
+		[]common.Address{
+			common.HexToAddress("0x2222222222222222222222222222222222222222"),
+			common.HexToAddress("0x1111111111111111111111111111111111111111"),
+			common.HexToAddress("0x3333333333333333333333333333333333333333"),
+		},
+	)
+
+	if len(bindings) != 3 {
+		t.Fatalf("len(bindings) = %d, want 3", len(bindings))
+	}
+	if bindings[0].Operator != common.HexToAddress("0x4F2a2d66d7f13f3Ac8A9f8E35CAb2B3a1D52A03F") || bindings[0].FeeRecipient != common.HexToAddress("0x1111111111111111111111111111111111111111") {
+		t.Fatalf("binding[0] = (%s -> %s)", bindings[0].Operator.Hex(), bindings[0].FeeRecipient.Hex())
+	}
+	if bindings[1].Operator != common.HexToAddress("0x90f8bf6a479f320ead074411a4b0e7944ea8c9c1") || bindings[1].FeeRecipient != common.HexToAddress("0x3333333333333333333333333333333333333333") {
+		t.Fatalf("binding[1] = (%s -> %s)", bindings[1].Operator.Hex(), bindings[1].FeeRecipient.Hex())
+	}
+	if bindings[2].Operator != common.HexToAddress("0xBf0CB7f2dE3dEdA412fF6A9021fdaBf8B34C10A7") || bindings[2].FeeRecipient != common.HexToAddress("0x2222222222222222222222222222222222222222") {
+		t.Fatalf("binding[2] = (%s -> %s)", bindings[2].Operator.Hex(), bindings[2].FeeRecipient.Hex())
 	}
 }
 

@@ -73,6 +73,7 @@ type config struct {
 	ContractsOut                        string
 	Threshold                           int
 	OperatorAddresses                   []common.Address
+	OperatorFeeRecipients               []common.Address
 	VerifierAddress                     common.Address
 	BridgeFeeBps                        uint64
 	BridgeRelayerTipBps                 uint64
@@ -138,8 +139,9 @@ type report struct {
 		MinWithdrawAmount             uint64 `json:"min_withdraw_amount"`
 	} `json:"bridge_params"`
 
-	Operators []string `json:"operators"`
-	Threshold int      `json:"threshold"`
+	Operators             []string `json:"operators"`
+	OperatorFeeRecipients []string `json:"operator_fee_recipients"`
+	Threshold             int      `json:"threshold"`
 
 	Transactions struct {
 		FundEphemeral          string `json:"fund_ephemeral,omitempty"`
@@ -175,6 +177,11 @@ type report struct {
 		} `json:"revoke_bootstrap_roles"`
 		SweepEphemeral string `json:"sweep_ephemeral,omitempty"`
 	} `json:"transactions"`
+}
+
+type operatorBinding struct {
+	Operator     common.Address
+	FeeRecipient common.Address
 }
 
 type foundryArtifact struct {
@@ -238,6 +245,7 @@ func run(args []string, stdout io.Writer) error {
 func parseArgs(args []string) (config, error) {
 	var cfg config
 	var operatorAddressFlags stringListFlag
+	var operatorFeeRecipientFlags stringListFlag
 	var deployerKeyFile string
 	var funderKeyFile string
 	var verifierAddressHex string
@@ -261,6 +269,7 @@ func parseArgs(args []string) (config, error) {
 	fs.StringVar(&cfg.FunderKeyHex, "funder-key-hex", "", "funder private key hex used for ephemeral deployer funding")
 	fs.StringVar(&ephemeralFundingAmountWei, "ephemeral-funding-amount-wei", "", "wei amount to fund a generated ephemeral deployer")
 	fs.Var(&operatorAddressFlags, "operator-address", "operator address (repeat)")
+	fs.Var(&operatorFeeRecipientFlags, "operator-fee-recipient", "operator fee recipient address (repeat, aligns with --operator-address)")
 	fs.IntVar(&cfg.Threshold, "threshold", 3, "operator quorum threshold")
 	fs.StringVar(&verifierAddressHex, "verifier-address", "", "verifier router address")
 	fs.Uint64Var(&cfg.BridgeFeeBps, "fee-bps", defaultBridgeFeeBps, "bridge fee in basis points")
@@ -399,6 +408,25 @@ func parseArgs(args []string) (config, error) {
 	if len(cfg.OperatorAddresses) < cfg.Threshold {
 		return cfg, fmt.Errorf("need at least %d operator addresses, got %d", cfg.Threshold, len(cfg.OperatorAddresses))
 	}
+	if len(operatorFeeRecipientFlags) != 0 && len(operatorFeeRecipientFlags) != len(cfg.OperatorAddresses) {
+		return cfg, fmt.Errorf(
+			"need either 0 or %d --operator-fee-recipient flags, got %d",
+			len(cfg.OperatorAddresses),
+			len(operatorFeeRecipientFlags),
+		)
+	}
+	cfg.OperatorFeeRecipients = make([]common.Address, 0, len(cfg.OperatorAddresses))
+	if len(operatorFeeRecipientFlags) == 0 {
+		cfg.OperatorFeeRecipients = append(cfg.OperatorFeeRecipients, cfg.OperatorAddresses...)
+	} else {
+		for _, raw := range operatorFeeRecipientFlags {
+			recipient, err := parseRequiredAddress("--operator-fee-recipient", raw)
+			if err != nil {
+				return cfg, err
+			}
+			cfg.OperatorFeeRecipients = append(cfg.OperatorFeeRecipients, recipient)
+		}
+	}
 
 	if sweepRecipientHex != "" {
 		if cfg.SweepRecipient, err = parseRequiredAddress("--sweep-recipient", sweepRecipientHex); err != nil {
@@ -423,11 +451,12 @@ func parseArgs(args []string) (config, error) {
 
 func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report, error) {
 	rep := &report{
-		GeneratedAtUTC: time.Now().UTC().Format(time.RFC3339),
-		RPCURL:         cfg.RPCURL,
-		ChainID:        cfg.ChainID,
-		Operators:      make([]string, 0, len(cfg.OperatorAddresses)),
-		Threshold:      cfg.Threshold,
+		GeneratedAtUTC:        time.Now().UTC().Format(time.RFC3339),
+		RPCURL:                cfg.RPCURL,
+		ChainID:               cfg.ChainID,
+		Operators:             make([]string, 0, len(cfg.OperatorAddresses)),
+		OperatorFeeRecipients: make([]string, 0, len(cfg.OperatorFeeRecipients)),
+		Threshold:             cfg.Threshold,
 	}
 	rep.Contracts.Verifier = cfg.VerifierAddress.Hex()
 	rep.Governance.GovernanceSafe = cfg.GovernanceSafe.Hex()
@@ -451,8 +480,9 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 	rep.BridgeParams.MaxExpiryExtensionSeconds = cfg.BridgeMaxExpiryExtensionSeconds
 	rep.BridgeParams.MinDepositAmount = cfg.BridgeMinDepositAmount
 	rep.BridgeParams.MinWithdrawAmount = cfg.BridgeMinWithdrawAmount
-	for _, op := range cfg.OperatorAddresses {
+	for i, op := range cfg.OperatorAddresses {
 		rep.Operators = append(rep.Operators, op.Hex())
+		rep.OperatorFeeRecipients = append(rep.OperatorFeeRecipients, cfg.OperatorFeeRecipients[i].Hex())
 	}
 
 	chainID := new(big.Int).SetUint64(cfg.ChainID)
@@ -596,13 +626,9 @@ func deploy(ctx context.Context, client *ethclient.Client, cfg config) (*report,
 	}
 	rep.Transactions.SetFeeDistributor = setFeeDistributorTx.Hex()
 
-	sortedOperators := append([]common.Address(nil), cfg.OperatorAddresses...)
-	sort.Slice(sortedOperators, func(i, j int) bool {
-		return bytes.Compare(sortedOperators[i].Bytes(), sortedOperators[j].Bytes()) < 0
-	})
-	for _, op := range sortedOperators {
-		if _, err := transactAndWait(ctx, client, deployerAuth, reg, "setOperator", op, op, big.NewInt(1), true); err != nil {
-			return nil, fmt.Errorf("setOperator(%s): %w", op.Hex(), err)
+	for _, binding := range sortedOperatorBindings(cfg.OperatorAddresses, cfg.OperatorFeeRecipients) {
+		if _, err := transactAndWait(ctx, client, deployerAuth, reg, "setOperator", binding.Operator, binding.FeeRecipient, big.NewInt(1), true); err != nil {
+			return nil, fmt.Errorf("setOperator(%s): %w", binding.Operator.Hex(), err)
 		}
 	}
 
@@ -791,6 +817,20 @@ func verifyDeployment(
 	}
 	if operatorCount != uint64(len(cfg.OperatorAddresses)) {
 		return fmt.Errorf("operatorCount mismatch: got=%d want=%d", operatorCount, len(cfg.OperatorAddresses))
+	}
+	for _, binding := range sortedOperatorBindings(cfg.OperatorAddresses, cfg.OperatorFeeRecipients) {
+		feeRecipient, err := callOperatorFeeRecipient(ctx, reg, binding.Operator)
+		if err != nil {
+			return fmt.Errorf("operatorRegistry.getOperator(%s): %w", binding.Operator.Hex(), err)
+		}
+		if feeRecipient != binding.FeeRecipient {
+			return fmt.Errorf(
+				"operator feeRecipient mismatch for %s: got=%s want=%s",
+				binding.Operator.Hex(),
+				feeRecipient.Hex(),
+				binding.FeeRecipient.Hex(),
+			)
+		}
 	}
 	threshold, err := waitUint64AtLeastAttempts(ctx, "threshold", uint64(cfg.Threshold), readRetries, readBackoff, func() (uint64, error) {
 		return callUint64(ctx, reg, "threshold")
@@ -1659,6 +1699,41 @@ func callBool(ctx context.Context, c contractCaller, method string, args ...any)
 		return false, fmt.Errorf("unexpected %s type: %T", method, res[0])
 	}
 	return v, nil
+}
+
+func callOperatorFeeRecipient(ctx context.Context, c contractCaller, operator common.Address) (common.Address, error) {
+	var res []any
+	if err := c.Call(&bind.CallOpts{Context: ctx}, &res, "getOperator", operator); err != nil {
+		return common.Address{}, err
+	}
+	if len(res) != 3 {
+		return common.Address{}, fmt.Errorf("unexpected getOperator result count: %d", len(res))
+	}
+	switch v := res[0].(type) {
+	case common.Address:
+		return v, nil
+	case [20]byte:
+		return common.BytesToAddress(v[:]), nil
+	default:
+		return common.Address{}, fmt.Errorf("unexpected getOperator feeRecipient type: %T", res[0])
+	}
+}
+
+func sortedOperatorBindings(operators, feeRecipients []common.Address) []operatorBinding {
+	if len(operators) != len(feeRecipients) {
+		return nil
+	}
+	bindings := make([]operatorBinding, len(operators))
+	for i := range operators {
+		bindings[i] = operatorBinding{
+			Operator:     operators[i],
+			FeeRecipient: feeRecipients[i],
+		}
+	}
+	sort.Slice(bindings, func(i, j int) bool {
+		return bytes.Compare(bindings[i].Operator.Bytes(), bindings[j].Operator.Bytes()) < 0
+	})
+	return bindings
 }
 
 func timelockAdminRole() common.Hash {
