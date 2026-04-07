@@ -133,6 +133,11 @@ Usage:
 Options:
   --shared-manifest PATH    Shared manifest JSON for the deployment (required)
   --app-deploy PATH         App deploy handoff JSON for the deployment (required)
+  --app-binaries-release-tag TAG
+                           Optional published app-binaries release tag to stage
+                           bridge-api/backoffice binaries into the refresh bundle
+  --github-repo REPO        GitHub repo for release asset downloads
+                           (default: juno-intents/intents-juno)
   --output-dir DIR          Output directory for rendered runtime artifacts (required)
   --dry-run                 Render local artifacts but skip remote mutations
 EOF
@@ -140,6 +145,8 @@ EOF
 
 shared_manifest=""
 app_deploy=""
+app_binaries_release_tag=""
+github_repo="juno-intents/intents-juno"
 output_dir=""
 dry_run="false"
 
@@ -147,6 +154,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --shared-manifest) shared_manifest="$2"; shift 2 ;;
     --app-deploy) app_deploy="$2"; shift 2 ;;
+    --app-binaries-release-tag) app_binaries_release_tag="$2"; shift 2 ;;
+    --github-repo) github_repo="$2"; shift 2 ;;
     --output-dir) output_dir="$2"; shift 2 ;;
     --dry-run) dry_run="true"; shift ;;
     --help|-h) usage; exit 0 ;;
@@ -163,9 +172,17 @@ done
 for cmd in jq base64 tar cast aws; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
+if [[ -n "$app_binaries_release_tag" ]]; then
+  for cmd in gh sha256sum; do
+    have_cmd "$cmd" || die "required command not found: $cmd"
+  done
+fi
 
 output_dir="$(production_abs_path "$(pwd)" "$output_dir")"
 mkdir -p "$output_dir" "$output_dir/nginx" "$output_dir/systemd" "$output_dir/bin"
+if [[ -n "$app_binaries_release_tag" ]]; then
+  mkdir -p "$output_dir/app-binaries"
+fi
 
 tmp_dir="$(mktemp -d)"
 bundle_dir="$tmp_dir/bundle"
@@ -203,6 +220,22 @@ if [[ -z "$backoffice_hostname" ]]; then
   backoffice_hostname="$(production_json_optional "$shared_manifest" '.wireguard_role.backoffice_hostname // .shared_roles.wireguard.backoffice_hostname')"
 fi
 [[ -n "$backoffice_hostname" ]] || die "app deploy is missing services.backoffice.record_name or services.backoffice.public_url"
+
+if [[ -n "$app_binaries_release_tag" ]]; then
+  gh release download "$app_binaries_release_tag" \
+    --repo "$github_repo" \
+    --pattern "bridge-api_linux_amd64" \
+    --pattern "bridge-api_linux_amd64.sha256" \
+    --pattern "backoffice_linux_amd64" \
+    --pattern "backoffice_linux_amd64.sha256" \
+    --dir "$output_dir/app-binaries" \
+    --clobber
+  (
+    cd "$output_dir/app-binaries"
+    sha256sum -c bridge-api_linux_amd64.sha256 >/dev/null
+    sha256sum -c backoffice_linux_amd64.sha256 >/dev/null
+  )
+fi
 
 bridge_wrapper="$output_dir/bin/bridge-api-wrapper"
 cat >"$bridge_wrapper" <<'EOF'
@@ -568,6 +601,11 @@ if [[ -n "$cloudflared_wrapper" && -n "$cloudflared_unit" ]]; then
   cp "$cloudflared_wrapper" "$bundle_dir/cloudflared-backoffice-wrapper"
   cp "$cloudflared_unit" "$bundle_dir/systemd/cloudflared-backoffice.service"
 fi
+if [[ -n "$app_binaries_release_tag" ]]; then
+  mkdir -p "$bundle_dir/app-binaries"
+  cp "$output_dir/app-binaries/bridge-api_linux_amd64" "$bundle_dir/app-binaries/bridge-api_linux_amd64"
+  cp "$output_dir/app-binaries/backoffice_linux_amd64" "$bundle_dir/app-binaries/backoffice_linux_amd64"
+fi
 
 install_script="$output_dir/install.sh"
 cat >"$install_script" <<'EOF'
@@ -604,6 +642,11 @@ if ! command -v aws >/dev/null 2>&1; then
   "$aws_tmp_dir/aws/install" --update
   trap - EXIT
   rm -rf "$aws_tmp_dir"
+fi
+
+if [[ -d "$script_dir/app-binaries" ]]; then
+  install -m 0755 "$script_dir/app-binaries/bridge-api_linux_amd64" /usr/local/bin/bridge-api
+  install -m 0755 "$script_dir/app-binaries/backoffice_linux_amd64" /usr/local/bin/backoffice
 fi
 
 install -m 0600 "$script_dir/bridge-api.env" /etc/intents-juno/bridge-api.env

@@ -230,6 +230,37 @@ EOF
   chmod +x "$target"
 }
 
+write_fake_refresh_runtime_gh() {
+  local target="$1"
+  cat >"$target" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+dir=""
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dir) dir="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+
+[[ -n "$dir" ]] || {
+  printf 'missing --dir for fake gh\n' >&2
+  exit 1
+}
+
+mkdir -p "$dir"
+printf 'bridge-api-binary\n' >"$dir/bridge-api_linux_amd64"
+printf 'backoffice-binary\n' >"$dir/backoffice_linux_amd64"
+(
+  cd "$dir"
+  sha256sum bridge-api_linux_amd64 > bridge-api_linux_amd64.sha256
+  sha256sum backoffice_linux_amd64 > backoffice_linux_amd64.sha256
+)
+EOF
+  chmod +x "$target"
+}
+
 test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   local tmp fake_bin aws_log shared_manifest app_deploy secret_contract output_dir operators_root
   tmp="$(mktemp -d)"
@@ -251,6 +282,7 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   write_refresh_runtime_operator_handoff "$operators_root" "0x2222222222222222222222222222222222222222" "$tmp/op2-secrets.env"
   write_fake_refresh_runtime_aws "$fake_bin/aws"
   write_fake_refresh_runtime_cast "$fake_bin/cast"
+  write_fake_refresh_runtime_gh "$fake_bin/gh"
 
   (
     cd "$REPO_ROOT"
@@ -258,6 +290,8 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
       bash "$REPO_ROOT/deploy/production/refresh-app-runtime.sh" \
         --shared-manifest "$shared_manifest" \
         --app-deploy "$app_deploy" \
+        --app-binaries-release-tag app-binaries-v2026.04.07-r2-mainnet \
+        --github-repo juno-intents/intents-juno \
         --output-dir "$output_dir" >"$tmp/refresh-summary.json"
   )
 
@@ -267,9 +301,13 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=wallet-mainnet-f8379377446f" "refresh renders the backoffice scan wallet id"
   assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_ID=intents-juno-mainnet-app-runtime-config" "refresh renders the runtime config secret id for host hydration"
   assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_REGION=us-east-1" "refresh renders the runtime config secret region for host hydration"
+  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$script_dir/app-binaries/bridge-api_linux_amd64" /usr/local/bin/bridge-api' "refresh installs the staged published bridge-api binary onto the host"
+  assert_contains "$(cat "$output_dir/install.sh")" 'install -m 0755 "$script_dir/app-binaries/backoffice_linux_amd64" /usr/local/bin/backoffice' "refresh installs the staged published backoffice binary onto the host"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-url "${BACKOFFICE_JUNO_SCAN_URL}"' "refresh passes the backoffice scan url to the backoffice wrapper"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-wallet-id "${BACKOFFICE_JUNO_SCAN_WALLET_ID}"' "refresh passes the backoffice scan wallet id to the backoffice wrapper"
   assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-bearer-token-env BACKOFFICE_JUNO_SCAN_BEARER_TOKEN' "refresh passes the optional backoffice scan bearer token env to the backoffice wrapper"
+  assert_eq "$(cat "$output_dir/app-binaries/bridge-api_linux_amd64")" "bridge-api-binary" "refresh stages the published bridge-api binary in the remote bundle"
+  assert_eq "$(cat "$output_dir/app-binaries/backoffice_linux_amd64")" "backoffice-binary" "refresh stages the published backoffice binary in the remote bundle"
   assert_contains "$(cat "$output_dir/install.sh")" 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' "refresh writes a self-locating install script for remote bundle extraction"
   assert_contains "$(cat "$output_dir/install.sh")" 'for _ in $(seq 1 60); do' "refresh allows slow app runtime startup during the remote readiness gate"
   assert_contains "$(cat "$output_dir/install.sh")" 'sleep 5' "refresh backs off between remote readiness checks so the app can finish booting"
