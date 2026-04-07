@@ -1328,13 +1328,13 @@ func (s *Store) SetBatchFinalized(ctx context.Context, batchID [32]byte, fence w
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE withdrawal_batches
 		SET state = $5,
-			base_tx_hash = COALESCE(base_tx_hash, $4),
+			base_tx_hash = COALESCE(base_tx_hash, $4::text),
 			updated_at = now()
 		WHERE batch_id = $1
 		  AND lease_owner = $2
 		  AND lease_version = $3
 		  AND state IN ($6, $7, $5)
-		  AND ($4 IS NULL OR base_tx_hash IS NULL OR base_tx_hash = $4)
+		  AND ($4::text IS NULL OR base_tx_hash IS NULL OR base_tx_hash = $4::text)
 		  AND dlq_at IS NULL
 	`, batchID[:], fence.Owner, fence.LeaseVersion, baseTxHashValue,
 		int16(withdraw.BatchStateFinalized),

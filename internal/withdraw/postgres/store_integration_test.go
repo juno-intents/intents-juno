@@ -311,6 +311,94 @@ func TestStore_FencedBatchMutationAndFailureBookkeeping(t *testing.T) {
 	}
 }
 
+func TestStore_SetBatchFinalized_AllowsEmptyBaseTxHashForOnChainRepair(t *testing.T) {
+	if _, err := exec.LookPath("docker"); err != nil {
+		t.Skip("docker not available")
+	}
+
+	const pgImage = "postgres@sha256:4327b9fd295502f326f44153a1045a7170ddbfffed1c3829798328556cfd09e2"
+
+	port := mustFreePort(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	t.Cleanup(cancel)
+
+	containerID := dockerRunPostgres(t, ctx, pgImage, port)
+	t.Cleanup(func() { _ = exec.Command("docker", "rm", "-f", containerID).Run() })
+
+	dsn := "postgres://postgres:postgres@127.0.0.1:" + port + "/postgres?sslmode=disable"
+	pool := dialPostgres(t, ctx, dsn)
+	t.Cleanup(pool.Close)
+
+	s, err := New(pool)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := s.EnsureSchema(ctx); err != nil {
+		t.Fatalf("EnsureSchema: %v", err)
+	}
+
+	now := time.Date(2026, 2, 9, 0, 0, 0, 0, time.UTC)
+	fence := testFence("a")
+
+	w := withdraw.Withdrawal{ID: seq32(0x72), Amount: 5, FeeBps: 0, RecipientUA: []byte{0x05}, Expiry: now.Add(24 * time.Hour)}
+	if _, created, err := s.UpsertRequested(ctx, w); err != nil || !created {
+		t.Fatalf("UpsertRequested: created=%v err=%v", created, err)
+	}
+	if _, err := s.ClaimUnbatched(ctx, fence, 10*time.Second, 1); err != nil {
+		t.Fatalf("ClaimUnbatched: %v", err)
+	}
+
+	batchID := seq32(0x73)
+	if err := s.CreatePlannedBatch(ctx, fence, withdraw.Batch{
+		ID:            batchID,
+		WithdrawalIDs: [][32]byte{w.ID},
+		State:         withdraw.BatchStatePlanned,
+		TxPlan:        []byte(`{"v":1}`),
+	}); err != nil {
+		t.Fatalf("CreatePlannedBatch: %v", err)
+	}
+	if err := s.MarkBatchSigning(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchSigning: %v", err)
+	}
+	if err := s.SetBatchSigned(ctx, batchID, fence, []byte{0x01}); err != nil {
+		t.Fatalf("SetBatchSigned: %v", err)
+	}
+	if err := s.MarkBatchBroadcastLocked(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchBroadcastLocked: %v", err)
+	}
+	if err := s.SetBatchBroadcasted(ctx, batchID, fence, "tx1"); err != nil {
+		t.Fatalf("SetBatchBroadcasted: %v", err)
+	}
+	if err := s.MarkBatchJunoConfirmed(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchJunoConfirmed: %v", err)
+	}
+	if err := s.SetBatchConfirmed(ctx, batchID, fence); err != nil {
+		t.Fatalf("SetBatchConfirmed: %v", err)
+	}
+	if err := s.MarkBatchFinalizing(ctx, batchID, fence); err != nil {
+		t.Fatalf("MarkBatchFinalizing: %v", err)
+	}
+
+	if err := s.SetBatchFinalized(ctx, batchID, fence, ""); err != nil {
+		t.Fatalf("SetBatchFinalized empty: %v", err)
+	}
+	if err := s.SetBatchFinalized(ctx, batchID, fence, ""); err != nil {
+		t.Fatalf("SetBatchFinalized empty #2: %v", err)
+	}
+
+	b, err := s.GetBatch(ctx, batchID)
+	if err != nil {
+		t.Fatalf("GetBatch: %v", err)
+	}
+	if b.State != withdraw.BatchStateFinalized {
+		t.Fatalf("state: got %s want %s", b.State, withdraw.BatchStateFinalized)
+	}
+	if b.BaseTxHash != "" {
+		t.Fatalf("base tx hash: got %q want empty", b.BaseTxHash)
+	}
+}
+
 func TestStore_ClaimBatchesAndScanBackfillCursorRoundTrip(t *testing.T) {
 	if _, err := exec.LookPath("docker"); err != nil {
 		t.Skip("docker not available")
