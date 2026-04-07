@@ -26,10 +26,13 @@ type ServerConfig struct {
 	BaseClient *ethclient.Client
 	SP1RPCURL  string // Succinct prover network gRPC URL (e.g. rpc.mainnet.succinct.xyz)
 
-	JunoRPCURL  string
-	JunoRPCURLs []string
-	JunoRPCUser string
-	JunoRPCPass string
+	JunoRPCURL          string
+	JunoRPCURLs         []string
+	JunoRPCUser         string
+	JunoRPCPass         string
+	JunoScanURL         string
+	JunoScanWalletID    string
+	JunoScanBearerToken string
 
 	DLQStore          dlq.Store
 	AlertStore        *alerts.Store

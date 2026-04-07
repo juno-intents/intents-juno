@@ -15,6 +15,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/juno-intents/intents-juno/internal/emf"
+	"github.com/juno-intents/intents-juno/internal/junoscanhttp"
 )
 
 // handleFunds returns all fund data in one response: base relayer signer
@@ -107,12 +108,13 @@ func (s *Server) handleFunds(w http.ResponseWriter, r *http.Request) {
 
 	// MPC wallet balance (Juno RPC z_gettotalbalance).
 	junoRPCURLs := s.configuredJunoRPCURLs()
-	if strings.TrimSpace(s.cfg.OWalletUA) != "" && len(junoRPCURLs) == 0 {
+	scanConfigured := strings.TrimSpace(s.cfg.JunoScanURL) != "" && strings.TrimSpace(s.cfg.JunoScanWalletID) != ""
+	if strings.TrimSpace(s.cfg.OWalletUA) != "" && !scanConfigured && len(junoRPCURLs) == 0 {
 		resp["mpcWallet"] = map[string]any{
 			"address": strings.TrimSpace(s.cfg.OWalletUA),
 			"error":   "Juno RPC not configured on app host",
 		}
-	} else if len(junoRPCURLs) > 0 {
+	} else if scanConfigured || len(junoRPCURLs) > 0 {
 		mpcBalance, mpcErr := s.fetchJunoMPCBalance(ctx)
 		if mpcErr != nil {
 			s.log.Warn("fetch juno mpc balance", "err", mpcErr)
@@ -348,30 +350,76 @@ func decodeVarint(buf []byte, i int) (uint64, int) {
 // fetchJunoMPCBalance calls z_gettotalbalance on the Juno RPC to retrieve the
 // MPC wallet balance. Uses raw JSON-RPC.
 func (s *Server) fetchJunoMPCBalance(ctx context.Context) (map[string]any, error) {
+	scanURL := strings.TrimSpace(s.cfg.JunoScanURL)
+	scanWalletID := strings.TrimSpace(s.cfg.JunoScanWalletID)
 	urls := s.configuredJunoRPCURLs()
-	if len(urls) == 0 {
+	if scanURL == "" && scanWalletID == "" && len(urls) == 0 {
 		return nil, fmt.Errorf("juno rpc not configured")
 	}
 
-	errs := make([]string, 0, len(urls))
-	seenErrs := make(map[string]struct{}, len(urls))
-	for _, rpcURL := range urls {
-		balance, err := s.fetchJunoMPCBalanceFromURL(ctx, rpcURL)
+	errs := make([]string, 0, len(urls)+1)
+	seenErrs := make(map[string]struct{}, len(urls)+1)
+	appendErr := func(err error) {
 		if err == nil {
-			return balance, nil
+			return
 		}
 		msg := err.Error()
 		if _, ok := seenErrs[msg]; ok {
-			continue
+			return
 		}
 		seenErrs[msg] = struct{}{}
 		errs = append(errs, msg)
 	}
 
+	if scanURL != "" || scanWalletID != "" {
+		balance, err := s.fetchJunoMPCBalanceFromScan(ctx, scanURL, scanWalletID)
+		if err == nil {
+			return balance, nil
+		}
+		appendErr(err)
+	}
+
+	for _, rpcURL := range urls {
+		balance, err := s.fetchJunoMPCBalanceFromURL(ctx, rpcURL)
+		if err == nil {
+			return balance, nil
+		}
+		appendErr(err)
+	}
+
+	if len(errs) == 0 {
+		return nil, fmt.Errorf("juno rpc not configured")
+	}
 	if len(errs) == 1 {
 		return nil, fmt.Errorf("%s", errs[0])
 	}
-	return nil, fmt.Errorf("all juno rpc endpoints failed: %s", strings.Join(errs, "; "))
+	return nil, fmt.Errorf("all mpc wallet sources failed: %s", strings.Join(errs, "; "))
+}
+
+func (s *Server) fetchJunoMPCBalanceFromScan(ctx context.Context, scanURL string, walletID string) (map[string]any, error) {
+	if strings.TrimSpace(scanURL) == "" {
+		return nil, fmt.Errorf("juno scan url not configured")
+	}
+	if strings.TrimSpace(walletID) == "" {
+		return nil, fmt.Errorf("juno scan wallet id not configured")
+	}
+
+	scan := junoscanhttp.New(scanURL, s.cfg.JunoScanBearerToken)
+	notes, err := scan.ListWalletNotes(ctx, walletID)
+	if err != nil {
+		return nil, fmt.Errorf("juno scan: %w", err)
+	}
+
+	total := new(big.Int)
+	for _, note := range notes {
+		total.Add(total, new(big.Int).SetUint64(note.ValueZat))
+	}
+	formattedTotal := formatBigZatFixed8(total)
+	return map[string]any{
+		"transparent": "0.00000000",
+		"private":     formattedTotal,
+		"total":       formattedTotal,
+	}, nil
 }
 
 func (s *Server) fetchJunoMPCBalanceFromURL(ctx context.Context, rpcURL string) (map[string]any, error) {
@@ -429,4 +477,18 @@ func (s *Server) fetchJunoMPCBalanceFromURL(ctx context.Context, rpcURL string) 
 		"private":     rpcResp.Result.Private,
 		"total":       rpcResp.Result.Total,
 	}, nil
+}
+
+func formatBigZatFixed8(raw *big.Int) string {
+	if raw == nil || raw.Sign() == 0 {
+		return "0.00000000"
+	}
+	divisor := big.NewInt(1_0000_0000)
+	whole := new(big.Int)
+	frac := new(big.Int)
+	whole.DivMod(raw, divisor, frac)
+	if frac.Sign() < 0 {
+		frac.Abs(frac)
+	}
+	return fmt.Sprintf("%s.%08d", whole.String(), frac.Int64())
 }

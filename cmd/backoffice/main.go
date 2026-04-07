@@ -43,10 +43,14 @@ func main() {
 		)
 		baseRPCURL = flag.String("base-rpc-url", "", "Base chain RPC URL (required)")
 
-		junoRPCURL     = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, for MPC wallet balance)")
-		junoRPCURLsRaw = flag.String("juno-rpc-urls", "", "Comma-separated Juno RPC URLs (optional, tried in order for MPC wallet balance)")
-		junoRPCUser    = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
-		junoRPCPass    = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
+		junoRPCURL             = flag.String("juno-rpc-url", "", "Juno RPC URL (optional, for MPC wallet balance)")
+		junoRPCURLsRaw         = flag.String("juno-rpc-urls", "", "Comma-separated Juno RPC URLs (optional, tried in order for MPC wallet balance)")
+		junoRPCUser            = flag.String("juno-rpc-user", "", "Juno RPC basic auth username")
+		junoRPCPass            = flag.String("juno-rpc-pass", "", "Juno RPC basic auth password")
+		junoScanURL            = flag.String("juno-scan-url", "", "Juno scan URL (optional, preferred source for MPC wallet balance)")
+		junoScanWalletID       = flag.String("juno-scan-wallet-id", "", "Juno scan wallet id (required with --juno-scan-url)")
+		junoScanBearerToken    = flag.String("juno-scan-bearer-token", "", "optional Juno scan bearer token")
+		junoScanBearerTokenEnv = flag.String("juno-scan-bearer-token-env", "BACKOFFICE_JUNO_SCAN_BEARER_TOKEN", "env var containing an optional Juno scan bearer token")
 
 		authSecret = flag.String("auth-secret", "", "Bearer token for API auth (required)")
 
@@ -129,6 +133,10 @@ func main() {
 	}
 	if *depositMinConfirmations <= 0 || *withdrawPlannerMinConfirmations <= 0 || *withdrawBatchConfirmations <= 0 {
 		fmt.Fprintln(os.Stderr, "error: runtime confirmation defaults must be > 0")
+		os.Exit(2)
+	}
+	if (*junoScanURL == "") != (*junoScanWalletID == "") {
+		fmt.Fprintln(os.Stderr, "error: --juno-scan-url and --juno-scan-wallet-id must be provided together")
 		os.Exit(2)
 	}
 
@@ -396,10 +404,13 @@ func main() {
 		BaseClient: baseClient,
 		SP1RPCURL:  strings.TrimSpace(*sp1RPCURL),
 
-		JunoRPCURL:  strings.TrimSpace(*junoRPCURL),
-		JunoRPCURLs: junoRPCURLs,
-		JunoRPCUser: strings.TrimSpace(*junoRPCUser),
-		JunoRPCPass: strings.TrimSpace(*junoRPCPass),
+		JunoRPCURL:          strings.TrimSpace(*junoRPCURL),
+		JunoRPCURLs:         junoRPCURLs,
+		JunoRPCUser:         strings.TrimSpace(*junoRPCUser),
+		JunoRPCPass:         strings.TrimSpace(*junoRPCPass),
+		JunoScanURL:         strings.TrimSpace(*junoScanURL),
+		JunoScanWalletID:    strings.TrimSpace(*junoScanWalletID),
+		JunoScanBearerToken: envutil.ResolveOptional(*junoScanBearerToken, *junoScanBearerTokenEnv),
 
 		DLQStore:          dlqStore,
 		AlertStore:        alertStore,

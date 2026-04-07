@@ -559,7 +559,7 @@ func TestHandleFundsReturnsOperatorErrorInsteadOfHTTP500OnBalanceFailure(t *test
 
 	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
-			ID     any `json:"id"`
+			ID     any    `json:"id"`
 			Method string `json:"method"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -684,6 +684,88 @@ func TestHandleFundsFallsBackAcrossConfiguredJunoRPCURLs(t *testing.T) {
 	}
 	if body.MPCWallet.Total != "12.34000000" {
 		t.Fatalf("mpc total = %q, want %q", body.MPCWallet.Total, "12.34000000")
+	}
+}
+
+func TestHandleFundsUsesConfiguredJunoScanWalletBalance(t *testing.T) {
+	scanServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/v1/wallets/wallet-mainnet-op1/notes":
+			w.Header().Set("Content-Type", "application/json")
+			if err := json.NewEncoder(w).Encode(map[string]any{
+				"notes": []map[string]any{
+					{"txid": "tx1", "action_index": 0, "value_zat": 123000000, "memo_hex": "", "height": 100},
+					{"txid": "tx2", "action_index": 1, "value_zat": 42000000, "memo_hex": "", "height": 101},
+				},
+				"next_cursor": "",
+			}); err != nil {
+				t.Fatalf("encode scan response: %v", err)
+			}
+		default:
+			t.Fatalf("unexpected scan path: %s", r.URL.Path)
+		}
+	}))
+	defer scanServer.Close()
+
+	rpcServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(map[string]any{
+			"jsonrpc": "2.0",
+			"id":      1,
+			"result":  "0x0",
+		}); err != nil {
+			t.Fatalf("encode eth rpc response: %v", err)
+		}
+	}))
+	defer rpcServer.Close()
+
+	baseClient, err := ethclient.Dial(rpcServer.URL)
+	if err != nil {
+		t.Fatalf("dial eth rpc: %v", err)
+	}
+	defer baseClient.Close()
+
+	s := &Server{
+		cfg: ServerConfig{
+			BaseClient:          baseClient,
+			OWalletUA:           "j1examplemainnetwallet",
+			JunoScanURL:         scanServer.URL,
+			JunoScanWalletID:    "wallet-mainnet-op1",
+			JunoScanBearerToken: "",
+		},
+		log: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "/api/funds", nil)
+	s.handleFunds(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rec.Code, http.StatusOK)
+	}
+
+	var body struct {
+		MPCWallet struct {
+			Address     string `json:"address"`
+			Transparent string `json:"transparent"`
+			Private     string `json:"private"`
+			Total       string `json:"total"`
+		} `json:"mpcWallet"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if body.MPCWallet.Address != "j1examplemainnetwallet" {
+		t.Fatalf("mpc address = %q, want %q", body.MPCWallet.Address, "j1examplemainnetwallet")
+	}
+	if body.MPCWallet.Transparent != "0.00000000" {
+		t.Fatalf("mpc transparent = %q, want %q", body.MPCWallet.Transparent, "0.00000000")
+	}
+	if body.MPCWallet.Private != "1.65000000" {
+		t.Fatalf("mpc private = %q, want %q", body.MPCWallet.Private, "1.65000000")
+	}
+	if body.MPCWallet.Total != "1.65000000" {
+		t.Fatalf("mpc total = %q, want %q", body.MPCWallet.Total, "1.65000000")
 	}
 }
 
