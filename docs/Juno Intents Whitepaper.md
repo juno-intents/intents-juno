@@ -2,72 +2,43 @@
 
 ## Abstract
 
-Juno Intents is a threshold-operated bridge for extending shielded Juno liquidity to Base without reducing custody to a single bridge signer.
+Juno Intents is a bridge architecture for extending shielded Juno liquidity to Base without collapsing custody into a single bridge signer. The design begins from a simple observation: a practical bridge for shielded assets cannot rely on vague trust claims. It must say clearly who can move funds, which assumptions are cryptographic, which assumptions are operational, and which events can be independently audited.
 
-The system combines threshold-controlled custody on Junocash, operator-signed checkpoints on Base, SP1-backed proof verification relative to those checkpoints, and published viewing material for external monitoring.
-
-Base does not verify Junocash consensus directly, and the bridge therefore depends on an operator quorum not signing an invalid checkpoint.
-
-Juno Intents defines a bridge for Orchard-based shielded assets in which custody, attestation, proving, and settlement are separated into explicit stages with defined trust boundaries, publicly inspectable data, and governance mechanisms for pause, rotation, and recovery.
+The system therefore combines three ideas. First, custody on the Juno side is threshold-controlled from the beginning through distributed key generation, so no single operator ever holds the full spend authority for the bridge wallet. Second, movement on Base is authorized only against signed checkpoints of Junocash state, rather than against unilateral relayer claims. Third, the bridge wallet publishes viewing material that allows independent observers to monitor inflows and outflows without granting spend authority. The result is not a trustless light client. It is a transparent, threshold-operated bridge whose security properties are explicit, measurable, and governable.
 
 ## 1. Introduction
 
-Shielded-asset bridging differs materially from bridging in transparent systems. In a conventional transparent bridge, deposits are visible on-chain, can be indexed directly, and can often be verified against an external chain with relatively straightforward logic. In an Orchard-based system, that is no longer true. The destination chain does not see an ordinary public deposit record, does not natively understand Junocash state transitions, and cannot cheaply determine whether a particular shielded note should authorize minting elsewhere.
+Shielded assets create a distinct challenge for bridge design. A conventional bridge often assumes that deposits are publicly visible, easily indexed, and cheaply verifiable by an external chain. Orchard-style shielded state does not offer those assumptions. The bridge must instead solve a more delicate problem: preserve the privacy and custody model of Juno while still producing a usable asset on Base with fast settlement and a familiar application environment.
 
-The design problem is therefore broader than asset transfer across two chains. It is the movement of value out of a shielded state machine while preserving privacy, constraining custody risk, and still providing enough evidence for external audit. If those three goals are not addressed together, the result is typically either an opaque custodial bridge or a system that overstates trust minimization while depending on trusted operators.
+Juno Intents approaches that problem by favoring explicit trust structure over implicit convenience. Users should be able to move value between Juno and Base with a minimal on-chain interaction pattern. Operators should not be able to act alone. External observers should be able to audit bridge behavior without receiving spend authority. And when the system fails, it should fail in ways that are legible enough to pause, rotate, and recover.
 
-Juno Intents addresses that setting directly. Base accepts typed checkpoints of Junocash state signed by a threshold of registered operators. Zero-knowledge proofs are then verified relative to those accepted checkpoints. Custody of the Junocash-side bridge wallet is itself threshold-controlled, and viewing material is published so that external observers can monitor bridge activity without receiving spend authority.
+This whitepaper describes that model. It focuses on the economic and cryptographic structure of Juno Intents rather than on implementation-specific deployment details.
 
-The claim of this paper is limited. Juno Intents combines threshold custody on Junocash, threshold checkpoint attestation on Base, and SP1-backed proof verification into a bridge model that is more constrained and auditable than a single-signer shielded bridge. Its trust boundary remains explicit. Base acts on signed Junocash state commitments rather than direct consensus verification.
+## 2. Design Principles
 
-## 2. Problem Setting And Design Objectives
+Juno Intents is organized around five principles.
 
-Juno Intents addresses the problem of moving Juno between the shielded Junocash environment and an EVM chain without collapsing either privacy expectations or operational control into a single opaque actor.
+First, custody should be threshold-based rather than single-key. If one machine, one team, or one signer can move the bridge wallet alone, the bridge reduces to concentrated custodial risk.
 
-This problem can be decomposed into four requirements that are often conflated.
+Second, Base-side minting and withdrawal finalization should be tied to explicit Junocash state commitments. This creates a narrow verification surface: the bridge reasons about signed checkpoints and proofs relative to those checkpoints, not about ad hoc relayer testimony.
 
-First, custody on the Junocash side should not reduce to one hot wallet or one trusted signer. If one operator can spend from the bridge wallet alone, the bridge becomes custodial in the narrowest sense.
+Third, auditability should be public. The system should allow independent monitoring of bridge wallet activity and state transitions without exposing the secret material required to spend funds.
 
-Second, Base-side minting and withdrawal finalization should depend on explicit Junocash state commitments rather than ad hoc relayer testimony. A relayer may carry data from one side to the other, but it should not be the authoritative source of whether a deposit or withdrawal is valid.
+Fourth, the trust boundary should be candid. Base does not verify Junocash consensus directly in this design. A threshold quorum can therefore attest to a false checkpoint. That assumption is not hidden; it is part of the stated model.
 
-Third, bridge behavior should be externally auditable. Shielded systems are inherently harder for outsiders to monitor than transparent systems, so a bridge that moves shielded value must create public audit surfaces deliberately. Published viewing material, signed checkpoint packages, and proof-carrying settlement inputs serve that purpose.
-
-Fourth, the system must admit governance and recovery. If operators equivocate, if custody material is suspected compromised, or if proving infrastructure degrades, the bridge should support pause, signer rotation, verifier updates, and renewed custody ceremonies.
-
-These requirements explain why Juno Intents is threshold-operated rather than trustless, and operationally renewable rather than static. The design makes each trusted surface explicit and bounded.
+Fifth, operations should be reversible through governance and rotation. When a key share is suspected compromised, when a quorum misbehaves, or when infrastructure becomes unavailable, the bridge must support pause and renewal rather than pretending that no trusted control exists.
 
 ## 3. System Overview
 
-Juno Intents spans three layers.
+At a high level, Juno Intents consists of a threshold-controlled wallet on Juno, a checkpoint and proof pipeline operated by a quorum of bridge operators, and a set of contracts on Base that mint, escrow, burn, and distribute fees.
 
-On Junocash, a threshold-controlled bridge wallet receives shielded deposits and produces threshold-authorized payout transactions. This layer provides custody and note observation within the shielded pool.
-
-Between the chains, operators and support services maintain checkpoint, witness, and proof infrastructure. This intermediate layer converts Junocash events into artifacts that Base can evaluate, including signed state commitments, witness bundles, and proof requests.
-
-On Base, a bridge contract, operator registry, wrapped asset contract, and fee distribution logic accept signed checkpoints, verify proofs, mint or burn `wJUNO`, and track withdrawal state. This layer provides settlement and policy enforcement for minting and finalization.
-
-The principal actors are:
-
-| Actor | Role |
-| --- | --- |
-| User | Deposits on Junocash or requests withdrawal on Base |
-| Operator quorum | Signs checkpoints and participates in threshold custody / payout authorization |
-| Relayer / submitter | Submits mint and finalization transactions on Base |
-| Proof services | Build guest inputs, request proofs, and return seals tied to specific journals |
-| Base contracts | Verify checkpoints and proofs, escrow or burn `wJUNO`, and distribute fees |
-
-Two settlement lanes define the protocol.
-
-1. Junocash-to-Base: a shielded Juno deposit becomes a proof-backed mint of `wJUNO` on Base.
-2. Base-to-Junocash: escrowed `wJUNO` becomes a threshold-authorized payout on Junocash and a proof-backed finalization on Base.
-
-The important architectural property is stage separation. Custody, checkpoint attestation, proof generation, and contract settlement are different stages with different failure modes and different audit surfaces. That separation is one of the main reasons the bridge is more inspectable than a design in which one operator both controls funds and simply asserts what happened.
+The protocol is best understood as two distinct settlement lanes. The Juno-to-Base lane turns shielded deposits into Base-side mint actions after proof-backed confirmation under a signed Orchard root. The Base-to-Juno lane escrows `wJUNO`, coordinates a threshold-signed Juno payout, marks that payout as paid on Base, and only then finalizes the withdrawal record after proof-backed confirmation. The important feature is not merely that these flows work. It is that custody, checkpoint attestation, proving, and settlement remain distinct stages with explicit boundaries.
 
 ```mermaid
 flowchart LR
   user["User"]
 
-  subgraph juno["Junocash / Orchard"]
+  subgraph juno["Juno / Orchard"]
     wallet["Threshold-controlled bridge wallet"]
     view["UFVK scanning and witness extraction"]
     payout["Threshold payout transaction"]
@@ -453,19 +424,11 @@ This approach is important economically as well as technically. A bridge that ca
 
 ## 12. Conclusion
 
-Juno Intents proposes a bridge architecture for shielded Juno liquidity that is candid about what is and is not proven. Threshold custody reduces single-party spend risk on the Junocash side. Signed checkpoints create an explicit Base-side acceptance boundary. Proofs bind concrete deposit and withdrawal events to that boundary. Published viewing material makes bridge activity more legible to external observers. Governance and rotation powers make incident response part of the system design rather than an off-book emergency measure.
+Juno Intents proposes a bridge model for shielded Juno liquidity that is explicit about what is trusted and why. Its central claim is not that trust disappears, but that bridge trust can be narrowed into a form that is threshold-controlled, publicly auditable, and operationally renewable.
 
-The design remains threshold-operated rather than trustless. It narrows and clarifies the trust boundary relative to a conventional single-signer shielded bridge. In that more limited but practical sense, Juno Intents provides a more disciplined cryptographic and operational foundation for shielded-asset bridging.
+That combination matters. Threshold custody reduces single-party risk. Signed checkpoints create a precise Base-side acceptance boundary. Guest proofs bind concrete deposit and withdrawal witnesses to that boundary. Public viewing makes bridge activity legible to external observers. And a clear evidence and rotation model ensures that failure is survivable rather than terminal.
 
-## References
-
-- Zcash Protocol Specification. https://zips.z.cash/protocol/protocol.pdf
-- ZIP 224: Orchard Shielded Protocol. https://zips.z.cash/zip-0224
-- ZIP 316: Unified Addresses. https://zips.z.cash/zip-0316
-- ZIP 317: Fee calculation and conventional fee schedule for Zcash. https://zips.z.cash/zip-0317
-- EIP-712: Typed structured data hashing and signing. https://eips.ethereum.org/EIPS/eip-712
-- Succinct SP1 documentation. https://docs.succinct.xyz/docs/sp1/introduction
-- Juno Intents repository implementation anchors, including `contracts/src/Bridge.sol`, `contracts/src/OperatorRegistry.sol`, `internal/checkpoint/checkpoint.go`, `internal/memo/memo.go`, `internal/proverinput/private_input.go`, `internal/depositrelayer/relayer.go`, `internal/withdrawcoordinator/coordinator.go`, `internal/withdrawfinalizer/finalizer.go`, and `internal/witnessextract/extractor.go` in the companion source tree.
+In that sense, Juno Intents is best understood not as a claim of perfect decentralization, but as an attempt to give shielded-asset bridging a stronger institutional and cryptographic foundation.
 
 ## Appendix A. Canonical Encodings
 
