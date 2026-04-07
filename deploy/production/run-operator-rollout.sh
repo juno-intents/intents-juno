@@ -361,6 +361,102 @@ ensure_runtime_deposit_relayer_binary() {
   rm -f "$binary_path"
 }
 
+ensure_runtime_withdraw_coordinator_binary() {
+  local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
+
+  requested_tag="$(jq -r '.deposit_relayer_release_tag // empty' "$operator_deploy")"
+  release_tag_marker="/var/lib/intents-juno/.withdraw-coordinator-release-tag"
+
+  if [[ -n "$requested_tag" ]] \
+    && sudo test -x /usr/local/bin/withdraw-coordinator \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+  if [[ -z "$requested_tag" && -x /usr/local/bin/withdraw-coordinator ]]; then
+    return 0
+  fi
+
+  if [[ -z "$requested_tag" ]]; then
+    latest_release_json="$(curl -fsSL https://api.github.com/repos/juno-intents/intents-juno/releases/latest)"
+    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
+    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest withdraw-coordinator release tag"
+    requested_tag="$latest_release_tag"
+  fi
+
+  asset_name="withdraw-coordinator_linux_amd64"
+  binary_path="$(mktemp)"
+  download_github_release_asset_with_checksum "juno-intents/intents-juno" "$requested_tag" "$asset_name" "$binary_path"
+  sudo install -m 0755 "$binary_path" /usr/local/bin/withdraw-coordinator
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -f "$binary_path"
+}
+
+ensure_runtime_withdraw_finalizer_binary() {
+  local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
+
+  requested_tag="$(jq -r '.deposit_relayer_release_tag // empty' "$operator_deploy")"
+  release_tag_marker="/var/lib/intents-juno/.withdraw-finalizer-release-tag"
+
+  if [[ -n "$requested_tag" ]] \
+    && sudo test -x /usr/local/bin/withdraw-finalizer \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+  if [[ -z "$requested_tag" && -x /usr/local/bin/withdraw-finalizer ]]; then
+    return 0
+  fi
+
+  if [[ -z "$requested_tag" ]]; then
+    latest_release_json="$(curl -fsSL https://api.github.com/repos/juno-intents/intents-juno/releases/latest)"
+    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
+    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest withdraw-finalizer release tag"
+    requested_tag="$latest_release_tag"
+  fi
+
+  asset_name="withdraw-finalizer_linux_amd64"
+  binary_path="$(mktemp)"
+  download_github_release_asset_with_checksum "juno-intents/intents-juno" "$requested_tag" "$asset_name" "$binary_path"
+  sudo install -m 0755 "$binary_path" /usr/local/bin/withdraw-finalizer
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -f "$binary_path"
+}
+
+ensure_runtime_base_event_scanner_binary() {
+  local requested_tag release_tag_marker binary_path asset_name latest_release_json latest_release_tag
+
+  requested_tag="$(jq -r '.deposit_relayer_release_tag // empty' "$operator_deploy")"
+  release_tag_marker="/var/lib/intents-juno/.base-event-scanner-release-tag"
+
+  if [[ -n "$requested_tag" ]] \
+    && sudo test -x /usr/local/bin/base-event-scanner \
+    && sudo test -f "$release_tag_marker" \
+    && [[ "$(sudo cat "$release_tag_marker")" == "$requested_tag" ]]; then
+    return 0
+  fi
+  if [[ -z "$requested_tag" && -x /usr/local/bin/base-event-scanner ]]; then
+    return 0
+  fi
+
+  if [[ -z "$requested_tag" ]]; then
+    latest_release_json="$(curl -fsSL https://api.github.com/repos/juno-intents/intents-juno/releases/latest)"
+    latest_release_tag="$(jq -r '.tag_name // empty' <<<"$latest_release_json")"
+    [[ -n "$latest_release_tag" ]] || die "failed to resolve latest base-event-scanner release tag"
+    requested_tag="$latest_release_tag"
+  fi
+
+  asset_name="base-event-scanner_linux_amd64"
+  binary_path="$(mktemp)"
+  download_github_release_asset_with_checksum "juno-intents/intents-juno" "$requested_tag" "$asset_name" "$binary_path"
+  sudo install -m 0755 "$binary_path" /usr/local/bin/base-event-scanner
+  sudo install -d -m 0755 /var/lib/intents-juno
+  printf '%s\n' "$requested_tag" | sudo tee "$release_tag_marker" >/dev/null
+  rm -f "$binary_path"
+}
+
 compute_dkg_roster_hash_hex() {
   local roster_json="$1"
   local canonical
@@ -466,6 +562,9 @@ restore_runtime
 ensure_runtime_dkg_admin_binary
 ensure_runtime_juno_txsign_binary
 ensure_runtime_deposit_relayer_binary
+ensure_runtime_withdraw_coordinator_binary
+ensure_runtime_withdraw_finalizer_binary
+ensure_runtime_base_event_scanner_binary
 stage_optional_tls_files
 refresh_dkg_client_tls_identity
 rewrite_dkg_roster

@@ -75,6 +75,24 @@ test_run_operator_rollout_repairs_deposit_relayer_from_published_release() {
   assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.deposit-relayer-release-tag"' "run-operator-rollout records the installed deposit-relayer release tag on the host"
 }
 
+test_run_operator_rollout_repairs_withdraw_binaries_from_published_release() {
+  local script_text
+  script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
+
+  assert_contains "$script_text" 'ensure_runtime_withdraw_coordinator_binary() {' "run-operator-rollout defines a withdraw-coordinator repair helper"
+  assert_contains "$script_text" 'asset_name="withdraw-coordinator_linux_amd64"' "run-operator-rollout downloads withdraw-coordinator from the published app binary release"
+  assert_contains "$script_text" 'sudo install -m 0755 "$binary_path" /usr/local/bin/withdraw-coordinator' "run-operator-rollout installs withdraw-coordinator into /usr/local/bin"
+  assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.withdraw-coordinator-release-tag"' "run-operator-rollout records the installed withdraw-coordinator release tag on the host"
+  assert_contains "$script_text" 'ensure_runtime_withdraw_finalizer_binary() {' "run-operator-rollout defines a withdraw-finalizer repair helper"
+  assert_contains "$script_text" 'asset_name="withdraw-finalizer_linux_amd64"' "run-operator-rollout downloads withdraw-finalizer from the published app binary release"
+  assert_contains "$script_text" 'sudo install -m 0755 "$binary_path" /usr/local/bin/withdraw-finalizer' "run-operator-rollout installs withdraw-finalizer into /usr/local/bin"
+  assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.withdraw-finalizer-release-tag"' "run-operator-rollout records the installed withdraw-finalizer release tag on the host"
+  assert_contains "$script_text" 'ensure_runtime_base_event_scanner_binary() {' "run-operator-rollout defines a base-event-scanner repair helper"
+  assert_contains "$script_text" 'asset_name="base-event-scanner_linux_amd64"' "run-operator-rollout downloads base-event-scanner from the published app binary release"
+  assert_contains "$script_text" 'sudo install -m 0755 "$binary_path" /usr/local/bin/base-event-scanner' "run-operator-rollout installs base-event-scanner into /usr/local/bin"
+  assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.base-event-scanner-release-tag"' "run-operator-rollout records the installed base-event-scanner release tag on the host"
+}
+
 test_run_operator_rollout_refreshes_dkg_client_tls_identity_after_staging() {
   local script_text
   script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
@@ -97,6 +115,7 @@ main() {
   test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release
   test_run_operator_rollout_repairs_juno_txsign_from_published_release
   test_run_operator_rollout_repairs_deposit_relayer_from_published_release
+  test_run_operator_rollout_repairs_withdraw_binaries_from_published_release
   test_run_operator_rollout_refreshes_dkg_client_tls_identity_after_staging
 }
 
