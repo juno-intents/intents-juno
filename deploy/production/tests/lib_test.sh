@@ -232,6 +232,55 @@ test_write_shared_terraform_override_tfvars_includes_operator_private_network_ci
   rm -rf "$workdir"
 }
 
+test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable() {
+  local workdir override_file
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.app_security_group_id = ""
+    | .app_role.security_group_id = ""
+    | .app_role.vpc_cidr = "10.64.0.0/16"
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_service_client_cidr_blocks[0]' "$override_file")" "10.64.0.0/16" "production shared tfvars allow the app VPC cidr into shared postgres and msk before the app sg exists"
+  assert_eq "$(jq -r '.shared_ipfs_client_cidr_blocks[0]' "$override_file")" "10.64.0.0/16" "production shared tfvars allow the app VPC cidr into shared ipfs before the app sg exists"
+  rm -rf "$workdir"
+}
+
+test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws() {
+  local workdir override_file path_backup
+  workdir="$(mktemp -d)"
+  write_inventory_fixture "$workdir/inventory.json" "$workdir"
+  jq '
+    .environment = "mainnet"
+    | .shared_postgres_password = "mainnet-postgres-password"
+    | .app_role.app_security_group_id = ""
+    | .app_role.security_group_id = ""
+    | del(.app_role.vpc_cidr)
+  ' "$workdir/inventory.json" >"$workdir/inventory.next"
+  mv "$workdir/inventory.next" "$workdir/inventory.json"
+
+  mkdir -p "$workdir/bin"
+  write_fake_aws_vpc_describer "$workdir/bin/aws" "vpc-0123456789abcdef0" "10.64.0.0/16"
+  path_backup="$PATH"
+  PATH="$workdir/bin:$PATH"
+
+  override_file="$workdir/shared-terraform.auto.tfvars.json"
+  production_write_shared_terraform_override_tfvars "$workdir/inventory.json" "$override_file"
+
+  assert_eq "$(jq -r '.shared_service_client_cidr_blocks[0]' "$override_file")" "10.64.0.0/16" "production shared tfvars discover the app VPC cidr from aws when inventory omits it"
+  assert_eq "$(jq -r '.shared_ipfs_client_cidr_blocks[0]' "$override_file")" "10.64.0.0/16" "production shared tfvars reuse the discovered app VPC cidr for shared ipfs ingress"
+
+  PATH="$path_backup"
+  rm -rf "$workdir"
+}
+
 write_terraform_tfvars_fixture() {
   local terraform_dir="$1"
   mkdir -p "$terraform_dir"
@@ -404,6 +453,45 @@ case "\${args[0]:-} \${args[1]:-}" in
       exit 1
     fi
     printf '%s\n' '$services_json'
+    ;;
+  *)
+    printf 'unexpected aws invocation: %s\n' "\$*" >&2
+    exit 1
+    ;;
+esac
+EOF
+  chmod +x "$target"
+}
+
+write_fake_aws_vpc_describer() {
+  local target="$1"
+  local expected_vpc_id="$2"
+  local vpc_cidr="$3"
+  cat >"$target" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+args=( "\$@" )
+while [[ \${#args[@]} -gt 0 ]]; do
+  case "\${args[0]}" in
+    --profile|--region)
+      args=( "\${args[@]:2}" )
+      ;;
+    *)
+      break
+      ;;
+  esac
+done
+case "\${args[0]:-} \${args[1]:-}" in
+  "ec2 describe-vpcs")
+    [[ "\${args[2]:-}" == "--vpc-ids" ]] || {
+      printf 'unexpected aws invocation: %s\n' "\$*" >&2
+      exit 1
+    }
+    [[ "\${args[3]:-}" == "$expected_vpc_id" ]] || {
+      printf 'unexpected vpc id: %s\n' "\${args[3]:-}" >&2
+      exit 1
+    }
+    jq -cn --arg vpc_id "$expected_vpc_id" --arg cidr "$vpc_cidr" '{Vpcs: [{VpcId: \$vpc_id, CidrBlock: \$cidr, CidrBlockAssociationSet: [{CidrBlock: \$cidr, CidrBlockState: {State: "associated"}}]}]}'
     ;;
   *)
     printf 'unexpected aws invocation: %s\n' "\$*" >&2
@@ -3960,6 +4048,8 @@ main() {
   test_write_shared_terraform_override_tfvars_writes_full_production_shared_tfvars
   test_write_shared_terraform_override_tfvars_starts_proof_ecs_services
   test_write_shared_terraform_override_tfvars_includes_operator_private_network_cidrs
+  test_write_shared_terraform_override_tfvars_includes_app_vpc_cidr_when_app_sg_is_unavailable
+  test_write_shared_terraform_override_tfvars_discovers_app_vpc_cidr_from_aws
   test_write_shared_terraform_override_tfvars_accepts_preview_legacy_wireguard_inventory
   test_write_shared_terraform_override_tfvars_prefers_persisted_live_e2e_operator_ami
   test_write_app_terraform_override_tfvars_includes_additional_public_bridge_certificates

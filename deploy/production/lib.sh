@@ -584,7 +584,44 @@ production_aws_existing_shared_vpc_endpoint_services_json() {
           "com.amazonaws.\($region).s3"
         ] as $managed
       | [$services[] | select(. as $service | $managed | index($service))] | unique
-    '
+      '
+}
+
+production_aws_vpc_cidr_block() {
+  local aws_profile="$1"
+  local aws_region="$2"
+  local vpc_id="$3"
+  local raw_vpc
+
+  if [[ -z "$vpc_id" ]] || ! command -v aws >/dev/null 2>&1; then
+    printf '\n'
+    return 0
+  fi
+
+  if ! raw_vpc="$(
+    aws --profile "$aws_profile" --region "$aws_region" ec2 describe-vpcs \
+      --vpc-ids "$vpc_id" \
+      --output json 2>/dev/null
+  )"; then
+    printf '\n'
+    return 0
+  fi
+
+  jq -r '
+    if (.Vpcs // [] | type) != "array" or ((.Vpcs // []) | length) == 0 then
+      ""
+    else
+      .Vpcs[0]
+      | (
+          (.CidrBlockAssociationSet // [])
+          | if type == "array" then . else [] end
+          | map(select((.CidrBlockState.State // "") == "associated") | .CidrBlock)
+        )
+        + [(.CidrBlock // empty)]
+      | map(select(type == "string" and length > 0))
+      | .[0] // ""
+    end
+  ' <<<"$raw_vpc"
 }
 
 production_inventory_live_e2e_operator_ami_id() {
@@ -644,8 +681,8 @@ production_write_shared_terraform_override_tfvars() {
   local proof_requestor_address proof_requestor_secret_arn proof_funder_secret_arn proof_rpc_url
   local shared_proof_service_image shared_proof_service_image_ecr_repository_arn shared_wireguard_role_ami_id
   local shared_wireguard_listen_port shared_wireguard_network_cidr alarm_actions_json
-  local app_security_group_id operator_client_security_group_ids_json shared_service_client_security_group_ids_json
-  local operator_private_network_cidr_blocks_json
+  local app_security_group_id app_vpc_cidr operator_client_security_group_ids_json shared_service_client_security_group_ids_json
+  local operator_private_network_cidr_blocks_json shared_service_client_cidr_blocks_json
   local aws_profile shared_existing_vpc_endpoint_services_json
   local live_e2e_json live_e2e_deployment_id live_e2e_allowed_ssh_cidr live_e2e_ssh_public_key
   local app_instance_profile_name operator_instance_count wireguard_public_subnet_id backoffice_private_endpoint
@@ -732,6 +769,10 @@ production_write_shared_terraform_override_tfvars() {
   else
     operator_client_security_group_ids_json='[]'
   fi
+  app_vpc_cidr="$(jq -r '.vpc_cidr // empty' <<<"$app_role_json")"
+  if [[ -z "$app_vpc_cidr" ]]; then
+    app_vpc_cidr="$(production_aws_vpc_cidr_block "$aws_profile" "$aws_region" "$vpc_id")"
+  fi
   operator_private_network_cidr_blocks_json="$(jq -c '
     [
       .operators[]?
@@ -740,6 +781,18 @@ production_write_shared_terraform_override_tfvars() {
     ]
     | unique
   ' "$inventory")"
+  shared_service_client_cidr_blocks_json="$(
+    jq -cn \
+      --arg app_vpc_cidr "$app_vpc_cidr" \
+      --argjson operator_cidrs "$operator_private_network_cidr_blocks_json" '
+        (
+          ($operator_cidrs | if type == "array" then . else [] end)
+          + (if $app_vpc_cidr == "" then [] else [$app_vpc_cidr] end)
+        )
+        | map(select(type == "string" and length > 0))
+        | unique
+      '
+  )"
   allowed_checkpoint_signer_kms_key_arns_json="$(production_inventory_checkpoint_signer_kms_key_arns_json "$inventory")"
   [[ -n "$shared_proof_service_image" ]] || die "shared_roles.proof.image_uri is required for shared terraform role runtime"
   if [[ "$shared_terraform_dir" == "deploy/shared/terraform/live-e2e" ]]; then
@@ -864,7 +917,7 @@ production_write_shared_terraform_override_tfvars() {
     --arg shared_proof_service_image "$shared_proof_service_image" \
     --arg shared_proof_service_image_ecr_repository_arn "$shared_proof_service_image_ecr_repository_arn" \
     --argjson shared_service_client_security_group_ids "$shared_service_client_security_group_ids_json" \
-    --argjson shared_service_client_cidr_blocks "$operator_private_network_cidr_blocks_json" \
+    --argjson shared_service_client_cidr_blocks "$shared_service_client_cidr_blocks_json" \
     '{
       aws_region: $aws_region,
       deployment_id: $deployment_id,
