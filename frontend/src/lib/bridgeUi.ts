@@ -1,7 +1,7 @@
 import { parseUnits } from 'viem'
 
 const BASE_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
-const JUNO_UNIFIED_ADDRESS_RE = /^j(?:test|uno)1[02-9ac-hj-np-z]+$/
+const JUNO_UNIFIED_ADDRESS_RE = /^j(?:test)?1[02-9ac-hj-np-z]+$/
 
 const RECENT_LIMIT = 5
 

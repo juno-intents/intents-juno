@@ -39,6 +39,11 @@ describe('bridgeUi', () => {
   it('validates juno unified address shape', () => {
     expect(validateJunoRecipient('')).toMatch(/Enter a Juno recipient/)
     expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq')).toBeNull()
+    expect(
+      validateJunoRecipient(
+        'j1nvmst2l8aupvaher30zyw78m429heheefc2g29ss44v4qffgd3pj23rk23u2ggc8jp2fpzk2qrd5p6j2sqdcvzf62f3qnxy6tyqrnpy4',
+      ),
+    ).toBeNull()
     expect(validateJunoRecipient('not-an-address')).toMatch(/valid Juno unified address/)
   })
 
