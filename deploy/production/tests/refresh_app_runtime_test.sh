@@ -109,7 +109,11 @@ write_refresh_runtime_app_deploy_fixture() {
   "secret_contract_file": "$secret_contract",
   "aws_profile": "juno",
   "aws_region": "us-east-1",
+  "runtime_config_secret_id": "intents-juno-mainnet-app-runtime-config",
+  "runtime_config_secret_region": "us-east-1",
   "juno_rpc_url": "http://127.0.0.1:18232",
+  "juno_scan_url": "http://10.0.0.12:8080",
+  "juno_scan_wallet_id": "wallet-mainnet-f8379377446f",
   "app_role": {
     "asg": "preview-app-asg",
     "app_instance_profile_name": "juno-live-e2e-preview0316d-instance-profile",
@@ -258,11 +262,20 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   )
 
   assert_contains "$(cat "$output_dir/bridge-api.env")" "BRIDGE_API_BRIDGE_ADDRESS=0x1111111111111111111111111111111111111111" "refresh renders the bridge env"
-  assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=backoffice-token" "refresh renders the backoffice env"
+  assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_AUTH_SECRET=" "refresh renders the backoffice env placeholder for hydrated auth secrets"
+  assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_JUNO_SCAN_URL=http://10.0.0.12:8080" "refresh renders the backoffice scan url"
+  assert_contains "$(cat "$output_dir/backoffice.env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=wallet-mainnet-f8379377446f" "refresh renders the backoffice scan wallet id"
+  assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_ID=intents-juno-mainnet-app-runtime-config" "refresh renders the runtime config secret id for host hydration"
+  assert_contains "$(cat "$output_dir/app-runtime-hydrator.env")" "APP_RUNTIME_CONFIG_SECRET_REGION=us-east-1" "refresh renders the runtime config secret region for host hydration"
+  assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-url "${BACKOFFICE_JUNO_SCAN_URL}"' "refresh passes the backoffice scan url to the backoffice wrapper"
+  assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-wallet-id "${BACKOFFICE_JUNO_SCAN_WALLET_ID}"' "refresh passes the backoffice scan wallet id to the backoffice wrapper"
+  assert_contains "$(cat "$output_dir/bin/backoffice-wrapper")" '--juno-scan-bearer-token-env BACKOFFICE_JUNO_SCAN_BEARER_TOKEN' "refresh passes the optional backoffice scan bearer token env to the backoffice wrapper"
   assert_contains "$(cat "$output_dir/install.sh")" 'script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"' "refresh writes a self-locating install script for remote bundle extraction"
   assert_contains "$(cat "$output_dir/install.sh")" 'for _ in $(seq 1 60); do' "refresh allows slow app runtime startup during the remote readiness gate"
   assert_contains "$(cat "$output_dir/install.sh")" 'sleep 5' "refresh backs off between remote readiness checks so the app can finish booting"
-  assert_contains "$(cat "$output_dir/install.sh")" 'systemctl is-active --quiet bridge-api.service backoffice.service nginx.service' "refresh treats supervised local services as the remote bootstrap success gate"
+  assert_contains "$(cat "$output_dir/install.sh")" 'ready_services=(' "refresh builds the supervised local service set for the remote readiness gate"
+  assert_contains "$(cat "$output_dir/install.sh")" 'intents-juno-app-config-hydrator.service' "refresh includes the config hydrator in the remote readiness gate"
+  assert_contains "$(cat "$output_dir/install.sh")" 'systemctl is-active --quiet "${ready_services[@]}"' "refresh treats the rendered ready service set as the remote bootstrap success gate"
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "map_hash_bucket_size 128;" "refresh sizes nginx host routing maps for long preview hostnames"
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "bridge.preview.intents-testing.thejunowallet.com" "refresh renders bridge host routing into nginx config"
   assert_contains "$(cat "$output_dir/nginx/app.conf")" "ops.preview.intents-testing.thejunowallet.com" "refresh renders backoffice host routing into nginx config"
@@ -278,6 +291,7 @@ test_refresh_app_runtime_bootstraps_all_in_service_app_instances_via_ssm() {
   assert_contains "$(cat "$aws_log")" '"FromPort":18443' "refresh restores operator grpc ingress using the published operator endpoint ports"
   assert_contains "$(cat "$aws_log")" '"ToPort":18444' "refresh restores operator grpc ingress across the preview operator port range"
   assert_contains "$(cat "$aws_log")" '"FromPort":18232' "refresh restores operator juno rpc ingress for the app security group"
+  assert_contains "$(cat "$aws_log")" '"FromPort":8080' "refresh restores operator juno scan ingress for the app security group"
   assert_contains "$(cat "$aws_log")" "autoscaling describe-auto-scaling-groups --auto-scaling-group-names preview-app-asg" "refresh discovers app instances from the app role asg"
   assert_contains "$(cat "$aws_log")" "ec2 create-launch-template-version --launch-template-id lt-app1234567890 --source-version 9" "refresh publishes the rendered app runtime bundle into a new app launch template version"
   assert_contains "$(cat "$aws_log")" "autoscaling update-auto-scaling-group --auto-scaling-group-name preview-app-asg --launch-template LaunchTemplateId=lt-app1234567890,Version=10" "refresh moves the app asg to the new bootstrap launch template version"

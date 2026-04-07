@@ -66,7 +66,7 @@ ensure_live_e2e_app_runtime_ingress() {
   local aws_region="$4"
   local app_security_group_id deployment_id shared_resource_name
   local shared_security_group_id ipfs_security_group_id operator_security_group_id
-  local shared_postgres_port shared_kafka_port shared_ipfs_api_port operator_grpc_min_port operator_grpc_max_port juno_rpc_port
+  local shared_postgres_port shared_kafka_port shared_ipfs_api_port operator_grpc_min_port operator_grpc_max_port juno_rpc_port juno_scan_port
 
   app_security_group_id="$(jq -r '.app_role.app_security_group_id // empty' "$app_deploy")"
   [[ -n "$app_security_group_id" ]] || return 0
@@ -89,6 +89,7 @@ ensure_live_e2e_app_runtime_ingress() {
   operator_grpc_min_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | min // empty' "$app_deploy")"
   operator_grpc_max_port="$(jq -r '[.operator_endpoints[]? | capture(":(?<port>[0-9]+)$").port | tonumber] | max // empty' "$app_deploy")"
   juno_rpc_port="$(jq -r '(.juno_rpc_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "18232"' "$app_deploy")"
+  juno_scan_port="$(jq -r '(.juno_scan_url // "") | capture(":(?<port>[0-9]+)(/|$)").port // "8080"' "$app_deploy")"
 
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_postgres_port" "$shared_postgres_port" "$app_security_group_id" "Postgres from app runtime"
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$shared_security_group_id" "$shared_kafka_port" "$shared_kafka_port" "$app_security_group_id" "Kafka from app runtime"
@@ -98,6 +99,7 @@ ensure_live_e2e_app_runtime_ingress() {
     ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$operator_grpc_min_port" "$operator_grpc_max_port" "$app_security_group_id" "Operator gRPC from app runtime"
   fi
   ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$juno_rpc_port" "$juno_rpc_port" "$app_security_group_id" "Juno RPC from app runtime"
+  ensure_security_group_ingress_rule "$aws_profile" "$aws_region" "$operator_security_group_id" "$juno_scan_port" "$juno_scan_port" "$app_security_group_id" "Juno scan from app runtime"
 }
 
 render_app_runtime_bootstrap_user_data() {
@@ -277,6 +279,15 @@ fi
 if [[ -n "${BACKOFFICE_OPERATOR_ENDPOINTS:-}" ]]; then
   args+=(--operator-endpoints "${BACKOFFICE_OPERATOR_ENDPOINTS}")
 fi
+if [[ -n "${BACKOFFICE_JUNO_SCAN_URL:-}" ]]; then
+  args+=(--juno-scan-url "${BACKOFFICE_JUNO_SCAN_URL}")
+fi
+if [[ -n "${BACKOFFICE_JUNO_SCAN_WALLET_ID:-}" ]]; then
+  args+=(--juno-scan-wallet-id "${BACKOFFICE_JUNO_SCAN_WALLET_ID}")
+fi
+if [[ -n "${BACKOFFICE_JUNO_SCAN_BEARER_TOKEN:-}" ]]; then
+  args+=(--juno-scan-bearer-token-env BACKOFFICE_JUNO_SCAN_BEARER_TOKEN)
+fi
 if [[ -n "${BACKOFFICE_JUNO_RPC_URLS:-}" ]]; then
   args+=(--juno-rpc-urls "${BACKOFFICE_JUNO_RPC_URLS}")
 fi
@@ -417,6 +428,7 @@ bridge_postgres_dsn="$(jq -r '.BRIDGE_API_POSTGRES_DSN // .APP_POSTGRES_DSN // .
 backoffice_postgres_dsn="$(jq -r '.BACKOFFICE_POSTGRES_DSN // .APP_POSTGRES_DSN // .CHECKPOINT_POSTGRES_DSN // empty' <<<"$secret_json")"
 backoffice_auth_secret="$(jq -r '.BACKOFFICE_AUTH_SECRET // .APP_BACKOFFICE_AUTH_SECRET // empty' <<<"$secret_json")"
 backoffice_ipfs_api_bearer_token="$(jq -r '.BACKOFFICE_IPFS_API_BEARER_TOKEN // .IPFS_API_BEARER_TOKEN // empty' <<<"$secret_json")"
+backoffice_juno_scan_bearer_token="$(jq -r '.BACKOFFICE_JUNO_SCAN_BEARER_TOKEN // .JUNO_SCAN_BEARER_TOKEN // empty' <<<"$secret_json")"
 backoffice_juno_rpc_user="$(jq -r '.BACKOFFICE_JUNO_RPC_USER // .APP_JUNO_RPC_USER // .JUNO_RPC_USER // empty' <<<"$secret_json")"
 backoffice_juno_rpc_pass="$(jq -r '.BACKOFFICE_JUNO_RPC_PASS // .APP_JUNO_RPC_PASS // .JUNO_RPC_PASS // empty' <<<"$secret_json")"
 min_deposit_admin_private_key="$(jq -r '.MIN_DEPOSIT_ADMIN_PRIVATE_KEY // .APP_MIN_DEPOSIT_ADMIN_PRIVATE_KEY // empty' <<<"$secret_json")"
@@ -437,6 +449,9 @@ set_env_value "$backoffice_env_file" BACKOFFICE_JUNO_RPC_PASS "$backoffice_juno_
 set_env_value "$backoffice_env_file" MIN_DEPOSIT_ADMIN_PRIVATE_KEY "$min_deposit_admin_private_key"
 if [[ -n "$backoffice_ipfs_api_bearer_token" ]]; then
   set_env_value "$backoffice_env_file" BACKOFFICE_IPFS_API_BEARER_TOKEN "$backoffice_ipfs_api_bearer_token"
+fi
+if [[ -n "$backoffice_juno_scan_bearer_token" ]]; then
+  set_env_value "$backoffice_env_file" BACKOFFICE_JUNO_SCAN_BEARER_TOKEN "$backoffice_juno_scan_bearer_token"
 fi
 if [[ -n "$backoffice_cloudflare_tunnel_token" ]]; then
   set_env_value "$backoffice_env_file" BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN "$backoffice_cloudflare_tunnel_token"

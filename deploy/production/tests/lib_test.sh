@@ -3070,6 +3070,7 @@ EOF
   assert_eq "$(jq -r '.edge.alarm_actions[0]' "$app_manifest")" "arn:aws:sns:us-east-1:021490342184:juno-alpha-alerts" "edge alarm actions"
   assert_eq "$(jq -r '.edge.state_path' "$app_manifest")" "$workdir/edge-state/alpha.tfstate" "edge state path is stable per environment"
   assert_contains "$(jq -cr '.operator_addresses' "$app_manifest")" "0x9999999999999999999999999999999999999999" "operator addresses"
+  assert_eq "$(jq -r '.juno_scan_wallet_id' "$app_manifest")" "wallet-mainnet-op1" "app handoff pins the backoffice scan wallet id"
 
   resolved_env="$workdir/resolved-app.env"
   production_resolve_secret_contract "$(jq -r '.secret_contract_file' "$app_manifest")" "true" "" "" "$resolved_env"
@@ -3108,6 +3109,8 @@ EOF
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_OPERATOR_ENDPOINTS=0x9999999999999999999999999999999999999999=203.0.113.11:18443" "backoffice env operator endpoints"
   assert_not_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URL=http://127.0.0.1:18232" "backoffice env omits unusable loopback juno rpc url"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_URLS=http://203.0.113.11:18232" "backoffice env falls back to operator juno rpc when the explicit url is loopback"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_URL=http://203.0.113.11:8080" "backoffice env derives a private operator juno-scan url"
+  assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_SCAN_WALLET_ID=wallet-mainnet-op1" "backoffice env pins the scan wallet id"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_USER=juno" "backoffice env keeps juno rpc user for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "BACKOFFICE_JUNO_RPC_PASS=rpcpass" "backoffice env keeps juno rpc pass for derived fallback urls"
   assert_contains "$(cat "$backoffice_env")" "MIN_DEPOSIT_ADMIN_PRIVATE_KEY=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" "backoffice env min deposit admin key"

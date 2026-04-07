@@ -584,6 +584,7 @@ EOF
   assert_eq "$(cat "$count_file")" "3" "juno-scan wrapper retries until junocashd rpc is ready"
   assert_eq "$(cat "$sequence_file")" $'curl-1\nsleep-5\ncurl-2\nsleep-5\ncurl-3\nscan' "juno-scan wrapper waits through transport and loading-block-index failures before starting the scanner"
   assert_contains "$(cat "$output_file")" '-db-path /var/lib/intents-juno/juno-scan.db' "juno-scan wrapper uses the dedicated rocksdb state directory"
+  assert_contains "$(cat "$output_file")" '-listen 0.0.0.0:8080' "juno-scan wrapper exposes the scanner on the private network"
 
   rm -rf "$tmp"
 }

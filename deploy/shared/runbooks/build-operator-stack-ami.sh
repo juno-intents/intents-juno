@@ -1083,7 +1083,7 @@ exec /usr/local/bin/juno-scan \
   -db-path /var/lib/intents-juno/juno-scan.db \
   -ua-hrp "${JUNO_SCAN_UA_HRP:-__BOOTSTRAP_JUNO_SCAN_UA_HRP__}" \
   -confirmations "${JUNO_SCAN_CONFIRMATIONS:-1}" \
-  -listen 127.0.0.1:8080
+  -listen "${JUNO_SCAN_LISTEN_ADDR:-0.0.0.0:8080}"
 EOF_SCAN
   sudo install -m 0755 /tmp/intents-juno-juno-scan.sh /usr/local/bin/intents-juno-juno-scan.sh
 

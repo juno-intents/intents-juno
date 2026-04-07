@@ -1382,6 +1382,26 @@ production_backoffice_juno_rpc_urls_csv() {
   fi
 }
 
+production_backoffice_juno_scan_url() {
+  local app_deploy="$1"
+  local explicit_url operator_endpoint endpoint_host_port endpoint_host
+
+  explicit_url="$(production_json_optional "$app_deploy" '.juno_scan_url')"
+  if [[ -n "$explicit_url" ]] && ! production_is_loopback_url "$explicit_url"; then
+    printf '%s\n' "$explicit_url"
+    return 0
+  fi
+
+  while IFS= read -r operator_endpoint; do
+    [[ -n "$operator_endpoint" ]] || continue
+    endpoint_host_port="${operator_endpoint#*=}"
+    endpoint_host="$(production_host_from_listen_addr "$endpoint_host_port")"
+    [[ -n "$endpoint_host" ]] || continue
+    printf 'http://%s:8080\n' "$endpoint_host"
+    return 0
+  done < <(jq -r '.operator_endpoints[]? // empty' "$app_deploy")
+}
+
 production_validate_secret_resolver() {
   local value="$1"
   local allow_local="$2"
@@ -2766,7 +2786,7 @@ production_render_app_handoff() {
   local bridge_record_name bridge_public_url backoffice_access_mode backoffice_record_name backoffice_public_url
   local bridge_probe_url="" backoffice_probe_url="" bridge_internal_url="" backoffice_internal_url=""
   local bridge_withdrawal_expiry_window_seconds bridge_min_deposit_amount bridge_min_withdraw_amount bridge_fee_bps
-  local juno_rpc_url operator_addresses_json base_relayer_signer_addresses_csv
+  local juno_rpc_url juno_scan_url juno_scan_wallet_id operator_addresses_json base_relayer_signer_addresses_csv
   local service_urls_json operator_endpoints_json backoffice_wireguard_source_cidrs_json
   local edge_enabled edge_state_path edge_state_dir edge_output_root edge_origin_record_name edge_origin_endpoint
   local edge_public_lb_dns_name edge_public_lb_zone_id
@@ -2849,6 +2869,8 @@ production_render_app_handoff() {
   bridge_min_withdraw_amount="$(production_json_required "$shared_manifest" '.contracts.bridge_params.min_withdraw_amount')"
   bridge_fee_bps="$(production_json_required "$shared_manifest" '.contracts.bridge_params.fee_bps')"
   juno_rpc_url="$(jq -r '.juno_rpc_url // empty' <<<"$app_json")"
+  juno_scan_url="$(jq -r '.juno_scan_url // empty' <<<"$app_json")"
+  juno_scan_wallet_id="$(jq -r '.juno_scan_wallet_id // empty' <<<"$app_json")"
   operator_addresses_json="$(jq -c '[.operators[] | (.operator_address // .operator_id)]' "$inventory")"
   base_relayer_signer_addresses_csv="$(jq -r '[.operators[] | .base_relayer_address? | select(type == "string" and length > 0)] | join(",")' "$inventory")"
   service_urls_json="$(jq -c '.service_urls // []' <<<"$app_json")"
@@ -2890,6 +2912,19 @@ production_render_app_handoff() {
   fi
   if [[ "$(jq -r 'length' <<<"$operator_endpoints_json")" == "0" ]]; then
     operator_endpoints_json="$(production_default_operator_endpoints_json "$inventory" "$shared_manifest")"
+  fi
+  if [[ -z "$juno_scan_url" ]]; then
+    juno_scan_url="$(
+      jq -r '
+        (.[0] // "")
+        | split("=")[1] // ""
+        | capture("^(?<host>[^:]+):").host // empty
+      ' <<<"$operator_endpoints_json" \
+      | sed 's|^|http://|; s|$|:8080|'
+    )"
+  fi
+  if [[ -z "$juno_scan_wallet_id" ]]; then
+    juno_scan_wallet_id="$(jq -r '[.operators[] | .deposit_scan_juno_scan_wallet_id // .withdraw_finalizer_juno_scan_wallet_id // .withdraw_coordinator_juno_wallet_id // empty | select(type == "string" and length > 0)] | .[0] // empty' "$inventory")"
   fi
 
   if [[ -n "$bridge_public_hostname" ]]; then
@@ -2949,6 +2984,8 @@ production_render_app_handoff() {
     --arg account_id "$account_id" \
     --arg security_group_id "$security_group_id" \
     --arg juno_rpc_url "$juno_rpc_url" \
+    --arg juno_scan_url "$juno_scan_url" \
+    --arg juno_scan_wallet_id "$juno_scan_wallet_id" \
     --arg base_relayer_signer_addresses_csv "$base_relayer_signer_addresses_csv" \
     --arg bridge_listen_addr "$bridge_listen_addr" \
     --arg bridge_public_url "$bridge_public_url" \
@@ -3008,6 +3045,8 @@ production_render_app_handoff() {
       security_group_id: (if $security_group_id == "" then null else $security_group_id end),
       public_scheme: $public_scheme,
       juno_rpc_url: (if $juno_rpc_url == "" then null else $juno_rpc_url end),
+      juno_scan_url: (if $juno_scan_url == "" then null else $juno_scan_url end),
+      juno_scan_wallet_id: (if $juno_scan_wallet_id == "" then null else $juno_scan_wallet_id end),
       base_relayer_signer_addresses: (if $base_relayer_signer_addresses_csv == "" then null else $base_relayer_signer_addresses_csv end),
       operator_addresses: $operator_addresses,
       service_urls: $service_urls,
@@ -3555,7 +3594,7 @@ production_render_backoffice_env() {
   local resolved_secret_env="$3"
   local output_file="$4"
 
-  local juno_rpc_url juno_rpc_urls
+  local juno_rpc_url juno_rpc_urls juno_scan_url juno_scan_wallet_id
   local listen_addr operator_addresses service_urls operator_endpoints
   local base_relayer_signer_addresses base_relayer_gas_min_wei
   local runtime_deposit_min_confirmations runtime_withdraw_planner_min_confirmations runtime_withdraw_batch_confirmations
@@ -3575,6 +3614,8 @@ production_render_backoffice_env() {
   [[ -n "$sp1_requestor_address" ]] || die "shared manifest is missing shared_services.proof.requestor_address"
   render_juno_rpc="false"
   juno_rpc_urls="$(production_backoffice_juno_rpc_urls_csv "$app_deploy" || true)"
+  juno_scan_url="$(production_backoffice_juno_scan_url "$app_deploy" || true)"
+  juno_scan_wallet_id="$(production_json_optional "$app_deploy" '.juno_scan_wallet_id')"
   production_json_required "$shared_manifest" '.contracts.wjuno | select(type == "string" and length > 0)' >/dev/null
   production_json_required "$shared_manifest" '.contracts.operator_registry | select(type == "string" and length > 0)' >/dev/null
 
@@ -3597,6 +3638,7 @@ BACKOFFICE_KAFKA_BROKERS=$(jq -r '.shared_services.kafka.bootstrap_brokers' "$sh
 BACKOFFICE_IPFS_API_URL=$(jq -r '.shared_services.ipfs.api_url' "$shared_manifest")
 BACKOFFICE_IPFS_API_BEARER_TOKEN=
 BACKOFFICE_CLOUDFLARE_TUNNEL_TOKEN=
+BACKOFFICE_JUNO_SCAN_BEARER_TOKEN=
 BACKOFFICE_JUNO_RPC_USER=
 BACKOFFICE_JUNO_RPC_PASS=
 MIN_DEPOSIT_ADMIN_PRIVATE_KEY=
@@ -3611,6 +3653,10 @@ EOF
   if [[ -n "$juno_rpc_urls" ]]; then
     render_juno_rpc="true"
     printf 'BACKOFFICE_JUNO_RPC_URLS=%s\n' "$juno_rpc_urls" >>"$output_file"
+  fi
+  if [[ -n "$juno_scan_url" && -n "$juno_scan_wallet_id" ]]; then
+    printf 'BACKOFFICE_JUNO_SCAN_URL=%s\n' "$juno_scan_url" >>"$output_file"
+    printf 'BACKOFFICE_JUNO_SCAN_WALLET_ID=%s\n' "$juno_scan_wallet_id" >>"$output_file"
   fi
   local fee_distributor
   fee_distributor="$(production_json_optional "$shared_manifest" '.contracts.fee_distributor')"
