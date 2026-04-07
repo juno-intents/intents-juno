@@ -49,9 +49,9 @@ func main() {
 			"on-chain withdrawal expiry window in seconds",
 		)
 		minDepositAmount                = flag.Uint64("min-deposit-amount", 0, "minimum deposit amount (0 = no minimum)")
-		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
-		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
-		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 200, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 200, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 200, "default withdraw batch confirmations used to seed runtime settings")
 		minWithdrawAmount               = flag.Uint64("min-withdraw-amount", 0, "minimum withdrawal amount (0 = no minimum)")
 		feeBps                          = flag.Uint("fee-bps", 0, "bridge fee in basis points (informational, returned by /v1/config)")
 

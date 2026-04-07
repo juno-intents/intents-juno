@@ -2010,21 +2010,21 @@ production_default_bridge_min_deposit_amount_zat() {
 }
 
 production_default_deposit_min_confirmations() {
-  local value="${PRODUCTION_DEPLOY_DEPOSIT_MIN_CONFIRMATIONS:-1}"
+  local value="${PRODUCTION_DEPLOY_DEPOSIT_MIN_CONFIRMATIONS:-200}"
   production_is_positive_integer "$value" \
     || die "PRODUCTION_DEPLOY_DEPOSIT_MIN_CONFIRMATIONS must be a positive integer"
   printf '%s\n' "$value"
 }
 
 production_default_withdraw_planner_min_confirmations() {
-  local value="${PRODUCTION_DEPLOY_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-1}"
+  local value="${PRODUCTION_DEPLOY_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-200}"
   production_is_positive_integer "$value" \
     || die "PRODUCTION_DEPLOY_WITHDRAW_PLANNER_MIN_CONFIRMATIONS must be a positive integer"
   printf '%s\n' "$value"
 }
 
 production_default_withdraw_batch_confirmations() {
-  local value="${PRODUCTION_DEPLOY_WITHDRAW_BATCH_CONFIRMATIONS:-1}"
+  local value="${PRODUCTION_DEPLOY_WITHDRAW_BATCH_CONFIRMATIONS:-200}"
   production_is_positive_integer "$value" \
     || die "PRODUCTION_DEPLOY_WITHDRAW_BATCH_CONFIRMATIONS must be a positive integer"
   printf '%s\n' "$value"

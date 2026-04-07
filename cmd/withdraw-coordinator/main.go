@@ -133,7 +133,7 @@ func main() {
 		junoChangeAddress       = flag.String("juno-change-address", "", "juno-txbuild change address (required)")
 		junoCoinType            = flag.Uint("juno-coin-type", 0, "ZIP-32 coin type for juno-txbuild")
 		junoAccount             = flag.Uint("juno-account", 0, "unified account id for juno-txbuild")
-		junoMinConf             = flag.Int64("juno-minconf", 1, "minimum confirmations for juno-txbuild input note selection")
+		junoMinConf             = flag.Int64("juno-minconf", 200, "minimum confirmations for juno-txbuild input note selection")
 		junoExpiryOffset        = flag.Uint("juno-expiry-offset", 240, "juno tx expiry offset (min 4)")
 		junoFeeMultiplier       = flag.Uint64("juno-fee-multiplier", 1, "juno-txbuild fee multiplier")
 		junoFeeAddZat           = flag.Uint64("juno-fee-add-zat", 0, "juno-txbuild extra absolute fee")
@@ -141,7 +141,7 @@ func main() {
 		junoMinNoteZat          = flag.Uint64("juno-min-note-zat", 0, "juno-txbuild min note amount")
 		junoScanURL             = flag.String("juno-scan-url", "", "optional juno-scan URL for juno-txbuild")
 		junoScanBearerEnv       = flag.String("juno-scan-bearer-env", "JUNO_SCAN_BEARER_TOKEN", "env var for optional juno-scan bearer token")
-		depositMinConfirmations = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
+		depositMinConfirmations = flag.Int64("deposit-min-confirmations", 200, "default deposit confirmations used to seed runtime settings")
 
 		// Juno RPC (broadcast + confirm)
 		junoRPCURL        = flag.String("juno-rpc-url", "", "junocashd JSON-RPC URL (required)")
@@ -149,7 +149,7 @@ func main() {
 		junoRPCPassEnv    = flag.String("juno-rpc-pass-env", "JUNO_RPC_PASS", "env var containing junocashd RPC password")
 		junoRPCTimeout    = flag.Duration("juno-rpc-timeout", 10*time.Second, "junocashd RPC timeout")
 		junoRPCMaxResp    = flag.Int64("juno-rpc-max-response-bytes", 5<<20, "max bytes in junocashd RPC response")
-		junoConfirmations = flag.Int64("juno-confirmations", 1, "required Juno confirmations before marking batch confirmed")
+		junoConfirmations = flag.Int64("juno-confirmations", 200, "required Juno confirmations before marking batch confirmed")
 		junoConfirmPoll   = flag.Duration("juno-confirm-poll", 5*time.Second, "poll interval while waiting for Juno confirmations")
 		junoConfirmWait   = flag.Duration("juno-confirm-max-wait", 30*time.Second, "maximum wait per confirmation check before yielding pending/missing status")
 

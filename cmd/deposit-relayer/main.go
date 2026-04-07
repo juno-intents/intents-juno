@@ -128,9 +128,9 @@ func main() {
 
 		healthPort = flag.Int("health-port", 0, "HTTP port for /livez, /readyz, and /healthz endpoints (0 = disabled)")
 
-		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
-		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
-		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 200, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 200, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 200, "default withdraw batch confirmations used to seed runtime settings")
 
 		scanEnabled       = flag.Bool("scan-enabled", false, "enable juno-scan deposit auto-detection")
 		junoScanURL       = flag.String("juno-scan-url", "", "juno-scan base URL (required when --scan-enabled)")

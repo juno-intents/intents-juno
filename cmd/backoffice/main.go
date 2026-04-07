@@ -69,9 +69,9 @@ func main() {
 		ipfsApiURL                      = flag.String("ipfs-api-url", "", "IPFS API URL for health probe (e.g. http://host:5001)")
 		ipfsApiBearerToken              = flag.String("ipfs-api-bearer-token", "", "optional IPFS API bearer token for the health probe")
 		ipfsApiBearerTokenEnv           = flag.String("ipfs-api-bearer-token-env", "BACKOFFICE_IPFS_API_BEARER_TOKEN", "env var containing an optional IPFS API bearer token")
-		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 1, "default deposit confirmations used to seed runtime settings")
-		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 1, "default withdraw planner confirmations used to seed runtime settings")
-		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 1, "default withdraw batch confirmations used to seed runtime settings")
+		depositMinConfirmations         = flag.Int64("deposit-min-confirmations", 200, "default deposit confirmations used to seed runtime settings")
+		withdrawPlannerMinConfirmations = flag.Int64("withdraw-planner-min-confirmations", 200, "default withdraw planner confirmations used to seed runtime settings")
+		withdrawBatchConfirmations      = flag.Int64("withdraw-batch-confirmations", 200, "default withdraw batch confirmations used to seed runtime settings")
 		minDepositAdminKeyEnv           = flag.String("min-deposit-admin-key-env", "MIN_DEPOSIT_ADMIN_PRIVATE_KEY", "env var containing the dedicated minDepositAdmin private key")
 		minDepositUpdateGasLimit        = flag.Uint64("min-deposit-update-gas-limit", 0, "optional gas limit override for setMinDepositAmount")
 
