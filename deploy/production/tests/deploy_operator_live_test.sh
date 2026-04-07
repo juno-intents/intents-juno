@@ -207,6 +207,7 @@ EOF
   assert_contains "$(cat "$log_dir/aws.log")" "ssm send-command --instance-ids i-op001" "live deploy stages files over ssm"
   assert_contains "$(cat "$log_dir/aws.log")" "--parameters file://" "live deploy stages ssm commands through a parameter file"
   assert_contains "$(cat "$log_dir/aws.log")" "authorize-security-group-ingress --group-id sg-op001" "live deploy refreshes grpc mesh ingress"
+  assert_contains "$(cat "$log_dir/aws.log")" '"FromPort":8443' "live deploy refreshes dkg admin mesh ingress"
   assert_contains "$(cat "$log_dir/aws.log")" "10.92.1.14/32" "live deploy allows peer private endpoint ingress for operator two"
   assert_contains "$(cat "$log_dir/aws.log")" "10.93.1.54/32" "live deploy allows peer private endpoint ingress for operator three"
   assert_contains "$(cat "$log_dir/commands.log")" "run-operator-rollout.sh" "live deploy runs the host rollout entrypoint over ssm"

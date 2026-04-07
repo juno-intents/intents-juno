@@ -264,6 +264,29 @@ aws_resolve_private_ip() {
   fi
 }
 
+aws_resolve_operator_private_ip_by_profile() {
+  local profile="$1"
+  local region="$2"
+  local operator_tag result=""
+
+  operator_tag="$(sed -nE 's/.*-(op[0-9]+)$/\1/p' <<<"$profile")"
+  [[ -n "$operator_tag" ]] || return 1
+
+  result="$(aws --profile "$profile" --region "$region" ec2 describe-instances \
+    --filters \
+      "Name=tag:Project,Values=intents-juno" \
+      "Name=tag:Stack,Values=operator-mainnet" \
+      "Name=tag:Operator,Values=$operator_tag" \
+      "Name=instance-state-name,Values=running" \
+    --query 'Reservations[].Instances[].PrivateIpAddress | [0]' --output text 2>/dev/null || true)"
+
+  if [[ -n "$result" && "$result" != "None" ]]; then
+    printf '%s\n' "$result"
+    return 0
+  fi
+  return 1
+}
+
 aws_describe_instance_field() {
   local profile="$1"
   local region="$2"
@@ -293,7 +316,7 @@ aws_describe_instance_field() {
 
 resolve_dkg_peer_host_from_manifest() {
   local manifest="$1"
-  local private_host host profile region
+  local private_host host profile region resolved_host
   private_host="$(jq -r '(.private_endpoint // .operator_probe_host) // empty' "$manifest")"
   if [[ -n "$private_host" ]]; then
     printf '%s\n' "$private_host"
@@ -304,7 +327,21 @@ resolve_dkg_peer_host_from_manifest() {
   profile="$(jq -r '.aws_profile // empty' "$manifest")"
   region="$(jq -r '.aws_region // empty' "$manifest")"
   if [[ -n "$profile" && -n "$region" ]]; then
-    aws_resolve_private_ip "$profile" "$region" "$host"
+    resolved_host="$(aws_resolve_private_ip "$profile" "$region" "$host" 2>/dev/null || true)"
+    if [[ -n "$resolved_host" && "$resolved_host" != "$host" ]]; then
+      printf '%s\n' "$resolved_host"
+      return 0
+    fi
+    resolved_host="$(aws_resolve_operator_private_ip_by_profile "$profile" "$region" 2>/dev/null || true)"
+    if [[ -n "$resolved_host" ]]; then
+      printf '%s\n' "$resolved_host"
+      return 0
+    fi
+    [[ -n "$resolved_host" ]] && {
+      printf '%s\n' "$resolved_host"
+      return 0
+    }
+    printf '%s\n' "$host"
     return 0
   fi
   printf '%s\n' "$host"
@@ -325,7 +362,7 @@ ensure_operator_grpc_mesh_ingress() {
   for group_id in $group_ids; do
     aws --profile "$profile" --region "$region" ec2 authorize-security-group-ingress \
       --group-id "$group_id" \
-      --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"UserIdGroupPairs\":[{\"GroupId\":\"$group_id\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
+      --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":8443,\"ToPort\":8443,\"UserIdGroupPairs\":[{\"GroupId\":\"$group_id\",\"Description\":\"Operator distributed DKG admin traffic\"}]},{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"UserIdGroupPairs\":[{\"GroupId\":\"$group_id\",\"Description\":\"Operator distributed signer traffic\"}]}]" \
       >/dev/null 2>&1 || true
 
     if [[ -d "$peer_manifests_dir" ]]; then
@@ -336,7 +373,7 @@ ensure_operator_grpc_mesh_ingress() {
         peer_mesh_cidr="${peer_mesh_host}/32"
         aws --profile "$profile" --region "$region" ec2 authorize-security-group-ingress \
           --group-id "$group_id" \
-          --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"IpRanges\":[{\"CidrIp\":\"$peer_mesh_cidr\",\"Description\":\"Operator distributed DKG peer traffic\"}]}]" \
+          --ip-permissions "[{\"IpProtocol\":\"tcp\",\"FromPort\":8443,\"ToPort\":8443,\"IpRanges\":[{\"CidrIp\":\"$peer_mesh_cidr\",\"Description\":\"Operator distributed DKG admin traffic\"}]},{\"IpProtocol\":\"tcp\",\"FromPort\":18443,\"ToPort\":18447,\"IpRanges\":[{\"CidrIp\":\"$peer_mesh_cidr\",\"Description\":\"Operator distributed signer traffic\"}]}]" \
           >/dev/null 2>&1 || true
       done < <(find "$peer_manifests_dir" -mindepth 2 -maxdepth 2 -type f -name 'operator-deploy.json' | sort)
     fi

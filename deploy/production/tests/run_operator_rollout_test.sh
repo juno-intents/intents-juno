@@ -49,7 +49,7 @@ test_run_operator_rollout_repairs_juno_txsign_from_published_release() {
   local script_text
   script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
 
-  assert_contains "$script_text" 'for cmd in curl jq sha256sum sudo systemctl tar; do' "run-operator-rollout requires the release download toolchain"
+  assert_contains "$script_text" 'for cmd in curl jq sha256sum sudo systemctl tar openssl; do' "run-operator-rollout requires the release download toolchain"
   assert_contains "$script_text" 'download_github_release_asset_with_checksum() {' "run-operator-rollout defines a shared GitHub release downloader"
   assert_contains "$script_text" 'ensure_runtime_juno_txsign_binary() {' "run-operator-rollout defines a juno-txsign repair helper"
   assert_contains "$script_text" "requested_tag=\"\$(jq -r '.juno_txsign_release_tag // empty' \"\$operator_deploy\")\"" "run-operator-rollout reads an optional pinned juno-txsign release tag from the operator manifest"
@@ -71,11 +71,29 @@ test_run_operator_rollout_repairs_deposit_relayer_from_published_release() {
   assert_contains "$script_text" 'release_tag_marker="/var/lib/intents-juno/.deposit-relayer-release-tag"' "run-operator-rollout records the installed deposit-relayer release tag on the host"
 }
 
+test_run_operator_rollout_refreshes_dkg_client_tls_identity_after_staging() {
+  local script_text
+  script_text="$(cat "$REPO_ROOT/deploy/production/run-operator-rollout.sh")"
+
+  assert_contains "$script_text" 'for cmd in curl jq sha256sum sudo systemctl tar openssl; do' "run-operator-rollout requires openssl for dkg client cert hashing"
+  assert_contains "$script_text" 'certificate_sha256_hex() {' "run-operator-rollout defines a cert fingerprint helper"
+  assert_contains "$script_text" 'openssl x509 -in "$cert_path" -outform DER' "run-operator-rollout hashes the coordinator client cert from DER bytes"
+  assert_contains "$script_text" 'refresh_dkg_client_tls_identity() {' "run-operator-rollout defines a dkg client tls refresh helper"
+  assert_contains "$script_text" 'coordinator_client_cert_sha256: $fingerprint' "run-operator-rollout rewrites the dkg client cert fingerprint after staging tls"
+  assert_contains "$script_text" 'tls_client_cert_pem_path: "./tls/coordinator-client.pem"' "run-operator-rollout rewrites the dkg client cert path after staging tls"
+  assert_contains "$script_text" 'tls_client_key_pem_path: "./tls/coordinator-client.key"' "run-operator-rollout rewrites the dkg client key path after staging tls"
+  assert_contains "$script_text" 'operator runtime admin config missing coordinator client tls paths' "run-operator-rollout verifies the refreshed dkg client tls paths"
+  assert_contains "$script_text" 'operator runtime admin config missing coordinator client fingerprint' "run-operator-rollout verifies the refreshed dkg client fingerprint"
+  assert_contains "$script_text" 'stage_optional_tls_files' "run-operator-rollout stages replacement tls files before refreshing admin config"
+  assert_contains "$script_text" 'refresh_dkg_client_tls_identity' "run-operator-rollout refreshes the dkg client tls identity during rollout"
+}
+
 main() {
   test_run_operator_rollout_recomputes_roster_hash_from_canonical_roster_without_newline
   test_run_operator_rollout_repairs_missing_dkg_admin_from_published_release
   test_run_operator_rollout_repairs_juno_txsign_from_published_release
   test_run_operator_rollout_repairs_deposit_relayer_from_published_release
+  test_run_operator_rollout_refreshes_dkg_client_tls_identity_after_staging
 }
 
 main "$@"

@@ -50,7 +50,15 @@ have_cmd() {
   command -v "$1" >/dev/null 2>&1
 }
 
-for cmd in curl jq sha256sum sudo systemctl tar; do
+certificate_sha256_hex() {
+  local cert_path="$1"
+  openssl x509 -in "$cert_path" -outform DER \
+    | openssl dgst -sha256 \
+    | awk '{print $NF}' \
+    | tr 'A-F' 'a-f'
+}
+
+for cmd in curl jq sha256sum sudo systemctl tar openssl; do
   have_cmd "$cmd" || die "required command not found: $cmd"
 done
 
@@ -116,6 +124,40 @@ stage_optional_tls_files() {
   if [[ -f "$stage_dir/coordinator-client.key" ]]; then
     sudo install -m 0600 -o intents-juno -g intents-juno "$stage_dir/coordinator-client.key" "$runtime_dir/bundle/tls/coordinator-client.key"
   fi
+}
+
+refresh_dkg_client_tls_identity() {
+  local admin_config_path client_cert_path client_key_path fingerprint tmp_admin
+  local configured_cert_path configured_key_path configured_fingerprint
+
+  admin_config_path="$runtime_dir/bundle/admin-config.json"
+  client_cert_path="$runtime_dir/bundle/tls/coordinator-client.pem"
+  client_key_path="$runtime_dir/bundle/tls/coordinator-client.key"
+
+  [[ -f "$admin_config_path" ]] || return 0
+  [[ -f "$client_cert_path" ]] || return 0
+  [[ -f "$client_key_path" ]] || return 0
+
+  fingerprint="$(certificate_sha256_hex "$client_cert_path")"
+  tmp_admin="$(mktemp)"
+  sudo cat "$admin_config_path" | jq --arg fingerprint "$fingerprint" '
+    .grpc = ((.grpc // {}) + {
+      coordinator_client_cert_sha256: $fingerprint,
+      tls_client_cert_pem_path: "./tls/coordinator-client.pem",
+      tls_client_key_pem_path: "./tls/coordinator-client.key"
+    })
+  ' >"$tmp_admin"
+  sudo install -m 0640 -o intents-juno -g intents-juno "$tmp_admin" "$admin_config_path"
+  rm -f "$tmp_admin"
+
+  configured_cert_path="$(sudo cat "$admin_config_path" | jq -r '.grpc.tls_client_cert_pem_path // empty')"
+  configured_key_path="$(sudo cat "$admin_config_path" | jq -r '.grpc.tls_client_key_pem_path // empty')"
+  configured_fingerprint="$(sudo cat "$admin_config_path" | jq -r '.grpc.coordinator_client_cert_sha256 // empty')"
+
+  [[ "$configured_cert_path" == "./tls/coordinator-client.pem" && "$configured_key_path" == "./tls/coordinator-client.key" ]] \
+    || die "operator runtime admin config missing coordinator client tls paths"
+  [[ "$configured_fingerprint" == "$fingerprint" ]] \
+    || die "operator runtime admin config missing coordinator client fingerprint"
 }
 
 install_stage_files() {
@@ -417,6 +459,7 @@ ensure_runtime_dkg_admin_binary
 ensure_runtime_juno_txsign_binary
 ensure_runtime_deposit_relayer_binary
 stage_optional_tls_files
+refresh_dkg_client_tls_identity
 rewrite_dkg_roster
 hydrate_and_restart
 log "rollout complete"

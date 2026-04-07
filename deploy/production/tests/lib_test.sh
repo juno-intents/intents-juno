@@ -735,7 +735,7 @@ EOF
   assert_eq "$(jq -r '.dkg_backup_zip' "$handoff_dir/operator-deploy.json")" "$handoff_dir/dkg-backup.zip" "operator deploy rewrites backup package into the handoff dir"
   assert_file_exists "$handoff_dir/dkg-backup.zip" "operator handoff renders a local backup package"
   shared_fingerprint="$(test_certificate_sha256_hex "$workdir/dkg-tls/coordinator-client.pem")"
-  bundled_fingerprint="$(unzip -p "$handoff_dir/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+  bundled_fingerprint="$(unzip -p "$handoff_dir/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -outform DER | openssl dgst -sha256 | awk '{print $NF}' | tr 'A-F' 'a-f')"
   assert_eq "$bundled_fingerprint" "$shared_fingerprint" "rendered backup package uses the shared coordinator client cert"
   admin_config_path="$workdir/rendered-admin-config.json"
   unzip -p "$handoff_dir/dkg-backup.zip" payload/admin-config.json >"$admin_config_path"

@@ -70,9 +70,9 @@ append_default_owallet_proof_keys() {
 
 test_certificate_sha256_hex() {
   local cert_path="$1"
-  openssl x509 -in "$cert_path" -noout -fingerprint -sha256 \
-    | cut -d= -f2 \
-    | tr -d ':' \
+  openssl x509 -in "$cert_path" -outform DER \
+    | openssl dgst -sha256 \
+    | awk '{print $NF}' \
     | tr 'A-F' 'a-f'
 }
 

@@ -177,7 +177,7 @@ EOF
   assert_eq "$(jq -r '.secret_contract_file' "$local_manifest")" "./operator-secrets.env" "local manifest rewrites secret contract path"
   assert_eq "$(jq -r '.dkg_backup_zip' "$local_manifest")" "./dkg-backup.zip" "local manifest rewrites backup path"
   bundled_tls_fingerprint="$(test_certificate_sha256_hex "$bundle_root/bundle/operator/dkg-tls/coordinator-client.pem")"
-  bundled_backup_fingerprint="$(unzip -p "$bundle_root/bundle/operator/operators/$operator_id/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -noout -fingerprint -sha256 | cut -d= -f2 | tr -d ':' | tr 'A-F' 'a-f')"
+  bundled_backup_fingerprint="$(unzip -p "$bundle_root/bundle/operator/operators/$operator_id/dkg-backup.zip" payload/tls/coordinator-client.pem | openssl x509 -inform PEM -outform DER | openssl dgst -sha256 | awk '{print $NF}' | tr 'A-F' 'a-f')"
   assert_eq "$bundled_backup_fingerprint" "$bundled_tls_fingerprint" "bundled backup package matches the bundled shared dkg tls"
 
   deploy_log="$workdir/deploy.log"
