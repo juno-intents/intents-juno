@@ -97,6 +97,30 @@ pub fn parse_deposit_memo_v1(
         return Err(MemoError::InvalidLength { got: b.len() });
     }
 
+    match parse_canonical_deposit_memo_v1(b, expected_base_chain_id, expected_bridge_addr) {
+        Ok(memo) => Ok(memo),
+        Err(MemoError::InvalidMagic) => {
+            let Some(raw_memo) = b.try_into().ok() else {
+                return Err(MemoError::InvalidLength { got: b.len() });
+            };
+            let Some(unwrapped) = unwrap_ascii_hex_wrapped_compact_deposit_memo_v1(raw_memo) else {
+                return Err(MemoError::InvalidMagic);
+            };
+            parse_canonical_deposit_memo_v1(&unwrapped, expected_base_chain_id, expected_bridge_addr)
+        }
+        Err(err) => Err(err),
+    }
+}
+
+fn parse_canonical_deposit_memo_v1(
+    b: &[u8],
+    expected_base_chain_id: u32,
+    expected_bridge_addr: [u8; 20],
+) -> Result<DepositMemoV1, MemoError> {
+    if b.len() != MEMO_LEN {
+        return Err(MemoError::InvalidLength { got: b.len() });
+    }
+
     if b[..8] != DEPOSIT_MAGIC_V1 {
         return Err(MemoError::InvalidMagic);
     }
@@ -137,6 +161,34 @@ pub fn parse_deposit_memo_v1(
         nonce,
         flags,
     })
+}
+
+fn unwrap_ascii_hex_wrapped_compact_deposit_memo_v1(b: &[u8; MEMO_LEN]) -> Option<[u8; MEMO_LEN]> {
+    let compact_hex_len = DEPOSIT_V1_PADDING_OFFSET * 2;
+    let first_zero = b.iter().position(|&byte| byte == 0).unwrap_or(MEMO_LEN);
+    if first_zero != compact_hex_len {
+        return None;
+    }
+    if b[first_zero..].iter().any(|&byte| byte != 0) {
+        return None;
+    }
+
+    let mut unwrapped = [0u8; MEMO_LEN];
+    for (idx, chunk) in b[..compact_hex_len].chunks_exact(2).enumerate() {
+        let hi = from_hex_nibble(chunk[0])?;
+        let lo = from_hex_nibble(chunk[1])?;
+        unwrapped[idx] = (hi << 4) | lo;
+    }
+    Some(unwrapped)
+}
+
+fn from_hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(10 + (b - b'a')),
+        b'A'..=b'F' => Some(10 + (b - b'A')),
+        _ => None,
+    }
 }
 
 /// `depositId = keccak256("deposit" || cmx || leafIndexBE32)`
@@ -413,6 +465,30 @@ mod tests {
 
         let enc = got.encode();
         assert_eq!(enc.as_slice(), golden.as_slice());
+    }
+
+    #[test]
+    fn deposit_memo_v1_accepts_ascii_hex_wrapped_compact_form() {
+        let golden =
+            decode_hex(include_str!("../../../../internal/memo/testdata/deposit_v1_valid.hex"));
+
+        const CHAIN_ID: u32 = 8453;
+        let bridge: [u8; 20] = hex20("1234567890abcdef1234567890abcdef12345678");
+
+        let compact = &golden[..68];
+        let compact_hex = encode_hex(compact);
+        let mut wrapped = [0u8; MEMO_LEN];
+        wrapped[..compact_hex.len()].copy_from_slice(&compact_hex);
+
+        let got = parse_deposit_memo_v1(&wrapped, CHAIN_ID, bridge).unwrap();
+        assert_eq!(got.base_chain_id, CHAIN_ID);
+        assert_eq!(got.bridge_addr, bridge);
+        assert_eq!(
+            got.base_recipient,
+            hex20("90f8bf6a479f320ead074411a4b0e7944ea8c9c1")
+        );
+        assert_eq!(got.nonce, 0x0102_0304_0506_0708);
+        assert_eq!(got.flags, 0xAABB_CCDD);
     }
 
     #[test]
@@ -753,5 +829,15 @@ mod tests {
     fn hex32(s: &str) -> [u8; 32] {
         let b = decode_hex(s);
         b.as_slice().try_into().unwrap()
+    }
+
+    fn encode_hex(bytes: &[u8]) -> std::vec::Vec<u8> {
+        const LUT: &[u8; 16] = b"0123456789abcdef";
+        let mut out = std::vec::Vec::with_capacity(bytes.len() * 2);
+        for &b in bytes {
+            out.push(LUT[(b >> 4) as usize]);
+            out.push(LUT[(b & 0x0f) as usize]);
+        }
+        out
     }
 }

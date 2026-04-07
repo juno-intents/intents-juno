@@ -27,6 +27,10 @@ function formatQueryError(error: unknown): string {
   return 'Unable to generate deposit instructions right now.'
 }
 
+function compactMemoHex(hex: string): string {
+  return hex.slice(0, 136)
+}
+
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -80,7 +84,7 @@ export default function DepositFlow() {
     enabled: false,
   })
 
-  const canonicalMemo = memo?.memoHex ?? ''
+  const walletMemo = memo ? compactMemoHex(memo.memoHex) : ''
   const recipientError = validateBaseRecipient(
     recipientMode === 'wallet' ? '' : customRecipient,
     recipientMode === 'wallet' ? address : undefined,
@@ -90,13 +94,13 @@ export default function DepositFlow() {
   const cliAmount = amount.trim()
   const cliModeArg = runtimeConfig.junoCliModeFlag.trim()
   const qrValue = memo
-    ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}` : ''}`
+    ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}` : ''}${walletMemo ? `${cliAmount ? '&' : '?'}memo=${walletMemo}` : ''}`
     : ''
   const cliCommand = memo
     ? `FROM="YOUR_JUNO_ADDRESS"
 TO="${memo.oWalletUA}"
 AMOUNT=${cliAmount || '"YOUR_JUNO_AMOUNT"'}
-MEMO="${canonicalMemo}"
+MEMO="${walletMemo}"
 
 junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   '[{"address":"'"$TO"'","amount":'"$AMOUNT"',"memo":"'"$MEMO"'"}]'`
@@ -178,11 +182,11 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
             )}
             <div className="qr-summary-row">
               <span className="qr-summary-label">Memo delivery</span>
-              <span className="qr-summary-value mono">QR omits the memo. Copy the full 1024-character memo separately.</span>
+              <span className="qr-summary-value mono">QR includes the 136-character wallet memo. Keep it exactly as shown if you paste it manually.</span>
             </div>
           </div>
           <p className="deposit-modal-copy">
-            Scan with a Juno wallet for the destination and amount only. Then paste the full memo exactly as shown below.
+            Scan with a Juno wallet for the destination, amount, and wallet memo. If you enter it manually, paste the wallet memo exactly as shown below.
           </p>
           <div className="field">
             <label className="label">Destination Address</label>
@@ -194,8 +198,8 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           <div className="field">
             <label className="label">Memo (required)</label>
             <div className="copy-field">
-              <span className="copy-field-value">{canonicalMemo}</span>
-              <CopyButton text={canonicalMemo} />
+              <span className="copy-field-value">{walletMemo}</span>
+              <CopyButton text={walletMemo} />
             </div>
           </div>
         </>
@@ -231,8 +235,8 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         <div className="field">
           <label className="label">Memo (required)</label>
           <div className="copy-field">
-            <span className="copy-field-value">{canonicalMemo}</span>
-            <CopyButton text={canonicalMemo} />
+            <span className="copy-field-value">{walletMemo}</span>
+            <CopyButton text={walletMemo} />
           </div>
         </div>
         {cliAmount !== '' ? (

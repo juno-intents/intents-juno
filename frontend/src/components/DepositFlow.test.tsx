@@ -150,6 +150,8 @@ describe('DepositFlow', () => {
     const user = userEvent.setup()
     renderDepositFlow()
 
+    const walletMemo = 'ab'.repeat(68)
+
     await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
     await user.click(await screen.findByRole('button', { name: 'Generate Deposit Instructions' }))
     await user.click(screen.getByRole('button', { name: 'I agree' }))
@@ -158,17 +160,16 @@ describe('DepositFlow', () => {
     await user.click(screen.getByRole('button', { name: 'QR Code' }))
 
     expect(screen.getByTestId('deposit-qr')).toBeInTheDocument()
-    expect(screen.getByTestId('deposit-qr')).toHaveTextContent('jtest1destinationwallet?amount=3')
-    expect(screen.getByTestId('deposit-qr')).not.toHaveTextContent('memo=')
+    expect(screen.getByTestId('deposit-qr')).toHaveTextContent(`jtest1destinationwallet?amount=3&memo=${walletMemo}`)
     expect(screen.getByText('Wallet will send')).toBeInTheDocument()
     expect(screen.getAllByText('3 JUNO')).not.toHaveLength(0)
     expect(screen.getByText('Memo delivery')).toBeInTheDocument()
-    expect(screen.getByText('QR omits the memo. Copy the full 1024-character memo separately.')).toBeInTheDocument()
+    expect(screen.getByText('QR includes the 136-character wallet memo. Keep it exactly as shown if you paste it manually.')).toBeInTheDocument()
   })
 
-  it('shows the canonical full memo in manual and cli formats', async () => {
+  it('shows the compact wallet memo in manual and cli formats', async () => {
     const user = userEvent.setup()
-    const canonicalMemo = `${'ab'.repeat(68)}${'00'.repeat(444)}`
+    const walletMemo = 'ab'.repeat(68)
     renderDepositFlow()
 
     await user.type(await screen.findByRole('spinbutton', { name: /Amount \(JUNO\)/i }), '3')
@@ -177,11 +178,11 @@ describe('DepositFlow', () => {
     await screen.findByRole('button', { name: 'Manual Send' })
 
     await user.click(screen.getByRole('button', { name: 'Manual Send' }))
-    expect(screen.getByText(canonicalMemo)).toBeInTheDocument()
+    expect(screen.getByText(walletMemo)).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: 'Back' }))
     await user.click(screen.getByRole('button', { name: 'Junocash CLI' }))
-    expect(screen.getByText(new RegExp(`MEMO=\"${canonicalMemo}\"`))).toBeInTheDocument()
+    expect(screen.getByText(new RegExp(`MEMO=\"${walletMemo}\"`))).toBeInTheDocument()
   })
 
   it('does not carry a memo fetch error into the next warning modal open', async () => {
