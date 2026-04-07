@@ -301,6 +301,7 @@ test_build_operator_stack_ami_uses_checksum_and_env_wiring() {
   assert_contains "$withdraw_wrapper" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper passes RPC password env name"
   assert_contains "$withdraw_wrapper" '--deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-200}"' "withdraw wrapper passes deposit confirmation seed"
   assert_contains "$withdraw_wrapper" '--juno-minconf "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-200}"' "withdraw wrapper passes withdraw planner confirmation seed"
+  assert_contains "$withdraw_wrapper" '--juno-fee-add-zat "${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}"' "withdraw wrapper passes the staged shielded-send fee floor"
   assert_contains "$withdraw_wrapper" '--juno-expiry-offset "${WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET:-240}"' "withdraw wrapper passes a safer juno expiry offset default"
   assert_contains "$withdraw_wrapper" '--juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-200}"' "withdraw wrapper passes withdraw batch confirmation seed"
   assert_contains "$withdraw_wrapper" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper passes base-relayer auth env name"
@@ -799,6 +800,7 @@ RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS=3
 RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS=4
 JUNO_TXSIGN_SIGNER_KEYS=0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 WITHDRAW_COORDINATOR_CLAIM_TTL=7m
+WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT=1000000
 WITHDRAW_BLOB_BUCKET=withdraw-bucket
 AWS_REGION=us-east-1
 AWS_DEFAULT_REGION=us-east-1
@@ -830,6 +832,7 @@ EOF
   assert_contains "$(cat "$output_file")" '--juno-rpc-pass-env JUNO_RPC_PASS' "withdraw wrapper forwards RPC password env name"
   assert_contains "$(cat "$output_file")" '--deposit-min-confirmations 2' "withdraw wrapper forwards deposit confirmation seed"
   assert_contains "$(cat "$output_file")" '--juno-minconf 3' "withdraw wrapper forwards withdraw planner confirmation seed"
+  assert_contains "$(cat "$output_file")" '--juno-fee-add-zat 1000000' "withdraw wrapper forwards the staged shielded-send fee floor"
   assert_contains "$(cat "$output_file")" '--juno-expiry-offset 240' "withdraw wrapper forwards the safer default juno expiry offset"
   assert_contains "$(cat "$output_file")" '--juno-confirmations 4' "withdraw wrapper forwards withdraw batch confirmation seed"
   assert_contains "$(cat "$output_file")" '--base-relayer-auth-env BASE_RELAYER_AUTH_TOKEN' "withdraw wrapper forwards base relayer auth env name"

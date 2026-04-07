@@ -2188,6 +2188,7 @@ exec /usr/local/bin/withdraw-coordinator \
   --juno-change-address "${WITHDRAW_COORDINATOR_JUNO_CHANGE_ADDRESS}" \
   --deposit-min-confirmations "${RUNTIME_SETTINGS_DEPOSIT_MIN_CONFIRMATIONS:-200}" \
   --juno-minconf "${RUNTIME_SETTINGS_WITHDRAW_PLANNER_MIN_CONFIRMATIONS:-200}" \
+  --juno-fee-add-zat "${WITHDRAW_COORDINATOR_JUNO_FEE_ADD_ZAT:-1000000}" \
   --juno-expiry-offset "${WITHDRAW_COORDINATOR_JUNO_EXPIRY_OFFSET:-240}" \
   --juno-confirmations "${RUNTIME_SETTINGS_WITHDRAW_BATCH_CONFIRMATIONS:-200}" \
   --tss-url "${WITHDRAW_COORDINATOR_TSS_URL}" \
