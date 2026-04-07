@@ -18,8 +18,8 @@ export default function GuideModal({ open, onClose }: Props) {
         <div className="modal-body guide-body">
           <section>
             <h3>Juno -&gt; Base</h3>
-            <p>Generate the deposit instructions, then send JUNO to the shielded bridge wallet with the exact memo shown.</p>
-            <p>The amount field is optional. It only pre-fills the QR code and CLI example. The memo is mandatory.</p>
+            <p>Generate the deposit instructions, then send JUNO to the shielded bridge wallet with the exact full memo shown.</p>
+            <p>The QR code only carries the destination and amount. Copy the memo separately and paste it exactly as shown.</p>
           </section>
           <section>
             <h3>Base -&gt; Juno</h3>

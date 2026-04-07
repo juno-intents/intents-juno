@@ -27,14 +27,6 @@ function formatQueryError(error: unknown): string {
   return 'Unable to generate deposit instructions right now.'
 }
 
-// The deposit memo is 512 bytes but only the first 68 bytes contain data;
-// bytes 68-511 are zero padding. Zcash/Juno nodes auto-pad short memos to
-// 512 bytes, so we can send just the compact form (136 hex chars) instead
-// of the full 1024 hex chars. This avoids copy-paste errors.
-function compactMemoHex(hex: string): string {
-  return hex.slice(0, 136)
-}
-
 function CopyButton({ text, label }: { text: string; label?: string }) {
   const [copied, setCopied] = useState(false)
 
@@ -88,7 +80,7 @@ export default function DepositFlow() {
     enabled: false,
   })
 
-  const compactMemo = memo ? compactMemoHex(memo.memoHex) : ''
+  const canonicalMemo = memo?.memoHex ?? ''
   const recipientError = validateBaseRecipient(
     recipientMode === 'wallet' ? '' : customRecipient,
     recipientMode === 'wallet' ? address : undefined,
@@ -98,13 +90,13 @@ export default function DepositFlow() {
   const cliAmount = amount.trim()
   const cliModeArg = runtimeConfig.junoCliModeFlag.trim()
   const qrValue = memo
-    ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}&memo=${compactMemo}` : `?memo=${compactMemo}`}`
+    ? `${memo.oWalletUA}${cliAmount ? `?amount=${cliAmount}` : ''}`
     : ''
   const cliCommand = memo
     ? `FROM="YOUR_JUNO_ADDRESS"
 TO="${memo.oWalletUA}"
 AMOUNT=${cliAmount || '"YOUR_JUNO_AMOUNT"'}
-MEMO="${compactMemo}"
+MEMO="${canonicalMemo}"
 
 junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
   '[{"address":"'"$TO"'","amount":'"$AMOUNT"',"memo":"'"$MEMO"'"}]'`
@@ -185,12 +177,12 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
               </div>
             )}
             <div className="qr-summary-row">
-              <span className="qr-summary-label">Memo fallback</span>
-              <span className="qr-summary-value mono">{compactMemo.length} hex characters ready to paste manually</span>
+              <span className="qr-summary-label">Memo delivery</span>
+              <span className="qr-summary-value mono">QR omits the memo. Copy the full 1024-character memo separately.</span>
             </div>
           </div>
           <p className="deposit-modal-copy">
-            Scan with a Juno wallet. If the wallet does not preserve the memo automatically, use the manual details below.
+            Scan with a Juno wallet for the destination and amount only. Then paste the full memo exactly as shown below.
           </p>
           <div className="field">
             <label className="label">Destination Address</label>
@@ -202,8 +194,8 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
           <div className="field">
             <label className="label">Memo (required)</label>
             <div className="copy-field">
-              <span className="copy-field-value">{compactMemo}</span>
-              <CopyButton text={compactMemo} />
+              <span className="copy-field-value">{canonicalMemo}</span>
+              <CopyButton text={canonicalMemo} />
             </div>
           </div>
         </>
@@ -239,8 +231,8 @@ junocash-cli ${cliModeArg ? `${cliModeArg} ` : ''}z_sendmany "$FROM" \
         <div className="field">
           <label className="label">Memo (required)</label>
           <div className="copy-field">
-            <span className="copy-field-value">{compactMemo}</span>
-            <CopyButton text={compactMemo} />
+            <span className="copy-field-value">{canonicalMemo}</span>
+            <CopyButton text={canonicalMemo} />
           </div>
         </div>
         {cliAmount !== '' ? (
