@@ -100,7 +100,7 @@ export default function WithdrawFlow() {
   const parsedAmount = parseAmountToZats(amount) ?? 0n
   const hasSufficientAllowance = allowance !== undefined && parsedAmount > 0n && (allowance as bigint) >= parsedAmount
   const amountError = validateWithdrawAmount(amount, cfg?.minWithdrawAmount, balance as bigint | undefined)
-  const recipientError = validateJunoRecipient(junoRecipient)
+  const recipientError = validateJunoRecipient(junoRecipient, runtimeConfig.baseChain.id)
   const formError = decodeError || amountError || recipientError
 
   useEffect(() => {

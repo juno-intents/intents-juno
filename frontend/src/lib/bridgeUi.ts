@@ -1,7 +1,8 @@
 import { parseUnits } from 'viem'
 
 const BASE_ADDRESS_RE = /^0x[a-fA-F0-9]{40}$/
-const JUNO_UNIFIED_ADDRESS_RE = /^j(?:test)?1[02-9ac-hj-np-z]+$/
+const JUNO_MAINNET_UNIFIED_ADDRESS_RE = /^j1[02-9ac-hj-np-z]+$/
+const JUNO_TESTNET_UNIFIED_ADDRESS_RE = /^jtest1[02-9ac-hj-np-z]+$/
 
 const RECENT_LIMIT = 5
 
@@ -97,12 +98,13 @@ export function validateWithdrawAmount(
   return null
 }
 
-export function validateJunoRecipient(input: string): string | null {
+export function validateJunoRecipient(input: string, baseChainId?: number): string | null {
   const trimmed = input.trim()
   if (trimmed === '') {
     return 'Enter a Juno recipient address.'
   }
-  if (!JUNO_UNIFIED_ADDRESS_RE.test(trimmed)) {
+  const addressPattern = baseChainId === 8453 ? JUNO_MAINNET_UNIFIED_ADDRESS_RE : JUNO_TESTNET_UNIFIED_ADDRESS_RE
+  if (!addressPattern.test(trimmed)) {
     return 'Enter a valid Juno unified address.'
   }
   return null

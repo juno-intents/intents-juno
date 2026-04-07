@@ -36,15 +36,26 @@ describe('bridgeUi', () => {
     expect(validateWithdrawAmount('1', '100000000', 1000000000n)).toBeNull()
   })
 
-  it('validates juno unified address shape', () => {
-    expect(validateJunoRecipient('')).toMatch(/Enter a Juno recipient/)
-    expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq')).toBeNull()
+  it('validates mainnet juno unified address shape', () => {
+    expect(validateJunoRecipient('', 8453)).toMatch(/Enter a Juno recipient/)
     expect(
       validateJunoRecipient(
         'j1nvmst2l8aupvaher30zyw78m429heheefc2g29ss44v4qffgd3pj23rk23u2ggc8jp2fpzk2qrd5p6j2sqdcvzf62f3qnxy6tyqrnpy4',
+        8453,
       ),
     ).toBeNull()
-    expect(validateJunoRecipient('not-an-address')).toMatch(/valid Juno unified address/)
+    expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', 8453)).toMatch(/valid Juno unified address/)
+    expect(validateJunoRecipient('not-an-address', 8453)).toMatch(/valid Juno unified address/)
+  })
+
+  it('validates testnet juno unified address shape', () => {
+    expect(validateJunoRecipient('jtest1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqq', 84532)).toBeNull()
+    expect(
+      validateJunoRecipient(
+        'j1nvmst2l8aupvaher30zyw78m429heheefc2g29ss44v4qffgd3pj23rk23u2ggc8jp2fpzk2qrd5p6j2sqdcvzf62f3qnxy6tyqrnpy4',
+        84532,
+      ),
+    ).toMatch(/valid Juno unified address/)
   })
 
   it('dedupes and caps recent recipients', () => {
