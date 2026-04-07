@@ -113,6 +113,16 @@ write_dkg_summary_with_operator_key() {
     ' "$REPO_ROOT/deploy/production/tests/fixtures/dkg-summary.json" >"$target"
 }
 
+test_deploy_operator_stages_live_juno_scan_artifacts() {
+  local script_text
+  script_text="$(cat "$REPO_ROOT/deploy/production/deploy-operator.sh")"
+
+  assert_contains "$script_text" 'intents-juno-juno-scan.sh' "deploy-operator stages the live juno-scan wrapper"
+  assert_contains "$script_text" 'intents-juno-juno-scan-backfill.sh' "deploy-operator stages the live juno-scan backfill wrapper"
+  assert_contains "$script_text" 'juno-scan.service' "deploy-operator stages the juno-scan unit"
+  assert_contains "$script_text" 'juno-scan-backfill.service' "deploy-operator stages the juno-scan backfill unit"
+}
+
 test_deploy_operator_enforces_known_hosts_and_updates_rollout() {
   local workdir output_dir manifest shared_manifest log_dir fake_bin state_file terraform_output queueauth_secret_arn
   workdir="$(mktemp -d)"
@@ -1302,6 +1312,7 @@ EOF
 }
 
 main() {
+  test_deploy_operator_stages_live_juno_scan_artifacts
   test_deploy_operator_enforces_known_hosts_and_updates_rollout
   test_deploy_operator_respects_scan_backfill_from_height_override
   test_deploy_operator_stages_distributed_dkg_server_tls

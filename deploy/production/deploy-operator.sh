@@ -695,6 +695,8 @@ extract_build_runbook_block \
   "EOF_CONFIG_HYDRATOR" \
   "$config_hydrator_stage"
 for wrapper_name in \
+  intents-juno-juno-scan.sh \
+  intents-juno-juno-scan-backfill.sh \
   intents-juno-checkpoint-signer.sh \
   intents-juno-checkpoint-aggregator.sh \
   intents-juno-deposit-relayer.sh \
@@ -705,6 +707,14 @@ for wrapper_name in \
   intents-juno-base-event-scanner.sh; do
   wrapper_stage="$tmp_dir/$wrapper_name"
   case "$wrapper_name" in
+    intents-juno-juno-scan.sh)
+      wrapper_start="cat > /tmp/intents-juno-juno-scan.sh <<'EOF_SCAN'"
+      wrapper_end="EOF_SCAN"
+      ;;
+    intents-juno-juno-scan-backfill.sh)
+      wrapper_start="cat > /tmp/intents-juno-juno-scan-backfill.sh <<'EOF_SCAN_BACKFILL'"
+      wrapper_end="EOF_SCAN_BACKFILL"
+      ;;
     intents-juno-checkpoint-signer.sh)
       wrapper_start="cat > /tmp/intents-juno-checkpoint-signer.sh <<'EOF_SIGNER'"
       wrapper_end="EOF_SIGNER"
@@ -785,6 +795,18 @@ extract_build_runbook_block \
   "cat > /tmp/operator-signer-api.service <<'EOF_OPERATOR_SIGNER_API_SERVICE'" \
   "EOF_OPERATOR_SIGNER_API_SERVICE" \
   "$operator_signer_api_service_stage"
+juno_scan_service_stage="$tmp_dir/juno-scan.service"
+extract_build_runbook_block \
+  "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
+  "cat > /tmp/juno-scan.service <<'EOF_SCAN_SERVICE'" \
+  "EOF_SCAN_SERVICE" \
+  "$juno_scan_service_stage"
+juno_scan_backfill_service_stage="$tmp_dir/juno-scan-backfill.service"
+extract_build_runbook_block \
+  "$REPO_ROOT/deploy/shared/runbooks/build-operator-stack-ami.sh" \
+  "cat > /tmp/juno-scan-backfill.service <<'EOF_SCAN_BACKFILL_SERVICE'" \
+  "EOF_SCAN_BACKFILL_SERVICE" \
+  "$juno_scan_backfill_service_stage"
 
 if [[ -n "$dkg_tls_dir" ]]; then
   resolved_operator_host="$(jq -r --arg operator_id "$operator_id" '.[] | select(.operator_id == $operator_id) | .host' "$dkg_peer_hosts_file")"
@@ -811,6 +833,8 @@ files_to_copy=(
   "$operator_deploy"
   "$run_operator_rollout_stage"
   "$operator_signer_api_service_stage"
+  "$juno_scan_service_stage"
+  "$juno_scan_backfill_service_stage"
   "$REPO_ROOT/deploy/operators/dkg/backup-package.sh"
   "$REPO_ROOT/deploy/operators/dkg/common.sh"
 )

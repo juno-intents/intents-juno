@@ -180,7 +180,15 @@ install_stage_files() {
   if [[ -f "$stage_dir/operator-signer-api.service" ]]; then
     sudo install -m 0644 "$stage_dir/operator-signer-api.service" /etc/systemd/system/operator-signer-api.service
   fi
+  if [[ -f "$stage_dir/juno-scan.service" ]]; then
+    sudo install -m 0644 "$stage_dir/juno-scan.service" /etc/systemd/system/juno-scan.service
+  fi
+  if [[ -f "$stage_dir/juno-scan-backfill.service" ]]; then
+    sudo install -m 0644 "$stage_dir/juno-scan-backfill.service" /etc/systemd/system/juno-scan-backfill.service
+  fi
   for wrapper_name in \
+    intents-juno-juno-scan.sh \
+    intents-juno-juno-scan-backfill.sh \
     intents-juno-checkpoint-signer.sh \
     intents-juno-checkpoint-aggregator.sh \
     intents-juno-deposit-relayer.sh \
