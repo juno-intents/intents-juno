@@ -84,6 +84,8 @@ const (
 	withdrawMetricIdleExpirySeconds = 24 * 60 * 60
 )
 
+var ensureWithdrawCoordinatorKafkaTopics = queue.EnsureKafkaTopics
+
 func main() {
 	var (
 		postgresDSN               = flag.String("postgres-dsn", "", "Postgres DSN (required unless --postgres-dsn-env is set)")
@@ -314,6 +316,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := ensureCoordinatorQueueTopics(ctx, *queueDriver, *queueBrokers, *queueTopics); err != nil {
+		log.Error("ensure kafka topics", "err", err)
+		os.Exit(2)
+	}
 	consumer, err := queue.NewConsumer(ctx, queue.ConsumerConfig{
 		Driver:        *queueDriver,
 		Brokers:       queue.SplitCommaList(*queueBrokers),
@@ -1105,4 +1111,11 @@ type slogKafkaLogger struct {
 
 func (l *slogKafkaLogger) Printf(msg string, args ...interface{}) {
 	l.log.Info(fmt.Sprintf(msg, args...), "component", "kafka-reader")
+}
+
+func ensureCoordinatorQueueTopics(ctx context.Context, driver, brokers, topics string) error {
+	if !strings.EqualFold(strings.TrimSpace(driver), queue.DriverKafka) {
+		return nil
+	}
+	return ensureWithdrawCoordinatorKafkaTopics(ctx, queue.SplitCommaList(brokers), queue.SplitCommaList(topics))
 }

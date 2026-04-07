@@ -48,6 +48,8 @@ type eventPayload struct {
 	FinalitySource string `json:"finalitySource"`
 }
 
+var ensureBaseEventScannerKafkaTopics = queue.EnsureKafkaTopics
+
 func runMain(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("base-event-scanner", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -90,6 +92,10 @@ func runMain(args []string, stdout io.Writer) error {
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	if err := ensureScannerQueueTopics(ctx, *queueDriver, *queueBrokers, *withdrawEventTopic); err != nil {
+		return fmt.Errorf("ensure kafka topics: %w", err)
+	}
 
 	logger := slog.New(slog.NewJSONHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	slog.SetDefault(logger)
@@ -223,4 +229,11 @@ func runMain(args []string, stdout io.Writer) error {
 		)
 		return nil
 	})
+}
+
+func ensureScannerQueueTopics(ctx context.Context, driver, brokers, topics string) error {
+	if !strings.EqualFold(strings.TrimSpace(driver), queue.DriverKafka) {
+		return nil
+	}
+	return ensureBaseEventScannerKafkaTopics(ctx, queue.SplitCommaList(brokers), queue.SplitCommaList(topics))
 }

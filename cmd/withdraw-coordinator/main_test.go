@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -218,6 +219,87 @@ func TestParseWithdrawRequestedMessage_AcceptsV2(t *testing.T) {
 	}
 	if msg.FinalitySource != "safe" {
 		t.Fatalf("FinalitySource = %q", msg.FinalitySource)
+	}
+}
+
+func TestEnsureCoordinatorQueueTopics(t *testing.T) {
+	original := ensureWithdrawCoordinatorKafkaTopics
+	t.Cleanup(func() {
+		ensureWithdrawCoordinatorKafkaTopics = original
+	})
+
+	tests := []struct {
+		name           string
+		driver         string
+		brokers        string
+		topics         string
+		wantCalled     bool
+		wantBrokers    []string
+		wantTopics     []string
+		injectedErr    error
+		wantErrSubstr  string
+	}{
+		{
+			name:        "kafka ensures topics",
+			driver:      "kafka",
+			brokers:     "broker-a:9092, broker-b:9092",
+			topics:      "withdrawals.requested.v2,ops.alerts.v1",
+			wantCalled:  true,
+			wantBrokers: []string{"broker-a:9092", "broker-b:9092"},
+			wantTopics:  []string{"withdrawals.requested.v2", "ops.alerts.v1"},
+		},
+		{
+			name:       "stdio skips topic creation",
+			driver:     "stdio",
+			brokers:    "broker-a:9092",
+			topics:     "withdrawals.requested.v2",
+			wantCalled: false,
+		},
+		{
+			name:          "propagates kafka error",
+			driver:        "kafka",
+			brokers:       "broker-a:9092",
+			topics:        "withdrawals.requested.v2",
+			wantCalled:    true,
+			wantBrokers:   []string{"broker-a:9092"},
+			wantTopics:    []string{"withdrawals.requested.v2"},
+			injectedErr:   errors.New("boom"),
+			wantErrSubstr: "boom",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			called := false
+			var gotBrokers []string
+			var gotTopics []string
+			ensureWithdrawCoordinatorKafkaTopics = func(_ context.Context, brokers []string, topics []string) error {
+				called = true
+				gotBrokers = append([]string(nil), brokers...)
+				gotTopics = append([]string(nil), topics...)
+				return tc.injectedErr
+			}
+
+			err := ensureCoordinatorQueueTopics(context.Background(), tc.driver, tc.brokers, tc.topics)
+			if tc.wantErrSubstr == "" {
+				if err != nil {
+					t.Fatalf("ensureCoordinatorQueueTopics: %v", err)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), tc.wantErrSubstr) {
+					t.Fatalf("ensureCoordinatorQueueTopics error = %v, want substring %q", err, tc.wantErrSubstr)
+				}
+			}
+			if called != tc.wantCalled {
+				t.Fatalf("ensure topic call = %v want %v", called, tc.wantCalled)
+			}
+			if tc.wantCalled && !reflect.DeepEqual(gotBrokers, tc.wantBrokers) {
+				t.Fatalf("brokers = %#v want %#v", gotBrokers, tc.wantBrokers)
+			}
+			if tc.wantCalled && !reflect.DeepEqual(gotTopics, tc.wantTopics) {
+				t.Fatalf("topics = %#v want %#v", gotTopics, tc.wantTopics)
+			}
+		})
 	}
 }
 
